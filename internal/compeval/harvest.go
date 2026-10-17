@@ -167,9 +167,9 @@ func credentialValues(class, m string) []string {
 }
 
 // cookieAttributes are the Set-Cookie attributes that carry a long value which is ordinary text
-// (a domain, an expiry): they are not remembered, or a harvest that names the same domain elsewhere
-// would be refused.
-var cookieAttributes = map[string]bool{"domain": true, "path": true, "expires": true, "max-age": true, "samesite": true}
+// (a domain, a path, an expiry): they are not remembered, or a harvest that names the same domain
+// elsewhere would be refused. (The values of SameSite, Secure and HttpOnly are at most six characters.)
+var cookieAttributes = map[string]bool{"domain": true, "path": true, "expires": true, "max-age": true}
 
 // cookieNameBefore is the cookie name that stands in front of the equals sign at i: the run of characters
 // back from it that no delimiter of a header, a list or a quoted string breaks.
@@ -184,15 +184,35 @@ func cookieNameBefore(m string, i int) string {
 // cookieQuoteCloses reports whether a quote that has k backslashes in front of it closes a quoted value that
 // was opened by a quote with b backslashes. The closing quote carries b; a quote inside the value carries twice
 // as many plus one, and an escaped backslash inside the value adds 2b+2 more, so only a run of b plus a
-// multiple of 2b+2 closes it.
-func cookieQuoteCloses(k, b int) bool { return k >= b && (k-b)%(2*b+2) == 0 }
+// multiple of 2b+2 closes it. (A run shorter than b leaves a remainder that is never zero.)
+func cookieQuoteCloses(k, b int) bool { return (k-b)%(2*b+2) == 0 }
+
+// cookieEscapeMax is the longest backslash run that is the escape of a bare value (a unicode escape in text that was
+// escaped four times has sixteen); the class stops at a longer one.
+const cookieEscapeMax = 16
+
+// cookieBareEscapeAt is the length of the escape that starts at q, a backslash run and the character it escapes,
+// when the class takes it into an unquoted value, and 0 when it does not: a quote closes the string the header
+// sits in, and the escape of a line break (an n or an r) ends the line.
+func cookieBareEscapeAt(m string, q int) int {
+	r := 0
+	for q+r < len(m) && m[q+r] == '\\' {
+		r++
+	}
+	if r == 0 || r > cookieEscapeMax || q+r >= len(m) || strings.IndexByte("\"'\r\nnr", m[q+r]) >= 0 {
+		return 0
+	}
+	return r + 1
+}
 
 // cookieValueAfter reads the value that starts at i (just after an equals sign) and returns it, as it stands in the
 // text, and the index where it ends. A value that opens with a double quote and any number of backslashes is the
 // text between that quote and the quote that closes it at that level, whatever stands inside (a space, an
-// apostrophe, an ampersand, a comma, a semicolon, a tab, a shell escape, an HTML escape), or up to the end of the
-// line when the quote is never closed; the quotes are not part of the value. A bare value runs to the first
-// space, quote, comma, semicolon, ampersand or backslash that does not begin a backslash-u escape.
+// apostrophe, an ampersand, a comma, a semicolon, a tab, a shell escape, an HTML escape, a line break), or up to the
+// end of the span when the quote is never closed; the quotes are not part of the value. A line break does not end a
+// quoted value, because a value that is open at one is not finished (the class decides how far such a span goes, and
+// this reads what it was given). A bare value runs to the first space, quote, comma, semicolon or ampersand, and to
+// a backslash that does not begin an escape the class takes into a bare value (a shell escape, a unicode escape).
 func cookieValueAfter(m string, i int) (string, int) {
 	b := 0
 	for i+b < len(m) && m[i+b] == '\\' {
@@ -201,45 +221,37 @@ func cookieValueAfter(m string, i int) (string, int) {
 	if i+b < len(m) && m[i+b] == '"' {
 		p := i + b + 1
 		for q := p; q < len(m); q++ {
-			switch m[q] {
-			case '\r', '\n':
-				return m[p:q], q
-			case '"':
-				k := 0
-				for p+k <= q-1 && m[q-1-k] == '\\' {
-					k++
-				}
-				if cookieQuoteCloses(k, b) {
-					// The b backslashes in front of the quote belong to the closing quote, not to the value.
-					return m[p : q-b], q + 1
-				}
+			if m[q] != '"' {
+				continue
+			}
+			// The run of backslashes in front of the quote stops at the opening quote, which is not one.
+			k := 0
+			for m[q-1-k] == '\\' {
+				k++
+			}
+			if cookieQuoteCloses(k, b) {
+				// The b backslashes in front of the quote belong to the closing quote, not to the value.
+				return m[p : q-b], q + 1
 			}
 		}
 		return m[p:], len(m)
 	}
 	q := i
 	for q < len(m) {
-		c := m[q]
-		if c == '\\' && q+6 <= len(m) && m[q+1] == 'u' && isHex4(m[q+2:q+6]) {
-			q += 6
+		if m[q] == '\\' {
+			n := cookieBareEscapeAt(m, q)
+			if n == 0 {
+				break
+			}
+			q += n
 			continue
 		}
-		if strings.IndexByte(" \t\r\n'\",;&\\", c) >= 0 {
+		if strings.IndexByte(" \t\r\n'\",;&", m[q]) >= 0 {
 			break
 		}
 		q++
 	}
 	return m[i:q], q
-}
-
-func isHex4(s string) bool {
-	for i := 0; i < 4; i++ {
-		c := s[i]
-		if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
-			return false
-		}
-	}
-	return true
 }
 
 // cookieValues are all the values of 12 or more characters in a cookie span, as they stand in the text: a bare
@@ -295,33 +307,24 @@ func (r *redactor) survivingTail(s string) bool {
 	return false
 }
 
-// redactFirstClass is applied before every other class. A cookie header is replaced as one span, and a
-// cookie whose name holds a key word (refresh_token=, password=, secret=) would otherwise be half taken by the
-// assignment class first: the name and the other cookies would stay behind as text the cookie class then had
-// to take by a different, shorter match, and the substitutions would be counted as two classes.
-const redactFirstClass = "cookie-header"
-
 // redactLastClass is applied after every other class. An address-shaped piece can sit inside a
 // credential value (GITHUB_TOKEN: a@b.c:rest); replacing it first would split the value, leave a
 // placeholder where the value must start, and so hide the rest of it from the credential classes.
 // The vet table keeps its order; only the order of substitution differs.
+//
+// The cookie class is deliberately not first. A cookie span ends in front of a quote that opens no quoted
+// cookie value, and an unquoted header followed on the same line by a credential with a quoted value (a key
+// word, a colon or an equals sign, a quote) would, run first, take the credential's key word into its span
+// and stop in front of the quote: the value is then left with no key word for any class and no memory in the
+// value-tail gate, and the residual gate stays clean. Run in the table's order, the credential classes take
+// their quoted values by their own key words first, and the cookie class takes what is left of the header
+// (a cookie whose name holds a key word is then found by both, and which class counts it does not matter).
 const redactLastClass = "email"
 
-// redactStage orders the substitution: the first class, then the others in the table's order, then the last.
-func redactStage(name string) int {
-	switch name {
-	case redactFirstClass:
-		return 0
-	case redactLastClass:
-		return 2
-	}
-	return 1
-}
-
 func (r *redactor) redact(s string) string {
-	for stage := 0; stage <= 2; stage++ {
+	for _, last := range [2]bool{false, true} {
 		for _, p := range redactPatterns {
-			if redactStage(p.name) == stage {
+			if (p.name == redactLastClass) == last {
 				s = r.apply(p.name, p.re, s)
 			}
 		}

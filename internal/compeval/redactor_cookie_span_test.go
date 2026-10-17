@@ -154,50 +154,10 @@ func TestRedactorTakesTheWholeCookieSpan(t *testing.T) {
 	t.Logf("%d probes", cases)
 }
 
-// TestRedactorTakesACookieWhoseNameHoldsAKeyWord: the cookie class runs before the assignment class. A cookie named
-// like a credential (refresh_token, auth_token, password, secret) was taken by the assignment class first, which
-// left the header name and the other cookies behind as text the cookie class then took by a different, shorter
-// match; both values must be gone, the line must be one cookie-header substitution and no assignment one, and
-// the residual gate must be clean.
-func TestRedactorTakesACookieWhoseNameHoldsAKeyWord(t *testing.T) {
-	v, w := tailFake(911, 32, tailAlnum), tailFake(912, 32, tailAlnum)
-	for _, names := range [][2]string{
-		{"refresh_" + spanKwToken, "sessionid"},
-		{"auth_" + spanKwToken, "sessionid"},
-		{spanKwPass, "sessionid"},
-		{spanKwSecr, "csrftoken"},
-		{"sessionid", "refresh_" + spanKwToken},
-		{"api_key", "sessionid"},
-	} {
-		line := spanCk + ": " + names[0] + "=" + v + "; " + names[1] + "=" + w
-		for _, asArgs := range []bool{false, true} {
-			in := line
-			if asArgs {
-				in = writeFileArgs(t, "one\n"+line+"\nthree\n")
-			}
-			r := NewRedactor()
-			out := r.Redact(in)
-			for _, secret := range []string{v, w} {
-				if run, ok := anyRun(secret, out, 8); ok {
-					t.Errorf("%v (args %v): %q of a value is still in %q", names, asArgs, run, out)
-				}
-			}
-			if res := r.Residual(out); len(res) != 0 {
-				t.Errorf("%v (args %v): residual gate reports %v on %q", names, asArgs, res, out)
-			}
-			if !strings.Contains(out, "[redacted-cookie-header-1]") || strings.Contains(out, "[redacted-api-key-assignment") {
-				t.Errorf("%v (args %v): want one cookie-header substitution and no assignment one, got %q", names, asArgs, out)
-			}
-			if h := r.Hits(); h["cookie-header"] != 1 || h["api-key-assignment"] != 0 {
-				t.Errorf("%v (args %v): hits %v, want one cookie-header and no api-key-assignment", names, asArgs, h)
-			}
-		}
-	}
-}
-
 // TestHarvestKeepsATraceWithAKeyWordCookie: through the harvest, a trace whose tool output and tool-call Args hold a
 // cookie line with key-word names is redacted whole and kept, with no skip note: nothing of either value is left
-// for the tail gate to trip on.
+// for the tail gate to trip on. (TestRedactorTakesACookieWhoseNameHoldsAKeyWordWhicheverClassCountsIt does the same
+// through the redactor.)
 func TestHarvestKeepsATraceWithAKeyWordCookie(t *testing.T) {
 	v, w := tailFake(913, 32, tailAlnum), tailFake(914, 32, tailAlnum)
 	line := spanCk + ": refresh_" + spanKwToken + "=" + v + "; sessionid=" + w
@@ -225,8 +185,8 @@ func TestHarvestKeepsATraceWithAKeyWordCookie(t *testing.T) {
 			t.Errorf("%q of a value is still in the harvested entry", run)
 		}
 	}
-	if stats.Redactions["cookie-header"] < 2 || stats.Redactions["api-key-assignment"] != 0 {
-		t.Errorf("redactions %v, want the cookie class to take both lines", stats.Redactions)
+	if stats.Redactions["cookie-header"] < 2 {
+		t.Errorf("redactions %v, want the cookie class to take the header of both lines", stats.Redactions)
 	}
 }
 

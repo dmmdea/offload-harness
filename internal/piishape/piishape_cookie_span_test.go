@@ -184,8 +184,8 @@ func TestCookieSpanTakesShellEscapesAtLevelThree(t *testing.T) {
 }
 
 // TestCookieSpanEndsWhereTheContractSays: the span stops at the end of the line, at the closing quote of the string
-// the header sits in (a bare quote, a backslash and a quote, or three backslashes and a quote) and at the closing
-// bracket of a list, whichever comes first; the closing quote and the bracket are not part of it.
+// the header sits in (a bare quote, or a quote with 1, 3, 7 or 15 backslashes) and at the closing bracket of a
+// list, whichever comes first; the closing quote and the bracket are not part of it.
 func TestCookieSpanEndsWhereTheContractSays(t *testing.T) {
 	v, _, a, b := spanValues()
 	span := ckName + ": theme=dark; m=\"" + a + " " + b + "\"; sid=" + v

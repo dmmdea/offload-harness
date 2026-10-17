@@ -177,18 +177,25 @@ const emailDomainStart = `(?:[A-Za-uw-z0-9-]|v[A-Za-z.-])`
 //
 //   - the end of the line (a carriage return, a line feed, a JSON-escaped one, or the end of the text),
 //   - the closing quote of the string the header sits in, which is a quote that opens no quoted cookie value: a
-//     bare quote, a backslash and a quote, or three backslashes and a quote (the three levels of escaping that
-//     occur: a header line or a shell command, JSON text, JSON text inside either), and
-//   - the closing bracket of a list, when the opener is a list ("Set-Cookie": [ ... ], map[Cookie:[ ... ]]); a
-//     list is one span to its closing bracket, however many elements it has, across lines too,
+//     bare quote, or a backslash run of 1, 3, 7 or 15 and a quote (the levels of escaping that occur: a header
+//     line, JSON text or the double-quoted string of a shell command, and each further layer of either; a
+//     level is 2^k-1 backslashes after k layers), and
+//   - the closing bracket of a list, when the opener is a list ("Set-Cookie": [ ... ], map[Cookie:[ ... ]]), or
+//     the closing brace of a slice literal ([]string{ ... }, the Go-syntax print of a header); a list is one
+//     span to its closing bracket, however many elements it has, across lines too,
 //
 // whichever comes first. What stands between is never inspected for an alphabet: a quoted value with a space,
 // an apostrophe, an ampersand, a comma, a semicolon, a tab, an escaped quote, a shell dollar sign or backtick, or
 // an HTML escape (backslash-u and four hex digits, which Go's encoder writes for &, < and >) is inside the span
-// like everything else. Over-redacting a cookie line is the accepted price: it is evidence of a header, not
-// of the build. The only fine-grained rule is the one that starts a match: some cookie value on the line
-// has 12 or more characters, so the header of a line of short cookies, the code that handles cookies and the
-// prose about them stay quiet.
+// like everything else, and so is a bare value with a shell escape or a backslash in it. Over-redacting a cookie
+// line is the accepted price: it is evidence of a header, not of the build. The only fine-grained rules are the
+// one that starts a match, some cookie value on the line has 12 or more characters, so the header of a line of
+// short cookies, the code that handles cookies and the prose about them stay quiet, and the two that tell the
+// quote that opens a quoted value from the one that closes the string the header sits in: a quote opens a value
+// only when what follows it can start one (not white space and not a separator, so base64 padding or an empty
+// last cookie in front of the closing quote does not make that quote an opener), and a quoted value that is
+// open at a line break goes on to its closing quote when that is within three more line breaks, and ends at the
+// line when it is not.
 
 // cookieFold is a header fold: a line break, which the gaps do not take (they take no line break), followed by
 // the spaces or tabs of the continuation line, which they do take, as they take the JSON escapes of a line break
@@ -196,30 +203,45 @@ const emailDomainStart = `(?:[A-Za-uw-z0-9-]|v[A-Za-z.-])`
 // opener and the cookies.
 const cookieFold = `\r?\n`
 
-// cookieGap is up to eight of the pieces that may stand next to the punctuation of an opener, as few as
-// possible.
-const cookieGap = headerGap + `{0,8}?`
+// cookieGapPiece is one piece of what may stand next to the punctuation of an opener: a non-word character other
+// than a line break, or a JSON escape. (The Basic header's gap also takes the word of a Go slice literal, so that
+// its scheme can follow a slice's opener; a cookie header handles the slice literal as a list of its own.)
+const cookieGapPiece = `(?:[^\w\r\n]|` + jsonEscape + `)`
+
+// cookieGap is up to eight of those pieces, as few as possible.
+const cookieGap = cookieGapPiece + `{0,8}?`
 
 // cookieOpener is what stands between a cookie header's name and the cookies: the punctuation the Basic header
-// takes (up to eight non-word characters, then a colon, an equals sign, a hash rocket or an opening bracket,
-// then up to eight more), so a header line, a subscript and a hash are covered; or else a comma behind which a
-// quote opens the string that holds the cookies, the form of a call that takes the name and the value as two
-// arguments (Header.Set("Cookie", "...")). A bare comma stays quiet: "the cookie, path=/some/long/path" is prose.
-// A header fold may stand before the punctuation and after it.
-const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieGap + `[:=>\[]|` + cookieGap + `,\s*\\*['"])` + cookieGap + `(?:` + cookieFold + cookieGap + `)?`
+// takes (up to eight non-word characters, then a colon, an equals sign or an opening bracket, then up to eight
+// more; a hash rocket is an equals sign and a greater-than sign, the second of which the gap takes), so a header
+// line, a subscript and a hash are covered; or else a comma behind which a quote opens the string that holds the
+// cookies, the form of a call that takes the name and the value as two arguments (Header.Set("Cookie", "...")).
+// A bare comma stays quiet: "the cookie, path=/some/long/path" is prose. A header fold may stand before the
+// punctuation and after it.
+const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieGap + `[:=\[]|` + cookieGap + `,\s*\\*['"])` + cookieGap + `(?:` + cookieFold + cookieGap + `)?`
 
 // cookieListOpener is the opener of a list: the punctuation, which a line break may precede or follow, then an
 // opening bracket. The white space behind the bracket, a pretty-printed list's line breaks and indentation
 // included, is taken by the steps of the list.
-const cookieListOpener = `(?:` + cookieFold + `)?` + cookieGap + `[:=>](?:` + headerGap + `|[\r\n]){0,8}?\[`
+const cookieListOpener = `(?:` + cookieFold + `)?` + cookieGap + `[:=](?:` + cookieGapPiece + `|[\r\n]){0,8}?\[`
+
+// cookieGoListOpener is the opener of a Go slice literal, the way the Go-syntax print of a header writes it
+// (http.Header{"Set-Cookie":[]string{"a=b", "c=d"}}): the punctuation, then the type, then the brace. The list ends
+// at the closing brace.
+const cookieGoListOpener = `(?:` + cookieFold + `)?` + cookieGap + `[:=](?:` + cookieGapPiece + `|[\r\n]){0,8}?\[\]string\{`
 
 // cookieQuoteLevels are the numbers of backslashes in front of a double quote that opens or closes a quoted
 // cookie, by how many times the text has been escaped: none on a header line, one in JSON text and in the
-// double-quoted string of a shell command or of code, three when that string is itself JSON text. The
-// pattern has no back-references, so it cannot ask that the closing quote carry as many backslashes as the
-// opening one; each level is written out instead. The level also fixes which backslash-and-quote is a quote
-// inside the value (twice the backslashes plus one) and which one closes it.
-var cookieQuoteLevels = []int{0, 1, 3}
+// double-quoted string of a shell command or of code, and 2q+1 for each further layer (three when that string
+// is itself JSON text, seven for JSON in a shell string in JSON, fifteen for a fourth layer). The pattern has no
+// back-references, so it cannot ask that the closing quote carry as many backslashes as the opening one; each
+// level is written out instead. The level also fixes which backslash-and-quote is a quote inside the value
+// (twice the backslashes plus one) and which one closes it.
+var cookieQuoteLevels = []int{0, 1, 3, 7, 15}
+
+// cookieBreakLimit is how many line breaks a quoted cookie value that is open at a line break may run over to find
+// its closing quote.
+const cookieBreakLimit = 3
 
 // backslashes is a pattern for n literal backslashes.
 func backslashes(n int) string { return strings.Repeat(`\\`, n) }
@@ -227,18 +249,76 @@ func backslashes(n int) string { return strings.Repeat(`\\`, n) }
 // cookieQuote is the quote of a level.
 func cookieQuote(n int) string { return backslashes(n) + `"` }
 
-// cookieSpanUnit is one piece of a quoted cookie's body at a level n, as generous as it can be: any character
-// that is not a quote, a backslash or a line break; a quote inside the value (2n+1 backslashes and a quote); a
-// backslash inside the value (2n+2 backslashes); and an escape, a backslash run and a character that is neither
-// a quote nor a line break (an octal escape such as the one for a comma, a semicolon or a space, a JSON escape
-// such as a tab or a unicode escape, a shell's escaped dollar sign and backtick). The backslash and quote that close the value are none of
-// these, and in JSON text neither is a backslash-n or backslash-r, which are line breaks.
-func cookieSpanUnit(n int) string {
-	u := `[^"\\\r\n]|` + backslashes(2*n+1) + `"|` + backslashes(2*n+2)
+// cookieBreakRun is the most backslashes that stand in front of the n of a JSON-escaped line break at a level n:
+// every layer of escaping doubles the backslashes of the line break (one after the first, two after the second, four
+// after the third, eight after the fourth), and the quotes of that level are 2^k-1 of them. A line break that was
+// escaped fewer times carries fewer.
+func cookieBreakRun(n int) int { return (n + 1) / 2 }
+
+// cookieUnitOf is one piece of a quoted cookie's body at a level n, as generous as it can be: single, which is a
+// class of single characters (any that is not a quote, a backslash or a line break, in the plain unit); a quote
+// inside the value (2n+1 backslashes and a quote); a backslash inside the value (2n+2 backslashes); and an escape,
+// a backslash run and a character that is neither a quote nor a line break (an octal escape such as the one for
+// a comma, a semicolon or a space, a JSON escape such as a tab or a unicode escape, a shell's escaped dollar sign
+// and backtick). The backslash and quote that close the value are none of these, and in escaped text neither is the
+// escape of a line break: a run of up to cookieBreakRun(n) backslashes and an n or an r. short is the pattern of the
+// escape behind a run of up to that many backslashes (cookieShortEscape); a longer run takes any character that is
+// not a quote, a backslash or a line break.
+func cookieUnitOf(n int, single, short string) string {
+	u := single + `|` + backslashes(2*n+1) + `"|` + backslashes(2*n+2) + `|` + short
 	if n == 0 {
-		return u + `|\\[^"\\\r\n]`
+		return u
 	}
-	return u + `|\\{2,` + strconv.Itoa(2*n+1) + `}[^"\\\r\n]|\\[^"\\\r\nnr]`
+	return u + `|\\{` + strconv.Itoa(cookieBreakRun(n)+1) + `,` + strconv.Itoa(2*n+1) + `}[^"\\\r\n]`
+}
+
+// cookieOpeningHex is what may follow a backslash-u at the start of a quoted value: anything but the four digits of
+// the escapes Go's encoder writes for an ampersand, a less-than sign and a greater-than sign (0026, 003c, 003e; the
+// class is case-insensitive, like the rest of the pattern, so 003C and 003E are out too).
+const cookieOpeningHex = `[^0"\\\r\n]|0[^0"\\\r\n]|00[^23"\\\r\n]|002[^6"\\\r\n]|003[^ce"\\\r\n]`
+
+// cookieShortEscape is the escape behind a backslash run that is too short to be an escaped backslash and a character
+// (up to cookieBreakRun(n) backslashes, one at the plain level): any character but a quote, a backslash, a line break
+// and, in escaped text, an n or an r (the escape of a line break). At the start of a quoted value (opening) it is
+// also not the escape of a tab, and a backslash-u is not the escape of an ampersand or an angle bracket: they are
+// white space and separators, which no value starts with.
+func cookieShortEscape(n int, opening bool) string {
+	run, not := `\\`, `"\\\r\n`
+	if n > 0 {
+		run, not = `\\{1,`+strconv.Itoa(cookieBreakRun(n))+`}`, not+`nr`
+	}
+	if !opening {
+		return run + `[^` + not + `]`
+	}
+	return run + `u(?:` + cookieOpeningHex + `)|` + run + `[^` + not + `tu]`
+}
+
+// cookieSpanUnit is one piece of a quoted cookie's body at a level n.
+func cookieSpanUnit(n int) string { return cookieUnitOf(n, `[^"\\\r\n]`, cookieShortEscape(n, false)) }
+
+// cookieOpeningUnit is the first piece of a quoted value: the same, except that a single character may be neither
+// white space nor a separator or a closer (a comma, a semicolon, a colon, a closing bracket, brace or paren, a pipe, an
+// ampersand, an angle bracket). A quote that is followed by one of them is the quote that closes the string the header
+// sits in, as in a last cookie that ends in an equals sign (base64 padding, or no value at all) in front of it; it
+// does not open a value.
+func cookieOpeningUnit(n int) string {
+	return cookieUnitOf(n, `[^"\\\s,;:)}\]|&<>]`, cookieShortEscape(n, true))
+}
+
+// cookieBreak is a line break inside a quoted cookie at a level n: a raw one (a header wrapped by a terminal, a fold)
+// and, in escaped text, the JSON escape of one (a carriage return and a line feed make one break).
+func cookieBreak(n int) string {
+	if n == 0 {
+		return `\r?\n`
+	}
+	return `\r?\n|(?:\\{1,` + strconv.Itoa(cookieBreakRun(n)) + `}[nr]){1,2}`
+}
+
+// cookieBody is the body of a quoted cookie at a level n that is closed within cookieBreakLimit line breaks: units, and
+// up to that many line breaks with units after each.
+func cookieBody(n int) string {
+	u := `(?:` + cookieSpanUnit(n) + `)*`
+	return u + `(?:(?:` + cookieBreak(n) + `)` + u + `){0,` + strconv.Itoa(cookieBreakLimit) + `}`
 }
 
 // cookieCountUnit is one character of a quoted value for the count that starts a match: 12 of them, with no
@@ -249,30 +329,43 @@ func cookieSpanUnit(n int) string {
 // hex digits counts for nothing; the span takes it all the same.
 func cookieCountUnit(n int) string {
 	k := strconv.Itoa(2*n + 1)
-	u := `[^\s"\\]|\\{1,8}u[0-9a-fA-F]{4}|\\{1,` + k + `}[0-7]{3}|` + backslashes(2*n+1) + `"|` + backslashes(2*n+2)
+	u := `[^\s"\\]|\\{1,` + cookieRunMax + `}u[0-9a-fA-F]{4}|\\{1,` + k + `}[0-7]{3}|` + backslashes(2*n+1) + `"|` + backslashes(2*n+2)
 	if n == 0 {
 		return u + `|\\[^"\\\r\nu0-7]`
 	}
-	return u + `|\\{2,` + k + `}[^"\\\r\nu0-7]|\\[^"\\\r\nnru0-7]`
+	h := strconv.Itoa(cookieBreakRun(n))
+	return u + `|\\{1,` + h + `}[^"\\\r\nnru0-7]|\\{` + strconv.Itoa(cookieBreakRun(n)+1) + `,` + k + `}[^"\\\r\nu0-7]`
 }
+
+// cookieRunMax is the most backslashes in a run that is the escape of a bare value: a JSON unicode escape in text that
+// has been escaped four times carries sixteen (one, doubled by each layer).
+const cookieRunMax = `16`
 
 // cookieBareLong is a bare cookie value of 12 or more characters (it ends before a quote, a space, a comma, a
 // semicolon, an ampersand or a closing bracket, so a header in a curl command ends before the quote that closes
 // the string and the value in a printed Go header before the bracket that closes its list); a JSON unicode
 // escape counts as one character.
-const cookieBareLong = `(?:[^\s'",;&\\\]]|\\{1,8}u[0-9a-fA-F]{4}){12,}`
+const cookieBareLong = `(?:[^\s'",;&\\\]]|\\{1,` + cookieRunMax + `}u[0-9a-fA-F]{4}){12,}`
 
-// cookieQuotedLong is a quoted cookie value at a level whose first 12 characters are counted, taken whole
-// (the rest of the body, then the closing quote when it is there).
-func cookieQuotedLong(n int) string {
-	return cookieQuote(n) + `(?:` + cookieCountUnit(n) + `){12,}(?:` + cookieSpanUnit(n) + `)*(?:` + cookieQuote(n) + `)?`
+// cookieQuotedLong is a quoted cookie value at a level whose first 12 characters are counted, taken whole: the rest
+// of the body, then the closing quote when it is there. With cross, a body that is open at a line break goes on
+// to its closing quote when that is within cookieBreakLimit line breaks, and ends at its line when it is not; a
+// list's strings never run over a line break.
+func cookieQuotedLong(n int, cross bool) string {
+	q := cookieQuote(n)
+	head := q + `(?:` + cookieCountUnit(n) + `){12}`
+	units := `(?:` + cookieSpanUnit(n) + `)*`
+	if !cross {
+		return head + units + `(?:` + q + `)?`
+	}
+	return head + `(?:` + cookieBody(n) + q + `|` + units + `)`
 }
 
 // cookieLongOf is the equals sign and a cookie value of 12 or more characters, quoted at any level or bare as given.
 func cookieLongOf(bare string) string {
 	var alts []string
 	for _, n := range cookieQuoteLevels {
-		alts = append(alts, cookieQuotedLong(n))
+		alts = append(alts, cookieQuotedLong(n, true))
 	}
 	return `=(?:` + strings.Join(alts, `|`) + `|` + bare + `)`
 }
@@ -280,66 +373,95 @@ func cookieLongOf(bare string) string {
 // cookieLong is a long cookie value on a line.
 var cookieLong = cookieLongOf(cookieBareLong)
 
-// cookiePair is a cookie whose value is a double-quoted string, from the equals sign to the closing quote, at
-// any level. A line break ends it. It is how the walk tells the quotes of a value from the quote that closes the
-// string the header sits in: a quote that is not the closing quote of a pair ends the span.
+// cookiePairAt is a cookie whose value is a double-quoted string at a level n, from the equals sign to the closing
+// quote: an empty value; a value that starts with a unit that can start one and runs to its closing quote, over up
+// to cookieBreakLimit line breaks; or, when there is no closing quote in reach, the rest of the line (a line that
+// the text was cut in). It is how the walk tells the quotes of a value from the quote that closes the string the
+// header sits in: a quote that is not the closing quote of a pair ends the span, and a quote that nothing can
+// follow as a value, white space, a separator or a closer, opens no pair.
+func cookiePairAt(n int) string {
+	q := cookieQuote(n)
+	first := `(?:` + cookieOpeningUnit(n) + `)`
+	return `=` + q + `(?:` + q + `|` + first + cookieBody(n) + q + `|` + first + `(?:` + cookieSpanUnit(n) + `)*)`
+}
+
+// cookiePair is a pair at any level.
 var cookiePair = func() string {
 	var alts []string
 	for _, n := range cookieQuoteLevels {
-		alts = append(alts, `=`+cookieQuote(n)+`(?:`+cookieSpanUnit(n)+`)*`+cookieQuote(n))
+		alts = append(alts, cookiePairAt(n))
 	}
 	return strings.Join(alts, `|`)
 }()
 
+// cookieBareEscape is a backslash run (a shell escape of a dollar sign, a backtick, a space or a semicolon, a path
+// separator, a JSON escape or a doubled backslash of either) and the character it escapes. Not a quote, which closes
+// the string the header sits in, and not a line break (the JSON escape of one is an n or an r).
+const cookieBareEscape = `\\{1,` + cookieRunMax + `}[^"'\\\r\nnr]`
+
 // cookieStep is one step over the span of a header line: a quoted pair, or any character that is not a quote, a
-// backslash or a line break, or a JSON escape that is not a line break. The quoted pair comes first, so the quote
-// that opens it is not where the step stops. A single quote ends the span: an apostrophe in an unquoted value
-// (name=O'Brien) cannot be told from the quote that closes a header written in single quotes.
-var cookieStep = `(?:` + cookiePair + `|[^'"\\\r\n]|\\{1,8}u[0-9a-fA-F]{4}|\\{1,4}[tbf/])`
+// backslash or a line break, or an escape that is not a quote or a line break. The quoted pair comes first, so the
+// quote that opens it is not where the step stops. A single quote ends the span: an apostrophe in an unquoted
+// value (name=O'Brien) cannot be told from the quote that closes a header written in single quotes.
+var cookieStep = `(?:` + cookiePair + `|[^'"\\\r\n]|` + cookieBareEscape + `)`
 
 // cookieLineBody is the span of a header on a line: steps, a long value, then steps to the end.
 var cookieLineBody = cookieStep + `*?` + cookieLong + cookieStep + `*`
 
-// cookieString is a JSON string of a list at a level, with its quotes: the body, then the closing quote when it
-// is there. Inside it a quote of the next level is a quote of a cookie value.
+// cookieString is a string of a list at a level, with its quotes: the body, then the closing quote when it is
+// there. Inside it a quote of the next level is a quote of a cookie value. A string that is open at a line break
+// goes on to its closing quote when that is within cookieBreakLimit line breaks (a printed header holds the quoted
+// value of a cookie as a string of the list, and that value may hold a line break).
 func cookieString(n int) string {
-	return cookieQuote(n) + `(?:` + cookieSpanUnit(n) + `)*(?:` + cookieQuote(n) + `)?`
+	q := cookieQuote(n)
+	return q + `(?:` + cookieBody(n) + q + `|(?:` + cookieSpanUnit(n) + `)*)`
 }
 
 // cookieSingleString is a single-quoted string of a list (Python's repr of a header list).
 const cookieSingleString = `'(?:[^'\\\r\n]|\\[^\r\n])*'?`
 
-// cookieListStep is one step over a list: a string at any level, a single-quoted string, or anything else that
-// is not a closing bracket, a quote or a backslash, and the JSON escapes. A closing bracket inside a string
-// is part of the string (Django's messages cookie holds two).
-var cookieListStep = func() string {
+// cookieListStepClosing is one step over a list that ends at the closer (the class of the characters a bracket or a
+// brace is): a string at any level, a single-quoted string, or anything else that is not the closer, a quote or a
+// backslash, and the JSON escapes. A closer inside a string is part of the string (Django's messages cookie holds
+// two closing brackets).
+func cookieListStepClosing(closer string) string {
 	var alts []string
 	for _, n := range cookieQuoteLevels {
 		alts = append(alts, cookieString(n))
 	}
-	return `(?:` + strings.Join(alts, `|`) + `|` + cookieSingleString + `|[^\]"'\\]|\\{1,8}u[0-9a-fA-F]{4}|\\{1,4}[nrtbf/])`
-}()
+	return `(?:` + strings.Join(alts, `|`) + `|` + cookieSingleString + `|[^` + closer + `"'\\]|\\{1,` + cookieRunMax + `}[^"'\\\r\n])`
+}
 
 // cookieListLong is where a list holds its long value: after an equals sign outside a string (a printed Go
 // header), inside a string at a level (the value bare, or quoted at the next level), or inside a single-quoted
 // string.
 var cookieListLong = func() string {
 	alts := []string{cookieLong}
+	deepest := cookieQuoteLevels[len(cookieQuoteLevels)-1]
 	for _, n := range cookieQuoteLevels {
 		// A quote of a cookie value inside a string at level n carries 2n+1 backslashes.
-		inner := cookieQuotedLong(2*n+1) + `|` + cookieBareLong
+		inner := cookieBareLong
+		if 2*n+1 <= deepest {
+			inner = cookieQuotedLong(2*n+1, false) + `|` + cookieBareLong
+		}
 		span := `(?:` + cookieSpanUnit(n) + `)`
 		alts = append(alts, cookieQuote(n)+span+`*?=(?:`+inner+`)`+span+`*(?:`+cookieQuote(n)+`)?`)
 	}
-	alts = append(alts, `'(?:[^'\\\r\n]|\\[^\r\n])*?=(?:`+cookieQuotedLong(0)+`|`+cookieBareLong+`)(?:[^'\\\r\n]|\\[^\r\n])*'?`)
+	alts = append(alts, `'(?:[^'\\\r\n]|\\[^\r\n])*?=(?:`+cookieQuotedLong(0, false)+`|`+cookieBareLong+`)(?:[^'\\\r\n]|\\[^\r\n])*'?`)
 	return `(?:` + strings.Join(alts, `|`) + `)`
 }()
 
-// cookieListBody is the span of a list: steps, a long value, then steps to the closing bracket.
-var cookieListBody = cookieListStep + `*?` + cookieListLong + cookieListStep + `*`
+// cookieListBodyClosing is the span of a list that ends at the closer: steps, a long value, then steps to the closer.
+func cookieListBodyClosing(closer string) string {
+	step := cookieListStepClosing(closer)
+	return step + `*?` + cookieListLong + step + `*`
+}
 
-// cookieHeader is the cookie-header class: a list, tried first, or a line.
-var cookieHeader = `(?i)` + lead + `(?:set-)?cookie(?:` + cookieListOpener + cookieListBody + `|` + cookieOpener + cookieLineBody + `)`
+// cookieHeader is the cookie-header class: a bracketed list, a Go slice literal, or a line.
+var cookieHeader = `(?i)` + lead + `(?:set-)?cookie(?:` +
+	cookieListOpener + cookieListBodyClosing(`\]`) + `|` +
+	cookieGoListOpener + cookieListBodyClosing(`}`) + `|` +
+	cookieOpener + cookieLineBody + `)`
 
 // Class is one refusal class: a name and the pattern that recognizes it.
 type Class struct {
@@ -428,20 +550,27 @@ type Class struct {
 //     white space from the start of a bare value or from the opening quote of a quoted one, a JSON unicode escape
 //     counting as one. The match then runs from the header name to the first of the end of the line (a line break,
 //     its JSON escape or the end of the text), the closing quote of the string the header sits in (a quote that
-//     opens no quoted cookie value: a bare quote, a backslash and a quote, or three backslashes and a quote, which
-//     are the three levels of escaping of a header line or a shell command, of JSON text, and of JSON text inside
-//     either; a single quote ends it too, so a curl command's header ends before the shell's closing quote) and
-//     the closing bracket of a list (a JSON list, a printed Go header, a Python list: one span however many
-//     elements and lines it has, a bracket inside a string element not ending it). The closing quote and the
-//     bracket are not part of the match, so redacted text keeps its quoting and Args stay valid JSON. Nothing
-//     inside the span is read for an alphabet: a quoted value with a space, an apostrophe, an ampersand, a comma,
-//     a semicolon, a tab, an escaped quote, a doubled backslash, an octal escape, a shell escape (an escaped
-//     dollar sign or backtick) or one of Go's HTML escapes (backslash-u0026, 003c, 003e) is inside it, and so is
-//     every other cookie and attribute on the line. Over-redacting a cookie line is accepted by design: it is
-//     evidence of a header, not of the build. An apostrophe in an unquoted value ends the span (name=O'Brien
-//     cannot be told from the quote that closes a header written in single quotes), so a cookie behind one is
-//     not covered. The fine-grained grammar of a cookie value lives only in the harvest redactor, which remembers
-//     the values of a span for its value-tail gate.
+//     opens no quoted cookie value: a bare quote, or a backslash run of 1, 3, 7 or 15 and a quote, which are the
+//     levels of escaping of a header line or a shell command, of JSON text, and of each further layer; a single
+//     quote ends it too, so a curl command's header ends before the shell's closing quote) and the closing bracket
+//     of a list or the closing brace of a Go slice literal (a JSON list, a printed Go header, the Go-syntax print
+//     of one, a Python list: one span however many elements and lines it has, a bracket inside a string element
+//     not ending it). The closing quote and the bracket are not part of the match, so redacted text keeps its
+//     quoting and Args stay valid JSON. Nothing inside the span is read for an alphabet: a quoted value with a
+//     space, an apostrophe, an ampersand, a comma, a semicolon, a tab, an escaped quote, a doubled backslash, an
+//     octal escape, a shell escape (an escaped dollar sign or backtick) or one of Go's HTML escapes
+//     (backslash-u0026, 003c, 003e) is inside it, a bare value with a shell escape or a backslash path is inside
+//     it, and so is every other cookie and attribute on the line. Over-redacting a cookie line is accepted by
+//     design: it is evidence of a header, not of the build. Two rules tell a quote that opens a value from the
+//     one that closes the string the header sits in. A quote after an equals sign opens a value only when a
+//     value can start behind it (not white space, not a separator or a closer, so base64 padding or an empty
+//     last cookie in front of the closing quote does not make it an opener; an empty value is still a value),
+//     and a quoted value that is open at a line break goes on to its closing quote when that is within three more
+//     line breaks, and ends at its line when it is not (a truncated line takes the rest of its line and no
+//     more). An apostrophe in an unquoted value ends the span (name=O'Brien cannot be told from the quote that
+//     closes a header written in single quotes), so a cookie behind one is not covered, and neither is one
+//     behind a bare double quote inside a value (a raw JSON value). The fine-grained grammar of a cookie value
+//     lives only in the harvest redactor, which remembers the values of a span for its value-tail gate.
 //
 // Every class that starts with a word also accepts, right before the word, a JSON string escape
 // (a backslash and n, r, t, b or f, or backslash-u and four hex digits) or a terminal control
@@ -466,9 +595,10 @@ type Class struct {
 // an operating-system command, the one-byte form of the bracket), and a Basic
 // header whose name and scheme (or a cookie header whose name and cookies) are more than
 // eight punctuation characters apart or have a word between them, a cookie behind a
-// single quote or an apostrophe in an unquoted value, a quoted cookie whose quotes carry two backslashes
-// or four or more, a header folded again after its first cookie, and a cookie passed apart from its
-// header name (curl -b, a jar).
+// single quote or an apostrophe in an unquoted value, a cookie behind a bare double quote inside an unquoted value,
+// a quoted cookie whose quotes carry a number of backslashes that is no level of escaping (not 0, 1, 3, 7 or 15),
+// a quoted value that starts with white space or a separator, a Go slice literal whose type is left out, a header
+// folded again after its first cookie, and a cookie passed apart from its header name (curl -b, a jar).
 var Classes = []Class{
 	{"email", regexp.MustCompile(`(?:` + jsonEscape + `)?[A-Za-z0-9._%+-]+@` + emailDomainStart + `[A-Za-z0-9.-]*\.[A-Za-z]{2,}`)},
 	{"private-key-block", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
