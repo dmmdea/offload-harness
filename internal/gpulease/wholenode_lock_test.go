@@ -96,3 +96,40 @@ func TestAWholeNodeGrantReadsTheHoldersProcessBeforeItTakesTheEpochLock(t *testi
 		t.Errorf("%d of %d process reads of the record were made with the epoch lock held, want none", underLock, reads)
 	}
 }
+
+// TestTheWholeNodeVerificationPaysAtMostOneWaitPerFile: the second critical section of a whole-node grant (the verification that no
+// card lease is live, which sweeps and then reads every record and heartbeat) is bounded the way a card grant's is
+// (TestAFreshLeftoverStagedHeartbeatCostsAGrantAtMostOneWaitPerFile): three card leases are held and each heartbeat has a fresh staged
+// file left beside it by a writer that died. The verification reads each heartbeat several times and waits for each file once. A pin
+// for the count; the hold itself, in milliseconds, is a measurement in the change fragment.
+func TestTheWholeNodeVerificationPaysAtMostOneWaitPerFile(t *testing.T) {
+	c := onGateClock(t)
+	m := scopedRealClock(t)
+	var held []*Lease
+	for _, card := range []string{card0, card1, card2} {
+		l := mustDevices(t, m, card)
+		held = append(held, l)
+		t.Cleanup(func() { _ = l.Release() })
+	}
+	for _, l := range held {
+		stuckBeside(t, c, m.heartbeatPath(l.Epoch()))
+	}
+	gatePauses.Store(0)
+	gateExpiries.Store(0)
+
+	if err := m.verifyNoDeviceLeases(1000); err == nil {
+		t.Fatal("the verification found no live card lease: the test does not observe the reads")
+	}
+
+	files := int64(len(held))
+	budgetPauses := int64(absentBudget / absentPause)
+	if gatePauses.Load() == 0 {
+		t.Fatal("the verification never met the leftovers: the test does not observe the wait")
+	}
+	if got := gateExpiries.Load(); got > files {
+		t.Errorf("the verification ran out %d budgets for %d files, want at most one each", got, files)
+	}
+	if got := gatePauses.Load(); got > files*budgetPauses {
+		t.Errorf("the verification paused %d times for %d files, want at most %d (one budget of %d for each file, not one for each read of it)", got, files, files*budgetPauses, budgetPauses)
+	}
+}
