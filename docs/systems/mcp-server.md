@@ -1164,8 +1164,9 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    directory that holds a file for the name is `present` and the runtime manifest names that file, subfolder and extension included; more than
    one (the root and a subfolder, two subfolders, two registered roots holding two copies) is `ambiguous`, refused as `models_missing` because
    the file ComfyUI opens varies from run to run and the manifest would name only one; a directory reached two ways (a root that links to
-   another registered root, a link inside a root, a root registered inside another) is one directory, because the inventory records where
-   each file really is; a file the class does not list (no extension) answers the name as written first, as `isfile` does; under a root
+   another registered root, a link inside a root, a root registered inside another, a registered spelling in another case) is one directory,
+   and a file linked into two directories (symbolic or hard) is one file, because the inventory records where each file really is (the path as
+   the file system spells it) and what the file system calls it; a file system that gives no identity falls back to the path; a file the class does not list (no extension) answers the name as written first, as `isfile` does; under a root
    whose volume folds case (NTFS by default, probed per root) a case variant is a hit; an annotated file that is not the one ComfyUI opens
    for the name the prompt gives (a `.safetensors` beside an annotated `.pt`) is `shadowed`; a node that holds none is `models_missing`,
    listed by the name the text gives. A loader widget's embeddings file (`ConditioningLoader`) is not a prompt name: it is met by its exact

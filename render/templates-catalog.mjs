@@ -109,8 +109,14 @@ export const nodeIo = {
   // realpath: the native one, which gives the spelling the file system keeps (the drive letter and the folders in their own case); the JS one
   // returns the case it was given, so one directory registered under two spellings would read as two.
   realpath: (p) => { try { return slash(realpathSync.native(p)); } catch { return slash(p); } },
+  // identity: what the file system calls this file (`id:<device>:<index>`), or null when it cannot say. Two names of one file, a hard link,
+  // share it, and no path tells them apart.
+  identity: (p) => { try { return fileIdentity(statSync(p, { bigint: true })); } catch { return null; } },
   writeText: (p, s) => { writeFileSync(p, s); },
 };
+
+// fileIdentity: the id of a file from its stat (bigint), or null when the file system gives none (an index of 0 is no index).
+export const fileIdentity = (st) => (st && st.ino !== 0n ? `id:${st.dev}:${st.ino}` : null);
 
 // walkFiles: every file under `root`, with its path relative to it. It follows symlinks and
 // junctions (ComfyUI's listing does) and refuses only a loop back into an ancestor.
@@ -1391,8 +1397,9 @@ function foldsCase(dir, io) {
 // scanModelInventory: what each class would list. A file reachable through several directories is
 // one entry that names them all (a junction to a model drive makes the same file appear twice).
 // Files with an extension the class's core loaders do not accept are only counted in `unlisted`.
-// The embeddings class also records, for each file and each directory that shows it, where the file really is (`reals`, parallel to `dirs`):
-// ComfyUI's lookup is by directory, and a link makes one directory, or one file, appear under several names (embeddingHits). And it records
+// The embeddings class also records, for each file and each directory that shows it, where the file really is (`reals`, parallel to `dirs`) and,
+// when the io can say, what the file system calls it (`ids`, the same shape: two names of one hard-linked file share one): ComfyUI's lookup is
+// by directory, and a link makes one directory, or one file, appear under several names (embeddingHits). And it records
 // the files it does not list (`unlisted_files`, the same shape without a size): load_embed asks for the name as written first, with no
 // extension filter, so a file whose whole name is the reference answers it whatever it ends in. And it records the roots whose volume folds
 // case (`case_insensitive_dirs`): isfile follows the file system, so under such a root `foo` is answered by `FOO.pt` too.
@@ -1404,13 +1411,14 @@ export function scanModelInventory(roots, io = nodeIo) {
     const notListed = new Map();
     let unlisted = 0;
     const real = cls === "embeddings";
+    const named = real && typeof io.identity === "function"; // an io that can tell two names of one file apart
     const record = (map, f, d, size) => {
       const seen = map.get(f.rel);
       if (seen) {
-        if (!seen.dirs.includes(d.path)) { seen.dirs.push(d.path); if (real) seen.reals.push(io.realpath(f.abs)); }
+        if (!seen.dirs.includes(d.path)) { seen.dirs.push(d.path); if (real) seen.reals.push(io.realpath(f.abs)); if (named) seen.ids.push(io.identity(f.abs)); }
         return;
       }
-      map.set(f.rel, { rel: f.rel, dirs: [d.path], ...(real ? { reals: [io.realpath(f.abs)] } : {}), ...(size ? { size: io.stat(f.abs)?.size ?? null } : {}) });
+      map.set(f.rel, { rel: f.rel, dirs: [d.path], ...(real ? { reals: [io.realpath(f.abs)] } : {}), ...(named ? { ids: [io.identity(f.abs)] } : {}), ...(size ? { size: io.stat(f.abs)?.size ?? null } : {}) });
     };
     const folding = [];
     for (const d of spec.dirs) {
@@ -1518,9 +1526,9 @@ const MET = new Set(["present", "present_class_unknown"]);
 // those it holds. The match is on whole path segments. `fold` compares in lower case, for the diagnosis of a name in another case.
 // A directory is one entry of the set however it is reached, so a hit is keyed by the directory string (a registered root that lies inside
 // another root is the same string as the subfolder walked from it), and hits that open the same file are one hit: the inventory records
-// where a file really is (`reals`, one per directory that shows it), and a root that is a link to another root, a link inside a root, or a
-// file linked into two directories answers with the same bytes from either. Two copies are two files and stay two hits. Without `reals`
-// (an inventory that carries none) every directory is taken as distinct.
+// where a file really is (`ids` when the io names the file, else `reals`: one per directory that shows it), and a root that is a link to
+// another root, a link inside a root, or a file linked into two directories (a symbolic or a hard link) answers with the same bytes from
+// either. Two copies are two files and stay two hits. Without either (an inventory that carries none) every directory is taken as distinct.
 // Under a root whose volume folds case (`folding`, the roots the inventory found so) isfile answers a name with a file in another case, so
 // the comparison there is in lower case: the file found is still reported by the spelling it has on disk.
 function embeddingHits(files, name, fold = false, folding = new Set()) {
@@ -1541,7 +1549,7 @@ function embeddingHits(files, name, fold = false, folding = new Set()) {
       if (!m) return;
       const dir = m.sub === "" ? root : `${root}/${m.sub.slice(0, -1)}`;
       const prev = byDir.get(dir);
-      if (!prev || m.rank < prev.rank) byDir.set(dir, { rank: m.rank, rel: f.rel, dir, real: f.reals?.[i] ?? null });
+      if (!prev || m.rank < prev.rank) byDir.set(dir, { rank: m.rank, rel: f.rel, dir, real: f.ids?.[i] ?? f.reals?.[i] ?? null });
     });
   }
   const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);

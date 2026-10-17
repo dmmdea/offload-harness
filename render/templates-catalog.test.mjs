@@ -4112,6 +4112,52 @@ test("readiness (real filesystem): a file hard-linked into two embeddings direct
   assert.equal(status(), "ambiguous", "a copy is a second file");
 });
 
+// The same, with an io that names its files, so the rule holds on a host where hard links or the case rule cannot be made: two names that
+// share an id are one file (whatever their paths), two ids are two files, and a file the io cannot name falls back to its real path.
+const idIo = (files, ids) => {
+  const io = memIo(files);
+  io.identity = (p) => ids[p] ?? null;
+  return io;
+};
+const idStatus = (ids) => {
+  const tree = { ...TREE, [EMB("e.pt")]: { size: 7 }, [EMB2("e.pt")]: { size: 7 } };
+  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: OVERFLOW }), idIo(tree, ids));
+  return [C.readiness([req("embeddings", "e", { annotated: false })], inv).requirements[0].status, inv.classes.embeddings.files.map((f) => f.ids)];
+};
+
+test("readiness: two names that share a file id are one file, whatever their paths; two ids are two files; a file with no id falls back to its real path", () => {
+  assert.deepEqual(idStatus({ [EMB("e.pt")]: "id:1:7", [EMB2("e.pt")]: "id:1:7" }), ["present", [["id:1:7", "id:1:7"]]], "one id, two paths");
+  assert.deepEqual(idStatus({ [EMB("e.pt")]: "id:1:7", [EMB2("e.pt")]: "id:1:8" }), ["ambiguous", [["id:1:7", "id:1:8"]]], "two ids");
+  assert.deepEqual(idStatus({}), ["ambiguous", [[null, null]]], "no ids: two real paths, two files");
+  assert.equal(idStatus({ [EMB("e.pt")]: "id:1:7" })[0], "ambiguous", "an id never equals a path");
+  assert.equal(invFrom({ ...TREE, [EMB("e.pt")]: { size: 7 } }).classes.embeddings.files[0].ids, undefined, "an io that cannot name files records no ids");
+});
+
+test("fileIdentity: a device and an index name a file, an index of 0 names nothing, and nodeIo gives the same id to two names of one file", async (t) => {
+  assert.equal(C.fileIdentity({ dev: 5n, ino: 9n }), "id:5:9");
+  assert.equal(C.fileIdentity({ dev: 5n, ino: 0n }), null, "a file system that has no index reports 0 for every file: those would all be one file");
+  assert.equal(C.fileIdentity(null), null);
+  const { mkdirSync, writeFileSync, linkSync } = await import("node:fs");
+  const dir = scratchDir(t, "tc-ident-").replace(/\\/g, "/");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(`${dir}/a.bin`, "x");
+  writeFileSync(`${dir}/c.bin`, "x");
+  const id = C.nodeIo.identity(`${dir}/a.bin`);
+  assert.notEqual(id, C.nodeIo.identity(`${dir}/c.bin`), "two files of the same bytes are two");
+  assert.equal(C.nodeIo.identity(`${dir}/missing.bin`), null);
+  try { linkSync(`${dir}/a.bin`, `${dir}/b.bin`); } catch { return; } // no hard links here: the pure part above still ran
+  assert.equal(C.nodeIo.identity(`${dir}/b.bin`), id);
+});
+
+test("nodeIo.realpath: gives the spelling the file system keeps, so two spellings of one folder read the same", async (t) => {
+  const { mkdirSync, existsSync } = await import("node:fs");
+  const dir = scratchDir(t, "tc-Spell-").replace(/\\/g, "/");
+  mkdirSync(`${dir}/Models`, { recursive: true });
+  if (!existsSync(`${dir}/models`)) return t.skip("this volume does not fold case: models is another folder than Models");
+  assert.equal(C.nodeIo.realpath(`${dir}/models`), C.nodeIo.realpath(`${dir}/Models`));
+  assert.equal(C.nodeIo.realpath(`${dir}/MODELS`), C.nodeIo.realpath(`${dir}/Models`));
+});
+
 // ---------------------------------------------------------------------------------------------------------------------------------
 // load_embed asks os.path.isfile for the name as written FIRST, with no extension filter, and only then appends .safetensors, .pt and .bin.
 // A file whose whole name is the reference is therefore a hit whatever it ends in, including no extension at all. The class lists only the

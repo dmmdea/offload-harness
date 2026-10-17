@@ -97,9 +97,12 @@
     can find); within one directory the order is as written, `.safetensors`, `.pt`, `.bin`. More than one directory is the new status
     `ambiguous`, listing the files, and the run is refused as `models_missing` with the entry named, so the manifest never names a file ComfyUI
     might not open. A directory is one entry of ComfyUI's set however it is reached, and the inventory tells a link from a copy: it records
-    where each embeddings file really is (`reals`), and hits that open the same real file are one hit. A root that is a link to another
-    registered root (a model drive reached through the default directory), a link inside a root, a root registered inside another and one
-    file linked into two directories are each one directory; two copies stay two files and stay `ambiguous`. An annotated file that is not
+    where each embeddings file really is (`reals`, the path as the file system spells it, so a root registered with the drive letter or a folder
+    in another case is the same directory) and what the file system calls it (`ids`, so two hard links of one file are one file), and hits
+    that open the same file are one hit. A root that is a link to another registered root (a model drive reached through the default
+    directory), a link inside a root, a root registered inside another and one file linked into two directories (symbolic or hard) are each
+    one directory; two copies stay two files and stay `ambiguous`. A file system that gives no file identity falls back to the real path, so
+    there a hard link reads as two files. An annotated file that is not
     the one ComfyUI opens for the name a prompt gives (a `.safetensors` beside an annotated `.pt`) is the new status `shadowed`. The lookup
     follows the volume, as `isfile` does: on a case-sensitive volume a file in another case is `case_mismatch`, and under a root whose volume
     folds case (NTFS by default; the scan asks each root through the io, one of its entries spelled in the other case, and records the roots
