@@ -52,7 +52,19 @@ type HostMemory struct {
 	// CommitLimitGiB is what the OS will commit before refusing: physical plus page file on Windows,
 	// CommitLimit on Linux.
 	CommitLimitGiB float64
+	// CommitLimitSoft says CommitLimitGiB is not a limit this OS enforces (Linux with vm.overcommit_memory 0 or 1,
+	// or a sandbox that hides the accounting). The zero value is a hard limit: Windows always, Linux in strict mode.
+	CommitLimitSoft bool
 }
+
+// HostLoad is what a job takes of the host's memory, in the two quantities the admission rule keeps apart.
+type HostLoad struct {
+	// TouchGiB is the working set the job will touch: the physical RAM it occupies.
+	TouchGiB float64
+	// CommitGiB is the commit it will be charged: memory the OS promises it, touched or not.
+	CommitGiB float64
+}
+
 
 // HostVerdict is the one word for how the host's memory stands against its physical RAM.
 type HostVerdict string
@@ -126,6 +138,10 @@ type HostRAMCheck struct {
 	// part still to load of leases already granted; LimitGiB is physical RAM less the headroom;
 	// AvailableGiB is what could be handed out without paging when the decision was taken.
 	NeedGiB, CommittedGiB, PendingGiB, PhysicalGiB, HeadroomGiB, LimitGiB, ProjectedGiB, AvailableGiB float64
+	// The commit side of the decision (all GiB).
+	CommitNeedGiB, CommitPendingGiB, CommitLimitGiB, CommitBoundGiB, CommitProjectedGiB float64
+	// CommitApplies says the commit condition was put to this reading; TouchShort and CommitShort say which condition refused.
+	CommitApplies, TouchShort, CommitShort bool
 	// Why is the sentence a refusal carries ("" when OK).
 	Why string
 }
@@ -165,6 +181,15 @@ type HostRAMCheck struct {
 // the reference box on 2026-10-10 from session readings that are not recorded in this repository.
 func HostRAMAdmits(mem HostMemory, readable bool, needGiB, pendingGiB, headroomGiB float64) HostRAMCheck {
 	return hostRAMAdmits(mem, readable, HostMemorySupported, needGiB, pendingGiB, headroomGiB)
+}
+
+// HostRAMAdmitsLoad is HostRAMAdmits for a job that declares its touched working set and its commit apart.
+func HostRAMAdmitsLoad(mem HostMemory, readable bool, need, pending HostLoad, headroomGiB float64) HostRAMCheck {
+	return hostRAMAdmitsLoad(mem, readable, HostMemorySupported, need, pending, headroomGiB)
+}
+
+func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending HostLoad, headroomGiB float64) HostRAMCheck {
+	return hostRAMAdmits(mem, readable, supported, need.TouchGiB, pending.TouchGiB, headroomGiB)
 }
 
 func hostRAMAdmits(mem HostMemory, readable, supported bool, needGiB, pendingGiB, headroomGiB float64) HostRAMCheck {
@@ -256,4 +281,21 @@ func parseMeminfo(text string) (HostMemory, bool) {
 		committed, limit = total-avail, total
 	}
 	return HostMemory{PhysicalGiB: total, AvailableGiB: avail, CommitUsedGiB: committed, CommitLimitGiB: limit}, true
+}
+
+// parseOvercommit reads vm.overcommit_memory text: the mode (0 heuristic, 1 always, 2 strict).
+func parseOvercommit(text string) (mode int, ok bool) { return 0, false }
+
+// readHostMemoryLinux is the Linux reader over a file-reading seam.
+func readHostMemoryLinux(read func(path string) ([]byte, error)) (HostMemory, bool) {
+	b, err := read("/proc/meminfo")
+	if err != nil {
+		return HostMemory{}, false
+	}
+	return parseMeminfo(string(b))
+}
+
+// hostMemoryFromStatus converts the Windows GlobalMemoryStatusEx counters (bytes) into a reading.
+func hostMemoryFromStatus(totalPhys, availPhys, totalPageFile, availPageFile uint64) (HostMemory, bool) {
+	return HostMemory{}, false
 }
