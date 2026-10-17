@@ -133,9 +133,10 @@ fake holds until the test releases it, a count of calls), and bound the wait wit
   constants a test refers to from the package's other files too) and fails on an upper bound on a measured elapsed time
   under one second that `clock_lint_allowlist_test.go` does not list with its count and its reason: what the bound rules
   out, and how wide the margin to it is. The measured time is `time.Since`, a difference with a `time.Now()` stamp, a name
-  that holds one, that value read as a number, rounded, converted or multiplied or divided by a constant, or the result of
-  a helper of the package that returns one (`measure(f) > C`, `results, sum, elapsed := runWithin(...)`); the bound is `>`
-  or `>=` against a constant it can evaluate. A bound of a second or more is not reviewed by the lint. That is where a
+  that holds one, that value read as a number, rounded, made absolute, converted or multiplied or divided by a constant, or
+  the result of a helper of the package that returns one (`measure(f) > C`, `results, sum, elapsed := runWithin(...)`; a
+  method counts only when it is called on a local name that holds a value of the type that declares it); the bound is `>`
+  or `>=` against a constant it can evaluate (a package const is trusted only when every declaration of the name agrees). A bound of a second or more is not reviewed by the lint. That is where a
   bound starts to be a hang guard, but the line is a ratchet and not a proof of safety (a 2.5 s ceiling failed under
   starvation too), so such a bound is still yours to judge. Fixing a listed site (waiting on an event instead) means
   lowering its count, or deleting the entry when it was the last, and the lint fails until you do. A test file that imports
@@ -144,9 +145,12 @@ fake holds until the test releases it, a count of calls), and bound the wait wit
   the code.
 - **What it does not see** (the header of the file has the full list). It reads Go only: the JavaScript tests under
   `render/` and the shell scripts have the same fault and no lint here. It does not see a bound against a value it cannot
-  evaluate (a field, a parameter, a poll interval, a constant of another package); a measured time it cannot follow (a sum
-  with another duration, a helper kept in a closure variable or in another package, a value stored in a field or sent on a
-  channel); `elapsed < C` when it is not a lower bound, namely a fixture schedule (a fake that answers one way until `C` has
+  evaluate (a field, a parameter, a poll interval, a constant of another package, a const written with `iota` or by
+  repetition of the line above); a measured time it cannot follow (a sum with another duration, `max` or `min` of it, a
+  helper kept in a closure variable or in another package, a method called through a package-level variable, a field or
+  an interface, a value stored in a field or sent on a channel, and an instant held as an integer: an atomic `UnixNano`
+  stored from `time.Now()` and subtracted later, of which `internal/delegate/callwait_test.go` holds a live 400 ms
+  ceiling); `elapsed < C` when it is not a lower bound, namely a fixture schedule (a fake that answers one way until `C` has
   passed and another way after) and a poll deadline written as a loop condition (`for time.Since(start) < C { ... }`
   followed by a failure); or the lower edge of a sampling window. It does not see the other shapes of the same fault
   either: a fixed sleep before an assertion, a short call or context window handed to the code under test, a poll deadline

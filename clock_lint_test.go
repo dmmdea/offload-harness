@@ -19,17 +19,24 @@ package main
 //
 //   - The measured time is time.Since(x); a.Sub(b) where a or b is a time.Now() stamp; a name that only ever holds one of
 //     those; that value read as a number (.Seconds(), .Milliseconds(), .Microseconds(), .Minutes(), .Nanoseconds()),
-//     rounded (.Round, .Truncate), converted (int, int64, float64, time.Duration), or multiplied or divided by a constant
-//     (2*d, d/2, d/time.Millisecond); and the result of a function or method of the same package that returns one on
-//     every return that sets it, whether it is called in the comparison (measure(f) > C), kept (d := measure(f)) or one of
-//     several results (results, sum, elapsed := runWithin(...)), through named results and bare returns and through
-//     helpers that return other helpers' results. A method is known by its name alone, so a name that two declarations
-//     answer differently, or a call through an imported package, is not read.
+//     rounded (.Round, .Truncate), made absolute (.Abs, math.Abs), converted (int, int64, float64, time.Duration, and
+//     math.Round, Floor, Ceil and Trunc of the number), or multiplied or divided by a constant (2*d, d/2, d/time.Millisecond);
+//     and the result of a function or method of the same package that returns one on every return that sets it, whether it
+//     is called in the comparison (measure(f) > C), kept (d := measure(f)) or one of several results
+//     (results, sum, elapsed := runWithin(...)), through named results and bare returns, through generic calls
+//     (measure[int](f)) and through helpers that return other helpers' results, to any depth. A function is found by its
+//     name unless the function defines that name itself (a parameter or a closure of the same name hides it). A method is
+//     found only through a receiver that is a local name holding a value of the type that declares it (a declared type, a
+//     composite literal, new(T), or the method's own receiver), so a method of another type, or of a type from another
+//     package, with the same name is not the helper. Names are settled to a fixed point, so the verdict does not depend on
+//     the order a map is read in.
 //   - The upper bound is `elapsed > C` or `elapsed >= C`, or the same written `C < elapsed` or `C <= elapsed`. C is a
 //     constant the lint can evaluate: a literal, a time unit product such as 250*time.Millisecond, a const of the same
 //     package (from a test file or from any other file of the package, because a test reads leasePollInterval from the code
-//     it tests; a name declared with two values, such as in two files built for different systems, is not trusted), or a
-//     const or a local that is assigned once in the same function. A bound of zero or less is not a bound.
+//     it tests), or a const or a local that is assigned once in the same function. A package name is trusted only when
+//     every package-level declaration of it, of any kind, is a const with the same value: a name that is also a var, a
+//     function or a type, that is a const the lint cannot evaluate, or that has two values in files built for different
+//     systems, is not trusted. A bound of zero or less is not a bound.
 //   - A bound at or above one second is not reviewed here. That is where a bound starts to be a hang guard (the test fails
 //     only when something is stuck) and where the list of sites stops being something one person can read. The floor is a
 //     ratchet and not a proof of safety: a 2.5 s ceiling failed under starvation too, so raising clockBoundFloor (and
@@ -44,9 +51,14 @@ package main
 // and no lint here.
 //
 //   - On the bound side: a value it cannot evaluate (a struct field, a parameter, a package variable, a constant from
-//     another package, a bound relative to a poll interval).
-//   - On the measured side: a sum or difference with another duration (d+x > C); a helper that is a closure kept in a
-//     variable (measure := func...) or lives in another package; an elapsed time stored in a field, a map or a channel.
+//     another package, a bound relative to a poll interval), and a const written with iota or by repetition of the line
+//     above, which is not evaluated.
+//   - On the measured side: a sum or difference with another duration (d+x > C); max, min or another function of a measured
+//     time; a helper that is a closure kept in a variable (measure := func...) or lives in another package; a method called
+//     through a package-level variable, a field, an interface or a call result (only a local name of the declaring type
+//     counts); an elapsed time stored in a field, a map or a channel; and an instant held as an integer, such as an atomic
+//     UnixNano stored from time.Now() and subtracted later (internal/delegate/callwait_test.go has one, a bound of 400 ms
+//     on `time.Duration(lastDispatch.Load() - horizon.UnixNano())`, which is a live sub-second ceiling the lint does not see).
 //   - `elapsed < C` that the test requires. It is overwhelmingly a LOWER bound ("it waited at least C"), which a slow runner
 //     only makes truer, so it is not read, but two shapes of it are not lower bounds. A fixture schedule: a fake server that
 //     answers one way until C has passed and another way after (`if time.Since(begin) < C { return accepted }`), so that a
@@ -1410,6 +1422,29 @@ const (
 	poll  = time.Second
 	other = platformValue
 )`}, map[string]int{"p/a_test.go:elapsed>500ms": 1}},
+		{"a chain of six helpers that each return the one before", map[string]string{"p/a_test.go": `package p
+import "time"
+func g() bool { return h6() > 160*time.Millisecond }
+func h6() time.Duration { return h5() }
+func h5() time.Duration { return h4() }
+func h4() time.Duration { return h3() }
+func h3() time.Duration { return h2() }
+func h2() time.Duration { return h1() }
+func h1() time.Duration { return time.Since(time.Now()) }`}, map[string]int{"p/a_test.go:elapsed>160ms": 1}},
+		{"a chain of package consts that runs through four files against their order", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start) > c4 }`, "p/w.go": `package p
+const c4 = c3`, "p/x.go": `package p
+const c3 = c2`, "p/y.go": `package p
+const c2 = c1`, "p/z.go": `package p
+import "time"
+const c1 = 800 * time.Millisecond`}, map[string]int{"p/a_test.go:elapsed>800ms": 1}},
+		{"a local name that is also given something the lint cannot type is not typed", map[string]string{"p/a_test.go": `package p
+import "time"
+type rig struct{ s time.Time }
+func (r *rig) took() time.Duration { return time.Since(r.s) }
+func pick() *rig { return nil }
+func g() bool { r := &rig{}; r = pick(); return r.took() > 100*time.Millisecond }`}, map[string]int{}},
 		{"a function of another package with the name of a local helper is not the helper", map[string]string{"p/a_test.go": `package p
 import (
 	"time"
