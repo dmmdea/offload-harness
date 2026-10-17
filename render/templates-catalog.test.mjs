@@ -4060,6 +4060,35 @@ test("readiness (real filesystem): an embeddings directory that is a junction to
   assert.equal(C.readiness([req("embeddings", "EasyNeg", { annotated: false })], C.scanModelInventory(withCopy, C.nodeIo)).requirements[0].status, "ambiguous", "a different file of the same name is a second file");
 });
 
+// Where a file really is, asked of the file system: a directory registered under a spelling that differs only in case is the directory it is
+// (the file system keeps one spelling on disk), and ComfyUI opens the same bytes from either string of its set, so neither is an ambiguity.
+test("readiness (real filesystem): one directory registered under a spelling that differs only in case is one directory, on a volume that folds case", async (t) => {
+  const { mkdirSync, writeFileSync, symlinkSync, existsSync } = await import("node:fs");
+  const root = scratchDir(t, "tc-emb-spell-").replace(/\\/g, "/");
+  mkdirSync(`${root}/comfy/models`, { recursive: true });
+  mkdirSync(`${root}/Store/Embeddings`, { recursive: true });
+  writeFileSync(`${root}/Store/Embeddings/EasyNeg.safetensors`, "x");
+  if (!existsSync(`${root}/store/embeddings/easyneg.safetensors`)) return t.skip("this volume does not fold case: a spelling in another case is another directory");
+  try {
+    symlinkSync(`${root}/Store/Embeddings`, `${root}/comfy/models/embeddings`, "junction");
+  } catch (e) {
+    return t.skip("no permission to create links here");
+  }
+  const status = (base, sub) => {
+    const yamls = [{ text: `p:\n  base_path: ${base}\n  embeddings: ${sub}\n`, dir: `${root}/comfy` }];
+    const roots = C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls });
+    assert.equal(roots.classes.embeddings.dirs.length, 2, "the default directory (the junction) and the registered one");
+    return C.readiness([req("embeddings", "EasyNeg", { annotated: false })], C.scanModelInventory(roots, C.nodeIo)).requirements[0].status;
+  };
+  assert.equal(status(`${root}/Store`, "Embeddings"), "present", "the spelling the disk keeps");
+  assert.equal(status(`${root}/store`, "embeddings"), "present", "the folders in lower case");
+  assert.equal(status(`${root}/STORE`, "EMBEDDINGS"), "present", "the folders in upper case");
+  if (/^[A-Za-z]:/.test(root)) {
+    const flipped = (root[0] === root[0].toLowerCase() ? root[0].toUpperCase() : root[0].toLowerCase()) + root.slice(1);
+    assert.equal(status(`${flipped}/Store`, "Embeddings"), "present", "the drive letter in the other case");
+  }
+});
+
 // ---------------------------------------------------------------------------------------------------------------------------------
 // load_embed asks os.path.isfile for the name as written FIRST, with no extension filter, and only then appends .safetensors, .pt and .bin.
 // A file whose whole name is the reference is therefore a hit whatever it ends in, including no extension at all. The class lists only the
