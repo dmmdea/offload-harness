@@ -304,6 +304,11 @@
     that imitates `renameReplacing` against the fixed Node reader, 150 s: 457,000 reads, 300,720 renames of which 1,787 were refused, 0 nulls. The same harness with the raw reader for 60 s, as a control: 244,000
     reads, 92,502 renames, 0 absent answers, so this host showed no episode in that run and the 0 above does not by itself show the gate worked. The release lane's 4000-loop copy of the stress test: 4,005 loops, 48,060
     reads, 9,252 renames (9,252 a different inode, 42 refused), 0 nulls. The lane saw 3 of 4 runs of that copy fail on the reader before the gate. The gate is shown by the injection tests above, not by these.
+  - **The same measurements again, at the head of the audit round** (the readers unchanged since; one host, once each, bounded, the Windows gate runner again unreachable, so on the workstation with one reader
+    process and one writer). The Go writer against the fixed Node reader, 150 s: 710,200 reads, 191,220 renames of which 7,230 were refused, **0 nulls**. The raw control, 60 s: 295,200 reads, 83,268 renames
+    (2,714 refused), **1 raw `ENOENT`**: the live name absent for 16.0 ms, back after 241 re-reads. So this host did show the episode in the control (about once in 83,000 renames), and with the fixed reader
+    710,200 reads over 191,220 renames, where two or three were to be expected, gave no null; one run each does not make that a rate. The release lane's 4000-loop copy of the stress test with the fixed readers
+    copied in: 4,005 loops, 6,462 renames (66 refused), 0 nulls, 4.3 s. That copy's own diagnostic prints 48,060 file reads for those loops because it multiplies by 12; a loop reads 6 files, so the figure is 24,030.
   - **Known limits of the gate and of the rule.**
     - **The directory-listing blind spot.** `reader.v2` and `reader.legacy`, the keeper's scan of the heartbeats (epoch 0), and `Waiters` list a directory, and a listing taken in the instant of a
       rename does not show the name; an unlocked caller then sees that lease as not live. Every destructive path re-reads under the epoch lock (the sweep, the grant, the release), and a card claim,

@@ -550,8 +550,10 @@ concurrency test rather than by reading:
     waits are on only on Windows (`policy.waitsOutDenied`). The bound is a deadline and not a count of pauses because
     `Atomics.wait(5)` sleeps a whole timer tick on Windows (15.4 ms measured), so 20 pauses were 308 ms. Plain
     `readFileSync` missed nothing in about a million reads against 55,000 renames issued (half of those runs renamed a link of one
-    seed file, which replaces nothing after the first pass; the fragment says so), so the helper guards an instant that
-    measurement could not provoke. `render/lease-read.test.mjs` (the helper and the five readers, with the refusal
+    seed file, which replaces nothing after the first pass; the fragment says so), so the permission wait guards an instant that
+    measurement could not provoke. The absent-name window it also waits out was provoked, by a Go writer with the write pattern of
+    `renameReplacing` (the release lane's harness; and in a control of this round, one raw `ENOENT` in 295,200 reads with the name
+    absent 16 ms), not by a Node writer, and the waits are shown by the injection tests. `render/lease-read.test.mjs` (the helper and the five readers, with the refusal
     injected) is the proof of the permission wait, `render/lease-read-gate.test.mjs` of the wait for an absent name, and
     `heartbeat_unknown_test.go` of the reclaim rule. `render/lease-read-stress.test.mjs` pins none of them: with the permission wait
     taken out it still passed 5 of 5 on Windows, because Node opens with `FILE_SHARE_DELETE` and the refusals it counts are the
