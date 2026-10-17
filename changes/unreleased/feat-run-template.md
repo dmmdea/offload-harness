@@ -211,19 +211,21 @@
   (`render/templates-catalog.test.mjs` 1, `render/template-manifest.test.mjs` 2 failed): the exact-path rule, a root file with a subfolder
   copy, and the run gate; the one earlier assertion that pinned the prompt lookup for an annotation without prompt names was changed to the
   loader rule. Physical directory (4 failed, one on a real junction in a scratch tree): a root that links to another root, a link inside a
-  root, a root registered inside another, and two copies that must stay ambiguous. Unlisted files (4 and 1 failed): an extension-less file
-  answering the name first, the same stem in another directory, an annotation it shadows, and the inventory record. Case folding (4 and 1
-  failed, with a probe checked against what the volume does on the real file system): a case variant alone, two variants in two directories,
-  and the run gate. Name as written (5 failed) and the reading without weights (3 failed): the probe list, the catalog row, readiness and
-  the run gate. Nineteen mutations of the new code, each applied to the real file, run, and restored byte-identical, each fail at least one
+  root, a root registered inside another, and two copies that must stay ambiguous. Unlisted files (4 failed): an extension-less file
+  answering the name first, the same stem in another directory, an annotation it shadows, and the inventory record; a run-gate test of it
+  was added with the fix and passed at once. Case folding (4 failed, one through the run gate): the roots the scan records, a case variant
+  alone, and two variants in two directories; a test that sets the scan's probe against what the real file system does with a name in
+  another case was added with the fix and passed at once. Name as written (5 failed) and the reading without weights (3 failed): the probe
+  list, the catalog row, readiness and the run gate. Nineteen mutations of the new code, each applied to the real file, run, and restored byte-identical, each fail at least one
   test: dispatch on the class name alone, `annotated` not forwarded by `readinessFor`, the hit key back to root and subfolder, no collapse by
   real file, real paths not recorded, unlisted files not recorded or not candidates, the case probe always false, the lookup ignoring the
   folding roots, the folding roots not recorded, the name as written dropped, probe findings not added, not passed by `readinessFor`, not
   explained in the refusal, not recorded on the row, not passed by the readiness table, the reading without weights dropped, read
   without its escapes, and the empty name probed. The reader's expected probe names were compared with the extracted functions of `comfy/sd1_clip.py` on a dozen
   texts in both modes. Measured read only on the installed package (578 templates): the catalog rows are byte-identical before and after,
-  and the three Marigold templates' conditioning file reads `present`, `in_subfolder` and `present` for a root file, a subfolder file and
-  both, as before the previous round.
+  the readiness counts on a snapshot of the measuring machine are unchanged (649 requirements missing, 214 present), and each of the three
+  Marigold templates (depth, albedo, surface normal) reads its conditioning file `present`, `in_subfolder` and `present` for a root file, a
+  subfolder file and both, the same as at the commit before the embedding work, on a synthetic inventory.
 - **Manifest-side normalisation tests.** `unlistedModels` lower-cases the manifest path, turns its backslashes into slashes and drops the
   `models/<class>/` prefix, and every test manifest was lower case with forward slashes, so no test could fail on that step. Both fixtures
   (`LISTED_MODELS` in `template-run.test.mjs`, `LISTED` in `comfy-run-graph.test.mjs`) now hold a mixed-case entry

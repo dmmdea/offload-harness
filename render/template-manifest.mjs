@@ -286,8 +286,9 @@ export function readinessFor(row, snapshot, { io }) {
   // embedding_refs are the prompt names an annotation of the embeddings class covers (the catalog records them): readiness checks that the
   // annotated file is the one ComfyUI opens for each. An annotation with none is a loader widget's file, read by the plain loader rule, and
   // `annotated` is what tells it from a name a prompt gives. The manifest and the row list the same models in the same order.
-  // embedding_probes are the other names ComfyUI may try for the template's prompts (the name as written before its commas are stripped):
-  // not requirements, but a file of the node that answers one is a file ComfyUI may open that no manifest names. They follow the models.
+  // embedding_probes are the other names ComfyUI may try for the template's prompts (the name as written before its commas are stripped, and
+  // what the encoders that read a prompt without weights take): not requirements, but a file of the node that answers one is a file ComfyUI
+  // may open that no manifest names. They follow the models.
   const checked = modelReadiness(manifest.models.map((m, i) => ({ name: m.name, directory: m.directory, annotated: row.models?.[i]?.annotated, embedding_refs: row.models?.[i]?.embedding_refs })), snapshot.inventory, { mode: "directory-aware", probes: row.embedding_probes ?? [] });
   const embedding_probes = checked.requirements.slice(manifest.models.length).map((p) => ({ name: p.name, directory: p.directory, status: p.status, found: p.found }));
   const models = manifest.models.map((m, i) => {
