@@ -4480,3 +4480,20 @@ test("catalog readiness: a template that needs no weights but is blocked by a pr
   assert.deepEqual({ local: s.local, zero_model: s.zero_model, needing_weights: s.needing_weights }, { local: 2, zero_model: 2, needing_weights: 0 }, "both need no weights");
   assert.deepEqual({ ...s.ready }, { total: 1, zero_model: 1, with_weights: 0, names: [], by_gate: { open: 0, ack_required: 0, blocked: 0 } }, "only the one the node does not block is ready");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// Within one directory the candidates are tried in order: the name as written, then with .safetensors, .pt and .bin appended, and the first
+// file that exists is the one opened. A name that already carries an extension is the case where the sort order of the file names and the
+// order ComfyUI tries them in point opposite ways.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test("readiness: within one directory the name as written wins over a file with an extension appended to it, whatever order the names sort in", () => {
+  assert.deepEqual(embGot([EMB("x.pt"), EMB("x.pt.safetensors")], "x.pt"), ["present", "x.pt", null], "isfile(x.pt) is true, so the appended names are never tried");
+  assert.deepEqual(embGot([EMB("sd15/y.pt"), EMB("sd15/y.pt.bin")], "sd15/y.pt"), ["present", "sd15/y.pt", null], "in a subfolder, by its path");
+  assert.deepEqual(embGot([EMB("sd15/y.pt"), EMB("sd15/y.pt.bin")], "y.pt"), ["present", "sd15/y.pt", null], "and by the bare name");
+});
+
+test("readiness: on a volume that folds case the earlier candidate wins whichever of the two files sorts first", () => {
+  assert.deepEqual(foldGot([EMB("FOO.safetensors"), EMB("foo.pt")], "foo"), ["present", "FOO.safetensors", null], ".safetensors is tried before .pt, and isfile finds FOO.safetensors");
+  assert.deepEqual(foldGot([EMB("FOO.pt"), EMB("foo.safetensors")], "foo"), ["present", "foo.safetensors", null], "and the other way round");
+});
