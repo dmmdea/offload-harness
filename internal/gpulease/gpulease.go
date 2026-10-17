@@ -693,7 +693,8 @@ type Manager struct {
 	cardScoped bool
 	// afterClaimHook, when set, runs right after a whole-node acquisition has made its
 	// meta.json claim and before it verifies there is no device lease. Tests use it to
-	// land a device lease in exactly that window; production never sets it.
+	// land a device lease in exactly that window; production never sets it. The epoch lock is already let go when it runs, so it may
+	// take the lock itself (a device grant does).
 	afterClaimHook func()
 	// beforeClaimHook, when set, runs just before a whole-node acquisition creates its meta.json claim. A test uses it to look at
 	// what is held at that instant (the epoch lock). Production never sets it.
@@ -1467,29 +1468,55 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		// grace period reads that as debris and deletes a live claim. A failed claim
 		// therefore burns an epoch number, which is harmless: the counter only has to
 		// be monotonic, never gapless.
-		epoch, eerr := m.bumpEpoch()
-		if eerr != nil {
-			return nil, eerr
-		}
-		rec, rerr := m.record(epoch, class, opts)
-		if rerr != nil {
-			return nil, rerr
-		}
+		//
+		// THE EPOCH, THE RECORD AND THE CLAIM ARE ONE CRITICAL SECTION under the epoch
+		// lock, as a card grant's are. The claim is an exclusive create of the name a
+		// holder's restamp replaces by a rename, and the restamp holds this lock: with
+		// the lock let go as the epoch was issued, a create could land inside the
+		// restamp (on Windows a rename over a name can leave it absent for tens of
+		// milliseconds while it runs) and the rename then replaced the created claim
+		// with the holder's record, a claim made and gone with the grant told it held
+		// the card. What the record needs from the process and from files (the holder's
+		// process start, the session registry) is read before the lock is taken
+		// (draftRecord), so the section is the epoch's two file operations, the record's
+		// encoding and the create. Nothing that takes the lock again runs inside it
+		// (the verification and the reclaim below do, after it).
+		draft := m.draftRecord(class, opts)
+		var epoch uint64
+		var claimErr error // the exclusive create's answer: nil is a claim made
+		lerr := m.withEpochLock(func() error {
+			var berr error
+			if epoch, berr = m.bumpEpochLocked(); berr != nil {
+				return berr
+			}
+			rec, rerr := m.finishRecord(draft, epoch)
+			if rerr != nil {
+				return rerr
+			}
 
-		// THE CLAIM: exclusive creation of meta.json, written complete in one call.
-		// This single token is what makes cross-language mutual exclusion real rather
-		// than merely documented.
-		if m.beforeClaimHook != nil {
-			m.beforeClaimHook()
-		}
-		f, err := createClaim(m.metaPath())
-		if err == nil {
+			// THE CLAIM: exclusive creation of meta.json, written complete in one call.
+			// This single token is what makes cross-language mutual exclusion real rather
+			// than merely documented.
+			if m.beforeClaimHook != nil {
+				m.beforeClaimHook()
+			}
+			f, cerr := createClaim(m.metaPath())
+			if cerr != nil {
+				claimErr = cerr
+				return nil
+			}
 			_, werr := f.Write(rec)
-			cerr := f.Close()
+			cerr = f.Close()
 			if werr != nil || cerr != nil {
 				_ = removeClaim(m.metaPath()) // drop a claim we could not complete
-				return nil, fmt.Errorf("gpulease: writing lease claim: %w", errors.Join(werr, cerr))
+				return fmt.Errorf("gpulease: writing lease claim: %w", errors.Join(werr, cerr))
 			}
+			return nil
+		})
+		if lerr != nil {
+			return nil, lerr
+		}
+		if claimErr == nil {
 			if m.afterClaimHook != nil {
 				m.afterClaimHook()
 			}
@@ -1507,8 +1534,8 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 			m.sweepSeen(map[uint64]bool{epoch: true})
 			return &Lease{mgr: m, epoch: epoch, class: class}, nil
 		}
-		if !os.IsExist(err) {
-			return nil, fmt.Errorf("gpulease: could not claim the lease: %w", err)
+		if !os.IsExist(claimErr) {
+			return nil, fmt.Errorf("gpulease: could not claim the lease: %w", claimErr)
 		}
 
 		// Someone else holds the claim.
@@ -1868,14 +1895,21 @@ func (m *Manager) claimIsFresh() bool {
 	return m.now().Sub(fi.ModTime()) < claimGrace
 }
 
-// record builds the complete lease record, so the claim can be created and filled in
-// by a single write. Nothing observes a partially written token.
-func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error) {
+// recordDraft is a lease record without what only the grant itself can say: the epoch it is issued and the instant it is granted at.
+// Everything else in it (the holder's process start, the owner and the session registry behind it, the term plan) is read from the
+// process and from files, which takes time, and none of it needs the epoch. A grant that holds the epoch lock builds the draft before
+// it takes the lock and only finishes it inside, so those reads are not paid while every other acquirer on the machine waits.
+type recordDraft struct {
+	meta Meta
+	ttl  time.Duration
+}
+
+// draftRecord builds the part of a lease record that does not need the epoch or the instant of the grant (see recordDraft).
+func (m *Manager) draftRecord(class Class, opts Options) *recordDraft {
 	ttl := opts.TTL
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	now := m.now()
 	start, _ := m.procStart(m.pid)
 	// A need the grant admits (HostRAMGiB) is not also one to await: the admitted figure wins.
 	awaiting := 0.0
@@ -1883,19 +1917,15 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		awaiting = max(opts.HostRAMWaitGiB, 0)
 	}
 	meta := Meta{
-		Epoch:        epoch,
-		Class:        class,
-		Holder:       Holder{PID: m.pid, StartTimeMs: start},
-		JobID:        opts.JobID,
-		Origin:       opts.Origin,
-		Reason:       opts.Reason,
-		AcquiredAtMs: now.UnixMilli(),
-		ExpiresAtMs:  now.Add(ttl).UnixMilli(),
-		RenewedAtMs:  now.UnixMilli(),
-		Exclusive:    opts.Exclusive && class == ClassText,
-		Draining:     opts.Draining,
-		Command:      clipCommand(opts.Command),
-		HostRAMGiB:   max(opts.HostRAMGiB, 0),
+		Class:      class,
+		Holder:     Holder{PID: m.pid, StartTimeMs: start},
+		JobID:      opts.JobID,
+		Origin:     opts.Origin,
+		Reason:     opts.Reason,
+		Exclusive:  opts.Exclusive && class == ClassText,
+		Draining:   opts.Draining,
+		Command:    clipCommand(opts.Command),
+		HostRAMGiB: max(opts.HostRAMGiB, 0),
 
 		HostRAMWaitGiB: awaiting,
 		Group:          strings.TrimSpace(opts.Group),
@@ -1907,11 +1937,29 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 	if !m.legacyWriter {
 		meta.Format = RecordFormat
 	}
+	return &recordDraft{meta: meta, ttl: ttl}
+}
+
+// finishRecord puts the epoch and the instant of the grant on a draft and encodes it. RenewedAtMs is written here and nowhere else:
+// it is the acquisition stamp, and the heartbeat is its own file (heartbeatAt).
+func (m *Manager) finishRecord(d *recordDraft, epoch uint64) ([]byte, error) {
+	now := m.now()
+	meta := d.meta
+	meta.Epoch = epoch
+	meta.AcquiredAtMs = now.UnixMilli()
+	meta.ExpiresAtMs = now.Add(d.ttl).UnixMilli()
+	meta.RenewedAtMs = now.UnixMilli()
 	b, err := json.Marshal(&meta)
 	if err != nil {
 		return nil, fmt.Errorf("gpulease: encoding lease record: %w", err)
 	}
 	return b, nil
+}
+
+// record builds the complete lease record, so the claim can be created and filled in
+// by a single write. Nothing observes a partially written token.
+func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error) {
+	return m.finishRecord(m.draftRecord(class, opts), epoch)
 }
 
 // bumpEpoch issues the next fencing token. The counter lives OUTSIDE the lease dir so

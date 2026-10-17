@@ -70,3 +70,29 @@ func TestAWholeNodeGrantThatMeetsAnotherClaimLetsTheEpochLockGoAndLeavesTheClaim
 		t.Errorf("the claim on disk = %+v, %v; want the winner's record, untouched", cur, rerr)
 	}
 }
+
+// TestAWholeNodeGrantReadsTheHoldersProcessBeforeItTakesTheEpochLock: what a record needs from the process table and from the session
+// registry is read before the lock, so that those reads (they open files) are not paid while every other acquirer on the machine spins
+// on the lock. A guard: it passes before the claim moved under the lock, and fails if the record's reads move in with it.
+func TestAWholeNodeGrantReadsTheHoldersProcessBeforeItTakesTheEpochLock(t *testing.T) {
+	m, _ := newTestManager(t)
+	reads, underLock := 0, 0
+	m.procStart = func(int) (int64, bool) {
+		reads++
+		if exists(m.epochLockPath()) {
+			underLock++
+		}
+		return 4242, true
+	}
+	l, err := m.TryAcquire(ClassMedia, Options{Reason: "whole", Owner: Owner{PID: os.Getpid(), Session: "s1"}})
+	if err != nil {
+		t.Fatalf("TryAcquire = %v", err)
+	}
+	defer l.Release()
+	if reads == 0 {
+		t.Fatal("the grant never read a process start: the test does not observe the record's reads")
+	}
+	if underLock != 0 {
+		t.Errorf("%d of %d process reads of the record were made with the epoch lock held, want none", underLock, reads)
+	}
+}
