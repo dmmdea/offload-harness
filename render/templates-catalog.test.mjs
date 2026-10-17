@@ -4089,6 +4089,29 @@ test("readiness (real filesystem): one directory registered under a spelling tha
   }
 });
 
+// A hard link is the same file under two names: the file system gives both one identity, and a path cannot tell them apart.
+test("readiness (real filesystem): a file hard-linked into two embeddings directories is one file, and a copy is another", async (t) => {
+  const { mkdirSync, writeFileSync, linkSync } = await import("node:fs");
+  const root = scratchDir(t, "tc-emb-hard-").replace(/\\/g, "/");
+  for (const d of ["comfy/models/embeddings/sd15", "comfy/models/embeddings/sdxl", "overflow/embeddings"]) mkdirSync(`${root}/${d}`, { recursive: true });
+  writeFileSync(`${root}/comfy/models/embeddings/sd15/foo.safetensors`, "x");
+  try {
+    linkSync(`${root}/comfy/models/embeddings/sd15/foo.safetensors`, `${root}/comfy/models/embeddings/sdxl/foo.safetensors`);
+    linkSync(`${root}/comfy/models/embeddings/sd15/foo.safetensors`, `${root}/overflow/embeddings/foo.safetensors`);
+  } catch (e) {
+    return t.skip("no hard links here");
+  }
+  const yamls = [{ text: `p:\n  base_path: ${root}/overflow\n  embeddings: embeddings\n`, dir: `${root}/comfy` }];
+  const status = () => {
+    const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls }), C.nodeIo);
+    return C.readiness([req("embeddings", "foo", { annotated: false })], inv).requirements[0].status;
+  };
+  assert.equal(status(), "present", "three names of one file: two subfolders of a root and a second registered root");
+  mkdirSync(`${root}/overflow/embeddings/copy`, { recursive: true });
+  writeFileSync(`${root}/overflow/embeddings/copy/foo.safetensors`, "z"); // a new file of its own
+  assert.equal(status(), "ambiguous", "a copy is a second file");
+});
+
 // ---------------------------------------------------------------------------------------------------------------------------------
 // load_embed asks os.path.isfile for the name as written FIRST, with no extension filter, and only then appends .safetensors, .pt and .bin.
 // A file whose whole name is the reference is therefore a hit whatever it ends in, including no extension at all. The class lists only the
