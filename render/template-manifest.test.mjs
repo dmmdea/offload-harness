@@ -544,3 +544,33 @@ test("resolve: an annotated embedding that another file of the node shadows is r
   const alone = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.pt"]);
   assert.equal(M.resolveRun(rowOf(catalogOf(alone), "tt_emb"), snapshotOf(alone), { io: alone }).ok, true, "with only the annotated file the run is allowed");
 });
+
+// A loader widget that names an embeddings file (ConditioningLoader) is read by ComfyUI's plain loader rule: the exact relative path under
+// the first root, no subfolder search. The prompt lookup (a set of directories, a subfolder file found by the bare name) is not its rule.
+const conditioningIo = (models) => {
+  const index = JSON.stringify([{ moduleName: "default", category: "Fixture", title: "Fixture", type: "image", templates: [{ name: "tt_emb", mediaType: "image", mediaSubtype: "webp", openSource: true, title: "tt_emb", tags: ["Image"], models: ["A"] }] }]);
+  const wf = JSON.stringify({
+    version: 0.4,
+    nodes: [
+      nestLoader(1, "UNETLoader", "a.safetensors", "diffusion_models"),
+      { id: 2, type: "ConditioningLoader", mode: 0, widgets_values: ["cond.safetensors"], properties: { cnr_id: "comfy-core", models: [{ name: "cond.safetensors", directory: "embeddings", url: WEIGHTS_A("cond.safetensors") }] } },
+    ],
+  });
+  return memIo(fixtureFiles({ models: ["diffusion_models/a.safetensors", ...models], extra: { [`${TEMPLATES}/index.json`]: index, [`${TEMPLATES}/tt_emb.json`]: wf } }));
+};
+
+test("resolve: a conditioning file a loader widget names is met only at its exact path: held only in a subfolder it is missing, with the file named", () => {
+  const io = conditioningIo(["embeddings/sd15/cond.safetensors"]);
+  const row = rowOf(catalogOf(io), "tt_emb");
+  const gone = M.resolveRun(row, snapshotOf(io), { io });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/cond.safetensors"]], "the widget value cond.safetensors is not in the combo of a node that holds sd15/cond.safetensors");
+  const m = M.readinessFor(row, snapshotOf(io), { io }).models.find((x) => x.name === "cond.safetensors");
+  assert.deepEqual([m.status, m.found, m.resolved_path], ["in_subfolder", ["sd15/cond.safetensors"], null]);
+});
+
+test("resolve: a conditioning file a loader widget names runs from the root even when a subfolder holds a copy, and the manifest names the root file", () => {
+  const io = conditioningIo(["embeddings/cond.safetensors", "embeddings/sd15/cond.safetensors"]);
+  const ok = M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.deepEqual(ok.runtime_manifest.models.map((m) => m.path), ["models/diffusion_models/a.safetensors", "models/embeddings/cond.safetensors"]);
+});

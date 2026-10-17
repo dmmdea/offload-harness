@@ -3969,3 +3969,26 @@ test("models: an annotation of the embeddings class covers the embedding a promp
     assert.deepEqual(C.requiredModels({ nodes: [annotated(name)] }).active.map((m) => m.name), [name], name);
   }
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// A loader widget names an embeddings file too (ConditioningLoader, which three templates of the installed package use). That is not the
+// prompt tokenizer's lookup: the node lists the embeddings directories (relative paths, a subfolder file is `sd15/x`) and opens its value
+// with get_full_path, the exact relative path under the first root that holds it. No subfolder search, no extension appended, no set.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+const LOADER_ENTRY = { annotated: true, node_types: ["ConditioningLoader"] };
+
+test("readiness: an annotated embeddings file that no prompt name covers (a loader widget's) is met by its exact path, as for every other class", () => {
+  assert.deepEqual(embGot([EMB("sd15/cond.safetensors")], "cond.safetensors", LOADER_ENTRY), ["in_subfolder", null, ["sd15/cond.safetensors"]], "the combo offers sd15/cond.safetensors, so the bare widget value is rejected");
+  assert.deepEqual(embGot([EMB("cond.safetensors"), EMB("sd15/cond.safetensors")], "cond.safetensors", LOADER_ENTRY), ["present", null, null], "the root file is the exact path; a copy in a subfolder is another entry of the combo, not an ambiguity");
+  assert.deepEqual(embGot([EMB("cond.safetensors"), EMB2("cond.safetensors")], "cond.safetensors", LOADER_ENTRY, OVERFLOW), ["present", null, null], "one relative path under two registered roots: the first root answers, deterministically");
+  assert.deepEqual(embGot([EMB("cond.safetensors")], "cond.safetensors", LOADER_ENTRY), ["present", null, null]);
+  assert.equal(embGot([EMB("Cond.safetensors")], "cond.safetensors", LOADER_ENTRY)[0], "case_mismatch", "the widget value is compared as a string");
+});
+
+test("readiness: an annotated embeddings entry that carries prompt names keeps the prompt lookup, and a prompt requirement is never read as a loader's", () => {
+  const covers = { annotated: true, embedding_refs: ["cond"], node_types: ["CLIPTextEncode"] };
+  assert.equal(embGot([EMB("sd15/cond.safetensors")], "cond.safetensors", covers)[0], "present", "ComfyUI finds a subfolder file by the bare name in a prompt");
+  assert.equal(embGot([EMB("cond.safetensors"), EMB("sd15/cond.safetensors")], "cond.safetensors", covers)[0], "ambiguous");
+  assert.equal(embGot([EMB("sd15/cond.safetensors")], "cond", { annotated: false })[0], "present");
+});
