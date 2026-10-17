@@ -37,7 +37,14 @@ func TestCookieValuesReadsEveryValueOfASpan(t *testing.T) {
 		{"quoted at level 1, escaped backslash before the closing quote", `Cookie: m=\"` + a + b + `\\\\\"; x=` + v, []string{a + b + `\\\\`, v}},
 		{"quoted at level 3", `Cookie: m=\\\"` + a + `\\$x ` + b + `\\\"; x=` + v, []string{a + `\\$x ` + b, v}},
 		{"quoted, never closed", `Cookie: m="` + a + ` ` + b, []string{a + ` ` + b}},
-		{"quoted, ends at a line break", "Cookie: m=\"" + a + "\n" + b + `"`, []string{a}},
+		{"quoted, a line break inside an open quote is part of the value", "Cookie: m=\"" + a + "\n" + b + `"`, []string{a + "\n" + b}},
+		{"quoted, escaped line break inside an open quote", `Cookie: m=\"` + a + `\n` + b + `\"; x=` + v, []string{a + `\n` + b, v}},
+		{"quoted, a fold inside an open quote", "Cookie: m=\"" + a + "\r\n " + b + `"; x=` + v, []string{a + "\r\n " + b, v}},
+		{"bare takes a shell escape", "Cookie: sid=" + a + `\$` + b, []string{a + `\$` + b}},
+		{"bare takes a backslash and a space", "Cookie: sid=" + a + `\ ` + b, []string{a + `\ ` + b}},
+		{"bare ends at an escaped line break", "Cookie: sid=" + a + `\n` + b, []string{a}},
+		{"quoted at level 7", `Cookie: m=\\\\\\\"` + a + ` ` + b + `\\\\\\\"; x=` + v, []string{a + ` ` + b, v}},
+		{"quoted at level 15", `Cookie: m=\\\\\\\\\\\\\\\"` + a + ` ` + b + `\\\\\\\\\\\\\\\"; x=` + v, []string{a + ` ` + b, v}},
 		{"two values, the second quoted", `Cookie: sid=` + v + `; m="` + a + ` ` + b + `"`, []string{v, a + ` ` + b}},
 		{"empty value", `Cookie: a=; b=` + v, []string{v}},
 		{"list", spanSetCk + `":["theme=dark","session=` + v + `; Path=/","other=` + a + b, []string{v, a + b}},
@@ -59,6 +66,8 @@ func TestCookieQuoteCloses(t *testing.T) {
 		{0, 0, true}, {1, 0, false}, {2, 0, true}, {3, 0, false}, {4, 0, true},
 		{1, 1, true}, {3, 1, false}, {5, 1, true}, {7, 1, false}, {0, 1, false},
 		{3, 3, true}, {7, 3, false}, {11, 3, true}, {2, 3, false},
+		{7, 7, true}, {15, 7, false}, {23, 7, true}, {6, 7, false},
+		{15, 15, true}, {31, 15, false}, {47, 15, true},
 	} {
 		if got := cookieQuoteCloses(c.k, c.b); got != c.want {
 			t.Errorf("cookieQuoteCloses(%d, %d) = %v, want %v", c.k, c.b, got, c.want)

@@ -170,21 +170,6 @@ func TestCookieSpanTakesAFoldedList(t *testing.T) {
 	}
 }
 
-// TestCookieSpanEndsAtAnEscapedLineBreakInsideAQuote: a quoted value does not run over a line break, a raw one on a
-// header line or the JSON escape of one in Args; the quote is then not a pair and ends the span.
-func TestCookieSpanEndsAtAnEscapedLineBreakInsideAQuote(t *testing.T) {
-	v, _, _, _ := spanValues()
-	span := ckName + ": sid=" + v + "; m="
-	line := span + `"short` + "\n" + `rest"; z=1`
-	if m := cookieMatch("one\n" + line); m[len(Lead(m)):] != span {
-		t.Errorf("raw: matched %q, want %q", m, span)
-	}
-	m := cookieMatch(argsOf("one\n" + line + "\nthree"))
-	if got := m[len(Lead(m)):]; got != enc(span) {
-		t.Errorf("args: matched %q, want %q", got, enc(span))
-	}
-}
-
 // TestCookieSpanTakesShellEscapesAtLevelThree: in Args that hold a curl command, a quoted cookie value is three
 // backslashes and a quote, and a dollar sign or a backtick the shell had to escape carries two backslashes in front
 // of it. The escapes ended the walk.

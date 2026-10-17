@@ -75,7 +75,7 @@ func cookieShapes() []cookieShape {
 		{"tab in a bare value", "a=x\ty", nil, false},
 		{"white space in the first characters of a quoted value", `e="ab cdefghijklmnopqrstuvwxyz"`, []string{"cdefghijklmnopqrstuvwxyz"}, false},
 	}
-	return append(shapes, edgeShapes()...)
+	return append(append(shapes, reviewShapes()...), edgeShapes()...)
 }
 
 // edgeShapes are values at the edge of the count that starts a match: 12 characters with no white space from the
@@ -123,12 +123,14 @@ func goEsc(s string) string { return strings.NewReplacer(`\`, `\\`, `"`, `\"`).R
 // and one per list element, and returns the text and the exact span the class has to take: from the header name
 // to the end of the line, to the closing quote of the string the header sits in, or to the closing bracket of
 // the list, whichever comes first. envelope marks the wrappers whose text is a JSON document around the header
-// (a tool call's Args): the redacted text has to stay valid JSON. plainOnly wrappers cannot hold a backslash or
-// an apostrophe in the cookies.
+// (a tool call's Args): the redacted text has to stay valid JSON. plainOnly wrappers cannot hold a backslash, an
+// apostrophe or a line feed in the cookies. openOK marks the wrappers in which a quoted value that is never closed
+// (a truncated line) ends the span where the line, or the string that holds the header, ends.
 type cookieWrapper struct {
 	name      string
 	envelope  bool
 	plainOnly bool
+	openOK    bool
 	build     func(body string, elems []string) (text, want string)
 }
 
@@ -145,20 +147,20 @@ func quotedList(elems []string, sep string) string {
 	return strings.Join(q, sep)
 }
 
-var cookieWrappers = []cookieWrapper{
-	{name: "header line", build: func(body string, _ []string) (string, string) {
+var baseCookieWrappers = []cookieWrapper{
+	{name: "header line", openOK: true, build: func(body string, _ []string) (string, string) {
 		w := ckName + ": " + body
 		return "line one\r\n" + w + "\r\nline three", w
 	}},
-	{name: "set header line", build: func(body string, _ []string) (string, string) {
+	{name: "set header line", openOK: true, build: func(body string, _ []string) (string, string) {
 		w := sckName + ": " + body + "; HttpOnly"
 		return "line one\n" + w + "\nline three", w
 	}},
-	{name: "args", envelope: true, build: func(body string, _ []string) (string, string) {
+	{name: "args", envelope: true, openOK: true, build: func(body string, _ []string) (string, string) {
 		w := ckName + ": " + body
 		return argsOf("one\n" + w + "\nthree"), enc(w)
 	}},
-	{name: "curl, double quotes", build: func(body string, _ []string) (string, string) {
+	{name: "curl, double quotes", openOK: true, build: func(body string, _ []string) (string, string) {
 		w := ckName + ": " + shellEsc(body)
 		return `curl -H "` + w + `" https://host.invalid/x`, w
 	}},
@@ -166,24 +168,24 @@ var cookieWrappers = []cookieWrapper{
 		w := ckName + ": " + body
 		return `curl -H '` + w + `' https://host.invalid/x`, w
 	}},
-	{name: "args of a curl command", envelope: true, build: func(body string, _ []string) (string, string) {
+	{name: "args of a curl command", envelope: true, openOK: true, build: func(body string, _ []string) (string, string) {
 		w := ckName + ": " + shellEsc(body)
 		return argsOf(`curl -H "` + w + `" https://host.invalid/x`), enc(w)
 	}},
-	{name: "args of args", envelope: true, build: func(body string, _ []string) (string, string) {
+	{name: "args of args", envelope: true, openOK: true, build: func(body string, _ []string) (string, string) {
 		w := ckName + ": " + body
 		inner, _ := json.Marshal(map[string]string{"h": "one\n" + w + "\nthree"})
 		return argsOf(string(inner)), enc(enc(w))
 	}},
-	{name: "Header.Set call", build: func(body string, _ []string) (string, string) {
+	{name: "Header.Set call", openOK: true, build: func(body string, _ []string) (string, string) {
 		w := ckName + `", "` + goEsc(body)
 		return `req.Header.Set("` + w + `")`, w
 	}},
-	{name: "folded header", build: func(body string, _ []string) (string, string) {
+	{name: "folded header", openOK: true, build: func(body string, _ []string) (string, string) {
 		w := ckName + ":\r\n " + body
 		return "line one\r\n" + w + "\r\nline three", w
 	}},
-	{name: "folded header in args", envelope: true, build: func(body string, _ []string) (string, string) {
+	{name: "folded header in args", envelope: true, openOK: true, build: func(body string, _ []string) (string, string) {
 		w := ckName + ":\r\n\t" + body
 		return argsOf("one\n" + w + "\nthree"), enc(w)
 	}},
@@ -224,6 +226,9 @@ var cookieWrappers = []cookieWrapper{
 	}},
 }
 
+// cookieWrappers are the base wrappers and the ones the review of the whole-span class added (reviewWrappers).
+var cookieWrappers = append(append([]cookieWrapper{}, baseCookieWrappers...), reviewWrappers()...)
+
 type cookieCase struct {
 	wrapper string
 	text    string
@@ -243,7 +248,10 @@ func cookieCases() []cookieCase {
 		long := false
 		for k, i := range idx {
 			s := shapes[i]
-			if w.plainOnly && strings.ContainsAny(s.text, `\'`) {
+			if w.plainOnly && strings.ContainsAny(s.text, "\\'\n") {
+				return
+			}
+			if openEndShapes[s.name] && (k != len(idx)-1 || !w.openOK) {
 				return
 			}
 			texts = append(texts, s.text)
