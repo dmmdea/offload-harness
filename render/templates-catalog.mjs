@@ -106,7 +106,9 @@ export const nodeIo = {
   stat: (p) => {
     try { const st = statSync(p); return { size: st.size, isDir: st.isDirectory(), isFile: st.isFile() }; } catch { return null; }
   },
-  realpath: (p) => { try { return slash(realpathSync(p)); } catch { return slash(p); } },
+  // realpath: the native one, which gives the spelling the file system keeps (the drive letter and the folders in their own case); the JS one
+  // returns the case it was given, so one directory registered under two spellings would read as two.
+  realpath: (p) => { try { return slash(realpathSync.native(p)); } catch { return slash(p); } },
   writeText: (p, s) => { writeFileSync(p, s); },
 };
 
