@@ -391,6 +391,21 @@ var compactKeep = []compactKeepEntry{
 		Why:      "the ticket collect protocol: do NOT call again to wait; re-send the same request with the token only to collect",
 	},
 	{
+		Tools:    []string{"offload_run_template"},
+		Sentence: "A run is allowed only for a non-API template with no custom node pack and a permissive licence class: a paid-API template returns deferred:true with class api_paid and never falls back to cloud, and a template with a blocked, conditional, non-commercial or unlisted licence is refused with its class.",
+		Why:      "what a run is allowed for: a paid-API template is deferred with its class and never falls back to cloud, and a licence that is not permissive is refused with its class",
+	},
+	{
+		Tools:    []string{"offload_run_template"},
+		Sentence: "It never downloads a model: a run with a model file or an input file missing is refused with the exact list.",
+		Why:      "a run never fetches a model: a missing file is a refusal with the exact list, not a download",
+	},
+	{
+		Tools:    []string{"offload_run_template"},
+		Sentence: "Every run stays on this machine's lane, and a template that reads input files is never sent to the fleet.",
+		Why:      "where a run goes: this machine only, and a template that reads input files is never sent to the fleet",
+	},
+	{
 		Tools:    []string{"offload_status"},
 		Sentence: "Every offload_* tool except offload_nim and offload_browse runs LOCAL — the GPU roster or a listed accelerator (free, on-box, no cloud); offload_nim is the only remote MODEL surface, and offload_browse (opt-in, present only when configured) drives the operator's own local browser with typed choices from a loopback decision endpoint the operator runs.",
 		Why:      "which tools run local and which leave the box: offload_nim is the only remote model surface",

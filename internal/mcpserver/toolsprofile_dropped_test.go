@@ -278,6 +278,8 @@ var compactDropped = []droppedSentence{
 	{Tools: []string{"offload_run_graph"}, Class: dropMech, Sentence: "Absent: a graph that names model_family wan22 and carries a height of 720 or more (the tallest height input of any node) gets a floor of 16, CHOSEN from the film owner's stated constraint and not measured.", Reason: "the default min_vram_gb floor for wan22 graphs at 720 or more is a harness default stated as chosen, not measured"},
 	{Tools: []string{"offload_run_graph"}, Class: dropDescr, Sentence: "0 lifts that default."},
 	{Tools: []string{"offload_run_graph"}, Class: dropMech, Sentence: "Only the default min_vram_gb floor reads it; the harness reads no other meaning into a graph.", Reason: "only the default min_vram_gb floor reads model_family: a placement default the harness applies"},
+	// offload_run_template
+	{Tools: []string{"offload_run_template"}, Class: dropDefer, Sentence: "A model file with no published hash is trusted on first use: its sha256 is recorded when a run first meets it, and a later run refuses a file whose hash differs.", Reason: "a file whose hash differs is refused as MODEL_SHA_MISMATCH with a detail that names both hashes and the record to delete, so the caller learns the rule when it happens; recording a first sighting changes nothing a caller acts on"},
 	// offload_segment
 	{Tools: []string{"offload_segment"}, Class: dropSchema, Sentence: "Default: YOLOv8s-seg, 80 COCO classes; everything=true: FastSAM (class-agnostic segment-everything)."},
 	{Tools: []string{"offload_segment"}, Class: dropResult, Sentence: "Writes an instance-id mask PNG (uint8: 0=background, i=instances[i-1]) next to the input or to out_path."},

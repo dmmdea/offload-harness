@@ -273,7 +273,7 @@ describe("review-round fixes", () => {
     expect(prompt).not.toMatch(/(^|[^_])offload_vqa/);
     const out = { system: [] as string[] };
     await h["experimental.chat.system.transform"]!({ model: {} as any }, out);
-    for (const name of ["offload_status", "offload_summarize", "offload_classify", "offload_extract", "offload_triage", "offload_vqa", "offload_ocr", "offload_transcribe", "offload_extract_image", "offload_assess_image", "offload_video_describe", "offload_generate_image", "offload_edit_image", "offload_inpaint_image", "offload_upscale_image", "offload_generate_video", "offload_generate_audio", "offload_generate_svg", "offload_run_graph", "offload_media", "offload_nim", "agent_run", "agent_delegate"]) {
+    for (const name of ["offload_status", "offload_summarize", "offload_classify", "offload_extract", "offload_triage", "offload_vqa", "offload_ocr", "offload_transcribe", "offload_extract_image", "offload_assess_image", "offload_video_describe", "offload_generate_image", "offload_edit_image", "offload_inpaint_image", "offload_upscale_image", "offload_generate_video", "offload_generate_audio", "offload_generate_svg", "offload_run_graph", "offload_run_template", "offload_media", "offload_nim", "agent_run", "agent_delegate"]) {
       expect(out.system[0]).toContain(`harness_${name}`);
     }
   });

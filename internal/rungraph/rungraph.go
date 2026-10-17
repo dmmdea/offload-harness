@@ -18,6 +18,10 @@ import (
 
 type Params struct {
 	GraphPath, ManifestPath, OutDir, ResultPath, ReserveVram string
+	// Template names a workflow template of the node's installed templates package in place of a graph file: the runner converts it
+	// once ComfyUI is up (render/comfy-run-graph.mjs --template). OverridesPath is a JSON file of node-addressed input values to
+	// set after the conversion and Seed a whole number that pins its seed inputs; both belong to a template run.
+	Template, OverridesPath, Seed string
 }
 
 type OutFile struct {
@@ -32,6 +36,8 @@ type Envelope struct {
 	Outputs          map[string][]OutFile `json:"outputs"`
 	ImagePath        string               `json:"image_path"`
 	UnverifiedModels []string             `json:"unverified_models"`
+	// TofuFirstSeen names the model files a template run recorded for the first time (trust on first use). Absent on a graph run.
+	TofuFirstSeen []string `json:"tofu_first_seen,omitempty"`
 	// Typed DEFER (fix #4): the mjs now exits 0 and writes {deferred,code,ref,detail} to the
 	// result on any handled failure, so the code reaches the Go side as data (not a lost
 	// stderr line). runRunGraph turns Deferred==true into a pipeline defer carrying Code+Detail.
@@ -42,9 +48,20 @@ type Envelope struct {
 }
 
 func buildArgs(p Params) []string {
-	args := []string{"--graph", p.GraphPath}
+	var args []string
+	if p.Template != "" {
+		args = []string{"--template", p.Template}
+	} else {
+		args = []string{"--graph", p.GraphPath}
+	}
 	if p.ManifestPath != "" {
 		args = append(args, "--manifest", p.ManifestPath)
+	}
+	if p.Template != "" && p.OverridesPath != "" {
+		args = append(args, "--overrides", p.OverridesPath)
+	}
+	if p.Template != "" && p.Seed != "" {
+		args = append(args, "--seed", p.Seed)
 	}
 	args = append(args, "--out-dir", p.OutDir, "--result", p.ResultPath)
 	if p.ReserveVram != "" {

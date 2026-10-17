@@ -46,6 +46,7 @@ var staleOtherDoorArgs = map[string]string{
 	"offload_ocr":                   `{"image":{}}`,
 	"offload_generate_image":        `{"prompt":"p","width":"wide"}`,
 	"offload_run_graph":             `{"graph_path":123}`,
+	"offload_run_template":          `{"action":5}`,
 	"offload_generate_svg":          `{"kind":"gauge","spec":"not-an-object"}`,
 	"offload_generate_video":        `{"prompt":"p","frames":"many"}`,
 	"offload_animate_character":     `{"ref":1}`,

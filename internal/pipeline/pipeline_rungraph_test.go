@@ -51,3 +51,34 @@ func TestRunGraphParamsThreaded(t *testing.T) {
 		t.Fatalf("params: %+v err %v", p, err)
 	}
 }
+
+func TestRunGraphParamsForATemplate(t *testing.T) {
+	p, err := buildRunGraphParams(core.Request{Task: core.TaskRunGraph, Params: map[string]any{
+		"template": "tt_open", "manifest_path": "m.json", "overrides_path": "o.json", "seed": "7", "out_dir": "o",
+	}})
+	if err != nil || p.Template != "tt_open" || p.GraphPath != "" || p.ManifestPath != "m.json" || p.OverridesPath != "o.json" || p.Seed != "7" {
+		t.Fatalf("params: %+v err %v", p, err)
+	}
+	// A graph and a template are two ways to say what to run; both is a contradiction, not a precedence rule.
+	if _, err := buildRunGraphParams(core.Request{Task: core.TaskRunGraph, Params: map[string]any{"graph_path": "g.json", "template": "tt_open"}}); err == nil || !strings.Contains(err.Error(), "exclusive") {
+		t.Errorf("graph_path and template together: %v", err)
+	}
+	// The template name is a name, never a path or a flag.
+	for _, bad := range []string{"../x", "a/b", "-x", "a b", "a\b"} {
+		if _, err := buildRunGraphParams(core.Request{Task: core.TaskRunGraph, Params: map[string]any{"template": bad}}); err == nil || !strings.Contains(err.Error(), "template") {
+			t.Errorf("template %q: %v", bad, err)
+		}
+	}
+}
+
+func TestRunGraphFootprintFamilyOfATemplateIsTheTemplate(t *testing.T) {
+	if got := runGraphFootprintFamily(map[string]any{"template": "tt_open"}); got != "comfy-template-tt_open" {
+		t.Errorf("family = %q", got)
+	}
+	if got := runGraphFootprintFamily(map[string]any{"template": "tt_open", "model_family": "wan22"}); got != "wan22" {
+		t.Errorf("a declared family wins: %q", got)
+	}
+	if got := runGraphFootprintFamily(map[string]any{}); got != "comfy-graph" {
+		t.Errorf("a graph run is what it was: %q", got)
+	}
+}

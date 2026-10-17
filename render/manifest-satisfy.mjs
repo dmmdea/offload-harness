@@ -48,12 +48,24 @@ export function parseExtraModelPaths(text) {
 // modelCandidates: every absolute path a manifest model MIGHT occupy — the canonical
 // comfyDir location first, then each dir registered for that model class in
 // extra_model_paths.yaml. Manifest paths look like `models/<category>/<rest>`.
+//
+// ComfyUI reads two classes from a second, legacy directory too: diffusion_models also lists models/unet, and text_encoders also lists
+// models/clip (folder_paths.py), and a yaml provider that registers the legacy key (`unet:`, `clip:`) adds its directories to the same
+// class. A path that names the modern class is therefore also looked for under the legacy directory and the legacy key, after the
+// modern ones. A path that names the legacy class is looked for as it always was (a template names the modern class).
+const LEGACY_OF = { diffusion_models: "unet", text_encoders: "clip" };
+
 export function modelCandidates(relPath, comfyDir, extraRoots) {
   const out = [join(comfyDir, relPath)];
   const m = /^models\/([^/]+)\/(.+)$/.exec(String(relPath || "").replace(/\\/g, "/"));
   if (!m) return out;
   for (const dir of (extraRoots && extraRoots[m[1]]) || []) out.push(join(dir, m[2]));
-  return out;
+  const legacy = Object.hasOwn(LEGACY_OF, m[1]) ? LEGACY_OF[m[1]] : null;
+  if (legacy) {
+    out.push(join(comfyDir, "models", legacy, m[2]));
+    for (const dir of (extraRoots && extraRoots[legacy]) || []) out.push(join(dir, m[2]));
+  }
+  return [...new Set(out)];
 }
 
 export async function satisfyModels(models, deps) {
@@ -241,7 +253,8 @@ export async function satisfyManifest(manifest, deps) {
 }
 
 import { spawn as nodeSpawn } from "node:child_process";
-import { existsSync, writeFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { writeFileAtomic } from "./atomic-out.mjs";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
 import { tmpdir } from "node:os";
@@ -485,5 +498,72 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
         return { ok: false, reason: "venv coherence check failed: " + String(e.message || e) };
       }
     },
+  };
+}
+
+// --- trust on first use -------------------------------------------------------------------------------------------------------------
+//
+// Most template annotations carry no hash, so a model file the template run meets has nothing to be checked against. Trust on first use
+// keeps the one guarantee that is left: the first run that meets the file hashes it and records the hash (and the file's size and
+// modification time) in a record beside the file, `<file>.tofu`; a later run refuses a file whose hash is not the recorded one. It is a
+// separate record from the `.sha-ok` sentinel on purpose: the sentinel means "matched the hash a manifest PINNED", and a trusted-on-first-
+// use hash is no pin, so it must never make a pinned model skip its own check.
+//
+// A file whose size and modification time are the recorded ones is trusted without hashing it again (a 20 GB file takes minutes to hash on
+// every run); a file whose either moved is hashed again, and only the same hash passes. The limit is the usual one of a stat cache: bytes
+// replaced under an unchanged size and time are not seen, and a record is the first sighting's word for a file, not a statement about its
+// origin. To trust a replaced file on purpose, delete its `.tofu` record.
+//
+// Only a model that asks for it (`trust: "tofu"`) and declares no hash is checked here; the rest is satisfyModels's business. The check
+// runs on every run, a cached one included (comfy-run-graph.mjs): the cache says the environment was provisioned, not that the file is
+// still the one that was trusted.
+export async function verifyTofuModels(models, deps) {
+  const { comfyDir, exists, extraRoots = {}, tofu } = deps;
+  const now = typeof deps.now === "function" ? deps.now : () => new Date().toISOString();
+  const beat = typeof deps.beat === "function" ? deps.beat : () => {};
+  const first_seen = [];
+  const matched = [];
+  for (const m of models || []) {
+    if (m.trust !== "tofu" || m.sha256) continue;
+    const found = modelCandidates(m.path, comfyDir, extraRoots).find((p) => exists(p)) || null;
+    if (!found) return defer("MODEL_DOWNLOAD_FAILED", m.path, "missing on disk (a template run never downloads a model)");
+    beat(`manifest: trust on first use ${m.path}`);
+    let rec;
+    try { rec = tofu.read(found); } catch (e) { return defer("MODEL_TOFU_RECORD", m.path, `the trust-on-first-use record of ${found} cannot be read: ${String(e.message || e)}`); }
+    if (rec !== null && rec !== undefined && (typeof rec !== "object" || typeof rec.sha256 !== "string" || rec.sha256 === "")) {
+      return defer("MODEL_TOFU_RECORD", m.path, `the trust-on-first-use record of ${found} is malformed`);
+    }
+    let st;
+    try { st = tofu.stat(found); } catch (e) { return defer("MODEL_DOWNLOAD_FAILED", m.path, `cannot stat ${found}: ${String(e.message || e)}`); }
+    if (rec && rec.size === st.size && rec.mtime_ms === st.mtimeMs) { matched.push(m.path); continue; }
+    let got;
+    try { got = await tofu.sha256(found); } catch (e) { return defer("MODEL_TOFU_RECORD", m.path, `cannot hash ${found}: ${String(e.message || e)}`); }
+    if (!rec) {
+      try { tofu.write(found, { schema_version: 1, sha256: got, size: st.size, mtime_ms: st.mtimeMs, first_seen: now() }); }
+      catch (e) { return defer("MODEL_TOFU_RECORD", m.path, `the trust-on-first-use record of ${found} cannot be written: ${String(e.message || e)}`); }
+      first_seen.push(m.path);
+      continue;
+    }
+    if (got !== rec.sha256) {
+      return defer("MODEL_SHA_MISMATCH", m.path, `trust on first use: ${found} has sha256 ${got}, but the run that first met it (${rec.first_seen ?? "date unknown"}) recorded ${rec.sha256}; delete ${found}.tofu to trust this file instead`);
+    }
+    try { tofu.write(found, { ...rec, size: st.size, mtime_ms: st.mtimeMs }); }
+    catch (e) { return defer("MODEL_TOFU_RECORD", m.path, `the trust-on-first-use record of ${found} cannot be updated: ${String(e.message || e)}`); }
+    matched.push(m.path);
+  }
+  return { ok: true, first_seen, matched };
+}
+
+// defaultTofuDeps: the record store on the real filesystem. The record is `<file>.tofu` (JSON), written atomically.
+export function defaultTofuDeps() {
+  const record = (p) => `${p}.tofu`;
+  return {
+    stat: (p) => { const s = statSync(p); return { size: s.size, mtimeMs: s.mtimeMs }; },
+    read: (p) => (existsSync(record(p)) ? JSON.parse(readFileSync(record(p), "utf8")) : null),
+    write: (p, rec) => writeFileAtomic(record(p), `${JSON.stringify(rec, null, 1)}\n`),
+    sha256: (p) => new Promise((res, rej) => {
+      const h = createHash("sha256"); const s = createReadStream(p);
+      s.on("data", (d) => h.update(d)); s.on("end", () => res(h.digest("hex"))); s.on("error", rej);
+    }),
   };
 }

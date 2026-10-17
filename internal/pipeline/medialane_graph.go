@@ -11,7 +11,9 @@ package pipeline
 // drives the real admission over a table of states) and creates and removes nothing (TestMediaLaneFreeGraphWritesNothing).
 //
 // What a graph declares for the host is the weight files its own loaders name (graphRAM, hostneed.ForGraphFile: the family
-// estimate's rule, 0 when they fit the card and their sum when they do not), read from the graph file the request names. A graph
+// estimate's rule, 0 when they fit the card and their sum when they do not), read from the graph file the request names; for a
+// template run (template and manifest_path, no graph file) they are the model files its runtime manifest names (hostneed.ForManifestFile,
+// the same rule), so the probe and the admission read one figure for it. A graph
 // the lease cannot read, one that names no weight file and one with a file the box cannot size keep the media class default, the
 // largest ComfyUI family the box binds (classDefaultRAM; a box that binds none declares nothing), an upper bound that is not the
 // graph's own size. The figure is an estimate from the files' sizes, not a measurement.

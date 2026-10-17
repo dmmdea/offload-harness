@@ -1648,7 +1648,11 @@ binding it is about to render with, once the card it will run on is known: image
 will render, with the request's own `transformer` put over the family's binding, because that is the file the runner
 loads: `TestAVideoRequestsOwnTransformerIsWhatTheAdmissionDeclares`), animate and music read their files; the `run-graph` lane declares the weight files its graph's loaders name, as `gpu reserve` does for a helper's `--graph`, above
 (`pipeline.graphRAM`, read from `graph_path`; `TestTheGraphLaneDeclaresTheFilesItsGraphNamesNotTheClassDefault`, and the lane probe's
-differential test), and keeps the class default for a graph it cannot read or size; the audio.cpp lanes take the class default (the largest ComfyUI
+differential test), and keeps the class default for a graph it cannot read or size; a template run (`template` with `manifest_path`,
+no graph file) declares the model files its runtime manifest names, by the same rule and source (`hostneed.ForManifestFile`, read from
+`manifest_path`; `TestTheRunGraphLaneIsAdmittedOnTheFilesItsTemplateNames`, and a row in the probe's differential test), on a box
+that binds no ComfyUI family too, and keeps the class default for a manifest it cannot read, one that names nothing, or a file it cannot
+find or size; the audio.cpp lanes take the class default (the largest ComfyUI
 family the box binds, an upper bound that is not their own size; a box that binds no ComfyUI family, an sd.cpp-only node, has
 a class default of 0, `TestAnSdcppOnlyBoxDeclaresNothing`). **The sd.cpp lanes (image, video, animate) declare the larger of that
 default and the weights they park themselves** (F60, `hostneed.ForSdcpp`, `pipeline.sdcppDeclared`): the bound files in full
