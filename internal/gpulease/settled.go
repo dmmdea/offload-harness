@@ -68,14 +68,41 @@ var statFile = os.Stat
 
 // statSettled is os.Stat of a lease file whose absence is an answer only when it is settled (see above). A name that is there is
 // returned as os.Stat returns it. A name that is absent with no fresh staged file beside it returns the not-exist error. A name that is
-// absent with a fresh staged file beside it returns a *fs.PathError wrapping errRenameInFlight, which is not a not-exist error. Any
-// other failure is returned as it is. The test seam of statRecord (UseStatFault) is consulted first, as statRecord does.
+// absent with a fresh staged file beside it is waited for, on Windows (gate.go: the stat is repeated until the rename ends or the budget
+// runs out, and a name whose wait just ran out is not waited for again); when it cannot be waited for, or the wait runs out, it returns
+// a *fs.PathError wrapping errRenameInFlight, which is not a not-exist error. Any other failure is returned as it is. The test seam of
+// statRecord (UseStatFault) is consulted first.
 func statSettled(path string) (os.FileInfo, error) {
 	if statFaultHook != nil {
 		if err := statFaultHook(path); err != nil {
 			return nil, err
 		}
 	}
+	if !deniedOpenMayClear {
+		// Nothing to wait for where rename(2) is atomic. A staged file beside an absent name is a leftover or a first publish, and it still
+		// says that the name is not settled.
+		return statWithoutWaiting(path)
+	}
+	var watch gateWatch
+	for {
+		fi, err := statFile(path)
+		if err == nil || !errors.Is(err, fs.ErrNotExist) {
+			return fi, err
+		}
+		switch watch.afterAbsentRead(path) {
+		case gateWaited:
+			continue
+		case gateExpired:
+			return nil, &fs.PathError{Op: "stat", Path: path, Err: errRenameInFlight}
+		case gateClear:
+			return statFile(path) // the rename may have ended between the first look and the one at the staged file
+		}
+		return nil, err // a file that is never replaced by a rename (a card claim): absent is the answer
+	}
+}
+
+// statWithoutWaiting is statSettled where there is no wait: a fresh staged file beside an absent name is answered at once.
+func statWithoutWaiting(path string) (os.FileInfo, error) {
 	fi, err := statFile(path)
 	if err == nil || !errors.Is(err, fs.ErrNotExist) {
 		return fi, err

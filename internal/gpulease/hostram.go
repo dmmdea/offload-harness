@@ -913,14 +913,12 @@ func UseReadFault(fn func(path string) error) (restore func()) {
 // statFaultHook, when set, is consulted by statRecord before the real stat: a test seam (UseStatFault).
 var statFaultHook func(path string) error
 
-// statRecord is os.Stat of a lease record, with the test seam in front of it.
+// statRecord is the stat of a lease record, with the test seam in front of it. A record is replaced by a rename over the live name, and a
+// stat that met the instant the name is absent would call a held lease absent: it goes through statSettled, which waits for the rename
+// (Windows) and answers an I/O failure, never an absence, when the wait runs out. Every caller already reads an error that is not "absent"
+// as "cannot be examined".
 func statRecord(path string) error {
-	if statFaultHook != nil {
-		if err := statFaultHook(path); err != nil {
-			return err
-		}
-	}
-	_, err := os.Stat(path)
+	_, err := statSettled(path)
 	return err
 }
 
