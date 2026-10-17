@@ -288,6 +288,45 @@ func TestKeyEncodingIsPinned(t *testing.T) {
 	}
 }
 
+// TestKeyIsInjectiveOverSmallLists is the exhaustive form of the named cases above:
+// every part list of up to three parts, each part a string of up to two characters
+// from {"a", NUL, \x01}. No two different lists may share a key, whichever pair they
+// are, so an encoding that only looks careful (a decimal length with no delimiter, a
+// prefix on all but one part, a different separator) fails here on a list nobody
+// thought to write down. About 2,400 lists.
+func TestKeyIsInjectiveOverSmallLists(t *testing.T) {
+	alphabet := []string{"a", "\x00", "\x01"}
+	strs := []string{""}
+	for _, c := range alphabet {
+		strs = append(strs, c)
+		for _, d := range alphabet {
+			strs = append(strs, c+d)
+		}
+	}
+
+	seen := map[string][]string{}
+	check := func(parts []string) {
+		k := Key(parts...)
+		if prev, dup := seen[k]; dup {
+			t.Fatalf("Key(%q) and Key(%q) are both %s", prev, parts, k)
+		}
+		seen[k] = append([]string(nil), parts...)
+	}
+	check(nil)
+	for _, a := range strs {
+		check([]string{a})
+		for _, b := range strs {
+			check([]string{a, b})
+			for _, c := range strs {
+				check([]string{a, b, c})
+			}
+		}
+	}
+	if want := 1 + 13 + 13*13 + 13*13*13; len(seen) != want {
+		t.Fatalf("checked %d lists, want %d: the enumeration is not what the doc says", len(seen), want)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // D-05: lazy open
 // ---------------------------------------------------------------------------
