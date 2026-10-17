@@ -7,10 +7,12 @@ package fleetnode
 // refuses a credential, and look for the presented value and for the configured key in the journal and in the answer.
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 // presentedValue is the secret-looking text a refused caller sends. It is built at run time and is unlike the node's key,
@@ -109,6 +111,41 @@ func TestARefusedReDispatchOfAKnownJobDoesNotWriteThePresentedCredential(t *test
 				t.Fatalf("wrote %d refusal line(s), want exactly 1; log = %q", n, buf.String())
 			}
 			assertCredentialNotCopied(t, buf.String(), rec.Body.String())
+		})
+	}
+}
+
+// A refusal can also write the line that says how many refusals the last window kept out of the journal. It is written by
+// the same call, with the refused request in hand, so it is the second place a presented header could be copied to. The
+// per-door tests above write one refusal on a fresh server, which never reaches it: this one fills a window with callers
+// that all present the header, lets the window end, and sends one more that presents it too.
+func TestTheWindowSummaryLineDoesNotWriteThePresentedCredential(t *testing.T) {
+	for name, header := range presentedHeaders() {
+		t.Run(name, func(t *testing.T) {
+			s, _ := newTestServer(t, tokenCfg(holderKey), &fakeRunner{}, authOpts(false))
+			clock := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+			s.refusals.now = func() time.Time { return clock }
+			buf := captureLog(t)
+			send := func(addr string) {
+				req := httptest.NewRequest(http.MethodPost, "/fleet/dispatch", strings.NewReader(`{"job_id":"j","task_type":"image-gen","payload":{}}`))
+				req.RemoteAddr = addr
+				req.Header.Set("Authorization", header)
+				rec := httptest.NewRecorder()
+				s.Handler().ServeHTTP(rec, req)
+				if rec.Code != http.StatusUnauthorized {
+					t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+				}
+			}
+			for i := 0; i < 5*refusalLogBudget; i++ {
+				send(fmt.Sprintf("192.0.2.%d:5000", i))
+			}
+			clock = clock.Add(2 * refusalLogWindow)
+			send("198.51.100.7:5000")
+			logged := buf.String()
+			if !strings.Contains(logged, "more refusal(s) were not logged one by one") {
+				t.Fatalf("the window ended with refusals unwritten and no summary line, so there is nothing to check; log = %q", logged)
+			}
+			assertCredentialNotCopied(t, logged, "")
 		})
 	}
 }
