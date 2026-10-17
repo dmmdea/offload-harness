@@ -4063,3 +4063,36 @@ test("readiness (real filesystem): an embeddings directory that is a junction to
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// load_embed asks os.path.isfile for the name as written FIRST, with no extension filter, and only then appends .safetensors, .pt and .bin.
+// A file whose whole name is the reference is therefore a hit whatever it ends in, including no extension at all. The class lists only the
+// extensions its loaders accept, so the inventory also records the embeddings files it does not list, and the bare name can match them.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test("readiness: an embeddings file with no extension, or one the class does not list, answers the bare name first, as isfile does", () => {
+  assert.deepEqual(embGot([EMB("foo"), EMB("foo.safetensors")], "foo"), ["present", "foo", null], "isfile(foo) is true, so ComfyUI opens it and never tries foo.safetensors");
+  assert.deepEqual(embGot([EMB("foo")], "foo"), ["present", "foo", null], "alone, it is the file ComfyUI opens");
+  assert.deepEqual(embGot([EMB("foo.v2"), EMB("foo.v2.safetensors")], "foo.v2"), ["present", "foo.v2", null], "a name that already has an unlisted extension is the same case");
+  assert.deepEqual(embGot([EMB("sd15/foo")], "foo"), ["present", "sd15/foo", null], "in a subfolder too");
+});
+
+test("readiness: an extension-less embeddings file in one directory and a listed file in another are two files, so the name is ambiguous", () => {
+  assert.equal(embGot([EMB("a/foo.pt"), EMB("b/foo")], "foo")[0], "ambiguous");
+  assert.equal(embGot([EMB("a/foo"), EMB("b/foo.safetensors")], "foo")[0], "ambiguous");
+  assert.equal(embGot([EMB("foo"), EMB("foo.pt")], "foo.pt")[0], "present", "a name with a listed extension is not answered by the extension-less file");
+});
+
+test("readiness: an annotation named for a listed file is shadowed by the extension-less file of the same stem that ComfyUI opens first", () => {
+  const covers = { annotated: true, embedding_refs: ["foo"] };
+  assert.deepEqual(embGot([EMB("foo"), EMB("foo.safetensors")], "foo.safetensors", covers), ["shadowed", null, ["foo"]]);
+  assert.equal(embGot([EMB("foo.safetensors")], "foo.safetensors", covers)[0], "present");
+});
+
+test("inventory: the embeddings class records the files it does not list (with where each really is), and no other class does", () => {
+  const inv = invFrom({ ...TREE, [EMB("foo")]: { size: 1 }, [EMB("sd15/notes.txt")]: { size: 1 }, [EMB("e.pt")]: { size: 1 }, "D:/x/comfy/models/vae/readme": { size: 1 } });
+  assert.deepEqual(inv.classes.embeddings.unlisted_files.map((f) => [f.rel, f.dirs, f.reals]), [["foo", [EMB("").slice(0, -1)], [EMB("foo")]], ["sd15/notes.txt", [EMB("").slice(0, -1)], [EMB("sd15/notes.txt")]]]);
+  assert.deepEqual(inv.classes.embeddings.files.map((f) => f.rel), ["e.pt"]);
+  assert.equal(inv.classes.embeddings.unlisted, 2);
+  assert.equal(inv.classes.vae.unlisted_files, undefined, "the other classes keep the count only");
+});
