@@ -328,6 +328,16 @@ names — is in-process only and does not close the cross-process gap named abov
 - **Reclaim needs both halves:** *(holder provably gone)* OR *(heartbeat stale AND declared window
   expired)*. A bare heartbeat timeout would expire a descheduled benchmark under exactly the load
   it exists to protect.
+- **An unreadable heartbeat is unknown, and unknown is never stale.** `heartbeatAt` returns the
+  heartbeat and whether it could tell. The content of `hb.<epoch>` when it parses; the file's
+  modification time when the file is there but its content is no use or the read failed for any reason
+  but absence (a renewed heartbeat has the time of its write, an unrenewed one ages out like any); the
+  acquisition stamp only when the file is *settled* absent (no staged file younger than 3 s beside the
+  name, and the name still absent on a second look: a holder that never renewed); unknown otherwise, which
+  the reader passes to the rule as no stamp. A rename that is installing the heartbeat, or one that cannot
+  be examined, therefore never makes a live lease past its window reclaimable. What frees a holder whose
+  heartbeat stays unknown for good is the first half of the rule (wrapper gone, by pid and start time) or
+  `gpu release`.
 - **Release is epoch-guarded** — a fenced-out straggler cannot delete the current holder's lease.
 - **A reclaim removes only what is still stale (register C-59).** The reclaim rule decides from one read, and
   the claim used to be removed by path: two acquirers that both read the same dead holder's record could
@@ -423,7 +433,8 @@ concurrency test rather than by reading:
     with the same rename over the live name, and `heartbeatAt`, `lastHeartbeat` and `keeperSignOfLife`
     read it through `readSharedFile`. Once a lease is past its declared window the heartbeat is the only
     thing that keeps it: the reclaim rule needs a stale heartbeat AND an expired window. A heartbeat
-    read that failed fell back to the stamp written at acquisition, so a live lease past its window (a
+    read that failed fell back to the stamp written at acquisition (it no longer does: an unreadable heartbeat is
+    unknown, and unknown is never stale; see *How it stays correct*), so a live lease past its window (a
     `gpu reserve` command that outran its `--for`, a detached hold past its window) read as reclaimable,
     an acquirer's sweep removed it, and the card was granted to a second job while the first still ran
     on it. A record that cannot be read is only skipped; a heartbeat that cannot be read is the

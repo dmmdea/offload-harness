@@ -226,6 +226,26 @@
   unprivileged user, with a memory-backed temp dir (a drvfs rename is not an ext4 rename): 50 of 50 passed, 118,283 `Leases()` reads, 138,177 `EpochIsCurrent` reads and 196,607 heartbeat reads,
   1,246,093 opens, 0 misses, 0 refused, 0 pauses. It has no red on the code as it is, because `rename(2)` is atomic; mutants: the heartbeat rewritten in place (truncate, then write) failed 3 of 3 with
   `the heartbeat could not be read on 265 of 3290 reads` (and 300 of 3330, 277 of 3255); a pause counted on every read failed with `readSharedFile paused 23845 times on Linux, want 0`.
+- **The reclaim rule changed: an unreadable heartbeat is unknown, and unknown is never stale.** A later review found that the wait above only narrows the window, because
+  `heartbeatAt` still mapped every read failure (including a rename in flight, where the live name is absent for tens of milliseconds with the staged file beside it) to the stamp written at
+  acquisition. The reclaim rule needs a stale heartbeat AND a lapsed window, and a lease past its window is kept by its heartbeat alone, which `Renew` replaces by a rename WITHOUT the epoch lock; an
+  acquirer's probe and its locked sweep each read it, so one episode spanning both read a live lease as stale, deleted it and granted its cards (or the whole node) to a second job.
+  - **The rule** (`heartbeatAt` in `internal/gpulease/gpulease.go` returns `(value, known)`; `settled.go` holds the helper). The content of `hb.<epoch>` when it parses (unchanged). The file's
+    modification time when the file is there but its content is no use (empty, torn) or the read failed for any reason but absence: `Renew` writes a staged file and renames it over the live
+    name, so a heartbeat renewed a moment ago has the time of that write, and one nobody renews still goes stale after the TTL. The stamp from the acquisition only when the file is SETTLED
+    absent (no staged file younger than 3 s beside the name, and a second look at the name, taken after the look at the staged file, still finds nothing): a holder that never renewed. Unknown
+    otherwise (a staged file is beside an absent name, or the read and the look at the file both failed), and `reader.judge` passes unknown to `Reclaimable` as no stamp, which it already read as
+    not stale. The wrapper-gone half of the rule (pid and process start time) is untouched, so a dead holder, and a recycled pid, are still reclaimed with an unreadable heartbeat.
+  - **Red, then fix** (`heartbeat_unknown_test.go`, every platform; the episode is modelled on disk by renaming the live name away and leaving the staged file, so the tests do not depend on how a reader
+    waits). A lease with a 50 ms window and the clock ten minutes on, renewed, its heartbeat then mid-rename; a second job asks for the same card, for the whole node over a card lease, for a card
+    over a whole-node lease, and for the whole node over a whole-node lease. Before the change all four fail with `Leases() = [] while the holder's heartbeat is mid-rename, want [1]` and `the lease of a
+    live holder was granted to a second job (epoch 2) because its heartbeat was mid-rename`, and the holder's next `Check` reads `lease is gone (epoch 1)`; a heartbeat that can be neither read nor
+    examined, an unreadable one written a moment ago, and an empty or torn one written a moment ago fail the same way. They pass after.
+  - **Guards that pass before and after.** An unreadable or corrupt heartbeat nobody has renewed for ten minutes still lets a lapsed lease go; a holder that never renewed, and a staged file left by a
+    writer that died, are settled absent and keep the acquisition stamp; a lease inside its window, or younger than the heartbeat TTL, stays held; a recycled pid is reclaimed with an unreadable heartbeat; a
+    renewed heartbeat has the fresh file time of its staged file (`Renew` sets no time by hand and nothing else writes the heartbeat).
+  - **Known limits.** A holder that is alive but hung, with a heartbeat that stays unreadable and unexaminable for good, is not reclaimed by the heartbeat rule: only the wrapper being gone, or `gpu release`, frees
+    it. `keeperSignOfLife` (the unreadable-record case) still reads a heartbeat that fails as no sign of life. The platform-independent rule takes no wait; the read gate that waits out an in-flight rename is separate.
 - **Not verified here.**
   - The 5 s memory of a refused file is a choice (long enough for the polls of a burst of acquirers, short enough that a new fault is waited on), not a measured figure, and the arithmetic of eighteen files
     is from the 110 ms a wait costs here. The real-ACL before and after runs are one host, a scratch test not committed, and they refuse a file for good; a foreign delete whose handle lingers was not
