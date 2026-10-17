@@ -45,8 +45,8 @@ func stagingPath(path string) string {
 	return path + ".tmp"
 }
 
-// stagedInFlight says whether a staged file stands beside path that its writer may still be installing: it exists and is younger
-// than stagingFresh. A negative age (a clock that stepped back, a timestamp from the future) counts as fresh, and so does a staged file
+// stagedInFlight says whether a staged file stands beside path that its writer may still be installing: it exists, is a regular
+// file (a writer stages a file) and is younger than stagingFresh. A negative age (a clock that stepped back, a timestamp from the future) counts as fresh, and so does a staged file
 // that cannot be examined for any reason but being absent. None of those is evidence that nothing is in flight.
 func stagedInFlight(path string) bool {
 	staged := stagingPath(path)
@@ -56,6 +56,9 @@ func stagedInFlight(path string) bool {
 	fi, err := statFile(staged)
 	if err != nil {
 		return !errors.Is(err, fs.ErrNotExist)
+	}
+	if !fi.Mode().IsRegular() {
+		return false // a writer stages a file; a directory (or anything else) in its place is somebody's blocker, not a rename
 	}
 	return time.Since(fi.ModTime()) < stagingFresh
 }
