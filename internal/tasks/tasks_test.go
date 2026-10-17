@@ -1,6 +1,9 @@
 package tasks
 
 import (
+	"fmt"
+	"sort"
+	"strings"
 	"testing"
 
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -75,5 +78,173 @@ func TestBuildVideoDescribe(t *testing.T) {
 	}
 	if b.User != "what happens?" {
 		t.Errorf("User = %q, want the question verbatim", b.User)
+	}
+}
+
+// TestStableParamsKeyKeepsEntriesApart: the rendering is "<key>=<value>;" per entry,
+// so a key or a value that itself held "=" or ";" could stand in for the structure
+// around it, and two different params maps rendered the same string. The string is
+// an ingredient of the result-cache key, names the render/video/edit output files,
+// and is recorded on the persisted exemplar rows, so two maps that shared it shared
+// all three. The pairs below rendered the same string before the fix.
+func TestStableParamsKeyKeepsEntriesApart(t *testing.T) {
+	pairs := []struct {
+		name string
+		a, b map[string]any
+		old  string // what both rendered before the fix
+	}{
+		{
+			name: "a value carries the next entry",
+			a:    map[string]any{"a": "1;b=2"},
+			b:    map[string]any{"a": "1", "b": "2"},
+			old:  "a=1;b=2;",
+		},
+		{
+			name: "a key carries its value and the next key",
+			a:    map[string]any{"a=x;b": "y"},
+			b:    map[string]any{"a": "x", "b": "y"},
+			old:  "a=x;b=y;",
+		},
+		{
+			name: "a value carries a whole entry after an empty one",
+			a:    map[string]any{"": ";a="},
+			b:    map[string]any{"": "", "a": ""},
+			old:  "=;a=;",
+		},
+	}
+	for _, p := range pairs {
+		t.Run(p.name, func(t *testing.T) {
+			// Guard on the guard: the pair has to be one the unescaped rendering made equal.
+			if got := unescapedParamsKey(p.a); got != p.old || unescapedParamsKey(p.b) != p.old {
+				t.Fatalf("the unescaped rendering of %v and %v is %q and %q, want both %q: pick a pair that collided",
+					p.a, p.b, got, unescapedParamsKey(p.b), p.old)
+			}
+			ka, kb := StableParamsKey(p.a), StableParamsKey(p.b)
+			if ka == kb {
+				t.Errorf("%v and %v share the params key %q", p.a, p.b, ka)
+			}
+		})
+	}
+}
+
+// unescapedParamsKey is StableParamsKey as it was written before the escaping: the
+// reference the colliding pairs above are checked against.
+func unescapedParamsKey(p map[string]any) string {
+	keys := make([]string, 0, len(p))
+	for k := range p {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	for _, k := range keys {
+		fmt.Fprintf(&b, "%s=%v;", k, p[k])
+	}
+	return b.String()
+}
+
+// TestStableParamsKeyOrdinaryParamsAreUnchanged holds the rendering of every params
+// map whose keys and rendered values contain none of "\", ";" and "=" to the exact
+// bytes it had before the escaping. That is a promise to more than the cache: the
+// string names the render-/video-/edit- output files (a stem is a hash of prompt +
+// this string, and an existing file is found again by that name) and is recorded on
+// the persisted exemplar rows, so a change to it for ordinary params would orphan
+// both. The expected strings are literals, written from the format, not computed by
+// StableParamsKey.
+func TestStableParamsKeyOrdinaryParamsAreUnchanged(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]any
+		want string
+	}{
+		{"nil map", nil, ""},
+		{"empty map", map[string]any{}, ""},
+		{"strings, sorted by key", map[string]any{"b": "two", "a": "one"}, "a=one;b=two;"},
+		{
+			"the image-batch parameter set",
+			map[string]any{"seed": 5, "width": 0, "height": 0, "steps": 0, "negative": "people"},
+			"height=0;negative=people;seed=5;steps=0;width=0;",
+		},
+		{"floats", map[string]any{"temperature": 0.7, "top_p": 1.0, "n": float64(3)}, "n=3;temperature=0.7;top_p=1;"},
+		{"bools", map[string]any{"stream": true, "refine": false}, "refine=false;stream=true;"},
+		{"a nested map", map[string]any{"opts": map[string]any{"b": 2, "a": "x"}, "seed": 7}, "opts=map[a:x b:2];seed=7;"},
+		{"slices", map[string]any{"tags": []string{"x", "y"}, "ids": []any{1, "a"}}, "ids=[1 a];tags=[x y];"},
+		{"a nil value", map[string]any{"k": nil}, "k=<nil>;"},
+		{
+			"prose with commas, punctuation and non-ASCII",
+			map[string]any{"negative": "blurry, low quality, señor ñ!", "question": "what happens?"},
+			"negative=blurry, low quality, señor ñ!;question=what happens?;",
+		},
+		{"paths and urls without backslashes", map[string]any{"path": "/tmp/a/b.png", "url": "http://host:8080/y"}, "path=/tmp/a/b.png;url=http://host:8080/y;"},
+		{"an empty key and an empty value", map[string]any{"": ""}, "=;"},
+	}
+	for _, tc := range cases {
+		if got := StableParamsKey(tc.in); got != tc.want {
+			t.Errorf("%s: StableParamsKey(%v) = %q, want %q (the bytes ordinary params always had)", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestStableParamsKeyEscapesWhatItMustEscape pins the escaping itself for the values
+// that are NOT ordinary: "\", ";" and "=" each get a backslash, in keys and in the
+// rendered value alike, and the backslash escapes itself so a value ending in one
+// cannot swallow the separator after it.
+func TestStableParamsKeyEscapesWhatItMustEscape(t *testing.T) {
+	cases := []struct {
+		name string
+		in   map[string]any
+		want string
+	}{
+		{"a semicolon and an equals sign in a value", map[string]any{"a": "1;b=2"}, `a=1\;b\=2;`},
+		{"a semicolon and an equals sign in a key", map[string]any{"a=x;b": "y"}, `a\=x\;b=y;`},
+		{"a backslash", map[string]any{"p": `C:\imgs\a.png`}, `p=C:\\imgs\\a.png;`},
+		{"a trailing backslash does not swallow the separator", map[string]any{"a": `x\`, "b": "y"}, `a=x\\;b=y;`},
+		{"inside a nested map", map[string]any{"o": map[string]any{"k": "v;w"}}, `o=map[k:v\;w];`},
+	}
+	for _, tc := range cases {
+		if got := StableParamsKey(tc.in); got != tc.want {
+			t.Errorf("%s: StableParamsKey(%v) = %q, want %q", tc.name, tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestStableParamsKeyIsInjectiveOverASmallAlphabet is the exhaustive form of the
+// pairs above: every params map of up to two entries whose keys and values are
+// strings of up to two characters from the alphabet {a, =, ;, \}, the three
+// characters the format treats specially and one ordinary one. No two different
+// maps may render the same string, whatever the pair. (About 93,000 maps; it runs
+// in milliseconds.)
+func TestStableParamsKeyIsInjectiveOverASmallAlphabet(t *testing.T) {
+	alphabet := []string{"a", "=", ";", `\`}
+	strs := []string{""}
+	for _, c := range alphabet {
+		strs = append(strs, c)
+		for _, d := range alphabet {
+			strs = append(strs, c+d)
+		}
+	}
+
+	seen := map[string]map[string]any{}
+	check := func(m map[string]any) {
+		k := StableParamsKey(m)
+		if prev, dup := seen[k]; dup {
+			t.Fatalf("%v and %v both render %q", prev, m, k)
+		}
+		seen[k] = m
+	}
+	for _, k1 := range strs {
+		for _, v1 := range strs {
+			check(map[string]any{k1: v1})
+			for _, k2 := range strs {
+				if k2 <= k1 { // keys are distinct, and each unordered pair of entries is built once
+					continue
+				}
+				for _, v2 := range strs {
+					check(map[string]any{k1: v1, k2: v2})
+				}
+			}
+		}
+	}
+	if len(seen) < 90000 {
+		t.Fatalf("only %d maps were checked, the enumeration is not what the doc says", len(seen))
 	}
 }

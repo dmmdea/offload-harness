@@ -285,7 +285,29 @@ func paramMap(p map[string]any, k string) map[string]any {
 	return nil
 }
 
-// stableParamsKey renders params deterministically for cache keying.
+// paramsEscaper writes the three characters StableParamsKey's format gives a meaning
+// to ("\", ";" and "=") as a backslash and the character. One pass, so the backslash
+// it adds is not itself escaped again.
+var paramsEscaper = strings.NewReplacer(`\`, `\\`, `;`, `\;`, `=`, `\=`)
+
+// StableParamsKey renders params deterministically: "<key>=<value>;" per entry, in
+// key order, the value as %v prints it.
+//
+// It is an ingredient of the result-cache key, it names the render-, video- and
+// edit- output files (a stem is a hash of the prompt and this string), and it is
+// recorded on the persisted exemplar rows. All three need two different params maps
+// to render two different strings, and the format alone does not give that: a key or
+// a value holding "=" or ";" could stand in for the structure around it, so
+// {"a": "1;b=2"} and {"a": "1", "b": "2"} were both "a=1;b=2;". Each key and each
+// rendered value is therefore escaped (paramsEscaper) before it is written, which
+// makes the entries uniquely decodable.
+//
+// The output is byte-identical to the unescaped format for every map whose keys and
+// rendered values contain none of "\", ";" and "=" — prompts, numbers, bools, paths
+// with forward slashes, nested maps and slices of those — so the file names and
+// stored keys of ordinary params did not move. A key or value that does contain one
+// of the three renders differently from before (a Windows path with backslashes, a
+// negative prompt with a semicolon), and its output stem and recorded key change once.
 func StableParamsKey(p map[string]any) string {
 	if len(p) == 0 {
 		return ""
@@ -297,7 +319,10 @@ func StableParamsKey(p map[string]any) string {
 	sort.Strings(keys)
 	var b strings.Builder
 	for _, k := range keys {
-		fmt.Fprintf(&b, "%s=%v;", k, p[k])
+		b.WriteString(paramsEscaper.Replace(k))
+		b.WriteByte('=')
+		b.WriteString(paramsEscaper.Replace(fmt.Sprintf("%v", p[k])))
+		b.WriteByte(';')
 	}
 	return b.String()
 }
