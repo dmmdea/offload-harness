@@ -4096,3 +4096,43 @@ test("inventory: the embeddings class records the files it does not list (with w
   assert.equal(inv.classes.embeddings.unlisted, 2);
   assert.equal(inv.classes.vae.unlisted_files, undefined, "the other classes keep the count only");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// load_embed finds a file with os.path.isfile, so on a volume that looks names up without regard to case (NTFS by default, which is where a
+// Windows node's ComfyUI runs) the name `foo` is answered by `FOO.pt` too. The inventory asks each embeddings root, through the io, whether
+// its volume folds case, and the lookup compares in lower case under such a root.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+// An io whose volume looks names up without regard to case: a path in any case finds the entry stored in its own.
+const foldIo = (files) => {
+  const io = memIo(files);
+  const stored = new Map();
+  for (const p of Object.keys(files)) stored.set(p.replace(/\\/g, "/").toLowerCase(), p.replace(/\\/g, "/"));
+  const fix = (p) => stored.get(String(p).replace(/\\/g, "/").toLowerCase()) ?? p;
+  return { ...io, stat: (p) => io.stat(fix(p)), exists: (p) => io.exists(fix(p)) };
+};
+const foldGot = (files, name, extra = {}, { fold = true } = {}) => {
+  const tree = { ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) };
+  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: [] }), fold ? foldIo(tree) : memIo(tree));
+  const r = C.readiness([req("embeddings", name, { annotated: false, ...extra })], inv).requirements[0];
+  return [r.status, r.resolved ?? null, r.found ?? null];
+};
+
+test("inventory: an embeddings root whose volume folds case is recorded as such, and one that does not is not", () => {
+  const files = { [EMB("Bar.safetensors")]: { size: 1 }, [EMB("sd15/x.pt")]: { size: 1 } };
+  assert.deepEqual(invFrom({ ...TREE, ...files }).classes.embeddings.case_insensitive_dirs, [], "an io that finds names by their exact case");
+  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: [] }), foldIo({ ...TREE, ...files }));
+  assert.deepEqual(inv.classes.embeddings.case_insensitive_dirs, [EMB("").slice(0, -1)]);
+  assert.equal(inv.classes.vae.case_insensitive_dirs, undefined, "only the embeddings class looks names up by a file system's rules");
+});
+
+test("readiness: on a volume that folds case a name is answered by a file in another case, the way os.path.isfile answers it", () => {
+  assert.deepEqual(foldGot([EMB("Bar.safetensors")], "bar"), ["present", "Bar.safetensors", null], "ComfyUI loads it on this node");
+  assert.deepEqual(foldGot([EMB("Bar.safetensors")], "bar", {}, { fold: false }), ["case_mismatch", null, ["Bar.safetensors"]], "a case-sensitive volume does not find it");
+  assert.deepEqual(foldGot([EMB("sd15/E.PT")], "e"), ["present", "sd15/E.PT", null]);
+});
+
+test("readiness: on a volume that folds case a second file differing only in case, in another directory, makes the name ambiguous", () => {
+  assert.deepEqual(foldGot([EMB("foo.pt"), EMB("sd15/FOO.pt")], "foo"), ["ambiguous", null, ["foo.pt", "sd15/FOO.pt"]], "ComfyUI opens either, by set order");
+  assert.deepEqual(foldGot([EMB("foo.pt"), EMB("sd15/FOO.pt")], "foo", {}, { fold: false }), ["present", "foo.pt", null], "on a case-sensitive volume sd15/FOO.pt is another name");
+});

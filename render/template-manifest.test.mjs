@@ -558,6 +558,30 @@ test("resolve: a file of no extension that ComfyUI opens first for the name refu
   assert.deepEqual([p.status, p.resolved_path], ["present", "models/embeddings/evil_ti"], "an unannotated prompt name resolves to the file ComfyUI opens, so the manifest names that file");
 });
 
+// An io over the same tree whose volume looks names up without regard to case (NTFS by default): a path in any case finds the entry stored
+// in its own. Only exists and stat fold, which is what the inventory's probe and a file lookup use.
+const foldingIo = (io) => {
+  const fix = (p) => {
+    const parts = String(p).replace(/\\/g, "/").split("/");
+    let cur = `/${parts[1]}`;
+    for (let i = 2; i < parts.length; i++) {
+      const hit = (io.list(cur) ?? []).find((e) => e.name.toLowerCase() === parts[i].toLowerCase());
+      cur = `${cur}/${hit ? hit.name : parts[i]}`;
+    }
+    return cur;
+  };
+  return { ...io, stat: (p) => io.stat(fix(p)), exists: (p) => io.exists(fix(p)) };
+};
+
+test("resolve: on a volume that folds case, a file in another case in another directory is a file ComfyUI may open for the name, so the run is refused", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/sd15/EVIL_TI.safetensors"]);
+  assert.equal(M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io }).ok, true, "on a case-sensitive volume sd15/EVIL_TI.safetensors is another name");
+  const folded = foldingIo(io);
+  const gone = M.resolveRun(rowOf(catalogOf(folded), "tt_emb"), snapshotOf(folded), { io: folded });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.safetensors"]]);
+});
+
 // A loader widget that names an embeddings file (ConditioningLoader) is read by ComfyUI's plain loader rule: the exact relative path under
 // the first root, no subfolder search. The prompt lookup (a set of directories, a subfolder file found by the bare name) is not its rule.
 const conditioningIo = (models) => {
