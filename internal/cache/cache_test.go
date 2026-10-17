@@ -208,6 +208,12 @@ func TestKeySeparatorCollision(t *testing.T) {
 		{"x, y", []string{"x", "y"}},
 		{"forged length header", []string{forgedHeader}},
 		{"forged frame of a, b", []string{forgedFrame}},
+		// A decimal length with no delimiter ("<len><part>") reads these two lists as the
+		// same fifteen digits: the lengths 1 and 11 and the digits of the parts run into
+		// each other. It needs a digit part of eleven characters, which is why the
+		// exhaustive short-list test below cannot reach it.
+		{"a digit, then eleven digits", []string{"1", "11111111111"}},
+		{"eleven digits, then a digit", []string{"11111111111", "1"}},
 	}
 
 	seen := make(map[string]string, len(lists))
@@ -288,12 +294,14 @@ func TestKeyEncodingIsPinned(t *testing.T) {
 	}
 }
 
-// TestKeyIsInjectiveOverSmallLists is the exhaustive form of the named cases above:
-// every part list of up to three parts, each part a string of up to two characters
-// from {"a", NUL, \x01}. No two different lists may share a key, whichever pair they
-// are, so an encoding that only looks careful (a decimal length with no delimiter, a
-// prefix on all but one part, a different separator) fails here on a list nobody
-// thought to write down. About 2,400 lists.
+// TestKeyIsInjectiveOverSmallLists is the exhaustive form of the named cases above,
+// for SHORT parts: every part list of up to three parts, each part a string of up to two
+// characters from {"a", NUL, \x01}. No two different lists may share a key, whichever
+// pair they are, so an encoding that only looks careful (a prefix on all but one part, a
+// different separator) fails here on a list nobody thought to write down. About 2,400
+// lists. What it cannot reach is an encoding whose collisions need long parts: a decimal
+// length with no delimiter collides only on digit parts of eleven characters, so that
+// case is named in TestKeySeparatorCollision instead.
 func TestKeyIsInjectiveOverSmallLists(t *testing.T) {
 	alphabet := []string{"a", "\x00", "\x01"}
 	strs := []string{""}
