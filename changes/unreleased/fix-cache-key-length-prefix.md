@@ -116,4 +116,4 @@
 - **Not verified here.** No live cache file, seat or fleet node was used, so the cold start after an upgrade is read from the code (a key that is not in the store is a miss) and not
   measured. The Windows pipeline run skips `TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere`: a lease-window timing test (it spawns real runner processes) that failed
   intermittently under load on this machine, always as "want one live lease while the render runs" within about 50 ms and on a different subtest each time, and passed three runs in a
-  row on its own; it has no cache code in its path, and the remote Linux runs of the whole package included it. A Windows run of the full suite was not made, and the leak-gate tool (it needs the operator's name list) was not run.
+  row on its own. That flake is the media-route lease-read race (a held lease record read as absent while it is rewritten) that PR #634 fixes, not this change: this diff touches no lease code, and the remote Linux runs of the whole package included the test. A Windows run of the full suite was not made, and the leak-gate tool (it needs the operator's name list) was not run.
