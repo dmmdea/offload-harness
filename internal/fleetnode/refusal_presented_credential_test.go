@@ -14,7 +14,7 @@ import (
 )
 
 // presentedValue is the secret-looking text a refused caller sends. It is built at run time and is unlike the node's key,
-// so finding it in the journal can only mean the journal copied the header.
+// so seeing it in the journal can only mean the journal copied the header.
 func presentedValue() string {
 	return strings.Join([]string{"zq7x2", "m4k9", "presented", "value"}, "-")
 }
