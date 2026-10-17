@@ -202,11 +202,12 @@
   span, 28,024 leaking a value, 67 breaking the Args JSON) and none does with the new one. Measured with the new class: it matches nowhere in
   `internal/` and `docs/` (2,276 files, 27 MB), and in Go's `net/http` source (158 files, 2.8 MB) the same four places as before, each with a
   real cookie value in it; it scans 1 MiB of Go source in about 0.1 s, as before; 1 MiB built to be slow for it takes 0.1 to 1.1 s (0.1 to
-  0.5 s before); the pattern is five times the size (54,000 program instructions, 11 ms to compile, once, against 9,800 and 2.5 ms), the cost of
+  0.5 s before); the pattern is five times the size (54,500 program instructions, 11 ms to compile, once, against 9,800 and 2.5 ms), the cost of
   five levels of escaping. A mutation pass after the fixes (47 mutants of the class, 29 of the harvest scanner: each level, break limit,
   opening rule, escape bound, closer, list opener, count and stop character) killed all but one, which is equivalent (the index at which the
   scanner resumes after a closing quote, which is only re-read as a quote that is not followed by an equals sign). Named gaps after the review: a raw JSON value (a bare double quote inside an unquoted value) ends the span at the
-  quote, and so does an apostrophe; a quoted value that starts with white space or a separator is not a pair; quotes with two, four to six or
+  quote, and so does an apostrophe; a backslash and an n or an r in an unquoted value is the JSON escape of a line break and ends the span (a
+  raw path such as `dir=C:\new\x` ends it there); a quoted value that starts with white space or a separator is not a pair; quotes with two, four to six or
   eight to fourteen backslashes are no level; a Go slice literal with its type left out is read as a line.
 - **A Go module version is not an email address.** The email pattern read `toolchain@v0.0.1-go1.27.2.linux-amd64`, which every Go stack
   trace and module-cache path carries, as an address. Measured on 9.4 MB of real Go build and test logs cut into 4, 16 and 64 KiB pieces,

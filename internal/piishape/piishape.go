@@ -596,7 +596,9 @@ type Class struct {
 // header whose name and scheme (or a cookie header whose name and cookies) are more than
 // eight punctuation characters apart or have a word between them, a cookie behind a
 // single quote or an apostrophe in an unquoted value, a cookie behind a bare double quote inside an unquoted value,
-// a quoted cookie whose quotes carry a number of backslashes that is no level of escaping (not 0, 1, 3, 7 or 15),
+// a cookie behind a backslash and an n or an r in an unquoted value (the JSON escape of a line break ends the line,
+// so a raw path such as C:\new\x ends the span there), a quoted cookie whose quotes carry a number of backslashes
+// that is no level of escaping (not 0, 1, 3, 7 or 15),
 // a quoted value that starts with white space or a separator, a Go slice literal whose type is left out, a header
 // folded again after its first cookie, and a cookie passed apart from its header name (curl -b, a jar).
 var Classes = []Class{

@@ -719,7 +719,7 @@ text that matches no class, all eleven classes took 1.51, 1.54 and 1.54 s (three
 is 0.6 s and each other class 0.1 to 0.2 s; the same input took 1.53, 1.53 and 1.55 s before the quoted-value and cookie changes, so those
 changes did not move it measurably. The whole-span cookie class alone scans 1 MiB of Go source in about 0.1 s, as the older class did, and a
 1 MiB of text built to be slow for it (one header line of short cookies, an unclosed list or slice literal, openers with no value, runs of
-quotes and backslashes) took 0.1 to 1.1 s, against 0.1 to 0.5 s for the older class; its pattern is five times the size (54,000 program
+quotes and backslashes) took 0.1 to 1.1 s, against 0.1 to 0.5 s for the older class; its pattern is five times the size (54,500 program
 instructions against 9,800, for the five levels of escaping) and compiles in 11 ms against 2.5 ms, once at start-up. A result is scanned only between 4 KiB and 64 KiB, so one scan costs at most about 0.1 s
 (a shared and noisy machine; unverified elsewhere). The compaction-eval harvest redactor is derived from the same table and substitutes the email class
 last, so it replaces a whole credential value rather than its head; its exit gate also fails the harvest when 12 or
@@ -763,7 +763,8 @@ residual gate clean. A cookie named like a credential (`refresh_token=`, `passwo
 value is gone either way, and the value-tail gate remembers every value in the span, a quoted body whole with its spaces, escapes and
 line breaks. The gaps are named: an apostrophe in an unquoted value ends the span (it cannot be told from the quote that closes a
 header written in single quotes), and so does a bare double quote inside a value (a raw JSON value such as `prefs={"t":"d"}`, which
-cannot be told from the quote that closes the string); a quote with two, four to six or eight to fourteen backslashes is no level of
+cannot be told from the quote that closes the string); a backslash and an n or an r in an unquoted value is the JSON escape of a line
+break and ends the span, so a raw path such as `dir=C:\new\x` ends it there; a quote with two, four to six or eight to fourteen backslashes is no level of
 escaping and is not read as a pair; a quoted value that starts with white space or a separator is not a pair; a Go slice literal
 whose type is left out (`{"a=b", "c=d"}` inside a map literal in source) is read as a line; a header folded again after its first
 cookie ends at that line break; and a cookie passed apart from its header name (`curl -b`, a cookie jar) is not covered.
