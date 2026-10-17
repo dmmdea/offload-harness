@@ -289,6 +289,40 @@
     stops its own tree spares another lease's ComfyUI instance only when it can read that instance's marker (`PIDsOfOtherLeases`): a marker whose rename never ends reads as not there, which is the direction it read
     before. The first publish of a file (no live name yet, a staged file beside it) is waited for like a rename and is, until it lands, an I/O failure and not an absence. Plain `os.ReadFile` of the epoch counter, the
     tokens, the orphan marker, the seen sidecar and the reader audit marker remain, none of which gates a fence or a reclaim.
+- **This round also changes how a whole-node grant takes the lock, and what a grant sweeps under it.** Not only the readers and the reclaim rule changed.
+  - **The claim is created under the epoch lock** (`TryAcquire`, `internal/gpulease/gpulease.go`). The claim is an exclusive create of `meta.json`, the name a holder's restamp replaces by a rename under the epoch lock.
+    The grant issued the epoch under the lock, let it go as `bumpEpoch` returned, and then built the record and made the claim with nothing held. The release lane measured an exclusive create of that form
+    succeeding on a name whose rename-over was stalled in 2 of 4 episodes, and in both the stalled rename then completed over the created file, so the creator's claim was replaced by the holder's record
+    (the creator would be fenced at its first `Check`). Reaching it takes a contested acquisition whose loser lands inside the winner's first restamp, which is rare; but "the lock is taken in `bumpEpoch`, so it
+    cannot" was false. The grant now takes the lock once around the epoch bump, the encoding of the record and the create and write of the claim, the shape of a card grant. The record's slow parts (the holder's process
+    start, the owner and the session registry behind it, the term plan) do not need the epoch and are read before the lock (`draftRecord`) and finished inside it (`finishRecord`, now the one place the acquisition
+    stamp `RenewedAtMs` and the other instants are written). The verification, the reclaim and the sweep of sidecars take the lock themselves and run after the section, so `afterClaimHook` still fires with
+    the lock let go. A grant that loses the exclusive create lets the lock go and leaves the winner's claim alone.
+  - **Red, then fix.** `TestAWholeNodeGrantCreatesItsClaimWhileHoldingTheEpochLock` reads the lock at the instant of the create through a new test seam (`beforeClaimHook`). Before: `wholenode_lock_test.go:35: the
+    claim was created without the epoch lock held: an exclusive create can then land inside a restamp's rename of the same name`. After: green, 3 of 3 runs. Guards that pass before and after: a grant that loses the create
+    lets the lock go and leaves the winner's record untouched; the record's process reads happen before the lock. The create inside a real stalled rename is not reproduced by a test (it needs a rename that stalls in the
+    OS call, which cannot be forced without a production-only hook); the lock-held assertion stands in for it.
+  - **The staged files whose writers hold the lock are swept under it, at any age** (`sweepStagedLeftoversLocked`, `devices.go`). `meta.json.restamp` and `e/<epoch>.json.tmp` are staged and renamed only by code that holds
+    the epoch lock, from before the file is staged until after the rename returns (the stall is inside that call, in the lane's probe), so to someone holding the lock one is a dead writer's leftover whatever its age; left
+    alone, a fresh one makes every reader of the absent name wait a whole budget for a rename that will never end. It runs first in the debris sweep (every card grant, and the verification a whole-node grant makes), before
+    any record is read, and in the whole-node grant's own section (the restamp file only). One try and no retry, so a file a scanner holds is left for the next sweep. `hb.<epoch>.tmp` is never swept: `Renew`
+    replaces the heartbeat without the lock. Before: `sweep_leftovers_test.go:44: meta.json.restamp (fresh) is still there after a grant that held the epoch lock`,
+    `:69: 7.json.tmp is still there after a grant that held the epoch lock (fresh)` and `:96: the verification paused 50 times for a rename in flight, want none: the leftover it waited for is a dead writer's and was
+    there to sweep`, each for a staged file a moment old and an hour old; after, green, 3 of 3 runs. The guard that the heartbeat's staged file and the live files stay passes before and after.
+  - **The worst epoch-lock hold of a whole-node acquisition, measured against the 2 s a second acquirer spins** (one Windows host, the real gate and the real clock, a scratch test run once and not in the tree; the
+    spin gave up after 2,186 ms against a lock that was never released). The grant's own section, 20 grants: 0.5 to 1.6 ms, median 1.1 ms; with a rename that takes 119 ms inside it (the epoch file held open without
+    delete sharing, so the rename is refused and retried), five grants: 121.8 to 124.5 ms, and a second acquirer that arrived 30 ms in waited 92 to 98 ms and got the lock. That section reads no lease file, so the gate
+    cannot add to it. The verification section (a separate hold) with N live card leases whose heartbeats each have a fresh leftover beside them and no live name, nothing remembered: N=1 253 ms, N=3 761 ms, N=8
+    2,030 ms (one 250 ms budget per file); with the leftovers already waited for outside the lock, as the probe every grant makes first does: 1.6, 2.7 and 5.9 ms (the probe paying 256, 760 and 2,019 ms).
+  - **Said plainly: the worst hold is bounded, not removed.** Cold it is N x 250 ms, once per file per 5 s per process: the nominal 2 s at eight files, past the measured 2.19 s at nine. Both levers are
+    in (the sweep above takes the record and restamp leftovers, and the memory of a wait that ran out, from the gate, makes it once per file); what remains is the heartbeat's leftover, which only `Renew`'s writer owns. What
+    keeps it to milliseconds is the order: the probe every grant makes without the lock judges ALL the leases, not only the conflicting ones, and pays the waits first. `TestTheProbeBeforeTheLockPaysTheGateWaitsSoTheLockIsHeldWithoutOne`
+    (a card grant over live leases on other cards, and a whole-node grant over leases whose holders are gone) counts the gate's pauses taken with the lock held and wants none, after checking that the probe paused outside it;
+    `TestTheWholeNodeVerificationPaysAtMostOneWaitPerFile` counts one wait per file for the verification. The cold hold needs leftovers that appear between the probe and the lock, fresh
+    (younger than 3 s) and unread for 5 s. On a host with eight or more cards, each with a lease whose writer died in the last 3 s, that could outlast a second acquirer's spin; it would then fail loudly
+    (`the epoch lock ... did not clear`) and never grant. Not built against: the host measured has three cards.
+  - **Known limits.** A lock broken as stale after 30 s (`epochLockStale`) lets a second holder in beside a first that only stalled; its sweep could remove the first's staged file, which fails that rename with an error
+    and corrupts nothing. The 5 s memory is the gate's choice and is not a measured figure. The measurements are one host's.
 - **Not verified here.**
   - The 5 s memory of a refused file is a choice (long enough for the polls of a burst of acquirers, short enough that a new fault is waited on), not a measured figure, and the arithmetic of eighteen files
     is from the 110 ms a wait costs here. The real-ACL before and after runs are one host, a scratch test not committed, and they refuse a file for good; a foreign delete whose handle lingers was not
@@ -321,7 +355,7 @@
     they were left as they were.
   - The epoch counter and the tokens are still read with `os.ReadFile`; no finding covers them.
   - The read gate: no natural episode (an absent name beside a staged file) was seen in the Windows runs above, so the gate is shown by injection and not by a live rename; the full `internal/gpulease` package was
-    not run on Windows (the Windows gate runner did not answer ssh), only the targeted tests of this change, three times each, on the workstation; the worst epoch-lock hold of a whole-node acquisition with the gate inside it
-    was not measured (the lock is not yet held across the claim; that is a later item).
+    not run on Windows (the Windows gate runner did not answer ssh), only the targeted tests of this change, three times each, on the workstation. The worst epoch-lock hold of a whole-node acquisition was measured once, on one
+    Windows host, in a scratch test that is not in the tree, with a rename stall made by holding the destination open (a refused and retried rename of 119 ms), not by a natural episode, and not with N above eight.
   - `windowAndKill` still reads the lease twice. A lease that ended between the two reads (the 2 s render killed and released) would also show
     `got []`; it needs a stall of seconds between two adjacent statements and was not seen.

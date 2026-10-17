@@ -473,6 +473,54 @@ concurrency test rather than by reading:
     writer names a staged file without `stagingPath` or stages under a suffix Node does not look for.
     Node returns `null` when its wait runs out (the fence aborts: fail-safe, and Node only reads), and
     keeps no memory of a wait that ran out.
+  - **The staged files whose writers hold the epoch lock are swept under it, at any age.** `meta.json.restamp` (the restamp of the
+    whole-node record) and `e/<epoch>.json.tmp` (a card record) are staged, and renamed over the live name, only by code that holds
+    the epoch lock, from before the file is staged until after the rename returns, and the stall of a Windows rename over a name is
+    inside that call (a review's probe saw its exclusive creates succeed at the end of a stalled rename, which then completed over
+    them). So a staged file found by someone who holds the lock is a dead writer's leftover whatever its age, and a fresh one would
+    make every reader of the absent name wait a whole budget for a rename that will never end. `sweepStagedLeftoversLocked`
+    (`devices.go`) removes both: first in the debris sweep (every card grant, and the verification a whole-node grant makes), before any
+    record is read, and in the whole-node grant's own section (the restamp file only: one remove, no listing). One try and no retry: a
+    file a scanner holds is left for the next sweep, and the lock is not held longer for it. **`hb.<epoch>.tmp` is never swept**: `Renew`
+    replaces the heartbeat without the lock, so that file may be a rename landing at that instant.
+    `TestAWholeNodeGrantSweepsTheRestampFileAWriterLeft`, `TestACardGrantSweepsTheStagedRecordsAndTheRestampFileWritersLeft` and
+    `TestTheWholeNodeVerificationSweepsLeftoversBeforeItReadsAnything` pin the sweep, and
+    `TestTheSweepOfLeftoversLeavesTheHeartbeatsStagedFileAndTheLiveFiles` pins what it leaves. Limit: a lock broken as stale after 30 s
+    (`epochLockStale`) lets a second holder in beside a first that only stalled, and its sweep could remove the first's staged file,
+    which fails that rename with an error and corrupts nothing.
+  - **A whole-node grant holds the epoch lock across the epoch, the record and the claim.** The claim is an exclusive create of
+    `meta.json`, the name a holder's restamp replaces by a rename under the lock. The grant used to let the lock go as the epoch was
+    issued and then build the record and make the claim with nothing held, so a create could land inside a restamp's rename (a
+    review's probe on Windows: the create succeeded in 2 of 4 episodes, and the stalled rename then replaced it with the holder's
+    record), and "the lock is taken in `bumpEpoch`, so it cannot" was not true. Now `TryAcquire` takes the lock once around
+    `bumpEpochLocked`, `finishRecord` and the create and write of the claim, as a card grant does
+    (`TestAWholeNodeGrantCreatesItsClaimWhileHoldingTheEpochLock` reads the lock at the instant of the create through
+    `beforeClaimHook`; the exclusive create inside a real stalled rename is not reproduced by a test, which would need a production-only
+    hook). What the record needs from the process and the session registry (the holder's process start, the owner, the term plan) is read
+    BEFORE the lock (`draftRecord`) and finished inside it (`finishRecord`, the one place `RenewedAtMs` and the other instants are
+    written), so the section is the epoch's two file operations, the encoding and the create. The verification, the reclaim and the sweep
+    of sidecars take the lock themselves and run after it, as before. A grant that loses the create lets the lock go and leaves the
+    winner's claim alone (`TestAWholeNodeGrantThatMeetsAnotherClaimLetsTheEpochLockGoAndLeavesTheClaimAlone`).
+    **How long the lock is held**, measured on one Windows host with the real gate and the real clock (a scratch test, not in the tree):
+    - the grant's own section, 20 grants: 0.5 to 1.6 ms, median 1.1 ms. With a rename that takes 119 ms inside it (the epoch file held
+      open without delete sharing, so the rename is refused and retried), five grants: 121.8 to 124.5 ms, and a second acquirer that
+      arrived 30 ms in waited 92 to 98 ms and got the lock. That section reads no lease file, so the gate cannot add to it.
+    - the verification section, a separate hold, with N live card leases whose heartbeats each have a fresh leftover beside them and no
+      live name, and nothing remembered: N=1 253 ms, N=3 761 ms, N=8 2,030 ms, one 250 ms budget per file. With the leftovers already
+      waited for outside the lock, as the probe that every grant makes first does: 1.6, 2.7 and 5.9 ms, the probe having paid 256, 760
+      and 2,019 ms.
+    - a second acquirer's spin gave up after 2,186 ms against a lock that was never released (400 pauses of 5 ms and the file operations
+      between them; 2 s nominal).
+
+    So the worst hold is bounded and not removed: N x 250 ms, once per file per 5 s per process, which reaches the nominal 2 s at eight
+    files and does not fit the measured 2.19 s at nine. What keeps it to milliseconds is the order: the probe judges every lease, not
+    only the conflicting ones, before the lock, and a wait that ran out is remembered
+    (`TestTheProbeBeforeTheLockPaysTheGateWaitsSoTheLockIsHeldWithoutOne`, for a card grant and for a whole-node grant, counts the gate's
+    pauses with the lock held and wants none; `TestTheWholeNodeVerificationPaysAtMostOneWaitPerFile` counts one wait per file). The cold
+    hold needs leftovers that appear between the probe and the lock, fresh (younger than 3 s) and not read in the last 5 s. On a host with
+    eight or more cards, each with a lease whose writer died in the last 3 s, that could outlast a second acquirer's spin; the acquirer
+    then fails loudly (`the epoch lock ... did not clear`) and never grants. Not built against: the host measured has three
+    cards.
   - **The wait is Windows only.** Off Windows nothing is delete-pending (`rename(2)` is atomic and an
     open descriptor never holds one up), so a permission error on a record is a lasting refusal and
     `readSharedFile` returns it at once. The choice is the constant `sharedOpenMeetsDeletePending`
@@ -512,9 +560,12 @@ concurrency test rather than by reading:
     heartbeat readers open `hb.<epoch>` once, with no pause
     (`TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt`); a grant whose sweep finds the three records it reads deleted
     under the lock opens each once and pauses never (`TestAMissingOrDeletedRecordCostsOneOpenAndNoWaitUnderTheEpochLock`).
-    The only reads that wait under the lock are of a file that exists and is refused. For the instant `Renew` swaps a
+    The reads that wait under the lock are of a file that exists and is refused, and of a name that is absent with a fresh
+    staged file beside it (the gate above). A record's writers hold the lock and the sweep removes their leftovers before it
+    reads anything (the bullet after the gate), so the second is in practice a heartbeat: for the instant `Renew` swaps a
     live lease's heartbeat (`Renew` does not take the epoch lock) that is one wait that clears, and it is what keeps the
-    sweep from judging a live lease stale. `readRetries` counts the pauses, as a test seam.
+    sweep from judging a live lease stale. `readRetries` counts the pauses of the refused open and `gatePauses` those of the
+    gate, as test seams.
   - **A file refused for good is waited out once, not once per read.** A refusal still there when the wait ends is a
     lasting fault (a deny-read ACL on a lease file, a foreign delete whose handle never closes), not a rename in flight.
     A grant reads each record five times and each heartbeat seven inside one hold of the epoch lock (the sweep, the scan
@@ -590,9 +641,11 @@ rule.) The consumers compare device sets since plan P4: a lease on card 0 no lon
 **Grant.** One critical section under the epoch lock, after a read-only probe so a one-second poller does not spin the
 lock: create `e/` and `cards/`; sweep debris; refuse while a live `meta.json` exists; refuse while a live device lease
 intersects; issue the epoch; write the record `granting`; create each card claim exclusively (all or nothing: any failure
-removes what was made); flip the record to `active`. A whole-node grant keeps its own atomic token (`O_EXCL meta.json`)
-and, once a device lease has ever existed on the host (or whenever `e/` cannot be proven absent), verifies under the same
-epoch lock that no device lease is live and withdraws its claim if one is. Before it judges, it **sweeps** every device
+removes what was made); flip the record to `active`. A whole-node grant keeps its own atomic token (`O_EXCL meta.json`),
+created in the same critical section as the epoch bump and the record (a holder's restamp replaces that name by a rename under
+the same lock, so a create cannot land inside it; the bullet on the whole-node grant below) and, once a device lease has ever
+existed on the host (or whenever `e/` cannot be proven absent), verifies under the epoch lock, in a second section, that no
+device lease is live and withdraws its claim if one is. Before it judges, it **sweeps** every device
 lease the shared rule calls reclaimable: a holder that is alive but stalled (a suspended or lid-closed session) has its
 record, claims and heartbeat removed, so when it resumes its per-epoch fence fails and it cannot renew over cards the
 whole-node holder now owns. A whole-node reclaim fenced the old holder by deleting `meta.json`; this is the same act. Because the device grant creates `e/` before it looks at `meta.json`, a whole-node claim
