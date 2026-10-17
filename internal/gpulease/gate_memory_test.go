@@ -105,6 +105,9 @@ func TestAFreshLeftoverStagedHeartbeatCostsAGrantAtMostOneWaitPerFile(t *testing
 		l := mustDevices(t, m, card)
 		held = append(held, l)
 		t.Cleanup(func() { _ = l.Release() })
+	}
+	// The leftovers go in once all three are held: a grant in between would meet (and remember) the earlier ones.
+	for _, l := range held {
 		stuckBeside(t, c, m.heartbeatPath(l.Epoch()))
 	}
 	gatePauses.Store(0)
