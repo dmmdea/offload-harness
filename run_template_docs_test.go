@@ -120,3 +120,58 @@ func TestTheEmbeddingDocCheckSeesBothHalves(t *testing.T) {
 		}
 	}
 }
+
+// A loader widget that names an embeddings file (ConditioningLoader) is not the prompt lookup. The node lists the directories by relative path
+// and opens its value with get_full_path, which tries every registered root in order and returns the first root that holds the file. The
+// first wording of this said "the exact path under the first root", which reads as if only the first registered root were consulted; a file
+// that sits only in a later root (a model drive registered through extra_model_paths.yaml) is found. This refuses that wording where the
+// run-template prose and comments live.
+func TestTheLoaderWidgetLookupIsDescribedAsTheFirstRootThatHoldsTheFile(t *testing.T) {
+	for _, problem := range loaderWidgetDocProblems(".") {
+		t.Error(problem)
+	}
+}
+
+// loaderWidgetDocProblems is that check over the files under root, as a list, so a test can run it on a root of its own.
+func loaderWidgetDocProblems(root string) []string {
+	retired := map[string][]string{
+		"CHANGELOG.md":                      {"under the first root, so it is met like a file of any other class"},
+		"render/templates-catalog.mjs":      {"under the first root. checkRequirement", "under the first root, which is the rule of every other class"},
+		"render/template-manifest.test.mjs": {"the first root, no subfolder search"},
+	}
+	var problems []string
+	for _, name := range embeddingDocFiles(retired) {
+		raw, err := docText(root, name)
+		if err != nil {
+			problems = append(problems, err.Error())
+			continue
+		}
+		text := strings.Join(strings.Fields(strings.ReplaceAll(raw, "//", " ")), " ")
+		for _, phrase := range retired[name] {
+			if strings.Contains(text, phrase) {
+				problems = append(problems, fmt.Sprintf("%s still says %q: get_full_path tries every registered root in order and returns the first root that holds the file, so say \"the first root that holds it\"", filepath.ToSlash(name), phrase))
+			}
+		}
+	}
+	return problems
+}
+
+func TestTheLoaderWidgetDocCheckSeesTheRetiredWording(t *testing.T) {
+	tree := func(catalog string) map[string]string {
+		return map[string]string{
+			"CHANGELOG.md":                      "# Changelog\n\n## [Unreleased]\n\n## [0.1.0] - 2026-01-01 - x\n\n- It is met like a file of any other class.\n",
+			"render/templates-catalog.mjs":      catalog,
+			"render/template-manifest.test.mjs": "// nothing\n",
+		}
+	}
+	clean := t.TempDir()
+	writeFixtureTree(t, clean, tree("// opens its value with get_full_path, the exact path under the first root that holds it. checkRequirement gives it a rule\n"))
+	if p := loaderWidgetDocProblems(clean); len(p) != 0 {
+		t.Fatalf("the control tree is not clean: %v", p)
+	}
+	bad := t.TempDir()
+	writeFixtureTree(t, bad, tree("// opens its value with get_full_path, the exact path under the\n// first root. checkRequirement gives it a rule\n"))
+	if got := strings.Join(loaderWidgetDocProblems(bad), "\n"); !strings.Contains(got, "still says \"under the first root. checkRequirement\"") {
+		t.Errorf("the check missed the retired wording across a wrapped comment:\n%s", got)
+	}
+}
