@@ -1659,6 +1659,8 @@ export function summarizeReadiness(catalog, results) {
   const needing = rows.filter((r) => r.models.length > 0);
   const zero = rows.filter((r) => r.models.length === 0);
   const ready = needing.filter((r) => results[r.name].ready);
+  // a template with no model rows is ready unless the node blocks it some other way (a file that answers a probe name)
+  const zeroReady = zero.filter((r) => results[r.name].ready);
   const by_gate = { open: 0, ack_required: 0, blocked: 0 };
   for (const r of ready) by_gate[r.gate.state]++;
   const histogram = { "0": 0, "1": 0, "2": 0, "3-5": 0, "6+": 0 };
@@ -1667,7 +1669,7 @@ export function summarizeReadiness(catalog, results) {
     local: rows.length,
     zero_model: zero.length,
     needing_weights: needing.length,
-    ready: { total: ready.length + zero.length, zero_model: zero.length, with_weights: ready.length, names: ready.map((r) => r.name).sort(), by_gate },
+    ready: { total: ready.length + zeroReady.length, zero_model: zeroReady.length, with_weights: ready.length, names: ready.map((r) => r.name).sort(), by_gate },
     histogram,
   };
 }
