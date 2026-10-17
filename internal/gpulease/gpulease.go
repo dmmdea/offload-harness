@@ -595,9 +595,9 @@ type Options struct {
 	Draining bool
 	// Command is recorded as Meta.Command (clipped to commandClip runes).
 	Command string
-	// HostRAMGiB is the host RAM the holder declares it will load (stamped as Meta.HostRAMGiB). The
-	// grant is admitted against it (hostram.go): committed memory now, plus this, plus what leases
-	// already granted have yet to load, must stay under physical RAM less the headroom. 0 declares
+	// HostRAMGiB is the host RAM the holder declares it will touch: its working set (stamped as Meta.HostRAMGiB). The
+	// grant is admitted against it (hostram.go): the available RAM less this and what leases already granted have yet
+	// to touch must stay at or above the headroom (and see HostRAMCommitGiB for the commit side). 0 declares
 	// nothing and is never read against the host. The callers resolve it: an explicit `gpu reserve
 	// --ram`, else an estimate from the model files of the render call, else a class default
 	// (internal/hostneed).

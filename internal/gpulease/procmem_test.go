@@ -247,4 +247,10 @@ func TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted(t *testing.T) {
 	if held, ok := descendantsResidentGiB(os.Getpid()); !ok || held*1024 > mib*0.5 {
 		t.Fatalf("held (resident) = %.0f MiB (ok=%v): committed-but-untouched memory was counted as loaded", held*1024, ok)
 	}
+	// The same reading's other half is what the commit declaration is subtracted from: the private bytes, which DO carry the
+	// committed-but-untouched memory.
+	load, ok := descendantsHeld(os.Getpid())
+	if !ok || load.CommitGiB*1024 < mib*0.8 || load.TouchGiB*1024 > mib*0.5 {
+		t.Fatalf("held = touched %.0f MiB, commit %.0f MiB (ok=%v): the commit half must carry the %d MiB the child was charged and the touched half must not", load.TouchGiB*1024, load.CommitGiB*1024, ok, mib)
+	}
 }

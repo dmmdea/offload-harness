@@ -28,7 +28,7 @@ other on a single shared card.
 | `internal/gpulease/term.go` | **terms (plan P9)**: `PlanTerm` (what a requested window comes to), the installed limits (`SetDefaultTerms`), and `AdvanceTerm`, the one place a term ends in a renewal or the expired label (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)) |
 | `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
-| `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmits` (the ONE admission rule), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
+| `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmitsLoad` (the ONE admission rule, over the working set a job touches and the commit it is charged, apart), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
 | `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card (for its own `--graph`, the files that graph's loaders name), else the media class default (see "Host RAM") |
@@ -663,9 +663,10 @@ after a transient `nvidia-smi` failure carries no `display_attached` and marks i
 them until the next good reading), not claimed (a
 whole-node lease claims every card), not under a foreign compute process
 (`foreign-busy`, reported and skipped, never killed), its free VRAM fits `--vram` (GiB per card), and the **host** has the
-host's memory admits what `--ram` declares: the same rule the grant applies (`gpuprobe.HostRAMAdmits`: committed memory +
-the need + the not-yet-loaded part of granted leases must stay under physical RAM less `gpu_host_ram_headroom_gib`, default
-8; see "Host RAM" below), here as an advisory pre-filter. Among allocatable cards the order is: no resident
+host's memory admits what `--ram` and `--ram-commit` declare: the same rule the grant applies (`gpuprobe.HostRAMAdmitsLoad`: the
+available RAM less the touched need and the not-yet-touched part of granted leases must leave `gpu_host_ram_headroom_gib`, default
+8, and, where the OS enforces a commit limit, the commit charge + the commit need + the not-yet-charged part must stay under that
+limit less the headroom; see "Host RAM" below), here as an advisory pre-filter. Among allocatable cards the order is: no resident
 seat first, then the cheapest eviction (the footprint of the configured layer seats loaded on it), then the lowest id. An
 unreadable host-memory reading refuses only when a RAM need was declared, and a need no state of the host admits ends the
 request at once. On Windows (WDDM) nvidia-smi lists no per-process
@@ -1585,14 +1586,17 @@ takeover that stops a tree, the hardening of `gpu release --epoch N` over a live
 
 **The rule (AGENTS.md).** The cards do the inference; RAM is overflow only. Spill is allowed only while it is
 bounded, and it never makes the box unstable. **What the guard keeps of that rule** is narrower, and is stated here so it is
-not read as more: before a lease that declares host RAM is granted, the guard holds it back if its declared need, added to the
-committed memory the OS reports and to what granted leases have yet to load, would pass a line (physical RAM less a headroom).
-The line is the guard's own, chosen 2026-10-09 as a conservative way to keep spill bounded; it is a definition, not a
-measurement of any box's paging. The guard compares a *declaration*, which is an estimate: it does not bound what a lane then
-commits and it does not stop a process that holds no lease (the measured case in which an admitted lane reads OVER is under
-"Known limits", below). A card has a hard edge (the driver refuses the allocation); host RAM does not (the OS pages and every
-other process stalls), so the harness checks *before* the grant, on a number that includes what the granted jobs are about to
-load.
+not read as more: before a lease that declares host RAM is granted, the guard holds it back if either of two things its
+declaration adds would pass a line. The **working set it will touch** is held to the memory that is *available* (less a
+headroom): that is what pages when it runs out. The **commit it will be charged** is held to the OS *commit limit* (less the same
+headroom), where the OS enforces one: that is what makes other processes' allocations fail. Committed memory is not memory in
+use, and the first version of the guard compared the commit charge to physical RAM, which refused a job while three quarters of
+the RAM was free ("Why two quantities", below). The lines are the guard's own, chosen 2026-10-09 as a conservative way to keep
+spill bounded; they are a definition, not a measurement of any box's paging. The guard compares a *declaration*, which is an
+estimate: it does not bound what a lane then commits and it does not stop a process that holds no lease (the measured case in
+which an admitted lane leaves the box close to a line is under "Known limits", below). A card has a hard edge (the driver
+refuses the allocation); host RAM does not (the OS pages and every other process stalls), so the harness checks *before* the
+grant, on numbers that include what the granted jobs are about to load.
 
 **The incident.** On the reference 3-card Windows box (127.7 GiB physical), two ComfyUI media lanes that stream bf16
 weights the card cannot hold ran at once under two card-scoped media leases (`gpu reserve --devices <card> --class media --
@@ -1612,8 +1616,11 @@ that have been granted and have not loaded yet (both lanes were granted while RA
 
 ### What a lease declares
 
-A lease carries `Options.HostRAMGiB`, stamped on its record as `host_ram_gib` (additive and omitted when 0: an older
-binary ignores it, and a record without it declares nothing). Where the number comes from, in order
+A lease carries `Options.HostRAMGiB`, the working set it will touch, stamped on its record as `host_ram_gib` (additive and
+omitted when 0: an older binary ignores it, and a record without it declares nothing), and `Options.HostRAMCommitGiB`, the commit
+it will be charged, stamped as `host_ram_commit_gib` (additive; 0 or absent means the same figure as `host_ram_gib`, which is what
+every caller that states one number declares, so such a caller is judged on commit at least as strictly as on what it touches).
+Where the touched figure comes from, in order
 (`internal/hostneed`; `TestAKrea2Bf16CallOn16GiBIsTheUnetPlusTheTextEncoder`, `TestAnExplicitRamBeatsTheEstimate`,
 `TestTextAndSeatLeasesDefaultToZero`):
 
@@ -1625,6 +1632,20 @@ binary ignores it, and a record without it declares nothing). Where the number c
 | a file whose size cannot be read | the documented per-family size (`hostneed.familySizes`: the files the reference box binds, rounded up; Qwen-Image 2512 bf16 is the incident's ~38 GiB stream). A family with neither has no estimate and takes the class default. |
 | the **media class default** | for a media lease with no `--ram` and no recognised call: the largest estimate over the render families **this box binds** (`imagegen_*`, `gen_edit_*`, `videogen_*`, named families; a binding on the sd.cpp engine is not counted, on whichever route it is, a video family included), so a 32 GiB node is not held to a 128 GiB node's numbers; 0 when nothing is bound. It is never clamped to fit the box: a default that cannot be admitted is refused with the reason and `--ram` as the way out. |
 | a text lease | 0: the harness cannot size an arbitrary wrapped command, so a text reservation declares nothing unless `--ram` says (the agent seat's own reload is sized where the harness does it, below). |
+
+**The commit, `gpu reserve --ram-commit <GiB>`.** Commit is memory the OS has promised the job, touched or not, and it can be much
+more than the job touches. Measured on the reference box (session readings, not recorded in this repository): one
+coder-model arm's process tree reached a 27.8 GiB working set and a 58.1 GiB private charge while the host's available memory
+fell from 91.5 to 61.1 GiB with no paging; a llama.cpp leg with every layer on the card held a 3.6 GiB working set and a 32.1
+GiB charge. So the arm states `--ram 28 --ram-commit 58`. Unset, `--ram-commit` is the `--ram` figure, **including when `--ram`
+was estimated**, so a job that states one number keeps a commit condition at least as strict as its touched one (now against the
+commit limit instead of physical RAM). A commit is declared beside the working set it goes with: `--ram-commit` needs a `--ram`
+(given or estimated) above 0, and is itself above 0. The converse is a known limit: a job whose commit is *smaller* than its
+working set (mapped files count in the working set and not in the commit) cannot say so by leaving the flag out, and is judged
+on the larger figure; `--ram-commit` states a smaller one. It is also the figure a caller that never heard of the flag declares:
+the media admission, the seat's warm-back and the card allocator pass one figure and it is taken for both. A lease that unloads
+the seat (`--unload-seat`) carries both figures through the wait (`host_ram_wait_gib` and `host_ram_wait_commit_gib`), and
+admission moves both into the declared fields in one step.
 
 **When the figure is the class default, the verb says why** (F71, `classDefaultHint`;
 `TestReserveNamesTheUnrecognisedWrapperWhenItDeclaresTheClassDefault`, `TestReserveNamesTheGraphWhenARecognisedHelperRunsOne`,
@@ -1671,28 +1692,50 @@ as the way to a smaller one (`TestReserveOnAFlagOffHostDeclaresTheFilesInFullWit
 
 ### The admission rule
 
-Every grant path applies **one** rule (`gpuprobe.HostRAMAdmits`), with committed memory read from the OS
-(`GlobalMemoryStatusEx`: total minus available page file on Windows; `/proc/meminfo` `Committed_AS` on Linux):
+Every grant path applies **one** rule (`gpuprobe.HostRAMAdmitsLoad`). It reads two counters of the OS, the memory that is
+available (`GlobalMemoryStatusEx` `AvailPhys` on Windows, `MemAvailable` in `/proc/meminfo` on Linux) and the commit charge and
+limit (Windows: total minus available page file, and the total, which on that call is the commit limit, physical RAM plus the page
+file; Linux: `Committed_AS` and `CommitLimit`), and admits a lease iff BOTH conditions hold:
 
 ```
-commit term:    committed memory now + the lease's declared need + the not-yet-loaded part   <= physical RAM - headroom
-physical term:  available physical RAM now - the lease's declared need - the not-yet-loaded part   >= headroom
-admit iff BOTH hold       (headroom = gpu_host_ram_headroom_gib, default 8 GiB: chosen, not measured; see "How the numbers get measured")
+touched:  available RAM now - the lease's touched need - the not-yet-touched part                    >= headroom
+commit:   commit charge now + the lease's commit need + the not-yet-charged part   <=  commit limit - headroom
+          (headroom = gpu_host_ram_headroom_gib, default 8 GiB: chosen, not measured; see "How the numbers get measured")
 ```
 
-Two terms, because what the OS counts as committed is not the same quantity as what sits in RAM. Commit is the primary term:
-it counts memory the OS has promised, touched or not, which is what stops a second lane before it has loaded. On Windows a
-process's GPU allocations may be charged to its commit without ever occupying system RAM (see the finding below), and that cuts
-two ways. Where the commit counter already carries the VRAM in use it reads high, and a rule that read only commit would make a
-lane wait longer than it needs to. But a declaration is the size of the model files, or, once three measured runs of that
-family exist on the node, the *resident* memory those runs reached (a high percentile of the last twenty, clamped at twice the files' sum; it never lowers a declaration below the files), so a lane whose commit carries card
-allocations on top commits **more than it declared**, and the commit term learns that only after the lane has started. The
-physical term reads what can be handed out without paging, so it refuses a load that resident memory cannot take even when
-commit does not show it; but it measures the box against the *declared* loads at the moment of the decision, so it does not
-bound a lane that holds more than it declared, and neither term sees a process that holds no lease. Together the two terms
-refuse when either reading says the declared load would pass the line; they do not make an admitted load fit. A refusal says
-which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB physical is available`
-(`TestHostRAMAdmitsAlsoRequiresTheAvailableFloor`).
+A quantity a lease declares as 0 is not judged (it adds nothing to that counter), a lease that declares neither is admitted
+without reading anything, and a touched need above physical RAM less the headroom, or a commit above the commit limit less the
+headroom, is refused at once (waiting cannot help). A refusal says which condition refused and with whose numbers, and says both
+when both did: `needs 28.0 GiB, only 30.0 GiB of 127.7 GiB physical is available, 8.0 GiB headroom` or `needs 58.1 GiB of
+commit, committed 150.0 of 171.7 GiB commit limit, 8.0 GiB headroom` (`TestEachConditionRefusesAlone`,
+`TestAGrantIsRefusedOnItsCommitAlthoughItsTouchedSetFits`).
+
+**Why two quantities, and why those lines.** The first version compared the commit charge plus the need against *physical RAM*
+less the headroom. Committed memory is not memory in use: on the reference box (127.7 GiB RAM, 171.7 GiB commit limit) it read
+70.5 GiB committed while 75.6 GiB were physically free (2026-10-17), and a coder-model arm that touches 27.8 GiB and is charged 58.1 GiB was
+refused (70.5 + 58.1 = 128.6 against 119.7). Against the commit limit the same arm needs 128.6 of 163.7, and against the available
+memory 27.8 of 67.6: admitted (`TestMeasuredCoderArmIsAdmittedAgainstTheCommitLimit`). The commit charge cannot simply be dropped:
+on Windows it, not the physical availability, is what can run out, because a job that commits about twice what it touches can push
+the charge past the limit (physical RAM plus the page file) and then other processes' allocations fail with plenty of RAM free. And
+what a job touches cannot be judged against the commit limit, because the available memory is what pages when it runs out. Each
+quantity is held to the line that is real for it. The incident of 2026-10-09 is still refused: with a 56 GiB desktop baseline
+(72 GiB of 128 available) the first 32.75 GiB lane is admitted and the second is refused on the available memory while the first
+has not loaded (`TestTheTwoLaneIncidentIsStillRefused`).
+
+**Where the commit condition is applied.** Always on Windows. On Linux only in strict overcommit mode (`vm.overcommit_memory` =
+2); in the default heuristic mode (0) and in mode 1 the kernel grants allocations past `CommitLimit`, and `Committed_AS` counts
+mappings a process reserved and never touched (CUDA and large `mmap`s do), so refusing on it would turn work away for a limit
+nothing enforces. The reading says so (`HostMemory.CommitLimitSoft`, read from `/proc/sys/vm/overcommit_memory` through a seam,
+`TestTheLinuxReaderMarksTheCommitLimitHardOnlyInStrictMode`; a mode that cannot be read is not assumed strict, and neither is a
+`/proc/meminfo` that hides the commit counters) and the touched condition is then the whole rule
+(`TestTheCommitConditionIsAppliedOnlyWhereTheLimitIsHard`). Two Linux nodes of the fleet were read on 2026-10-17: both in mode 0, with
+`Committed_AS` of 19.5 GiB on a 31.2 GiB `MemTotal` and 3.8 GiB on 30.2 GiB, so there the commit condition is moot.
+
+**The not-yet-loaded part, per quantity.** What running leases have yet to touch is their declared working set less what the
+processes below their holders hold *resident*; what they have yet to be charged is their declared commit less what those
+processes hold *privately* (private bytes are the currency of the commit charge). Each is never below zero and pooled per holder
+(see the bullet below). A declaration is an estimate, so this rule is a brake on declared loads: it does not bound what a lane then
+commits, and neither condition sees a process that holds no lease.
 
 * **Everywhere the cards are granted.** A card-scoped grant (`--devices`, `--cards`, the media admission) checks inside
   `grantDevicesLocked`, under the epoch lock, after the cards are shown free and before the epoch is issued; the record that
@@ -1736,17 +1779,20 @@ which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB phys
   to unblock a lane was still refused (found by the post-implementation review, 2026-10-10;
   `TestLoadInstallsTheHostRAMHeadroomForEveryGrant`, `TestAGrantKeepsTheInstalledHeadroomNotTheBuiltInOne`,
   `TestReserveGrantsAgainstTheConfiguredHeadroom`, `TestTheMediaAdmissionKeepsTheConfiguredHeadroom`).
-* **The not-yet-loaded part.** A granted lease's declared need minus what the processes below its holder hold RESIDENT
-  right now (`WorkingSetSize` through `K32GetProcessMemoryInfo` on Windows, `VmRSS` on Linux), never below zero. Resident and
-  not private, because a declaration is in RAM units and committed-but-unoccupied memory (a card allocation charged to the
+* **The not-yet-loaded part.** A granted lease's declared working set minus what the processes below its holder hold RESIDENT
+  right now (`WorkingSetSize` through `K32GetProcessMemoryInfo` on Windows, `VmRSS` on Linux), and its declared commit minus what
+  those processes hold PRIVATELY (`PrivateUsage` on Windows, `RssAnon` plus `VmSwap` on Linux), each never below zero. Each against
+  its own declaration, because a declaration is in RAM units and committed-but-unoccupied memory (a card allocation charged to the
   process's commit, an untouched reservation) is not RAM that has loaded: a real child that was committed 256 MiB it never
   touched read private 305 MiB and resident 13 MiB on the reference box, 2026-10-10
-  (`TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted`).
+  (`TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted`). Subtracting the private bytes from the working-set declaration would call a
+  lane loaded while most of its RAM was still to come; subtracting the working set from the commit declaration would call a lane
+  uncharged while its process already held the charge (`TestWhatARunningLeaseHasYetToBeChargedCountsAgainstTheCommitLimit`).
   Leases that share a holder pid are pooled (the pipeline holds one lease per card in one server process, and all their
   runners are below it), the holder's own memory is not subtracted (a long-lived server's memory is not the job's), and a
   holder whose memory cannot be read counts as holding nothing, so its whole declared need is pending
   (`TestTheNotYetLoadedPartOfAGrantedLeaseCounts`, `TestPendingPoolsLeasesByHolder`). Without this term the second lane
-  reads 20 GiB committed, sees room, and both go: the incident, replayed.
+  sees room, and both go: the incident, replayed.
 * **A need of 0 is never read against the host.** The lease adds no memory, so a box that is already over is not made to
   wait for it, and the counters are not even read (`TestALeaseThatDeclaresNoNeedIsNeverReadAgainstTheHost`).
 * **A shortage waits in the same line.** The request stays a registered waiter, in the same FIFO, in the same place,
@@ -1765,24 +1811,26 @@ which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB phys
   (`TestThePassedWaiterIsServedRightAfterThePasserAndNothingElsePassesItMeanwhile`): at most the lease of whoever passed.
   **Named limits.** Nothing reserves the waiter's memory against a declaring request on *disjoint* cards (disjoint backfill
   was always allowed), and a place held for a caller who left (a token) still holds against everyone for its 30 s grace.
-  The line `waiting for host RAM: needs 33.4 GiB, committed 96.4 of 127.7 GiB physical
-  (+12.0 GiB still to load by leases already running), 8.0 GiB headroom` is printed once per request, never per poll.
-  `--wait 0` refuses with that text, the flag that waits, and `--ram` as the way out; the media admission answers the same
+  The line `waiting for host RAM: needs 33.4 GiB, only 31.0 GiB of 127.7 GiB physical is available
+  (+12.0 GiB still to load by leases already running), 8.0 GiB headroom` (or the commit sentence, above) is printed once per request,
+  never per poll. `--wait 0` refuses with that text, the flag that waits, and `--ram` as the way out (`--ram-commit` too when the
+  commit is what refused); the media admission answers the same
   words as a queued place in line (resumable doors) or a busy defer (the rest). That holds for a call with no time left
   (`gpu_wait_ms` 0, or a window spent) on every plan shape: a pinned card, an allocated card and the whole node all answer
   the guard's sentence, never the line's "promised to callers ahead of this one" (the cards are free and nobody is ahead;
   `TestWaitZeroKeepsTheGuardsSentenceOnAPinnedPlan` and its siblings, G2 of the P0 plan).
-* **A need no state of the box admits is refused at once.** If the need exceeds physical RAM less the headroom, waiting
-  cannot help: the request ends with the text (it names `--ram` and `gpu_host_ram_headroom_gib`), and the pipeline classes it
+* **A need no state of the box admits is refused at once.** If the touched need exceeds physical RAM less the headroom, or the
+  commit exceeds the commit limit less the headroom (where it is enforced), waiting cannot help: the request ends with the text (it
+  names `--ram` or `--ram-commit`, and `gpu_host_ram_headroom_gib`), and the pipeline classes it
   `gpu_lease_unavailable` (a configuration fault), not `gpu_busy`. `--ram 0` is the escape hatch the operator owns.
 * **Unreadable memory.** On a platform that has a reader (Windows, Linux) a lease that declares a need waits until the host
   can be read, the way the other guards fail closed. On a platform with no reader the rule cannot judge and admits.
 
-**Known limits, stated so they are not discovered.** **An admitted lane can still read OVER.** The rule applied to a commit
-reading of 81.6 GiB (the reference box between jobs, 2026-10-10 about 04:12 UTC; 83 GiB available, 127.7 GiB physical,
-headroom 8) admits a 32.8 GiB declaration, the Krea 2 bf16 files: projected 114.4 GiB against a limit of 119.7, 50.2 GiB left
-available, so both terms pass (`gpuprobe.HostRAMAdmits` on those numbers, pinned by
-`TestTheQuotedCounterexampleIsAdmittedOnBothTerms`). **Provenance:** the readings in this paragraph (81.6 GiB committed with
+**Known limits, stated so they are not discovered.** **An admitted lane can still leave the box close to a line.** The rule applied
+to a commit reading of 81.6 GiB (the reference box between jobs, 2026-10-10 about 04:12 UTC; 83 GiB available, 127.7 GiB physical,
+commit limit 187.7 GiB, headroom 8) admits a 32.8 GiB declaration, the Krea 2 bf16 files: 114.4 GiB of projected commit against a
+bound of 179.7, 50.2 GiB left available, so both conditions pass (`gpuprobe.HostRAMAdmitsLoad` on those numbers, pinned by
+`TestTheQuotedCounterexampleIsAdmittedOnBothConditions`). **Provenance:** the readings in this paragraph (81.6 GiB committed with
 83 GiB available; 57.7 GiB private bytes with a 40.7 GiB working set; 129.3 GiB committed with 49.1 GiB available and 2,298 MiB of
 page file in use) were measured on the reference box on 2026-10-10, from session readings that are not recorded in this
 repository; they were not re-measured for this document. At 06:01 UTC the box read 129.5 GiB committed with
@@ -1791,18 +1839,21 @@ a second process, launched fresh seven minutes earlier, held the same 57.7 GiB, 
 available with the page file unchanged (2,298 MiB in use): 1.6 GiB above physical RAM and 9.6 GiB past the guard's own line. The
 family those lanes ran is not recorded in the readings, and the 81.6 and 129.3 GiB readings are separate observations two hours
 apart, so the 47.7 GiB between them is the lane and whatever else changed, not the lane alone. What they establish is narrower: a
-lane that holds 57.7 GiB private (24.9 GiB more than a 32.8 GiB declaration), added to a baseline the rule admits, passes
-physical RAM. Whether a Krea 2 lane runs at that footprint is the S1 acceptance data. The exposure is (a) the first three runs of every family/quant/task key on a node, which
+lane that holds 57.7 GiB private (24.9 GiB more than a 32.8 GiB declaration), added to a baseline the rule admits, reads 129.3 GiB
+committed: 58 GiB under the commit limit and with 49.1 GiB available, so the rule's own lines are not reached (the first version of
+the guard called that reading OVER because it was above physical RAM, a line the grant no longer applies). Whether a Krea 2 lane runs at that footprint is the S1 acceptance data. The exposure is (a) the first three runs of every family/quant/task key on a node, which
 declare the file sizes, (b) any lane whose private bytes exceed its declared resident need, and (c) any process that holds no
 lease (the watcher below saw commit swing 95.3 to 132.1 GiB, more than four times the 8 GiB headroom). What the guard does about it: a
-lane already running is counted whole in the commit reading, so the next lease waits (a declaration equal to that lane's working
-set, 40.7 GiB, is refused on the same baseline: 122.3 GiB projected against 119.7), and `OVER` reaches `gpu status` and
-`offload_status`. What it does not do: stop the lane that took the box over. The lasting fix is to declare the larger of
-resident and private for the commit term, or to add the card memory a lane's commit carries to the projection; both need the
-S1 acceptance runs' sampled data first (see "How the numbers get measured"). Linux's `Committed_AS` counts mappings a process reserved and never
-touched (CUDA and large `mmap`s do), so it reads high there: the safe direction for a guard whose failure is paging. A
-`/proc/meminfo` that omits the commit counters (a sandbox that virtualises it) falls back to what the box visibly uses
-(`MemTotal - MemAvailable`, limit `MemTotal`), which under-counts reserved memory but keeps the rule working: no reading
+lane already running is counted in the commit reading and gone from the available figure, so the next lease waits when its
+declaration would pass either line (at the 129.3 GiB reading with 49.1 GiB available, a 41.2 GiB declaration is refused on the
+available memory: 49.1 - 41.2 = 7.9 against a headroom of 8, `TestTheDocumentedReadingsAgreeWithTheRule`), and `NEAR` and `OVER`
+reach `gpu status` and `offload_status`. What it does not do: stop the lane that took the box over. The lasting fix is to declare the commit from
+measurement: the footprint store already records the private peak of a lane's process tree beside its resident peak
+(`TreeMemory`), so a declaration could take its commit from three measured runs instead of defaulting to the touched figure; that
+is not done here, and until it is the commit defaults to the touched figure unless the caller states one (see "How the numbers get
+measured"). On Linux the commit condition is not applied unless the kernel is in strict overcommit mode (see "The admission
+rule"). A `/proc/meminfo` that omits the commit counters (a sandbox that virtualises it) falls back to what the box visibly uses
+(`MemTotal - MemAvailable`, limit `MemTotal`), marked soft, which keeps the rule working on the available memory alone: no reading
 would make every declaring lease wait forever. A
 detached lease (`--detach`) has no command of its own below its holder, so its whole declared need counts as still to
 load for as long as it is held (a budget reservation). A kept ComfyUI whose runner has exited is reparented away from the
@@ -1869,13 +1920,14 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   runs. The stock ComfyUI loader (dynamic VRAM off) maps every safetensors file copy-on-write and Windows charges the whole
   file to commit at map time (14.73 GiB on one Wan expert); a read-only loader adds nothing. This replaces the earlier
   one-process observation (2026-10-10), which was consistent with it and could not settle it.
-  *What it means for the brake.* The brake's commit term counts card-resident weights as host memory: system commit sits
-  tens of GiB above what the host really uses, so commit says nothing about paging by itself. **The brake is unchanged**: it
-  still reads committed memory plus the declared need against physical RAM less the headroom, and available RAM is the paging
-  signal beside it (decided 2026-10-11, F70). What keeps card-only work moving is the declaration: a recipe
-  whose weights all sit on the cards (card-only placement, the read-only loader) declares **`--ram 0`**, which is the brake's own
-  unit (host memory the lane adds to commit), and a need of 0 is always admitted. A recipe that streams weights from RAM declares
-  them in full and waits behind the brake as before.
+  *What it means for the brake.* System commit sits tens of GiB above what the host really uses, because card-resident weights
+  are charged to it, so commit says nothing about paging by itself. The brake used to compare it to physical RAM (kept on
+  2026-10-11 while this was measured); it now judges what a lane touches against the available RAM, which is the paging signal,
+  and the commit it is charged against the OS commit limit, which is what other processes' allocations fail at. What keeps
+  card-only work moving is the declaration: a recipe whose weights all sit on the cards (card-only placement, the read-only
+  loader) declares **`--ram 0`**, and a need of 0 is always admitted. A recipe that streams weights from RAM declares them in
+  full; a recipe whose commit exceeds what it touches (the card allocations above are charged 1:1) states both,
+  `--ram <touched> --ram-commit <charged>`.
   *Limits.* **One driver on one box:** the 1:1 charge was measured on the reference box's Windows driver and not on any other node
   or driver version, so another host's commit says nothing until it is measured there. **Commit counters are system-wide:** other
   tenants move them by tens of GiB (133 GiB before one run), so only a process tree's own private bytes are attributable to a
@@ -1910,8 +1962,9 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   and whether the page-cache part is memory the OS can drop is not verified here. So with the key unset the warm-back is
   admitted against a figure below the incident's, and a node that runs a seat sets `agent_seat_host_ram_gib` from its own
   measurement before it relies on the check.
-* **The warm passes the grant's admission.** Committed memory now, plus the seat's footprint, plus what the *other* live
-  leases have yet to load, must stay under physical RAM less the headroom (`Manager.HostRAMCheckWithout`: the same function
+* **The warm passes the grant's admission.** The seat's footprint, taken for both quantities, plus what the *other* live
+  leases have yet to load, must leave the headroom of the available RAM and stay under the commit limit less the headroom
+  (`Manager.HostRAMCheckWithout`: the same function
   as the grant, with the lease being released left out, because its command has exited and it loads nothing more). A host
   that reads NEAR or OVER therefore never warms (`TestAWarmBackIsRefusedWhenTheHostCannotTakeTheSeatAndStaysOwed`,
   `TestAWarmBackDoesNotCountTheLeaseItIsReleasing`).
@@ -1993,7 +2046,7 @@ the drain starts over under the new lease, as for a lease lost during the drain.
 **What happened.** On the reference box a `gpu reserve --wait 8h --drain --unload-seat --class media --for 40m -- <a command that is
 not a recognised render helper>` with no `--ram` declared the media class default (46.8 GiB, the largest render family). The order
 above took the cards (exclusive), drained, unloaded the seat and only then asked the host, still holding the cards, for the whole
-`--wait`. The seat was not even loaded (the unload freed nothing), committed RAM was 84.6 of 127.7 GiB with 8 GiB of headroom, so the
+`--wait`. The seat was not even loaded (the unload freed nothing), committed RAM was 84.6 of 127.7 GiB with 8 GiB of headroom (the rule of that day compared it to physical RAM), so the
 figure could not be met, and the lease held all three cards idle for about 50 minutes while a production lease queued behind it,
 renewing its window with no work running. The order is not the defect (it breaks a real deadlock and stays); the defect is that
 nothing bounded the time the cards could be held after it.
@@ -2023,7 +2076,7 @@ host's admission:
    of the drain loop is never taken.
 3. **The reserve exits non-zero with one line** (`errHostRAMHoldBound`): the hold bound that passed; how long the cards were held
    and how much of it was the wait after the unload; the host's own refusal, which carries the need and the committed, physical and
-   headroom figures (`waiting for host RAM: needs 46.8 GiB, committed 84.6 of 127.7 GiB physical, 8.0 GiB headroom`); that nothing ran
+   headroom figures (the wording of that day was `waiting for host RAM: needs 46.8 GiB, committed 84.6 of 127.7 GiB physical, 8.0 GiB headroom`; the sentence now names the condition that refused); that nothing ran
    under it and the lease **is being released** (the text is built before the release runs and claims no more; see "Releasing on its
    own" below for the outcome); what to do (a figure that is only the media class default: pass `--ram <GiB>` with the real figure, `--ram 0` when
    the weights sit on the cards; any other figure: a smaller `--ram`, or wait for the host to free memory); and the lever that
@@ -2323,20 +2376,23 @@ reorder does not apply to it.
 ### What `gpu status` and `offload_status` show
 
 `gpu status` (text and `--json`) and `offload_status`'s `gpu_lease` block carry `host_memory`: `physical_gib`,
-`available_gib`, `commit_used_gib`, `commit_limit_gib`, `headroom_gib`, `declared_live_gib` (the sum of the host RAM the
-live leases declared), `pending_gib` (the part of it still to load), `admits_up_to_gib` and one **verdict**, built by
-`gpucards.HostView` for all three surfaces so they cannot disagree:
+`available_gib`, `commit_used_gib`, `commit_limit_gib`, `commit_limit_enforced` (whether the commit condition is applied on this
+host), `headroom_gib`, `declared_live_gib` and `declared_live_commit_gib` (the sums of the working set and the commit the live
+leases declared), `pending_gib` and `pending_commit_gib` (the part of each still to load), `admits_up_to_gib` (the most a touched
+set could ever be admitted at), `touch_room_gib` and `commit_room_gib` (what a new lease could touch and be charged now),
+`verdict_why` (which line a NEAR or OVER verdict rests on, with its numbers) and one **verdict**, built by `gpucards.HostView` for
+all three surfaces so they cannot disagree. The verdict judges the same two lines the grant applies:
 
 | host verdict | meaning |
 |---|---|
-| `OK` | committed memory is more than the headroom below physical RAM |
-| `NEAR` | committed memory is within the headroom of physical RAM: the next declaring lease waits |
-| `OVER` | committed memory is **above** physical RAM. The reading cannot say whether the box is paging now (that takes page-file growth or the pages-out rate, which no surface here reads), so none of them claims it. New leases that declare host RAM wait until commit is back under physical less the headroom; end a lease or stop a kept ComfyUI instance to free it |
+| `OK` | the available RAM and, where the OS enforces a commit limit, the room under it both exceed the headroom |
+| `NEAR` | one of them is inside the headroom: the next declaring lease waits |
+| `OVER` | one of them is gone: nothing is available, or the commit charge has reached an enforced commit limit. The reading cannot say whether the box is paging now (that takes page-file growth or the pages-out rate, which no surface here reads), so none of them claims it. New leases that declare host RAM wait until there is room again; end a lease or stop a kept ComfyUI instance to free it |
 | `unknown` | the reading could not be taken |
 
-The brief verdict line of `offload_status` leads with `HOST RAM OVER (committed memory 162.9 GiB exceeds the 127.7 GiB of
-physical RAM)` in capitals, ahead of the lease verdict word, because `free` at the head of that line reads as "the box has room";
-NEAR trails it. The lease rows show what each lease declared, and the queue rows what a waiter waits for
+The brief verdict line of `offload_status` leads with `HOST RAM OVER (3.2 of 127.7 GiB physical RAM is available; committed 187.9 of
+the 187.7 GiB commit limit, 8.0 GiB headroom)` in capitals, ahead of the lease verdict word, because `free` at the head of that line reads as "the box has room";
+NEAR trails it. The lease rows show what each lease declared (`host RAM 10.0 GiB touched, 60.0 GiB commit`), and the queue rows what a waiter waits for
 (`TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict`, `TestStatusNamesOverLoudlyOnTheBriefLine`).
 
 ### The driver's own fault events for the leased cards (C-83-B)

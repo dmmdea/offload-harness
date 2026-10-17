@@ -2,6 +2,7 @@ package gpuprobe
 
 import (
 	"errors"
+	"math"
 	"strings"
 	"testing"
 )
@@ -274,5 +275,39 @@ func TestHostLoadDeclares(t *testing.T) {
 		if got := c.l.Declares(); got != c.want {
 			t.Errorf("%+v.Declares() = %v, want %v", c.l, got, c.want)
 		}
+	}
+}
+
+// The reading docs/systems/gpu-lease.md quotes under "Known limits" (the reference box between jobs, 2026-10-10 about 04:12 UTC;
+// session readings that are not recorded in this repository): 81.6 GiB committed, 83 GiB available, a 187.7 GiB commit limit. A
+// 32.8 GiB declaration is admitted by both conditions. This pins the arithmetic the docs claim, so they cannot drift from the rule.
+func TestTheQuotedCounterexampleIsAdmittedOnBothConditions(t *testing.T) {
+	mem := HostMemory{PhysicalGiB: 127.7, AvailableGiB: 83, CommitUsedGiB: 81.6, CommitLimitGiB: 187.7}
+	got := hostRAMAdmits(mem, true, true, 32.8, 0, 8)
+	if !got.OK || got.Impossible {
+		t.Fatalf("the quoted reading admits a 32.8 GiB declaration, got ok=%v impossible=%v (%s)", got.OK, got.Impossible, got.Why)
+	}
+	if math.Abs(got.CommitProjectedGiB-114.4) > 1e-6 || math.Abs(got.CommitBoundGiB-179.7) > 1e-6 {
+		t.Errorf("projected commit = %v against a bound of %v, want 114.4 against 179.7", got.CommitProjectedGiB, got.CommitBoundGiB)
+	}
+	if math.Abs(got.AvailableAfterGiB-50.2) > 1e-6 || got.AvailableAfterGiB < 8 {
+		t.Errorf("available after = %v, want 50.2, above the 8 GiB floor", got.AvailableAfterGiB)
+	}
+}
+
+// The later reading the docs quote (06:32 UTC the same day): one lane holding 57.7 GiB private, 129.3 GiB committed and 49.1
+// GiB available. It is under the commit limit by 58 GiB, so the rule's own lines are not reached, and a declaration is refused on
+// the available memory once it would leave less than the headroom of it: 41.2 GiB (49.1 - 41.2 = 7.9) is refused, 41.0 is not.
+func TestTheDocumentedReadingsAgreeWithTheRule(t *testing.T) {
+	mem := HostMemory{PhysicalGiB: 127.7, AvailableGiB: 49.1, CommitUsedGiB: 129.3, CommitLimitGiB: 187.7}
+	if v := mem.Verdict(8); v != HostOK {
+		t.Errorf("129.3 GiB committed with 49.1 available under a 187.7 limit is OK, not %s", v)
+	}
+	over := hostRAMAdmits(mem, true, true, 41.2, 0, 8)
+	if over.OK || !over.TouchShort || over.CommitShort {
+		t.Errorf("41.2 GiB is refused on the available memory alone: %+v (%s)", over, over.Why)
+	}
+	if fits := hostRAMAdmits(mem, true, true, 41.0, 0, 8); !fits.OK {
+		t.Errorf("41.0 GiB leaves 8.1 GiB of the available memory and 170.3 of 179.7 commit: %+v (%s)", fits, fits.Why)
 	}
 }

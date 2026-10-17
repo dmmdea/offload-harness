@@ -99,7 +99,7 @@ type mediaNeed struct {
 	// RAM resolves the host RAM this call declares once the card it will run on is known (the
 	// estimate depends on whether its weights fit that card, internal/hostneed). nil declares
 	// nothing: a route whose weights always sit on the card (upscale, voice) adds no host memory the
-	// grant needs to see. The grant admits it against committed memory (gpulease/hostram.go).
+	// grant needs to see. The grant admits it against the available memory and the commit limit, the one figure taken for both (gpulease/hostram.go).
 	RAM func(vramGiB float64) hostneed.Need
 	// Foot is the footprint-store key this call's renders are recorded under (the key the same route's sampling
 	// hook uses), so a declaration can be raised to what those renders were measured to hold (calibratedRAM). The
