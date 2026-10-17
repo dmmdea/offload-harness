@@ -125,7 +125,8 @@ type clockDef struct {
 // clockEnv is what the lint knows about one file while it reads one function.
 type clockEnv struct {
 	timeName string               // the local name of the "time" import
-	imports  map[string]bool      // the local names of the file imports: a call through one is not a call of this package
+	locals   map[string]bool      // the names the function defines (parameters, locals, closures): they hide a function of the package
+	types    map[string]string    // local name -> the type of this package it holds, when every definition of the name says the same
 	helpers  map[string][]float64 // function or method name -> the scale of each result that is a measured elapsed time (0: not one)
 	consts   map[string]float64   // package-level consts plus the function once-assigned constants, in nanoseconds or plain numbers
 	stamps   map[string]bool      // names that only ever hold a time.Now() stamp
@@ -275,7 +276,11 @@ func clockElapsedAt(e ast.Expr, idx int, env *clockEnv) (float64, bool) {
 }
 
 // clockElapsedCall is clockElapsedAt for a call: time.Since; a difference with a time.Now() stamp; a Duration read as a
-// number or rounded; a conversion of an elapsed time; and a call of a function or method of the package whose result is one.
+// number, rounded or made absolute; a conversion or a math function of an elapsed time; and a call of a function or method
+// of the package whose result is one. A function is found by its name unless the function defines that name itself (a
+// parameter or a closure of the same name hides it); a method is found only through a receiver that is a local name holding
+// a value of the type that declares the method, so a method of another type, or of a type from another package, that has
+// the same name is not the helper.
 func clockElapsedCall(x *ast.CallExpr, idx int, env *clockEnv) (float64, bool) {
 	if len(x.Args) == 1 && idx == 0 {
 		conversion := false
@@ -288,6 +293,12 @@ func clockElapsedCall(x *ast.CallExpr, idx int, env *clockEnv) (float64, bool) {
 		case *ast.SelectorExpr:
 			if id, ok := fn.X.(*ast.Ident); ok && id.Name == env.timeName && fn.Sel.Name == "Duration" {
 				conversion = true
+			}
+			if id, ok := fn.X.(*ast.Ident); ok && id.Name == "math" {
+				switch fn.Sel.Name {
+				case "Abs", "Round", "RoundToEven", "Floor", "Ceil", "Trunc":
+					conversion = true
+				}
 			}
 		}
 		if conversion {
@@ -309,22 +320,31 @@ func clockElapsedCall(x *ast.CallExpr, idx int, env *clockEnv) (float64, bool) {
 				return scale, true
 			}
 		}
-		if (sel.Sel.Name == "Round" || sel.Sel.Name == "Truncate") && len(x.Args) == 1 {
+		if ((sel.Sel.Name == "Round" || sel.Sel.Name == "Truncate") && len(x.Args) == 1) || (sel.Sel.Name == "Abs" && len(x.Args) == 0) {
 			if inner, isElapsed := clockElapsed(sel.X, env); isElapsed {
 				return inner, true
 			}
 		}
 	}
-	name := ""
-	switch fn := x.Fun.(type) {
+	fun := x.Fun
+	switch g := fun.(type) { // a generic call: measure[int](f)
+	case *ast.IndexExpr:
+		fun = g.X
+	case *ast.IndexListExpr:
+		fun = g.X
+	}
+	key := ""
+	switch fn := fun.(type) {
 	case *ast.Ident:
-		name = fn.Name
+		if !env.locals[fn.Name] {
+			key = fn.Name
+		}
 	case *ast.SelectorExpr:
-		if id, ok := fn.X.(*ast.Ident); !ok || !env.imports[id.Name] {
-			name = fn.Sel.Name
+		if id, ok := fn.X.(*ast.Ident); ok && env.types[id.Name] != "" {
+			key = env.types[id.Name] + "." + fn.Sel.Name
 		}
 	}
-	if res := env.helpers[name]; name != "" && idx < len(res) && res[idx] != 0 {
+	if res := env.helpers[key]; key != "" && idx < len(res) && res[idx] != 0 {
 		return res[idx], true
 	}
 	return 0, false
@@ -406,23 +426,153 @@ func clockDefs(fn *ast.FuncDecl) map[string][]clockDef {
 	return defs
 }
 
-// clockBuildEnv works out, for one function, which names hold a constant, a time.Now() stamp or a measured elapsed time.
-func clockBuildEnv(fn *ast.FuncDecl, timeName string, imports map[string]bool, pkgConsts map[string]float64, helpers map[string][]float64) *clockEnv {
-	env := &clockEnv{timeName: timeName, imports: imports, helpers: helpers,
+// clockTypeName names the type a type expression refers to: T, *T, (T) and T[X] are T. A type from another package, an array,
+// a map or a func type has no such name here.
+func clockTypeName(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.Ident:
+		return x.Name
+	case *ast.StarExpr:
+		return clockTypeName(x.X)
+	case *ast.ParenExpr:
+		return clockTypeName(x.X)
+	case *ast.IndexExpr:
+		return clockTypeName(x.X)
+	case *ast.IndexListExpr:
+		return clockTypeName(x.X)
+	}
+	return ""
+}
+
+// clockValueType names the type of a value written as a composite literal (T{}, &T{}) or as new(T).
+func clockValueType(e ast.Expr) string {
+	switch x := e.(type) {
+	case *ast.ParenExpr:
+		return clockValueType(x.X)
+	case *ast.UnaryExpr:
+		if x.Op == token.AND {
+			return clockValueType(x.X)
+		}
+	case *ast.CompositeLit:
+		if x.Type != nil {
+			return clockTypeName(x.Type)
+		}
+	case *ast.CallExpr:
+		if id, ok := x.Fun.(*ast.Ident); ok && id.Name == "new" && len(x.Args) == 1 {
+			return clockTypeName(x.Args[0])
+		}
+	}
+	return ""
+}
+
+// clockVarTypes returns the type of each local name of a function (its receiver and parameters included) when every
+// definition of the name says the same type: a declared type, a composite literal or new(T). A name with a definition that
+// says nothing (a call result, a range variable, an op-assignment) or says something else has no type here.
+func clockVarTypes(fn *ast.FuncDecl) map[string]string {
+	seen := map[string][]string{}
+	add := func(id *ast.Ident, typ string) {
+		if id != nil && id.Name != "_" {
+			seen[id.Name] = append(seen[id.Name], typ)
+		}
+	}
+	fields := func(list *ast.FieldList) {
+		if list == nil {
+			return
+		}
+		for _, f := range list.List {
+			for _, n := range f.Names {
+				add(n, clockTypeName(f.Type))
+			}
+		}
+	}
+	fields(fn.Recv)
+	fields(fn.Type.Params)
+	fields(fn.Type.Results)
+	if fn.Body != nil {
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.FuncLit:
+				fields(x.Type.Params)
+				fields(x.Type.Results)
+			case *ast.AssignStmt:
+				plain := x.Tok == token.DEFINE || x.Tok == token.ASSIGN
+				for i, lhs := range x.Lhs {
+					id, isID := lhs.(*ast.Ident)
+					if !isID {
+						continue
+					}
+					if plain && len(x.Lhs) == len(x.Rhs) {
+						add(id, clockValueType(x.Rhs[i]))
+					} else {
+						add(id, "")
+					}
+				}
+			case *ast.ValueSpec:
+				for i, id := range x.Names {
+					switch {
+					case x.Type != nil:
+						add(id, clockTypeName(x.Type))
+					case i < len(x.Values) && len(x.Names) == len(x.Values):
+						add(id, clockValueType(x.Values[i]))
+					default:
+						add(id, "")
+					}
+				}
+			case *ast.RangeStmt:
+				if id, ok := x.Key.(*ast.Ident); ok {
+					add(id, "")
+				}
+				if id, ok := x.Value.(*ast.Ident); ok {
+					add(id, "")
+				}
+			case *ast.IncDecStmt:
+				if id, ok := x.X.(*ast.Ident); ok {
+					add(id, "")
+				}
+			}
+			return true
+		})
+	}
+	types := map[string]string{}
+	for name, list := range seen {
+		typ := list[0]
+		for _, t := range list {
+			if t != typ {
+				typ = ""
+			}
+		}
+		if typ != "" {
+			types[name] = typ
+		}
+	}
+	return types
+}
+
+// clockBuildEnv works out, for one function, which names hold a constant, a time.Now() stamp or a measured elapsed time,
+// and the type of each name that holds a value of a type of the package.
+func clockBuildEnv(fn *ast.FuncDecl, timeName string, pkgConsts map[string]float64, helpers map[string][]float64) *clockEnv {
+	env := &clockEnv{timeName: timeName, helpers: helpers, locals: map[string]bool{}, types: clockVarTypes(fn),
 		consts: map[string]float64{}, stamps: map[string]bool{}, elapsed: map[string]float64{}}
 	for k, v := range pkgConsts {
 		env.consts[k] = v
 	}
 	defs := clockDefs(fn)
 	for name := range defs { // a name defined in this function shadows a package const of the same name
+		env.locals[name] = true
 		delete(env.consts, name)
 	}
-	// Three passes settle chains such as `a := 2*time.Second; b := a/4` and `s := time.Now(); d := time.Since(s); ms := d.Milliseconds()`.
-	for pass := 0; pass < 3; pass++ {
+	// Settle to a fixed point: a chain of locals such as `a := 2*time.Second; b := a/4; c := b/2` or
+	// `s := time.Now(); d := time.Since(s); e := d` resolves whatever order the map is read in. A pass that changes nothing
+	// ends it; each pass that changes something settles at least one name, so len(defs)+1 passes are enough.
+	for pass := 0; pass <= len(defs); pass++ {
+		changed := false
 		for name, list := range defs {
 			if len(list) == 1 && list[0].expr != nil && !list[0].multi {
 				if v, ok := clockConst(list[0].expr, env); ok {
-					env.consts[name] = v
+					if old, had := env.consts[name]; !had || old != v {
+						env.consts[name] = v
+						changed = true
+					}
 				}
 			}
 			stamp, consistent := true, true
@@ -445,32 +595,22 @@ func clockBuildEnv(fn *ast.FuncDecl, timeName string, imports map[string]bool, p
 					scaled = s
 				}
 			}
-			if seen > 0 && stamp {
+			if seen > 0 && stamp && !env.stamps[name] {
 				env.stamps[name] = true
+				changed = true
 			}
 			if seen > 0 && consistent && scaled != 0 {
-				env.elapsed[name] = scaled
+				if old, had := env.elapsed[name]; !had || old != scaled {
+					env.elapsed[name] = scaled
+					changed = true
+				}
 			}
+		}
+		if !changed {
+			break
 		}
 	}
 	return env
-}
-
-// clockImportNames returns the local names a file gives its imports (the last element of the path when it gives none).
-func clockImportNames(f *ast.File) map[string]bool {
-	names := map[string]bool{}
-	for _, imp := range f.Imports {
-		p, err := strconv.Unquote(imp.Path.Value)
-		if err != nil {
-			continue
-		}
-		if imp.Name != nil {
-			names[imp.Name.Name] = true
-		} else {
-			names[path.Base(p)] = true
-		}
-	}
-	return names
 }
 
 // clockIsNeutralResult reports whether a returned expression says nothing about the time: a zero or a nil, the value a
@@ -554,24 +694,62 @@ func clockFuncResults(fn *ast.FuncDecl, env *clockEnv) []float64 {
 	return scale
 }
 
+// clockHelperKey names a function or method for the helper table: the name of a function, and Type.name for a method, so
+// that two types with a method of the same name are two entries.
+func clockHelperKey(fn *ast.FuncDecl) string {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return fn.Name.Name
+	}
+	typ := clockTypeName(fn.Recv.List[0].Type)
+	if typ == "" {
+		return ""
+	}
+	return typ + "." + fn.Name.Name
+}
+
+// clockSameHelpers reports whether two helper tables say the same.
+func clockSameHelpers(a, b map[string][]float64) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for k, v := range a {
+		if w, ok := b[k]; !ok || fmt.Sprint(v) != fmt.Sprint(w) {
+			return false
+		}
+	}
+	return true
+}
+
 // clockHelperResults finds, in every file of one package, the functions and methods that return a measured elapsed time,
-// and returns for each name the scale of each result (0 where it is not one). Methods are known by name alone: a name that
-// two declarations answer differently is left out, and a call through an imported package is never a call of one.
+// and returns for each key (the name of a function, Type.name of a method) the scale of each result (0 where it is not
+// one). A key that two declarations answer differently (a method declared in files built for different systems) is left
+// out. The table is settled to a fixed point, so a helper that returns another helper's result is found at any depth.
 func clockHelperResults(files []*ast.File, timeNames map[*ast.File]string, pkgConsts map[string]float64) map[string][]float64 {
+	funcs := 0
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			if _, ok := decl.(*ast.FuncDecl); ok {
+				funcs++
+			}
+		}
+	}
 	helpers := map[string][]float64{}
-	for pass := 0; pass < 3; pass++ {
+	for pass := 0; pass <= funcs; pass++ {
 		next := map[string][]float64{}
 		conflict := map[string]bool{}
 		for _, f := range files {
-			imports := clockImportNames(f)
 			for _, decl := range f.Decls {
 				fn, ok := decl.(*ast.FuncDecl)
 				if !ok || fn.Body == nil || fn.Type.Results == nil {
 					continue
 				}
+				key := clockHelperKey(fn)
+				if key == "" {
+					continue
+				}
 				var res []float64
 				if timeName := timeNames[f]; timeName != "" {
-					res = clockFuncResults(fn, clockBuildEnv(fn, timeName, imports, pkgConsts, helpers))
+					res = clockFuncResults(fn, clockBuildEnv(fn, timeName, pkgConsts, helpers))
 				} else {
 					for _, field := range fn.Type.Results.List {
 						k := len(field.Names)
@@ -581,17 +759,21 @@ func clockHelperResults(files []*ast.File, timeNames map[*ast.File]string, pkgCo
 						res = append(res, make([]float64, k)...)
 					}
 				}
-				old, seen := next[fn.Name.Name]
+				old, seen := next[key]
 				if seen && fmt.Sprint(old) != fmt.Sprint(res) {
-					conflict[fn.Name.Name] = true
+					conflict[key] = true
 				}
-				next[fn.Name.Name] = res
+				next[key] = res
 			}
 		}
-		for name := range conflict {
-			delete(next, name)
+		for key := range conflict {
+			delete(next, key)
 		}
+		same := clockSameHelpers(helpers, next)
 		helpers = next
+		if same {
+			break
+		}
 	}
 	return helpers
 }
@@ -636,49 +818,83 @@ func clockForm(ns float64) string {
 
 // clockPackageConsts evaluates the const declarations of one package (its test files and its other files together, because
 // a test reads a const from the code it tests as often as from a neighbouring test), settling chains that reach across
-// files. A name declared twice with different values (two files built for different systems, say) is not trusted, and
-// neither is any const derived from it.
+// files. A name is trusted only when every package-level declaration of it, of any kind, is a const that evaluates to the
+// same value: a name that is also a var, a function or a type in a file built for another system, that is a const the lint
+// cannot evaluate in another, or that has two values, is not trusted, and neither is any const derived from it.
 func clockPackageConsts(files []*ast.File, timeNames map[*ast.File]string) map[string]float64 {
-	blocked := map[string]bool{}
-	for round := 0; ; round++ {
-		consts := map[string]float64{}
-		ambiguous := map[string]bool{}
-		for pass := 0; pass < 4; pass++ {
-			for _, f := range files {
-				env := &clockEnv{timeName: timeNames[f], consts: consts}
-				for _, decl := range f.Decls {
-					gd, ok := decl.(*ast.GenDecl)
-					if !ok || gd.Tok != token.CONST {
-						continue
-					}
-					for _, spec := range gd.Specs {
-						vs := spec.(*ast.ValueSpec)
-						for i, id := range vs.Names {
-							if blocked[id.Name] || i >= len(vs.Values) || len(vs.Names) != len(vs.Values) {
-								continue
-							}
-							if v, ok := clockConst(vs.Values[i], env); ok {
-								if old, seen := consts[id.Name]; seen && old != v {
-									ambiguous[id.Name] = true
-								}
-								consts[id.Name] = v
+	declared := map[string]int{} // package-level declarations carrying each name, of any kind
+	type constSpec struct {
+		name  string
+		value ast.Expr
+		file  *ast.File
+	}
+	var specs []constSpec
+	for _, f := range files {
+		for _, decl := range f.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				if d.Recv == nil {
+					declared[d.Name.Name]++
+				}
+			case *ast.GenDecl:
+				for _, spec := range d.Specs {
+					switch sp := spec.(type) {
+					case *ast.ValueSpec:
+						for i, id := range sp.Names {
+							declared[id.Name]++
+							if d.Tok == token.CONST && i < len(sp.Values) && len(sp.Names) == len(sp.Values) {
+								specs = append(specs, constSpec{id.Name, sp.Values[i], f})
 							}
 						}
+					case *ast.TypeSpec:
+						declared[sp.Name.Name]++
 					}
 				}
 			}
 		}
-		if len(ambiguous) == 0 || round == 3 {
-			for name := range blocked {
-				delete(consts, name)
+	}
+	blocked := map[string]bool{}
+	for {
+		consts := map[string]float64{}
+		// Settle to a fixed point: a chain of consts resolves whatever order the files are read in.
+		for pass := 0; pass <= len(specs); pass++ {
+			changed := false
+			for _, sp := range specs {
+				if _, had := consts[sp.name]; had || blocked[sp.name] {
+					continue
+				}
+				if v, ok := clockConst(sp.value, &clockEnv{timeName: timeNames[sp.file], consts: consts}); ok {
+					consts[sp.name] = v
+					changed = true
+				}
 			}
-			for name := range ambiguous {
-				delete(consts, name)
+			if !changed {
+				break
 			}
-			return consts
 		}
-		for name := range ambiguous {
-			blocked[name] = true
+		evaluated := map[string]int{}
+		values := map[string]map[float64]bool{}
+		for _, sp := range specs {
+			if _, in := consts[sp.name]; !in {
+				continue
+			}
+			if v, ok := clockConst(sp.value, &clockEnv{timeName: timeNames[sp.file], consts: consts}); ok {
+				evaluated[sp.name]++
+				if values[sp.name] == nil {
+					values[sp.name] = map[float64]bool{}
+				}
+				values[sp.name][v] = true
+			}
+		}
+		ambiguous := false
+		for name := range consts {
+			if declared[name] != evaluated[name] || len(values[name]) > 1 {
+				blocked[name] = true
+				ambiguous = true
+			}
+		}
+		if !ambiguous {
+			return consts
 		}
 	}
 }
@@ -714,7 +930,7 @@ func clockSites(files map[string]*ast.File) map[string]int {
 				if !ok || fn.Body == nil {
 					continue
 				}
-				env := clockBuildEnv(fn, timeName, clockImportNames(f), pkgConsts, helpers)
+				env := clockBuildEnv(fn, timeName, pkgConsts, helpers)
 				ast.Inspect(fn.Body, func(n ast.Node) bool {
 					if be, isBin := n.(*ast.BinaryExpr); isBin {
 						if ns, bounded := clockBound(be, env); bounded && ns > 0 && ns < clockBoundFloor {
