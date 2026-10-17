@@ -89,6 +89,9 @@ func New() *Cache {
 //
 // Every component is length-prefixed before hashing so two fields cannot slide into one
 // another and collide (question "ab" + root "c" must not equal question "a" + root "bc").
+// cache.Key length-prefixes each of its parts as well, so the fields would stay apart
+// without field(); this prefix stays as a second, local layer so these keys do not rest on
+// that alone.
 func Key(question, readRoot string, docs []core.ContextDoc) string {
 	parts := make([]string, 0, 4+2*len(docs))
 	parts = append(parts, field(keySchema), field(question), field(readRoot), field(strconv.Itoa(len(docs))))

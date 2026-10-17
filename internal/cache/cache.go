@@ -28,6 +28,7 @@ package cache
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -485,10 +486,46 @@ func promoteSibling(sib *bolt.DB, primary string) bool {
 	return len(entries) == total
 }
 
-// Key derives a stable cache key from the given parts.
+// keyDomain opens every Key preimage. It names the encoding, so a change to the
+// encoding is a deliberate edit to this constant (and to TestKeyEncodingIsPinned)
+// rather than a silent one, and it keeps a Key from ever being the bare hash of a
+// caller's text.
+const keyDomain = "offload/cache.Key/v2"
+
+// Key derives a stable cache key from the given parts. Distinct part lists give
+// distinct keys: the list [a b] never collides with the single part "a<sep>b"
+// for any separator a caller's text can contain.
+//
+// The preimage is keyDomain followed by, for each part in order, the part's byte
+// length as an 8-byte big-endian integer and then the part's bytes. A length
+// prefix is self-delimiting, so no byte inside a part can be read as the
+// boundary between two parts, and the empty list, one empty part and two empty
+// parts each have a different preimage. The result is the hex SHA-256 of it.
+//
+// Why not a separator: the first encoding joined the parts with "\x00", so
+// Key("a", "b") was Key("a\x00b"). One part is arbitrary model input, and a
+// request that forges a boundary could be served another request's cached
+// result. A separator cannot fix that for text that may contain any byte;
+// lengths can.
+//
+// Changing the encoding changed every key once: entries written under the old
+// one are never looked up again, and the store has no eviction, so they stay in
+// the file as dead weight. The cache is an accelerator, so the only effect of the
+// upgrade is one cold start.
+//
+// A caller must pass each ingredient as its own part and never build one part by
+// gluing fields together with a separator of its own, which would recreate the
+// same ambiguity one level up.
 func Key(parts ...string) string {
-	h := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return hex.EncodeToString(h[:])
+	h := sha256.New()
+	h.Write([]byte(keyDomain))
+	var n [8]byte
+	for _, p := range parts {
+		binary.BigEndian.PutUint64(n[:], uint64(len(p)))
+		h.Write(n[:])
+		h.Write([]byte(p))
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // Get returns the stored value and true if present. An unavailable handle — a

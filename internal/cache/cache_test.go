@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,20 +163,129 @@ func TestKeyDistinguishesInputs(t *testing.T) {
 	}
 }
 
-// Documents a real collision: Key joins parts with \x00, so a part that itself
-// contains \x00 can forge the boundary between two parts. Model input is
-// arbitrary text, so this is reachable in principle — a hit here would serve
-// one request's result to a different request. Pinned as the current behaviour;
-// fixing it (length-prefixing the parts) changes every existing key and so
-// belongs in its own PR.
+// Key must be injective over part LISTS: two different lists never share a key,
+// whatever bytes the parts hold. The first encoding joined the parts with \x00, so
+// a part that itself held \x00 could forge the boundary between two parts
+// (Key("a", "b") == Key("a\x00b")). Model input is arbitrary text, so that was
+// reachable: a hit would serve one request's cached result to a different
+// request. The parts are length-prefixed now; this test fails against the old join
+// and is the proof that the boundary cannot be forged.
 func TestKeySeparatorCollision(t *testing.T) {
-	twoParts := Key("a", "b")
-	onePart := Key("a\x00b")
-	if twoParts != onePart {
-		t.Skip("Key no longer collides on the \\x00 separator — the encoding was fixed; " +
-			"update this test to assert the parts are unambiguous")
+	// forgedHeader is one part that spells out, byte for byte, what the encoding
+	// writes between "x" and "y" (the 8-byte big-endian length of "y"). It must
+	// still not reproduce Key("x", "y").
+	forgedHeader := "x" + string([]byte{0, 0, 0, 0, 0, 0, 0, 1}) + "y"
+	// forgedFrame is one part that carries, byte for byte, the frames of the
+	// two-part list a,b (length 1, "a", length 1, "b"). Its own length prefix has to
+	// cover the forged bytes.
+	forgedFrame := "\x00\x00\x00\x00\x00\x00\x00\x01a" + "\x00\x00\x00\x00\x00\x00\x00\x01b"
+
+	lists := []struct {
+		name  string
+		parts []string
+	}{
+		{"no parts", nil},
+		{"one empty part", []string{""}},
+		{"two empty parts", []string{"", ""}},
+		{"three empty parts", []string{"", "", ""}},
+		{"a", []string{"a"}},
+		{"a then empty", []string{"a", ""}},
+		{"empty then a", []string{"", "a"}},
+		{"a, b", []string{"a", "b"}},
+		{"b, a", []string{"b", "a"}},
+		{"ab, c", []string{"ab", "c"}},
+		{"a, bc", []string{"a", "bc"}},
+		{"abc as one part", []string{"abc"}},
+		{"a NUL b as one part", []string{"a\x00b"}},
+		{"a NUL b, c", []string{"a\x00b", "c"}},
+		{"a, b NUL c", []string{"a", "b\x00c"}},
+		{"a, b, c", []string{"a", "b", "c"}},
+		{"a NUL b NUL c as one part", []string{"a\x00b\x00c"}},
+		{"a NUL, b", []string{"a\x00", "b"}},
+		{"a, NUL b", []string{"a", "\x00b"}},
+		{"NUL as one part", []string{"\x00"}},
+		{"two NULs as one part", []string{"\x00\x00"}},
+		{"x, y", []string{"x", "y"}},
+		{"forged length header", []string{forgedHeader}},
+		{"forged frame of a, b", []string{forgedFrame}},
 	}
-	t.Logf("known collision: Key(%q, %q) == Key(%q) == %s", "a", "b", "a\x00b", twoParts)
+
+	seen := make(map[string]string, len(lists))
+	for _, l := range lists {
+		k := Key(l.parts...)
+		if len(k) != 64 {
+			t.Fatalf("%s: key %q is not a 64-char sha256 hex digest", l.name, k)
+		}
+		if k2 := Key(l.parts...); k != k2 {
+			t.Errorf("Key(%q) is not deterministic: %s != %s", l.parts, k, k2)
+		}
+		if other, dup := seen[k]; dup {
+			t.Errorf("%s and %s share the key %s: Key(%q) collides with another part list", l.name, other, k, l.parts)
+		}
+		seen[k] = l.name
+	}
+
+	// The named cases from the defect, spelled out so a failure reads as the
+	// requirement and not as a table row.
+	if Key("a", "b") == Key("a\x00b") {
+		t.Error(`Key("a", "b") == Key("a\x00b"): the \x00 boundary can be forged`)
+	}
+	if Key("a\x00b", "c") == Key("a", "b\x00c") {
+		t.Error(`Key("a\x00b", "c") == Key("a", "b\x00c"): a NUL shifted across the boundary collides`)
+	}
+	if Key("a", "b") == Key(forgedFrame) {
+		t.Error("a part carrying a forged length frame collides with the parts it imitates")
+	}
+	for _, c := range [][2][]string{
+		{nil, {""}},
+		{{""}, {"", ""}},
+		{{"", "a"}, {"a", ""}},
+		{{"a", ""}, {"a"}},
+	} {
+		if Key(c[0]...) == Key(c[1]...) {
+			t.Errorf("Key(%q) == Key(%q): the empty-part cases must stay distinct", c[0], c[1])
+		}
+	}
+
+	// Guard on the guard: these lists must have collided under the old join, or
+	// the table above would not be exercising the defect it claims to.
+	collidedBefore := [][2][]string{
+		{{"a", "b"}, {"a\x00b"}},
+		{{"a\x00b", "c"}, {"a", "b\x00c"}},
+		{{"", ""}, {"\x00"}},
+		{nil, {""}},
+	}
+	for _, c := range collidedBefore {
+		if strings.Join(c[0], "\x00") != strings.Join(c[1], "\x00") {
+			t.Errorf("%q and %q did not collide under the old \\x00 join; pick a pair that did", c[0], c[1])
+		}
+	}
+}
+
+// TestKeyEncodingIsPinned holds the encoding itself to account. Key's doc says a
+// change to it is a deliberate, visible edit because it re-keys the whole cache;
+// that is only true while a test fails when the encoding moves. The expected
+// values were computed outside this package, straight from the written encoding
+// (SHA-256 over "offload/cache.Key/v2", then each part as an 8-byte big-endian
+// length followed by its bytes), so they pin the version tag and the width of the
+// length as well as the framing. If this test goes red because the encoding was
+// changed on purpose, bump the version tag and say so in the changelog: every
+// stored key is unreachable afterwards.
+func TestKeyEncodingIsPinned(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		parts []string
+		want  string
+	}{
+		{"no parts", nil, "66a737870e2abb663d8ea2744a5bbdca16227f69aea9545a264bbdb28a510471"},
+		{"one empty part", []string{""}, "e67eae136df6a6c7c7b2a9be3c56fd1ae76560d6d05d5940b2a39745f5e42f60"},
+		{"a, b", []string{"a", "b"}, "b0ac631e407a1db3a4ec24f2680d3acb5b063147079a35ebba4de4fdb049a1b3"},
+		{"three parts", []string{"summarize", "hello", "model-x"}, "17477d719a571c8868cbfc4326110780724e6a8192118733daf1056ebc622b9a"},
+	} {
+		if got := Key(tc.parts...); got != tc.want {
+			t.Errorf("%s: Key(%q) = %s, want %s", tc.name, tc.parts, got, tc.want)
+		}
+	}
 }
 
 // ---------------------------------------------------------------------------
