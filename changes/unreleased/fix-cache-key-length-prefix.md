@@ -106,7 +106,7 @@
   output-file stems that glue fields (`composevideo.go:343` hashes a `fmt.Sprint` of its fields with no separator at all; the render, video and edit stems hash the prompt
   and the params string with no boundary). Left alone on purpose, no row: `promptPrefixFingerprint` (`internal/pipeline/identity.go`) and the research retry-cap key
   (`pageKeyFor`, `internal/delegate/processgate.go`) join their fields with a NUL, but they are telemetry and a retry cap, not result-cache keys.
-- **Proved.** Remote Linux runs at commit `babdd239`, before the typed-params round: a gate over `./internal/cache`, `./internal/askcache`, `./internal/tasks`, `./internal/mcpserver`,
+- **Proved.** Remote Linux runs at commit `dca2e015` (the typed-params round; `babdd239` before it passed the same): a gate over `./internal/cache`, `./internal/askcache`, `./internal/tasks`, `./internal/mcpserver`,
   `./internal/changelog`, `./internal/pipeline` and the root package passed (7 of 7), and `./internal/pipeline` passed again on a second remote Linux runner. On Windows, for the
   typed-params round, `go test -p 1 -count=1` passes on `./internal/cache/`, `./internal/askcache/`, `./internal/tasks/` and `./internal/mcpserver/` with `-run TestAsk`, and on
   `./internal/pipeline/` with `-run` over the key, cache, vision, tier, exemplar, template, transcribe, gate, media, image-batch, render, video and legacy-file-name tests
@@ -116,5 +116,4 @@
 - **Not verified here.** No live cache file, seat or fleet node was used, so the cold start after an upgrade is read from the code (a key that is not in the store is a miss) and not
   measured. The Windows pipeline run skips `TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere`: a lease-window timing test (it spawns real runner processes) that failed
   intermittently under load on this machine, always as "want one live lease while the render runs" within about 50 ms and on a different subtest each time, and passed three runs in a
-  row on its own; it has no cache code in its path, and the remote Linux runs of the whole package included it. A Windows run of the full suite was not made, and the leak-gate tool (it needs the operator's name list) was not run. The remote gate has not been repeated on the
-  typed-params round.
+  row on its own; it has no cache code in its path, and the remote Linux runs of the whole package included it. A Windows run of the full suite was not made, and the leak-gate tool (it needs the operator's name list) was not run.
