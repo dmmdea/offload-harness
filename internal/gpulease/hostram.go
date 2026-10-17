@@ -282,6 +282,9 @@ func pendingGiB(live []Info, held func(l Info) (float64, bool)) float64 {
 	return pending
 }
 
+// DeclaresHostRAM says the lease declared any host RAM (scaffold: the touched figure only).
+func (i Info) DeclaresHostRAM() bool { return i.HostRAMGiB > 0 }
+
 // HostRAMPendingCommit is the commit side of HostRAMPending (scaffold: not yet counted).
 func (m *Manager) HostRAMPendingCommit() float64 { return 0 }
 
