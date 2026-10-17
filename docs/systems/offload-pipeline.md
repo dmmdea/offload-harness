@@ -485,19 +485,36 @@ this process. Asking never resolves the server's own handle and never creates a 
 `cache.Key` hashes a version tag (`offload/cache.Key/v2`) and then, for each part, the part's byte
 length (8 bytes, big-endian) followed by its bytes. Each ingredient of a request (task, input,
 parameters, model, grammar, template tag and the rest) is its own length-prefixed part, so no byte in
-one ingredient can be read as the boundary between two, and a request cannot shape its input to equal
-another request's key. A caller therefore passes every field as a separate part and never glues
-several fields into one part with a separator of its own (`input + "|" + id`): the encoding cannot
-see inside a part, so a glued part rebuilds the ambiguity one level up. The two tags that are
-themselves one part of a key (the template tag and the exemplar tag) are hashed through `cache.Key`
-too, not through a second format. The parameters part is `tasks.StableParamsKey`, which
-percent-escapes `%`, `;` and `=` in keys and values so that every top-level `key=value;` entry is
-unambiguous. Nested and non-string values keep Go's `%v` rendering, so `{"seed": "5"}` and
-`{"seed": 5}` still render alike; that limit is documented and pinned by a test. For parameters
-without those characters (Windows paths with backslashes included) the string renders exactly as it
-always did, which matters because it names the render, video and edit output files (the stems hash
-the prompt and this string with no boundary between them, so the escaping does not make file names
-injective).
+one ingredient can be read as the boundary between two. A caller therefore passes every field as a
+separate part and never glues several fields into one part with a separator of its own
+(`input + "|" + id`): the encoding cannot see inside a part, so a glued part rebuilds the ambiguity
+one level up. The two tags that are themselves one part of a key (the template tag and the exemplar
+tag) are hashed through `cache.Key` too, not through a second format. One glued part is left, and it
+is the known exception: the video media identity (`vid:<digest>|fps=...|n=...|w=...|frames=...`, and
+the per-window `vidw:` form) is built from the file digest and numbers and passed as one part. None of
+it is caller text, so it cannot forge a boundary.
+
+The parameters part is `tasks.CacheParamsKey`: the params as JSON with the keys of every map sorted
+at every depth, typed, so `{"seed": "5"}` and `{"seed": 5}`, `["a", "b"]` and `["a b"]`, and a string
+and the bool it spells all differ. An int 5 and the float64 5 that the MCP door decodes agree, as do a
+`[]string` and a `[]any` holding the same strings. It exists because the string `StableParamsKey`
+prints nested and non-string values with Go's `%v`, which is type-erased: an extract schema with
+`"required": ["a b"]` and the same schema with `"required": ["a", "b"]` rendered alike, got the same
+key, and the second was served the first's cached answer before its own schema was checked (a cached
+reply is validated against the requesting call's schema only on a miss, not on a hit). Params with no
+faithful typed form (NaN or an infinity, a function, a struct, a byte slice, a type with its own JSON
+form, a string that is not valid UTF-8, a self-referencing value) fail closed: the call neither reads
+nor writes the cache, runs the model every time, logs one line, and records `cache_bypass`
+("params: ...") on its ledger row. There is no fallback to a `%v` rendering, which would reopen the
+collision.
+
+`tasks.StableParamsKey` stays for what it always named, the render, video and edit output files and
+the exemplar rows, and is not part of the cache key. It percent-escapes `%`, `;` and `=` in keys and
+values so that every top-level `key=value;` entry is unambiguous, renders exactly as it always did for
+parameters without those characters (Windows paths with backslashes included), and keeps Go's `%v`
+rendering for nested and non-string values: a limit that now matters only for file stems and exemplar
+rows, and is pinned by a test. The stems hash the prompt and this string with no boundary between
+them, so the escaping does not make file names injective.
 
 The encoding changed once. It used to join the parts with a NUL byte, so `Key("a", "b")` was
 `Key("a\x00b")` and a request whose text held a NUL could forge a boundary. Every key is derived from
