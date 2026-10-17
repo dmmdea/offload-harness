@@ -349,8 +349,8 @@ const cookieBareLong = `(?:[^\s'",;&\\\]]|\\{1,` + cookieRunMax + `}u[0-9a-fA-F]
 
 // cookieQuotedLong is a quoted cookie value at a level whose first 12 characters are counted, taken whole: the rest
 // of the body, then the closing quote when it is there. With cross, a body that is open at a line break goes on
-// to its closing quote when that is within cookieBreakLimit line breaks, and ends at its line when it is not; a
-// list's strings never run over a line break.
+// to its closing quote when that is within cookieBreakLimit line breaks, and ends at its line when it is not. Without
+// it (the value quoted inside a string of a list, which is itself one string of the list) the body ends at its line.
 func cookieQuotedLong(n int, cross bool) string {
 	q := cookieQuote(n)
 	head := q + `(?:` + cookieCountUnit(n) + `){12}`
