@@ -11,32 +11,54 @@ package main
 // test to put a number on a clock was not covered. This file is the one lint, over every *_test.go file of the module, with
 // the sites that were read by hand written down, in the style of tempdir_lint_test.go.
 //
-// WHAT IT CHECKS (go/parser, no regular expressions on text): every UPPER bound on a measured elapsed time against a
+// WHAT IT CHECKS (go/parser, no regular expressions on text). Every UPPER bound on a measured elapsed time against a
 // constant under clockBoundFloor (one second) is listed in clockBoundAllowlist (clock_lint_allowlist_test.go) with its
 // count and its reason: what the bound rules out (the longer wait, or the ceiling, that the code under test would otherwise
 // run into) and how wide the margin to it is. A thin margin is written down as thin, so that the next flake lands on a
-// known entry and not on a new investigation. The measured time is time.Since(x); a.Sub(b) where a or b is a
-// time.Now() stamp (or a variable that only ever holds one); a variable that only ever holds one of those; and that value
-// read as a number (.Seconds(), .Milliseconds(), .Microseconds(), .Minutes(), .Nanoseconds()). The upper bound is `elapsed >
-// C` or `elapsed >= C`, or the same written `C < elapsed` or `C <= elapsed`. C is a constant the lint can evaluate: a
-// literal, a time unit product such as 250*time.Millisecond, a package-level const of the same package, or a const or a
-// local that is assigned once in the same function. A bound of zero or less is not a bound. A bound at or above one second
-// is left to the author's judgment: it is where a bound starts to be a hang guard (the test fails only when something is
-// stuck), and where the list of sites stops being a review one person can read. The floor is a ratchet and not a proof of
-// safety: a 2.5 s ceiling failed under starvation too, so raising clockBoundFloor (and listing the sites it then finds) is
-// the next step, not a change of rule. The key is "file:elapsed>C" (for example "gpu_warm_watch_test.go:elapsed>500ms"), so
-// moving a bound re-opens its review, and widening one to a second or more removes the site: a use that went away fails
-// until its entry is removed, so the list stays the truth.
+// known entry and not on a new investigation.
 //
-// WHAT IT CANNOT SEE. A bound against a value the lint cannot evaluate (a struct field, a parameter, a package variable, a
-// constant from another package, a bound relative to a poll interval) is not seen. A bound written as `elapsed < C` that the
-// test requires is not seen: `elapsed < C` is overwhelmingly a LOWER bound ("it waited at least C"), which a slow runner
-// only makes truer. The lint does not tell a ceiling from the lower edge of a sampling window (`el > lo && el < hi`, a
-// classification of samples); such a site is listed with that reason. A fixed time.Sleep before an assertion, a short call
-// or context window handed to the code under test, a poll deadline taken from time.Now().Add(C), and a helper that takes a
-// sub-second timeout are not seen either; those are the other shapes of the same fault and are fixed, as before, by waiting
-// on the event the product signals (a channel, a barrier, a held fake) instead of on a clock. `case <-time.After(C):
-// t.Fatal(...)` ceilings were counted when this lint was written: none is under one second.
+//   - The measured time is time.Since(x); a.Sub(b) where a or b is a time.Now() stamp; a name that only ever holds one of
+//     those; that value read as a number (.Seconds(), .Milliseconds(), .Microseconds(), .Minutes(), .Nanoseconds()),
+//     rounded (.Round, .Truncate), converted (int, int64, float64, time.Duration), or multiplied or divided by a constant
+//     (2*d, d/2, d/time.Millisecond); and the result of a function or method of the same package that returns one on
+//     every return that sets it, whether it is called in the comparison (measure(f) > C), kept (d := measure(f)) or one of
+//     several results (results, sum, elapsed := runWithin(...)), through named results and bare returns and through
+//     helpers that return other helpers' results. A method is known by its name alone, so a name that two declarations
+//     answer differently, or a call through an imported package, is not read.
+//   - The upper bound is `elapsed > C` or `elapsed >= C`, or the same written `C < elapsed` or `C <= elapsed`. C is a
+//     constant the lint can evaluate: a literal, a time unit product such as 250*time.Millisecond, a const of the same
+//     package (from a test file or from any other file of the package, because a test reads leasePollInterval from the code
+//     it tests; a name declared with two values, such as in two files built for different systems, is not trusted), or a
+//     const or a local that is assigned once in the same function. A bound of zero or less is not a bound.
+//   - A bound at or above one second is not reviewed here. That is where a bound starts to be a hang guard (the test fails
+//     only when something is stuck) and where the list of sites stops being something one person can read. The floor is a
+//     ratchet and not a proof of safety: a 2.5 s ceiling failed under starvation too, so raising clockBoundFloor (and
+//     listing the sites it then finds) is the next step, not a change of rule.
+//   - The key is "file:elapsed>C" (for example "gpu_warm_watch_test.go:elapsed>500ms"), so moving a bound re-opens its
+//     review, and widening one to a second or more removes the site: a use that went away fails until its count is lowered
+//     (or its entry removed, when it was the last), so the list stays the truth.
+//   - A test file that imports "time" with a dot is named as a failure, because the lint reads the package by its name and
+//     would skip the whole file in silence.
+//
+// WHAT IT CANNOT SEE. The lint reads Go only: the JavaScript tests under render/ and the shell scripts have the same fault
+// and no lint here.
+//
+//   - On the bound side: a value it cannot evaluate (a struct field, a parameter, a package variable, a constant from
+//     another package, a bound relative to a poll interval).
+//   - On the measured side: a sum or difference with another duration (d+x > C); a helper that is a closure kept in a
+//     variable (measure := func...) or lives in another package; an elapsed time stored in a field, a map or a channel.
+//   - `elapsed < C` that the test requires. It is overwhelmingly a LOWER bound ("it waited at least C"), which a slow runner
+//     only makes truer, so it is not read, but two shapes of it are not lower bounds. A fixture schedule: a fake server that
+//     answers one way until C has passed and another way after (`if time.Since(begin) < C { return accepted }`), so that a
+//     starved runner moves the flip relative to the code under test; sub-second ones exist in the tree and are the same
+//     family as the queued-credit fixture that was rewritten. And a poll deadline written as a loop condition
+//     (`for time.Since(start) < C { ...; if ready() { return } }; t.Fatal("never ready")`), which is an upper bound on a wait.
+//   - A ceiling from the lower edge of a sampling window (`el > lo && el < hi`, a classification of samples) is not told
+//     apart from a bound; such a site is listed with that reason.
+//   - The other shapes of the same fault: a fixed time.Sleep before an assertion, a short call or context window handed to
+//     the code under test, a poll deadline taken from time.Now().Add(C), and a helper that takes a sub-second timeout. They
+//     are fixed, as before, by waiting on the event the product signals (a channel, a barrier, a held fake) instead of on a
+//     clock. `case <-time.After(C): t.Fatal(...)` ceilings were counted when this lint was written: none is under one second.
 //
 // REGENERATING THE LIST. CLOCK_LINT_PRINT=1 go test . -run TestTestsPutNoSubSecondCeilingOnMeasuredTime -v
 // prints the entries the current tree needs, with an empty reason. The reason is the review: write it only after reading
@@ -60,7 +82,8 @@ import (
 
 const clockLintPrintEnv = "CLOCK_LINT_PRINT"
 
-// clockBoundFloor is the line between a bound on measured time that the lint reviews and a hang guard it leaves alone.
+// clockBoundFloor is the line between a bound on measured time that the lint reviews and one it leaves to the author. It is a
+// ratchet: a bound just above it is not safe, it is only past what the list can hold.
 const clockBoundFloor = float64(time.Second)
 
 // clockAllow is one allowlisted site: how many bounds of that form the file holds, and why each holds on a starved runner.
@@ -765,7 +788,7 @@ func clockBoundProblems(got map[string]int, allow map[string]clockAllow) []strin
 		want, listed := allow[key]
 		switch {
 		case !listed:
-			out = append(out, fmt.Sprintf("%s fails when a measured time is above %s (%d time(s)) and is not in clockBoundAllowlist: a loaded runner stretches any wall-clock span, so a bound under one second is a flake, not a rule. Wait on the event the product signals (a channel, a barrier, a held fake) instead, or bound the wait with a hang guard of a second or more; or list %q with the reason (what the bound rules out, and the margin to it)", file, bound, n, key))
+			out = append(out, fmt.Sprintf("%s fails when a measured time is above %s (%d time(s)) and is not in clockBoundAllowlist: a loaded runner stretches any wall-clock span, so a bound under one second is a flake, not a rule. Wait on the event the product signals (a channel, a barrier, a held fake) instead, or bound the wait generously, as a guard against a hang and not as a measurement; or list %q with the reason (what the bound rules out, and the margin to it)", file, bound, n, key))
 		case n > want.count:
 			out = append(out, fmt.Sprintf("%s fails when a measured time is above %s %d time(s), the allowlist says %d: wait on an event for the new one, or review it and raise the count of %q with its reason", file, bound, n, want.count, key))
 		case n < want.count:
@@ -1052,10 +1075,10 @@ func f(start time.Time) bool { return time.Since(start) < 500*time.Millisecond }
 		{"a lower bound with the constant on the left is clean", map[string]string{"p/a_test.go": `package p
 import "time"
 func f(start time.Time) bool { return 500*time.Millisecond > time.Since(start) }`}, map[string]int{}},
-		{"a bound of one second is a hang guard", map[string]string{"p/a_test.go": `package p
+		{"a bound of one second is left to the author", map[string]string{"p/a_test.go": `package p
 import "time"
 func f(start time.Time) bool { return time.Since(start) > time.Second }`}, map[string]int{}},
-		{"a bound above a second is a hang guard", map[string]string{"p/a_test.go": `package p
+		{"a bound above a second is left to the author", map[string]string{"p/a_test.go": `package p
 import "time"
 func f(start time.Time) bool { return time.Since(start) > 5*time.Second }`}, map[string]int{}},
 		{"just under a second is flagged", map[string]string{"p/a_test.go": `package p
