@@ -6,7 +6,8 @@
 // fails with ERROR_ACCESS_DENIED, however the opener shares it; libuv reports that as EPERM. A reader that took the
 // failure for "no record" answered "this lease is not current" for a lease that was held, and the render aborted at its
 // fence. lease-read.mjs waits that refusal out (EPERM and EACCES only, about 100 ms in all, the bound internal/gpulease
-// uses) and reads a missing file once. internal/gpulease/readretry_test.go is the Go twin of sections 1 and 2.
+// uses) and reads a missing file once, unless a rename may be installing it (a fresh staged file beside the name, up to 250 ms:
+// lease-read-gate.test.mjs). internal/gpulease/readretry_test.go is the Go twin of sections 1 and 2.
 //
 //   1. the helper, with the read and the pause injected (so the counts are exact and nothing sleeps for long)
 //   2. the real readers, with fs.readFileSync refusing a path the way the system does
@@ -59,8 +60,9 @@ function withWait(t, value = true) {
 test("a file that is not there is read once and reads as absent, with no pause (a released lease stays absent at once)", (t) => {
   withWait(t);
   const s = scripted([{ code: "ENOENT" }]);
-  assert.equal(readSharedSync("gone.json", { read: s.read, sleep: s.sleep, now: s.now }), null);
-  assert.equal(s.seen.reads, 1, "a missing file is an answer, not a refusal to wait out");
+  // The looks that settle an absence (lease-read-gate.test.mjs) are given a filesystem where nothing stands beside the name.
+  assert.equal(readSharedSync("gone.json", { read: s.read, sleep: s.sleep, now: s.now, stat: () => undefined }), null);
+  assert.equal(s.seen.reads, 1, "a settled absence is an answer, not a refusal to wait out");
   assert.deepEqual(s.seen.pauses, []);
 });
 

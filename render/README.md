@@ -90,8 +90,11 @@ zero-always-warm (it shares the 8 GB with llama-swap, so it must coordinate). Ta
 - **`lease-read.mjs`** — the one way `render/` reads a lease file the Go side owns (`readLease`, `readEpochRecord`,
   `readCardClaim` and so the fence `checkInheritedLease`, and the record reader of `lease-progress.mjs`). Go replaces
   those files by rename-over; on Windows an open that meets the instant of the rename fails with `EPERM`, so the read
-  waits that out (`EPERM` and `EACCES` only, a 100 ms deadline, Windows only) and reads a missing file once, so a
-  released lease still reads absent at once. See [GPU lease](../docs/systems/gpu-lease.md).
+  waits that out (`EPERM` and `EACCES` only, a 100 ms deadline, Windows only). A rename that succeeded can also leave the
+  live name absent for tens of milliseconds with the staged file beside it, so a missing file is an answer only once it
+  is settled: while a fresh staged file stands beside it the read waits (a 250 ms deadline, Windows only) and gives
+  `null` if the wait runs out, and with none it reads once, so a released lease still reads absent at once. See
+  [GPU lease](../docs/systems/gpu-lease.md).
 - **`preflight-graph.mjs`** — validates a built graph against the live `/object_info` (all
   required inputs present) **before** spending a GPU cycle.
 
