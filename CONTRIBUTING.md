@@ -60,6 +60,26 @@ tests caught it) or `SURVIVED` (they did not); and restores the file byte for by
 `MUTATION-VERDICT:` line, with the mutation it printed, in the pull request. `bash scripts/mutation-check-selftest.sh` (or
 `pwsh -File scripts/mutation-check-selftest.ps1`) shows every verdict on a fixture under `scripts/testdata/`.
 
+## Tests that certify a seam
+
+A seam is the place where one part of the harness hands work to another: a function variable or an interface that production
+code fills in, a config key that picks an engine, a door that calls a lane. A test that certifies a seam says the two sides
+are wired together and behave across it, and it proves nothing if it injects the very thing it certifies. A test that assigns
+a stand-in to the seam, runs the code, and asserts on the value it just put there passes with the production wiring deleted;
+a mutation of exactly that kind once survived a green seam test here. It matters most in red-first work: the behaviour-free
+stub that lets the first test compile is what the test must go red against, not what it certifies.
+
+- **Fake the far side of the seam, never the seam.** Stand in for what lies beyond it (a node, an engine, a clock source) and
+  let the production code on the near side run, so the path under test is the path production takes.
+- **Assert on something the production path produces,** not on a value the test supplied, and not on a count of calls to a
+  stand-in that only the test drives. You must be able to name the production line whose removal turns the test red.
+- **Show that it goes red.** Remove or neutralise that line with `scripts/mutation-check.sh` (see "Proving a test can fail")
+  and quote the `RED` verdict in the pull request; a seam test whose mutation `SURVIVED` is certifying its stand-in.
+  `TestRunNoEligibleRemoteNamesTheRealCause` in `internal/delegate/run_test.go` is a worked example: it drives `Run` against
+  fake nodes (or none) and asserts the reason and the `Unplaced` flag that the production path reports.
+- **Reviewer's check:** for each test that claims to cover a wiring, ask which production line it goes red without. If the
+  answer is none, or only a line inside the test, it does not certify the seam.
+
 ## Keeping tests out of the OS temp dir
 
 A test takes its scratch space from `t.TempDir()`, which `testing` removes when the test ends. A test that makes a folder
