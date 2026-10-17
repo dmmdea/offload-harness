@@ -4497,3 +4497,13 @@ test("readiness: on a volume that folds case the earlier candidate wins whicheve
   assert.deepEqual(foldGot([EMB("FOO.safetensors"), EMB("foo.pt")], "foo"), ["present", "FOO.safetensors", null], ".safetensors is tried before .pt, and isfile finds FOO.safetensors");
   assert.deepEqual(foldGot([EMB("FOO.pt"), EMB("foo.safetensors")], "foo"), ["present", "foo.safetensors", null], "and the other way round");
 });
+
+// The lookup name keeps its case when it is compared with a lower-cased file name: on a volume that folds case both sides are lowered, and on a
+// case-sensitive one the diagnosis names the file that has another case.
+
+test("readiness: a name with capitals is answered on a volume that folds case, and named in the diagnosis on one that does not", () => {
+  assert.deepEqual(foldGot([EMB("EasyNeg.safetensors")], "EasyNeg"), ["present", "EasyNeg.safetensors", null]);
+  assert.deepEqual(foldGot([EMB("easyneg.safetensors")], "EasyNeg"), ["present", "easyneg.safetensors", null], "a file in lower case, on a volume that folds");
+  assert.deepEqual(foldGot([EMB("easyneg.safetensors")], "EasyNeg", {}, { fold: false }), ["case_mismatch", null, ["easyneg.safetensors"]]);
+  assert.deepEqual(foldGot([EMB("EASYNEG.pt")], "EasyNeg", {}, { fold: false }), ["case_mismatch", null, ["EASYNEG.pt"]]);
+});
