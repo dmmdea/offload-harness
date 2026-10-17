@@ -45,7 +45,7 @@ other on a single shared card.
 | `internal/gpulease/yield.go`, `gpu_yield*.go` | **the yield request (plan P11, ADR 0086)**: the policy (`ParseOnOverdue`, `SetDefaultOnOverdue`), the asker, the `yield.<epoch>` sidecar, the holder's ticker, the read-only `YieldViewOf` every surface words from; the root files hold the shell runner (`sh -c`, `cmd.exe /d /s /c`, hidden) and the `--detach` report |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
 | `gpu_progress.go`, `internal/gpulease/progressdir.go`, `render/lease-progress.mjs` | the progress contract of a wrapped render helper (F8): the helpers the wrapper declares one for, the minted file and its sweep, `GPU_LEASE_PROGRESS_FILE`, and the helper-side heartbeat |
-| `render/lease-read.mjs`, `render/gpu-lock.mjs` | **the Node readers of the lease**: `readSharedSync` / `readSharedJson` (a refused open waited out to a 100 ms deadline, on Windows only; a missing file read once), behind `readLease`, `readEpochRecord`, `readCardClaim`, the fence `checkInheritedLease`, and the `render/lease-progress.mjs` record reader. Node never writes these files |
+| `render/lease-read.mjs`, `render/gpu-lock.mjs` | **the Node readers of the lease**: `readSharedSync` / `readSharedJson` (a refused open waited out to a 100 ms deadline, and an absent name waited for to a 250 ms deadline while a fresh staged file stands beside it, on Windows only; a missing file with nothing beside it read once), behind `readLease`, `readEpochRecord`, `readCardClaim`, the fence `checkInheritedLease`, and the `render/lease-progress.mjs` record reader. Node never writes these files |
 | `gpu_reserve_devices.go`, `gpu_cards.go`, `gpu_doctor.go` | which cards a reserve holds (`--devices`, `--cards`, derivation, the queue), `gpu cards` and the status table, `gpu doctor` |
 | `internal/gpulease/owner.go` | **ownership (ADR 0070)**: who asked for a lease (`Owner`), the session registry, the first-observer orphan marker, the progress contract and `Standing`, the derived reading every status surface shares |
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
@@ -447,6 +447,32 @@ concurrency test rather than by reading:
     removal's bound) and any other failure is returned at once. Measured on a loaded host with a
     heartbeat renewed in a loop: 5 failed reads in about 124,000 without the wait, none in about
     108,000 with it. A file that stays unreadable is waited out once, not once per read (below).
+  - **A rename that was not refused can still leave the live name absent, and that is not an answer yet.**
+    For 11 to 75 ms as a reader sees it (one rename took 119 ms to return), about once in 74,000 renames
+    on the host that showed it, the live name is absent (`ENOENT`) while the staged file (`stagingPath`:
+    `<name>.tmp`, or `meta.json.restamp`, none for a card claim) still stands beside it. A reader that took
+    that for "not there" called a held lease gone: the fence failed it, `Leases()` dropped it, a release
+    took the whole-node branch. So on Windows an absence is an answer only once it is settled (`gate.go`,
+    `settled.go`). `readSharedFile` and `statSettled`, which `statRecord`, the keeper's look at a record,
+    `claimIsFresh` and the waiter and request-file stats go through, wait while a staged file younger than
+    3 s stands beside the absent name, pausing 5 ms, until 250 ms have passed since they first met one.
+    With none they look once at the name itself, taken after the look at the staged file (the rename can
+    end between the two), and answer absent only if that finds nothing too. When the 250 ms run out the
+    answer is `errRenameInFlight`, an I/O failure and never `ErrNotExist`: `Check` reads it as a record that
+    cannot be read (`RecordUnreadableError`, which `confirmFence` retries) and not as "the lease is gone",
+    and every stat caller already reads a non-absent error as "cannot be examined". The name whose wait
+    ran out is remembered for 5 s, so a staged file left by a writer that died a moment ago costs one wait
+    per file and not one per read (a grant reads each heartbeat about seven times under the epoch lock:
+    three such heartbeats cost a grant 1050 pauses before the memory and 150 after,
+    `TestAFreshLeftoverStagedHeartbeatCostsAGrantAtMostOneWaitPerFile`). A card claim has no staged
+    name and costs one open and no stat. The wait is on the same switch as the wait for a refused open
+    (`deniedOpenMayClear`): off Windows an absence is answered at once. The ComfyUI launch markers, which
+    Node restamps through a `.tmp` file, are read the same way (`ReadSharedFile`, used by
+    `internal/comfyinst`), as are the waiter records and the yield request. The Node readers keep the same
+    lists (`STAGING_SUFFIXES` in `render/lease-read.mjs`), and `staging_drift_test.go` fails when a Go
+    writer names a staged file without `stagingPath` or stages under a suffix Node does not look for.
+    Node returns `null` when its wait runs out (the fence aborts: fail-safe, and Node only reads), and
+    keeps no memory of a wait that ran out.
   - **The wait is Windows only.** Off Windows nothing is delete-pending (`rename(2)` is atomic and an
     open descriptor never holds one up), so a permission error on a record is a lasting refusal and
     `readSharedFile` returns it at once. The choice is the constant `sharedOpenMeetsDeletePending`
@@ -463,8 +489,9 @@ concurrency test rather than by reading:
     instant, as `EPERM` (a file held delete-pending reads exactly that, and `ENOENT` once the last handle closes). A
     `null` record for a card lease falls through to `meta.json`, which a card lease never writes, so a refused open read
     as "this lease is not current" and the render aborted. The helper retries `EPERM` and `EACCES` until a 100 ms deadline,
-    pausing 5 ms with `Atomics.wait`, and returns `null` at once for a missing file or any other error; the wait is on
-    only on Windows (`policy.waitsOutDenied`). The bound is a deadline and not a count of pauses because
+    pausing 5 ms with `Atomics.wait`, waits for a rename while a fresh staged file stands beside an absent name (the
+    bullet above), and returns `null` at once for any other error or for a missing file with nothing beside it; the
+    waits are on only on Windows (`policy.waitsOutDenied`). The bound is a deadline and not a count of pauses because
     `Atomics.wait(5)` sleeps a whole timer tick on Windows (15.4 ms measured), so 20 pauses were 308 ms. Plain
     `readFileSync` missed nothing in about a million reads against 55,000 renames issued (half of those runs renamed a link of one
     seed file, which replaces nothing after the first pass; the fragment says so), so the helper guards an instant that
@@ -477,8 +504,10 @@ concurrency test rather than by reading:
     `EEXIST` at the second pass and on Windows renamed a link onto itself (9 real replacements in 4,761 renames, nothing refused).
     It ran three times on Windows (every rename a replacement) and three times on Linux under WSL (about 16,000 renames a run, 0
     refused, 0 misses).
-  - **A file that is not there is never waited on, on any platform, and no read of one under the epoch lock
-    multiplies a wait.** `readSharedFile` retries a permission error only; a missing file is one open and the error. After a release,
+  - **A file that is not there is not waited on unless a rename may be installing it, and no read of one under the epoch lock
+    multiplies a wait.** `readSharedFile` retries a permission error, and waits for a rename only while a fresh staged file
+    stands beside the name; a missing file with nothing beside it is one open, one look at the staged file and one at the name
+    (none for a claim), and the error, with no pause (`gatePauses` counts the gate's, `readRetries` the refused open's). After a release,
     `Leases()` opens `meta.json` once, `EpochIsCurrent` opens `e/<epoch>.json` and `meta.json` once each, and the
     heartbeat readers open `hb.<epoch>` once, with no pause
     (`TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt`); a grant whose sweep finds the three records it reads deleted
@@ -508,8 +537,8 @@ concurrency test rather than by reading:
     (`Restamp`) and heartbeat (`Renew`) in loops while `Leases()`, `EpochIsCurrent` and the heartbeat read poll: 50 runs
     in a Linux environment, 0 misses in about 450,000 reads, 0 refused opens, 0 pauses. The Node readers on Linux are covered by
     `render/lease-read-stress.test.mjs` (above), which wants no refused rename there.
-  - The epoch counter, the tokens and the waiters are still read with `os.ReadFile`; no finding covers
-    them yet.
+  - The epoch counter and the tokens are still read with `os.ReadFile`; no finding covers
+    them yet. The waiter records, the yield request and the ComfyUI launch markers are read through the shared open.
 
 Neither of the first two is defensive padding: with waiters polling once a second, both races are
 ordinary traffic. Measured under six concurrent acquire/release workers, 1 in 48 cycles failed

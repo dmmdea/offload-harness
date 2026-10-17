@@ -246,6 +246,48 @@
     renewed heartbeat has the fresh file time of its staged file (`Renew` sets no time by hand and nothing else writes the heartbeat).
   - **Known limits.** A holder that is alive but hung, with a heartbeat that stays unreadable and unexaminable for good, is not reclaimed by the heartbeat rule: only the wrapper being gone, or `gpu release`, frees
     it. `keeperSignOfLife` (the unreadable-record case) still reads a heartbeat that fails as no sign of life. The platform-independent rule takes no wait; the read gate that waits out an in-flight rename is separate.
+- **The read gate: an absent name is an answer only once it is settled.** The wait above is for a file that is there and refused. A rename that was NOT refused can also leave the live name
+  absent (`ENOENT`) for 11 to 75 ms as a reader sees it (one rename took 119 ms to return), about once in 74,000 renames on the host that showed it, with the staged file still beside it; the mechanism is
+  unverified. Both readers took that for "not there": the Go reader called a held record or heartbeat absent, and the Node reader answered `null`, which for a card lease falls through to `meta.json`
+  and fails the fence. The reclaim rule no longer depends on the Go read (above); this makes the reads themselves right.
+  - **The rule** (`internal/gpulease/gate.go`, `settled.go`; `render/lease-read.mjs`). Windows only, on the same switch as the wait for a refused open (`deniedOpenMayClear`, `policy.waitsOutDenied`);
+    off Windows an absence is answered at once, with no stat and no pause. On `ENOENT`: a file that is never renamed over (a card claim) is absent, at the cost of one open. A staged file younger than 3 s
+    beside the name (a negative age, a clock that stepped back, and a staged file that cannot be examined all count as fresh) is waited for: pause 5 ms and read again, until 250 ms have passed since the
+    first such look. A deadline, never a count of pauses (the Node timer sleeps a whole 15.4 ms tick). With no fresh staged file, ONE stat of the name itself, taken after the look at the staged file: the rename
+    can end between the read and that look, and the name is then back. A name that is there is read again within the same deadline; a name that is not is absent. If the 250 ms run out, Go returns a
+    `*fs.PathError` wrapping `errRenameInFlight` (an I/O failure and never `ErrNotExist`, so `Check` answers `RecordUnreadableError`, which `confirmFence` retries, and not "the lease is gone") and
+    Node returns `null` (the fence aborts: loud, fail-safe, and Node only reads). Constants: 250 ms is about twice the longest absent name seen and is paid only beside a fresh staged file; 3 s is the longest a
+    writer keeps retrying its rename (2 s) plus a second, because a retry chain was seen to take 2.29 s.
+  - **A wait that ran out is remembered for 5 seconds, so a stuck staged file costs one wait per file.** A grant reads each record about five times and each heartbeat about seven inside one hold of the
+    epoch lock, so a budget per read held it for 1.75 s for one heartbeat with a staged file a writer left behind a moment ago, and a second acquirer's spin allows 2 s. The memory (separate from the
+    memory of a lasting permission refusal, which an absence is never fed to) answers the same I/O failure at once while the staged file is still fresh; it ends when the staged file is gone, when a read of the
+    name succeeds, and after its time. Node keeps none: it reads a file once per fence or beat.
+  - **The sites.** `readSharedFile` (every record and heartbeat read) and `statSettled` (the stat sites): `statRecord` (so `Restamp`, `restampLocked`, `ReleaseTarget`, `RecordState` and `releaseByEpochV2`, each
+    of which already reads a non-absent error as "cannot be examined"), the keeper's look at the record, `claimIsFresh` (an unexaminable claim now counts as a claim in progress and not as debris; it read every
+    error as "not fresh", which is a removal), the waiter stat (an in-flight answer is not a confirmed absence, so the record is not pruned) and the first look of the yield ask. The waiter record, the yield
+    request, the launch markers (`tree.go`, `infer.go`, and the five reads in `internal/comfyinst`, through the exported `ReadSharedFile`) were plain `os.ReadFile` reads and go through the shared open. The two
+    yield stats under the epoch lock stay plain: the only writer of that file runs under the same lock, so no rename is in flight there and a staged file would only hold the lock.
+  - **One name for a staged file.** Every writer takes its staged name from `stagingPath` (`meta.json` stages as `meta.json.restamp`, because `.tmp` is the epoch counter's; a claim has none; everything else as
+    `<name>.tmp`), and the readers that list or clear staged files ask `isStagedName`, `withoutStagedSuffix` and `stagingPath`. `staging_drift_test.go` fails on a hand-built staged name outside `stagingPath` and
+    on a suffix `stagingPath` can return that `STAGING_SUFFIXES` in `render/lease-read.mjs` does not list.
+  - **Red, then fix** (every platform: the tests run the gate on a clock that only a pause moves, and end the rename at a chosen open or stat). Before the change: a read with a fresh staged file beside an absent
+    heartbeat returned `readSharedFile = "", open ...: The system cannot find the file specified. while the rename of the heartbeat was in flight, want the new content 42`; one whose rename never ends returned
+    the not-exist error (`the wait ran out and the reader called the file gone; Check would then call the lease gone`); the straddle returned `want the content of the file that is there on the second look`;
+    `statRecord` returned `GetFileAttributesEx ...: The system cannot find the file specified. while the rename of the record was in flight, want nil once it ends`; `keeperSignOfLife` found no sign of life in a
+    record that was being replaced (`a keeper that is alive reads as gone`); `claimIsFresh` was false for a claim that cannot be examined; a waiter record whose rename never ends read as a confirmed absence; a second
+    asker went on to ask an epoch whose request file was mid-rename (`tick 2 of a second asker = asked true`); and in Node ten of the twelve gate tests failed (`a null here is a held lease called not current`; the two that pass are the guards: a claim is one read and no stat, and nothing waits off Windows).
+  - **The bound, counted.** A grant of a free card with three held leases whose heartbeats each have a fresh leftover beside them paused 1050 times and ran 21 budgets out before the memory (3 files x 7 reads), and
+    150 times and 3 budgets after (`TestAFreshLeftoverStagedHeartbeatCostsAGrantAtMostOneWaitPerFile`). Seven reads of one stuck heartbeat paused 350 times before and 50 after. The existing counts are unchanged:
+    a released lease is one open per file and no pause (`TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt`, `TestAMissingOrDeletedRecordCostsOneOpenAndNoWaitUnderTheEpochLock`; the new looks are stats and have
+    their own counter, `gatePauses`), the Node `[3,3,1]` read counts, and Linux's zero waits and zero stats.
+  - **The Windows rename measurements, against the fixed readers** (the release lane's harnesses, one host, run once each and bounded; the Windows gate runner did not answer ssh, so these ran on the workstation). The Go writer
+    that imitates `renameReplacing` against the fixed Node reader, 150 s: 457,000 reads, 300,720 renames of which 1,787 were refused, 0 nulls. The same harness with the raw reader for 60 s, as a control: 244,000
+    reads, 92,502 renames, 0 absent answers, so this host showed no episode in that run and the 0 above does not by itself show the gate worked. The release lane's 4000-loop copy of the stress test: 4,005 loops, 48,060
+    reads, 9,252 renames (9,252 a different inode, 42 refused), 0 nulls. The lane saw 3 of 4 runs of that copy fail on the reader before the gate. The gate is shown by the injection tests above, not by these.
+  - **Known limits of the gate.** Directory listings (`reader.v2`, the keeper's scan) still see a live name absent for an unlocked caller during an episode; every destructive path re-reads under the lock. A wrapper that
+    stops its own tree spares another lease's ComfyUI instance only when it can read that instance's marker (`PIDsOfOtherLeases`): a marker whose rename never ends reads as not there, which is the direction it read
+    before. The first publish of a file (no live name yet, a staged file beside it) is waited for like a rename and is, until it lands, an I/O failure and not an absence. Plain `os.ReadFile` of the epoch counter, the
+    tokens, the orphan marker, the seen sidecar and the reader audit marker remain, none of which gates a fence or a reclaim.
 - **Not verified here.**
   - The 5 s memory of a refused file is a choice (long enough for the polls of a burst of acquirers, short enough that a new fault is waited on), not a measured figure, and the arithmetic of eighteen files
     is from the 110 ms a wait costs here. The real-ACL before and after runs are one host, a scratch test not committed, and they refuse a file for good; a foreign delete whose handle lingers was not
@@ -258,7 +300,7 @@
     `comfy-lifecycle.mjs`; a copy that has the format signature but not the new module fails at import. Not checked against any such copy.
   - The stress test ran on Linux under WSL (Node 22, three runs) before this was pushed, not on the CI image (Ubuntu, Node 24): that run is the first one there. Not run on macOS.
     The Windows runs were three, on one host (Node 26); the host's own noise was not varied.
-  - Go: the claim files (`cards/<card>.claim`) are still read with `os.ReadFile`, as the epoch counter, the tokens and the waiters are; the Node side reads claims through the helper.
+  - Go: the claim files (`cards/<card>.claim`) are still read with `os.ReadFile`, as the epoch counter and the tokens are; the Node side reads claims through the helper. The waiter records are read through the shared open now.
   - No GPU job, lease on a real card or seat was used: every lease in these runs is in a scratch lease root, with the stub runner.
   - The double-booking was shown with a held `DELETE`-access handle in a scratch lease root, which models the instant of the rename, and by a tight `Renew`
     loop in a review. It was not seen with a real `gpu reserve` command that outran its window, with a waiter queued, on a real card. The chance in
@@ -276,6 +318,9 @@
   - The claim file has the same two retries with no platform gate: `createClaim` retries a permission error and `removeClaim` retries any error,
     `removeAttempts` times at `removePause`. They are older than this branch, concern the claim file and not a lease record, no finding covers them, and
     they were left as they were.
-  - The epoch counter, the tokens and the waiters are still read with `os.ReadFile`; no finding covers them.
+  - The epoch counter and the tokens are still read with `os.ReadFile`; no finding covers them.
+  - The read gate: no natural episode (an absent name beside a staged file) was seen in the Windows runs above, so the gate is shown by injection and not by a live rename; the full `internal/gpulease` package was
+    not run on Windows (the Windows gate runner did not answer ssh), only the targeted tests of this change, three times each, on the workstation; the worst epoch-lock hold of a whole-node acquisition with the gate inside it
+    was not measured (the lock is not yet held across the claim; that is a later item).
   - `windowAndKill` still reads the lease twice. A lease that ended between the two reads (the 2 s render killed and released) would also show
     `got []`; it needs a stall of seconds between two adjacent statements and was not seen.
