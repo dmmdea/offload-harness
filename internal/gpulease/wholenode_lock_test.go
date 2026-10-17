@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // A whole-node acquisition creates meta.json by an exclusive create, and a holder's restamp replaces that same name by a rename (and
@@ -132,4 +134,79 @@ func TestTheWholeNodeVerificationPaysAtMostOneWaitPerFile(t *testing.T) {
 	if got := gatePauses.Load(); got > files*budgetPauses {
 		t.Errorf("the verification paused %d times for %d files, want at most %d (one budget of %d for each file, not one for each read of it)", got, files, files*budgetPauses, budgetPauses)
 	}
+}
+
+// lockedPauses counts the pauses of the read gate taken with the epoch lock held and without it.
+type lockedPauses struct{ under, outside atomic.Int64 }
+
+func countGatePausesAroundTheLock(t *testing.T, lock string) *lockedPauses {
+	t.Helper()
+	p := &lockedPauses{}
+	old := gateSleep
+	gateSleep = func(d time.Duration) {
+		if exists(lock) {
+			p.under.Add(1)
+		} else {
+			p.outside.Add(1)
+		}
+		old(d)
+	}
+	t.Cleanup(func() { gateSleep = old })
+	return p
+}
+
+// TestTheProbeBeforeTheLockPaysTheGateWaitsSoTheLockIsHeldWithoutOne: what keeps the epoch lock short when a heartbeat has a fresh
+// leftover beside it (a writer that died a moment ago). Every grant probes the leases without the lock first, over ALL leases and not
+// only the ones that conflict, and a wait that ran out is remembered, so the reads under the lock find the answer waiting. The waits
+// are paid outside the lock (the hold is then milliseconds, not 250 ms per file: the measurement is in the change fragment). A guard
+// for that order: a grant that took its first look under the lock would hold it for a budget per file.
+func TestTheProbeBeforeTheLockPaysTheGateWaitsSoTheLockIsHeldWithoutOne(t *testing.T) {
+	t.Run("card grant, live leases on other cards", func(t *testing.T) {
+		c := onGateClock(t)
+		m := scopedRealClock(t)
+		var held []*Lease
+		for _, card := range []string{card0, card1, card2} {
+			l := mustDevices(t, m, card)
+			held = append(held, l)
+			t.Cleanup(func() { _ = l.Release() })
+		}
+		for _, l := range held {
+			stuckBeside(t, c, m.heartbeatPath(l.Epoch()))
+		}
+		p := countGatePausesAroundTheLock(t, m.epochLockPath())
+		l4, err := m.TryAcquire(ClassMedia, Options{Reason: "card", Devices: []string{card3}, TTL: time.Hour})
+		if err != nil {
+			t.Fatalf("a grant of a free card = %v", err)
+		}
+		defer l4.Release()
+		if p.outside.Load() == 0 {
+			t.Fatal("the probe never met the leftovers: the test does not observe the wait")
+		}
+		if n := p.under.Load(); n != 0 {
+			t.Errorf("%d gate pauses were taken with the epoch lock held (%d outside it), want none: the probe has paid", n, p.outside.Load())
+		}
+	})
+	t.Run("whole-node grant over leases whose holders are gone", func(t *testing.T) {
+		c := onGateClock(t)
+		m := scopedRealClock(t)
+		const deadA, deadB = 7001, 7002
+		deadPIDs(t) // every pid reads alive while the leases are taken
+		a := mustDevices(t, asPID(m, deadA), card0, card1)
+		b := mustDevices(t, asPID(m, deadB), card2)
+		deadPIDs(t, deadA, deadB)
+		stuckBeside(t, c, m.heartbeatPath(a.Epoch()))
+		stuckBeside(t, c, m.heartbeatPath(b.Epoch()))
+		p := countGatePausesAroundTheLock(t, m.epochLockPath())
+		l, err := m.TryAcquire(ClassMedia, Options{Reason: "whole"})
+		if err != nil {
+			t.Fatalf("a whole-node grant over reclaimable leases = %v", err)
+		}
+		defer l.Release()
+		if p.outside.Load() == 0 {
+			t.Fatal("the probe never met the leftovers: the test does not observe the wait")
+		}
+		if n := p.under.Load(); n != 0 {
+			t.Errorf("%d gate pauses were taken with the epoch lock held (%d outside it), want none: the probe has paid", n, p.outside.Load())
+		}
+	})
 }
