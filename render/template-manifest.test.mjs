@@ -545,6 +545,19 @@ test("resolve: an annotated embedding that another file of the node shadows is r
   assert.equal(M.resolveRun(rowOf(catalogOf(alone), "tt_emb"), snapshotOf(alone), { io: alone }).ok, true, "with only the annotated file the run is allowed");
 });
 
+test("resolve: a file of no extension that ComfyUI opens first for the name refuses the run, though the inventory lists only the annotated file", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/evil_ti"]);
+  const row = rowOf(catalogOf(io), "tt_emb");
+  const gone = M.resolveRun(row, snapshotOf(io), { io });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.safetensors"]]);
+  const m = M.readinessFor(row, snapshotOf(io), { io }).models.find((x) => x.name === "evil_ti.safetensors");
+  assert.deepEqual([m.status, m.found], ["shadowed", ["evil_ti"]]);
+  const bare = embeddingIo(null, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/evil_ti"]);
+  const p = M.readinessFor(rowOf(catalogOf(bare), "tt_emb"), snapshotOf(bare), { io: bare }).models.find((x) => x.name === "evil_ti");
+  assert.deepEqual([p.status, p.resolved_path], ["present", "models/embeddings/evil_ti"], "an unannotated prompt name resolves to the file ComfyUI opens, so the manifest names that file");
+});
+
 // A loader widget that names an embeddings file (ConditioningLoader) is read by ComfyUI's plain loader rule: the exact relative path under
 // the first root, no subfolder search. The prompt lookup (a set of directories, a subfolder file found by the bare name) is not its rule.
 const conditioningIo = (models) => {

@@ -1329,27 +1329,33 @@ const byRel = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
 // one entry that names them all (a junction to a model drive makes the same file appear twice).
 // Files with an extension the class's core loaders do not accept are only counted in `unlisted`.
 // The embeddings class also records, for each file and each directory that shows it, where the file really is (`reals`, parallel to `dirs`):
-// ComfyUI's lookup is by directory, and a link makes one directory, or one file, appear under several names (embeddingHits).
+// ComfyUI's lookup is by directory, and a link makes one directory, or one file, appear under several names (embeddingHits). And it records
+// the files it does not list (`unlisted_files`, the same shape without a size): load_embed asks for the name as written first, with no
+// extension filter, so a file whose whole name is the reference answers it whatever it ends in.
 export function scanModelInventory(roots, io = nodeIo) {
   const classes = {};
   const missing_dirs = [];
   for (const [cls, spec] of Object.entries(roots.classes)) {
     const listed = new Map();
+    const notListed = new Map();
     let unlisted = 0;
     const real = cls === "embeddings";
+    const record = (map, f, d, size) => {
+      const seen = map.get(f.rel);
+      if (seen) {
+        if (!seen.dirs.includes(d.path)) { seen.dirs.push(d.path); if (real) seen.reals.push(io.realpath(f.abs)); }
+        return;
+      }
+      map.set(f.rel, { rel: f.rel, dirs: [d.path], ...(real ? { reals: [io.realpath(f.abs)] } : {}), ...(size ? { size: io.stat(f.abs)?.size ?? null } : {}) });
+    };
     for (const d of spec.dirs) {
       if (!io.list(d.path)) { missing_dirs.push({ class: cls, path: d.path }); continue; }
       for (const f of walkFiles(d.path, io, { follow: true, excludeDirs: [".git"] })) {
-        if (!extListed(f.rel, spec.exts)) { unlisted++; continue; }
-        const seen = listed.get(f.rel);
-        if (seen) {
-          if (!seen.dirs.includes(d.path)) { seen.dirs.push(d.path); if (real) seen.reals.push(io.realpath(f.abs)); }
-          continue;
-        }
-        listed.set(f.rel, { rel: f.rel, dirs: [d.path], ...(real ? { reals: [io.realpath(f.abs)] } : {}), size: io.stat(f.abs)?.size ?? null });
+        if (!extListed(f.rel, spec.exts)) { unlisted++; if (real) record(notListed, f, d, false); continue; }
+        record(listed, f, d, true);
       }
     }
-    classes[cls] = { dirs: spec.dirs.map((d) => d.path), exts: spec.exts, files: [...listed.values()].sort(byRel), unlisted };
+    classes[cls] = { dirs: spec.dirs.map((d) => d.path), exts: spec.exts, files: [...listed.values()].sort(byRel), unlisted, ...(real ? { unlisted_files: [...notListed.values()].sort(byRel) } : {}) };
   }
   return { classes, missing_dirs };
 }
@@ -1376,7 +1382,8 @@ function indexInventory(inv) {
       pushTo(base, baseName(f.rel).toLowerCase(), f);
       pushTo(allBase, baseName(f.rel).toLowerCase(), { class: cls, rel: f.rel });
     }
-    byClass.set(cls, { exact, lower, base, files: c.files ?? [], exts: c.exts ?? null, dirs: c.dirs ?? [] });
+    // `candidates`: the files a name can be answered by. An embeddings file the class does not list can answer the bare name (scanModelInventory).
+    byClass.set(cls, { exact, lower, base, files: c.files ?? [], exts: c.exts ?? null, dirs: c.dirs ?? [], candidates: [...(c.files ?? []), ...(c.unlisted_files ?? [])] });
   }
   const index = { byClass, allBase };
   indexCache.set(inv, index);
@@ -1475,12 +1482,12 @@ function embeddingHits(files, name, fold = false) {
 // varies from run to run: the files are listed, and no file may be named), `case_mismatch` (only a file in another case, which a Linux
 // ComfyUI does not find) or `missing`.
 function resolveEmbedding(c, name) {
-  const hits = embeddingHits(c.files, name);
+  const hits = embeddingHits(c.candidates, name);
   if (hits.length === 1) return { status: "present", resolved: hits[0].rel };
   if (hits.length > 1) {
     return { status: "ambiguous", found: [...new Set(hits.map((h) => h.rel))].sort(), found_in: hits.map((h) => ({ class: "embeddings", rel: h.rel, dir: h.dir })) };
   }
-  const folded = embeddingHits(c.files, name, true);
+  const folded = embeddingHits(c.candidates, name, true);
   if (folded.length > 0) return { status: "case_mismatch", found: [...new Set(folded.map((h) => h.rel))].sort() };
   return { status: "missing" };
 }
