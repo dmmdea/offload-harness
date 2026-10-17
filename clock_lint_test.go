@@ -1052,6 +1052,13 @@ type b struct{}
 func (a) took() time.Duration { return time.Since(time.Now()) }
 func (b) took() time.Duration { return 5 * time.Millisecond }
 func g(x a) bool { return x.took() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a helper name declared twice, the measuring declaration last, is not trusted either", map[string]string{"p/a_test.go": `package p
+import "time"
+type a struct{}
+type b struct{}
+func (a) took() time.Duration { return 5 * time.Millisecond }
+func (b) took() time.Duration { return time.Since(time.Now()) }
+func g(x b) bool { return x.took() > 100*time.Millisecond }`}, map[string]int{}},
 		{"a function of another package with the name of a local helper is not the helper", map[string]string{"p/a_test.go": `package p
 import (
 	"time"
