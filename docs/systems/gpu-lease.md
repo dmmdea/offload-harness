@@ -455,9 +455,17 @@ concurrency test rather than by reading:
     pausing 5 ms with `Atomics.wait`, and returns `null` at once for a missing file or any other error; the wait is on
     only on Windows (`policy.waitsOutDenied`). The bound is a deadline and not a count of pauses because
     `Atomics.wait(5)` sleeps a whole timer tick on Windows (15.4 ms measured), so 20 pauses were 308 ms. Plain
-    `readFileSync` missed nothing in about a million reads against 55,000 renames, so the helper guards an instant that
+    `readFileSync` missed nothing in about a million reads against 55,000 renames issued (half of those runs renamed a link of one
+    seed file, which replaces nothing after the first pass; the fragment says so), so the helper guards an instant that
     measurement could not provoke. `render/lease-read.test.mjs` (the helper and the five readers, with the refusal
-    injected) and `render/lease-read-stress.test.mjs` (a rename-over writer in another process, no miss allowed) pin it.
+    injected) and `render/lease-read-stress.test.mjs` pin it. The stress test runs a writer in another process that renames a
+    different inode over each of three lease files in turn (two seeds per file, alternated; the writer counts the replacements and
+    the test wants every rename to be one) while the five readers loop, and allows no miss. It also wants some of the writer's
+    renames refused on Windows (the readers and the rename really met: 1 to 6 per 600 to 740 renames measured) and none elsewhere,
+    where `rename(2)` is atomic, so it cannot pass without having raced. Its first form linked one seed, which on Linux died on
+    `EEXIST` at the second pass and on Windows renamed a link onto itself (9 real replacements in 4,761 renames, nothing refused).
+    It ran three times on Windows (every rename a replacement) and three times on Linux under WSL (about 16,000 renames a run, 0
+    refused, 0 misses).
   - **A file that is not there is never waited on, on any platform, and no read of one under the epoch lock
     multiplies a wait.** `readSharedFile` retries a permission error only; a missing file is one open and the error. After a release,
     `Leases()` opens `meta.json` once, `EpochIsCurrent` opens `e/<epoch>.json` and `meta.json` once each, and the
@@ -487,7 +495,8 @@ concurrency test rather than by reading:
   - **Linux.** Nothing is delete-pending, so no read waits and none is missed.
     `TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeverWaitedFor` rewrites a held lease's record
     (`Restamp`) and heartbeat (`Renew`) in loops while `Leases()`, `EpochIsCurrent` and the heartbeat read poll: 50 runs
-    in a Linux environment, 0 misses in about 450,000 reads, 0 refused opens, 0 pauses.
+    in a Linux environment, 0 misses in about 450,000 reads, 0 refused opens, 0 pauses. The Node readers on Linux are covered by
+    `render/lease-read-stress.test.mjs` (above), which wants no refused rename there.
   - The epoch counter, the tokens and the waiters are still read with `os.ReadFile`; no finding covers
     them yet.
 

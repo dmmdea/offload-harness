@@ -128,7 +128,7 @@
     102 to 111 ms (3 runs); against one held for 40 ms it returned `null` (the file was then gone) at 43 to 67 ms.
   - **Node miss counts, before and after.** A writer in another process renamed files over `e/7.json`, `meta.json` and `cards/<card>.claim` of 40 scratch lease roots in
     rotation: a Go process with the write pattern of `renameReplacing` (write beside, rename over, retry a refused rename), and a Node process with the same; in half the runs
-    a hard link of a seed file instead of a fresh file, which is the same rename at tens of times the rate (a fresh file costs tens of milliseconds on this host). 4 or 8
+    a hard link of a seed file instead of a fresh file, at tens of times the rate (a fresh file costs tens of milliseconds on this host; see the caveat after the counts). 4 or 8
     reader processes called the real `readEpochRecord`, `readLease`, `readCardClaim`, `checkInheritedLease` and `leaseProgressFile` in a tight loop, with a raw
     `readFileSync` of the same paths beside them to record error codes. 40 s a run; four configurations a matrix (quiet; 30 busy-loop processes with a Go writer and 4 readers,
     with a Node writer and 4, with a Go writer and 8); a 36-thread Windows host that other work was also loading.
@@ -138,18 +138,48 @@
     - So Node misses nothing in this setup, loaded or not. A Node open costs about 0.65 ms here, so each reader holds its file long enough that a rename mostly waits for it (the
       retried renames), and the delete-pending instant is microseconds wide. The helper is a guard against an instant this setup could not provoke; it is shown by the injected
       refusal and by the held delete-pending file above, not by a natural miss.
+    - Caveat found in review. A hard link of ONE seed file is a different file from the one in place only on the first pass: afterwards the live name and the seed are one inode, and
+      renaming a link over another name of its own inode replaces nothing. That scratch script is not kept and was not re-run, so for the hard-link half of these runs the renames
+      counted above are renames issued and not replacements, and that half is weaker evidence than it reads. The fresh-file half replaced on every rename.
   - **Tests** (`render/lease-read.test.mjs`, 17; `render/lease-read-stress.test.mjs`, 1).
     - Red, before any wait (the helper was the plain read): 9 of the 17 failed on their assertions, among them `refused opens are waited out` (`+ null  - '{"epoch":7}'`),
       `a refusal that never ends ...` (`1 reads, want the first and 20 retries`), and, through the real readers, `the fence holds a held card lease current through refused reads
       of its record and of its claim` (`a null record for a card lease falls through to meta.json ... actual: false, expected: true`). Green and meant to stay so: a missing file is read
       once with no pause, any other error code is not retried, a permission error is returned at once off Windows, a released lease reads absent through every reader with each file
-      opened once, and the stress. The stress test cannot be red on the old readers (above); it is a guard.
+      opened once, and the stress. The stress test cannot be red on the old readers (above); it is a guard on the fixed ones, and it is only a guard if its renames really replace a
+      file (the next bullets).
     - The stress test is sized by work, not by the clock: the writer makes 600 renames and stops once the reader has made 150 loops. A first form that ran the writer for 3 s failed on a
       loaded host (`the writer made 1 renames in 3000 ms`); the same work took 1.4 s, 8.4 s and 26 s in the same hour.
+    - **The stress test's first form proved nothing on Windows and failed on Linux** (a review finding; it passed on Windows when it was written and was not run on Linux). The writer
+      hard-linked ONE seed file to `<live>.tmp` and renamed that over the live name. After the first pass the live name and the seed were the same inode, and renaming a link over
+      another name of its own inode replaces nothing. On Linux `rename(2)` then does nothing and leaves `<live>.tmp` where it was, the next `linkSync` threw `EEXIST` outside the
+      retry, the writer died before it wrote its `done` marker, and the reader spun to the 60 s cap. Red, run under WSL (Node 22) on the head before the fix, with the writer's own
+      stderr `Error: EEXIST: file already exists, link '<root>/1/e/7.json.seed' -> '<root>/1/e/7.json.tmp'` and then `not ok 1 - the readers never answer null for a lease file that is
+      there ...`, `duration_ms: 60266`, `error: 'Unexpected end of JSON input'`. CI runs `node --test render/*.test.mjs` on Linux, so that was a red build. On Windows the same
+      loop passed, but a reviewer counted 9 real replacements in 4,761 renames and no refused rename: the others put a link onto its own inode, which Windows allows even over a name a
+      reader holds open, so no reader ever met a refusal and "no miss" pinned nothing.
+    - **Now every rename replaces, and the test proves it.** Each file has two seeds (`<live>.seed` and `<live>.seed2`: two inodes, one body) and the writer alternates them, so each
+      rename installs a different inode than the one in place, as `writeEpochRecord` and `Renew` do with a fresh file. The writer compares the inodes itself and reports `replaced`;
+      the test requires `replaced == renames`. The link is retried on a refusal like the rename, and a writer that throws still writes `done` and reports the error, so the test fails
+      at once with the cause and not at the cap. It also counts the refused renames (`retries`) and requires some on Windows (the writer keeps going until the first, within the
+      cap) and none elsewhere, where `rename(2)` is atomic and never refused: a run in which the writer and the readers never met now fails instead of passing. Go never renames
+      over a card claim (it creates one once and deletes it); the claim is renamed over here all the same, which is harder on its reader than production is.
+    - Measured, the file alone, three runs each. Windows: 612, 702 and 738 renames, every one a replacement; 6, 3 and 1 of them refused and retried; 0 link refusals; 208, 154 and 154
+      loops of the five readers (about 1,800 to 2,500 file reads); 0 misses; 674, 662 and 685 ms. WSL (Linux, Node 22; the scratch root in the distro's own temp directory): 18,252,
+      15,894 and 16,200 renames, every one a replacement; 0 refused; 154, 153 and 151 loops; 0 misses; 462, 461 and 465 ms. The refused count on Windows is small and varies (1 to 6 in
+      600 to 740 renames), so the test leans on the writer going on to the first refusal; it has not seen a run that needed the cap.
+    - Mutants of the test, one at a time, in a scratch copy of `render/` (the tree untouched), the cap cut to 6 s. The writer restored to one seed: red on Windows, `only 18 of 11052
+      renames installed a different inode than the one in place` (3,730 loops, 0 refused); red under WSL in 281 ms and not at a cap, `the writer stopped on an error after 36 renames:
+      EEXIST EEXIST: file already exists, link '<root>/1/e/7.json.seed' -> '<root>/1/e/7.json.tmp'`. The one seed with the `replaced` assertion removed too, on Windows: red on the
+      next assertion, `no rename was refused in 10872 renames against 3622 reader loops (capped: true): the writer and the readers never met, so this run proves nothing`.
+    - Two wall-clock bounds beside counters were dropped, because a loaded runner stalls a test for longer than they allowed: `took < 250` in the real-time bound test of
+      `lease-read.test.mjs`, and the `2 x removeAttempts x removePause` (200 ms) bounds in the three tests of `readrelease_test.go` that count opens and pauses. The counters stay and
+      are the proof; the times are logged. The lower bound of the real-time test stays, and the 308 ms case (20 pauses of a 15.4 ms tick) stays pinned by the fake-clock test, which
+      wants 7 pauses. The header of `lease-read.mjs` no longer says Go renames over a card claim.
     - Mutants of the helper, one at a time, each caught: every error retried (3 tests red, among them `a file that is not there is read once ...`); one pause short of the bound (1);
       the platform gate ignored (`off Windows a permission refusal is returned at once`); `EACCES` not retried (1); no pause between reads (4; a first run of this mutant hung the
       test, so the scripted read now ends a runaway loop and fails). `node --test` on `lease-read.test.mjs`, `lease-read-stress.test.mjs`, `gpu-lock.test.mjs`,
-      `lease-progress.test.mjs` and `no-visible-windows.test.mjs`: 97 tests, all pass.
+      `lease-progress.test.mjs` and `no-visible-windows.test.mjs`: 97 tests, all pass under WSL; the same files without the stress file, 96 tests, all pass on Windows.
 - **The release lane's checks, on the Go side.** The wait of `readSharedFile` is for a file that is there and passes in milliseconds. It must not be paid for a file that is not there,
   and no read under the epoch lock may multiply it. These are guards: the code was already in place, so none could be red first; each was shown red against a mutant. They run with the
   wait forced on (`waitOutDeniedOpens`), so a read that waited on a missing file shows on every platform.
@@ -201,10 +231,13 @@
     is from the 110 ms a wait costs here. The real-ACL before and after runs are one host, a scratch test not committed, and they refuse a file for good; a foreign delete whose handle lingers was not
     reproduced (the harness's own deletes do not make one).
   - Node: the retry was never exercised by a natural refusal. Plain `readFileSync` missed nothing in about a million reads, so that Node can meet `EPERM` from a rename rests on the delete-pending probe and not
-    on a miss, and the wait is shown by the injected refusal and a file held delete-pending, not by a natural rename-over. The 15.4 ms timer tick is one host's; a host where another process has raised the
+    on a miss, and the wait is shown by the injected refusal and a file held delete-pending, not by a natural rename-over. The fixed stress test does make the writer and the readers meet
+    on Windows (the writer's renames are refused 1 to 6 times a run), but not a reader's open be refused: no reader has missed. The 15.4 ms timer tick is one host's; a host where another process has raised the
     timer resolution ticks faster, and the deadline holds either way.
   - A copy of `gpu-lock.mjs` outside this tree (a media repository's own, which `gpu doctor` audits) now needs `lease-read.mjs` beside it, as it already needs `lease-progress.mjs` and
     `comfy-lifecycle.mjs`; a copy that has the format signature but not the new module fails at import. Not checked against any such copy.
+  - The stress test ran on Linux under WSL (Node 22, three runs) before this was pushed, not on the CI image (Ubuntu, Node 24): that run is the first one there. Not run on macOS.
+    The Windows runs were three, on one host (Node 26); the host's own noise was not varied.
   - Go: the claim files (`cards/<card>.claim`) are still read with `os.ReadFile`, as the epoch counter, the tokens and the waiters are; the Node side reads claims through the helper.
   - No GPU job, lease on a real card or seat was used: every lease in these runs is in a scratch lease root, with the stub runner.
   - The double-booking was shown with a held `DELETE`-access handle in a scratch lease root, which models the instant of the rename, and by a tight `Renew`
