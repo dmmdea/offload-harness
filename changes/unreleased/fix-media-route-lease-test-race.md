@@ -172,7 +172,7 @@
       renames installed a different inode than the one in place` (3,730 loops, 0 refused); red under WSL in 281 ms and not at a cap, `the writer stopped on an error after 36 renames:
       EEXIST EEXIST: file already exists, link '<root>/1/e/7.json.seed' -> '<root>/1/e/7.json.tmp'`. The one seed with the `replaced` assertion removed too, on Windows: red on the
       next assertion, `no rename was refused in 10872 renames against 3622 reader loops (capped: true): the writer and the readers never met, so this run proves nothing`.
-    - Two wall-clock bounds beside counters were dropped, because a loaded runner stalls a test for longer than they allowed: `took < 250` in the real-time bound test of
+    - Four wall-clock upper bounds beside counters were dropped (one in Node, three in Go), because a loaded runner stalls a test for longer than they allowed: `took < 250` in the real-time bound test of
       `lease-read.test.mjs`, and the `2 x removeAttempts x removePause` (200 ms) bounds in the three tests of `readrelease_test.go` that count opens and pauses. The counters stay and
       are the proof; the times are logged. The lower bound of the real-time test stays, and the 308 ms case (20 pauses of a 15.4 ms tick) stays pinned by the fake-clock test, which
       wants 7 pauses. The header of `lease-read.mjs` no longer says Go renames over a card claim.
