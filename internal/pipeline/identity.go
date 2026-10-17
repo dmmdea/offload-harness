@@ -26,6 +26,7 @@ package pipeline
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"sort"
 	"strings"
 
@@ -57,6 +58,45 @@ func cacheKeyFor(task core.TaskType, orig, paramsKey, model string, built tasks.
 		templateCacheTag(built.System, built.Grammar, built.User, orig),
 		exemplarCacheTag(shots),
 	)
+}
+
+// resultCacheParamsKey is the params ingredient of a result-cache key: the typed
+// canonical form from tasks.CacheParamsKey, and the handling of the one thing that can go
+// wrong with it. ok == false means these params have no faithful typed form (NaN, a
+// function, a struct...), and the call must then neither READ nor WRITE the result cache.
+// Callers carry that as an empty key (no real key is empty) or as their own cacheable flag.
+//
+// It FAILS CLOSED, and that is the whole point of returning a flag instead of a string:
+// there is deliberately no fallback to a %v rendering or to StableParamsKey. That
+// rendering is type-erased, so a fallback key is one a different request can reach, which
+// is the collision CacheParamsKey exists to close. A call that cannot be keyed is computed
+// every time, which costs a model call and never serves a wrong answer.
+//
+// The skip is reported where the code already reports one: a log line, and
+// meta.CacheBypass, which reaches the ledger row on Run, vision and transcribe. RunTier
+// writes no ledger row (the in-loop pipeline has no ledger and records nothing), so there
+// the reason is on the returned Result.Meta only. Nothing is reported on a node with no
+// cache configured, where nothing was ever cacheable.
+func (p *Pipeline) resultCacheParamsKey(task core.TaskType, params map[string]any, meta *core.Meta) (string, bool) {
+	key, err := tasks.CacheParamsKey(params)
+	if err == nil {
+		return key, true
+	}
+	if p.cache != nil {
+		why := strings.TrimPrefix(err.Error(), tasks.ErrParamsNotKeyable.Error()+": ")
+		if meta.CacheBypass == "" {
+			meta.CacheBypass = "params: " + why
+		}
+		log.Printf("%s: params cannot be keyed for the result cache (%s) — cache bypassed; result computed but not stored", task, why)
+	}
+	return "", false
+}
+
+// paramsKeyable reports whether params have the typed form resultCacheParamsKey needs.
+// The exemplar harvest asks it before it prints params with StableParamsKey.
+func paramsKeyable(params map[string]any) bool {
+	_, err := tasks.CacheParamsKey(params)
+	return err == nil
 }
 
 // tierKeyspaceTag separates RunTier's entries from Run's.
@@ -99,15 +139,31 @@ func cacheKeyForTier(task core.TaskType, orig, paramsKey, model string, built ta
 }
 
 // cacheKeyForTierRender is cacheKeyForTier with the call's render folded in.
-// render is llamaclient.RenderKey of the generate options: "" keeps every
-// pre-0.115.18 key byte-identical (cacheKeyForTier IS that case); a non-empty
-// render joins the model ingredient, so a non-thinking render of a seat never
-// shares an entry with that seat's thinking render — the answers differ.
+// render is llamaclient.RenderKey of the generate options: "" is the historical
+// option-free render (cacheKeyForTier IS that case); a non-empty render is a part of
+// its own next to the keyspace tag, so a non-thinking render of a seat never shares an
+// entry with that seat's thinking render — the answers differ. It is a part, not text
+// appended to the model name with a separator: a model whose name happened to end in
+// the separator and a render would otherwise be the same key as the plain name with
+// that render.
 func cacheKeyForTierRender(task core.TaskType, orig, paramsKey, model string, built tasks.Built, render string) string {
-	if render != "" {
-		model = model + "#" + render
-	}
-	return cache.Key(tierKeyspaceTag, cacheKeyFor(task, orig, paramsKey, model, built, nil))
+	return cache.Key(tierKeyspaceTag, render, cacheKeyFor(task, orig, paramsKey, model, built, nil))
+}
+
+// transcribeCacheKey builds the exact-result cache key for a transcription: the
+// content digest of the source, the model, the language, the protocol and the
+// params, each a part of its own.
+//
+// They were one "<digest>|model=<m>|lang=<l>|proto=<p>" string, with the model
+// repeated after the params. cache.Key length-prefixes every part, so a joined string
+// would hand the field boundaries back to a convention that text in a field (the
+// language is the caller's) is free to imitate. The model is passed once: as a part
+// of its own it needs no second copy to stay apart from its neighbours.
+//
+// The joined string still exists in runTranscribe, as the input of the on-disk media
+// stem. A file name must not change with this key, and a stem is not a cache key.
+func transcribeCacheKey(digest, model, lang, proto, paramsKey string) string {
+	return cache.Key("transcribe", digest, model, lang, proto, paramsKey)
 }
 
 // idHashLen bounds a recorded fingerprint. 16 hex chars = 64 bits: collision
@@ -207,7 +263,17 @@ func templateCacheTag(system, grammar, user, input string) string {
 	if system == "" && grammar == "" && elided == "" {
 		return ""
 	}
-	return shortHash(system + "\x00" + grammar + "\x00" + elided)
+	return partsHash(system, grammar, elided)
+}
+
+// partsHash is shortHash over a LIST of fields, for a tag that is itself one part of
+// a cache key. The fields go through cache.Key, which length-prefixes each one, so
+// text in one field (an exemplar's input is a past caller's text) cannot stand in
+// for the boundary to its neighbour: joined with "\x00" before hashing, the
+// two-field list ("a", "b\x00c") and the list ("a\x00b", "c") were the same tag.
+// One framing for the whole key, not a second one for the tags.
+func partsHash(parts ...string) string {
+	return cache.Key(parts...)[:idHashLen]
 }
 
 // maxExemplarIDs caps how many ids a row records. The ledger's one-line records
@@ -260,14 +326,14 @@ func exemplarCacheTag(shots []exemplars.Pair) string {
 	if len(shots) == 0 {
 		return ""
 	}
-	var b strings.Builder
+	// Input and output of every shot are parts of their own (see partsHash), so the
+	// shot count and each boundary are part of the identity, not text a stored input
+	// could imitate.
+	parts := make([]string, 0, 2*len(shots))
 	for _, s := range shots {
-		b.WriteString(s.Input)
-		b.WriteByte(0)
-		b.WriteString(s.Output)
-		b.WriteByte(0)
+		parts = append(parts, s.Input, s.Output)
 	}
-	return shortHash(b.String())
+	return partsHash(parts...)
 }
 
 // contextHash fingerprints the DECISION ARTIFACTS in force for this call: the

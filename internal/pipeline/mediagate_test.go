@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -72,7 +73,7 @@ func cacheHas(t *testing.T, ca *cache.Cache, key string) bool {
 // could not establish the source file's content identity.
 //
 // The blast radius if this gate is removed is larger than the bug it replaced:
-// for video_describe the key is cache.Key(task, req.Input+"|"+extra, ...), and
+// for video_describe the key is cache.Key(task, req.Input, extra, ...), and
 // `extra` is the ONLY carrier of file identity. When cacheable is false `extra`
 // is "" — so an ungated write would key every unidentifiable video on the prompt
 // alone, colliding all of them.
@@ -145,6 +146,81 @@ func TestRunVisionGenCachesWhenCacheable(t *testing.T) {
 	}
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("model calls = %d, want 1", got)
+	}
+}
+
+// THE VISION KEY BOUNDARY. runVisionGen keys on the caller's req.Input AND the
+// media identity (`extra`). Gluing them into one "input|extra" string let two
+// different (input, extra) pairs spell the same bytes, so a request whose input
+// carried a forged "|" served another request's cached description. Each field is
+// its own key part now, and this drives runVisionGen itself so the assertion is on
+// the behaviour a caller sees (the second request must run the model), not on a
+// mirror of the key formula.
+//
+// The tokens are unique on purpose: templateCacheTag also hashes the prompt, and a
+// token that reappeared in the question would make the second call miss for the
+// wrong reason, passing this test against the glued key too.
+func TestRunVisionGenKeepsInputAndIdentityApart(t *testing.T) {
+	cfg := gateCfg(t)
+	ca := gateCache(t)
+	p := gatePipeline(t, cfg, ca)
+
+	var calls atomic.Int64
+	gen := func(context.Context) (llamaclient.GenResult, error) {
+		return llamaclient.GenResult{Content: fmt.Sprintf("answer %d", calls.Add(1)), TokensIn: 7}, nil
+	}
+	meta := core.Meta{Model: cfg.VisionModel}
+	params := map[string]any{"question": "what happens?"}
+	reqA := core.Request{Task: core.TaskVideoDescribe, Input: "zxq1|zxq2", Params: params}
+	reqB := core.Request{Task: core.TaskVideoDescribe, Input: "zxq1", Params: params}
+	const extraA, extraB = "zxq3", "zxq2|zxq3" // "zxq1|zxq2" + "|" + "zxq3" == "zxq1" + "|" + "zxq2|zxq3"
+
+	run := func(req core.Request, extra string) core.Result {
+		t.Helper()
+		built, err := tasks.Build(req)
+		if err != nil {
+			t.Fatalf("tasks.Build: %v", err)
+		}
+		res := p.runVisionGen(context.Background(), req, built, meta, time.Now(), extra, true, gen)
+		if !res.OK {
+			t.Fatalf("call deferred: %s", res.Reason)
+		}
+		return res
+	}
+
+	first := run(reqA, extraA)
+	if first.Meta.CacheHit {
+		t.Fatal("the first call cannot be a hit on an empty cache")
+	}
+	// The mirror the other tests in this file use must be the key the pipeline wrote,
+	// or an assertion on its absence elsewhere would pass for the wrong reason.
+	builtA, err := tasks.Build(reqA)
+	if err != nil {
+		t.Fatalf("tasks.Build: %v", err)
+	}
+	if !cacheHas(t, ca, visionKeyFor(reqA, builtA, meta, extraA)) {
+		t.Fatal("the first call did not store under visionKeyFor — the mirror has drifted from runVisionGen")
+	}
+	second := run(reqB, extraB)
+	if second.Meta.CacheHit {
+		t.Fatal("a different (input, identity) pair was served the first pair's entry — the key still runs the two fields together")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("model calls = %d, want 2: the second request must run the model", got)
+	}
+	if string(first.Data) == string(second.Data) {
+		t.Fatalf("both requests came back with %q: one request's answer was served to the other", first.Data)
+	}
+	if n := countEntries(t, ca); n != 2 {
+		t.Fatalf("cache holds %d entries, want 2 (one per request)", n)
+	}
+
+	// Not vacuous: the cache still works for a genuine repeat of either request.
+	if !run(reqA, extraA).Meta.CacheHit || !run(reqB, extraB).Meta.CacheHit {
+		t.Fatal("a genuine repeat missed the cache: the fix disabled caching instead of separating the fields")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("model calls = %d after the repeats, want 2", got)
 	}
 }
 
@@ -229,6 +305,73 @@ func TestRunTranscribeCachesWhenIdentifiable(t *testing.T) {
 	}
 	if n := countEntries(t, ca); n == 0 {
 		t.Fatal("an identifiable input stored nothing — the gate disabled caching instead of scoping it")
+	}
+}
+
+// THE TRANSCRIBE KEY, at its call site. TestTranscribeCacheKeyKeepsFieldsApart only
+// calls transcribeCacheKey, so it cannot see which key runTranscribe really stores
+// under: with the glued `cache.Key("transcribe", ident, ...)` put back at the call site
+// every other test in this file stayed green. This drives runTranscribe and ties the
+// entry it stores to transcribeCacheKey, the way the vision test ties its entry to
+// visionKeyFor. The language is given (and the route, which decides the protocol and
+// whether the language is part of the identity, is read from the same function the
+// pipeline uses), so the expected key is fully determined. Both protocol legs run: the
+// OAI leg (an HQ model on the OpenAI shape) keys with no language and proto "oai", so a
+// call site that passed the requested language there would go red on that leg only.
+func TestRunTranscribeStoresUnderTranscribeCacheKey(t *testing.T) {
+	ffmpeg := lookFFmpeg()
+	if ffmpeg == "" {
+		t.Skip("ffmpeg not on PATH")
+	}
+	for _, leg := range []struct {
+		name   string
+		hq     bool
+		params map[string]any
+	}{
+		{"whisper", false, map[string]any{"language": "en"}},
+		{"oai", true, map[string]any{"language": "en", "hq": true}},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			wav := makeSilentWav(t, ffmpeg)
+			cfg := gateCfg(t)
+			cfg.MediaDir = t.TempDir()
+			cfg.FFmpegPath = ffmpeg
+			cfg.Endpoint = fakeWhisper(t)
+			cfg.STTModelHQ = "stt-hq"
+			cfg.STTHQAPI = "openai"
+			ca := gateCache(t)
+			p := gatePipeline(t, cfg, ca)
+
+			res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav, Params: leg.params})
+			if !res.OK {
+				t.Fatalf("transcribe deferred: %s", res.Reason)
+			}
+
+			id, err := p.digestMedia(wav)
+			if err != nil {
+				t.Fatalf("digestMedia: %v", err)
+			}
+			model, useOAI := sttRoute(cfg, leg.hq)
+			if useOAI != leg.hq {
+				t.Fatalf("sttRoute(hq=%v) chose useOAI=%v: the leg does not run the protocol it names", leg.hq, useOAI)
+			}
+			lang, proto := "en", "whisper"
+			if useOAI {
+				lang, proto = "", "oai"
+			}
+			want := transcribeCacheKey(id.Digest, model, lang, proto, cacheParams(leg.params))
+			if !cacheHas(t, ca, want) {
+				t.Fatal("runTranscribe did not store under transcribeCacheKey(digest, model, lang, proto, params): its call site builds the key some other way")
+			}
+			if n := countEntries(t, ca); n != 1 {
+				t.Fatalf("the cache holds %d entries, want exactly the one under transcribeCacheKey", n)
+			}
+
+			// Not vacuous: that entry is the one a repeat reads.
+			if rep := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav, Params: leg.params}); !rep.Meta.CacheHit {
+				t.Fatal("a repeat did not hit the entry stored under transcribeCacheKey")
+			}
+		})
 	}
 }
 
@@ -389,7 +532,7 @@ func countEntries(t *testing.T, ca *cache.Cache) int {
 // visionKeyFor mirrors runVisionGen's key so a test can assert the ABSENCE of the
 // entry an ungated write would have produced.
 func visionKeyFor(req core.Request, built tasks.Built, meta core.Meta, extra string) string {
-	return cache.Key(string(req.Task), req.Input+"|"+extra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar,
+	return cache.Key(string(req.Task), req.Input, extra, cacheParams(req.Params), meta.Model, built.Grammar,
 		templateCacheTag(built.System, built.Grammar, built.User, req.Input))
 }
 
