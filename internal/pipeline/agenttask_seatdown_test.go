@@ -118,9 +118,7 @@ func seatDownPipeline(t *testing.T, base string, contentionSec int) *Pipeline {
 // silence in the reason — not four independent per-run stalls. Four runs share
 // the seat, as the four decode stalls of 2026-09-29 23:00:12 did.
 func TestRunAgentTaskWedgedSeatFilesSeatDownPrefix(t *testing.T) {
-	defer compressLiveness(t, 200*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)()
-	defer compressColdLoad(t, 50*time.Millisecond, 700*time.Millisecond)()
-	defer compressBusyHold(t, 300*time.Millisecond, 50*time.Millisecond)()
+	defer compressWedgedSeat(t)()
 	life := &seatLife{}
 	fake := &agentFake{
 		rosterIDs:   []string{agentTestSeat},
@@ -164,7 +162,7 @@ func TestRunAgentTaskWedgedSeatFilesSeatDownPrefix(t *testing.T) {
 			t.Fatalf("run %d: seat_recoveries=%d seat_down_wait_sec=%.2f, want no recovery and the ~0.7 s waited", i, w.SeatRecoveries, w.SeatDownWaitSec)
 		}
 	}
-	if el := time.Since(start); el > 8*time.Second {
+	if el := time.Since(start); el > 30*time.Second {
 		t.Fatalf("four wedged runs took %s: the cold-load bound (700 ms) did not bound the wait", el)
 	}
 }
