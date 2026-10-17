@@ -374,23 +374,33 @@ func clockForm(ns float64) string {
 	return "elapsed>" + time.Duration(ns).String()
 }
 
-// clockPackageConsts evaluates the const declarations of one package (all its test files together), settling chains that
-// reach across files.
+// clockPackageConsts evaluates the const declarations of one package (its test files and its other files together, because
+// a test reads a const from the code it tests as often as from a neighbouring test), settling chains that reach across
+// files. A name declared twice with different values (two files built for different systems, say) is not trusted, and
+// neither is any const derived from it.
 func clockPackageConsts(files []*ast.File, timeNames map[*ast.File]string) map[string]float64 {
-	consts := map[string]float64{}
-	for pass := 0; pass < 4; pass++ {
-		for _, f := range files {
-			env := &clockEnv{timeName: timeNames[f], consts: consts}
-			for _, decl := range f.Decls {
-				gd, ok := decl.(*ast.GenDecl)
-				if !ok || gd.Tok != token.CONST {
-					continue
-				}
-				for _, spec := range gd.Specs {
-					vs := spec.(*ast.ValueSpec)
-					for i, id := range vs.Names {
-						if i < len(vs.Values) && len(vs.Names) == len(vs.Values) {
+	blocked := map[string]bool{}
+	for round := 0; ; round++ {
+		consts := map[string]float64{}
+		ambiguous := map[string]bool{}
+		for pass := 0; pass < 4; pass++ {
+			for _, f := range files {
+				env := &clockEnv{timeName: timeNames[f], consts: consts}
+				for _, decl := range f.Decls {
+					gd, ok := decl.(*ast.GenDecl)
+					if !ok || gd.Tok != token.CONST {
+						continue
+					}
+					for _, spec := range gd.Specs {
+						vs := spec.(*ast.ValueSpec)
+						for i, id := range vs.Names {
+							if blocked[id.Name] || i >= len(vs.Values) || len(vs.Names) != len(vs.Values) {
+								continue
+							}
 							if v, ok := clockConst(vs.Values[i], env); ok {
+								if old, seen := consts[id.Name]; seen && old != v {
+									ambiguous[id.Name] = true
+								}
 								consts[id.Name] = v
 							}
 						}
@@ -398,12 +408,24 @@ func clockPackageConsts(files []*ast.File, timeNames map[*ast.File]string) map[s
 				}
 			}
 		}
+		if len(ambiguous) == 0 || round == 3 {
+			for name := range blocked {
+				delete(consts, name)
+			}
+			for name := range ambiguous {
+				delete(consts, name)
+			}
+			return consts
+		}
+		for name := range ambiguous {
+			blocked[name] = true
+		}
 	}
-	return consts
 }
 
-// clockSites reads the parsed test files (keyed by slash-separated path; the directory of the path is the package's) and
-// returns every upper bound on measured time under the floor as "file:form" -> count.
+// clockSites reads the parsed Go files (keyed by slash-separated path; the directory of the path and the package name make
+// the package) and returns every upper bound on measured time under the floor as "file:form" -> count. Only a *_test.go
+// file is judged; the other files of the package are read for the constants a test refers to.
 func clockSites(files map[string]*ast.File) map[string]int {
 	byPkg := map[string][]string{} // directory + package name -> file paths
 	for name, f := range files {
@@ -423,7 +445,7 @@ func clockSites(files map[string]*ast.File) map[string]int {
 		for _, name := range names {
 			f := files[name]
 			timeName := timeNames[f]
-			if timeName == "" {
+			if timeName == "" || !strings.HasSuffix(name, "_test.go") {
 				continue
 			}
 			for _, decl := range f.Decls {
@@ -460,7 +482,9 @@ func clockParse(srcs map[string]string) (map[string]*ast.File, error) {
 	return out, nil
 }
 
-// scanClockTree parses every *_test.go file below root, keyed by slash-separated relative path.
+// scanClockTree parses every Go file below root, keyed by slash-separated relative path: the *_test.go files are judged, the
+// others are read for the package-level constants a test refers to. A test file that does not parse is an error; another
+// file that does not parse (a template, a file for a build the walk cannot tell) is left out, and its constants are unknown.
 func scanClockTree(root string) (map[string]*ast.File, error) {
 	fset := token.NewFileSet()
 	out := map[string]*ast.File{}
@@ -478,12 +502,15 @@ func scanClockTree(root string) (map[string]*ast.File, error) {
 			}
 			return nil
 		}
-		if !strings.HasSuffix(p, "_test.go") {
+		if !strings.HasSuffix(p, ".go") {
 			return nil
 		}
 		f, perr := parser.ParseFile(fset, p, nil, parser.SkipObjectResolution)
 		if perr != nil {
-			return perr
+			if strings.HasSuffix(p, "_test.go") {
+				return perr
+			}
+			return nil
 		}
 		out[filepath.ToSlash(rel)] = f
 		return nil
@@ -612,7 +639,49 @@ func f(start time.Time) bool { return time.Since(start) > window }`, "p/b_test.g
 import "time"
 const window = 900 * time.Millisecond
 func g(start time.Time) bool { return time.Since(start) > window }`}, map[string]int{"p/a_test.go:elapsed>600ms": 1, "p/b_test.go:elapsed>900ms": 1}},
+		{"a package-level const declared in a file of the package that is not a test", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start) > poll/2 }`, "p/a.go": `package p
+import "time"
+const poll = time.Second`}, map[string]int{"p/a_test.go:elapsed>500ms": 1}},
+		{"an entry of a const block in a file that is not a test", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(d time.Duration, start time.Time) bool { return time.Since(start) > infoTimeout/2 }`, "p/a.go": `package p
+import "time"
+const (
+	retries     = 3
+	infoTimeout = time.Second
+)`}, map[string]int{"p/a_test.go:elapsed>500ms": 1}},
+		{"a const chain that runs from a test file into a file that is not a test", map[string]string{"p/a_test.go": `package p
+import "time"
+const half = poll / 2
+func f(start time.Time) bool { return time.Since(start) > half }`, "p/a.go": `package p
+import "time"
+const poll = 800 * time.Millisecond`}, map[string]int{"p/a_test.go:elapsed>400ms": 1}},
 		// The controls: none of these is a sub-second upper bound on measured time.
+		{"a const of the package is not a const of its external test package", map[string]string{"p/a.go": `package p
+import "time"
+const poll = time.Second`, "p/b_test.go": `package p_test
+import "time"
+func f(start time.Time) bool { return time.Since(start) > poll/2 }`}, map[string]int{}},
+		{"a file that is not a test is read for constants and never judged", map[string]string{"p/a.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start) > 500*time.Millisecond }`}, map[string]int{}},
+		{"a const declared with two values is not trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start) > poll/2 }`, "p/a_linux.go": `package p
+import "time"
+const poll = time.Second`, "p/a_windows.go": `package p
+import "time"
+const poll = 2 * time.Second`}, map[string]int{}},
+		{"a const derived from one declared with two values is not trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+const half = poll / 2
+func f(start time.Time) bool { return time.Since(start) > half }`, "p/a_linux.go": `package p
+import "time"
+const poll = time.Second`, "p/a_windows.go": `package p
+import "time"
+const poll = 2 * time.Second`}, map[string]int{}},
 		{"a lower bound is clean", map[string]string{"p/a_test.go": `package p
 import "time"
 func f(start time.Time) bool { return time.Since(start) < 500*time.Millisecond }`}, map[string]int{}},
