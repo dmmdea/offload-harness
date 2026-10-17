@@ -1325,13 +1325,28 @@ function extOf(rel) {
 const extListed = (rel, exts) => exts === null || exts.length === 0 || exts.includes(extOf(rel));
 const byRel = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
 
+// foldsCase: does the volume under `dir` look names up without regard to case (NTFS by default, as on a Windows node's ComfyUI)? Asked of the
+// directory itself: one of its entries, spelled with the case swapped, is looked up under it. A directory that holds both spellings is
+// case-sensitive, and one with no entry that has a letter in its name gives no answer (and no file to match either).
+function foldsCase(dir, io) {
+  const entries = io.list(dir) ?? [];
+  const swap = (s) => [...s].map((ch) => (ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase())).join("");
+  for (const e of entries) {
+    const other = swap(e.name);
+    if (other === e.name) continue;
+    return !entries.some((x) => x.name === other) && io.stat(`${dir}/${other}`) !== null;
+  }
+  return false;
+}
+
 // scanModelInventory: what each class would list. A file reachable through several directories is
 // one entry that names them all (a junction to a model drive makes the same file appear twice).
 // Files with an extension the class's core loaders do not accept are only counted in `unlisted`.
 // The embeddings class also records, for each file and each directory that shows it, where the file really is (`reals`, parallel to `dirs`):
 // ComfyUI's lookup is by directory, and a link makes one directory, or one file, appear under several names (embeddingHits). And it records
 // the files it does not list (`unlisted_files`, the same shape without a size): load_embed asks for the name as written first, with no
-// extension filter, so a file whose whole name is the reference answers it whatever it ends in.
+// extension filter, so a file whose whole name is the reference answers it whatever it ends in. And it records the roots whose volume folds
+// case (`case_insensitive_dirs`): isfile follows the file system, so under such a root `foo` is answered by `FOO.pt` too.
 export function scanModelInventory(roots, io = nodeIo) {
   const classes = {};
   const missing_dirs = [];
@@ -1348,14 +1363,19 @@ export function scanModelInventory(roots, io = nodeIo) {
       }
       map.set(f.rel, { rel: f.rel, dirs: [d.path], ...(real ? { reals: [io.realpath(f.abs)] } : {}), ...(size ? { size: io.stat(f.abs)?.size ?? null } : {}) });
     };
+    const folding = [];
     for (const d of spec.dirs) {
       if (!io.list(d.path)) { missing_dirs.push({ class: cls, path: d.path }); continue; }
+      if (real && foldsCase(d.path, io)) folding.push(d.path);
       for (const f of walkFiles(d.path, io, { follow: true, excludeDirs: [".git"] })) {
         if (!extListed(f.rel, spec.exts)) { unlisted++; if (real) record(notListed, f, d, false); continue; }
         record(listed, f, d, true);
       }
     }
-    classes[cls] = { dirs: spec.dirs.map((d) => d.path), exts: spec.exts, files: [...listed.values()].sort(byRel), unlisted, ...(real ? { unlisted_files: [...notListed.values()].sort(byRel) } : {}) };
+    classes[cls] = {
+      dirs: spec.dirs.map((d) => d.path), exts: spec.exts, files: [...listed.values()].sort(byRel), unlisted,
+      ...(real ? { unlisted_files: [...notListed.values()].sort(byRel), case_insensitive_dirs: folding } : {}),
+    };
   }
   return { classes, missing_dirs };
 }
@@ -1383,7 +1403,7 @@ function indexInventory(inv) {
       pushTo(allBase, baseName(f.rel).toLowerCase(), { class: cls, rel: f.rel });
     }
     // `candidates`: the files a name can be answered by. An embeddings file the class does not list can answer the bare name (scanModelInventory).
-    byClass.set(cls, { exact, lower, base, files: c.files ?? [], exts: c.exts ?? null, dirs: c.dirs ?? [], candidates: [...(c.files ?? []), ...(c.unlisted_files ?? [])] });
+    byClass.set(cls, { exact, lower, base, files: c.files ?? [], exts: c.exts ?? null, dirs: c.dirs ?? [], candidates: [...(c.files ?? []), ...(c.unlisted_files ?? [])], folding: new Set(c.case_insensitive_dirs ?? []) });
   }
   const index = { byClass, allBase };
   indexCache.set(inv, index);
@@ -1451,19 +1471,27 @@ const MET = new Set(["present", "present_class_unknown"]);
 // where a file really is (`reals`, one per directory that shows it), and a root that is a link to another root, a link inside a root, or a
 // file linked into two directories answers with the same bytes from either. Two copies are two files and stay two hits. Without `reals`
 // (an inventory that carries none) every directory is taken as distinct.
-function embeddingHits(files, name, fold = false) {
-  const norm = fold ? (s) => s.toLowerCase() : (s) => s;
-  const candidates = [name, ...EMBEDDING_EXTS.map((e) => name + e)].map(norm);
+// Under a root whose volume folds case (`folding`, the roots the inventory found so) isfile answers a name with a file in another case, so
+// the comparison there is in lower case: the file found is still reported by the spelling it has on disk.
+function embeddingHits(files, name, fold = false, folding = new Set()) {
+  const exact = [name, ...EMBEDDING_EXTS.map((e) => name + e)];
+  const lowered = exact.map((s) => s.toLowerCase());
   const byDir = new Map();
   for (const f of files) {
-    const rel = norm(f.rel);
-    const rank = candidates.findIndex((c) => rel === c || rel.endsWith("/" + c));
-    if (rank < 0) continue;
-    const sub = rel.slice(0, rel.length - candidates[rank].length);
+    const match = (lower) => {
+      const rel = lower ? f.rel.toLowerCase() : f.rel;
+      const candidates = lower ? lowered : exact;
+      const rank = candidates.findIndex((c) => rel === c || rel.endsWith("/" + c));
+      return rank < 0 ? null : { rank, sub: f.rel.slice(0, rel.length - candidates[rank].length) };
+    };
+    const asWritten = fold ? null : match(false);
+    const folded = fold || f.dirs.some((root) => folding.has(root)) ? match(true) : null;
     f.dirs.forEach((root, i) => {
-      const dir = sub === "" ? root : `${root}/${sub.slice(0, -1)}`;
+      const m = fold || folding.has(root) ? folded : asWritten;
+      if (!m) return;
+      const dir = m.sub === "" ? root : `${root}/${m.sub.slice(0, -1)}`;
       const prev = byDir.get(dir);
-      if (!prev || rank < prev.rank) byDir.set(dir, { rank, rel: f.rel, dir, real: f.reals?.[i] ?? null });
+      if (!prev || m.rank < prev.rank) byDir.set(dir, { rank: m.rank, rel: f.rel, dir, real: f.reals?.[i] ?? null });
     });
   }
   const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -1482,12 +1510,12 @@ function embeddingHits(files, name, fold = false) {
 // varies from run to run: the files are listed, and no file may be named), `case_mismatch` (only a file in another case, which a Linux
 // ComfyUI does not find) or `missing`.
 function resolveEmbedding(c, name) {
-  const hits = embeddingHits(c.candidates, name);
+  const hits = embeddingHits(c.candidates, name, false, c.folding);
   if (hits.length === 1) return { status: "present", resolved: hits[0].rel };
   if (hits.length > 1) {
     return { status: "ambiguous", found: [...new Set(hits.map((h) => h.rel))].sort(), found_in: hits.map((h) => ({ class: "embeddings", rel: h.rel, dir: h.dir })) };
   }
-  const folded = embeddingHits(c.candidates, name, true);
+  const folded = embeddingHits(c.candidates, name, true, c.folding);
   if (folded.length > 0) return { status: "case_mismatch", found: [...new Set(folded.map((h) => h.rel))].sort() };
   return { status: "missing" };
 }

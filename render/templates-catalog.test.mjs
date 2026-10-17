@@ -4107,7 +4107,10 @@ test("inventory: the embeddings class records the files it does not list (with w
 const foldIo = (files) => {
   const io = memIo(files);
   const stored = new Map();
-  for (const p of Object.keys(files)) stored.set(p.replace(/\\/g, "/").toLowerCase(), p.replace(/\\/g, "/"));
+  for (const p of Object.keys(files)) {
+    const parts = p.replace(/\\/g, "/").split("/");
+    for (let i = 2; i <= parts.length; i++) stored.set(parts.slice(0, i).join("/").toLowerCase(), parts.slice(0, i).join("/")); // the file and every directory above it
+  }
   const fix = (p) => stored.get(String(p).replace(/\\/g, "/").toLowerCase()) ?? p;
   return { ...io, stat: (p) => io.stat(fix(p)), exists: (p) => io.exists(fix(p)) };
 };
@@ -4124,6 +4127,23 @@ test("inventory: an embeddings root whose volume folds case is recorded as such,
   const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: [] }), foldIo({ ...TREE, ...files }));
   assert.deepEqual(inv.classes.embeddings.case_insensitive_dirs, [EMB("").slice(0, -1)]);
   assert.equal(inv.classes.vae.case_insensitive_dirs, undefined, "only the embeddings class looks names up by a file system's rules");
+});
+
+test("inventory (real filesystem): the probe agrees with what the volume does with a name in another case", async () => {
+  const { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const root = mkdtempSync(`${tmpdir().replace(/\\/g, "/")}/tc-emb-case-`).replace(/\\/g, "/");
+  try {
+    mkdirSync(`${root}/comfy/models/embeddings`, { recursive: true });
+    writeFileSync(`${root}/comfy/models/embeddings/Probe.pt`, "x");
+    const folds = existsSync(`${root}/comfy/models/embeddings/pROBE.PT`); // the oracle: ask the volume directly
+    const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls: [] }), C.nodeIo);
+    assert.deepEqual(inv.classes.embeddings.case_insensitive_dirs, folds ? [`${root}/comfy/models/embeddings`] : []);
+    const r = C.readiness([req("embeddings", "probe", { annotated: false })], inv).requirements[0];
+    assert.deepEqual([r.status, r.resolved ?? null], folds ? ["present", "Probe.pt"] : ["case_mismatch", null]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("readiness: on a volume that folds case a name is answered by a file in another case, the way os.path.isfile answers it", () => {
