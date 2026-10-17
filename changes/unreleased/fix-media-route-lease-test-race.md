@@ -269,7 +269,8 @@
     yield stats under the epoch lock stay plain: the only writer of that file runs under the same lock, so no rename is in flight there and a staged file would only hold the lock.
   - **One name for a staged file.** Every writer takes its staged name from `stagingPath` (`meta.json` stages as `meta.json.restamp`, because `.tmp` is the epoch counter's; a claim has none; everything else as
     `<name>.tmp`), and the readers that list or clear staged files ask `isStagedName`, `withoutStagedSuffix` and `stagingPath`. `staging_drift_test.go` fails on a hand-built staged name outside `stagingPath` and
-    on a suffix `stagingPath` can return that `STAGING_SUFFIXES` in `render/lease-read.mjs` does not list.
+    on a suffix `stagingPath` can return that `STAGING_SUFFIXES` in `render/lease-read.mjs` does not list. Node looks for both suffixes beside every name but a claim, a superset of Go's
+    (which stages `meta.json` only as `.restamp` and the rest only as `.tmp`): one extra look, and no per-file table to drift.
   - **Red, then fix** (every platform: the tests run the gate on a clock that only a pause moves, and end the rename at a chosen open or stat). Before the change: a read with a fresh staged file beside an absent
     heartbeat returned `readSharedFile = "", open ...: The system cannot find the file specified. while the rename of the heartbeat was in flight, want the new content 42`; one whose rename never ends returned
     the not-exist error (`the wait ran out and the reader called the file gone; Check would then call the lease gone`); the straddle returned `want the content of the file that is there on the second look`;

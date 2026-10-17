@@ -53,7 +53,11 @@ export const ABSENT_PAUSE_MS = 5;
 /** How young a staged file must be to count as a write that may still be installing: the Go side's stagingFresh (the longest a writer keeps retrying its rename, 2 s, plus a second). */
 export const STAGING_FRESH_MS = 3000;
 
-/** The suffixes the Go writers stage a lease file under before they rename it over the live name (internal/gpulease stagingPath). */
+/**
+ * The suffixes the Go writers stage a lease file under before they rename it over the live name (internal/gpulease stagingPath). Node
+ * looks for both beside every name but a claim, a superset of Go's (which stages meta.json only as .restamp and everything else only as
+ * .tmp): one extra look, and no per-file table to drift.
+ */
 export const STAGING_SUFFIXES = [".tmp", ".restamp"];
 
 /** waitsOutDenied: are the waits worth making here? Windows only (see above). */
