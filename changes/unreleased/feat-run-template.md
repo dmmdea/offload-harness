@@ -230,6 +230,26 @@
   the readiness counts on a snapshot of the measuring machine are unchanged (649 requirements missing, 214 present), and each of the three
   Marigold templates (depth, albedo, surface normal) reads its conditioning file `present`, `in_subfolder` and `present` for a root file, a
   subfolder file and both, the same as at the commit before the embedding work, on a synthetic inventory.
+- **Embedding resolver round (third review).** Each fix has a commit of failing tests before it; the findings that were gaps in the tests
+  (the code was right) have a commit of tests that pass at once and were each shown to bite by a one-line change to a scratch copy of
+  `render/`. Fixed: one directory registered under a spelling that differs only in case (a lower-case drive letter or folder in
+  `extra_model_paths.yaml` beside a junction target spelled another way), which read as two directories because `nodeIo.realpath` kept the
+  case it was given: it is the native one now; one file hard-linked into several embeddings directories, which a path cannot tell from a
+  copy: the inventory records the file system's own id for each file (`ids`, beside `reals`) and keys a hit by it, falling back to the real
+  path for a file the io cannot name; an annotated embedding refused as `shadowed` by the same file under its other path (a root registered
+  inside another root, a link inside a root), because `checkEmbedding` compared two path strings: it compares the file now; a root whose
+  top-level names have no letter that a case swap changes (`2023`, a script without case), which read as case-sensitive: the probe takes the
+  first file below the root whose name has one; a template with no model rows that a probe name blocks, counted as ready by
+  `summarizeReadiness`; the loader widget wording ("the first root", now "the first root that holds it", with a prose test); and the two real
+  file system tests that made their folders by hand and turned `test-scratch.test.mjs` red (they use `scratchDir`). Pinned by tests that
+  were missing: the folder that holds both spellings, the skip of a name with no swappable letter, the case swap, the per-root answer of the
+  case rule, a probe name held by two directories, a probe that keeps its case, a probe from a text the CLIP reading reads nothing from, the
+  name as written winning over a file with an extension appended to it, and a name with capitals compared in lower case. Measured: the
+  directory spelling and the hard link on this machine's NTFS (real files, a real junction); the zero-index guard and the fall-back by path
+  through an io that names its files; the rest through ios that fold or do not.
+  Not verified here: a file system that gives no file index (the id is then absent and a hard link there reads as two files), a network share's
+  index, ReFS, a directory marked case-sensitive inside a case-folding volume (the root's answer is applied to every subfolder, as before), and
+  a case-sensitive Linux volume with real files (the real-file-system tests skip when the volume does not fold case or links cannot be made).
 - **Manifest-side normalisation tests.** `unlistedModels` lower-cases the manifest path, turns its backslashes into slashes and drops the
   `models/<class>/` prefix, and every test manifest was lower case with forward slashes, so no test could fail on that step. Both fixtures
   (`LISTED_MODELS` in `template-run.test.mjs`, `LISTED` in `comfy-run-graph.test.mjs`) now hold a mixed-case entry
