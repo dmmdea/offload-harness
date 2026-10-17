@@ -13,6 +13,7 @@ import { spawnSync } from "node:child_process";
 import * as nfs from "node:fs";
 import * as nos from "node:os";
 import * as C from "./templates-catalog.mjs";
+import { scratchDir } from "./test-scratch.mjs";
 
 const FX = fileURLToPath(new URL("./testdata/templates-catalog/", import.meta.url)).replace(/\\/g, "/").replace(/\/$/, "");
 const REAL_SITE = `${FX}/site-packages`;
@@ -4038,30 +4039,25 @@ test("readiness: a registered root inside another registered root is the same di
 });
 
 test("readiness (real filesystem): an embeddings directory that is a junction to a second registered root reads present, and a real second copy reads ambiguous", async (t) => {
-  const { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const root = mkdtempSync(`${tmpdir().replace(/\\/g, "/")}/tc-emb-link-`).replace(/\\/g, "/");
+  const { mkdirSync, writeFileSync, symlinkSync } = await import("node:fs");
+  const root = scratchDir(t, "tc-emb-link-").replace(/\\/g, "/");
+  mkdirSync(`${root}/comfy/models`, { recursive: true });
+  mkdirSync(`${root}/store/embeddings`, { recursive: true });
+  writeFileSync(`${root}/store/embeddings/EasyNeg.safetensors`, "x");
   try {
-    mkdirSync(`${root}/comfy/models`, { recursive: true });
-    mkdirSync(`${root}/store/embeddings`, { recursive: true });
-    writeFileSync(`${root}/store/embeddings/EasyNeg.safetensors`, "x");
-    try {
-      symlinkSync(`${root}/store/embeddings`, `${root}/comfy/models/embeddings`, "junction");
-    } catch (e) {
-      return t.skip("no permission to create links here"); // a pass here would prove nothing, so say so
-    }
-    const yamls = [{ text: `p:\n  base_path: ${root}/store\n  embeddings: embeddings\n`, dir: `${root}/comfy` }];
-    const roots = C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls });
-    assert.equal(roots.classes.embeddings.dirs.length, 2, "the default directory (the junction) and the registered one");
-    const status = (name) => C.readiness([req("embeddings", name, { annotated: false })], C.scanModelInventory(roots, C.nodeIo)).requirements[0].status;
-    assert.equal(status("EasyNeg"), "present", "one file, reached through two registered roots");
-    mkdirSync(`${root}/copy`, { recursive: true });
-    writeFileSync(`${root}/copy/EasyNeg.safetensors`, "y");
-    const withCopy = C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls: [...yamls, { text: `q:\n  base_path: ${root}/copy\n  embeddings: .\n`, dir: `${root}/comfy` }] });
-    assert.equal(C.readiness([req("embeddings", "EasyNeg", { annotated: false })], C.scanModelInventory(withCopy, C.nodeIo)).requirements[0].status, "ambiguous", "a different file of the same name is a second file");
-  } finally {
-    rmSync(root, { recursive: true, force: true });
+    symlinkSync(`${root}/store/embeddings`, `${root}/comfy/models/embeddings`, "junction");
+  } catch (e) {
+    return t.skip("no permission to create links here"); // a pass here would prove nothing, so say so
   }
+  const yamls = [{ text: `p:\n  base_path: ${root}/store\n  embeddings: embeddings\n`, dir: `${root}/comfy` }];
+  const roots = C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls });
+  assert.equal(roots.classes.embeddings.dirs.length, 2, "the default directory (the junction) and the registered one");
+  const status = (name) => C.readiness([req("embeddings", name, { annotated: false })], C.scanModelInventory(roots, C.nodeIo)).requirements[0].status;
+  assert.equal(status("EasyNeg"), "present", "one file, reached through two registered roots");
+  mkdirSync(`${root}/copy`, { recursive: true });
+  writeFileSync(`${root}/copy/EasyNeg.safetensors`, "y");
+  const withCopy = C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls: [...yamls, { text: `q:\n  base_path: ${root}/copy\n  embeddings: .\n`, dir: `${root}/comfy` }] });
+  assert.equal(C.readiness([req("embeddings", "EasyNeg", { annotated: false })], C.scanModelInventory(withCopy, C.nodeIo)).requirements[0].status, "ambiguous", "a different file of the same name is a second file");
 });
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -4129,21 +4125,16 @@ test("inventory: an embeddings root whose volume folds case is recorded as such,
   assert.equal(inv.classes.vae.case_insensitive_dirs, undefined, "only the embeddings class looks names up by a file system's rules");
 });
 
-test("inventory (real filesystem): the probe agrees with what the volume does with a name in another case", async () => {
-  const { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } = await import("node:fs");
-  const { tmpdir } = await import("node:os");
-  const root = mkdtempSync(`${tmpdir().replace(/\\/g, "/")}/tc-emb-case-`).replace(/\\/g, "/");
-  try {
-    mkdirSync(`${root}/comfy/models/embeddings`, { recursive: true });
-    writeFileSync(`${root}/comfy/models/embeddings/Probe.pt`, "x");
-    const folds = existsSync(`${root}/comfy/models/embeddings/pROBE.PT`); // the oracle: ask the volume directly
-    const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls: [] }), C.nodeIo);
-    assert.deepEqual(inv.classes.embeddings.case_insensitive_dirs, folds ? [`${root}/comfy/models/embeddings`] : []);
-    const r = C.readiness([req("embeddings", "probe", { annotated: false })], inv).requirements[0];
-    assert.deepEqual([r.status, r.resolved ?? null], folds ? ["present", "Probe.pt"] : ["case_mismatch", null]);
-  } finally {
-    rmSync(root, { recursive: true, force: true });
-  }
+test("inventory (real filesystem): the probe agrees with what the volume does with a name in another case", async (t) => {
+  const { mkdirSync, writeFileSync, existsSync } = await import("node:fs");
+  const root = scratchDir(t, "tc-emb-case-").replace(/\\/g, "/");
+  mkdirSync(`${root}/comfy/models/embeddings`, { recursive: true });
+  writeFileSync(`${root}/comfy/models/embeddings/Probe.pt`, "x");
+  const folds = existsSync(`${root}/comfy/models/embeddings/pROBE.PT`); // the oracle: ask the volume directly
+  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls: [] }), C.nodeIo);
+  assert.deepEqual(inv.classes.embeddings.case_insensitive_dirs, folds ? [`${root}/comfy/models/embeddings`] : []);
+  const r = C.readiness([req("embeddings", "probe", { annotated: false })], inv).requirements[0];
+  assert.deepEqual([r.status, r.resolved ?? null], folds ? ["present", "Probe.pt"] : ["case_mismatch", null]);
 });
 
 test("readiness: on a volume that folds case a name is answered by a file in another case, the way os.path.isfile answers it", () => {
