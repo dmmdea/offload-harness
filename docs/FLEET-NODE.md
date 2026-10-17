@@ -848,13 +848,14 @@ The rule is one rule for every route that does work or returns a result. Three c
   `fleet-queue` for the others) and which of "no bearer", "wrong bearer" or "no token configured" it was; never the
   credential presented, the configured one or the payload. A door that is closed (compose-project and media-job on a node
   that has not opted in) answers `403` whatever the caller holds; that is not a credential refusal and it writes no line.
-  What throttles the journal is never a field the caller chooses (the door and the task type are the caller's own text): one
+  What throttles the journal is never a field the caller chooses (the door and the task type are the caller's own text, and so
+  is every header; a test varies each of them from one address): one
   line per caller address and reason every ten seconds, shared by all the doors, at most twenty lines a minute across
   callers, and the first refusal after that minute writes one line counting the rest.
 - **Jobs and artifacts follow the dispatch.** A poll or withdraw of any job answers `401` without the bearer before any of the
   job's state crosses the wire, a re-dispatch of a known job id gets the same verdict, `GET /fleet/media/{name}` needs the
-  bearer for every name (the outputs of a plain dispatch included; the check precedes the file lookup, so the answer never
-  says whether a name exists), and the jobs feed (`GET /fleet/jobs`) omits every row's `error` text without it.
+  bearer for every name (the outputs of a plain dispatch included, and a name the node would refuse as not a bare name;
+  the check precedes the name check and the file lookup, so the answer never says whether a name exists), and the jobs feed (`GET /fleet/jobs`) omits every row's `error` text without it.
 - **Health stays open**, so a roster read works before it holds a credential and a cascade lane can tell whether a base is a
   fleet node. Without the bearer, on a node that has a token, it still carries the node's identity, versions, capacity, counts,
   lanes and model names, and withholds the lease's free-text `reason`, the store steward's status (its `root` is a path on the

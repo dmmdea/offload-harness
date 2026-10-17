@@ -24,11 +24,15 @@
   deliberately goes without is listed in `fleetBearerAllowlist` with the reason (the node's own forward to its local
   engine, the identity read of a cascade base that may not be a fleet node, PAIR's loopback endpoints, the terminal
   view's read of the dashboard it runs against); a stale entry fails too, and a second bare request in an allowed
-  function is a new site. The lint follows names, not types, so a client held under a name it cannot tie to
+  function is a new site. The lint follows a client through the names it is held under (a parameter, a field, a package
+  variable, a package variable that re-exports another package's client, a function that returns one, and a local that
+  copies, points to or dereferences any of these), not through types, so a client held under a name it cannot tie to
   `*http.Client`, and a request handed over through an interface or a function value, are not seen. The shapes it must
-  report are fixtures in `testdata/fleetbearerlint/red` (19: each shorthand on the package and on a client, a `Do` of a
-  request built by a helper, a second request left bare, a helper named `auth` that sets nothing, a stray `Authorization`
-  string, a header set on another request, a value that is not a bearer), and the requests in `testdata/fleetbearerlint/green`
-  must pass; one test holds the lint to both.
-- **Mutant.** Removing the `auth` call from the text client's poll turned both its package test and the source test red. Two more mutants turned the source test red: the accelerator client's `auth` helper setting another header, and the delegator's withdraw request no longer setting the bearer.
+  report are fixtures in `testdata/fleetbearerlint/red` (27: each shorthand on the package and on a client, on a re-exported
+  client, on a client a function hands back and on a local copy of one, a `Do` of a request built by a helper or in its own
+  argument, a second request left bare, a helper named `auth` that sets nothing, a helper of another package that sets
+  nothing, a stray `Authorization` string, a header set on another request, a value that is not a bearer), and the requests in
+  `testdata/fleetbearerlint/green` must pass (a helper of another package that sets the bearer included); one test holds the
+  lint to both.
+- **Mutant.** Removing the `auth` call from the text client's poll turned both its package test and the source test red. Two more mutants turned the source test red: the accelerator client's `auth` helper setting another header, and the delegator's withdraw request no longer setting the bearer. A `Get` in place of the `Do` in the media client's JSON read, and a `Post` in place of the `Do` in the chat client's node lane, which hold their client as a re-exported package variable and as a local copy of a field, turn it red too (the lint that followed names without copies let both through). One-line changes to the lint itself (functions that return a client, a `Do` on an inline request, a helper of another package, the field rule, the package-variable rule, the dereference and pointer rules, and the package-variable resolution cut to one pass) each turn the fixture test red.
 - **Not verified here.** No live node was called; every node in these tests is an in-process loopback server.

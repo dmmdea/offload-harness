@@ -1854,7 +1854,8 @@ local-MCP trust boundary and stays open.
 type, so a media dispatch, a run-graph, the legacy `stt` lane, the poll and withdraw of any job and the read of any artifact in
 `GET /fleet/media/{name}` need the bearer on a node that has a token (pinned by `bearer_every_lane_test.go`; every refusal of a
 credential, at every door that checks one, writes one journal line through `refuseBearer`, `refuseNoToken` or `queueAuthOK`
-(pinned by `refusal_every_door_test.go`), throttled per caller address and reason, never per door or task type). `/fleet/health` and the jobs feed answer without it, with
+(pinned by `refusal_every_door_test.go`), throttled per caller address and reason, never per door, task type or any header the caller sends, pinned by
+`refusal_throttle_key_test.go`). `/fleet/health` and the jobs feed answer without it, with
 their private fields withheld (`healthPayload.withoutPrivateFields`: the lease's free-text `reason`, the store steward's status,
 the weight-file rows of the image, video, animation and audio recipes; the jobs feed's `error` text). A run-graph manifest may
 name a node pack only at a pinned repository and commit (`render/node-packs.json`, its copy `internal/mediacap/nodepacks.go`

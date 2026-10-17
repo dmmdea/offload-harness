@@ -7,7 +7,9 @@
   choosing, with or without a token configured.
 - **Every lane is gated.** `tokenGated` returns true for every task type (the special case for the legacy `stt` lane is gone).
   With a `fleet_auth_token` a request without the bearer is `401`; a poll or withdraw of any job, a re-dispatch of a known job id
-  and every read of `GET /fleet/media/{name}` follow the same rule, and the jobs feed omits every row's `error` text without it.
+  and every read of `GET /fleet/media/{name}` (whatever the name: a name with a separator, a dot-dot or no name at all is
+  `401` for a caller without the credential, because the check runs before the name is validated, and is `400` only for a
+  holder) follow the same rule, and the jobs feed omits every row's `error` text without it.
   The check runs first, before the request body is read on `/fleet/dispatch`, `/fleet/vision` and `/fleet/text` (a caller
   without the credential costs the node no buffering, and a malformed body, a wrong content type or an oversized body is `401`,
   not `400`), before the envelope and task validation and before the task type is looked up, so such a caller learns nothing
@@ -92,6 +94,14 @@
   headers sent to every route of the door table, to a node with no token beyond loopback and to the re-dispatch of a known
   job, with the line and the answer searched for the presented value and for the node's key; appending the header to the line
   turns every case red).
+  A fourth series pins what the third left to the code alone, and each of its tests passes on the code as it stands and turns
+  red under a one-line change: the media route's order (a name that is not a bare name, without the bearer, was `400`
+  before the bearer was looked at; it is red first, then fixed); the journal's throttle key against every field a caller
+  chooses (the User-Agent, the presented bearer or scheme, the forwarding headers, the host, the query, the source port,
+  the job id and task type; a key that followed any of them lets one caller spend the whole minute's lines); one note per
+  refusal, counted through the journal's own tally because the throttle hides a second note; the window's summary line
+  carrying no presented credential; and `gatedJob` for every task type, with a failed run-graph job hidden on the poll and the
+  feed (leaving one more task type out of it turns the test red).
 - **Pins to confirm.** The MultiGPU pin is the documented one. The VideoHelperSuite and GGUF commits are the ones one reference
   node's checkout was at, not documented anywhere (`"pin": "unverified"` in the file); confirm them against the fleet before a
   workflow depends on them, and add a row for any other pack a workflow needs.
