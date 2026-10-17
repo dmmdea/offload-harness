@@ -1095,8 +1095,8 @@ func hostRAMWarmCheck(m *gpulease.Manager, epoch uint64) func(need hostneed.Need
 			self = live[0].Epoch
 		}
 		for _, l := range live {
-			if l.Epoch != self && l.HostRAMGiB > 0 {
-				return fmt.Sprintf("a lane that declared %.1f GiB of host RAM is still live (%s lease epoch %d), and a seat is not loaded while a lane streams", l.HostRAMGiB, l.Class, l.Epoch)
+			if l.Epoch != self && l.DeclaresHostRAM() {
+				return fmt.Sprintf("a lane that declared %.1f GiB of host RAM is still live (%s lease epoch %d), and a seat is not loaded while a lane streams", max(l.HostRAMGiB, l.HostRAMCommitGiB), l.Class, l.Epoch)
 			}
 		}
 		if chk := m.HostRAMCheckWithout(need.GiB, self); !chk.OK {

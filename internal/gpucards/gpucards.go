@@ -215,10 +215,15 @@ func LeaseRows(leases []gpulease.Info) []map[string]any {
 		if l.HostRAMGiB > 0 {
 			row["host_ram_gib"] = round1(l.HostRAMGiB)
 		}
+		// The commit it declared beside the working set (the same figure when it declared one).
+		if l.DeclaresHostRAM() {
+			row["host_ram_commit_gib"] = round1(l.HostRAMCommitGiB)
+		}
 		// Host RAM a lease that clears the seat asked for and the host has not admitted yet (F82): it declares nothing
 		// until then, so the next grant counts nothing for it; the figure is what an operator reads to see what it waits for.
-		if l.HostRAMWaitGiB > 0 {
+		if l.AsksForHostRAM() {
 			row["host_ram_wait_gib"] = round1(l.HostRAMWaitGiB)
+			row["host_ram_wait_commit_gib"] = round1(l.HostRAMWaitCommitGiB)
 		}
 		// When the hold bound releases a lease that waits for the host with its cards held (F82): the outer bound a detached reserve
 		// stamps before its drain, then the wait's own end; present until the host admits the figure.

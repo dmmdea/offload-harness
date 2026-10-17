@@ -103,7 +103,7 @@ func TestTheDetachedHolderOfAnUnloadSeatLeaseTakesItsCardsAndComparesNothing(t *
 // What the wait after the unload says and returns, with a fake lease in place of the real one.
 func TestAwaitHostRAMHeldTellsOnceAndAdmits(t *testing.T) {
 	short := &gpulease.ErrHostRAM{}
-	short.Why = "waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical, 8.0 GiB headroom"
+	short.Why = "waiting for host RAM: needs 30.0 GiB of commit, committed 90.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
 	var gotDeadline time.Time
 	await := func(o gpulease.AwaitHostRAMOptions) error {
 		gotDeadline = o.Deadline
@@ -144,7 +144,7 @@ func TestAwaitHostRAMHeldTellsOnceAndAdmits(t *testing.T) {
 // an impossible figure and a cancelled wait pass through as what they are.
 func TestAwaitHostRAMHeldReturnsTheGrantsRefusalWithTheFlagThatWaitsLonger(t *testing.T) {
 	short := &gpulease.ErrHostRAM{}
-	short.Why = "waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical, 8.0 GiB headroom"
+	short.Why = "waiting for host RAM: needs 30.0 GiB of commit, committed 90.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
 	var out bytes.Buffer
 	err := awaitHostRAMBounded(context.Background(), func(gpulease.AwaitHostRAMOptions) error { return short }, time.Now(), 4*time.Second, hostRAMHold{}, &out)
 	var got *gpulease.ErrHostRAM

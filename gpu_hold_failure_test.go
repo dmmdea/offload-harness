@@ -107,7 +107,7 @@ func TestStatusSaysTheHolderGaveUpAndNeverPromisesItsNextPoll(t *testing.T) {
 		t.Error("a holder that has not given up adds nothing")
 	}
 	// The line with the marker is not the one that promises a poll.
-	line := hostRAMAskedStatus(30, 12*time.Minute, until, "", now, false, 4, false, false, gaveUp, "access denied")
+	line := hostRAMAskedStatus(30, 30, 12*time.Minute, until, "", now, false, 4, false, false, gaveUp, "access denied")
 	if strings.Contains(line, "at its next poll") || !strings.Contains(line, "the holder gave up releasing it") {
 		t.Errorf("nothing polls the lease any more, so the text must not promise a poll:\n%s", line)
 	}

@@ -79,7 +79,7 @@ func TestAWarmBackIsRefusedWhenTheHostCannotTakeTheSeatAndStaysOwed(t *testing.T
 	if m.SeatWarmOwed() != "seat" {
 		t.Errorf("a refused warm stays owed, owed=%q", m.SeatWarmOwed())
 	}
-	for _, want := range []string{"NOT warming seat back", "the host cannot take the seat's 21.0 GiB (seat default)", "committed 85.0 of 100.0 GiB physical", "the warm stays owed"} {
+	for _, want := range []string{"NOT warming seat back", "the host cannot take the seat's 21.0 GiB (seat default)", "committed 85.0 of 100.0 GiB commit limit", "the warm stays owed"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("the refusal must say %q:\n%s", want, out.String())
 		}

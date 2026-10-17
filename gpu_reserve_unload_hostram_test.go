@@ -120,7 +120,7 @@ func TestAnUnloadSeatLeaseStillWaitsWhenTheUnloadDoesNotFreeEnough(t *testing.T)
 	if err == nil {
 		t.Fatalf("the host still reads 90 committed: the lease must end with the host-RAM refusal\n%s", stderr)
 	}
-	for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical, 8.0 GiB headroom", "--wait"} {
+	for _, want := range []string{"waiting for host RAM: needs 30.0 GiB of commit, committed 90.0 of 100.0 GiB commit limit, 8.0 GiB headroom", "--wait"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("the refusal must say %q: %v", want, err)
 		}
@@ -158,7 +158,7 @@ func TestALeaseWithoutUnloadSeatKeepsTheOldOrder(t *testing.T) {
 			args, epochFile := unloadSeatReserve(t, cfgPath, append([]string{"--wait", "2s", "--ram", "30"}, tc.args...)...)
 			var err error
 			stderr := captureStderr(t, func() { err = runGPUReserve(args) })
-			if err == nil || !strings.Contains(err.Error(), "waiting for host RAM: needs 30.0 GiB, committed 95.0 of 100.0 GiB physical") {
+			if err == nil || !strings.Contains(err.Error(), "waiting for host RAM: needs 30.0 GiB of commit, committed 95.0 of 100.0 GiB commit limit") {
 				t.Fatalf("the grant admits the RAM as before and refuses it: %v\n%s", err, stderr)
 			}
 			if n := f.unloads.Load(); n != 0 {
@@ -329,7 +329,7 @@ func TestACardLeaseWhoseUnloadReachesNothingIsComparedToTheHostInTheGrant(t *tes
 		helperCmdFor("TestHelperRecordEpoch")...)
 	var err error
 	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
-	if err == nil || !strings.Contains(err.Error(), "waiting for host RAM: needs 30.0 GiB, committed 95.0 of 100.0 GiB physical") {
+	if err == nil || !strings.Contains(err.Error(), "waiting for host RAM: needs 30.0 GiB of commit, committed 95.0 of 100.0 GiB commit limit") {
 		t.Fatalf("the grant refuses the figure, as it does for a lease that unloads nothing: %v\n%s", err, stderr)
 	}
 	for _, held := range []string{"neither drained nor unloaded", "lease stamped exclusive", "the cards are held"} {

@@ -217,7 +217,7 @@ func TestUseHostMemoryReaderStandsAHostInAndRestores(t *testing.T) {
 	}
 }
 
-// The two conditions are independent (G3(c) of the P0 plan, kept): what can be handed out without paging, less the need and
+// The two conditions are independent: what can be handed out without paging, less the need and
 // the part of the running leases still to load, must stay at or above the headroom, and the commit must fit the commit limit.
 // If WDDM GPU allocations inflate a process's commit, the commit condition sees them and the available one is untouched; if
 // some resident memory is not in commit, the available condition catches it. Either way an admission needs BOTH.

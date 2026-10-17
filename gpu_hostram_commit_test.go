@@ -248,3 +248,78 @@ func TestGPUStatusShowsBothDeclarations(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// useSeatBackedMem installs a host whose reading is withSeat while loaded() reports the fake seat resident and withoutSeat
+// once it is not, on both readings of it (the grant's and the card allocator's).
+func useSeatBackedMem(t *testing.T, loaded func() bool, withSeat, withoutSeat gpuprobe.HostMemory) {
+	t.Helper()
+	read := func() (gpuprobe.HostMemory, bool) {
+		if loaded() {
+			return withSeat, true
+		}
+		return withoutSeat, true
+	}
+	restore := gpuprobe.UseHostMemoryReader(read)
+	old := hostMemoryFn
+	hostMemoryFn = read
+	t.Cleanup(func() { restore(); hostMemoryFn = old })
+}
+
+// THE DEFERRED LEASE CARRIES ITS COMMIT. The seat's weights hold 140 GiB of a 160 GiB commit limit; the lease touches 10 GiB
+// and is charged 30. 140 + 30 is over the bound of 152, so the grant would refuse it, and only its own --unload-seat frees
+// the commit: it takes the cards, unloads the seat, and then, seeing 40 + 30 <= 152, runs.
+func TestAnUnloadSeatLeaseIsNotHeldByTheCommitItsOwnUnloadFrees(t *testing.T) {
+	f := &orderedSwap{drainSwap: &drainSwap{}}
+	f.loaded.Store(true)
+	cfgPath, m := handoffFixture(t, f)
+	useSeatBackedMem(t, f.loaded.Load,
+		gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 60, CommitUsedGiB: 140, CommitLimitGiB: 160},
+		gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 80, CommitUsedGiB: 40, CommitLimitGiB: 160})
+	args, epochFile := unloadSeatReserve(t, cfgPath, "--wait", "6s", "--drain", "--unload-seat", "--ram", "10", "--ram-commit", "30")
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if err != nil {
+		t.Fatalf("a lease that unloads the seat is not held by the commit the unload frees: %v\nunloads=%d\n%s", err, f.unloads.Load(), stderr)
+	}
+	if n := f.unloads.Load(); n != 1 || !fileExists(epochFile) {
+		t.Errorf("the seat is unloaded once and the command runs: unloads=%d ran=%v\n%s", n, fileExists(epochFile), stderr)
+	}
+	if info := m.Inspect(); info.Held {
+		t.Errorf("the reserve must release on exit; still held: %+v", info)
+	}
+}
+
+// NOT LOOSER, on commit. The unload frees only 10 GiB of commit (130 stay): 130 + 30 > 152, while the touched set alone (10 of
+// 80 available) and the commit taken as the touched figure (130 + 10) would both fit. The wait after the unload ends with
+// the commit sentence, and the command never runs: a build that dropped the commit between the verb and the await would run it.
+func TestAnUnloadSeatLeaseStillWaitsOnItsCommitWhenTheUnloadDoesNotFreeEnough(t *testing.T) {
+	f := &orderedSwap{drainSwap: &drainSwap{}}
+	f.loaded.Store(true)
+	cfgPath, m := handoffFixture(t, f)
+	useSeatBackedMem(t, f.loaded.Load,
+		gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 60, CommitUsedGiB: 140, CommitLimitGiB: 160},
+		gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 80, CommitUsedGiB: 130, CommitLimitGiB: 160})
+	shortFloor(t, 400*time.Millisecond)
+	args, epochFile := unloadSeatReserve(t, cfgPath, "--wait", "4s", "--drain", "--unload-seat", "--ram", "10", "--ram-commit", "30")
+	var err error
+	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
+	if n := f.unloads.Load(); n != 1 {
+		t.Fatalf("the lease takes the cards and unloads the seat BEFORE it asks the host: unloads=%d err=%v\n%s", n, err, stderr)
+	}
+	if err == nil {
+		t.Fatalf("the host still reads 130 committed: the lease must end with the commit refusal\n%s", stderr)
+	}
+	var short *gpulease.ErrHostRAM
+	if !errors.As(err, &short) || !short.CommitShort || short.TouchShort {
+		t.Fatalf("the refusal is on the commit alone: %v", err)
+	}
+	if !strings.Contains(err.Error(), "needs 30.0 GiB of commit, committed 130.0 of 160.0 GiB commit limit, 8.0 GiB headroom") {
+		t.Errorf("the refusal carries the commit declared on the command line: %v", err)
+	}
+	if fileExists(epochFile) {
+		t.Errorf("the command ran although the host did not admit its commit\n%s", stderr)
+	}
+	if info := m.Inspect(); info.Held {
+		t.Errorf("the lease is released: %+v", info)
+	}
+}

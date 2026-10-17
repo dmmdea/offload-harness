@@ -430,7 +430,7 @@ func TestADetachedWaitThatWaitEndsAlsoReleasesTheLease(t *testing.T) {
 			if err == nil {
 				t.Fatalf("the host never admitted the lease: the detached reserve must fail\n%s", stderr)
 			}
-			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical", "within --wait 3s", "being released"} {
+			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB of commit, committed 90.0 of 100.0 GiB commit limit", "within --wait 3s", "being released"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the failure must say %q (what ended the wait, and what happens to the lease): %v", want, err)
 				}
@@ -585,7 +585,7 @@ func TestAReleaseOfALeaseTheHolderAlreadyReleasedIsNotAFailure(t *testing.T) {
 // at the moment --wait would have ended the wait too, not only at the hold bound.
 func TestTheStampedEndOfTheWaitIsWhicheverOfTheBoundAndWaitComesFirst(t *testing.T) {
 	short := &gpulease.ErrHostRAM{}
-	short.Why = "waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical, 8.0 GiB headroom"
+	short.Why = "waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
 	for _, tc := range []struct {
 		name     string
 		max      time.Duration

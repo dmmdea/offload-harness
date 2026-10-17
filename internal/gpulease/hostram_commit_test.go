@@ -261,7 +261,7 @@ func TestHostRAMCheckLoadPutsBothFigures(t *testing.T) {
 	}
 }
 
-// F82, the lease that clears the seat first: BOTH figures wait on the record, the await puts both to the one rule, and
+// The lease that clears the seat first: BOTH figures wait on the record, the await puts both to the one rule, and
 // admission moves both into the declared fields in one step.
 func TestADeferredLeaseCarriesBothFiguresThroughTheAwait(t *testing.T) {
 	m, f := commitScoped(t, commitHostMem(80, 130))

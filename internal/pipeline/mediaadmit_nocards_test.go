@@ -56,7 +56,7 @@ func TestACallThatFoundNoCardForWantOfHostRAMGetsAPlaceInLine(t *testing.T) {
 	if res.Meta.ErrClass != "gpu_queued" || res.DeferClass != core.DeferClassCapacity {
 		t.Fatalf("want a queued capacity defer, got ok=%v class=%q/%q: %s", res.OK, res.Meta.ErrClass, res.DeferClass, res.Reason)
 	}
-	if !strings.Contains(res.Reason, "waiting for host RAM: needs 32.8 GiB, committed 95.0 of 100.0 GiB physical, 8.0 GiB headroom") {
+	if !strings.Contains(res.Reason, "waiting for host RAM: needs 32.8 GiB of commit, committed 95.0 of 100.0 GiB commit limit, 8.0 GiB headroom") {
 		t.Errorf("the reason must say what is short: %q", res.Reason)
 	}
 	var p struct {

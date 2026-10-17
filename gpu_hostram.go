@@ -8,9 +8,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -18,6 +20,36 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 )
+
+// resolveReserveHostCommit is the commit a reserve declares beside the working set need: the operator's --ram-commit when given,
+// else the same figure (so a job that states one number is judged on commit at least as strictly as on what it touches). A commit
+// is declared beside the working set it goes with, so it needs a declaration above 0 (--ram given or estimated); it says on out
+// when it differs from the working set. A job whose commit is smaller than its working set (mapped files count in the working set
+// and not in the commit) cannot say so: --ram-commit below --ram is taken as stated, but unset is never below it.
+func resolveReserveHostCommit(given bool, commitGiB float64, need hostneed.Need, out io.Writer) (float64, error) {
+	if !given {
+		return need.GiB, nil
+	}
+	if commitGiB <= 0 {
+		return 0, errors.New("--ram-commit must be a number of GiB above 0 (unset = the --ram figure); a job that is charged no commit declares no host RAM at all, which is --ram 0")
+	}
+	if need.GiB <= 0 {
+		return 0, fmt.Errorf("--ram-commit %s GiB needs a host-RAM declaration above 0 to go with, and --ram resolved to 0 for this reserve: a commit is declared beside the working set the job touches (pass --ram <GiB>)", strconv.FormatFloat(commitGiB, 'f', -1, 64))
+	}
+	if commitGiB != need.GiB {
+		fmt.Fprintf(out, "gpu reserve: declaring %.1f GiB of commit (--ram-commit), beside %.1f GiB touched\n", commitGiB, need.GiB)
+	}
+	return commitGiB, nil
+}
+
+// commitDeclared is the commit to put on the options of a declaration: nothing when it is the touched figure (the lease takes
+// that default), so a reserve that stated one figure declares exactly what it always did.
+func commitDeclared(l gpuprobe.HostLoad) float64 {
+	if l.CommitGiB != l.TouchGiB {
+		return l.CommitGiB
+	}
+	return 0
+}
 
 // resolveReserveHostRAM is the order of internal/hostneed: the operator's --ram when given (0 is a
 // value), else the estimate for a recognised render helper call, else the class default, else

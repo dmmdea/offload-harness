@@ -150,7 +150,7 @@ func TestABouncedNodeReadsAsBouncedAndNeverAsUnreachable(t *testing.T) {
 // and a host short of RAM (it refuses with the same class) was told as a card held by someone else: on a live run that
 // sent an operator looking for a lease that did not exist.
 func TestABouncedRowSaysWhyTheNodePassedTheCallBack(t *testing.T) {
-	ram := "gpu busy: waiting for host RAM: needs 23.1 GiB, committed 36.3 of 63.7 GiB physical, 8.0 GiB headroom"
+	ram := "gpu busy: waiting for host RAM: needs 23.1 GiB of commit, committed 36.3 of 63.7 GiB commit limit, 8.0 GiB headroom"
 	a := startImageNode(t, "node-a", "hidream-o1", map[string]string{"qwen-image-2.1": block(int8Ckpt, "")},
 		nodeOpts{deferAs: ram, deferClass: core.ErrClassGPUBusy})
 	cfg := overflowClient(t, "krea2", map[string]string{"qwen-image-2.1-fast": block(int8Ckpt, "")}, a)

@@ -204,7 +204,7 @@ func membersResidentGiB(members []TreeMember) (float64, bool) {
 // it. A process whose memory cannot be read (another security context) counts 0, which leaves more of the
 // declared need pending: the conservative reading.
 //
-// EACH QUANTITY IS SUBTRACTED FROM ITS OWN DECLARATION (G3 of the P0 plan, extended). A lease declares the host RAM it
+// EACH QUANTITY IS SUBTRACTED FROM ITS OWN DECLARATION. A lease declares the host RAM it
 // will touch, in RAM units (the files that stream from RAM, hostneed), and the working set is what is subtracted from it to
 // find what is still to be touched. It declares the commit it will be charged, and the private bytes are what is subtracted
 // from that: private bytes ARE the currency of the commit charge, memory a process has been promised, resident or not. On

@@ -153,7 +153,7 @@ func TestAHoldBoundOfZeroKeepsTheWholeWait(t *testing.T) {
 			if took := time.Since(start); took < waitFor-500*time.Millisecond {
 				t.Errorf("with no bound the cards are held for the whole --wait (%s), the reserve ended after %s: %v", waitFor, took, err)
 			}
-			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical", "--wait " + waitFor.String(), "pass a longer --wait"} {
+			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit", "--wait " + waitFor.String(), "pass a longer --wait"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the old refusal says %q: %v", want, err)
 				}
@@ -380,7 +380,7 @@ func TestARamHoldMaxAboveTheCeilingIsRefusedBeforeAnythingIsTaken(t *testing.T) 
 // fail: the stamp leaves the record only with admission.
 func TestAFailedStampIsSaidOnce(t *testing.T) {
 	short := &gpulease.ErrHostRAM{}
-	short.Why = "waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical, 8.0 GiB headroom"
+	short.Why = "waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
 	await := func(o gpulease.AwaitHostRAMOptions) error {
 		if o.OnStampError == nil {
 			return nil // the CLI wired nothing: the failures below would be swallowed
