@@ -3992,3 +3992,71 @@ test("readiness: an annotated embeddings entry that carries prompt names keeps t
   assert.equal(embGot([EMB("cond.safetensors"), EMB("sd15/cond.safetensors")], "cond.safetensors", covers)[0], "ambiguous");
   assert.equal(embGot([EMB("sd15/cond.safetensors")], "cond", { annotated: false })[0], "present");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// One physical directory is one directory to ComfyUI, however many ways it is registered or reached. Its set holds a directory string once,
+// and two strings that name the same directory open the same file, so neither is an ambiguity: only distinct files are.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+// An io in which some directories are links: realpath sends the link to its target, as the real one does.
+const linkedIo = (files, links) => {
+  const io = memIo(files);
+  const plain = io.realpath;
+  io.realpath = (p) => {
+    let s = plain(p);
+    for (const [from, to] of Object.entries(links)) if (s === from || s.startsWith(`${from}/`)) s = to + s.slice(from.length);
+    return s;
+  };
+  return io;
+};
+const linkedGot = (files, links, name, yamls = OVERFLOW) => {
+  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls }), linkedIo({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) }, links));
+  const r = C.readiness([req("embeddings", name, { annotated: false })], inv).requirements[0];
+  return [r.status, r.resolved ?? null, r.found ?? null];
+};
+
+test("readiness: an embeddings root that is a link to another registered root is one directory, so a name both show is present, not ambiguous", () => {
+  const links = { "E:/x/overflow/embeddings": "D:/x/comfy/models/embeddings" };
+  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt")], links, "e")[0], "present", "the second root is the first directory again");
+  assert.equal(linkedGot([EMB("sd15/e.pt"), EMB2("sd15/e.pt")], links, "e")[0], "present", "and so is every subfolder of it");
+  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt")], {}, "e")[0], "ambiguous", "two copies (no link) are two files and stay ambiguous");
+  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt"), EMB("sd15/e.pt")], links, "e")[0], "ambiguous", "a link does not hide a distinct second file");
+});
+
+test("readiness: a link inside an embeddings root is one directory with its target", () => {
+  assert.equal(linkedGot([EMB("sd15/e.pt"), EMB("alias/e.pt")], { [EMB("alias")]: EMB("sd15") }, "e", [])[0], "present", "alias is sd15 again");
+});
+
+test("readiness: a registered root inside another registered root is the same directory string, which ComfyUI's set holds once", () => {
+  const nested = [{ text: "p:\n  base_path: D:/x/comfy/models\n  embeddings: embeddings/s2\n", dir: "D:/x/comfy" }];
+  const [status, resolved] = linkedGot([EMB("s2/foo.bin")], {}, "foo", nested);
+  assert.equal(status, "present", "the set holds the string for s2 once, whether it is a registered root or walked from the other");
+  assert.match(resolved, /foo\.bin$/);
+});
+
+test("readiness (real filesystem): an embeddings directory that is a junction to a second registered root reads present, and a real second copy reads ambiguous", async (t) => {
+  const { mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const root = mkdtempSync(`${tmpdir().replace(/\\/g, "/")}/tc-emb-link-`).replace(/\\/g, "/");
+  try {
+    mkdirSync(`${root}/comfy/models`, { recursive: true });
+    mkdirSync(`${root}/store/embeddings`, { recursive: true });
+    writeFileSync(`${root}/store/embeddings/EasyNeg.safetensors`, "x");
+    try {
+      symlinkSync(`${root}/store/embeddings`, `${root}/comfy/models/embeddings`, "junction");
+    } catch (e) {
+      return t.skip("no permission to create links here"); // a pass here would prove nothing, so say so
+    }
+    const yamls = [{ text: `p:\n  base_path: ${root}/store\n  embeddings: embeddings\n`, dir: `${root}/comfy` }];
+    const roots = C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls });
+    assert.equal(roots.classes.embeddings.dirs.length, 2, "the default directory (the junction) and the registered one");
+    const status = (name) => C.readiness([req("embeddings", name, { annotated: false })], C.scanModelInventory(roots, C.nodeIo)).requirements[0].status;
+    assert.equal(status("EasyNeg"), "present", "one file, reached through two registered roots");
+    mkdirSync(`${root}/copy`, { recursive: true });
+    writeFileSync(`${root}/copy/EasyNeg.safetensors`, "y");
+    const withCopy = C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls: [...yamls, { text: `q:\n  base_path: ${root}/copy\n  embeddings: .\n`, dir: `${root}/comfy` }] });
+    assert.equal(C.readiness([req("embeddings", "EasyNeg", { annotated: false })], C.scanModelInventory(withCopy, C.nodeIo)).requirements[0].status, "ambiguous", "a different file of the same name is a second file");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
