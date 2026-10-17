@@ -122,7 +122,8 @@ func (m *Manager) hostMemory() (gpuprobe.HostMemory, bool) {
 // read.
 func (m *Manager) heldGiB(holderPID int) (float64, bool) {
 	if m.workload != nil {
-		return m.workload(holderPID)
+		l, ok := m.workload(holderPID)
+		return l.TouchGiB, ok
 	}
 	return descendantsResidentGiB(holderPID)
 }
@@ -279,6 +280,14 @@ func pendingGiB(live []Info, held func(l Info) (float64, bool)) float64 {
 		}
 	}
 	return pending
+}
+
+// HostRAMPendingCommit is the commit side of HostRAMPending (scaffold: not yet counted).
+func (m *Manager) HostRAMPendingCommit() float64 { return 0 }
+
+// HostRAMCheckLoad is HostRAMCheck for a declaration of both quantities (scaffold: the touched figure only).
+func (m *Manager) HostRAMCheckLoad(need gpuprobe.HostLoad) gpuprobe.HostRAMCheck {
+	return m.HostRAMCheck(need.TouchGiB)
 }
 
 // HostRAMPending is pendingGiB over the leases live right now, for the readers that apply the same

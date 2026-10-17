@@ -68,7 +68,7 @@ func TestADeferredLeaseTakesItsCardsWhereTheHostRefusesAndIsAdmittedWhenTheHostH
 			// A single attempt while the host is short: the grant's sentence, and the record unchanged.
 			err = l.AwaitHostRAM(AwaitHostRAMOptions{})
 			short := asHostRAM(t, err)
-			want := "waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical, 8.0 GiB headroom"
+			want := "waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
 			if err.Error() != want || short.Impossible {
 				t.Fatalf("the await refuses with the grant's words\n got: %s\nwant: %s (impossible=%v)", err.Error(), want, short.Impossible)
 			}

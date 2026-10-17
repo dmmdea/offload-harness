@@ -26,11 +26,17 @@ type fakeHost struct {
 	mem      gpuprobe.HostMemory
 	memOK    bool
 	reads    atomic.Int32
-	heldByPD map[int]float64
+	heldByPD map[int]float64 // working set (resident) below a holder
+	privByPD map[int]float64 // private bytes below a holder, where a test says they differ from the working set
 }
 
 func newFakeHost(commit float64) *fakeHost {
-	return &fakeHost{mem: gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 160}, memOK: true, heldByPD: map[int]float64{}}
+	return &fakeHost{mem: gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 100}, memOK: true, heldByPD: map[int]float64{}, privByPD: map[int]float64{}}
+}
+
+// newFakeHostMem is a fake host with exactly this reading.
+func newFakeHostMem(mem gpuprobe.HostMemory) *fakeHost {
+	return &fakeHost{mem: mem, memOK: true, heldByPD: map[int]float64{}, privByPD: map[int]float64{}}
 }
 
 func (f *fakeHost) setCommit(commit float64) {
@@ -39,10 +45,19 @@ func (f *fakeHost) setCommit(commit float64) {
 	f.mem.CommitUsedGiB = commit
 }
 
+// setHeld says the processes below pid hold gib resident AND privately (the two coincide unless a test says otherwise).
 func (f *fakeHost) setHeld(pid int, gib float64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.heldByPD[pid] = gib
+	delete(f.privByPD, pid)
+}
+
+// setHeldPrivate says the processes below pid are charged gib of private bytes, whatever they hold resident.
+func (f *fakeHost) setHeldPrivate(pid int, gib float64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.privByPD[pid] = gib
 }
 
 // arm installs the fake on m: memory reader and the holder-memory reader.
@@ -54,10 +69,14 @@ func (f *fakeHost) arm(m *Manager) {
 		defer f.mu.Unlock()
 		return f.mem, f.memOK
 	}
-	m.workload = func(pid int) (float64, bool) {
+	m.workload = func(pid int) (gpuprobe.HostLoad, bool) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		return f.heldByPD[pid], true
+		load := gpuprobe.HostLoad{TouchGiB: f.heldByPD[pid], CommitGiB: f.heldByPD[pid]}
+		if p, ok := f.privByPD[pid]; ok {
+			load.CommitGiB = p
+		}
+		return load, true
 	}
 }
 
@@ -98,7 +117,7 @@ func TestACardScopedGrantIsRefusedWhenTheHostCannotTakeItsDeclaredNeed(t *testin
 	before := epochNow(t, m)
 	_, err := m.TryAcquire(ClassMedia, Options{Reason: "krea2", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: 30})
 	short := asHostRAM(t, err)
-	want := "waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical, 8.0 GiB headroom"
+	want := "waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
 	if err.Error() != want {
 		t.Fatalf("refusal text\n got: %s\nwant: %s", err.Error(), want)
 	}
@@ -349,7 +368,7 @@ func TestAcquireWithNoWaitRefusesWithTheHostRAMText(t *testing.T) {
 	_, err := m.Acquire(ClassMedia, Options{Reason: "krea2", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: 30,
 		OnHostRAMWait: func(*ErrHostRAM) { told.Add(1) }})
 	asHostRAM(t, err)
-	if want := "waiting for host RAM: needs 30.0 GiB, committed 80.0 of 100.0 GiB physical, 8.0 GiB headroom"; err.Error() != want {
+	if want := "waiting for host RAM: needs 30.0 GiB of commit, committed 80.0 of 100.0 GiB commit limit, 8.0 GiB headroom"; err.Error() != want {
 		t.Fatalf("refusal text\n got: %s\nwant: %s", err.Error(), want)
 	}
 	if told.Load() != 0 {
@@ -552,7 +571,7 @@ func TestHostRAMCheckIsTheRuleTheGrantApplies(t *testing.T) {
 					t.Errorf("%s: HostRAMCheck.OK = %v but the grant's refusal = %v", name, chk.OK, refusal)
 					continue
 				}
-				if refusal != nil && (chk.Why != refusal.Why || chk.Impossible != refusal.Impossible || chk.ProjectedGiB != refusal.ProjectedGiB || chk.PendingGiB != refusal.PendingGiB) {
+				if refusal != nil && (chk.Why != refusal.Why || chk.Impossible != refusal.Impossible || chk.CommitProjectedGiB != refusal.CommitProjectedGiB || chk.AvailableAfterGiB != refusal.AvailableAfterGiB || chk.PendingGiB != refusal.PendingGiB) {
 					t.Errorf("%s: the check and the grant disagree\n check: %+v\n grant: %+v", name, chk, refusal.HostRAMCheck)
 				}
 				if declared > 0 && need > 0 && chk.PendingGiB != declared {

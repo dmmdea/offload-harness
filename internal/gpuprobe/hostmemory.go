@@ -56,7 +56,8 @@ import (
 // the thing to change when a node's own measurement says so.
 const DefaultHostRAMHeadroomGiB = 8.0
 
-// HostMemory is one reading of the host's memory, in GiB.
+// HostMemory is one reading of the host's memory, in GiB. A reading that leaves CommitLimitGiB at 0 has no commit accounting,
+// and the commit condition is not applied to it (a fixture that omits the limit tests the available condition alone).
 type HostMemory struct {
 	// PhysicalGiB is the installed RAM the OS can use.
 	PhysicalGiB float64
@@ -81,6 +82,10 @@ type HostLoad struct {
 	// CommitGiB is the commit it will be charged: memory the OS promises it, touched or not.
 	CommitGiB float64
 }
+
+// Declares says the job declares any host memory at all: the one test every "does this lease ask the host for something"
+// decision goes through, so a job that declares only a commit is not mistaken for one that declares nothing.
+func (l HostLoad) Declares() bool { return l.TouchGiB > 0 || l.CommitGiB > 0 }
 
 // HostVerdict is the one word for how the host's memory stands against the two lines the admission rule keeps.
 type HostVerdict string

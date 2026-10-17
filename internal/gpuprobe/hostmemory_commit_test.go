@@ -263,3 +263,16 @@ func TestTheWindowsCountersBecomeAReadingWithAHardLimit(t *testing.T) {
 		t.Error("no physical memory is no reading")
 	}
 }
+
+// A job that declares only one quantity still declares.
+func TestHostLoadDeclares(t *testing.T) {
+	cases := []struct {
+		l    HostLoad
+		want bool
+	}{{HostLoad{}, false}, {HostLoad{TouchGiB: 1}, true}, {HostLoad{CommitGiB: 1}, true}, {HostLoad{TouchGiB: 1, CommitGiB: 2}, true}, {HostLoad{TouchGiB: -1, CommitGiB: -1}, false}}
+	for _, c := range cases {
+		if got := c.l.Declares(); got != c.want {
+			t.Errorf("%+v.Declares() = %v, want %v", c.l, got, c.want)
+		}
+	}
+}
