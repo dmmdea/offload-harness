@@ -695,6 +695,9 @@ type Manager struct {
 	// meta.json claim and before it verifies there is no device lease. Tests use it to
 	// land a device lease in exactly that window; production never sets it.
 	afterClaimHook func()
+	// beforeClaimHook, when set, runs just before a whole-node acquisition creates its meta.json claim. A test uses it to look at
+	// what is held at that instant (the epoch lock). Production never sets it.
+	beforeClaimHook func()
 	// legacyWriter makes this Manager write records the way a binary that predates card-scoped
 	// leases did (no Format stamp). A test seam: production never sets it.
 	legacyWriter bool
@@ -1476,6 +1479,9 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		// THE CLAIM: exclusive creation of meta.json, written complete in one call.
 		// This single token is what makes cross-language mutual exclusion real rather
 		// than merely documented.
+		if m.beforeClaimHook != nil {
+			m.beforeClaimHook()
+		}
 		f, err := createClaim(m.metaPath())
 		if err == nil {
 			_, werr := f.Write(rec)
