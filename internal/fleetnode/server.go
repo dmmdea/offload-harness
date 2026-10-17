@@ -2270,14 +2270,23 @@ type dispatchEnvelope struct {
 	Payload     json.RawMessage `json:"payload"`
 }
 
-// handleDispatch is the ack path: validate everything a caller can get wrong
-// (the 400s), resolve a KNOWN job_id first (re-ack/409 — see below; this
+// dispatchRefusalLabel is what the journal calls a refused /fleet/dispatch request. The task type rides in the
+// body, which is not read until the bearer has been checked, so the refusal can name the door and not the lane.
+const dispatchRefusalLabel = "dispatch"
+
+// handleDispatch is the ack path. The bearer comes first, before a byte of the body is read, so a caller without it
+// is answered 401 (403 on a node with no token beyond loopback) and nothing else: no buffering, no decode, no
+// validation answer. Then it validates everything a caller can get wrong
+// (the 400s), resolves a KNOWN job_id first (re-ack/409 — see below; this
 // runs regardless of drain state, since a job this node already owns is
-// never new work), refuse UNKNOWN work during drain (503), then Accept —
+// never new work), refuses UNKNOWN work during drain (503), then Accept —
 // which either starts the run (202 exact echo) or reveals a duplicate (202
 // re-ack for anything not failed, 409 for a previously failed job; never a
 // second render).
 func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeGated(w, r, dispatchRefusalLabel) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxDispatchBody)
 
 	// Soft Content-Type check: a set-but-wrong type is a caller mistake; an
@@ -2308,11 +2317,15 @@ func (s *Server) handleDispatch(w http.ResponseWriter, r *http.Request) {
 // handleVision is the vision lane's ack path (0.116.0): the ONLY thing it
 // does differently from handleDispatch is the body — capped from this node's
 // vision_max_image_bytes (VisionBodyCap) instead of dispatch's 1 MiB, and
-// decoded as a VisionPayload whose job_id rides inside it. The decoded body
-// then becomes a "vision" envelope and joins admit: bearer auth first, then
-// the known-id re-ack, drain, lease, band and queue gates, then BuildRequest
+// decoded as a VisionPayload whose job_id rides inside it. The bearer is checked
+// before the body is read, so a caller without it costs the node no buffering at
+// all, whatever the cap. The decoded body then becomes a "vision" envelope and joins
+// admit: the known-id re-ack, drain, lease, band and queue gates, then BuildRequest
 // (buildVision) and the job store — nothing about admission is re-implemented.
 func (s *Server) handleVision(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeGated(w, r, VisionTask) {
+		return
+	}
 	cap := VisionBodyCap(s.opts.Cfg)
 	r.Body = http.MaxBytesReader(w, r.Body, cap)
 	if ct := r.Header.Get("Content-Type"); ct != "" {
@@ -2344,10 +2357,14 @@ func (s *Server) handleVision(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleText is the text lane's ack path (0.154.0): handleVision with the text lane's
-// small body (TextBodyCap) and a TextPayload whose job_id rides inside it. The decoded
-// body becomes a "text" envelope and joins admit, so bearer auth, the known-id re-ack,
-// drain, lease, band and queue gates and the job store apply exactly as for every job.
+// small body (TextBodyCap) and a TextPayload whose job_id rides inside it. The bearer is
+// checked before the body is read. The decoded body becomes a "text" envelope and joins
+// admit, so the known-id re-ack, drain, lease, band and queue gates and the job store
+// apply exactly as for every job.
 func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
+	if !s.authorizeGated(w, r, TextTask) {
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, TextBodyCap)
 	if ct := r.Header.Get("Content-Type"); ct != "" {
 		if mt, _, err := mime.ParseMediaType(ct); err != nil || mt != "application/json" {
@@ -2375,12 +2392,14 @@ func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
 	s.admit(w, r, dispatchEnvelope{JobID: p.JobID, TaskType: TextTask, Payload: body})
 }
 
-// authorizeGated is the lanes' auth, in one place so the doors that must check the bearer before they
-// read a large body (the stt upload door, the project door) run the SAME rule admit applies to every job:
+// authorizeGated is the lanes' auth, in one place so every door that takes a body (dispatch, vision, text, the stt
+// upload door) checks the bearer BEFORE it reads any of it, and runs the SAME rule admit applies to every job:
 // fleet_auth_token required (401 without it), and with none configured a loopback listener stays open while
 // any other is refused with 403. It writes the 401/403 itself, logs the refusal, and reports whether the
 // request may go on. Every task type is gated (tokenGated): a task type the node does not serve is refused for
-// the credential before it is refused for being unserved, so a stranger learns nothing about the node's lanes.
+// the credential before it is refused for being unserved, so a caller without the credential learns nothing about the
+// node's lanes. The label is a fixed word for the door (the dispatch door passes dispatchRefusalLabel, since its
+// task type is in the body), never text the caller supplies.
 func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType string) bool {
 	if tokenGated(s.opts.Cfg, taskType) {
 		if s.opts.Cfg.FleetAuthToken == "" {
@@ -2414,13 +2433,13 @@ func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType
 
 // refusalLog writes the journal line for a refused request. A caller with no credential must not be able to grow the
 // journal, so what throttles it is never a field the caller chooses (the task type is the caller's own text):
-//   - one line per (caller address, reason) every refusalLogEvery, the first request's task type in it;
+//   - one line per (caller address, reason) every refusalLogEvery, the first request's door or task type in it;
 //   - at most refusalLogBudget lines per refusalLogWindow across all callers;
 //   - what a window kept out of the journal is counted, and the first refusal after the window ends writes one line
 //     saying how many (there is no timer: a node nobody probes writes nothing).
 //
-// The line carries the caller's address and the task type as quoted text, never the credential presented and never the
-// payload.
+// The line carries the caller's address and the door or task type as quoted text, never the credential presented and
+// never the payload.
 type refusalLog struct {
 	mu      sync.Mutex
 	last    map[string]time.Time // (caller, reason) -> when its line was last written
@@ -2492,12 +2511,17 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 	// EVERY LANE'S AUTH (see tokenGated: the agent lane was the first lane gated,
 	// and every task type is now, media dispatch included; the rule is pinned in
 	// bearer_every_lane_test.go).
-	// Ordering: the check needs the DECODED task_type, so it cannot precede
-	// the body decode; it sits immediately AFTER decode and BEFORE everything
-	// else — the job_id check, the known-job re-ack/409 lookup, the drain
-	// gate, BuildRequest — so an unauthorized caller gets only the auth
-	// verdict (401/403), never a validation 400 to probe the envelope with
-	// and never a re-ack/409 that discloses job existence or state.
+	// Ordering: the doors that reach admit have already checked the bearer
+	// BEFORE they read their body (handleDispatch, handleVision, handleText and
+	// handleSTTUpload through authorizeGated; handleComposeProject and
+	// handleMediaJob through their own bearer check), and tokenGated no longer
+	// depends on the task type, so nothing here needs the decoded envelope to
+	// decide. This second check is a backstop, kept on purpose: it costs one
+	// constant-time compare, it makes admit safe for a caller added later that
+	// forgets the first check (a bearerless request still cannot create a job,
+	// get a re-ack/409 that discloses a job's existence or state, or learn which
+	// validation it would fail), and it can never double-log, because a request
+	// the first check refused does not get here.
 	if !s.authorizeGated(w, r, env.TaskType) {
 		return
 	}

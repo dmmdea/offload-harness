@@ -89,9 +89,10 @@ func TestATokenlessRunGraphBeyondLoopbackIsRefusedLoggedAndNeverBuilt(t *testing
 	if n := len(runner.requests()); n != 0 {
 		t.Fatalf("the runner ran %d request(s) for a refused dispatch", n)
 	}
+	// The task type is in the body, which a refused caller's request never gets as far as: the line names the door.
 	line := buf.String()
-	if !strings.Contains(line, "refused") || !strings.Contains(line, "run-graph") {
-		t.Fatalf("the node did not log the refusal naming the task type; log = %q", line)
+	if !strings.Contains(line, "refused") || !strings.Contains(line, `"`+dispatchRefusalLabel+`"`) {
+		t.Fatalf("the node did not log the refusal naming the dispatch door; log = %q", line)
 	}
 	if strings.Contains(line, "s3cret") || strings.Contains(line, "example.invalid") {
 		t.Fatalf("the refusal log carries the token or the payload: %q", line)

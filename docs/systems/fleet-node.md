@@ -1836,9 +1836,10 @@ marker — or, for a vision job, the `Gated` marker — written atomically at cr
 with the record). The comparison hashes both
 sides with SHA-256 before a constant-time compare, making it length-independent. Wrong or
 missing credential → `401` with the standard error envelope (`"error": "unauthorized"`),
-checked immediately after the body decode and **before** the job_id validation and the re-ack
-lookup, so an unauthorized caller can neither probe the field validators nor learn job
-existence.
+checked **before** the request body is read (on the dispatch, vision and text routes: nothing of it is
+buffered or decoded, and a malformed body, a wrong content type or an oversized one is `401`, not `400`) and so
+before the job_id validation and the re-ack lookup. A caller without the credential gets the auth verdict and nothing
+else: no validation answer, no job existence.
 
 With **no token configured**, a non-loopback listener refuses every dispatch, of any task type, outright —
 `403 fleet lanes require fleet_auth_token on a non-loopback listener` — and `fleet-serve` does not start in that

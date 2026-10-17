@@ -8,8 +8,10 @@
 - **Every lane is gated.** `tokenGated` returns true for every task type (the special case for the legacy `stt` lane is gone).
   With a `fleet_auth_token` a request without the bearer is `401`; a poll or withdraw of any job, a re-dispatch of a known job id
   and every read of `GET /fleet/media/{name}` follow the same rule, and the jobs feed omits every row's `error` text without it.
-  The check runs first, before validation and before the task type is looked up, so a stranger learns nothing about the node's
-  lanes. Each refusal is logged with the caller's address and the task type (never the credential or the payload). The journal
+  The check runs first, before the request body is read on `/fleet/dispatch`, `/fleet/vision` and `/fleet/text` (a caller
+  without the credential costs the node no buffering, and a malformed body, a wrong content type or an oversized body is `401`,
+  not `400`), before validation and before the task type is looked up, so such a caller learns nothing about the node's
+  lanes. `admit` keeps its own check as a backstop. Each refusal is logged with the caller's address and the door or task type (never the credential or the payload). The journal
   cannot be grown by a caller: the throttle is keyed on the caller's address and the reason, never on the task type (which the
   caller chooses), at most twenty lines are written a minute across callers, and the first refusal after that minute writes one
   line counting the rest.

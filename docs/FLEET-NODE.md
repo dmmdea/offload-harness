@@ -832,9 +832,14 @@ The rule is one rule for every route that does work or returns a result. Three c
   `compose-video`), and any task type a later release adds (`tokenGated` returns true for all of them). Before this rule
   a media task was admitted with no check at all, so any peer that could reach a listener beyond loopback could dispatch a
   `run-graph` whose manifest names node packs for the node to clone and install.
-- **The check runs first.** It precedes the job_id validation, the known-job lookup and the task validation, so an
-  unauthorized caller can neither probe field validation nor learn job state, and a task type the node does not serve is
-  refused for the credential before it is refused for being unserved. Each refusal is logged (the caller's address, the task
+- **The check runs first.** On `/fleet/dispatch`, `/fleet/vision` and `/fleet/text` it precedes the body read (nothing of
+  the body is buffered, decoded or type-checked for a caller without the credential), and on every lane it precedes the
+  job_id validation, the known-job lookup and the task validation. A caller without the credential is answered `401` (or
+  `403` on a node with no token beyond loopback) and nothing else: a malformed body, a wrong content type and an
+  oversized body are all `401`, not `400`, it learns no job state, and a task type the node does not serve is
+  refused for the credential before it is refused for being unserved. The `400` answers (and the 1 MiB, vision and text
+  body caps) are what a bearer holder gets. The stt upload, chat, kvslot, PAIR relay, compose-project and media-job doors
+  checked the credential before their body read already. Each refusal is logged (the caller's address, the door or task
   type, which of "no bearer", "wrong bearer" or "no token configured" it was; never the credential or the payload). What
   throttles the journal is never a field the caller chooses (the task type is the caller's own text): one line per caller
   address and reason every ten seconds, at most twenty lines a minute across callers, and the first refusal after that
@@ -1273,8 +1278,9 @@ delegator side is `internal/visionremote` (the `route` parameter on `offload_vqa
 `/fleet/dispatch` caps its body at 1 MiB — right for every media envelope and agent contract,
 and a fifth of one image at the configured cap. `/fleet/vision` sizes its body from THIS node's
 `vision_max_image_bytes` (× 4/3 for base64, plus 64 KiB of envelope slack — `VisionBodyCap`) and
-then joins the **same** admission path as every other job (`Server.admit`): bearer auth, known-id
-re-ack, drain, lease, band, queue cap, then `BuildRequest` and the job store. It stays
+then joins the **same** admission path as every other job (`Server.admit`): known-id
+re-ack, drain, lease, band, queue cap, then `BuildRequest` and the job store (the bearer was checked before the body was
+read; `admit` checks it again as a backstop). It stays
 concurrency-CAPPED (it contends for the shared llama-swap endpoint, exactly like agent work).
 
 ### Payload
