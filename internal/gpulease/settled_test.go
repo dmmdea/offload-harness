@@ -79,6 +79,11 @@ func TestAStatOfALeaseFileIsSettledOnlyWhenNoRenameCanBeInstallingIt(t *testing.
 		{"absent, a staged file just under the freshness bound", "hb.1", func(t *testing.T, p string) { stage(t, p, stagingFresh-time.Second) }, true, false},
 		{"absent, a staged file older than the bound (a writer that died)", "hb.1", func(t *testing.T, p string) { stage(t, p, stagingFresh+2*time.Second) }, false, true},
 		{"absent, a staged file dated in the future (a clock that stepped back)", "hb.1", func(t *testing.T, p string) { stage(t, p, -time.Hour) }, true, false},
+		{"absent, a directory in the staged name's place (a writer stages a file, never a directory)", "hb.1", func(t *testing.T, p string) {
+			if err := os.Mkdir(stagingPath(p), 0o777); err != nil {
+				t.Fatal(err)
+			}
+		}, false, true},
 		{"the whole-node record with its restamp file beside it", "meta.json", func(t *testing.T, p string) { stage(t, p, 0) }, true, false},
 		{"the whole-node record with only a .tmp beside it, which is not its staging name", "meta.json", func(t *testing.T, p string) {
 			if err := os.WriteFile(p+".tmp", []byte("1"), 0o666); err != nil {
