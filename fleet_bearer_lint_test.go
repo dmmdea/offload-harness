@@ -22,8 +22,10 @@ import (
 //     judgment is per request, not per function: each request value (a second request in the same function, or the
 //     same name assigned again) needs its own call, and a request that is not kept in a variable cannot be given one;
 //   - a call to http.Get, http.Post, http.Head or http.PostForm, and to the same four methods on an *http.Client (a
-//     parameter, a field, a package variable, http.DefaultClient, a client built on the spot, or the result of a
-//     function that returns one): they build and send a request in one call and leave nowhere to set a header;
+//     parameter, a field, a package variable, http.DefaultClient, a client built on the spot, the result of a
+//     function that returns one, a package variable that re-exports a client another package holds, or a local that
+//     copies, points to or dereferences any of these): they build and send a request in one call and leave nowhere to
+//     set a header;
 //   - a Do on a request that was not built by http.NewRequest in the same function, was not handed in as a
 //     *http.Request, and has no bearer-setting call on it, and a Do on a request built inline.
 //
@@ -257,13 +259,25 @@ func calleeName(call *ast.CallExpr) string {
 	return ""
 }
 
-// holdsClient: the expression is a client literal or a call of a function that returns one.
-func (l *bearerLint) holdsClient(e ast.Expr) bool {
+// holdsClient: the expression is, or hands back, an *http.Client: a client literal, a call of a function that returns
+// one, a field or package variable that holds one (by name, in any package: what a re-export or a copy of a field
+// reads), a package variable of dir, a local that local reports as holding one, or a pointer to or a copy of any of
+// these. local may be nil outside a function body.
+func (l *bearerLint) holdsClient(dir string, local func(string) bool, e ast.Expr) bool {
 	if isClientLiteral(e) {
 		return true
 	}
-	if call, ok := unparen(e).(*ast.CallExpr); ok {
-		return l.clientFuncs[calleeName(call)]
+	switch v := unparen(e).(type) {
+	case *ast.CallExpr:
+		return l.clientFuncs[calleeName(v)]
+	case *ast.SelectorExpr:
+		return l.clientFields[v.Sel.Name]
+	case *ast.Ident:
+		return l.pkgClients[dir][v.Name] || (local != nil && local(v.Name))
+	case *ast.StarExpr:
+		return l.holdsClient(dir, local, v.X)
+	case *ast.UnaryExpr:
+		return v.Op == token.AND && l.holdsClient(dir, local, v.X)
 	}
 	return false
 }
@@ -296,8 +310,10 @@ func (l *bearerLint) collectClients() {
 			return true
 		})
 	}
-	// Package variables, twice: a variable can be initialised from a function that returns a client.
-	for pass := 0; pass < 2; pass++ {
+	// Package variables, until nothing new turns up: a variable can be initialised from a function that returns a client,
+	// from a variable of this package, or from one another package holds.
+	for changed := true; changed; {
+		changed = false
 		for _, lf := range l.files {
 			for _, decl := range lf.file.Decls {
 				gd, ok := decl.(*ast.GenDecl)
@@ -307,12 +323,16 @@ func (l *bearerLint) collectClients() {
 				for _, spec := range gd.Specs {
 					vs := spec.(*ast.ValueSpec)
 					for i, name := range vs.Names {
-						if isClientType(vs.Type) || (i < len(vs.Values) && l.holdsClient(vs.Values[i])) {
+						if name.Name == "_" || l.pkgClients[lf.dir][name.Name] {
+							continue
+						}
+						if isClientType(vs.Type) || (i < len(vs.Values) && l.holdsClient(lf.dir, nil, vs.Values[i])) {
 							if l.pkgClients[lf.dir] == nil {
 								l.pkgClients[lf.dir] = map[string]bool{}
 							}
 							l.pkgClients[lf.dir][name.Name] = true
 							l.clientFields[name.Name] = true
+							changed = true
 						}
 					}
 				}
@@ -538,34 +558,27 @@ func (l *bearerLint) judge(lf *lintFile, u unit) []string {
 		}
 	}
 	noteParams(u.params)
+	isLocalClient := func(name string) bool { return locals[name] }
 	ast.Inspect(u.node, func(n ast.Node) bool {
 		switch v := n.(type) {
 		case *ast.FuncLit:
 			noteParams(v.Type.Params)
 		case *ast.ValueSpec:
 			for i, name := range v.Names {
-				if isClientType(v.Type) || (i < len(v.Values) && l.holdsClient(v.Values[i])) {
+				if isClientType(v.Type) || (i < len(v.Values) && l.holdsClient(lf.dir, isLocalClient, v.Values[i])) {
 					locals[name.Name] = true
 				}
 			}
 		case *ast.AssignStmt:
 			for i, rhs := range v.Rhs {
-				if id, ok := v.Lhs[min(i, len(v.Lhs)-1)].(*ast.Ident); ok && l.holdsClient(rhs) {
+				if id, ok := v.Lhs[min(i, len(v.Lhs)-1)].(*ast.Ident); ok && l.holdsClient(lf.dir, isLocalClient, rhs) {
 					locals[id.Name] = true
 				}
 			}
 		}
 		return true
 	})
-	isClient := func(x ast.Expr) bool {
-		switch v := unparen(x).(type) {
-		case *ast.Ident:
-			return locals[v.Name] || l.pkgClients[lf.dir][v.Name]
-		case *ast.SelectorExpr:
-			return isHTTPSel(v, "DefaultClient") || l.clientFields[v.Sel.Name]
-		}
-		return l.holdsClient(x)
-	}
+	isClient := func(x ast.Expr) bool { return l.holdsClient(lf.dir, isLocalClient, x) }
 
 	var found []lintHit
 
