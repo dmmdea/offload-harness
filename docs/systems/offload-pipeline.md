@@ -490,10 +490,11 @@ another request's key. A caller therefore passes every field as a separate part 
 several fields into one part with a separator of its own (`input + "|" + id`): the encoding cannot
 see inside a part, so a glued part rebuilds the ambiguity one level up. The two tags that are
 themselves one part of a key (the template tag and the exemplar tag) are hashed through `cache.Key`
-too, not through a second format. The parameters part is `tasks.StableParamsKey`, which escapes `\`,
-`;` and `=` in keys and values so that two parameter maps cannot render one string; for parameters
-without those characters it renders exactly as it always did, which matters because the same string
-names the render, video and edit output files.
+too, not through a second format. The parameters part is `tasks.StableParamsKey`, which
+percent-escapes `%`, `;` and `=` in keys and values so that two parameter maps cannot render one
+string; for parameters without those characters (Windows paths with backslashes included) it renders
+exactly as it always did, which matters because the same string names the render, video and edit
+output files.
 
 The encoding changed once. It used to join the parts with a NUL byte, so `Key("a", "b")` was
 `Key("a\x00b")` and a request whose text held a NUL could forge a boundary. Every key is derived from

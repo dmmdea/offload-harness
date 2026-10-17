@@ -143,13 +143,14 @@ func unescapedParamsKey(p map[string]any) string {
 }
 
 // TestStableParamsKeyOrdinaryParamsAreUnchanged holds the rendering of every params
-// map whose keys and rendered values contain none of "\", ";" and "=" to the exact
+// map whose keys and rendered values contain none of "%", ";" and "=" to the exact
 // bytes it had before the escaping. That is a promise to more than the cache: the
 // string names the render-/video-/edit- output files (a stem is a hash of prompt +
 // this string, and an existing file is found again by that name) and is recorded on
 // the persisted exemplar rows, so a change to it for ordinary params would orphan
-// both. The expected strings are literals, written from the format, not computed by
-// StableParamsKey.
+// both. Backslashes are ordinary: image, edit and upscale params carry Windows paths,
+// and those file names must not move. The expected strings are literals, written from
+// the format, not computed by StableParamsKey.
 func TestStableParamsKeyOrdinaryParamsAreUnchanged(t *testing.T) {
 	cases := []struct {
 		name string
@@ -176,6 +177,11 @@ func TestStableParamsKeyOrdinaryParamsAreUnchanged(t *testing.T) {
 		},
 		{"paths and urls without backslashes", map[string]any{"path": "/tmp/a/b.png", "url": "http://host:8080/y"}, "path=/tmp/a/b.png;url=http://host:8080/y;"},
 		{"an empty key and an empty value", map[string]any{"": ""}, "=;"},
+		// The backslash is not special to the format, so these render as they always did.
+		{"Windows paths", map[string]any{"image": `C:\imgs\a.png`, "mask": `C:\imgs\m.png`}, `image=C:\imgs\a.png;mask=C:\imgs\m.png;`},
+		{"a UNC path", map[string]any{"share": `\\server\share\a.png`}, `share=\\server\share\a.png;`},
+		{"backslashes at the end of a key and of a value", map[string]any{"k": `trailing\`, `key\`: "v"}, `k=trailing\;key\=v;`},
+		{"a lone backslash value", map[string]any{"b": `\`}, `b=\;`},
 	}
 	for _, tc := range cases {
 		if got := StableParamsKey(tc.in); got != tc.want {
@@ -185,36 +191,43 @@ func TestStableParamsKeyOrdinaryParamsAreUnchanged(t *testing.T) {
 }
 
 // TestStableParamsKeyEscapesWhatItMustEscape pins the escaping itself for the values
-// that are NOT ordinary: "\", ";" and "=" each get a backslash, in keys and in the
-// rendered value alike, and the backslash escapes itself so a value ending in one
-// cannot swallow the separator after it.
+// that are NOT ordinary: "%", ";" and "=" are written as "%25", "%3B" and "%3D", in
+// keys and in the rendered value alike. "%" is the escape character, so it is escaped
+// too: that is what keeps a value that spells an escape ("%3B") apart from the
+// character it spells (";"). Backslashes are left alone.
 func TestStableParamsKeyEscapesWhatItMustEscape(t *testing.T) {
 	cases := []struct {
 		name string
 		in   map[string]any
 		want string
 	}{
-		{"a semicolon and an equals sign in a value", map[string]any{"a": "1;b=2"}, `a=1\;b\=2;`},
-		{"a semicolon and an equals sign in a key", map[string]any{"a=x;b": "y"}, `a\=x\;b=y;`},
-		{"a backslash", map[string]any{"p": `C:\imgs\a.png`}, `p=C:\\imgs\\a.png;`},
-		{"a trailing backslash does not swallow the separator", map[string]any{"a": `x\`, "b": "y"}, `a=x\\;b=y;`},
-		{"inside a nested map", map[string]any{"o": map[string]any{"k": "v;w"}}, `o=map[k:v\;w];`},
+		{"a semicolon and an equals sign in a value", map[string]any{"a": "1;b=2"}, `a=1%3Bb%3D2;`},
+		{"a semicolon and an equals sign in a key", map[string]any{"a=x;b": "y"}, `a%3Dx%3Bb=y;`},
+		{"a percent sign", map[string]any{"p": "100%"}, `p=100%25;`},
+		{"a value that spells an escape", map[string]any{"p": "%3B"}, `p=%253B;`},
+		{"a trailing percent does not run into the separator", map[string]any{"a": "x%", "b": "y"}, `a=x%25;b=y;`},
+		{"a percent sign in a key", map[string]any{"50%": "y"}, `50%25=y;`},
+		{"inside a nested map", map[string]any{"o": map[string]any{"k": "v;w"}}, `o=map[k:v%3Bw];`},
+		{"a backslash next to a special character", map[string]any{"p": `C:\a;b`}, `p=C:\a%3Bb;`},
 	}
 	for _, tc := range cases {
 		if got := StableParamsKey(tc.in); got != tc.want {
 			t.Errorf("%s: StableParamsKey(%v) = %q, want %q", tc.name, tc.in, got, tc.want)
 		}
 	}
+	if StableParamsKey(map[string]any{"p": "%3B"}) == StableParamsKey(map[string]any{"p": ";"}) {
+		t.Error(`a value that spells "%3B" shares a params key with the value ";"`)
+	}
 }
 
 // TestStableParamsKeyIsInjectiveOverASmallAlphabet is the exhaustive form of the
 // pairs above: every params map of up to two entries whose keys and values are
-// strings of up to two characters from the alphabet {a, =, ;, \}, the three
+// strings of up to two characters from the alphabet {a, %, =, ;}, the three
 // characters the format treats specially and one ordinary one. No two different
 // maps may render the same string, whatever the pair. (About 93,000 maps; it runs
 // in milliseconds.)
 func TestStableParamsKeyIsInjectiveOverASmallAlphabet(t *testing.T) {
-	alphabet := []string{"a", "=", ";", `\`}
+	alphabet := []string{"a", "%", "=", ";"}
 	strs := []string{""}
 	for _, c := range alphabet {
 		strs = append(strs, c)
@@ -246,5 +259,40 @@ func TestStableParamsKeyIsInjectiveOverASmallAlphabet(t *testing.T) {
 	}
 	if len(seen) < 90000 {
 		t.Fatalf("only %d maps were checked, the enumeration is not what the doc says", len(seen))
+	}
+}
+
+// TestStableParamsKeyIsInjectiveOverEscapeSpellings closes what the alphabet above
+// cannot reach: an escape is three characters ("%3B"), so a format that forgot to
+// escape "%" itself only collides on a value that SPELLS an escape, and that needs
+// the characters of the spelling in the alphabet. Every single-entry map whose key
+// and value are strings of up to three characters from {a, %, ;, =, 3, B, D}
+// (160,000 maps) must render differently, so a value "%3B" is kept apart from the
+// value ";" and "%3D" from "=".
+func TestStableParamsKeyIsInjectiveOverEscapeSpellings(t *testing.T) {
+	alphabet := []string{"a", "%", ";", "=", "3", "B", "D"}
+	strs := []string{""}
+	for _, c := range alphabet {
+		strs = append(strs, c)
+		for _, d := range alphabet {
+			strs = append(strs, c+d)
+			for _, e := range alphabet {
+				strs = append(strs, c+d+e)
+			}
+		}
+	}
+
+	seen := make(map[string][2]string, len(strs)*len(strs))
+	for _, k := range strs {
+		for _, v := range strs {
+			got := StableParamsKey(map[string]any{k: v})
+			if prev, dup := seen[got]; dup {
+				t.Fatalf("{%q: %q} and {%q: %q} both render %q", prev[0], prev[1], k, v, got)
+			}
+			seen[got] = [2]string{k, v}
+		}
+	}
+	if want := 400 * 400; len(seen) != want {
+		t.Fatalf("checked %d maps, want %d: the enumeration is not what the doc says", len(seen), want)
 	}
 }

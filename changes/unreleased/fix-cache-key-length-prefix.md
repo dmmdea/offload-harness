@@ -33,12 +33,13 @@
     test that said `cache.Key` joins with a NUL, changed.
 - **The params string (`internal/tasks`).** `StableParamsKey` renders `<key>=<value>;` per entry with nothing to tell a structural `=` or `;` from one inside a key or
   a value, so `{"a": "1;b=2"}` and `{"a": "1", "b": "2"}` both rendered `a=1;b=2;`. The string is an ingredient of the cache key, it names the render-, video-, animate-,
-  inpaint-, upscale-, edit- and audio output files, and it is recorded as `params_key` on the persisted exemplar rows. Each key and each rendered value now has `\`, `;`
-  and `=` written as a backslash and the character, in one pass. **The output is byte-identical to the old format for every params map whose keys and rendered values
-  contain none of those three characters** (prompts, numbers, bools, forward-slash paths, nested maps and slices of those), so the output file names and recorded keys
-  of ordinary params do not move. A key or value that does contain one of the three, such as a Windows path with backslashes or a negative prompt with a semicolon or an
-  equals sign, renders differently from before: its default output file name changes once (an earlier file under the old name is not reused), and its `params_key` on
-  newly written exemplar rows differs. Nothing reads `params_key` back for matching today.
+  inpaint-, upscale-, edit- and audio output files, and it is recorded as `params_key` on the persisted exemplar rows. Each key and each rendered value now has `%`, `;`
+  and `=` written as `%25`, `%3B` and `%3D`, in one pass (`%` is the escape character, so it is escaped too; that is what keeps a value that spells `%3B` apart from the
+  value `;`). Backslashes are left alone. **The output is byte-identical to the old format for every params map whose keys and rendered values contain none of `%`, `;`
+  and `=`** (prompts, numbers, bools, paths of either slash direction, nested maps and slices of those), so the output file names and recorded keys of ordinary params do
+  not move, and neither do those of the image, edit and upscale params that carry Windows paths. A key or value that does contain one of the three, such as a negative
+  prompt with a semicolon or an equals sign, or a percent-encoded URL, renders differently from before: its default output file name changes once (an earlier file under
+  the old name is not reused), and its `params_key` on newly written exemplar rows differs. Nothing reads `params_key` back for matching today.
 - **Tests, red first.** Each new test was written before its fix and run against the old code, where it failed.
   - `internal/cache`: `TestKeySeparatorCollision` no longer skips. It asserts 24 named part lists give 24 distinct keys (the NUL cases, every empty-part case, a part that
     spells out a length header, a part that spells out the frames of another list), names the headline pairs as separate checks, and checks that its colliding pairs
@@ -51,16 +52,19 @@
     the grammar agrees) cover the render and the two tags. `TestTranscribeCacheKeyKeepsFieldsApart` has three cases; two fail on the old key, and the third (model text imitating the digest
     boundary) passes on it because the old key repeated the model, which is what the case now holds to the framing.
   - `internal/tasks`: `TestStableParamsKeyKeepsEntriesApart` (three pairs, each checked against a copy of the old rendering), `TestStableParamsKeyEscapesWhatItMustEscape`
-    and `TestStableParamsKeyIsInjectiveOverASmallAlphabet` (all 93,051 params maps of up to two entries over `{a, =, ;, \}`, strings up to two characters) fail on
-    the old format. `TestStableParamsKeyOrdinaryParamsAreUnchanged` holds a table of ordinary maps to hard-coded expected strings, written from the format and not
-    computed by the function; it passes on the old code and the new, which is the promise that file names and recorded keys did not move.
+    and `TestStableParamsKeyIsInjectiveOverASmallAlphabet` (all 93,051 params maps of up to two entries over `{a, %, =, ;}`, strings up to two characters) fail on the old
+    format. `TestStableParamsKeyIsInjectiveOverEscapeSpellings` covers what that alphabet cannot reach, a value that spells an escape: all 160,000 single-entry maps with
+    keys and values of up to three characters over `{a, %, ;, =, 3, B, D}`. `TestStableParamsKeyOrdinaryParamsAreUnchanged` holds a table of ordinary maps, Windows and
+    UNC paths and values with backslashes among them, to hard-coded expected strings written from the format and not computed by the function; it passes on the old
+    format and the new, which is the promise that file names and recorded keys did not move.
 - **Mutations run.** With each of these put back in turn, the named tests fail and the code is restored byte for byte afterwards: the old NUL join in `Key`; `Key`
   without the version tag (only `TestKeyEncodingIsPinned` fails); an 8-byte length cut to 4 (only `TestKeyEncodingIsPinned`); the length missing on the last part; the glued
   vision key; the folded render; the NUL-terminated exemplar fields; the NUL-joined template tag; the glued transcription identity; the transcription key without the
-  model; values escaped but not keys; the backslash left unescaped; the `=` left unescaped; the trailing `;` changed. Removing `field()` from `askcache.Key` on its own
-  no longer turns a test red, because `cache.Key` keeps those fields apart; its test says so.
+  model; in `StableParamsKey`, the keys not escaped, the values not escaped, `%` not escaped, `=` not escaped, `;` not escaped, the trailing `;` changed, the backslash
+  escaped as well, and the escape applied twice. Removing `field()` from `askcache.Key` on its own no longer turns a test red, because `cache.Key` keeps those fields apart;
+  its test says so.
 - **Proved.** `go test -p 1 -count=1` passes on `./internal/cache/`, `./internal/askcache/` and `./internal/tasks/`; on `./internal/pipeline/` with `-run` over the key, cache,
-  vision, tier, exemplar, template, transcribe, gate, media, image-batch, render, video and legacy-file-name tests; and on `./internal/mcpserver/` with `-run 'AskCache|Askcache'`.
+  vision, tier, exemplar, template, transcribe, gate, media, image-batch, render, video and legacy-file-name tests; and on `./internal/mcpserver/` with `-run TestAsk`.
   `go vet` is clean on the four packages and `go run ./cmd/changelog check` passes. The other callers of `StableParamsKey` (the output-file stems in `internal/pipeline`, the cache keys
   and the exemplar append) were read, and the tests that reach them pass, among them the legacy file-name test in `imagebatch_family_test.go`. That test computes its expectation with
   `StableParamsKey` itself, so it cannot see a change in the output; the hard-coded table above is what holds the bytes.

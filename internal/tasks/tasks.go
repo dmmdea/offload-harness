@@ -285,10 +285,13 @@ func paramMap(p map[string]any, k string) map[string]any {
 	return nil
 }
 
-// paramsEscaper writes the three characters StableParamsKey's format gives a meaning
-// to ("\", ";" and "=") as a backslash and the character. One pass, so the backslash
-// it adds is not itself escaped again.
-var paramsEscaper = strings.NewReplacer(`\`, `\\`, `;`, `\;`, `=`, `\=`)
+// paramsEscaper percent-escapes the characters StableParamsKey's format gives a meaning
+// to: ";" and "=" are its separators, and "%" is the escape character, so it has to be
+// written too or a value that spells an escape ("%3B") could not be told from the
+// character it spells (";"). One pass, so the "%" an escape adds is not escaped again.
+// Backslashes are deliberately not special: params carry Windows paths, and those
+// must render as they always did.
+var paramsEscaper = strings.NewReplacer("%", "%25", ";", "%3B", "=", "%3D")
 
 // StableParamsKey renders params deterministically: "<key>=<value>;" per entry, in
 // key order, the value as %v prints it.
@@ -299,15 +302,16 @@ var paramsEscaper = strings.NewReplacer(`\`, `\\`, `;`, `\;`, `=`, `\=`)
 // to render two different strings, and the format alone does not give that: a key or
 // a value holding "=" or ";" could stand in for the structure around it, so
 // {"a": "1;b=2"} and {"a": "1", "b": "2"} were both "a=1;b=2;". Each key and each
-// rendered value is therefore escaped (paramsEscaper) before it is written, which
-// makes the entries uniquely decodable.
+// rendered value is therefore percent-escaped (paramsEscaper) before it is written,
+// which makes the entries uniquely decodable.
 //
 // The output is byte-identical to the unescaped format for every map whose keys and
-// rendered values contain none of "\", ";" and "=" — prompts, numbers, bools, paths
-// with forward slashes, nested maps and slices of those — so the file names and
-// stored keys of ordinary params did not move. A key or value that does contain one
-// of the three renders differently from before (a Windows path with backslashes, a
-// negative prompt with a semicolon), and its output stem and recorded key change once.
+// rendered values contain none of "%", ";" and "=" — prompts, numbers, bools, paths
+// of either slash direction (a Windows path with backslashes included), nested maps
+// and slices of those — so the file names and stored keys of ordinary params did not
+// move. A key or value that does contain one of the three renders differently from
+// before (a negative prompt with a semicolon, a percent-encoded URL), and its output
+// stem and recorded key change once.
 func StableParamsKey(p map[string]any) string {
 	if len(p) == 0 {
 		return ""
