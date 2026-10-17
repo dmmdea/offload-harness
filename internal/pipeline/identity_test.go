@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -117,6 +118,201 @@ func TestCacheKeySameInputsSameKey(t *testing.T) {
 	b := keyOf(t, baseBuilt(), []exemplars.Pair{{Input: "a", Output: "b"}, {Input: "c", Output: "d"}})
 	if a != b {
 		t.Errorf("identical inputs produced different cache keys:\n  %q\n  %q", a, b)
+	}
+}
+
+// TestExemplarCacheTagKeepsFieldsApart: exemplar inputs and outputs are real past
+// request and answer text, so they can hold a NUL byte. Ending each field with a
+// NUL let one set's field boundary stand in for another's, so two exemplar sets
+// that render DIFFERENT prompts shared a cache key and one request was answered
+// from the other's entry. Each pair below spelled the same bytes under the NUL
+// terminator.
+func TestExemplarCacheTagKeepsFieldsApart(t *testing.T) {
+	cases := []struct {
+		name string
+		a, b []exemplars.Pair
+	}{
+		{
+			name: "a NUL moved across the input/output boundary",
+			a:    []exemplars.Pair{{Input: "a\x00b", Output: "c"}},
+			b:    []exemplars.Pair{{Input: "a", Output: "b\x00c"}},
+		},
+		{
+			name: "one pair whose output forges a second pair",
+			a:    []exemplars.Pair{{Input: "a", Output: "b\x00c\x00d"}},
+			b:    []exemplars.Pair{{Input: "a", Output: "b"}, {Input: "c", Output: "d"}},
+		},
+		{
+			name: "a field's tail moved into the next pair's head",
+			a:    []exemplars.Pair{{Input: "a", Output: "b\x00c"}, {Input: "d", Output: "e"}},
+			b:    []exemplars.Pair{{Input: "a", Output: "b"}, {Input: "c\x00d", Output: "e"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ta, tb := exemplarCacheTag(tc.a), exemplarCacheTag(tc.b)
+			if ta == "" || tb == "" {
+				t.Fatalf("a non-empty exemplar set must have a tag, got %q and %q", ta, tb)
+			}
+			if ta == tb {
+				t.Errorf("two exemplar sets that render different prompts share the tag %q", ta)
+			}
+			if keyOf(t, baseBuilt(), tc.a) == keyOf(t, baseBuilt(), tc.b) {
+				t.Error("two exemplar sets that render different prompts share a cache key")
+			}
+		})
+	}
+
+	// Not vacuous: identical sets still agree, so the framing did not turn the tag
+	// into something that churns on every call, and the empty set still has no tag.
+	same := []exemplars.Pair{{Input: "a\x00b", Output: "c"}, {Input: "", Output: ""}}
+	if exemplarCacheTag(same) != exemplarCacheTag([]exemplars.Pair{{Input: "a\x00b", Output: "c"}, {Input: "", Output: ""}}) {
+		t.Error("identical exemplar sets produced different tags")
+	}
+	if got := exemplarCacheTag(nil); got != "" {
+		t.Errorf("the empty exemplar set must have no tag, got %q", got)
+	}
+}
+
+// TestTemplateCacheTagKeepsFieldsApart: the template tag fingerprints the system
+// prompt, the grammar and the user template (with the caller's input elided).
+// Joined with a NUL before hashing, a NUL at the edge of one field was
+// indistinguishable from the separator, so two templates that render different
+// prompts had one tag. The system prompt and the user template reach the key only
+// through this tag, so the collision was a key collision whenever the grammar
+// agreed.
+func TestTemplateCacheTagKeepsFieldsApart(t *testing.T) {
+	// Each pair spelled the same bytes under the NUL join.
+	cases := []struct {
+		name string
+		a, b tasks.Built
+	}{
+		{
+			name: "a NUL moved between the system prompt and the grammar",
+			a:    tasks.Built{System: "a", Grammar: "b\x00c", User: "U"},
+			b:    tasks.Built{System: "a\x00b", Grammar: "c", User: "U"},
+		},
+		{
+			name: "a NUL moved between the system prompt and the user template",
+			a:    tasks.Built{System: "a", User: "\x00c"},
+			b:    tasks.Built{System: "a\x00", User: "c"},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ta := templateCacheTag(tc.a.System, tc.a.Grammar, tc.a.User, "")
+			tb := templateCacheTag(tc.b.System, tc.b.Grammar, tc.b.User, "")
+			if ta == "" || tb == "" {
+				t.Fatalf("a non-empty template must have a tag, got %q and %q", ta, tb)
+			}
+			if ta == tb {
+				t.Errorf("two templates that render different prompts share the tag %q", ta)
+			}
+		})
+	}
+
+	// The second case is the one that reaches the key: the grammar is the same in
+	// both, so nothing but the tag tells the two templates apart.
+	a := tasks.Built{System: "a", User: "\x00c"}
+	b := tasks.Built{System: "a\x00", User: "c"}
+	if keyOf(t, a, nil) == keyOf(t, b, nil) {
+		t.Error("two templates that render different prompts share a cache key")
+	}
+
+	// Not vacuous: the same template gives the same tag, and a template with
+	// nothing in it has none.
+	if templateCacheTag("a", "g", "u", "") != templateCacheTag("a", "g", "u", "") {
+		t.Error("the same template produced different tags")
+	}
+	if got := templateCacheTag("", "", "", ""); got != "" {
+		t.Errorf("an empty template must have no tag, got %q", got)
+	}
+}
+
+// TestTierKeyKeepsModelAndRenderApart: RunTier's key used to fold the render into
+// the model name ("model#render"), so a model whose own name ends in "#nothink"
+// and the same-looking model run with a non-thinking render named one entry. The
+// render is its own key part now.
+func TestTierKeyKeepsModelAndRenderApart(t *testing.T) {
+	key := func(model, render string) string {
+		return cacheKeyForTierRender(core.TaskSummarize, baseInput, "params", model, baseBuilt(), render)
+	}
+	if key("x#y", "") == key("x", "y") {
+		t.Error(`model "x#y" with no render shares an entry with model "x" rendered "y"`)
+	}
+	if key("seat#nothink", "") == key("seat", "nothink") {
+		t.Error("a model named like a render shares an entry with that render of the shorter name")
+	}
+	// The render still separates, and an absent render is still the plain tier key.
+	if key("seat", "") == key("seat", "nothink") {
+		t.Error("a non-thinking render must not share an entry with the thinking render of the same seat")
+	}
+	rendered := key("seat", "nothink")
+	if again := key("seat", "nothink"); again != rendered {
+		t.Errorf("the tier key is not deterministic: %q vs %q", rendered, again)
+	}
+	if got, want := key("seat", ""), cacheKeyForTier(core.TaskSummarize, baseInput, "params", "seat", baseBuilt()); got != want {
+		t.Errorf("cacheKeyForTier is no longer the render-less case of cacheKeyForTierRender:\n  %q\n  %q", got, want)
+	}
+}
+
+// TestTranscribeCacheKeyKeepsFieldsApart: the transcription key used to take the
+// content digest, model, language and protocol as ONE "|"-joined string
+// ("<digest>|model=<m>|lang=<l>|proto=<p>"), so text in one field could imitate the
+// separator and the label of the next. The language is the caller's, so the
+// boundaries were a convention the data was free to imitate. Each pair below
+// spelled the same joined string; the fields are separate key parts now.
+//
+// This seam was never reachable end to end, and the test does not pretend it was:
+// the old key also carried the model as a part of its own, and the digest comes from
+// hashing the file, so no caller could build the second member of a pair. What the
+// test pins is the key function's own property, and that the model, which now
+// appears once, is kept apart from the fields around it without that second copy.
+func TestTranscribeCacheKeyKeepsFieldsApart(t *testing.T) {
+	type fields struct{ digest, model, lang, proto string }
+	joined := func(f fields) string {
+		return fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", f.digest, f.model, f.lang, f.proto)
+	}
+	key := func(f fields) string { return transcribeCacheKey(f.digest, f.model, f.lang, f.proto, "") }
+
+	pairs := []struct {
+		name string
+		a, b fields
+	}{
+		// Same model on both sides, so only the glued form could tell them apart.
+		{"language text imitates the model and language labels", fields{"d", "m", "|model=m|lang=z", "whisper"}, fields{"d|model=m|lang=", "m", "z", "whisper"}},
+		{"language text imitates the protocol label", fields{"d", "m", "x|proto=whisper", "oai"}, fields{"d", "m", "x", "whisper|proto=oai"}},
+		// Held by the model's own copy in the old key; with one copy it has to hold by the framing.
+		{"model text imitates the digest boundary", fields{"d|model=m", "n", "", "oai"}, fields{"d", "m|model=n", "", "oai"}},
+	}
+	for _, p := range pairs {
+		t.Run(p.name, func(t *testing.T) {
+			// Guard on the guard: the pair has to have been one key under the joined form.
+			if joined(p.a) != joined(p.b) {
+				t.Fatalf("%+v and %+v are not the same joined string; pick a pair that was", p.a, p.b)
+			}
+			if key(p.a) == key(p.b) {
+				t.Errorf("%+v and %+v share a transcription cache key", p.a, p.b)
+			}
+		})
+	}
+
+	// Every ingredient is in the key, and the key is deterministic.
+	base := fields{"digest", "model", "en", "whisper"}
+	ref := transcribeCacheKey(base.digest, base.model, base.lang, base.proto, "p=1;")
+	if again := transcribeCacheKey(base.digest, base.model, base.lang, base.proto, "p=1;"); again != ref {
+		t.Fatalf("the key is not deterministic: %q vs %q", ref, again)
+	}
+	for name, got := range map[string]string{
+		"digest": transcribeCacheKey("other", base.model, base.lang, base.proto, "p=1;"),
+		"model":  transcribeCacheKey(base.digest, "other", base.lang, base.proto, "p=1;"),
+		"lang":   transcribeCacheKey(base.digest, base.model, "es", base.proto, "p=1;"),
+		"proto":  transcribeCacheKey(base.digest, base.model, base.lang, "oai", "p=1;"),
+		"params": transcribeCacheKey(base.digest, base.model, base.lang, base.proto, "p=2;"),
+	} {
+		if got == ref {
+			t.Errorf("changing the %s did not change the transcription key", name)
+		}
 	}
 }
 

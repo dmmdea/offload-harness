@@ -480,6 +480,33 @@ It also carries `siblings` and `sibling_bytes` (the census the D-05 regression i
 rising count is the defect returning), and `entries` / `entries_from` when the store is readable from
 this process. Asking never resolves the server's own handle and never creates a file.
 
+### How a result-cache entry is keyed
+
+`cache.Key` hashes a version tag (`offload/cache.Key/v2`) and then, for each part, the part's byte
+length (8 bytes, big-endian) followed by its bytes. Each ingredient of a request (task, input,
+parameters, model, grammar, template tag and the rest) is its own length-prefixed part, so no byte in
+one ingredient can be read as the boundary between two, and a request cannot shape its input to equal
+another request's key. A caller therefore passes every field as a separate part and never glues
+several fields into one part with a separator of its own (`input + "|" + id`): the encoding cannot
+see inside a part, so a glued part rebuilds the ambiguity one level up. The two tags that are
+themselves one part of a key (the template tag and the exemplar tag) are hashed through `cache.Key`
+too, not through a second format. The parameters part is `tasks.StableParamsKey`, which
+percent-escapes `%`, `;` and `=` in keys and values so that every top-level `key=value;` entry is
+unambiguous. Nested and non-string values keep Go's `%v` rendering, so `{"seed": "5"}` and
+`{"seed": 5}` still render alike; that limit is documented and pinned by a test. For parameters
+without those characters (Windows paths with backslashes included) the string renders exactly as it
+always did, which matters because it names the render, video and edit output files (the stems hash
+the prompt and this string with no boundary between them, so the escaping does not make file names
+injective).
+
+The encoding changed once. It used to join the parts with a NUL byte, so `Key("a", "b")` was
+`Key("a\x00b")` and a request whose text held a NUL could forge a boundary. Every key is derived from
+the encoding, so every existing key changed with that fix and the cache started cold: entries stored
+under the old keys are never looked up again, and the cache has no eviction, so they stay in the file
+as dead weight until it is removed. The cache is a transparent accelerator, so nothing else changed
+(changelog entry "the result-cache key can no longer be forged from request text"). A later change
+to the encoding has the same cost, which is why `TestKeyEncodingIsPinned` holds it to exact values.
+
 ### Why "recordless" split into two constructors
 
 The original single invariant bundled two unrelated guarantees:

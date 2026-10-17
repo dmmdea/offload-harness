@@ -995,7 +995,13 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	// field semantics — so editing one used to leave this cache serving pre-edit
 	// transcriptions forever, silently. No exemplars are injected on the vision
 	// path, so the exemplar tag is not an ingredient here.
-	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar,
+	//
+	// Input and cacheKeyExtra are separate PARTS of the key, not one part joined with
+	// "|": req.Input is arbitrary caller text, so joined, the input "x|y" with an empty
+	// extra was the same key as the input "x" with the extra "y". The extra is the only
+	// carrier of the source file's identity, so that is one file's cached result served
+	// for another.
+	ck := cache.Key(string(req.Task), req.Input, cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar,
 		templateCacheTag(built.System, built.Grammar, built.User, req.Input))
 	// cacheable is false when the caller could not establish the source file's
 	// CONTENT identity (T2-A2). Keying on anything else — a path, or a synthetic
@@ -1299,9 +1305,10 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	}
 	defer cleanup()
 
-	// Identity = source file CONTENT (sha256 of its bytes) + model + lang. Used for BOTH the
-	// cache key AND the on-disk media filename so they agree and never collide
-	// across distinct sources that share a basename (recording.m4a is common in
+	// Identity = source file CONTENT (sha256 of its bytes) + model + lang. The same fields
+	// feed BOTH the cache key (transcribeCacheKey, each one a separate key part) AND the
+	// on-disk media filename (the joined `ident` string below) so they agree and never
+	// collide across distinct sources that share a basename (recording.m4a is common in
 	// field audio) or across model/lang variants of the same source.
 	// The protocol is part of the result's identity: the same alias re-bound across
 	// protocols (whisper <-> mtmd) produces differently-shaped results (timestamped
@@ -1347,8 +1354,10 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		meta.CacheBypass = "media identity: " + why
 		log.Printf("transcribe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Audio, why)
 	}
+	// ident names the on-disk stem (mediaBase) and nothing else, so no output file is
+	// renamed by the key fix.
 	ident := fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", audioID.Digest, model, identLang, proto)
-	ck := cache.Key("transcribe", ident, tasks.StableParamsKey(req.Params), model, "")
+	ck := transcribeCacheKey(audioID.Digest, model, identLang, proto, tasks.StableParamsKey(req.Params))
 	if p.cache != nil && identifiable {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
@@ -1566,8 +1575,9 @@ type transcribeResult struct {
 // output stem. The ident hash disambiguates distinct sources that share a
 // basename (e.g. two different recording.m4a) or model/lang variants of one
 // source, so the returned .srt/.txt/.segments.json pointers never reference a
-// different audio's transcript. ident is the SAME identity used for the cache
-// key, so on-disk files and cache entries agree.
+// different audio's transcript. ident carries the SAME identity fields the cache
+// key is built from (transcribeCacheKey passes them as separate parts, this stem
+// hashes the joined string), so on-disk files and cache entries agree.
 func mediaBase(mediaDir, audioPath, ident string) string {
 	name := filepath.Base(audioPath)
 	if ext := filepath.Ext(name); ext != "" {
