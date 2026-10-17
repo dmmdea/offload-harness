@@ -114,8 +114,9 @@ func TestAgentAuthPrecedesEnvelopeValidation(t *testing.T) {
 
 // TestAgentAuthPrecedesKnownJobReack: re-dispatching a job id this node
 // already owns AS task_type "agent" without the token must 401, never re-ack
-// — the auth check sits after decode but BEFORE the known-job lookup, so an
-// unauthorized caller cannot use the agent lane to probe job existence/state.
+// — the auth check sits before the body is read, and so before the known-job
+// lookup, so an unauthorized caller cannot use the agent lane to find out
+// whether a job exists or what state it is in.
 func TestAgentAuthPrecedesKnownJobReack(t *testing.T) {
 	s, _ := newTestServer(t, tokenCfg("s3cret"), &fakeRunner{}, authOpts(true))
 	holder := map[string]string{"Authorization": "Bearer s3cret"}

@@ -23,8 +23,9 @@
 // Auth is the agent and vision lanes' rule, verbatim: fleet_auth_token
 // required beyond loopback, loopback + no token stays open
 // (AgentLaneSafelyReachable). The check runs FIRST, before the body is even
-// read, because unlike the vision lane nothing about the decision depends on
-// the body — so an unauthorized caller gets the auth verdict and nothing else.
+// read, because nothing about the decision depends on the body (the vision lane
+// checks first too) — so an unauthorized caller gets the auth verdict and
+// nothing else.
 package fleetnode
 
 import (
