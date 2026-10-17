@@ -3198,16 +3198,17 @@ func truncateRunes(s string, n int) string {
 // resolved path is checked for containment under the resolved media dir, so
 // a symlink planted inside MediaDir cannot serve a file from outside it.
 func (s *Server) handleMedia(w http.ResponseWriter, r *http.Request) {
+	// A rendered artifact is the node's output, whatever task made it: the bearer is required on a node that
+	// has a token, and a node that listens beyond loopback with none refuses the read (authorizeGated, the
+	// rule every lane runs). Checked first of all, before the name is validated and before the file is looked
+	// up, so a caller without the credential is answered for the credential and learns nothing about the
+	// name rule or whether the name exists. A loopback node with no token serves as it always did.
+	if !s.authorizeGated(w, r, "media-file") {
+		return
+	}
 	name := r.PathValue("filename")
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 		writeError(w, http.StatusBadRequest, "filename must be a bare name")
-		return
-	}
-	// A rendered artifact is the node's output, whatever task made it: the bearer is required on a node that
-	// has a token, and a node that listens beyond loopback with none refuses the read (authorizeGated, the
-	// rule every lane runs). Checked before the file is looked up, so the answer never says whether the name
-	// exists. A loopback node with no token serves as it always did.
-	if !s.authorizeGated(w, r, "media-file") {
 		return
 	}
 	// A dot name is this node's own bookkeeping (the stt upload directory, the compose cache): never
