@@ -4507,3 +4507,10 @@ test("readiness: a name with capitals is answered on a volume that folds case, a
   assert.deepEqual(foldGot([EMB("easyneg.safetensors")], "EasyNeg", {}, { fold: false }), ["case_mismatch", null, ["easyneg.safetensors"]]);
   assert.deepEqual(foldGot([EMB("EASYNEG.pt")], "EasyNeg", {}, { fold: false }), ["case_mismatch", null, ["EASYNEG.pt"]]);
 });
+
+// get_full_path tries every registered root in order and returns the first root that holds the file.
+test("readiness: a loader widget's embeddings file that sits only in a later registered root is found", () => {
+  assert.deepEqual(embGot([EMB2("cond.safetensors")], "cond.safetensors", LOADER_ENTRY, OVERFLOW), ["present", null, null], "only in the second root");
+  assert.deepEqual(embGot([EMB2("sd15/cond.safetensors")], "sd15/cond.safetensors", LOADER_ENTRY, OVERFLOW), ["present", null, null], "a subfolder file, by its path");
+  assert.deepEqual(embGot([EMB2("sd15/cond.safetensors")], "cond.safetensors", LOADER_ENTRY, OVERFLOW), ["in_subfolder", null, ["sd15/cond.safetensors"]], "the combo offers sd15/cond.safetensors, so the bare value is rejected");
+});
