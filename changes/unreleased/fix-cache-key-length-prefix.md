@@ -72,7 +72,7 @@
   model; in `StableParamsKey`, the keys not escaped, the values not escaped, `%` not escaped, `=` not escaped, `;` not escaped, the trailing `;` changed, the backslash
   escaped as well, the escape applied twice, and the nested rendering changed to `%#v`. Removing `field()` from `askcache.Key` on its own no longer turns a test red, because `cache.Key` keeps those fields apart;
   its test says so.
-- **Proved.** Remote Linux runs of this branch before its last review round: a gate over `./internal/cache`, `./internal/askcache`, `./internal/tasks`, `./internal/mcpserver`,
+- **Proved.** Remote Linux runs of this branch at commit `babdd239` (the last code change; only this entry changed after it): a gate over `./internal/cache`, `./internal/askcache`, `./internal/tasks`, `./internal/mcpserver`,
   `./internal/changelog`, `./internal/pipeline` and the root package passed (7 of 7), and `./internal/pipeline` passed again on a second remote Linux runner. On Windows,
   `go test -p 1 -count=1` passes on `./internal/cache/`, `./internal/askcache/` and `./internal/tasks/`; on `./internal/pipeline/` with `-run` over the key, cache,
   vision, tier, exemplar, template, transcribe, gate, media, image-batch, render, video and legacy-file-name tests; and on `./internal/mcpserver/` with `-run TestAsk`.
@@ -80,6 +80,4 @@
   and the exemplar append) were read, and the tests that reach them pass, among them the legacy file-name test in `imagebatch_family_test.go`. That test computes its expectation with
   `StableParamsKey` itself, so it cannot see a change in the output; the hard-coded table above is what holds the bytes.
 - **Not verified here.** No live cache file, seat or fleet node was used, so the cold start after an upgrade is read from the code (a key that is not in the store is a miss) and not
-  measured. A Windows run of the full suite was not made, and the leak-gate tool (it needs the operator's name list) was not run. The review round's own changes (the pinned-limit
-  test, the `runtier_test.go` probe, the comments, the documentation paragraph and this entry) were run as targeted packages and `go run ./cmd/changelog check` here; the remote gate
-  has not been repeated on them.
+  measured. A Windows run of the full suite was not made, and the leak-gate tool (it needs the operator's name list) was not run.
