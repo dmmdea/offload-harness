@@ -298,20 +298,33 @@ var paramsEscaper = strings.NewReplacer("%", "%25", ";", "%3B", "=", "%3D")
 //
 // It is an ingredient of the result-cache key, it names the render-, video- and
 // edit- output files (a stem is a hash of the prompt and this string), and it is
-// recorded on the persisted exemplar rows. All three need two different params maps
-// to render two different strings, and the format alone does not give that: a key or
-// a value holding "=" or ";" could stand in for the structure around it, so
-// {"a": "1;b=2"} and {"a": "1", "b": "2"} were both "a=1;b=2;". Each key and each
-// rendered value is therefore percent-escaped (paramsEscaper) before it is written,
-// which makes the entries uniquely decodable.
+// recorded on the persisted exemplar rows. The format alone left the top-level
+// structure ambiguous: a key or a value holding "=" or ";" could stand in for the
+// structure around it, so {"a": "1;b=2"} and {"a": "1", "b": "2"} were both
+// "a=1;b=2;". Each key and each rendered value is therefore percent-escaped
+// (paramsEscaper) before it is written, which makes every top-level entry
+// unambiguous.
+//
+// That is the whole guarantee. Nested and non-string values keep Go's %v rendering,
+// which is type-erased and separates elements with a space: {"seed": "5"} and
+// {"seed": 5} render alike, so do []any{"a b"} and []any{"a", "b"}, and so do a map
+// value that holds "k2:v2" and a map with a second entry. That limit is documented
+// and pinned by TestStableParamsKeyNestedAndNonStringValuesKeepGoRendering; lifting
+// it would give every params map with such a value a new file name.
+//
+// Nor does the escaping make output file names injective. A stem is
+// sha256hex(prompt + this string)[:8] with no boundary between the prompt and the
+// string, so the two can still run together. That is older than the escaping and out
+// of its scope: a stem collision only reuses or overwrites a file under a truncated
+// 32-bit name.
 //
 // The output is byte-identical to the unescaped format for every map whose keys and
 // rendered values contain none of "%", ";" and "=" — prompts, numbers, bools, paths
 // of either slash direction (a Windows path with backslashes included), nested maps
 // and slices of those — so the file names and stored keys of ordinary params did not
 // move. A key or value that does contain one of the three renders differently from
-// before (a negative prompt with a semicolon, a percent-encoded URL), and its output
-// stem and recorded key change once.
+// before (a negative prompt with a semicolon, a URL with a query string such as
+// "?a=b", a percent-encoded URL), and its output stem and recorded key change once.
 func StableParamsKey(p map[string]any) string {
 	if len(p) == 0 {
 		return ""

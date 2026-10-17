@@ -491,10 +491,13 @@ several fields into one part with a separator of its own (`input + "|" + id`): t
 see inside a part, so a glued part rebuilds the ambiguity one level up. The two tags that are
 themselves one part of a key (the template tag and the exemplar tag) are hashed through `cache.Key`
 too, not through a second format. The parameters part is `tasks.StableParamsKey`, which
-percent-escapes `%`, `;` and `=` in keys and values so that two parameter maps cannot render one
-string; for parameters without those characters (Windows paths with backslashes included) it renders
-exactly as it always did, which matters because the same string names the render, video and edit
-output files.
+percent-escapes `%`, `;` and `=` in keys and values so that every top-level `key=value;` entry is
+unambiguous. Nested and non-string values keep Go's `%v` rendering, so `{"seed": "5"}` and
+`{"seed": 5}` still render alike; that limit is documented and pinned by a test. For parameters
+without those characters (Windows paths with backslashes included) the string renders exactly as it
+always did, which matters because it names the render, video and edit output files (the stems hash
+the prompt and this string with no boundary between them, so the escaping does not make file names
+injective).
 
 The encoding changed once. It used to join the parts with a NUL byte, so `Key("a", "b")` was
 `Key("a\x00b")` and a request whose text held a NUL could forge a boundary. Every key is derived from

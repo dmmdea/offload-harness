@@ -299,14 +299,31 @@ func TestRunTier_NoCacheWrite(t *testing.T) {
 	if calls == callsBefore {
 		t.Fatal("Run after RunTier did not call the model — it returned a cached RunTier result, which must not happen")
 	}
+
+	// The probe above is only worth anything if computeCacheKey names the key Run
+	// really uses: Run just ran the model, so its answer must now be in the cache
+	// under exactly that key.
+	if _, hit := p.cache.Get(ck); !hit {
+		t.Fatal("Run stored its answer under a key other than computeCacheKey's — the \"no entry under the default-model key\" check above probes a key nothing writes and cannot fail")
+	}
 }
 
-// computeCacheKey replicates the cache key that Run/RunTier build for a text
-// classify request so the test can probe the cache directly.
+// computeCacheKey is the key Run stores a text request under, so the test can probe
+// the cache for it directly. It calls the production constructor, cacheKeyFor, with
+// the inputs Run passes it (the original input, the params string, the primary model,
+// the built prompt and no exemplars: the default ExemplarShots is 0), instead of
+// listing the ingredients a second time.
+//
+// It used to be a hand-written five-part cache.Key call. Run's real key has seven
+// parts (the template tag and the exemplar tag were added after this helper), so the
+// helper named a key nothing ever wrote, and "no entry under the default-model key"
+// could not fail whatever RunTier did. TestRunTier_NoCacheWrite now also checks that
+// Run's own entry is found under this key, which is what keeps the helper from
+// drifting away from Run again.
 func computeCacheKey(p *Pipeline, req core.Request) string {
 	built, err := tasks.Build(req)
 	if err != nil {
 		return ""
 	}
-	return cache.Key(string(req.Task), req.Input, tasks.StableParamsKey(req.Params), p.cfg.Model, built.Grammar)
+	return cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), p.cfg.Model, built, nil)
 }

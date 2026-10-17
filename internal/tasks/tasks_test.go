@@ -296,3 +296,52 @@ func TestStableParamsKeyIsInjectiveOverEscapeSpellings(t *testing.T) {
 		t.Fatalf("checked %d maps, want %d: the enumeration is not what the doc says", len(seen), want)
 	}
 }
+
+// TestStableParamsKeyNestedAndNonStringValuesKeepGoRendering PINS A DOCUMENTED LIMIT,
+// it does not describe a goal. Only the top-level "<key>=<value>;" structure is
+// unambiguous. A value is rendered with %v, which is type-erased and, for slices and
+// maps, separates elements with a space, so values that print alike render alike:
+// the string "5" and the number 5, a one-element slice holding "a b" and a two-element
+// slice holding "a" and "b", a map entry whose value holds "k2:v2" and a second entry.
+// The pairs below are exactly such collisions and must keep rendering equal.
+//
+// Changing that is possible (a typed, delimited rendering of nested values) and is
+// deliberate work: the string is hashed into the output file names and recorded on
+// the persisted exemplar rows, so every nested or non-string value would get a new
+// file name and a new recorded key. If this test goes red because the rendering was
+// changed on purpose, update the doc comment on StableParamsKey, the paragraph in
+// docs/systems/offload-pipeline.md and the changelog fragment, and say that file
+// names move.
+func TestStableParamsKeyNestedAndNonStringValuesKeepGoRendering(t *testing.T) {
+	pairs := []struct {
+		name string
+		a, b map[string]any
+		want string // what both render
+	}{
+		{
+			name: "a slice element with a space against two elements",
+			a:    map[string]any{"tags": []any{"a b"}},
+			b:    map[string]any{"tags": []any{"a", "b"}},
+			want: "tags=[a b];",
+		},
+		{
+			name: "a nested map value that spells another entry",
+			a:    map[string]any{"o": map[string]any{"k": "v k2:v2"}},
+			b:    map[string]any{"o": map[string]any{"k": "v", "k2": "v2"}},
+			want: "o=map[k:v k2:v2];",
+		},
+		{
+			name: "a string against the number it spells",
+			a:    map[string]any{"seed": "5"},
+			b:    map[string]any{"seed": 5},
+			want: "seed=5;",
+		},
+	}
+	for _, p := range pairs {
+		ka, kb := StableParamsKey(p.a), StableParamsKey(p.b)
+		if ka != p.want || kb != p.want {
+			t.Errorf("%s: %v renders %q and %v renders %q, want both %q (the documented limit: nested and non-string values keep Go's %%v rendering)",
+				p.name, p.a, ka, p.b, kb, p.want)
+		}
+	}
+}
