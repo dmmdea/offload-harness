@@ -129,3 +129,48 @@ func TestStatSettledReportsWhatTheStatSeamInjects(t *testing.T) {
 		t.Errorf("statSettled = %v, want the injected failure", err)
 	}
 }
+
+// The rename can end between the look at the name and the look at the staged file: the first look finds nothing, the staged file is
+// gone by the second, and the name is back. Reading that as "settled absent" is the miss at the tail of a rename, so a second look at
+// the name decides, and it finds the file.
+func TestAStatThatMeetsTheRenameEndingBetweenTheLooksReturnsTheFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hb.1")
+	if err := os.WriteFile(path, []byte("1"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	looks := 0
+	old := statFile
+	statFile = func(p string) (os.FileInfo, error) {
+		if p == path {
+			looks++
+			if looks == 1 {
+				return nil, &fs.PathError{Op: "stat", Path: p, Err: fs.ErrNotExist} // the rename had not landed yet
+			}
+		}
+		return old(p)
+	}
+	defer func() { statFile = old }()
+	fi, err := statSettled(path)
+	if err != nil || fi == nil {
+		t.Fatalf("statSettled = %v, %v, want the file that appeared between the looks", fi, err)
+	}
+	if looks != 2 {
+		t.Errorf("the name was looked at %d times, want 2 (before and after the look at the staged file)", looks)
+	}
+}
+
+// A staged file that cannot be examined for any reason but being absent is not evidence that nothing is in flight.
+func TestAStagedFileThatCannotBeExaminedCountsAsInFlight(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hb.1")
+	old := statFile
+	statFile = func(p string) (os.FileInfo, error) {
+		if p == stagingPath(path) {
+			return nil, &fs.PathError{Op: "stat", Path: p, Err: os.ErrPermission}
+		}
+		return old(p)
+	}
+	defer func() { statFile = old }()
+	if _, err := statSettled(path); !errors.Is(err, errRenameInFlight) {
+		t.Errorf("statSettled = %v, want errRenameInFlight: the staged file could not be examined", err)
+	}
+}

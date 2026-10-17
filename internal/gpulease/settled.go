@@ -53,12 +53,15 @@ func stagedInFlight(path string) bool {
 	if staged == "" {
 		return false
 	}
-	fi, err := os.Stat(staged)
+	fi, err := statFile(staged)
 	if err != nil {
 		return !errors.Is(err, fs.ErrNotExist)
 	}
 	return time.Since(fi.ModTime()) < stagingFresh
 }
+
+// statFile is os.Stat, as a variable so a test can make the rename end between two looks at a name (settled_test.go).
+var statFile = os.Stat
 
 // statSettled is os.Stat of a lease file whose absence is an answer only when it is settled (see above). A name that is there is
 // returned as os.Stat returns it. A name that is absent with no fresh staged file beside it returns the not-exist error. A name that is
@@ -70,12 +73,12 @@ func statSettled(path string) (os.FileInfo, error) {
 			return nil, err
 		}
 	}
-	fi, err := os.Stat(path)
+	fi, err := statFile(path)
 	if err == nil || !errors.Is(err, fs.ErrNotExist) {
 		return fi, err
 	}
 	if stagedInFlight(path) {
 		return nil, &fs.PathError{Op: "stat", Path: path, Err: errRenameInFlight}
 	}
-	return os.Stat(path) // the rename may have ended between the first look and the one at the staged file
+	return statFile(path) // the rename may have ended between the first look and the one at the staged file
 }
