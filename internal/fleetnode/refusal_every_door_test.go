@@ -148,6 +148,9 @@ func TestEveryDoorWritesOneJournalLineForARefusedCredential(t *testing.T) {
 				if n := refusalLines(buf.String()); n != 1 {
 					t.Fatalf("wrote %d refusal line(s), want exactly 1; log = %q", n, buf.String())
 				}
+				if n := refusalsNoted(s); n != 1 {
+					t.Fatalf("the door told the journal of %d refusals for one request, want 1 (the throttle hides a second note, so only the count of what the journal kept out shows it)", n)
+				}
 				if n := journalLinesFor(buf.String(), door.label); n != 1 {
 					t.Fatalf("the line does not name the door %q; log = %q", door.label, buf.String())
 				}
@@ -177,6 +180,9 @@ func TestEveryDoorWritesOneJournalLineOnANodeWithNoTokenBeyondLoopback(t *testin
 			if n := refusalLines(buf.String()); n != 1 {
 				t.Fatalf("wrote %d refusal line(s), want exactly 1; log = %q", n, buf.String())
 			}
+			if n := refusalsNoted(s); n != 1 {
+				t.Fatalf("the door told the journal of %d refusals for one request, want 1", n)
+			}
 			if n := journalLinesFor(buf.String(), door.label); n != 1 {
 				t.Fatalf("the line does not name the door %q; log = %q", door.label, buf.String())
 			}
@@ -196,6 +202,9 @@ func TestARefusedReDispatchOfAKnownJobWritesOneJournalLine(t *testing.T) {
 	}
 	if n := refusalLines(buf.String()); n != 1 {
 		t.Fatalf("wrote %d refusal line(s), want exactly 1; log = %q", n, buf.String())
+	}
+	if n := refusalsNoted(s); n != 1 {
+		t.Fatalf("the door told the journal of %d refusals for one request, want 1", n)
 	}
 }
 
