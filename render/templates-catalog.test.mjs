@@ -4279,6 +4279,32 @@ test("readiness: on a volume that folds case a second file differing only in cas
   assert.deepEqual(foldGot([EMB("foo.pt"), EMB("sd15/FOO.pt")], "foo", {}, { fold: false }), ["present", "foo.pt", null], "on a case-sensitive volume sd15/FOO.pt is another name");
 });
 
+// The probe asks the volume about a name that has a letter in it. A root whose top-level entries have none (a folder called 2023, a name in a
+// script without case) says nothing, so the probe goes down to the first file whose name has a letter: the volume's rule is the same below.
+const foldInv = (files, { fold = true } = {}) => {
+  const tree = { ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) };
+  return C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: [] }), fold ? foldIo(tree) : memIo(tree));
+};
+
+test("inventory: a root with no letter in its top-level names is judged by the first file below it that has one", () => {
+  const root = EMB("").slice(0, -1);
+  assert.deepEqual(foldInv([EMB("2023/Foo.PT")]).classes.embeddings.case_insensitive_dirs, [root], "a folder called 2023");
+  assert.deepEqual(foldInv([EMB("2023/Foo.PT")], { fold: false }).classes.embeddings.case_insensitive_dirs, [], "and a volume that does not fold");
+  assert.deepEqual(foldInv([EMB("2023/9/Foo.PT")]).classes.embeddings.case_insensitive_dirs, [root], "two levels down");
+  assert.deepEqual(foldInv([EMB("\u4eba\u7269/Foo.PT")]).classes.embeddings.case_insensitive_dirs, [root], "a folder in a script without case");
+});
+
+test("readiness: on a volume that folds case, a name is answered by a file in another case under a root whose top-level names have no letter", () => {
+  assert.deepEqual(foldGot([EMB("2023/Foo.PT")], "2023/foo"), ["present", "2023/Foo.PT", null], "ComfyUI loads it: isfile finds 2023/foo.pt");
+  assert.deepEqual(foldGot([EMB("2023/Foo.PT")], "foo"), ["present", "2023/Foo.PT", null], "and by the bare name, from the subfolder");
+  assert.deepEqual(foldGot([EMB("2023/Foo.PT")], "foo", {}, { fold: false }), ["case_mismatch", null, ["2023/Foo.PT"]], "a case-sensitive volume does not find it");
+});
+
+test("readiness: on a volume that folds case, two case variants of one name in two folders with no letter in their names are ambiguous", () => {
+  assert.deepEqual(foldGot([EMB("2023/9/bar.PT"), EMB("7/bar.pt")], "bar.pt"), ["ambiguous", null, ["2023/9/bar.PT", "7/bar.pt"]], "ComfyUI's set holds both folders, and isfile finds a file in each");
+  assert.deepEqual(foldGot([EMB("2023/9/bar.PT"), EMB("7/bar.pt")], "bar.pt", {}, { fold: false }), ["present", "7/bar.pt", null], "on a case-sensitive volume 2023/9/bar.PT is another name");
+});
+
 // ---------------------------------------------------------------------------------------------------------------------------------
 // _try_get_embedding asks load_embed for the name AS WRITTEN first (the first word after the identifier, cut at `<` or `[`), and strips
 // commas from both ends only if that finds nothing. `embedding:foo, a cat` is the name `foo,` first, so a file called `foo,.safetensors` is
