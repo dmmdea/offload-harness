@@ -746,13 +746,15 @@ func (m *Manager) verifyNoDeviceLeases(epoch uint64) error {
 //   - an active lease the shared rule judges reclaimable (holder gone), with its claims;
 //   - an unreadable record file once it is older than claimGrace;
 //   - a card claim whose record is gone, or does not name that card, once its own
-//     timestamp is older than claimGrace.
+//     timestamp is older than claimGrace;
+//   - the staged files whose writers hold the epoch lock, at any age (sweepStagedLeftoversLocked).
 //
 // A removal that fails here is left for the next sweep: it is debris, no reader treats
 // it as a live lease, and a claim it leaves behind only delays a grant for claimGrace
 // ("claim in progress"), never double-books a card. Unlike a release, nobody is waiting
 // to be told it worked.
 func (m *Manager) sweepDebrisLocked() {
+	m.sweepStagedLeftoversLocked() // first: the reads below would otherwise wait for a rename a dead writer began
 	r := m.reader()
 	liveEpoch := map[uint64]*Meta{}
 	for _, j := range r.v2() {
@@ -831,6 +833,53 @@ func (m *Manager) sweepDebrisLocked() {
 		}
 		if age > claimGrace {
 			_ = m.remove(path)
+		}
+	}
+}
+
+// sweepStagedLeftoversLocked removes the staged files left by writers that hold the epoch lock: meta.json.restamp (restampWholeLocked)
+// and e/<epoch>.json.tmp (writeEpochRecord). The caller holds the epoch lock, so none of those writers is running: a writer that
+// holds the lock does so from before it stages the file until after its rename returns (the stall of a Windows rename over a name is
+// inside that call, measured), so a staged file found here is a dead writer's, whatever its age. Left alone, a fresh one reads as a
+// rename in flight beside an absent name, and every reader of that name waits a whole budget for a rename that will never end
+// (gate.go).
+//
+// THE HEARTBEAT'S STAGED FILE (hb.<epoch>.tmp) IS NOT SWEPT. Renew replaces the heartbeat without the epoch lock, so that file may be
+// a rename that is landing at this instant, and removing it could cost a live holder its renewal. The same goes for every staged file
+// whose writer does not hold the lock: they are not in this list.
+//
+// Best-effort and one try: a file that cannot be removed now (a scanner holds it) is left for the next sweep, and the lock is not held
+// longer for it.
+func (m *Manager) sweepStagedLeftoversLocked() {
+	m.sweepStagedMetaLocked()
+	m.sweepStagedRecordsLocked()
+}
+
+// sweepStagedMetaLocked is the whole-node record's half of sweepStagedLeftoversLocked: one remove, no listing, so a whole-node grant
+// can do it inside its own short critical section.
+func (m *Manager) sweepStagedMetaLocked() {
+	_ = os.Remove(stagingPath(m.metaPath()))
+}
+
+// sweepStagedRecordsLocked is the card records' half: the staged files of e/<epoch>.json. A host that never wrote a card lease has no
+// e/ and the listing fails at once.
+func (m *Manager) sweepStagedRecordsLocked() {
+	entries, err := os.ReadDir(m.v2Dir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		live := withoutStagedSuffix(name)
+		if e.IsDir() || live == name || !strings.HasSuffix(live, ".json") {
+			continue
+		}
+		epoch, perr := strconv.ParseUint(strings.TrimSuffix(live, ".json"), 10, 64)
+		if perr != nil {
+			continue
+		}
+		if staged := stagingPath(epochRecordPath(m.leaseDir(), epoch)); filepath.Base(staged) == name {
+			_ = os.Remove(staged)
 		}
 	}
 }

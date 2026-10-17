@@ -1485,6 +1485,7 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		var epoch uint64
 		var claimErr error // the exclusive create's answer: nil is a claim made
 		lerr := m.withEpochLock(func() error {
+			m.sweepStagedMetaLocked() // a dead restamp's leftover beside meta.json: one remove (devices.go)
 			var berr error
 			if epoch, berr = m.bumpEpochLocked(); berr != nil {
 				return berr
