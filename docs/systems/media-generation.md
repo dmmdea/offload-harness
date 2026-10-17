@@ -990,7 +990,9 @@ seat keeps `compute cuda:0`). **Fallback source once upstream goes read-only:** 
 plus this pinned commit). `render/comfy-nodes.mjs` (`NODE_PACKS`) and
 `internal/mediacap/routeneeds.go` (`nodePacks`/`packHint`) both carry the pin+mirror note in the
 operator-facing `MISSING_NODE` hint, so a box missing the pack is told where to get the frozen,
-patched code, not just the (soon read-only) upstream URL. All four fleet Windows/Linux ComfyUI
+patched code, not just the (soon read-only) upstream URL. The same pin (upstream and mirror) is a row of
+`render/node-packs.json`, the table a run-graph manifest's `node_packs` is checked against (a pack is taken only at a
+pinned repository and commit; see the [manifest flow](../flows/run-graph-manifest-satisfaction.md)). All four fleet Windows/Linux ComfyUI
 installs (<node-b>, <node-e>, <node-a>, <node-c>) are aligned to this commit (2026-09-24) — see the
 per-node rev table and the A/B seat-switch decision in
 `Ecosystem/Benchmarks and Optimizations/2026-09-22-qwen-image-21-hyperframes/infra/multigpu-archival-actions-2026-09-24.md`

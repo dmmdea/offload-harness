@@ -3,6 +3,7 @@
 // gate); this file starts with the models leg. All side-effecting deps are injected so
 // the whole satisfier is testable with zero network/disk.
 import { join, dirname } from "node:path";
+import { checkNodePack, checkModelEntry, normalizeModelPath } from "./node-packs.mjs";
 
 const defer = (code, ref, detail) => ({ ok: false, defer: { code, ref, detail } });
 
@@ -58,6 +59,15 @@ export function modelCandidates(relPath, comfyDir, extraRoots) {
 
 export async function satisfyModels(models, deps) {
   const { comfyDir, exists, download, sha256, sentinelOk, writeSentinel, extraRoots = {} } = deps;
+  // FIRST, before any file is looked for, hashed or fetched: every entry must land under models/<class>/ and come, if
+  // from anywhere, over https from a listed host (node-packs.json). The path is joined onto the ComfyUI directory and
+  // the source is fetched into it before ComfyUI starts, so an entry the caller chose freely is a file the caller
+  // placed where ComfyUI loads code, or anywhere above it. All entries are read before the first is provisioned, so a
+  // refusal leaves nothing downloaded.
+  for (const m of models || []) {
+    const refusal = checkModelEntry(m);
+    if (refusal) return defer(refusal.code, refusal.ref, refusal.detail);
+  }
   // beat (optional) tells the lease's progress file which model the satisfier is on (lease-progress.mjs): this
   // step runs before ComfyUI exists, so no poll loop is beating, and a manifest of several large models is the one
   // place a run-graph job is quiet for longer than a lease's stall window. One model's download or hash can still
@@ -66,12 +76,13 @@ export async function satisfyModels(models, deps) {
   const unverified = [];
   for (const m of models || []) {
     beat(`manifest: checking ${m.path}`);
-    const abs = join(comfyDir, m.path);
+    const rel = normalizeModelPath(m.path);
+    const abs = join(comfyDir, rel);
     // Presence resolves across ComfyUI's FULL search path, not just comfyDir. A model that
     // lives only on a secondary tree (e.g. the V: Optane drive registered via
     // extra_model_paths.yaml) otherwise reads as MISSING and is re-downloaded to C: — 15GB
     // per run for a big GGUF, which is exactly what the scene-swap consumer hit live.
-    const found = modelCandidates(m.path, comfyDir, extraRoots).find((p) => exists(p)) || null;
+    const found = modelCandidates(rel, comfyDir, extraRoots).find((p) => exists(p)) || null;
     if (found) {
       if (!m.sha256) continue;            // present but unverifiable — trust on-disk
       if (sentinelOk(found)) continue;    // already verified once
@@ -166,6 +177,22 @@ export async function satisfyManifest(manifest, deps) {
 
   const hasPacks = (manifest.node_packs || []).length > 0;
 
+  // FIRST, before any tooling probe, model download or git command: a pack is taken only at a pinned repository
+  // and commit (node-packs.json). Naming one makes this node run the caller's code, and a manifest that gets
+  // that far with a model download already done has spent the node's disk on a request it was going to refuse.
+  // deps.packAllowed is a seam for tests that use stand-in packs; production leaves it unset, which is the table.
+  const packAllowed = deps.packAllowed || checkNodePack;
+  for (const pack of manifest.node_packs || []) {
+    const refusal = packAllowed(pack);
+    if (refusal) return defer(refusal.code, refusal.ref, refusal.detail);
+  }
+  // Models too: a path that leaves models/<class>/ or a source that is not a listed https host is refused here, before
+  // the tooling probe, the version read, a download or a clone (satisfyModels checks again for a caller that reaches it directly).
+  for (const m of manifest.models || []) {
+    const refusal = checkModelEntry(m);
+    if (refusal) return defer(refusal.code, refusal.ref, refusal.detail);
+  }
+
   // The satisfier tooling (uv) is ONLY needed to install PACKS. A models-only or
   // empty manifest (a graph using only built-in nodes) must NOT require it.
   if (hasPacks && !satisfierAvailable()) return defer("SATISFIER_UNAVAILABLE", "uv", "uv not found in the ComfyUI venv (pip install uv)");
@@ -207,7 +234,11 @@ export async function satisfyManifest(manifest, deps) {
     for (const pack of manifest.node_packs) {
       let res;
       try { res = await ensurePack(pack); }
-      catch (e) { return spawnOrVenv(e, pack.name); }
+      catch (e) {
+        // The checkout stage refuses an unpinned pack too (makeEnsurePack): the same typed answer, never "the venv is broken".
+        if (e && e.code === "NODE_PACK_NOT_ALLOWED") return defer(e.code, e.ref || pack.name, e.detail || String(e.message || e));
+        return spawnOrVenv(e, pack.name);
+      }
       if (res.changed) changed = true;
     }
     // 2. ONE unified resolve+install over all packs' on-disk requirements (under the
@@ -343,12 +374,19 @@ async function runOut(cmd, opts = {}) {
 // step from injectable primitives so it is unit-testable without spawning git. #3: `changed`
 // is decided by the git HEAD before-vs-after (a fresh clone, or a checkout that MOVED HEAD),
 // NOT merely "did the dir exist" — a same-commit checkout is correctly a no-op.
-export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun }) {
+export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd }) {
   return async (pack) => {
+    // The last stop before git: the directory, the clone and the checkout all come from the pack, so a pack that is
+    // not pinned is refused before any of them is looked at (satisfyManifest has refused it already; this is for a
+    // caller that reaches the checkout stage another way).
+    const refusal = packAllowed(pack);
+    if (refusal) {
+      throw Object.assign(new Error(`node pack ${refusal.ref} refused: ${refusal.detail}`), refusal);
+    }
     const dir = `${comfyDir}/custom_nodes/${pack.name}`;
     const existed = exists(dir);
     const headBefore = existed ? await gitHead(dir) : null;
-    if (!existed) await gitRun(buildClonePackCmd(pack, { comfyDir }));
+    if (!existed) await gitRun(buildClone(pack, { comfyDir }));
     await gitRun(buildEnsurePackCmd(pack, { comfyDir }));
     const headAfter = await gitHead(dir);
     return { changed: !existed || headBefore !== headAfter };

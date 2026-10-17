@@ -43,6 +43,8 @@ func accelNodeOpts(ids ...string) *Options {
 		GpuVendor:    "nvidia",
 		GpuArch:      "ampere",
 		Accelerators: ids,
+		// a loopback node: every lane needs the bearer, or a loopback listener when the node has no token
+		LoopbackListener: true,
 	}
 }
 

@@ -17,34 +17,34 @@ const base = {
 };
 
 test("present + sentinel-ok model is skipped", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "HASH" }],
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }],
     { ...base, exists: () => true, sentinelOk: () => true });
   assert.deepEqual(r, { ok: true, unverified: [] });
 });
 
 test("missing model with matching sha downloads + verifies", async () => {
   let dl = 0;
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "HASH" }],
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }],
     { ...base, download: async () => { dl++; }, sha256: async () => "HASH" });
   assert.equal(dl, 1); assert.equal(r.ok, true);
 });
 
 test("sha mismatch DEFERs MODEL_SHA_MISMATCH", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "WANT" }],
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "WANT" }],
     { ...base, sha256: async () => "GOT" });
   assert.equal(r.ok, false);
   assert.equal(r.defer.code, "MODEL_SHA_MISMATCH");
-  assert.equal(r.defer.ref, "m/x");
+  assert.equal(r.defer.ref, "models/checkpoints/x.safetensors");
 });
 
 test("null-sha model downloads and is reported unverified", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: null }], base);
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: null }], base);
   assert.equal(r.ok, true);
-  assert.deepEqual(r.unverified, ["m/x"]);
+  assert.deepEqual(r.unverified, ["models/checkpoints/x.safetensors"]);
 });
 
 test("no source_url for a missing model DEFERs MODEL_DOWNLOAD_FAILED", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "", sha256: null }], base);
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "", sha256: null }], base);
   assert.equal(r.defer.code, "MODEL_DOWNLOAD_FAILED");
 });
 
@@ -104,7 +104,7 @@ test("model present ONLY under an extra root is NOT re-downloaded", async () => 
   // The exact CMP defect: file lives on V:, absent from C: — must be seen as present.
   const onV = join("V:/m/unet", "x.gguf");
   let dl = 0;
-  const r = await satisfyModels([{ path: "models/unet/x.gguf", source_url: "u", sha256: "HASH" }], {
+  const r = await satisfyModels([{ path: "models/unet/x.gguf", source_url: "https://huggingface.co/x/y", sha256: "HASH" }], {
     ...base,
     extraRoots: { unet: ["V:/m/unet"] },
     exists: (p) => p === onV,
@@ -122,7 +122,7 @@ test("model present ONLY under an extra root is NOT re-downloaded", async () => 
 
 test("present pinned-sha file WITHOUT a sentinel is adopted, not re-downloaded", async () => {
   let dl = 0, wrote = null;
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "HASH" }], {
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }], {
     ...base,
     exists: () => true,
     sentinelOk: () => false,          // pre-provisioned: no sidecar
@@ -131,14 +131,14 @@ test("present pinned-sha file WITHOUT a sentinel is adopted, not re-downloaded",
     writeSentinel: (p, h) => { wrote = [p, h]; },
   });
   assert.equal(dl, 0, "a byte-correct present file must be adopted, never re-downloaded");
-  assert.deepEqual(wrote, [join("C:/ComfyUI", "m/x"), "HASH"], "adoption writes the sentinel");
+  assert.deepEqual(wrote, [join("C:/ComfyUI", "models/checkpoints/x.safetensors"), "HASH"], "adoption writes the sentinel");
   assert.equal(r.ok, true);
 });
 
 test("adoption writes the sentinel BESIDE the file it actually found (extra root)", async () => {
   const onV = join("V:/m/vae", "v.safetensors");
   let wrote = null;
-  await satisfyModels([{ path: "models/vae/v.safetensors", source_url: "u", sha256: "HASH" }], {
+  await satisfyModels([{ path: "models/vae/v.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }], {
     ...base,
     extraRoots: { vae: ["V:/m/vae"] },
     exists: (p) => p === onV,
@@ -151,7 +151,7 @@ test("adoption writes the sentinel BESIDE the file it actually found (extra root
 
 test("present file whose hash MISMATCHES the pin is re-downloaded", async () => {
   let dl = 0, calls = 0;
-  const r = await satisfyModels([{ path: "m/x", source_url: "u", sha256: "WANT" }], {
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "WANT" }], {
     ...base,
     exists: () => true,
     sentinelOk: () => false,
@@ -164,7 +164,7 @@ test("present file whose hash MISMATCHES the pin is re-downloaded", async () => 
 });
 
 test("present mismatching file with NO source_url DEFERs MODEL_SHA_MISMATCH", async () => {
-  const r = await satisfyModels([{ path: "m/x", source_url: "", sha256: "WANT" }], {
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "", sha256: "WANT" }], {
     ...base, exists: () => true, sentinelOk: () => false, sha256: async () => "GOT",
   });
   assert.equal(r.ok, false);
@@ -179,11 +179,14 @@ const okDeps = {
   satisfierAvailable: () => true, comfyVersion: async () => "0.23.5",
   resolveDeps: async () => {}, ensurePack: async () => ({ changed: false }),
   pipCheck: async () => ({ ok: true }),
+  // These tests use stand-in packs ("r", "c"): the pinned-pack allowlist is exercised, with the real table,
+  // in the tests at the end of this file and in node-packs.test.mjs.
+  packAllowed: () => null,
 };
 const M = parseManifest({
   comfyui_min_version: "0.23.0",
   node_packs: [{ name: "A", repo: "r", commit: "c" }],
-  models: [{ path: "m/x", source_url: "u", sha256: "HASH" }],
+  models: [{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }],
 });
 
 test("fully satisfied → ok, no change", async () => {
@@ -232,7 +235,7 @@ test("empty manifest (no packs) skips the satisfier entirely — no cm-cli", asy
 });
 
 test("models-only manifest satisfies without the pack satisfier present", async () => {
-  const mo = parseManifest({ node_packs: [], models: [{ path: "m/y", source_url: "u", sha256: "HASH" }] });
+  const mo = parseManifest({ node_packs: [], models: [{ path: "models/checkpoints/y.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }] });
   const r = await satisfyManifest(mo, { ...okDeps, satisfierAvailable: () => false });
   assert.equal(r.ok, true);
 });
@@ -484,7 +487,7 @@ test("buildClonePackCmd inserts -- so a leading-dash repo is a positional, not a
 test("makeEnsurePack: HEAD moved on checkout → changed:true", async () => {
   let head = "aaaaaaa";
   const ep = makeEnsurePack({
-    comfyDir: "C:/ComfyUI", exists: () => true,
+    comfyDir: "C:/ComfyUI", exists: () => true, packAllowed: () => null,
     gitHead: async () => head,
     gitRun: async (cmd) => { if (cmd.includes("checkout")) head = "bbbbbbb"; }, // checkout moves HEAD
   });
@@ -493,7 +496,7 @@ test("makeEnsurePack: HEAD moved on checkout → changed:true", async () => {
 });
 test("makeEnsurePack: HEAD unchanged (same-commit checkout) → changed:false", async () => {
   const ep = makeEnsurePack({
-    comfyDir: "C:/ComfyUI", exists: () => true,
+    comfyDir: "C:/ComfyUI", exists: () => true, packAllowed: () => null,
     gitHead: async () => "samehead", gitRun: async () => {},
   });
   const r = await ep({ name: "A", repo: "r", commit: "samehead" });
@@ -502,7 +505,7 @@ test("makeEnsurePack: HEAD unchanged (same-commit checkout) → changed:false", 
 test("makeEnsurePack: fresh clone (dir absent) → changed:true, clones once", async () => {
   let cloned = 0;
   const ep = makeEnsurePack({
-    comfyDir: "C:/ComfyUI", exists: () => false,
+    comfyDir: "C:/ComfyUI", exists: () => false, packAllowed: () => null,
     gitHead: async () => "h", gitRun: async (cmd) => { if (cmd.includes("clone")) cloned++; },
   });
   const r = await ep({ name: "A", repo: "r", commit: "c" });
@@ -636,4 +639,182 @@ test("defaultSatisfyDeps.resolveDeps leaves no host-constraints file or pack loc
   assert.ok(r.outcome instanceof Error && /exit 1/.test(r.outcome.message), "the uv failure still reaches the caller: " + r.outcome);
   assert.ok(underDir(r.lock, r.priv), `uv had written the lock under the OS temp dir (${r.lock}) before it failed`);
   assert.deepEqual(r.left, []);
+});
+
+// --- the pinned-pack allowlist (the real table; no stand-in policy) ---
+// A manifest that names a pack makes the node clone its repository and pip-install its requirements, so it
+// runs the caller's code. Only a pack whose repository AND commit are in render/node-packs.json is taken;
+// anything else is refused before the first git command, whatever the models and the tooling say.
+const VHS = { name: "ComfyUI-VideoHelperSuite", repo: "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite", commit: "4d907bee61e92c2e65af3bd6383a4e4d356126d1" };
+const HOSTILE = { name: "payload", repo: "https://example.invalid/payload", commit: "0".repeat(40) };
+const realPolicy = { ...okDeps, packAllowed: undefined };
+
+function spies() {
+  const calls = [];
+  return {
+    calls,
+    deps: {
+      ...realPolicy,
+      satisfierAvailable: () => { calls.push("satisfierAvailable"); return true; },
+      download: async () => { calls.push("download"); },
+      exists: () => false,
+      ensurePack: async () => { calls.push("ensurePack"); return { changed: false }; },
+      resolveDeps: async () => { calls.push("resolveDeps"); },
+      pipCheck: async () => { calls.push("pipCheck"); return { ok: true }; },
+    },
+  };
+}
+
+test("satisfyManifest refuses an unpinned pack before anything is downloaded, cloned or installed", async () => {
+  const { calls, deps } = spies();
+  const m = parseManifest({ node_packs: [HOSTILE], models: [{ path: "models/checkpoints/x.safetensors", source_url: "https://example.invalid/x", sha256: null }] });
+  const r = await satisfyManifest(m, deps);
+  assert.equal(r.ok, false);
+  assert.equal(r.defer.code, "NODE_PACK_NOT_ALLOWED");
+  assert.equal(r.defer.ref, "payload", "the refusal names the pack");
+  assert.deepEqual(calls, [], "nothing ran: no tooling probe, no model download, no checkout, no install");
+});
+
+test("satisfyManifest refuses a pinned repository at another commit, and a pinned pair under another directory name", async () => {
+  for (const pack of [{ ...VHS, commit: "1".repeat(40) }, { ...VHS, name: "ComfyUI-Manager" }, { ...VHS, name: "../../x" }]) {
+    const { calls, deps } = spies();
+    const r = await satisfyManifest(parseManifest({ node_packs: [pack], models: [] }), deps);
+    assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED", JSON.stringify(pack));
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("satisfyManifest refuses the whole manifest when one of its packs is unpinned", async () => {
+  const { calls, deps } = spies();
+  const r = await satisfyManifest(parseManifest({ node_packs: [VHS, HOSTILE], models: [] }), deps);
+  assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED");
+  assert.deepEqual(calls, [], "the pinned pack was not checked out ahead of the refusal");
+});
+
+test("satisfyManifest takes a manifest that names only pinned packs", async () => {
+  const { calls, deps } = spies();
+  const r = await satisfyManifest(parseManifest({ node_packs: [VHS], models: [] }), deps);
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.ok(calls.includes("ensurePack"));
+});
+
+test("makeEnsurePack refuses an unpinned pack before it asks git anything, and never builds a clone command", async () => {
+  const touched = [];
+  const ep = makeEnsurePack({
+    comfyDir: "C:/ComfyUI",
+    exists: (d) => { touched.push(["exists", d]); return false; },
+    gitHead: async () => { touched.push(["gitHead"]); return "h"; },
+    gitRun: async (cmd) => { touched.push(["gitRun", cmd]); },
+    buildClone: (...a) => { touched.push(["buildClone", a]); return ["git", "clone"]; },
+  });
+  await assert.rejects(() => ep(HOSTILE), (e) => e.code === "NODE_PACK_NOT_ALLOWED" && /payload/.test(e.message));
+  assert.deepEqual(touched, [], "the clone command was built or run for a pack that is not pinned");
+  const r = await ep(VHS);
+  assert.equal(r.changed, true);
+  assert.ok(touched.some((t) => t[0] === "buildClone"), "a pinned pack is cloned");
+});
+
+test("a refusal from the checkout stage is the same typed defer, not a broken venv", async () => {
+  const ep = makeEnsurePack({ comfyDir: "C:/ComfyUI", exists: () => false, gitHead: async () => "h", gitRun: async () => {} });
+  const r = await satisfyManifest(parseManifest({ node_packs: [VHS], models: [] }), { ...realPolicy, ensurePack: (p) => ep({ ...p, commit: "2".repeat(40) }) });
+  assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED");
+});
+
+// --- a model lands under models/<class>/ and nowhere else ---------------------------------------------------------
+// A holder of the fleet bearer can have the node render, not write a file of its choosing: the entries are checked
+// before the first download, before any file is looked for, and before a pack is cloned. The table is the one
+// internal/mediacap/manifestmodels_test.go reads.
+const modelCases = JSON.parse(readFileSync(new URL("./testdata/manifest-model-cases.json", import.meta.url), "utf8")).cases;
+
+function spyDeps(extra = {}) {
+  const calls = [];
+  const note = (name) => (...a) => { calls.push([name, ...a]); };
+  return {
+    calls,
+    deps: {
+      comfyDir: "/opt/comfy",
+      exists: (p) => { calls.push(["exists", p]); return false; },
+      sentinelOk: () => { calls.push(["sentinelOk"]); return false; },
+      writeSentinel: note("writeSentinel"),
+      download: async (url, dest) => { calls.push(["download", url, dest]); },
+      sha256: async () => "HASH",
+      ...extra,
+    },
+  };
+}
+
+for (const c of modelCases) {
+  test(`satisfyModels: ${c.name}`, async () => {
+    const { calls, deps } = spyDeps();
+    const r = await satisfyModels([{ path: c.path, source_url: c.source_url, sha256: null }], deps);
+    if (c.ok) {
+      assert.notEqual(r.defer && r.defer.code, "MODEL_NOT_ALLOWED", "refused an entry the node provisions");
+      if (c.source_url) {
+        const dl = calls.find((x) => x[0] === "download");
+        assert.ok(dl, "a listed source was not downloaded");
+        assert.ok(resolve(dl[2]).startsWith(resolve("/opt/comfy", "models") + sep), `the file lands at ${dl[2]}, outside models/`);
+      }
+      return;
+    }
+    assert.equal(r.ok, false);
+    assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+    assert.deepEqual(calls, [], "a refused entry must touch nothing: no lookup, no download, no sentinel");
+  });
+}
+
+test("satisfyModels refuses a hostile entry even when the file is already on disk (no adoption, no sentinel)", async () => {
+  const { calls, deps } = spyDeps({ exists: () => true });
+  const r = await satisfyModels([{ path: "custom_nodes/evil/__init__.py", source_url: "", sha256: "HASH" }], deps);
+  assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+  assert.deepEqual(calls, []);
+});
+
+test("satisfyModels checks every entry before it provisions the first", async () => {
+  const { calls, deps } = spyDeps();
+  const r = await satisfyModels([
+    { path: "models/vae/ok.safetensors", source_url: "https://huggingface.co/x/y", sha256: null },
+    { path: "custom_nodes/evil/__init__.py", source_url: "https://huggingface.co/x/y", sha256: null },
+  ], deps);
+  assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+  assert.equal(r.defer.ref, "custom_nodes/evil/__init__.py");
+  assert.deepEqual(calls, [], "the first, valid entry was provisioned before the second was refused");
+});
+
+test("satisfyModels does not throw on an entry whose path is not a string", async () => {
+  for (const path of [5, ["models/vae/x.safetensors"], { a: 1 }]) {
+    const { deps } = spyDeps();
+    const r = await satisfyModels([{ path, source_url: "", sha256: null }], deps);
+    assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+  }
+});
+
+test("satisfyManifest refuses a hostile model before the tooling probe, the version read, a download or a clone", async () => {
+  const called = [];
+  const mark = (n, v) => () => { called.push(n); return v; };
+  const m = parseManifest({
+    comfyui_min_version: "0.23.0",
+    node_packs: [{ name: "A", repo: "r", commit: "c" }],
+    models: [{ path: "custom_nodes/evil/__init__.py", source_url: "https://huggingface.co/x/y", sha256: null }],
+  });
+  const r = await satisfyManifest(m, {
+    ...okDeps,
+    exists: mark("exists", false), sentinelOk: mark("sentinelOk", false),
+    download: async () => { called.push("download"); },
+    satisfierAvailable: mark("satisfierAvailable", true),
+    comfyVersion: async () => { called.push("comfyVersion"); return "0.23.5"; },
+    ensurePack: async () => { called.push("ensurePack"); return { changed: false }; },
+    resolveDeps: async () => { called.push("resolveDeps"); },
+  });
+  assert.equal(r.ok, false);
+  assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
+  assert.deepEqual(called, []);
+});
+
+test("a manifest of the shipped shape (a model under models/, a listed source) still provisions", async () => {
+  const { calls, deps } = spyDeps();
+  const r = await satisfyManifest(parseManifest({ node_packs: [], models: [{ path: "models/unet/x.gguf", source_url: "https://huggingface.co/x/y/resolve/main/x.gguf", sha256: null }] }),
+    { ...deps, satisfierAvailable: () => true, comfyVersion: async () => "0.23.5" });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.unverified, ["models/unet/x.gguf"]);
+  assert.equal(calls.filter((x) => x[0] === "download").length, 1);
 });

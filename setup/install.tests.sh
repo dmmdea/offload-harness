@@ -180,6 +180,99 @@ else
   fail "--client renders a client config and gates it, with no tier, llama.cpp or service" "rc=$RC: $OUT"
 fi
 
+# --token-file on a node install. Every lane of a fleet node requires the fleet bearer, and fleet-serve will not start on
+# the tailnet address without fleet_auth_token in the config it reads, so a unit written without one would crash-loop.
+# The installer asks for the key before it writes anything, stores it from a file (the value is never printed), and
+# refuses to register the service without it.
+NODE_KEY="$TMP/node-key"; printf '%s\n' 'fixture-value-0123456789' >"$NODE_KEY"
+NODE_KEY_VALUE="fixture-value-0123456789"
+
+# A service wanted and no key anywhere: refused up front, naming the key and the config the node will read.
+rm -rf "$TMP/svc"
+OUT="$(STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/svc" --dry-run --llama-bin "$TMP/llama" 2>&1)"; RC=$?
+if [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "fleet_auth_token" && printf '%s' "$OUT" | grep -q -- "$TMP/svc/etc/config.json" \
+  && printf '%s' "$OUT" | grep -q -- "--token-file"; then
+  pass "a node install with a service and no fleet_auth_token is refused, naming the key, the config and --token-file"
+else
+  fail "a node install with a service and no fleet_auth_token is refused, naming the key, the config and --token-file" "rc=$RC: $OUT"
+fi
+
+# With --token-file the dry run goes on, says where the key would go, and never prints the value.
+OUT="$(STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/svc" --dry-run --llama-bin "$TMP/llama" --token-file "$NODE_KEY" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q "would store fleet_auth_token" && printf '%s' "$OUT" | grep -q -- "$TMP/svc/etc/config.json" \
+  && ! printf '%s' "$OUT" | grep -q -- "$NODE_KEY_VALUE" && [ ! -e "$TMP/svc/etc/config.json" ]; then
+  pass "--token-file on a node install: the dry run says where the key goes, prints no value, writes nothing"
+else
+  fail "--token-file on a node install: the dry run says where the key goes, prints no value, writes nothing" "rc=$RC: $OUT"
+fi
+
+# A config that already holds the key needs no --token-file.
+mkdir -p "$TMP/svc2/etc"; printf '{"home":"/srv/x","fleet_auth_token":"already-set"}' >"$TMP/svc2/etc/config.json"
+OUT="$(STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/svc2" --dry-run --llama-bin "$TMP/llama" 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && printf '%s' "$OUT" | grep -q "holds fleet_auth_token" && ! printf '%s' "$OUT" | grep -q "already-set" \
+  && pass "a config that already holds fleet_auth_token satisfies a node install, and the value is not printed" || fail "a config that already holds fleet_auth_token satisfies a node install, and the value is not printed" "rc=$RC: $OUT"
+
+# A config whose key is empty does not.
+mkdir -p "$TMP/svc3/etc"; printf '{"home":"/srv/x","fleet_auth_token":""}' >"$TMP/svc3/etc/config.json"
+OUT="$(STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/svc3" --dry-run --llama-bin "$TMP/llama" 2>&1)"; RC=$?
+[ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "fleet_auth_token" \
+  && pass "a config whose fleet_auth_token is empty is refused like an absent one" || fail "a config whose fleet_auth_token is empty is refused like an absent one" "rc=$RC: $OUT"
+
+# --no-service writes no unit, so it asks for no key (the operator starts fleet-serve by hand and fleet-serve refuses itself).
+OUT="$(STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/svc4" --no-service --dry-run --llama-bin "$TMP/llama" 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && pass "--no-service asks for no fleet_auth_token" || fail "--no-service asks for no fleet_auth_token" "rc=$RC: $OUT"
+
+# A live run stores the key in the config, keeps the other keys, and prints no value.
+mkdir -p "$TMP/live-key/etc"; printf '{"home":"/srv/x","keep":1}' >"$TMP/live-key/etc/config.json"
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-key" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" 2>&1)"; RC=$?
+if [ "$RC" -eq 0 ] \
+  && [ "$(jq -r '.fleet_auth_token' "$TMP/live-key/etc/config.json" 2>/dev/null)" = "$NODE_KEY_VALUE" ] \
+  && [ "$(jq -r '.keep' "$TMP/live-key/etc/config.json" 2>/dev/null)" = "1" ] \
+  && ! printf '%s' "$OUT" | grep -q -- "$NODE_KEY_VALUE"; then
+  pass "a live node install stores fleet_auth_token from --token-file, keeps the other keys and prints no value"
+else
+  fail "a live node install stores fleet_auth_token from --token-file, keeps the other keys and prints no value" "rc=$RC config=$(cat "$TMP/live-key/etc/config.json" 2>/dev/null) out=$OUT"
+fi
+if [ "$(uname -s)" = "Linux" ]; then
+  [ "$(stat -c %a "$TMP/live-key/etc/config.json")" = "600" ] \
+    && pass "the config that holds the key is readable by its owner only" || fail "the config that holds the key is readable by its owner only" "$(stat -c %a "$TMP/live-key/etc/config.json")"
+fi
+
+# A token file with nothing in it is refused, not stored as an empty key.
+: >"$TMP/empty-key"
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-empty" --no-service --llama-bin "$TMP/llama" --token-file "$TMP/empty-key" 2>&1)"; RC=$?
+[ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "empty" && [ ! -e "$TMP/live-empty/etc/config.json" ] \
+  && pass "an empty --token-file is refused before anything is written" || fail "an empty --token-file is refused before anything is written" "rc=$RC: $OUT"
+
+# The unit no longer claims the endpoints are unauthenticated, and --help says what --token-file does on a node.
+! grep -q "unauthenticated by design" "$INSTALL" \
+  && pass "the generated unit's comment no longer says the fleet endpoints are unauthenticated" || fail "the generated unit's comment no longer says the fleet endpoints are unauthenticated" "$(grep -n 'unauthenticated by design' "$INSTALL")"
+bash "$INSTALL" --help 2>&1 | grep -A2 -- "--token-file" | grep -q "fleet_auth_token" \
+  && pass "--help documents --token-file for a node install" || fail "--help documents --token-file for a node install" "$(bash "$INSTALL" --help 2>&1 | grep -A2 -- '--token-file')"
+
+# A node installed for another service identity: the config the key lands in is readable by its owner only, and the unit and
+# the acceptance gate run as that account, so the file is handed to it (sudo chown; the installer escalates for the unit and
+# the gate already). For the installing user itself there is nothing to hand over. A stand-in sudo records what it was asked.
+export SUDO_LOG="$TMP/sudo-log"; : >"$SUDO_LOG"
+printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >>"$SUDO_LOG"' >"$TMP/nodebin/sudo"; chmod +x "$TMP/nodebin/sudo"
+mkdir -p "$TMP/live-user/etc"; printf '{"home":"/srv/x"}' >"$TMP/live-user/etc/config.json"
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-user" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" --user svc-account 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && grep -q -- "chown svc-account $TMP/live-user/etc/config.json" "$SUDO_LOG" \
+  && pass "the config that holds the key is handed to another service identity" || fail "the config that holds the key is handed to another service identity" "rc=$RC sudo=$(cat "$SUDO_LOG") out=$OUT"
+
+: >"$SUDO_LOG"
+mkdir -p "$TMP/live-self/etc"; printf '{"home":"/srv/x"}' >"$TMP/live-self/etc/config.json"
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-self" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" 2>&1)"; RC=$?
+[ "$RC" -eq 0 ] && ! grep -q "chown" "$SUDO_LOG" \
+  && pass "the installing user's own config is not handed over" || fail "the installing user's own config is not handed over" "rc=$RC sudo=$(cat "$SUDO_LOG") out=$OUT"
+
+# A hand-over that fails is not left unsaid.
+printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *chown*) exit 1 ;; esac' >"$TMP/nodebin/sudo"
+mkdir -p "$TMP/live-fail/etc"; printf '{"home":"/srv/x"}' >"$TMP/live-fail/etc/config.json"
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-fail" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" --user svc-account 2>&1)"; RC=$?
+[ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "could not hand" && printf '%s' "$OUT" | grep -q "svc-account" \
+  && pass "a failed hand-over of the config stops the install, naming the account" || fail "a failed hand-over of the config stops the install, naming the account" "rc=$RC: $OUT"
+
 if [ "$FAIL" -eq 0 ]; then
   echo "ALL PASS"
   exit 0

@@ -1,6 +1,10 @@
 package main
 
 import (
+	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -451,6 +455,114 @@ func TestNodeSwapLaunchersForwardCards(t *testing.T) {
 	for _, want := range []string{`--cards) CARDS="$2"; shift 2 ;;`, `[ -n "$CARDS" ] && ARGS+=(--cards "$CARDS")`} {
 		if !strings.Contains(string(sh), want) {
 			t.Errorf("linux-node-swap-launch.sh does not forward --cards (%q missing)", want)
+		}
+	}
+}
+
+// A node that listens beyond loopback needs a fleet_auth_token in the config its fleet-serve reads, or the binary a swap
+// installs will not start. node-swap reads the config it resolves for the node (flag, env, cwd, home), records only whether
+// the key is there, and the engine refuses before it touches anything (internal/nodeswap).
+func TestResolveNodeSwapFleetKey(t *testing.T) {
+	src := config.Source{Path: "/srv/offload/etc/config.json"}
+	plan := nodeswap.Plan{HealthURL: "http://192.0.2.7:18811/fleet/health"}
+
+	got := resolveNodeSwapFleetKey(plan, config.Config{}, src, false)
+	if got.FleetKey == nil || got.FleetKey.Present || got.FleetKey.Config != src.Path {
+		t.Errorf("a config with no key: FleetKey = %+v, want {Config: %q, Present: false}", got.FleetKey, src.Path)
+	}
+
+	got = resolveNodeSwapFleetKey(plan, config.Config{FleetAuthToken: "a-token"}, src, false)
+	if got.FleetKey == nil || !got.FleetKey.Present {
+		t.Errorf("a config with a key: FleetKey = %+v, want Present", got.FleetKey)
+	}
+	if b, _ := json.Marshal(got); strings.Contains(string(b), "a-token") {
+		t.Errorf("the plan carries the key's value: %s", b)
+	}
+
+	if got = resolveNodeSwapFleetKey(plan, config.Config{}, src, true); got.FleetKey != nil {
+		t.Errorf("--skip-fleet-key-check still recorded a check: %+v", got.FleetKey)
+	}
+
+	// No config file was found: the check names that, rather than a path.
+	got = resolveNodeSwapFleetKey(plan, config.Config{}, config.Source{}, false)
+	if got.FleetKey == nil || got.FleetKey.Present || got.FleetKey.Config == "" {
+		t.Errorf("no config file: FleetKey = %+v, want a refusal that says no file was found", got.FleetKey)
+	}
+}
+
+func TestParseNodeSwapFlags_SkipFleetKeyCheck(t *testing.T) {
+	_, out, err := parseNodeSwapFlags([]string{"--staged", "s", "--target", "t", "--sha256", "h"})
+	if err != nil || out.skipFleetKeyCheck {
+		t.Fatalf("default: skipFleetKeyCheck = %v (err %v), want false", out.skipFleetKeyCheck, err)
+	}
+	_, out, err = parseNodeSwapFlags([]string{"--staged", "s", "--target", "t", "--sha256", "h", "--skip-fleet-key-check"})
+	if err != nil || !out.skipFleetKeyCheck {
+		t.Fatalf("--skip-fleet-key-check: skipFleetKeyCheck = %v (err %v), want true", out.skipFleetKeyCheck, err)
+	}
+}
+
+// runNodeSwap is too large to run against a real node in a test, so the call that gives the engine its check is pinned at the
+// source: it resolves the key after the defaults (which may fill the health URL) and before nodeswap.Run.
+func TestRunNodeSwapRecordsTheFleetKeyBeforeRunningTheSwap(t *testing.T) {
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "node_swap_cmd.go", nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keyPos, runPos, defaultsPos token.Pos
+	for _, d := range f.Decls {
+		fd, ok := d.(*ast.FuncDecl)
+		if !ok || fd.Name.Name != "runNodeSwap" {
+			continue
+		}
+		ast.Inspect(fd.Body, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			switch fn := call.Fun.(type) {
+			case *ast.Ident:
+				switch fn.Name {
+				case "resolveNodeSwapFleetKey":
+					keyPos = call.Pos()
+				case "resolveNodeSwapDefaults":
+					defaultsPos = call.Pos()
+				}
+			case *ast.SelectorExpr:
+				if fn.Sel.Name == "Run" {
+					runPos = call.Pos()
+				}
+			}
+			return true
+		})
+	}
+	if keyPos == token.NoPos || runPos == token.NoPos || defaultsPos == token.NoPos {
+		t.Fatalf("runNodeSwap must call resolveNodeSwapDefaults, resolveNodeSwapFleetKey and nodeswap.Run (positions %v %v %v)", defaultsPos, keyPos, runPos)
+	}
+	if !(defaultsPos < keyPos && keyPos < runPos) {
+		t.Errorf("resolveNodeSwapFleetKey must run after the defaults and before nodeswap.Run")
+	}
+}
+
+// The launchers run the swap detached and enumerate the flags they forward: a flag the engine accepts and a launcher does
+// not name never reaches it, and --skip-fleet-key-check is the operator's way past the check for a box whose config is not the node's.
+func TestNodeSwapLaunchersForwardSkipFleetKeyCheck(t *testing.T) {
+	ps1, err := os.ReadFile(filepath.Join("setup", "windows-node-swap-launch.ps1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"[switch]$SkipFleetKeyCheck", "if ($SkipFleetKeyCheck)", "'-skip-fleet-key-check'"} {
+		if !strings.Contains(string(ps1), want) {
+			t.Errorf("windows-node-swap-launch.ps1 does not forward -SkipFleetKeyCheck (%q missing)", want)
+		}
+	}
+	sh, err := os.ReadFile(filepath.Join("setup", "linux-node-swap-launch.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`--skip-fleet-key-check) SKIP_FLEET_KEY_CHECK=1; shift ;;`, `[ "$SKIP_FLEET_KEY_CHECK" = 1 ] && ARGS+=(--skip-fleet-key-check)`} {
+		if !strings.Contains(string(sh), want) {
+			t.Errorf("linux-node-swap-launch.sh does not forward --skip-fleet-key-check (%q missing)", want)
 		}
 	}
 }

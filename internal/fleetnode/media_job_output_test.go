@@ -84,8 +84,8 @@ func TestMediaJobRendersUnderAGatedStem(t *testing.T) {
 			if !mediaJobOutputRe.MatchString(base) || !strings.HasPrefix(base, mediaJobOutputPrefix) || filepath.Ext(base) != "."+tc.ext {
 				t.Errorf("out name %q, want mediajob-<16 hex>.%s", base, tc.ext)
 			}
-			if !gatedMediaName(base) {
-				t.Errorf("%q is not a gated media name: GET /fleet/media would serve it tokenless", base)
+			if !isGatedLaneOutput(base) {
+				t.Errorf("%q does not have the media-job lane's output shape", base)
 			}
 			again, cleanup2, err := BuildRequest(context.Background(), cfg, true, MediaJobTask, mediaPayload(tc.task, tc.inner, bundle, tc.inputs, nil))
 			if err != nil {
@@ -173,8 +173,8 @@ func TestMediaJobOutputPathCreatesAMissingMediaDirAndToleratesNone(t *testing.T)
 }
 
 // The end-to-end privacy rule: the output of a media-job is refused to a tokenless fetch and served with the
-// token; the output of a plain dispatch is still read by bare name.
-func TestMediaJobOutputNeedsTheBearerAPlainDispatchOutputDoesNot(t *testing.T) {
+// token; so is the output of a plain dispatch, whose name carries no private input but is no less the node's output.
+func TestMediaJobOutputAndPlainDispatchOutputBothNeedTheBearer(t *testing.T) {
 	cfg := mediaJobCfg(t)
 	s, jobs := newTestServer(t, cfg, &outRunner{media: cfg.MediaDir}, nil)
 
@@ -207,9 +207,9 @@ func TestMediaJobOutputNeedsTheBearerAPlainDispatchOutputDoesNot(t *testing.T) {
 		t.Errorf("GET of a media-job output with the bearer = %d (%q)", rec.Code, rec.Body.String())
 	}
 
-	// A plain dispatch on the same node: the tokenless door, the pipeline's own name, read by bare name.
+	// A plain dispatch on the same node: the plain door, the pipeline's own name; read with the bearer like every artifact.
 	env := `{"job_id":"d-plain","task_type":"image-gen","payload":{"prompt":"p"}}`
-	if rec := do(t, s, "POST", "/fleet/dispatch", env, nil); rec.Code != http.StatusAccepted {
+	if rec := do(t, s, "POST", "/fleet/dispatch", env, bearer()); rec.Code != http.StatusAccepted {
 		t.Fatalf("dispatch status %d: %s", rec.Code, rec.Body.String())
 	}
 	dv := waitDone(t, jobs, "d-plain")
@@ -223,7 +223,10 @@ func TestMediaJobOutputNeedsTheBearerAPlainDispatchOutputDoesNot(t *testing.T) {
 	if strings.HasPrefix(pname, mediaJobOutputPrefix) {
 		t.Fatalf("a plain dispatch output carries the media-job stem: %q", pname)
 	}
-	if rec := do(t, s, http.MethodGet, "/fleet/media/"+pname, "", nil); rec.Code != http.StatusOK {
-		t.Errorf("tokenless GET of a plain dispatch output %q = %d, want 200", pname, rec.Code)
+	if rec := do(t, s, http.MethodGet, "/fleet/media/"+pname, "", nil); rec.Code != http.StatusUnauthorized {
+		t.Errorf("tokenless GET of a plain dispatch output %q = %d, want 401: every artifact needs the bearer", pname, rec.Code)
+	}
+	if rec := do(t, s, http.MethodGet, "/fleet/media/"+pname, "", bearer()); rec.Code != http.StatusOK {
+		t.Errorf("GET of a plain dispatch output %q with the bearer = %d, want 200", pname, rec.Code)
 	}
 }

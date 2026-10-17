@@ -28,6 +28,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/jobdir"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
@@ -830,6 +831,21 @@ func buildRunGraph(cfg config.Config, payload json.RawMessage) (core.Request, fu
 		var manifestObj map[string]json.RawMessage
 		if err := json.Unmarshal(in.Manifest, &manifestObj); err != nil {
 			return core.Request{}, noop, fmt.Errorf("run-graph payload: manifest must be a JSON object: %v", err)
+		}
+		// A manifest that names a node pack makes this node clone its repository and install its requirements:
+		// the caller's code, run here. The bearer lets a caller run renders, not that, so a pack is taken only
+		// at a pinned repository and commit (mediacap.NodePackPins), refused here with the pack named, before a
+		// file is written, a job exists or a lease is taken. The runner refuses on the same table again
+		// (render/manifest-satisfy.mjs) for a manifest that reaches it another way.
+		if err := mediacap.CheckManifestNodePacks(in.Manifest); err != nil {
+			return core.Request{}, noop, err
+		}
+		// A models[] entry makes the node download its source_url into the ComfyUI tree at its path before ComfyUI
+		// starts: a path outside models/<class>/ would place a file where ComfyUI loads code (or above the tree), and
+		// a source that is not a listed https host is a fetch from where the caller chose. Refused here on the same
+		// grounds, again with the entry named, and again in the runner's satisfier.
+		if err := mediacap.CheckManifestModels(in.Manifest); err != nil {
+			return core.Request{}, noop, err
 		}
 	}
 	if nre := graphFilesRefusal(cfg, in.Graph, in.Manifest); nre != nil {

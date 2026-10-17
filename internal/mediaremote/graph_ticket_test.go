@@ -150,9 +150,9 @@ func TestABusyGraphIsATicketAndTheSameGraphAttachesToIt(t *testing.T) {
 	}
 
 	// A manifest is its content too: the same manifest from a file of its own attaches, an edited one is another job.
-	m1 := writeFile(t, t.TempDir(), "a.json", []byte(`{"models":[{"name":"x"}]}`))
-	m2 := writeFile(t, t.TempDir(), "b.json", []byte(`{"models":[{"name":"x"}]}`))
-	m3 := writeFile(t, t.TempDir(), "c.json", []byte(`{"models":[{"name":"y"}]}`))
+	m1 := writeFile(t, t.TempDir(), "a.json", []byte(`{"models":[{"path":"models/checkpoints/x.safetensors"}]}`))
+	m2 := writeFile(t, t.TempDir(), "b.json", []byte(`{"models":[{"path":"models/checkpoints/x.safetensors"}]}`))
+	m3 := writeFile(t, t.TempDir(), "c.json", []byte(`{"models":[{"path":"models/checkpoints/y.safetensors"}]}`))
 	withManifest := graphAnswer(t, runDoor(e.cfg, e.lr, resend(e, req, krea2Graph, map[string]any{"manifest_path": m1}), AtOnce))
 	if a := graphAnswer(t, runDoor(e.cfg, e.lr, resend(e, req, krea2Graph, map[string]any{"manifest_path": m2}), AtOnce)); a.Ticket != withManifest.Ticket {
 		t.Errorf("the same manifest from another file is the same ticket: %s vs %s", a.Ticket, withManifest.Ticket)

@@ -12,10 +12,11 @@ import (
 	"strings"
 )
 
-// Validate refuses any listen host that is not loopback. The servers using it
-// are UNAUTHENTICATED by design, so binding beyond loopback exposes an
-// RCE-class surface to the local network — a footgun for anyone publishing
-// this repo.
+// Validate refuses any listen host that is not loopback. The local agent's
+// server using it is UNAUTHENTICATED by design, so binding beyond loopback
+// exposes an RCE-class surface to the local network — a footgun for anyone
+// publishing this repo; a fleet node behind it requires the fleet bearer on
+// every lane, and refuses to start beyond loopback without one.
 //
 // Empty-host forms ("", ":18800") are treated as non-loopback: Go's net.Listen
 // binds ALL interfaces when the host is empty, so they are exactly as exposed as
@@ -49,9 +50,10 @@ func Validate(addr string, allowNonLocal bool) error {
 	if allowNonLocal || isLoopbackHost(host) {
 		return nil
 	}
-	return fmt.Errorf("refusing to bind --listen %q: this endpoint is UNAUTHENTICATED and "+
-		"each request drives the agent's write/GitHub tools; binding beyond loopback exposes "+
-		"an RCE-class surface to your network. Use a loopback address (127.0.0.1, [::1], localhost) "+
+	return fmt.Errorf("refusing to bind --listen %q: binding beyond loopback exposes this endpoint to your network. "+
+		"The local agent's endpoint is UNAUTHENTICATED and each request drives its write/GitHub tools (an RCE-class "+
+		"surface); a fleet node requires the fleet bearer on every lane and will not start beyond loopback without "+
+		"fleet_auth_token. Use a loopback address (127.0.0.1, [::1], localhost) "+
 		"or pass --listen-trusted-network to override (only on a network you fully trust)", addr)
 }
 

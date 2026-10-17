@@ -88,7 +88,7 @@ func dispatchAndWait(t *testing.T, s *Server, id string, headers map[string]stri
 	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", `{"job_id":"`+id+`","task_type":"image-gen","payload":{"prompt":"hi"}}`, headers); rec.Code != http.StatusAccepted {
 		t.Fatalf("dispatch %s = %d (body %s)", id, rec.Code, rec.Body.String())
 	}
-	pollJob(t, s, id, JobDone)
+	pollJobWith(t, s, id, JobDone, headers)
 }
 
 func requestFor(t *testing.T, fr *fakeRunner, id string) core.Request {
@@ -123,39 +123,42 @@ func TestPushedJobStampsTheAskersOriginOnTheNodesRequest(t *testing.T) {
 	}
 }
 
-// The trust rule, end to end. A media dispatch to a node with no token (open by design: deployed media clients are
-// tokenless) keeps the session and drops the class; with a token configured but no bearer sent it is the same; with the
-// bearer the class is kept. Without this a peer that can reach the port could label the node's rows "bake" and hide
+// The trust rule, end to end. Every lane authenticates a request before its run class is read, so a class is
+// believed from a caller the node authenticated: a bearer holder on a node that has a token, or any caller of a
+// loopback node with no token (the local trust boundary). A caller without the bearer never gets as far as a class:
+// the dispatch is refused. Without this a peer that can reach the port could label the node's rows "bake" and hide
 // them from every production view.
-func TestTokenlessMediaDispatchIgnoresAWireRunClass(t *testing.T) {
+func TestAWireRunClassIsBelievedOnlyFromACallerTheNodeAuthenticated(t *testing.T) {
 	hdr := map[string]string{core.OriginHeader: "sess-abc", core.RunClassHeader: "bake"}
 
+	// A loopback node with no token authenticates by the listener.
 	fr := &fakeRunner{}
-	s, _ := newTestServer(t, imageCfg(), fr, authOpts(false))
-	dispatchAndWait(t, s, "tokenless-1", hdr)
-	if r := requestFor(t, fr, "tokenless-1"); r.RunClass != "" || r.OriginSession != "sess-abc" {
-		t.Fatalf("tokenless node: class %q session %q, want no class and the session kept", r.RunClass, r.OriginSession)
-	}
-	// An EMPTY bearer is not the tokenless node's (empty) token. bearerOK hashes both sides, so "Bearer " with nothing
-	// after it hashes equal to an empty configured token: the only thing that keeps such a request from being believed
-	// is trustsWire asking for a configured token first (mutant N10). A real listener trims the trailing space off the
-	// header value, so this is set on the request directly, as do() does.
-	emptyBearer := map[string]string{"Authorization": "Bearer ", core.OriginHeader: "sess-abc", core.RunClassHeader: "bake"}
-	dispatchAndWait(t, s, "tokenless-empty-1", emptyBearer)
-	if r := requestFor(t, fr, "tokenless-empty-1"); r.RunClass != "" || r.OriginSession != "sess-abc" {
-		t.Fatalf("tokenless node, empty bearer: class %q session %q, want no class and the session kept", r.RunClass, r.OriginSession)
+	s, _ := newTestServer(t, imageCfg(), fr, authOpts(true))
+	dispatchAndWait(t, s, "loopback-1", hdr)
+	if r := requestFor(t, fr, "loopback-1"); r.RunClass != "bake" || r.OriginSession != "sess-abc" {
+		t.Fatalf("loopback node, no token: class %q session %q, want the class and the session kept", r.RunClass, r.OriginSession)
 	}
 
+	// A node with a token takes nothing from a caller that did not show it, and carries no class from one.
 	fr = &fakeRunner{}
 	s, _ = newTestServer(t, tokenCfg("s3cret"), fr, authOpts(false))
-	dispatchAndWait(t, s, "nobearer-1", hdr)
-	if r := requestFor(t, fr, "nobearer-1"); r.RunClass != "" {
-		t.Fatalf("token configured, no bearer sent: class %q, want none", r.RunClass)
+	body := `{"job_id":"nobearer-1","task_type":"image-gen","payload":{"prompt":"hi"}}`
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", body, hdr); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("token configured, no bearer sent: status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
 	}
 	wrong := map[string]string{"Authorization": "Bearer nope", core.OriginHeader: "sess-abc", core.RunClassHeader: "bake"}
-	dispatchAndWait(t, s, "wrongbearer-1", wrong)
-	if r := requestFor(t, fr, "wrongbearer-1"); r.RunClass != "" {
-		t.Fatalf("token configured, wrong bearer sent: class %q, want none", r.RunClass)
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", strings.Replace(body, "nobearer-1", "wrongbearer-1", 1), wrong); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("token configured, wrong bearer sent: status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+	// An EMPTY bearer is not an empty configured token either: bearerOK hashes both sides, so "Bearer " with nothing
+	// after it would hash equal to an empty token, and the only thing that keeps it from passing is that a node with
+	// no token never asks (authorizeGated reads the listener instead). A node WITH a token holds it to the real one.
+	emptyBearer := map[string]string{"Authorization": "Bearer ", core.OriginHeader: "sess-abc", core.RunClassHeader: "bake"}
+	if rec := do(t, s, http.MethodPost, "/fleet/dispatch", strings.Replace(body, "nobearer-1", "emptybearer-1", 1), emptyBearer); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("token configured, empty bearer sent: status = %d, want 401", rec.Code)
+	}
+	if n := len(fr.requests()); n != 0 {
+		t.Fatalf("the runner saw %d request(s) from callers the node did not authenticate", n)
 	}
 	right := map[string]string{"Authorization": "Bearer s3cret", core.OriginHeader: "sess-abc", core.RunClassHeader: "bake"}
 	dispatchAndWait(t, s, "bearer-1", right)
@@ -163,12 +166,12 @@ func TestTokenlessMediaDispatchIgnoresAWireRunClass(t *testing.T) {
 		t.Fatalf("right bearer: class %q, want bake", r.RunClass)
 	}
 
-	// A class-prefixed session from the unauthenticated caller does not smuggle the class in through the label.
+	// A class-prefixed session label from a caller of a loopback node is that caller's own label, kept as given.
 	fr = &fakeRunner{}
-	s, _ = newTestServer(t, imageCfg(), fr, authOpts(false))
+	s, _ = newTestServer(t, imageCfg(), fr, authOpts(true))
 	dispatchAndWait(t, s, "prefix-1", map[string]string{core.OriginHeader: "bake:run-7"})
-	if r := requestFor(t, fr, "prefix-1"); r.OriginSession != "" || r.RunClass != "" {
-		t.Fatalf("unauthenticated bake: label: session %q class %q, want neither", r.OriginSession, r.RunClass)
+	if r := requestFor(t, fr, "prefix-1"); r.OriginSession != "bake:run-7" {
+		t.Fatalf("a loopback caller's label: session %q, want it kept", r.OriginSession)
 	}
 }
 
