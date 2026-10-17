@@ -384,7 +384,8 @@ function clipWords(text) {
 //    raises on the first (and asks for a file named after the directory on a name cut to nothing) and reads the second up to about nine
 //    hundred groups. The empty name is refused by every caller, which is the side that fails closed.
 //  - Tokenizers built with disable_weights (the LLM-based text encoders) do not cut the text at parentheses, so `embedding:foo(bar)` is the
-//    name `foo(bar)` there and `(embedding:foo)` is no reference. The names this gives are not requirements either; see embeddingProbes.
+//    name `foo(bar)` there and `(embedding:foo)` is no reference. This reads the CLIP tokenizer's way, the one embeddings are made for;
+//    the names the other reading gives are not requirements either, and embeddingProbes returns them.
 //  - A tokenizer without an embeddings directory loads nothing; the file is still listed (the side that lists more).
 // A value that is not a string names nothing.
 export function embeddingRefs(text) {
@@ -401,11 +402,15 @@ export function embeddingRefs(text) {
 // needs, and no manifest names it, so readiness refuses a template when a file of the node answers one (readiness, `probes`). The empty
 // name is not probed (embeddingRefs gives it, and every caller refuses it).
 //  - The name as written. `embedding:foo, a cat` asks load_embed for `foo,` first and strips the comma only when no file answers.
+//  - The names of the reading without weights. The LLM-based text encoders (Z-Image, Flux.2, ERNIE and others) pass the embeddings
+//    directory on and call tokenize_with_weights with disable_weights: the text is not cut at parentheses and no group weight is read, so
+//    `embedding:foo(bar)` is `foo(bar)` there and `a cat ( embedding:1.2 )` names `1.2`. A template does not say which encoder runs, so
+//    the CLIP reading stays the requirement and the other reading's names are probes.
 export function embeddingProbes(text) {
   if (typeof text !== "string" || !text.includes(EMBEDDING_ID)) return [];
   const refs = embeddingRefs(text);
   const out = [];
-  for (const { written, name } of clipWords(text) ?? []) {
+  for (const { written, name } of [...(clipWords(text) ?? []), ...referenceWords([escapeImportant(text)])]) {
     if (name === "") continue;
     for (const n of [written, name]) if (n !== "" && !refs.includes(n) && !out.includes(n)) out.push(n);
   }
