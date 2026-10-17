@@ -76,6 +76,18 @@ var refusalDoors = []refusalDoor{
 		body: `{}`, noKeyStatus: 403, noKeyError: fleetTokenRequired},
 	{name: "media file", label: "media-file", method: http.MethodGet, path: "/fleet/media/out.png",
 		noKeyStatus: 403, noKeyError: fleetTokenRequired},
+	// A name that is not a bare name is answered for the credential too: a caller without it gets the auth verdict and
+	// nothing about the name rule.
+	{name: "media file, encoded slash", label: "media-file", method: http.MethodGet, path: "/fleet/media/a%2Fb",
+		noKeyStatus: 403, noKeyError: fleetTokenRequired},
+	{name: "media file, literal slash", label: "media-file", method: http.MethodGet, path: "/fleet/media/a/b",
+		noKeyStatus: 403, noKeyError: fleetTokenRequired},
+	{name: "media file, dot-dot", label: "media-file", method: http.MethodGet, path: "/fleet/media/..x",
+		noKeyStatus: 403, noKeyError: fleetTokenRequired},
+	{name: "media file, encoded backslash", label: "media-file", method: http.MethodGet, path: "/fleet/media/a%5Cb",
+		noKeyStatus: 403, noKeyError: fleetTokenRequired},
+	{name: "media file, empty name", label: "media-file", method: http.MethodGet, path: "/fleet/media/",
+		noKeyStatus: 403, noKeyError: fleetTokenRequired},
 	{name: "pair relay", label: "pair-relay", method: http.MethodPost, path: pairworkloads.RelayPath,
 		body: `{}`, noKeyStatus: 403, noKeyError: fleetTokenRequired},
 	{name: "chat", label: "chat", method: http.MethodPost, path: "/fleet/chat",

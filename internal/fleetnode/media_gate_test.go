@@ -326,3 +326,22 @@ func TestComposeProjectOutputsCarryTheGatedStem(t *testing.T) {
 		t.Errorf("webm out = %q", o)
 	}
 }
+
+// A name that is not a bare name (a separator, a dot-dot, nothing at all) is refused with 400 for a caller who holds the
+// bearer, and a loopback node with no token keeps answering so; a caller without the bearer is answered for the credential
+// first (the doors in refusal_every_door_test.go hold that), so the name rule is not something it can probe.
+func TestABearerHolderStillGetsTheBareNameRefusalOnATokenedNode(t *testing.T) {
+	cfg := tokenCfg(holderKey)
+	cfg.MediaDir = t.TempDir()
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(false))
+	hold := map[string]string{"Authorization": "Bearer " + holderKey}
+	for _, p := range []string{"/fleet/media/a%2Fb", "/fleet/media/a/b", "/fleet/media/..x", "/fleet/media/a%5Cb", "/fleet/media/"} {
+		wantErrorShape(t, do(t, s, http.MethodGet, p, "", hold), http.StatusBadRequest, "bare name")
+	}
+	open := imageCfg()
+	open.MediaDir = t.TempDir()
+	s2, _ := newTestServer(t, open, &fakeRunner{}, authOpts(true))
+	for _, p := range []string{"/fleet/media/a%2Fb", "/fleet/media/..x", "/fleet/media/"} {
+		wantErrorShape(t, do(t, s2, http.MethodGet, p, "", nil), http.StatusBadRequest, "bare name")
+	}
+}
