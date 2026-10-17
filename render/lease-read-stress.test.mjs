@@ -100,18 +100,21 @@ const ino = (p) => statSync(p, { bigint: true }).ino;
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 const stats = { renames: 0, replaced: 0, absentAfter: 0, retries: 0, linkRetries: 0, fails: 0, capped: false, crashed: null };
 // The inode of the live name, looked at right after the writer's own rename. The name can be absent for tens of milliseconds after
-// a rename that was not refused (the episode the read gate waits for), so an ENOENT is looked at again, counted, and only a name that
-// stays absent for 5 s is an error.
+// a rename that was not refused (the episode the read gate waits for), so an ENOENT is looked at again, counted once, and only a name
+// that stays absent for 5 s is an error. The 5 s is a DEADLINE and not a count of pauses: Atomics.wait(1) sleeps a whole timer tick on
+// Windows (15.4 ms), so a count of 5000 pauses would be over a minute.
 function observe(path) {
-  for (let attempt = 0; attempt < 5000; attempt++) {
+  const until = Date.now() + 5000;
+  let first = true;
+  for (;;) {
     try { return ino(path); }
     catch (e) {
       if (e.code !== "ENOENT") throw e;
-      if (attempt === 0) stats.absentAfter++;
+      if (first) { stats.absentAfter++; first = false; }
+      if (Date.now() >= until) throw new Error("the live name " + path + " stayed absent for 5 s after a rename");
       pause(1);
     }
   }
-  throw new Error("the live name " + path + " stayed absent for 5 s after a rename");
 }
 // Run op until it is not refused (EPERM, EACCES, EBUSY: a reader holds the name); each refusal is counted under counter. Any other
 // error is real and ends the writer. True when op ran.
