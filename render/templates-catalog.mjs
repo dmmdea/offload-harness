@@ -1380,16 +1380,19 @@ function extOf(rel) {
 const extListed = (rel, exts) => exts === null || exts.length === 0 || exts.includes(extOf(rel));
 const byRel = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
 
-// foldsCase: does the volume under `dir` look names up without regard to case (NTFS by default, as on a Windows node's ComfyUI)? Asked of the
-// directory itself: one of its entries, spelled with the case swapped, is looked up under it. A directory that holds both spellings is
-// case-sensitive, and one with no entry that has a letter in its name gives no answer (and no file to match either).
-function foldsCase(dir, io) {
-  const entries = io.list(dir) ?? [];
+// foldsCase: does the volume under a root look names up without regard to case (NTFS by default, as on a Windows node's ComfyUI)? `files` are
+// the files under the root (walkFiles). Asked of the first one whose name has a letter that a case swap changes: its name, spelled with the case
+// swapped, is looked up in the folder it is in. A folder that holds both spellings is case-sensitive. A name with no such letter (2023, a name
+// in a script without case) says nothing, so the probe goes on to the next file, at any depth: the root's top-level names may have none. A root
+// with no file that has a letter gives no answer, and has no file a case variant could be matched to either.
+function foldsCase(files, io) {
   const swap = (s) => [...s].map((ch) => (ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase())).join("");
-  for (const e of entries) {
-    const other = swap(e.name);
-    if (other === e.name) continue;
-    return !entries.some((x) => x.name === other) && io.stat(`${dir}/${other}`) !== null;
+  for (const f of files) {
+    const cut = f.abs.lastIndexOf("/");
+    const folder = f.abs.slice(0, cut);
+    const other = swap(f.abs.slice(cut + 1));
+    if (other === f.abs.slice(cut + 1)) continue;
+    return !(io.list(folder) ?? []).some((x) => x.name === other) && io.stat(`${folder}/${other}`) !== null;
   }
   return false;
 }
@@ -1423,8 +1426,9 @@ export function scanModelInventory(roots, io = nodeIo) {
     const folding = [];
     for (const d of spec.dirs) {
       if (!io.list(d.path)) { missing_dirs.push({ class: cls, path: d.path }); continue; }
-      if (real && foldsCase(d.path, io)) folding.push(d.path);
-      for (const f of walkFiles(d.path, io, { follow: true, excludeDirs: [".git"] })) {
+      const walked = walkFiles(d.path, io, { follow: true, excludeDirs: [".git"] });
+      if (real && foldsCase(walked, io)) folding.push(d.path);
+      for (const f of walked) {
         if (!extListed(f.rel, spec.exts)) { unlisted++; if (real) record(notListed, f, d, false); continue; }
         record(listed, f, d, true);
       }

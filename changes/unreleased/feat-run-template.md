@@ -105,7 +105,7 @@
     there a hard link reads as two files. An annotated file that is not
     the one ComfyUI opens for the name a prompt gives (a `.safetensors` beside an annotated `.pt`) is the new status `shadowed`. The lookup
     follows the volume, as `isfile` does: on a case-sensitive volume a file in another case is `case_mismatch`, and under a root whose volume
-    folds case (NTFS by default; the scan asks each root through the io, one of its entries spelled in the other case, and records the roots
+    folds case (NTFS by default; the scan asks each root through the io, the first file below it whose name has a letter, spelled in the other case, and records the roots
     that do as `case_insensitive_dirs`) the comparison is in lower case, so a case variant is a hit, reported by its spelling on disk, and
     two case variants in two directories are `ambiguous`; a node with none is `models_missing`, listed by the name the text gives.
   - A loader widget's embeddings file is not a prompt name. An annotated entry of the embeddings class that records no prompt name is the
@@ -133,9 +133,10 @@
     returned is the one after the comma retry and the reading is the CLIP tokenizer's, the one embeddings are made for, and the names the
     other tries (the name as written, the reading without weights) are probes, not requirements (above); `embedding:` with no readable
     name, and a text nested more than 500 groups deep (ComfyUI reads about 900), are the empty name, which every caller refuses; the
-    inventory skips `.git` directories (ComfyUI's walk enters them); the volume's case rule is probed once per root and applied to every
-    subfolder of it, so a single directory marked case-sensitive inside a case-folding volume, or a link into another volume, is judged by its
-    root's answer.
+    inventory skips `.git` directories (ComfyUI's walk enters them); the volume's case rule is probed once per root, with the first file
+    below it that has a letter a case swap changes (at any depth: a root whose top-level names are 2023 or a script without case is judged by the
+    files below), and applied to every subfolder of it, so a single directory marked case-sensitive inside a case-folding volume, or a link
+    into another volume, is judged by its root's answer; a root with no such file has no case variant to match.
   - Limit: the override check and the runner's comparison both read the string values of the graph, so an embedding assembled while the graph
     runs by string nodes (a concatenation of two overrides, for example) is neither refused nor compared with the manifest, and the licence
     gate, the hash and the trust record never see the file it loads. "An override never retargets a file or names an embedding" is true of the
