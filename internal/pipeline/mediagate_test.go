@@ -308,6 +308,56 @@ func TestRunTranscribeCachesWhenIdentifiable(t *testing.T) {
 	}
 }
 
+// THE TRANSCRIBE KEY, at its call site. TestTranscribeCacheKeyKeepsFieldsApart only
+// calls transcribeCacheKey, so it cannot see which key runTranscribe really stores
+// under: with the glued `cache.Key("transcribe", ident, ...)` put back at the call site
+// every other test in this file stayed green. This drives runTranscribe and ties the
+// entry it stores to transcribeCacheKey, the way the vision test ties its entry to
+// visionKeyFor. The language is given (and the route, which decides the protocol and
+// whether the language is part of the identity, is read from the same function the
+// pipeline uses), so the expected key is fully determined.
+func TestRunTranscribeStoresUnderTranscribeCacheKey(t *testing.T) {
+	ffmpeg := lookFFmpeg()
+	if ffmpeg == "" {
+		t.Skip("ffmpeg not on PATH")
+	}
+	wav := makeSilentWav(t, ffmpeg)
+	cfg := gateCfg(t)
+	cfg.MediaDir = t.TempDir()
+	cfg.FFmpegPath = ffmpeg
+	cfg.Endpoint = fakeWhisper(t)
+	ca := gateCache(t)
+	p := gatePipeline(t, cfg, ca)
+
+	params := map[string]any{"language": "en"}
+	res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav, Params: params})
+	if !res.OK {
+		t.Fatalf("transcribe deferred: %s", res.Reason)
+	}
+
+	id, err := p.digestMedia(wav)
+	if err != nil {
+		t.Fatalf("digestMedia: %v", err)
+	}
+	model, useOAI := sttRoute(cfg, false)
+	lang, proto := "en", "whisper"
+	if useOAI {
+		lang, proto = "", "oai"
+	}
+	want := transcribeCacheKey(id.Digest, model, lang, proto, cacheParams(params))
+	if !cacheHas(t, ca, want) {
+		t.Fatal("runTranscribe did not store under transcribeCacheKey(digest, model, lang, proto, params): its call site builds the key some other way")
+	}
+	if n := countEntries(t, ca); n != 1 {
+		t.Fatalf("the cache holds %d entries, want exactly the one under transcribeCacheKey", n)
+	}
+
+	// Not vacuous: that entry is the one a repeat reads.
+	if rep := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav, Params: params}); !rep.Meta.CacheHit {
+		t.Fatal("a repeat did not hit the entry stored under transcribeCacheKey")
+	}
+}
+
 // A cached transcript names files on disk. A node that removes a finished upload job's transcript
 // files (fleet_stt_transcript_ttl_min) leaves the cache entry pointing at nothing, and a second upload
 // of the same recording would be answered with paths that do not exist: a hit whose files are gone is
