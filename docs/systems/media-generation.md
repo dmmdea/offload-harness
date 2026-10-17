@@ -3340,7 +3340,10 @@ the extensions its core loaders accept, by path relative to the directory (so `s
 file nobody annotated, met by its exact name in any class) or says why not: `missing`, `wrong_class` (and
 where the file is), `in_subfolder`, `case_mismatch`, `extension_not_listed`, `class_unregistered`, and, for an embedding (which
 ComfyUI finds in the roots and every subfolder through a set, so the directory that answers is chosen by hash order), `ambiguous` (more than
-one directory holds a file for the name) and `shadowed` (the annotated file is not the one ComfyUI opens for the name a prompt gives).
+one directory holds a different file for the name; a directory or file reached two ways counts once) and `shadowed` (the annotated file is
+not the one ComfyUI opens for the name a prompt gives, or a file answers another name ComfyUI may try for the template's prompts, listed
+as `embedding_probes`). A loader widget's embeddings file (an annotation that records no prompt name) is met by its exact path like any
+other class, and under an embeddings root whose volume folds case the name is matched without regard to case.
 `--mode basename-only` is the older shortcut (any file with that name, anywhere), kept so its numbers can be
 reproduced and compared. Only `local` templates are evaluated. A snapshot records the node's ComfyUI version
 and the hashes of `folder_paths.py` and `utils/extra_config.py`; `readiness` compares the hashes with the

@@ -1162,10 +1162,17 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    `embeddings` class, unless an annotation of that class covers it (the annotation records the name), so the licence gate and trust on first
    use read it like any weights file (a name with no source is `license_unknown`). Readiness resolves it the way ComfyUI does: exactly one
    directory that holds a file for the name is `present` and the runtime manifest names that file, subfolder and extension included; more than
-   one (the root and a subfolder, two subfolders, two registered roots) is `ambiguous`, refused as `models_missing` because the file ComfyUI
-   opens varies from run to run and the manifest would name only one; an annotated file that is not the one ComfyUI opens for the name the
-   prompt gives (a `.safetensors` beside an annotated `.pt`) is `shadowed`; a node that holds none is `models_missing`, listed by the name
-   the text gives. A graph run is not compared.
+   one (the root and a subfolder, two subfolders, two registered roots holding two copies) is `ambiguous`, refused as `models_missing` because
+   the file ComfyUI opens varies from run to run and the manifest would name only one; a directory reached two ways (a root that links to
+   another registered root, a link inside a root, a root registered inside another) is one directory, because the inventory records where
+   each file really is; a file the class does not list (no extension) answers the name as written first, as `isfile` does; under a root
+   whose volume folds case (NTFS by default, probed per root) a case variant is a hit; an annotated file that is not the one ComfyUI opens
+   for the name the prompt gives (a `.safetensors` beside an annotated `.pt`) is `shadowed`; a node that holds none is `models_missing`,
+   listed by the name the text gives. A loader widget's embeddings file (`ConditioningLoader`) is not a prompt name: it is met by its exact
+   path like a file of any other class. Names ComfyUI may also try for a prompt (the name as written before its commas come off, and the
+   names the LLM-based text encoders take when they read the text without weights) are not requirements; the catalog row records them
+   (`embedding_probes`) and a file of the node that answers one makes the template not ready (`shadowed`, `models_missing` at the gate).
+   A graph run is not compared.
 4. The converted graph goes through the run-graph preflight and is posted. The result is the run-graph envelope with `template`,
    `license_class`, `reads_input`, `local_only` and `fleet_note` beside the outputs, and `tofu_first_seen` when a run recorded a
    model for the first time.

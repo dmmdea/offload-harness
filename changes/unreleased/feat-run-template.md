@@ -90,14 +90,36 @@
     licence gate like any weights file. Text that only looks like a reference to the override's wider matcher (`Embedding: a primer`,
     `wordembedding:vec`) names nothing here.
   - Readiness resolves a name the way ComfyUI does, directory by directory: the candidates are the name as written and then with the three
-    extensions, in the roots and every subfolder. One directory that holds a file is `present` and the runtime manifest names that file
+    extensions, in the roots and every subfolder. A file the class does not list answers the name as written too (no extension, or a whole
+    name that is the reference), because `load_embed` asks `isfile` for the name first with no extension filter; the inventory records those
+    files (`unlisted_files`) for this class. One directory that holds a file is `present` and the runtime manifest names that file
     (`models/embeddings/<sub>/<name>.<ext>` for one in a subfolder, which the host-RAM figure can size and the satisfier and the trust check
     can find); within one directory the order is as written, `.safetensors`, `.pt`, `.bin`. More than one directory is the new status
     `ambiguous`, listing the files, and the run is refused as `models_missing` with the entry named, so the manifest never names a file ComfyUI
-    might not open (a link that shows one file under two registered roots reads the same, because the inventory cannot tell a link from a
-    copy: register one root). An annotated file that is not the one ComfyUI opens for the name a prompt gives (a `.safetensors` beside an
-    annotated `.pt`) is the new status `shadowed`. The lookup is case-exact like the other classes, so a file in another case is
-    `case_mismatch`; a node with none is `models_missing`, listed by the name the text gives.
+    might not open. A directory is one entry of ComfyUI's set however it is reached, and the inventory tells a link from a copy: it records
+    where each embeddings file really is (`reals`), and hits that open the same real file are one hit. A root that is a link to another
+    registered root (a model drive reached through the default directory), a link inside a root, a root registered inside another and one
+    file linked into two directories are each one directory; two copies stay two files and stay `ambiguous`. An annotated file that is not
+    the one ComfyUI opens for the name a prompt gives (a `.safetensors` beside an annotated `.pt`) is the new status `shadowed`. The lookup
+    follows the volume, as `isfile` does: on a case-sensitive volume a file in another case is `case_mismatch`, and under a root whose volume
+    folds case (NTFS by default; the scan asks each root through the io, one of its entries spelled in the other case, and records the roots
+    that do as `case_insensitive_dirs`) the comparison is in lower case, so a case variant is a hit, reported by its spelling on disk, and
+    two case variants in two directories are `ambiguous`; a node with none is `models_missing`, listed by the name the text gives.
+  - A loader widget's embeddings file is not a prompt name. An annotated entry of the embeddings class that records no prompt name is the
+    file a `ConditioningLoader` widget carries (three templates of the installed package, the Marigold depth, albedo and surface-normal
+    ones). That node lists the directories by relative path (a subfolder file is `sd15/x`) and opens its value with the exact path under the
+    first root, so it is met like a file of any other class: a subfolder-only file is `in_subfolder`, and a root file with a copy in a
+    subfolder is `present`. The prompt lookup applies to an unannotated requirement and to an annotation that records the prompt names it
+    covers (`embedding_refs`); `readinessFor` forwards `annotated` so the run gate makes the same split.
+  - Other names ComfyUI may try (`embedding_probes`). Two readings of a prompt open files the requirement does not name. `_try_get_embedding`
+    asks `load_embed` for the name as written first (`embedding:foo, a cat` asks for `foo,`) and strips the commas only when nothing
+    answers; and the LLM-based text encoders (Z-Image, Flux.2, ERNIE and others) hand the same directory on with `disable_weights`, so the
+    text is not cut at parentheses and no group weight is read (`embedding:foo(bar)` names `foo(bar)`, `a cat ( embedding:1.2 )` names
+    `1.2`). A template does not say which encoder runs, and the two readings differ in both directions, so the CLIP reading stays the
+    requirement. `embeddingProbes` returns the other names; they are not requirements (listing them would refuse every prompt with a comma
+    after the name), the catalog row carries them as `embedding_probes` only when there are some, and readiness adds an entry (`shadowed`,
+    `probe: true`, the file in `found`) after the requirements when a file of the node answers one. The template is then not ready and the
+    run gate refuses it as `models_missing`, naming the probe name, because ComfyUI may open a file that no manifest names.
   - Grammar: the reader is a port of the tokenizer path of `comfy/sd1_clip.py` (`token_weights`, `tokenize_with_weights`,
     `_try_get_embedding`), compared with the extracted functions of that file on 150,000 generated texts with no difference. The text is cut
     at parentheses and a closed group loses a numeric tail, so `(embedding:name:1.2)` is `name` and a bare `embedding:name:1.2` is the name
@@ -105,11 +127,12 @@
     `Embedding:`, `wordembedding:` and `a,embedding:x` are not references, while `an embedding: soft light` is (ComfyUI looks for a file named
     `soft`); whitespace after the identifier is skipped; the name ends at whitespace, `(`, `<` or `[` (an unescaped `)` with no group to
     close stays in it); commas come off both ends; `\(` and `\)` are characters of the name. Deviations from ComfyUI, each named: the name
-    returned is the one after the comma retry, so a file whose own name ends in a comma, which ComfyUI opens first, is not looked for;
-    `embedding:` with no readable name, and a text nested more than 500 groups deep (ComfyUI reads about 900), are the empty name, which every
-    caller refuses; the LLM-based text encoders (built with `disable_weights`) do not cut the text at parentheses, and the reader follows the
-    CLIP tokenizer, the one embeddings are made for; the inventory skips `.git` directories (ComfyUI's walk enters them) and lists only the
-    class's extensions, so an extension-less file that ComfyUI would try first is not seen.
+    returned is the one after the comma retry and the reading is the CLIP tokenizer's, the one embeddings are made for, and the names the
+    other tries (the name as written, the reading without weights) are probes, not requirements (above); `embedding:` with no readable
+    name, and a text nested more than 500 groups deep (ComfyUI reads about 900), are the empty name, which every caller refuses; the
+    inventory skips `.git` directories (ComfyUI's walk enters them); the volume's case rule is probed once per root and applied to every
+    subfolder of it, so a single directory marked case-sensitive inside a case-folding volume, or a link into another volume, is judged by its
+    root's answer.
   - Limit: the override check and the runner's comparison both read the string values of the graph, so an embedding assembled while the graph
     runs by string nodes (a concatenation of two overrides, for example) is neither refused nor compared with the manifest, and the licence
     gate, the hash and the trust record never see the file it loads. "An override never retargets a file or names an embedding" is true of the
@@ -184,6 +207,23 @@
   parentheses, no skip of whitespace, any group tail as a weight, float() without `inf`, `nan` or digit underscores or with the wrong
   whitespace, JavaScript's whitespace, escapes not honoured, no depth bound, a spread of a group's pieces, and a gate on the wide matcher in
   the catalog and in the runner.
+- **Embedding resolver round (six findings of a second review).** Each fix has a commit of failing tests before it. Loader widget
+  (`render/templates-catalog.test.mjs` 1, `render/template-manifest.test.mjs` 2 failed): the exact-path rule, a root file with a subfolder
+  copy, and the run gate; the one earlier assertion that pinned the prompt lookup for an annotation without prompt names was changed to the
+  loader rule. Physical directory (4 failed, one on a real junction in a scratch tree): a root that links to another root, a link inside a
+  root, a root registered inside another, and two copies that must stay ambiguous. Unlisted files (4 and 1 failed): an extension-less file
+  answering the name first, the same stem in another directory, an annotation it shadows, and the inventory record. Case folding (4 and 1
+  failed, with a probe checked against what the volume does on the real file system): a case variant alone, two variants in two directories,
+  and the run gate. Name as written (5 failed) and the reading without weights (3 failed): the probe list, the catalog row, readiness and
+  the run gate. Nineteen mutations of the new code, each applied to the real file, run, and restored byte-identical, each fail at least one
+  test: dispatch on the class name alone, `annotated` not forwarded by `readinessFor`, the hit key back to root and subfolder, no collapse by
+  real file, real paths not recorded, unlisted files not recorded or not candidates, the case probe always false, the lookup ignoring the
+  folding roots, the folding roots not recorded, the name as written dropped, probe findings not added, not passed by `readinessFor`, not
+  explained in the refusal, not recorded on the row, not passed by the readiness table, the reading without weights dropped, read
+  without its escapes, and the empty name probed. The reader's expected probe names were compared with the extracted functions of `comfy/sd1_clip.py` on a dozen
+  texts in both modes. Measured read only on the installed package (578 templates): the catalog rows are byte-identical before and after,
+  and the three Marigold templates' conditioning file reads `present`, `in_subfolder` and `present` for a root file, a subfolder file and
+  both, as before the previous round.
 - **Manifest-side normalisation tests.** `unlistedModels` lower-cases the manifest path, turns its backslashes into slashes and drops the
   `models/<class>/` prefix, and every test manifest was lower case with forward slashes, so no test could fail on that step. Both fixtures
   (`LISTED_MODELS` in `template-run.test.mjs`, `LISTED` in `comfy-run-graph.test.mjs`) now hold a mixed-case entry
@@ -198,7 +238,10 @@
   An embedding loaded by a live ComfyUI: the directory set and the tokenizer path are read from ComfyUI's source (0.38.0) and compared with
   its extracted functions in Python, not run in a live ComfyUI, and no template of the installed package names one in an active prompt, so the
   catalog path has no real template to be measured on. The resolver on the real model tree of a node: the measuring machine's snapshot holds
-  no embedding file.
+  no embedding file. The junction layout of a model drive was reproduced with a real junction in a scratch tree, not on a node. The case
+  probe was checked on the file system of the measuring machine only (it folds case); a case-sensitive volume is covered by an io that
+  does not fold, not by a second machine. The probe names (the name as written, the reading without weights) were not run through a live
+  encoder: ComfyUI's extracted functions give the names, and which text encoder a template uses is not asked.
   One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
   change. The production wiring of the conversion against a live ComfyUI (the `/object_info` and `/system_stats` reads in
   `comfy-run-graph.mjs`; the flow and the converter are tested with injected values, and the converter on saved listings). The time of a

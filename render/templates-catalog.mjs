@@ -244,9 +244,15 @@ export function modelCovered(names, file) {
 // and every subdirectory below it (os.walk, links followed) into one Python set(), and load_embed takes the first directory of list(set)
 // that holds the name: the directory that answers is chosen by hash order, which differs from one process to the next. So a file that sits
 // only in a subfolder is found by the bare name, and a name that more than one directory holds is not one file at all. checkEmbedding
-// turns that into `present` (exactly one directory holds it) or `ambiguous`.
+// turns that into `present` (exactly one directory holds it) or `ambiguous`. A directory is one entry however it is reached, and the name
+// as written is asked of isfile first, with no extension filter and under the file system's own case rule (embeddingHits, the scan).
 //
-// WHAT it reads from a prompt is the tokenizer's, and embeddingRefs ports that path. The override step (template-run.mjs) does not use
+// A file a loader widget names (ConditioningLoader) is a different lookup: the node lists the directories by relative path and opens its
+// value with get_full_path, the exact path under the first root. checkRequirement gives it the rule of every other class.
+//
+// WHAT it reads from a prompt is the tokenizer's, and embeddingRefs ports that path. Names ComfyUI may try beyond the ones it returns
+// (embeddingProbes: the name as written before its commas come off, and what the encoders that read a prompt without weights take) are
+// not requirements; readiness refuses a template when a file of the node answers one. The override step (template-run.mjs) does not use
 // it: it refuses on mentionsEmbedding, a deliberately wider matcher, so that what it lets through is never something the reader finds a
 // file in. The runner's comparison with the manifest (unlistedModels) and the catalog (requiredModels) use embeddingRefs and
 // embeddingCovered, which is the one reading of the reference.
@@ -1459,8 +1465,9 @@ function indexInventory(inv) {
 //   case_mismatch       the right class, another spelling of the name
 //   extension_not_listed  the class's core loaders do not accept this file type (a .gguf in a core loader)
 //   class_unregistered  no directory is registered for the class
-//   ambiguous           (embeddings) more than one directory holds a file for the name: ComfyUI opens one of them by set order
-//   shadowed            (embeddings) the annotated file is not the one ComfyUI opens for the name a prompt gives
+//   ambiguous           (embeddings) more than one directory holds a different file for the name: ComfyUI opens one of them by set order
+//   shadowed            (embeddings) the annotated file is not the one ComfyUI opens for the name a prompt gives; or a file answers a
+//                       probe name (readiness, `probes`), another name ComfyUI may try for the template's prompts
 // A file with no class (an unannotated widget file) is met by its exact name in any class.
 function checkRequirement(req, inv, mode, asFile = false) {
   const name = String(req.name);
@@ -1548,8 +1555,8 @@ function embeddingHits(files, name, fold = false, folding = new Set()) {
 
 // resolveEmbedding: what ComfyUI does with one name on this node: `present` (exactly one directory holds a file for it: `resolved` is
 // that file's path under the class directory, the name a manifest must carry), `ambiguous` (more than one does, so which one it opens
-// varies from run to run: the files are listed, and no file may be named), `case_mismatch` (only a file in another case, which a Linux
-// ComfyUI does not find) or `missing`.
+// varies from run to run: the files are listed, and no file may be named), `case_mismatch` (only a file in another case, under a root
+// whose volume is case-sensitive, where ComfyUI does not find it) or `missing`.
 function resolveEmbedding(c, name) {
   const hits = embeddingHits(c.candidates, name, false, c.folding);
   if (hits.length === 1) return { status: "present", resolved: hits[0].rel };
