@@ -1149,6 +1149,12 @@ func probeWritable(dir string) error {
 // process that was recorded. This pure rule reads the record alone: a lease that recorded no tree has no member to hold it,
 // so it is freed at once. The reader (reader.judge in tree.go) first folds in the other evidence that ties a live process to
 // such a lease (a launch marker, or on Windows a child of the dead wrapper), and a lease with none alive is freed as before.
+//
+// A heartbeat that is UNKNOWN is not stale. The reader (reader.judge) passes it as RenewedAtMs 0, "no stamp", and a heartbeat nobody
+// could read or examine (a rename is installing it, an I/O error that outlasted its wait) says nothing about the holder. What frees
+// such a lease is the first half of the rule (the wrapper is gone: pid and start time) or `gpu release`; a heartbeat that stays unknown
+// for good on a holder that is alive but hung keeps its lease until then. A file that can be examined is aged by its modification time,
+// so a corrupt heartbeat nobody renews still goes stale (heartbeatAt).
 func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart func(int) (int64, bool)) bool {
 	if m == nil {
 		return true // no/unreadable meta => stale, same rule the .mjs used
@@ -1166,6 +1172,8 @@ func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart f
 		return len(liveMembers(m.Tree, procStart)) == 0
 	}
 	nowMs := now.UnixMilli()
+	// RenewedAtMs <= 0 is no stamp: the reader (reader.judge) leaves it 0 when the heartbeat is UNKNOWN, and a heartbeat nobody could
+	// read is not evidence of a dead holder. Only the wrapper-gone half above frees such a lease (pid and start time), or `gpu release`.
 	heartbeatStale := m.RenewedAtMs > 0 && nowMs-m.RenewedAtMs > heartbeatTTL.Milliseconds()
 	windowExpired := nowMs > m.ExpiresAtMs
 	return heartbeatStale && windowExpired
@@ -1223,21 +1231,43 @@ func inspectDirDetailAt(leaseDir string, now time.Time, hbTTL time.Duration) (In
 	return reader{dir: leaseDir, now: now, hbTTL: hbTTL, procStart: processStart}.detail()
 }
 
-// heartbeatAt reads the per-epoch heartbeat beside a lease record, falling back to the
-// value stamped at acquisition when nothing has renewed yet.
+// heartbeatAt reads the per-epoch heartbeat beside a lease record and says whether it could tell. The second result is false when the
+// heartbeat is UNKNOWN, and the reclaim rule reads unknown as "not stale" (see reader.judge): a heartbeat that cannot be read says
+// nothing about the holder, and the cost of acting on it is a live lease handed to a second job.
 //
-// It reads through a handle that shares delete (readSharedFile). Renew replaces the file by a rename over the live name, and a plain
-// read that meets that rename fails on Windows; the fallback would then call a lease past its window stale and let it be reclaimed.
-func heartbeatAt(leaseDir string, meta *Meta) int64 {
-	b, err := readSharedFile(filepath.Join(leaseDir, "hb."+strconv.FormatUint(meta.Epoch, 10)))
-	if err != nil {
-		return meta.RenewedAtMs
+// The value, known, is:
+//
+//   - the content of hb.<epoch> when it reads and parses (never earlier than the stamp from the acquisition);
+//   - the file's modification time when the file is there but its content is no use (empty, torn, not a number) or the read failed
+//     for any reason but the file being absent (a permission error that outlasted its wait, an I/O error). The file is aged like any
+//     heartbeat: Renew writes a staged file and renames it over the live name, so a heartbeat renewed a moment ago has the time of that
+//     write, and one nobody renews goes stale after the TTL, corrupt or not. The time is never earlier than the stamp either;
+//   - the stamp from the acquisition when the file is SETTLED absent (no fresh staged file beside the name, and the name still not
+//     there on a second look: statSettled), which is a holder that never renewed;
+//   - unknown otherwise: the name is absent with a fresh staged file beside it (a rename is installing it), the read said absent and
+//     the look at the file disagrees, or the read and the look at the file both failed.
+//
+// It reads through a handle that shares delete (readSharedFile). Renew replaces the file by a rename over the live name, WITHOUT the
+// epoch lock, so the sweep that reads it under that lock is not protected from it: an acquirer's probe and its locked sweep each meet
+// the heartbeat, and a lease past its window is kept by nothing else. A read that met the rename and fell back to the acquisition stamp
+// (hours old by then) called a live lease stale and let it be reclaimed.
+func heartbeatAt(leaseDir string, meta *Meta) (at int64, known bool) {
+	path := filepath.Join(leaseDir, "hb."+strconv.FormatUint(meta.Epoch, 10))
+	b, err := readSharedFile(path)
+	if err == nil {
+		if v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil {
+			return max(v, meta.RenewedAtMs), true
+		}
+		// read, but it says nothing: age the file itself
 	}
-	v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-	if perr != nil || v < meta.RenewedAtMs {
-		return meta.RenewedAtMs
+	fi, serr := statSettled(path)
+	switch {
+	case serr == nil:
+		return max(fi.ModTime().UnixMilli(), meta.RenewedAtMs), true
+	case err != nil && errors.Is(err, fs.ErrNotExist) && errors.Is(serr, fs.ErrNotExist):
+		return meta.RenewedAtMs, true // settled absent: the holder never renewed
 	}
-	return v
+	return 0, false
 }
 
 // infoFrom builds the public view. Age is time HELD, from the acquirer's own stamp.
@@ -2094,7 +2124,10 @@ func (l *Lease) Renew() error {
 	// the heartbeat.
 	path := l.mgr.heartbeatPath(l.epoch)
 	b := []byte(strconv.FormatInt(l.mgr.now().UnixMilli(), 10))
-	tmp := path + ".tmp"
+	tmp := stagingPath(path) // the reader that asks whether this rename is in flight takes the name from the same place
+	// The file time is the one this write gives the staged file, and the rename carries it to the live name (nothing here sets a time
+	// by hand): a heartbeat renewed a moment ago is never older than the renewal. A heartbeat whose content cannot be read is aged by
+	// that time (heartbeatAt).
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return err
 	}
@@ -2207,17 +2240,13 @@ func (m *Manager) heartbeatPath(epoch uint64) string {
 }
 
 // lastHeartbeat returns the most recent heartbeat for this epoch, falling back to the
-// value stamped into the record at acquisition when nothing has renewed yet.
+// value stamped into the record at acquisition when nothing has renewed yet or when the
+// heartbeat is unknown (heartbeatAt: it reads the heartbeat the one way, so the two cannot drift).
 func (m *Manager) lastHeartbeat(meta *Meta) int64 {
-	b, err := readSharedFile(m.heartbeatPath(meta.Epoch))
-	if err != nil {
-		return meta.RenewedAtMs
+	if at, known := heartbeatAt(m.leaseDir(), meta); known {
+		return at
 	}
-	v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-	if perr != nil || v < meta.RenewedAtMs {
-		return meta.RenewedAtMs
-	}
-	return v
+	return meta.RenewedAtMs
 }
 
 // ReleaseByEpoch drops the CURRENT lease from a process that does not hold it (the

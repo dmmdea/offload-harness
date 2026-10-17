@@ -766,9 +766,12 @@ var openSharedFile = OpenShared
 // exactly when the heartbeat is the evidence of life (keeper.go).
 //
 // The heartbeat matters more than the record here. A record that cannot be read is skipped, and the lease is only briefly missing from
-// a listing. A heartbeat that cannot be read falls back to the stamp written at acquisition, which for a lease past its declared window
-// is stale: the reclaim rule (stale heartbeat AND expired window) then calls a live lease debris, the acquirer's sweep removes it, and
-// the card is granted to a second job while the first still runs on it.
+// a listing. A heartbeat that cannot be read used to fall back to the stamp written at acquisition, which for a lease past its declared
+// window is stale: the reclaim rule (stale heartbeat AND expired window) then called a live lease debris, the acquirer's sweep removed
+// it, and the card was granted to a second job while the first still ran on it. It no longer does: heartbeatAt takes the file's own
+// modification time when it can be examined and calls the heartbeat UNKNOWN when it cannot, and the reclaim rule never reads unknown as
+// stale. The stamp from the acquisition stays only for a file that is settled absent (settled.go). So the wait below narrows the
+// window in which a heartbeat is unknown, and no longer carries the weight of keeping a live lease from being reclaimed.
 //
 // On Windows an open that fails with a permission error is tried again, removeAttempts times at removePause (about 100 ms in all, the
 // bound the claim removal uses), and any other failure is returned at once. The shared open takes the sharing violation away, but not

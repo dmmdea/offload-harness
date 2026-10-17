@@ -77,8 +77,8 @@ func TestTheHeartbeatReadsWhileAnotherHandleHoldsDeleteAccessOnIt(t *testing.T) 
 	if _, err := os.ReadFile(hb); !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
 		t.Fatalf("control: os.ReadFile of the heartbeat with a delete-access handle open returned %v, want ERROR_SHARING_VIOLATION: the test no longer models the race", err)
 	}
-	if got := heartbeatAt(m.leaseDir(), rec); got != want {
-		t.Errorf("heartbeatAt = %d, want the renewed stamp %d (the acquisition stamp is %d)", got, want, rec.RenewedAtMs)
+	if got, known := heartbeatAt(m.leaseDir(), rec); !known || got != want {
+		t.Errorf("heartbeatAt = %d (known %v), want the renewed stamp %d (the acquisition stamp is %d)", got, known, want, rec.RenewedAtMs)
 	}
 	if got := m.lastHeartbeat(rec); got != want {
 		t.Errorf("lastHeartbeat = %d, want the renewed stamp %d (the acquisition stamp is %d)", got, want, rec.RenewedAtMs)

@@ -180,7 +180,7 @@ func TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt(t *testing.T) {
 			return ""
 		}},
 		{"heartbeatAt", func() string {
-			if got := heartbeatAt(m.leaseDir(), meta); got != meta.RenewedAtMs {
+			if got, known := heartbeatAt(m.leaseDir(), meta); !known || got != meta.RenewedAtMs {
 				return "a heartbeat other than the stamp"
 			}
 			return ""

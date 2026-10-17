@@ -299,7 +299,9 @@ func (r reader) live() []liveLease {
 	var out []liveLease
 	if meta, ok, tree := r.legacy(); ok {
 		info := infoFrom(meta, r.now)
-		info.HeartbeatAt = time.UnixMilli(heartbeatAt(r.dir, meta))
+		if at, known := heartbeatAt(r.dir, meta); known {
+			info.HeartbeatAt = time.UnixMilli(at)
+		}
 		info.applyTree(tree)
 		out = append(out, liveLease{Meta: *meta, Info: info})
 	}
@@ -309,7 +311,9 @@ func (r reader) live() []liveLease {
 		}
 		rec := j.Meta
 		info := infoFrom(&rec, r.now)
-		info.HeartbeatAt = time.UnixMilli(heartbeatAt(r.dir, &rec))
+		if at, known := heartbeatAt(r.dir, &rec); known {
+			info.HeartbeatAt = time.UnixMilli(at)
+		}
 		info.applyTree(j.Tree)
 		out = append(out, liveLease{Meta: rec, Info: info, V2: true})
 	}

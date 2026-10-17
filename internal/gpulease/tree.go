@@ -209,7 +209,13 @@ type treeReading struct {
 // process table for a healthy lease.
 func (r reader) judge(meta *Meta) (Meta, treeReading) {
 	eff := *meta
-	eff.RenewedAtMs = heartbeatAt(r.dir, meta)
+	// An UNKNOWN heartbeat (it could not be read or examined, or a rename is installing it) is no stamp at all: RenewedAtMs 0 is
+	// what Reclaimable reads as "nothing to call stale". The record on disk is not touched, this is the reader's copy.
+	if at, known := heartbeatAt(r.dir, meta); known {
+		eff.RenewedAtMs = at
+	} else {
+		eff.RenewedAtMs = 0
+	}
 	if !wrapperGone(&eff, r.procStart) {
 		return eff, treeReading{}
 	}

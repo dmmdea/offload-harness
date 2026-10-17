@@ -64,7 +64,10 @@ func TestAReadThatMeetsAnAccessDeniedOpenWaitsForTheFile(t *testing.T) {
 	readers := map[string]func() string{
 		"readSharedFile": func() string { return asText(readSharedFile(hb)) },
 		"readRecordFile": func() string { return asText(readRecordFile(hb)) },
-		"heartbeatAt":    func() string { return strconv.FormatInt(heartbeatAt(dir, meta), 10) },
+		"heartbeatAt": func() string {
+			at, _ := heartbeatAt(dir, meta)
+			return strconv.FormatInt(at, 10)
+		},
 	}
 	for name, read := range readers {
 		calls := failingOpens(t, 3, os.ErrPermission)

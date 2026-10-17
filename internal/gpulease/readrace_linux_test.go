@@ -133,7 +133,7 @@ func TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeve
 		t.Errorf("readSharedFile paused %d times on Linux, want 0: the wait for a refused open must never trigger where no rename can cause one", n)
 	}
 	// the heartbeat reader's value is the fallback stamp only when the file cannot be read: it must be a real renewal
-	if got := heartbeatAt(m.leaseDir(), meta); got < meta.RenewedAtMs {
-		t.Errorf("heartbeatAt = %d, before the record's stamp %d", got, meta.RenewedAtMs)
+	if got, known := heartbeatAt(m.leaseDir(), meta); !known || got < meta.RenewedAtMs {
+		t.Errorf("heartbeatAt = %d (known %v), before the record's stamp %d or unknown", got, known, meta.RenewedAtMs)
 	}
 }
