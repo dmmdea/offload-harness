@@ -335,6 +335,30 @@ func TestKeyIsInjectiveOverSmallLists(t *testing.T) {
 	}
 }
 
+// TestEmptyKeyNamesNoEntry: Key never returns an empty string, so the pipeline uses "" for
+// "this call has no key and must not be cached". That has to hold in this package, not
+// depend on what the store underneath does with an empty key.
+func TestEmptyKeyNamesNoEntry(t *testing.T) {
+	c := openTemp(t)
+	if err := c.Put("", []byte("v")); !errors.Is(err, ErrEmptyKey) {
+		t.Errorf("Put(\"\") = %v, want ErrEmptyKey", err)
+	}
+	if v, ok := c.Get(""); ok || v != nil {
+		t.Errorf("Get(\"\") = %q, %v, want a miss", v, ok)
+	}
+	if n, err := c.Count(); err != nil || n != 0 {
+		t.Errorf("Count() = %d, %v after a refused Put, want 0", n, err)
+	}
+	// Not vacuous: a real key stores and reads back.
+	k := Key("x")
+	if err := c.Put(k, []byte("v")); err != nil {
+		t.Fatalf("Put(%q): %v", k, err)
+	}
+	if v, ok := c.Get(k); !ok || string(v) != "v" {
+		t.Errorf("Get(%q) = %q, %v, want the stored value", k, v, ok)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // D-05: lazy open
 // ---------------------------------------------------------------------------

@@ -296,21 +296,25 @@ var paramsEscaper = strings.NewReplacer("%", "%25", ";", "%3B", "=", "%3D")
 // StableParamsKey renders params deterministically: "<key>=<value>;" per entry, in
 // key order, the value as %v prints it.
 //
-// It is an ingredient of the result-cache key, it names the render-, video- and
-// edit- output files (a stem is a hash of the prompt and this string), and it is
-// recorded on the persisted exemplar rows. The format alone left the top-level
-// structure ambiguous: a key or a value holding "=" or ";" could stand in for the
-// structure around it, so {"a": "1;b=2"} and {"a": "1", "b": "2"} were both
-// "a=1;b=2;". Each key and each rendered value is therefore percent-escaped
-// (paramsEscaper) before it is written, which makes every top-level entry
-// unambiguous.
+// It names the render-, video- and edit- output files (a stem is a hash of the prompt
+// and this string) and it is recorded on the persisted exemplar rows. It is NOT part of
+// the result-cache key: that carries CacheParamsKey, the typed canonical form, because
+// the %v rendering below is type-erased and let a request shape its params to share
+// another request's cache entry.
+//
+// The format alone left the top-level structure ambiguous: a key or a value holding "="
+// or ";" could stand in for the structure around it, so {"a": "1;b=2"} and
+// {"a": "1", "b": "2"} were both "a=1;b=2;". Each key and each rendered value is
+// therefore percent-escaped (paramsEscaper) before it is written, which makes every
+// top-level entry unambiguous.
 //
 // That is the whole guarantee. Nested and non-string values keep Go's %v rendering,
 // which is type-erased and separates elements with a space: {"seed": "5"} and
 // {"seed": 5} render alike, so do []any{"a b"} and []any{"a", "b"}, and so do a map
-// value that holds "k2:v2" and a map with a second entry. That limit is documented
-// and pinned by TestStableParamsKeyNestedAndNonStringValuesKeepGoRendering; lifting
-// it would give every params map with such a value a new file name.
+// value that holds "k2:v2" and a map with a second entry. That limit is documented and
+// pinned by TestStableParamsKeyNestedAndNonStringValuesKeepGoRendering; lifting it
+// would give every params map with such a value a new file name. It matters only for
+// file stems and exemplar rows now that the result cache has its own key.
 //
 // Nor does the escaping make output file names injective. A stem is
 // sha256hex(prompt + this string)[:8] with no boundary between the prompt and the

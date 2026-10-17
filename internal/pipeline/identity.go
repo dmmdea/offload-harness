@@ -26,6 +26,7 @@ package pipeline
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"log"
 	"sort"
 	"strings"
 
@@ -57,6 +58,36 @@ func cacheKeyFor(task core.TaskType, orig, paramsKey, model string, built tasks.
 		templateCacheTag(built.System, built.Grammar, built.User, orig),
 		exemplarCacheTag(shots),
 	)
+}
+
+// resultCacheParamsKey is the params ingredient of a result-cache key: the typed
+// canonical form from tasks.CacheParamsKey, and the handling of the one thing that can go
+// wrong with it. ok == false means these params have no faithful typed form (NaN, a
+// function, a struct...), and the call must then neither READ nor WRITE the result cache.
+// Callers carry that as an empty key (no real key is empty) or as their own cacheable flag.
+//
+// It FAILS CLOSED, and that is the whole point of returning a flag instead of a string:
+// there is deliberately no fallback to a %v rendering or to StableParamsKey. That
+// rendering is type-erased, so a fallback key is one a different request can reach, which
+// is the collision CacheParamsKey exists to close. A call that cannot be keyed is computed
+// every time, which costs a model call and never serves a wrong answer.
+//
+// The skip is reported where the code already reports one: a log line, and
+// meta.CacheBypass, which reaches the ledger row. Nothing is reported on a node with no
+// cache configured, where nothing was ever cacheable.
+func (p *Pipeline) resultCacheParamsKey(task core.TaskType, params map[string]any, meta *core.Meta) (string, bool) {
+	key, err := tasks.CacheParamsKey(params)
+	if err == nil {
+		return key, true
+	}
+	if p.cache != nil {
+		why := strings.TrimPrefix(err.Error(), tasks.ErrParamsNotKeyable.Error()+": ")
+		if meta.CacheBypass == "" {
+			meta.CacheBypass = "params: " + why
+		}
+		log.Printf("%s: params cannot be keyed for the result cache (%s) — cache bypassed; result computed but not stored", task, why)
+	}
+	return "", false
 }
 
 // tierKeyspaceTag separates RunTier's entries from Run's.

@@ -661,8 +661,18 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	// is a correctness change, not a hit-rate optimisation: old entries are not
 	// wiped, they simply stop being reachable from a prompt that no longer matches
 	// the template which produced them — which is exactly the intent.
-	ck := cacheKeyFor(req.Task, orig, tasks.StableParamsKey(req.Params), p.cfg.Model, built, shots)
-	if p.cache != nil {
+	//
+	// The params ingredient is tasks.CacheParamsKey, the typed canonical form, and NOT
+	// StableParamsKey: that one prints nested values with %v, which is type-erased, so a
+	// schema's "required":["a b"] and "required":["a","b"] rendered alike and one request
+	// was served the other's cached answer before its own schema was ever checked.
+	// ck == "" means the params cannot be keyed at all (resultCacheParamsKey): this call
+	// then neither reads nor writes the cache.
+	ck := ""
+	if paramsKey, keyable := p.resultCacheParamsKey(req.Task, req.Params, &meta); keyable {
+		ck = cacheKeyFor(req.Task, orig, paramsKey, p.cfg.Model, built, shots)
+	}
+	if p.cache != nil && ck != "" {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
@@ -997,12 +1007,18 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	// path, so the exemplar tag is not an ingredient here.
 	//
 	// Input and cacheKeyExtra are separate PARTS of the key, not one part joined with
-	// "|": req.Input is arbitrary caller text, so joined, the input "x|y" with an empty
-	// extra was the same key as the input "x" with the extra "y". The extra is the only
+	// "|": req.Input is arbitrary caller text, so joined, the input "x|y" with the extra
+	// "z" was the same key as the input "x" with the extra "y|z". The extra is the only
 	// carrier of the source file's identity, so that is one file's cached result served
 	// for another.
-	ck := cache.Key(string(req.Task), req.Input, cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar,
+	//
+	// The params ingredient is the typed canonical form (tasks.CacheParamsKey); params
+	// that cannot be keyed make the call uncacheable, like an unknown file identity does
+	// (resultCacheParamsKey says why).
+	paramsKey, keyable := p.resultCacheParamsKey(req.Task, req.Params, &meta)
+	ck := cache.Key(string(req.Task), req.Input, cacheKeyExtra, paramsKey, meta.Model, built.Grammar,
 		templateCacheTag(built.System, built.Grammar, built.User, req.Input))
+	cacheable = cacheable && keyable
 	// cacheable is false when the caller could not establish the source file's
 	// CONTENT identity (T2-A2). Keying on anything else — a path, or a synthetic
 	// error token — makes a transient read failure write a durable entry that a
@@ -1357,8 +1373,12 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// ident names the on-disk stem (mediaBase) and nothing else, so no output file is
 	// renamed by the key fix.
 	ident := fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", audioID.Digest, model, identLang, proto)
-	ck := transcribeCacheKey(audioID.Digest, model, identLang, proto, tasks.StableParamsKey(req.Params))
-	if p.cache != nil && identifiable {
+	// The params ingredient is the typed canonical form; params that cannot be keyed make
+	// the call uncacheable, like an unknown file identity does (resultCacheParamsKey says why).
+	paramsKey, keyable := p.resultCacheParamsKey(req.Task, req.Params, &meta)
+	ck := transcribeCacheKey(audioID.Digest, model, identLang, proto, paramsKey)
+	storeable := identifiable && keyable
+	if p.cache != nil && storeable {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
 			// A hit names transcript files on disk: one whose files are gone (a fleet node removes an
@@ -1521,7 +1541,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// Storing under a non-content key is what turns a transient read failure into
 	// a permanent wrong answer — so an unidentifiable input is computed, returned,
 	// and deliberately not persisted.
-	if p.cache != nil && identifiable {
+	if p.cache != nil && storeable {
 		if b, e := json.Marshal(cacheVal{Data: data, Model: model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
@@ -4745,7 +4765,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 			// and exemplar harvest. Pass record=false for counterfactual RunTier calls
 			// that must produce a gradeable result without any production side-effects.
 			if record {
-				if p.cache != nil {
+				if p.cache != nil && ck != "" {
 					if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 						_ = p.cache.Put(ck, b)
 					}
@@ -4863,7 +4883,7 @@ func (p *Pipeline) attemptReasoningOn(ctx context.Context, model string, req cor
 	if !v.OK {
 		return core.Deferf("reasoning tier: "+v.Reason, gen.Content, meta), false
 	}
-	if p.cache != nil {
+	if p.cache != nil && ck != "" {
 		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
@@ -5718,7 +5738,7 @@ func (p *Pipeline) RunTierWith(ctx context.Context, req core.Request, model stri
 	// ...and it lives in RunTier's OWN keyspace, so Run and RunTier can never
 	// compute the same key and overwrite each other's entries. See
 	// tierKeyspaceTag for why guarding only the read was not enough.
-	ck := cacheKeyForTierRender(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built, llamaclient.RenderKey(opts...))
+	var ck string // set below, once the call is known to use the cache and its params can be keyed
 	meta := core.Meta{Model: model, Feat: feat}
 	meta.InputSHA256 = inputFingerprint(req.Input)
 	meta.PromptPrefixSHA256 = promptPrefixFingerprint(built.System, userPreambleOf(built.User, req.Input))
@@ -5730,6 +5750,15 @@ func (p *Pipeline) RunTierWith(ctx context.Context, req core.Request, model stri
 	// writing them — would corrupt the very measurement it exists to produce. Only
 	// NewInLoopPipeline sets tierCache.
 	useCache := p.tierCache && p.cache != nil
+	if useCache {
+		// The typed canonical params, as for Run. Params that cannot be keyed switch the
+		// cache off for this call: no read, no write (resultCacheParamsKey says why).
+		if paramsKey, keyable := p.resultCacheParamsKey(req.Task, req.Params, &meta); keyable {
+			ck = cacheKeyForTierRender(req.Task, req.Input, paramsKey, model, built, llamaclient.RenderKey(opts...))
+		} else {
+			useCache = false
+		}
+	}
 	if useCache {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal

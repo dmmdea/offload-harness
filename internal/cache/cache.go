@@ -515,7 +515,9 @@ const keyDomain = "offload/cache.Key/v2"
 //
 // A caller must pass each ingredient as its own part and never build one part by
 // gluing fields together with a separator of its own, which would recreate the
-// same ambiguity one level up.
+// same ambiguity one level up. (The one deliberate exception is the video media
+// identity in internal/pipeline: a file digest and numbers glued with "|", none of it
+// caller text.)
 func Key(parts ...string) string {
 	h := sha256.New()
 	h.Write([]byte(keyDomain))
@@ -527,6 +529,12 @@ func Key(parts ...string) string {
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// ErrEmptyKey is what Put answers for an empty key. Key never returns one, so an empty
+// key means "this call has no key": the pipeline uses it to say that a call must not be
+// cached (its params could not be keyed). Put refuses it, so no empty key is ever stored
+// and Get("") is a miss.
+var ErrEmptyKey = errors.New("cache: empty key")
 
 // Get returns the stored value and true if present. An unavailable handle — a
 // reader that could reach neither the primary nor a sibling — answers every Get
@@ -550,8 +558,11 @@ func (c *Cache) Get(key string) ([]byte, bool) {
 	return out, out != nil
 }
 
-// Put stores val under key.
+// Put stores val under key. An empty key is refused with ErrEmptyKey.
 func (c *Cache) Put(key string, val []byte) error {
+	if key == "" {
+		return ErrEmptyKey
+	}
 	if c.readOnly {
 		return ErrReadOnly
 	}

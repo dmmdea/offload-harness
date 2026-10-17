@@ -465,7 +465,7 @@ func countEntries(t *testing.T, ca *cache.Cache) int {
 // visionKeyFor mirrors runVisionGen's key so a test can assert the ABSENCE of the
 // entry an ungated write would have produced.
 func visionKeyFor(req core.Request, built tasks.Built, meta core.Meta, extra string) string {
-	return cache.Key(string(req.Task), req.Input, extra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar,
+	return cache.Key(string(req.Task), req.Input, extra, cacheParams(req.Params), meta.Model, built.Grammar,
 		templateCacheTag(built.System, built.Grammar, built.User, req.Input))
 }
 

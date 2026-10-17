@@ -325,5 +325,5 @@ func computeCacheKey(p *Pipeline, req core.Request) string {
 	if err != nil {
 		return ""
 	}
-	return cacheKeyFor(req.Task, req.Input, tasks.StableParamsKey(req.Params), p.cfg.Model, built, nil)
+	return cacheKeyFor(req.Task, req.Input, cacheParams(req.Params), p.cfg.Model, built, nil)
 }
