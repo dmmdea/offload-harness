@@ -159,8 +159,8 @@ func TestTheLaunchMarkerReadersGoThroughTheSharedOpen(t *testing.T) {
 		}
 	}
 	log := recordOpens(t, "", nil)
-	if got := readLaunchMarkers(dir); len(got) != 2 {
-		t.Fatalf("readLaunchMarkers = %+v, want both markers", got)
+	if got, unknown := readLaunchMarkers(dir); len(got) != 2 || unknown {
+		t.Fatalf("readLaunchMarkers = %+v (unknown %v), want both markers and nothing unknown", got, unknown)
 	}
 	if _, ok := LaunchMarkerReader(dir)(); !ok {
 		t.Fatal("LaunchMarkerReader found no marker")

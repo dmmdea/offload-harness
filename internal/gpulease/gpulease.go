@@ -381,6 +381,10 @@ type Meta struct {
 	// Tree is the process tree the wrapper started, recorded by the wrapper (plan P10): pid and
 	// start identity of each member, rewritten when the set changes. See tree.go.
 	Tree []TreeMember `json:"tree,omitempty"`
+
+	// treeUnknown is set on the reader's copy of a record (reader.judge, never on disk): a launch marker that may tie a live instance to
+	// a lease whose wrapper is gone is being installed and cannot be read. Reclaimable reads it as "an instance may be running".
+	treeUnknown bool
 }
 
 // RecordFormat is the Meta.Format every binary that understands card-scoped leases stamps.
@@ -1152,7 +1156,9 @@ func probeWritable(dir string) error {
 // pid is dead or recycled is reclaimable only if no member of the tree it recorded is still the
 // process that was recorded. This pure rule reads the record alone: a lease that recorded no tree has no member to hold it,
 // so it is freed at once. The reader (reader.judge in tree.go) first folds in the other evidence that ties a live process to
-// such a lease (a launch marker, or on Windows a child of the dead wrapper), and a lease with none alive is freed as before.
+// such a lease (a launch marker, or on Windows a child of the dead wrapper), and a lease with none alive is freed as before. A launch
+// marker that is being installed cannot be read and so cannot say that none is alive: the reader sets treeUnknown on its copy of the
+// record, and the lease is held for as long as the marker is (at most the freshness of its staged file, tree.go).
 //
 // A heartbeat that is UNKNOWN is not stale. The reader (reader.judge) passes it as RenewedAtMs 0, "no stamp", and a heartbeat nobody
 // could read or examine (a rename is installing it, an I/O error that outlasted its wait) says nothing about the holder. What frees
@@ -1173,7 +1179,7 @@ func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart f
 		// the tree it recorded is still alive the card is in use and the claim is kept (plan
 		// P10, tree.go). With no recorded member alive this rule frees the lease at once; the reader that has found a
 		// live process by the other evidence passes it in Tree, so it is held.
-		return len(liveMembers(m.Tree, procStart)) == 0
+		return len(liveMembers(m.Tree, procStart)) == 0 && !m.treeUnknown
 	}
 	nowMs := now.UnixMilli()
 	// RenewedAtMs <= 0 is no stamp: the reader (reader.judge) leaves it 0 when the heartbeat is UNKNOWN, and a heartbeat nobody could
