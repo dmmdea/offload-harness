@@ -4467,3 +4467,16 @@ test("readiness: a probe keeps the case the prompt gives: a case-sensitive node 
   assert.deepEqual(run("Evil_TI,.pt"), [false, [["Evil_TI,", "shadowed", ["Evil_TI,.pt"]]]]);
   assert.deepEqual(run("evil_ti,.pt"), [true, []], "another case is another name there");
 });
+
+test("catalog readiness: a template that needs no weights but is blocked by a probe is not counted among the ready ones", () => {
+  const gate = { state: "open" };
+  const cat = { templates: [
+    { name: "plain", kind: "local", models: [], gate },
+    { name: "probed", kind: "local", models: [], gate, embedding_probes: ["1.2"] },
+  ] };
+  const results = C.catalogReadiness(cat, invFrom({ ...TREE, [EMB("1.2.safetensors")]: { size: 1 } }));
+  assert.deepEqual([results.plain.ready, results.probed.ready], [true, false], "a file of the node answers the probe 1.2");
+  const s = C.summarizeReadiness(cat, results);
+  assert.deepEqual({ local: s.local, zero_model: s.zero_model, needing_weights: s.needing_weights }, { local: 2, zero_model: 2, needing_weights: 0 }, "both need no weights");
+  assert.deepEqual({ ...s.ready }, { total: 1, zero_model: 1, with_weights: 0, names: [], by_gate: { open: 0, ack_required: 0, blocked: 0 } }, "only the one the node does not block is ready");
+});
