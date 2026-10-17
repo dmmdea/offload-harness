@@ -60,7 +60,7 @@ func stagedInFlight(path string) bool {
 	if !fi.Mode().IsRegular() {
 		return false // a writer stages a file; a directory (or anything else) in its place is somebody's blocker, not a rename
 	}
-	return time.Since(fi.ModTime()) < stagingFresh
+	return gateNow().Sub(fi.ModTime()) < stagingFresh
 }
 
 // statFile is os.Stat, as a variable so a test can make the rename end between two looks at a name (settled_test.go).

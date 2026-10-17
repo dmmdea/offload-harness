@@ -774,7 +774,11 @@ var openSharedFile = OpenShared
 // window in which a heartbeat is unknown, and no longer carries the weight of keeping a live lease from being reclaimed.
 //
 // On Windows an open that fails with a permission error is tried again, removeAttempts times at removePause (about 100 ms in all, the
-// bound the claim removal uses), and any other failure is returned at once. The shared open takes the sharing violation away, but not
+// bound the claim removal uses). An open that finds the name ABSENT is not an answer while a rename may be installing it: with a fresh
+// staged file beside the name (stagingPath, settled.go) the read waits for the rename to end, up to absentBudget, and if the budget runs
+// out it returns an I/O failure (errRenameInFlight) and never "not found"; with none it looks once at the name itself, and answers
+// absent only when that finds nothing too (gate.go). Any other failure is returned at once. A file that is never replaced by a rename (a
+// card claim) costs one open and nothing else. The shared open takes the sharing violation away, but not
 // the instant the rename has marked the old entry for deletion and the new one has not taken its name: the file is delete-pending, and
 // every open of the name fails with ERROR_ACCESS_DENIED until the rename ends, a few milliseconds. Measured on a loaded host, with the
 // shared open in, that was 5 failed reads in about 124,000 of a heartbeat that was renewed in a loop.
@@ -791,23 +795,45 @@ var openSharedFile = OpenShared
 // It is a lasting refusal there, a record written with a mode the reader cannot read, and the wait cost about 108 ms per unreadable
 // record per read: Leases() and the acquirer, which reads the records under the epoch lock, paid it for every one.
 func readSharedFile(path string) ([]byte, error) {
-	for attempt := 0; ; attempt++ {
+	var watch gateWatch
+	denied := 0 // the refusals met so far: the wait for a refused open is counted apart from the gate's
+	for {
 		f, err := openSharedFile(path)
 		if err == nil {
 			forgetRefusedFile(path)
 			defer f.Close()
 			return io.ReadAll(f)
 		}
+		if deniedOpenMayClear && errors.Is(err, fs.ErrNotExist) {
+			// Absent. For the instant a rename installs the file that is not an answer yet (gate.go): wait while a fresh staged file
+			// stands beside the name, and look at the name itself once when none does.
+			switch watch.afterAbsentRead(path) {
+			case gateWaited:
+				continue
+			case gateExpired:
+				return nil, &fs.PathError{Op: "open", Path: path, Err: errRenameInFlight}
+			case gateClear:
+				if _, serr := statFile(path); serr != nil && errors.Is(serr, fs.ErrNotExist) {
+					return nil, err // settled: nothing is installing it and the name is not there
+				}
+				if watch.nameIsThere() == gateExpired {
+					return nil, &fs.PathError{Op: "open", Path: path, Err: errRenameInFlight}
+				}
+				continue
+			}
+			return nil, err // a file that is never replaced by a rename (a card claim): absent is the answer
+		}
 		if !deniedOpenMayClear || !errors.Is(err, os.ErrPermission) {
 			return nil, err
 		}
-		if attempt == 0 && refusedFileRemembered(path) {
+		if denied == 0 && refusedFileRemembered(path) {
 			return nil, err // it outlasted a whole wait a moment ago: this open was the look at whether it has been repaired
 		}
-		if attempt >= removeAttempts {
+		if denied >= removeAttempts {
 			rememberRefusedFile(path)
 			return nil, err
 		}
+		denied++
 		readRetries.Add(1)
 		time.Sleep(removePause)
 	}

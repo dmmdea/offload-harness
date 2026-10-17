@@ -37,3 +37,65 @@ var (
 	gatePauses   atomic.Int64
 	gateExpiries atomic.Int64
 )
+
+// gateWatch is one read's wait for a rename to end. The zero value is a read that has not met one yet; the deadline runs from the first
+// time it does.
+type gateWatch struct {
+	first    time.Time // when the read first met a fresh staged file, or a name the look found and the open did not
+	rechecks int       // looks at the name that found it there after a read that did not
+}
+
+// gateVerdict is what a read that found its name absent learns from the file beside it.
+type gateVerdict int
+
+const (
+	// gateNoStaging: the file is never replaced by a rename (a card claim), so there is nothing beside it to look for and absent is the answer.
+	gateNoStaging gateVerdict = iota
+	// gateClear: no fresh staged file stands beside the name. The caller looks at the name once, unconditionally: the rename may have
+	// ended between its read and the look at the staged file, and the name is then back.
+	gateClear
+	// gateWaited: a fresh staged file stands beside the name, a rename may be installing it, and the gate has paused: look again.
+	gateWaited
+	// gateExpired: the budget ran out. The caller answers an I/O failure (errRenameInFlight), never an absence.
+	gateExpired
+)
+
+// afterAbsentRead is called by a read that found its name absent, with the gate on.
+func (w *gateWatch) afterAbsentRead(path string) gateVerdict {
+	if stagingPath(path) == "" {
+		return gateNoStaging
+	}
+	if !stagedInFlight(path) {
+		return gateClear
+	}
+	now := gateNow()
+	if w.first.IsZero() {
+		w.first = now
+	}
+	if now.Sub(w.first) >= absentBudget {
+		gateExpiries.Add(1)
+		return gateExpired
+	}
+	gatePauses.Add(1)
+	gateSleep(absentPause)
+	return gateWaited
+}
+
+// nameIsThere is called when the look at the name found it there although the read of it found it absent: the rename ended between the
+// two. The caller reads again at once; if that keeps happening the same deadline ends it.
+func (w *gateWatch) nameIsThere() gateVerdict {
+	now := gateNow()
+	if w.first.IsZero() {
+		w.first = now
+	}
+	if now.Sub(w.first) >= absentBudget {
+		gateExpiries.Add(1)
+		return gateExpired
+	}
+	if w.rechecks > 0 {
+		gatePauses.Add(1)
+		gateSleep(absentPause)
+	}
+	w.rechecks++
+	return gateWaited
+}
