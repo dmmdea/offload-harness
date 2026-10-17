@@ -1853,9 +1853,11 @@ const claimGrace = 10 * time.Second
 // claimIsFresh reports whether the claim file was created recently enough to be a
 // write in progress.
 func (m *Manager) claimIsFresh() bool {
-	fi, err := os.Stat(m.metaPath())
+	fi, err := statSettled(m.metaPath())
 	if err != nil {
-		return false
+		// The claim is replaced by a rename over the live name (restampWholeLocked). One that cannot be examined because a rename may be
+		// installing it is a claim in progress, held and not debris: calling it stale would have it removed.
+		return errors.Is(err, errRenameInFlight)
 	}
 	return m.now().Sub(fi.ModTime()) < claimGrace
 }

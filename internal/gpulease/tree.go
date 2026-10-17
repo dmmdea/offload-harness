@@ -323,7 +323,9 @@ func readLaunchMarkers(dir string) []launchMarker {
 		if e.IsDir() || !strings.HasPrefix(name, ".offload-launch") || !strings.HasSuffix(name, ".json") {
 			continue
 		}
-		b, rerr := os.ReadFile(filepath.Join(dir, name))
+		// Node restamps a marker through a staged .tmp file and a rename over the live name; the shared open does not hold that rename
+		// up, and an absence is only an answer once it is settled (gate.go).
+		b, rerr := readSharedFile(filepath.Join(dir, name))
 		if rerr != nil {
 			continue
 		}

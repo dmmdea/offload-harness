@@ -840,6 +840,10 @@ func readSharedFile(path string) ([]byte, error) {
 	}
 }
 
+// ReadSharedFile is readSharedFile for a reader in another package of a file its writer replaces by a rename over the live name: the
+// ComfyUI launch markers (internal/comfyinst), which render/comfy-ownership.mjs restamps through a staged .tmp file.
+func ReadSharedFile(path string) ([]byte, error) { return readSharedFile(path) }
+
 // readRetries counts the pauses readSharedFile has taken waiting out a refused open, since the process started: a test seam, not a
 // metric (readrace_linux_test.go asserts it stays 0 where no rename can cause a refusal; readrelease_test.go, that a missing file never adds to it).
 var readRetries atomic.Int64

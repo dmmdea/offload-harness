@@ -32,7 +32,9 @@ func (m *Manager) keeperSignOfLife(epoch uint64, record string) time.Time {
 			newest = t
 		}
 	}
-	if fi, err := os.Stat(record); err == nil {
+	// The record is replaced by a rename over the live name, so a look that met the instant it is absent waits for the rename
+	// (statSettled); a look that cannot tell gives no sign, as an absent record does.
+	if fi, err := statSettled(record); err == nil {
 		note(fi.ModTime())
 	}
 	noteHeartbeat := func(path string) {

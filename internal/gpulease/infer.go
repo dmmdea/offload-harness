@@ -807,7 +807,7 @@ func LaunchMarkerReader(comfyDir string) func() (Marker, bool) {
 		if strings.TrimSpace(comfyDir) == "" {
 			return Marker{}, false
 		}
-		b, err := os.ReadFile(filepath.Join(comfyDir, ".offload-launch.json"))
+		b, err := readSharedFile(filepath.Join(comfyDir, ".offload-launch.json")) // restamped by Node through a staged .tmp file, like the keyed ones
 		if err != nil {
 			return Marker{}, false
 		}
