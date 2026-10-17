@@ -1,8 +1,9 @@
 ### Fixed - the result-cache key can no longer be forged from request text: every part is length-prefixed, callers pass each ingredient as its own part, the params part is typed, and every existing cache key changes once
 
 - **One-time effect on upgrade: every existing result-cache key changes, so the cache starts cold.** The first call of each kind after the upgrade misses and
-  runs the model, then stores its result under the new key. Nothing else changes: the cache is a transparent accelerator, a miss does what the request would have
-  done with no cache at all, and there is nothing to configure or migrate. Entries stored under the old keys are never looked up again, and the cache has no
+  runs the model, then stores its result under the new key. The cache itself needs nothing: it is a transparent accelerator, a miss does what the request would have
+  done with no cache at all, and there is nothing to configure or migrate. (Some output file names and exemplar `params_key` values change once too; the
+  `StableParamsKey` entry below says which.) Entries stored under the old keys are never looked up again, and the cache has no
   eviction, so they stay in the cache file as dead weight until the file is removed. (The ask lane's own cache lives in memory for the life of one server process,
   so it has nothing stored to orphan.)
 - **The defect (issue #4).** `cache.Key` joined its parts with a NUL byte and hashed the result, so `Key("a", "b")` and `Key("a\x00b")` were one key. One part of a
@@ -41,9 +42,13 @@
   key now carries `tasks.CacheParamsKey`: the params as JSON with the keys of every map sorted at every depth, typed, so `"5"` and 5, `["a","b"]` and `["a b"]`, a string
   and the bool it spells all differ, while an int 5 and the float64 5 the MCP door decodes, or a `[]string` and a `[]any` holding the same strings, still agree. It is used
   for the result cache only: Run, RunTier, the vision path and the transcription key. **It fails closed.** Params with no faithful typed form (NaN or an infinity, a
-  function or channel, a struct, a byte slice, a type with its own JSON form, a string that is not valid UTF-8, a self-referencing value) make that call neither read nor
-  write the result cache: it runs the model every time, logs one line, and records `cache_bypass` ("params: ...") on its ledger row. There is no fallback to a `%v`
-  rendering or to `StableParamsKey`, because that would hand the call a key a different request can reach.
+  function or channel, a struct, a byte slice, a type with its own JSON or text form by any of `MarshalJSON`, `MarshalJSONTo`, `MarshalText` or `AppendText` on the
+  value or the pointer receiver, a `json.Number` that is not a number, a string that is not valid UTF-8, a self-referencing value) make that call neither read nor
+  write the result cache: it runs the model every time, logs one line, and sets `cache_bypass` ("params: ...") on the result's meta, which `Run`, vision and transcribe
+  write to their ledger row (`RunTier` writes no ledger row, so there it is on the returned meta only). The reason names the params key and a kind, never a value. Such a
+  call is not harvested as an exemplar either: the exemplar row prints the params with `%v`, which has no cycle guard, so a self-referencing value would have crashed
+  the process after the model answered. There is no fallback to a `%v` rendering or to `StableParamsKey`, because that would hand the call a key a different request
+  can reach. Nesting is bounded at 128 JSON levels.
 - **The params string for file names (`internal/tasks`).** `StableParamsKey` renders `<key>=<value>;` per entry with nothing to tell a structural `=` or `;` from one
   inside a key or a value, so `{"a": "1;b=2"}` and `{"a": "1", "b": "2"}` both rendered `a=1;b=2;`. It names the render-, video-, animate-, inpaint-, upscale-, edit- and
   audio output files and is recorded as `params_key` on the persisted exemplar rows, so it stays, with the escaping. Each key and each rendered value now has `%`, `;`
@@ -60,27 +65,32 @@
   name is not reused), and its `params_key` on newly written exemplar rows differs. Nothing reads `params_key` back for matching today.
 - **Tests, red first.** A test that pins a defect was written before its fix and failed on the old code; a test that pins behaviour the code already has (the
   ordinary-params table, the documented limit, the encoding values, the digit-part entries, the empty-key refusal) is shown red by a mutation instead, listed below.
-  - `internal/cache`: `TestKeySeparatorCollision` no longer skips. It asserts 26 named part lists give 26 distinct keys (the NUL cases, every empty-part case, a part that
-    spells out a length header, a part that spells out the frames of another list, and two digit lists that a decimal length with no delimiter would read as one), names the
+  - `internal/cache`: `TestKeySeparatorCollision` no longer skips. It asserts 28 named part lists give 28 distinct keys (the NUL cases, every empty-part case, a part that
+    spells out a length header, a part that spells out the frames of another list, and two pairs of lists that a decimal length with no delimiter would read as one:
+    two digit lists, and a pair whose only long part is ten characters with no digits after the first), names the
     headline pairs as separate checks, and checks that its colliding pairs really did collide under the old `strings.Join(parts, "\x00")`, so the table cannot go stale.
-    `TestKeyIsInjectiveOverSmallLists` checks all 2,380 lists of up to three SHORT parts over `{a, NUL, \x01}` (what it cannot reach, long digit parts, is the named digit
-    entries above). `TestKeyEncodingIsPinned` holds four keys to values computed outside the package, so a change to the tag or the length width is a visible edit.
+    `TestKeyIsInjectiveOverSmallLists` checks all 2,380 lists of up to three SHORT parts over `{a, NUL, \x01}` (what it cannot reach, a part of ten characters or more, is the named
+    decimal-length entries above). `TestKeyEncodingIsPinned` holds four keys to values computed outside the package, so a change to the tag or the length width is a visible edit.
     `TestEmptyKeyNamesNoEntry` holds the empty-key refusal.
   - `internal/pipeline`: `TestRunVisionGenKeepsInputAndIdentityApart` drives `runVisionGen` itself with inputs whose old glued strings are equal; the second call must
     miss, the model must run twice, two entries must be stored, the answers must differ, and a genuine repeat of either must still hit.
     `TestTierKeyKeepsModelAndRenderApart`, `TestExemplarCacheTagKeepsFieldsApart` (tag and key level) and `TestTemplateCacheTagKeepsFieldsApart` (tag level, and key level for the case where
     the grammar agrees) cover the render and the two tags. `TestTranscribeCacheKeyKeepsFieldsApart` has three cases; two fail on the old key, and the third (model text imitating the digest
     boundary) passes on it because the old key repeated the model, which is what the case now holds to the framing. `TestRunTranscribeStoresUnderTranscribeCacheKey` drives
-    `runTranscribe` and ties the entry it stores to `transcribeCacheKey`; that is what makes the call site a pinned seam (the function's own test cannot see which key the call
+    `runTranscribe` on both protocol legs (whisper, and an HQ model on the OpenAI shape, which keys with no language) and ties the entry it stores to `transcribeCacheKey`; that is what makes the call site a pinned seam (the function's own test cannot see which key the call
     site builds: with the glued key put back at the call site every other transcription test stayed green).
   - Typed params, driven through `Run` (`internal/pipeline`): `TestRunKeepsTypeErasedParamsApart` stores one request and asks the other for both release-review pairs
     (`required` and `minimum`); the asking request must miss and the model must run again. It fails on the old code with "A was served B's cached answer". The
     fail-closed behaviour is pinned the same way for `Run` (NaN, an infinity, a function), `RunTier`, the vision path and the transcribe path: two identical calls both run the model,
     no entry is stored, and `cache_bypass` says why; the same request with keyable params is cached and hit, so the tests are not vacuous. They fail on the old code, where the
-    second call is a cache hit.
+    second call is a cache hit. `TestRunDoesNotHarvestParamsThatCannotBeKeyed` sends a map and a list that hold themselves through `Run`: no crash and no exemplar row,
+    while the same call with keyable params is harvested. `TestRunCacheBypassNeverEchoesAParamsValue` sends an invalid `json.Number` and checks that its text is in
+    none of the log, the meta and the ledger.
   - `internal/tasks`: `TestCacheParamsKeyKeepsTypesAndStructureApart` (eight pairs, each checked against the old `%v` rendering first),
-    `TestCacheParamsKeyIsStableAcrossRepresentations`, `TestCacheParamsKeyIsPinned` (exact strings) and `TestCacheParamsKeyFailsClosed` (twenty unkeyable values, each an error that
-    names a kind and never a value). For `StableParamsKey`: `TestStableParamsKeyKeepsEntriesApart` (three pairs, each checked against a copy of the old rendering),
+    `TestCacheParamsKeyIsStableAcrossRepresentations`, `TestCacheParamsKeyIsPinned` (exact strings) and `TestCacheParamsKeyFailsClosed` (twenty-four unkeyable values, each an error that
+    names a kind and never a value, by every route to an error: the walk, the `json.Number` check and the encoder; a 100-level object stays keyable), and
+    `TestCacheParamsKeyRejectsAV2OwnForm` (a type whose only own form is the v2 `MarshalJSONTo`, which `json.Marshal` honours on Go 1.27; it first checks that the
+    encoder really renders it its own way). For `StableParamsKey`: `TestStableParamsKeyKeepsEntriesApart` (three pairs, each checked against a copy of the old rendering),
     `TestStableParamsKeyEscapesWhatItMustEscape` and `TestStableParamsKeyIsInjectiveOverASmallAlphabet` (all 93,051 params maps of up to two entries over `{a, %, =, ;}`, strings
     up to two characters) fail on the old format. `TestStableParamsKeyIsInjectiveOverEscapeSpellings` covers what that alphabet cannot reach, a value that spells an escape: all
     160,000 single-entry maps with keys and values of up to three characters over `{a, %, ;, =, 3, B, D}`. `TestStableParamsKeyOrdinaryParamsAreUnchanged` holds a table of
@@ -94,10 +104,12 @@
   (only `TestKeyEncodingIsPinned`); an 8-byte length cut to 4 (only `TestKeyEncodingIsPinned`); the length missing on the last part; a decimal length with no delimiter
   (`TestKeySeparatorCollision` and `TestKeyEncodingIsPinned`; before the digit entries only the pinned test failed). `Cache.Put` without the empty-key refusal. Call sites:
   the glued vision key; the folded render; the NUL-terminated exemplar fields; the NUL-joined template tag; the glued transcription identity, inside `transcribeCacheKey` and
-  at the `runTranscribe` call site (the latter fails only `TestRunTranscribeStoresUnderTranscribeCacheKey`); the transcription key without the model; `StableParamsKey` back in
+  at the `runTranscribe` call site (the latter fails only `TestRunTranscribeStoresUnderTranscribeCacheKey`); the requested language passed on the OAI leg (only that
+  test's `oai` leg fails); the transcription key without the model; `StableParamsKey` back in
   the key at the `Run`, vision, `RunTier` and transcribe call sites. Fail-closed handling: a fallback from an unkeyable value to `StableParamsKey`; the bypass not recorded;
   the unkeyable flag ignored at the `Run`, `RunTier`, vision and transcribe call sites. `CacheParamsKey`: it returning `StableParamsKey`; no walk over the values; byte slices,
-  non-UTF-8 strings or types with their own JSON form allowed; a `fmt` fallback for an unkeyable value (it crashes on a self-referencing map, which is the danger of a
+  non-UTF-8 strings or types with their own JSON form allowed; the pointer-receiver half of that check, `MarshalJSONTo` or `AppendText` dropped from it; the
+  `json.Number` check off; the encoder's error text forwarded; the walk bound back at 64; the exemplar harvest without the keyability check (a stack overflow); a `fmt` fallback for an unkeyable value (it crashes on a self-referencing map, which is the danger of a
   fallback). `StableParamsKey`: the keys not escaped, the values not escaped, `%` not escaped, `=` not escaped, `;` not escaped, the trailing `;` changed, the backslash
   escaped as well, the escape applied twice, and the nested rendering changed to `%#v`. Removing `field()` from `askcache.Key` on its own no longer turns a test red, because
   `cache.Key` keeps those fields apart; its test says so.

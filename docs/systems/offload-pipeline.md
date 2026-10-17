@@ -503,10 +503,12 @@ prints nested and non-string values with Go's `%v`, which is type-erased: an ext
 key, and the second was served the first's cached answer before its own schema was checked (a cached
 reply is validated against the requesting call's schema only on a miss, not on a hit). Params with no
 faithful typed form (NaN or an infinity, a function, a struct, a byte slice, a type with its own JSON
-form, a string that is not valid UTF-8, a self-referencing value) fail closed: the call neither reads
-nor writes the cache, runs the model every time, logs one line, and records `cache_bypass`
-("params: ...") on its ledger row. There is no fallback to a `%v` rendering, which would reopen the
-collision.
+or text form, a `json.Number` that is not a number, a string that is not valid UTF-8, a
+self-referencing value) fail closed: the call neither reads nor writes the cache, runs the model every
+time, logs one line, and sets `cache_bypass` ("params: ...", a key and a kind, never a value) on the
+result's meta, which `Run`, vision and transcribe write to their ledger row; `RunTier` writes no ledger
+row. Such a call is not harvested as an exemplar either. There is no fallback to a `%v` rendering,
+which would reopen the collision.
 
 `tasks.StableParamsKey` stays for what it always named, the render, video and edit output files and
 the exemplar rows, and is not part of the cache key. It percent-escapes `%`, `;` and `=` in keys and

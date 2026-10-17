@@ -1,7 +1,6 @@
 package tasks
 
 import (
-	"encoding"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,13 +14,35 @@ import (
 var ErrParamsNotKeyable = errors.New("params cannot be keyed for the result cache")
 
 // maxKeyableDepth bounds how deeply a params value may nest. It is a bound on the walk,
-// not a feature: a params map that holds itself would otherwise never finish.
-const maxKeyableDepth = 64
+// not a feature: a params map that holds itself would otherwise never finish. The walk
+// takes two steps per JSON level (the interface, then the map or slice inside it), so
+// 256 steps admit 128 levels, far past any real schema.
+const maxKeyableDepth = 256
 
-var (
-	jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
-	textMarshalerType = reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
-)
+// ownFormMethods are the methods through which encoding/json renders a type its own way
+// instead of by its kind: the v1 json.Marshaler and encoding.TextMarshaler, and the
+// encoding/json/v2 forms that the json v1 API also honours on toolchains built with it
+// (MarshalJSONTo, and AppendText from encoding.TextAppender). They are matched by name,
+// not by interface, so a v2 signature counts without importing jsontext, and on the
+// value and the pointer receiver alike (json.Marshal calls a pointer method on an
+// addressable value, such as a slice element).
+var ownFormMethods = []string{"MarshalJSON", "MarshalJSONTo", "MarshalText", "AppendText"}
+
+// jsonNumberType is json.Number: a string kind that json.Marshal writes as a bare number,
+// and rejects when the string is not one.
+var jsonNumberType = reflect.TypeOf(json.Number(""))
+
+func hasOwnForm(t reflect.Type) bool {
+	for _, name := range ownFormMethods {
+		if _, ok := t.MethodByName(name); ok {
+			return true
+		}
+		if _, ok := reflect.PointerTo(t).MethodByName(name); ok {
+			return true
+		}
+	}
+	return false
+}
 
 // CacheParamsKey is the params ingredient of a RESULT-CACHE key: the params rendered as
 // JSON with the keys of every map sorted at every depth, typed, so values that differ
@@ -65,9 +86,17 @@ func CacheParamsKey(p map[string]any) (string, error) {
 	}
 	b, err := json.Marshal(p)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrParamsNotKeyable, err)
+		// The encoder's error can quote the offending value; this message reaches a log
+		// line, meta.CacheBypass and the ledger row, so it carries no text of the error.
+		return "", fmt.Errorf("%w: the params do not render as JSON", ErrParamsNotKeyable)
 	}
 	return string(b), nil
+}
+
+// isJSONNumber reports whether s is a JSON number literal (json.Valid alone also
+// accepts a quoted string, true or null).
+func isJSONNumber(s string) bool {
+	return s != "" && (s[0] == '-' || (s[0] >= '0' && s[0] <= '9'))
 }
 
 // checkKeyable walks one params value and returns an error for anything json.Marshal
@@ -80,11 +109,14 @@ func checkKeyable(v reflect.Value, depth int) error {
 		return nil
 	}
 	t := v.Type()
-	if v.Kind() != reflect.Interface {
-		if t.Implements(jsonMarshalerType) || t.Implements(textMarshalerType) ||
-			reflect.PointerTo(t).Implements(jsonMarshalerType) || reflect.PointerTo(t).Implements(textMarshalerType) {
-			return fmt.Errorf("type %s has its own JSON or text form", t)
+	if t == jsonNumberType {
+		if !json.Valid([]byte(v.String())) || !isJSONNumber(v.String()) {
+			return errors.New("a json.Number that is not a number")
 		}
+		return nil
+	}
+	if v.Kind() != reflect.Interface && hasOwnForm(t) {
+		return fmt.Errorf("type %s has its own JSON or text form", t)
 	}
 	switch v.Kind() {
 	case reflect.Bool,

@@ -73,7 +73,9 @@ func cacheKeyFor(task core.TaskType, orig, paramsKey, model string, built tasks.
 // every time, which costs a model call and never serves a wrong answer.
 //
 // The skip is reported where the code already reports one: a log line, and
-// meta.CacheBypass, which reaches the ledger row. Nothing is reported on a node with no
+// meta.CacheBypass, which reaches the ledger row on Run, vision and transcribe. RunTier
+// writes no ledger row (the in-loop pipeline has no ledger and records nothing), so there
+// the reason is on the returned Result.Meta only. Nothing is reported on a node with no
 // cache configured, where nothing was ever cacheable.
 func (p *Pipeline) resultCacheParamsKey(task core.TaskType, params map[string]any, meta *core.Meta) (string, bool) {
 	key, err := tasks.CacheParamsKey(params)
@@ -88,6 +90,13 @@ func (p *Pipeline) resultCacheParamsKey(task core.TaskType, params map[string]an
 		log.Printf("%s: params cannot be keyed for the result cache (%s) — cache bypassed; result computed but not stored", task, why)
 	}
 	return "", false
+}
+
+// paramsKeyable reports whether params have the typed form resultCacheParamsKey needs.
+// The exemplar harvest asks it before it prints params with StableParamsKey.
+func paramsKeyable(params map[string]any) bool {
+	_, err := tasks.CacheParamsKey(params)
+	return err == nil
 }
 
 // tierKeyspaceTag separates RunTier's entries from Run's.

@@ -315,46 +315,63 @@ func TestRunTranscribeCachesWhenIdentifiable(t *testing.T) {
 // entry it stores to transcribeCacheKey, the way the vision test ties its entry to
 // visionKeyFor. The language is given (and the route, which decides the protocol and
 // whether the language is part of the identity, is read from the same function the
-// pipeline uses), so the expected key is fully determined.
+// pipeline uses), so the expected key is fully determined. Both protocol legs run: the
+// OAI leg (an HQ model on the OpenAI shape) keys with no language and proto "oai", so a
+// call site that passed the requested language there would go red on that leg only.
 func TestRunTranscribeStoresUnderTranscribeCacheKey(t *testing.T) {
 	ffmpeg := lookFFmpeg()
 	if ffmpeg == "" {
 		t.Skip("ffmpeg not on PATH")
 	}
-	wav := makeSilentWav(t, ffmpeg)
-	cfg := gateCfg(t)
-	cfg.MediaDir = t.TempDir()
-	cfg.FFmpegPath = ffmpeg
-	cfg.Endpoint = fakeWhisper(t)
-	ca := gateCache(t)
-	p := gatePipeline(t, cfg, ca)
+	for _, leg := range []struct {
+		name   string
+		hq     bool
+		params map[string]any
+	}{
+		{"whisper", false, map[string]any{"language": "en"}},
+		{"oai", true, map[string]any{"language": "en", "hq": true}},
+	} {
+		t.Run(leg.name, func(t *testing.T) {
+			wav := makeSilentWav(t, ffmpeg)
+			cfg := gateCfg(t)
+			cfg.MediaDir = t.TempDir()
+			cfg.FFmpegPath = ffmpeg
+			cfg.Endpoint = fakeWhisper(t)
+			cfg.STTModelHQ = "stt-hq"
+			cfg.STTHQAPI = "openai"
+			ca := gateCache(t)
+			p := gatePipeline(t, cfg, ca)
 
-	params := map[string]any{"language": "en"}
-	res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav, Params: params})
-	if !res.OK {
-		t.Fatalf("transcribe deferred: %s", res.Reason)
-	}
+			res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav, Params: leg.params})
+			if !res.OK {
+				t.Fatalf("transcribe deferred: %s", res.Reason)
+			}
 
-	id, err := p.digestMedia(wav)
-	if err != nil {
-		t.Fatalf("digestMedia: %v", err)
-	}
-	model, useOAI := sttRoute(cfg, false)
-	lang, proto := "en", "whisper"
-	if useOAI {
-		lang, proto = "", "oai"
-	}
-	want := transcribeCacheKey(id.Digest, model, lang, proto, cacheParams(params))
-	if !cacheHas(t, ca, want) {
-		t.Fatal("runTranscribe did not store under transcribeCacheKey(digest, model, lang, proto, params): its call site builds the key some other way")
-	}
-	if n := countEntries(t, ca); n != 1 {
-		t.Fatalf("the cache holds %d entries, want exactly the one under transcribeCacheKey", n)
-	}
+			id, err := p.digestMedia(wav)
+			if err != nil {
+				t.Fatalf("digestMedia: %v", err)
+			}
+			model, useOAI := sttRoute(cfg, leg.hq)
+			if useOAI != leg.hq {
+				t.Fatalf("sttRoute(hq=%v) chose useOAI=%v: the leg does not run the protocol it names", leg.hq, useOAI)
+			}
+			lang, proto := "en", "whisper"
+			if useOAI {
+				lang, proto = "", "oai"
+			}
+			want := transcribeCacheKey(id.Digest, model, lang, proto, cacheParams(leg.params))
+			if !cacheHas(t, ca, want) {
+				t.Fatal("runTranscribe did not store under transcribeCacheKey(digest, model, lang, proto, params): its call site builds the key some other way")
+			}
+			if n := countEntries(t, ca); n != 1 {
+				t.Fatalf("the cache holds %d entries, want exactly the one under transcribeCacheKey", n)
+			}
 
-	// Not vacuous: that entry is the one a repeat reads.
-	if rep := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav, Params: params}); !rep.Meta.CacheHit {
-		t.Fatal("a repeat did not hit the entry stored under transcribeCacheKey")
+			// Not vacuous: that entry is the one a repeat reads.
+			if rep := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav, Params: leg.params}); !rep.Meta.CacheHit {
+				t.Fatal("a repeat did not hit the entry stored under transcribeCacheKey")
+			}
+		})
 	}
 }
 

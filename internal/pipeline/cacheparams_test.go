@@ -1,11 +1,15 @@
 package pipeline
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log"
 	"math"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -172,6 +176,82 @@ func TestRunSkipsTheResultCacheWhenParamsCannotBeKeyed(t *testing.T) {
 				t.Fatal("the same request with keyable params did not hit the cache: the test would pass with caching off")
 			}
 		})
+	}
+}
+
+// A params value that holds itself cannot be keyed, and it must not reach the exemplar
+// harvest either: StableParamsKey prints it with %v, which has no cycle guard, and the
+// process would die with a stack overflow after the model answered. JSON cannot carry a
+// cycle, so only an in-process caller can send one.
+func TestRunDoesNotHarvestParamsThatCannotBeKeyed(t *testing.T) {
+	selfMap := map[string]any{}
+	selfMap["me"] = selfMap
+	selfList := []any{nil}
+	selfList[0] = selfList
+	for name, v := range map[string]any{"a map that holds itself": selfMap, "a list that holds itself": selfList} {
+		t.Run(name, func(t *testing.T) {
+			var calls atomic.Int64
+			srv := repliesWith(t, `{"label":"animal","confidence":0.91}`, &calls)
+			tmp := t.TempDir()
+			p, cleanup := newTestPipelineWithSideEffects(t, srv, tmp)
+			defer cleanup()
+			p.cfg.ExemplarsDir = filepath.Join(tmp, "exemplars")
+			if err := os.MkdirAll(p.cfg.ExemplarsDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			sidecar := filepath.Join(p.cfg.ExemplarsDir, string(core.TaskClassify)+".jsonl")
+			input := "the cat sat on the mat and looked at the dog with curiosity"
+
+			res := p.Run(context.Background(), core.Request{Task: core.TaskClassify, Input: input,
+				Params: map[string]any{"labels": []string{"animal", "finance"}, "note": v}})
+			if !res.OK {
+				t.Fatalf("deferred: %s", res.Reason)
+			}
+			if _, err := os.Stat(sidecar); err == nil {
+				t.Fatal("an exemplar row was harvested for params that cannot be keyed")
+			}
+
+			// Not vacuous: the same call with keyable params is harvested.
+			p.Run(context.Background(), core.Request{Task: core.TaskClassify, Input: input,
+				Params: map[string]any{"labels": []string{"animal", "finance"}}})
+			if _, err := os.Stat(sidecar); err != nil {
+				t.Fatalf("the keyable call harvested no exemplar row, so the test cannot see a skip: %v", err)
+			}
+		})
+	}
+}
+
+// The reason a call bypassed the cache names the params key and a kind, never a value:
+// it reaches a log line, meta.CacheBypass and the ledger row. An invalid json.Number is
+// the value the encoder used to quote back.
+func TestRunCacheBypassNeverEchoesAParamsValue(t *testing.T) {
+	const secret = "the-secret-question"
+	var buf bytes.Buffer
+	log.SetOutput(&buf)
+	defer log.SetOutput(os.Stderr)
+
+	var calls atomic.Int64
+	srv := repliesWith(t, `{"label":"animal","confidence":0.91}`, &calls)
+	tmp := t.TempDir()
+	p, cleanup := newTestPipelineWithSideEffects(t, srv, tmp)
+	res := p.Run(context.Background(), core.Request{Task: core.TaskClassify,
+		Input:  "the cat sat on the mat and looked at the dog with curiosity",
+		Params: map[string]any{"labels": []string{"animal", "finance"}, "note": json.Number(secret)}})
+	cleanup()
+	if !res.OK {
+		t.Fatalf("deferred: %s", res.Reason)
+	}
+	if res.Meta.CacheBypass == "" {
+		t.Fatal("no CacheBypass: the value was keyed, so the test cannot see the reason")
+	}
+	led, err := os.ReadFile(filepath.Join(tmp, "ledger.jsonl"))
+	if err != nil || !bytes.Contains(led, []byte("cache_bypass")) {
+		t.Fatalf("the ledger row carries no cache_bypass (%v), so the test cannot see the reason", err)
+	}
+	for where, text := range map[string]string{"meta.CacheBypass": res.Meta.CacheBypass, "the log": buf.String(), "the ledger": string(led)} {
+		if strings.Contains(text, secret) {
+			t.Errorf("%s echoes the params value: %s", where, text)
+		}
 	}
 }
 

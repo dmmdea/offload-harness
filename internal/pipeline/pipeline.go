@@ -4778,7 +4778,10 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 				// the unbounded original (sidecar bloat) or a cut carrying
 				// repackMarker, which future prompts would re-inject as few-shot
 				// CONTENT (round-1 review finding).
-				if p.cfg.ExemplarsDir != "" && p.goodExemplar(meta) && meta.TierPack == "" {
+				// Params that cannot be keyed (tasks.CacheParamsKey) are not harvested either:
+				// the row's StableParamsKey prints them with %v, which has no cycle guard, so
+				// a params value that holds itself would kill the process here.
+				if p.cfg.ExemplarsDir != "" && p.goodExemplar(meta) && meta.TierPack == "" && paramsKeyable(req.Params) {
 					_ = exemplars.Append(p.cfg.ExemplarsDir, string(req.Task), tasks.StableParamsKey(req.Params), req.Input, data, meta.Margin)
 				}
 			}

@@ -154,6 +154,20 @@ func (s shout) MarshalJSON() ([]byte, error) {
 	return []byte(`"` + strings.ToUpper(string(s)) + `"`), nil
 }
 
+// ptrShout has its own JSON form on the POINTER receiver only. json.Marshal calls it for
+// an addressable value, such as a slice element, so []ptrShout{"a"} renders as ["A"].
+type ptrShout string
+
+func (s *ptrShout) MarshalJSON() ([]byte, error) {
+	return []byte(`"` + strings.ToUpper(string(*s)) + `"`), nil
+}
+
+// appender has its own text form through encoding.TextAppender, which the encoding/json/v2
+// encoder honours.
+type appender string
+
+func (a appender) AppendText(b []byte) ([]byte, error) { return append(b, "T-"+string(a)...), nil }
+
 // TestCacheParamsKeyFailsClosed: a value with no faithful typed form returns an error
 // instead of a rendering, so the caller skips the cache for that call. A fallback
 // rendering would reopen the collision CacheParamsKey exists to close.
@@ -181,6 +195,10 @@ func TestCacheParamsKeyFailsClosed(t *testing.T) {
 		{"a time", map[string]any{"x": time.Unix(0, 0)}},
 		{"a type with its own JSON form", map[string]any{"x": ownJSON{}}},
 		{"a string type with its own JSON form", map[string]any{"x": shout("a")}},
+		{"a slice of a type whose pointer has its own JSON form", map[string]any{"x": []ptrShout{"a"}}},
+		{"a string type with AppendText", map[string]any{"x": appender("a")}},
+		{"a json.Number that is not a number", map[string]any{"x": json.Number("abc")}},
+		{"a json.Number with trailing space", map[string]any{"x": json.Number("5 ")}},
 		{"a map keyed by ints", map[string]any{"x": map[int]string{1: "a"}}},
 		{"a string that is not UTF-8", map[string]any{"x": "a\xffb"}},
 		{"a nested string that is not UTF-8", map[string]any{"x": []any{"ok", "a\xffb"}}},
@@ -204,10 +222,19 @@ func TestCacheParamsKeyFailsClosed(t *testing.T) {
 		})
 	}
 
-	// The error names kinds, never values: it goes to a log line and the ledger.
-	_, err := CacheParamsKey(map[string]any{"question": "the secret text", "x": func() {}})
-	if err == nil || strings.Contains(err.Error(), "secret") {
-		t.Errorf("the error must name the offender and not echo a value: %v", err)
+	// The error names kinds, never values: it goes to a log line, meta.CacheBypass and the
+	// ledger. Each input below carries its distinctive text in the value that fails, by
+	// every route to an error: the walk, the json.Number check and the encoder.
+	for _, in := range []map[string]any{
+		{"question": "the secret text", "x": func() {}},
+		{"x": json.Number("the-secret-question")},
+		{"x": []any{json.Number("31337 ")}},
+		{"x": shout("secret")},
+	} {
+		_, err := CacheParamsKey(in)
+		if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "31337") {
+			t.Errorf("the error must name the offender and not echo a value: %v", err)
+		}
 	}
 
 	// Not vacuous: values next to the failing ones that DO have a typed form.
@@ -217,9 +244,20 @@ func TestCacheParamsKeyFailsClosed(t *testing.T) {
 		{"x": []any{nil, true, 1, "s", 2.5, []any{}, map[string]any{}}},
 		{"x": (*int)(nil)},
 		{"x": map[string]int{"a": 1}},
+		{"x": json.Number("-1.5e3")},
+		{"x": nestedObject(100)},
 	} {
 		if _, err := CacheParamsKey(ok); err != nil {
 			t.Errorf("CacheParamsKey(%v) failed: %v", ok, err)
 		}
 	}
+}
+
+// nestedObject is a value nested n JSON objects deep, like a deep extract schema.
+func nestedObject(n int) map[string]any {
+	m := map[string]any{"leaf": 1}
+	for i := 0; i < n; i++ {
+		m = map[string]any{"properties": m}
+	}
+	return m
 }
