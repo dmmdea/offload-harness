@@ -39,6 +39,7 @@ func TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeve
 
 	log := recordOpens(t, "", nil)
 	readRetries.Store(0)
+	gatePauses.Store(0)
 
 	const (
 		rewrites  = 3000
@@ -132,6 +133,10 @@ func TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeve
 	if n := readRetries.Load(); n != 0 {
 		t.Errorf("readSharedFile paused %d times on Linux, want 0: the wait for a refused open must never trigger where no rename can cause one", n)
 	}
+	if n := gatePauses.Load(); n != 0 {
+		t.Errorf("the gate paused %d times on Linux, want 0: nothing is absent mid-rename where rename(2) is atomic", n)
+	}
+
 	// the heartbeat reader's value is the fallback stamp only when the file cannot be read: it must be a real renewal
 	if got, known := heartbeatAt(m.leaseDir(), meta); !known || got < meta.RenewedAtMs {
 		t.Errorf("heartbeatAt = %d (known %v), before the record's stamp %d or unknown", got, known, meta.RenewedAtMs)
