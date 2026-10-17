@@ -88,7 +88,7 @@ func (s *Server) handleComposeProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		s.refuseBearer(w, r, ComposeProjectTask)
 		return
 	}
 	// Only a token holder gets the longer window; everyone else met the blanket timeouts above.

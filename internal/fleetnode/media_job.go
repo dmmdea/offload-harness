@@ -125,7 +125,7 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		s.refuseBearer(w, r, MediaJobTask)
 		return
 	}
 	// A body whose declared length is over the cap is refused here, before the slot and without reading it

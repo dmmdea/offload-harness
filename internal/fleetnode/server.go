@@ -190,7 +190,7 @@ type Server struct {
 	runner Runner
 	jobs   *Jobs
 	opts   Options
-	// refusals throttles the journal line written for each request authorizeGated refuses.
+	// refusals throttles the journal line written for each request refused for its credential, at every door.
 	refusals refusalLog
 	// cardAdmitMu makes a pushed dispatch's id lookup, its node card's queued frame and its Admit one
 	// step (handleDispatch), so a racing duplicate emits no frame of its own.
@@ -1069,12 +1069,7 @@ func (s *Server) Handler() http.Handler {
 		// trust only (the queue is pointless on a loopback-only fleet, but
 		// failing open beyond loopback without a token would be the RCE-class
 		// surface the agent lane refuses).
-		fleetqueue.Mount(mux, s.queue, func(r *http.Request) bool {
-			if s.opts.Cfg.FleetAuthToken == "" {
-				return s.opts.LoopbackListener
-			}
-			return bearerOK(r, s.opts.Cfg.FleetAuthToken)
-		})
+		fleetqueue.Mount(mux, s.queue, s.queueAuthOK)
 	}
 	// SF-16: every route sits behind the ingress guard: a Host outside loopback, the tailnet
 	// and every zone in tailnet_suffix / tailnet_suffixes (unless it is the address the
@@ -1088,6 +1083,25 @@ func (s *Server) Handler() http.Handler {
 		Key:             "fleet_ingress_guard",
 		Logf:            log.Printf,
 	}, mux)
+}
+
+// queueAuthOK is the queue holder surface's rule, handed to fleetqueue.Mount: the bearer when a token is configured,
+// loopback trust when none is. The guard calls it once per request and answers 401 itself when it returns false (the
+// status and body fleetqueue always answered with), so the refusal is journaled here, once, in the same words as every
+// other door's.
+func (s *Server) queueAuthOK(r *http.Request) bool {
+	if s.opts.Cfg.FleetAuthToken == "" {
+		if s.opts.LoopbackListener {
+			return true
+		}
+		s.refusals.note(r, queueRefusalLabel, refusedNoToken)
+		return false
+	}
+	if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
+		s.refusals.note(r, queueRefusalLabel, bearerRefusalReason(r))
+		return false
+	}
+	return true
 }
 
 // EnableQueueHost opens the durable queue store and arms the holder surface —
@@ -2401,34 +2415,10 @@ func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
 // node's lanes. The label is a fixed word for the door (the dispatch door passes dispatchRefusalLabel, since its
 // task type is in the body), never text the caller supplies.
 func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType string) bool {
-	if tokenGated(s.opts.Cfg, taskType) {
-		if s.opts.Cfg.FleetAuthToken == "" {
-			// The reachability condition is CONSULTED, never re-derived:
-			// AgentLaneSafelyReachable is the same expression AgentLaneAdmissible
-			// applies to the same resolved listener, so this refusal can never
-			// disagree with what health advertised. (With no token configured it
-			// reduces to "is the listener loopback?" — a tokenless lane beyond
-			// loopback runs renders, installs node packs and drives a coding-agent loop
-			// for whoever can reach the port, an RCE-class surface. Misconfiguration must
-			// fail here, visibly, at ack time; fleet-serve refuses to start in this state.)
-			if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
-				s.refusals.note(r, taskType, "no fleet_auth_token is set on this non-loopback listener")
-				writeError(w, http.StatusForbidden, fleetTokenRequired)
-				return false
-			}
-			// Loopback + no token: the lanes are reachable only from this
-			// box — the same trust boundary as the local MCP surface.
-		} else if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
-			why := "no fleet bearer presented"
-			if r.Header.Get("Authorization") != "" {
-				why = "the fleet bearer presented is not this node's"
-			}
-			s.refusals.note(r, taskType, why)
-			writeError(w, http.StatusUnauthorized, "unauthorized")
-			return false
-		}
+	if !tokenGated(s.opts.Cfg, taskType) {
+		return true
 	}
-	return true
+	return s.authorizeLane(w, r, taskType, fleetTokenRequired)
 }
 
 // refusalLog writes the journal line for a refused request. A caller with no credential must not be able to grow the
@@ -2944,7 +2934,7 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 // and the withdraw do, so the caller gets the auth verdict and nothing else.
 func (s *Server) answerKnownJob(w http.ResponseWriter, r *http.Request, view *JobView) {
 	if s.pollDenied(view, r) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		s.refuseBearer(w, r, dispatchRefusalLabel)
 		return
 	}
 	if view.State == JobError {
@@ -3040,7 +3030,7 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 	// view.Gated (0.116.0) is the vision lane's job: the same rule, the same
 	// reason (its data is the caller's image judged in prose).
 	if s.pollDenied(view, r) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		s.refuseBearer(w, r, pollRefusalLabel)
 		return
 	}
 	// An authorized poll is the delegator saying it is still there: it restarts
@@ -3097,7 +3087,7 @@ func (s *Server) handleWithdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.pollDenied(view, r) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		s.refuseBearer(w, r, withdrawRefusalLabel)
 		return
 	}
 	if !view.Agent {

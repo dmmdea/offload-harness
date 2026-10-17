@@ -1852,8 +1852,9 @@ local-MCP trust boundary and stays open.
 **Every lane is behind the bearer** since the amendment of 2026-10-15 to
 [ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md): `tokenGated` returns true for every task
 type, so a media dispatch, a run-graph, the legacy `stt` lane, the poll and withdraw of any job and the read of any artifact in
-`GET /fleet/media/{name}` need the bearer on a node that has a token (pinned by `bearer_every_lane_test.go`; each refusal is
-logged by `authorizeGated`, throttled per caller, task type and reason). `/fleet/health` and the jobs feed answer without it, with
+`GET /fleet/media/{name}` need the bearer on a node that has a token (pinned by `bearer_every_lane_test.go`; every refusal of a
+credential, at every door that checks one, writes one journal line through `refuseBearer`, `refuseNoToken` or `queueAuthOK`
+(pinned by `refusal_every_door_test.go`), throttled per caller address and reason, never per door or task type). `/fleet/health` and the jobs feed answer without it, with
 their private fields withheld (`healthPayload.withoutPrivateFields`: the lease's free-text `reason`, the store steward's status,
 the weight-file rows of the image, video, animation and audio recipes; the jobs feed's `error` text). A run-graph manifest may
 name a node pack only at a pinned repository and commit (`render/node-packs.json`, its copy `internal/mediacap/nodepacks.go`

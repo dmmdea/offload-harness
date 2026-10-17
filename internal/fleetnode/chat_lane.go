@@ -136,16 +136,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	// AUTH FIRST — see the package comment. Nothing about this decision needs
 	// the body, so an unauthorized caller never reaches a validation 400 it
 	// could probe this node's configuration with.
-	if s.opts.Cfg.FleetAuthToken == "" {
-		// The reachability condition is CONSULTED, never re-derived: the same
-		// expression ChatLaneAdmissible applies to the same resolved listener,
-		// so this refusal can never disagree with what health advertised.
-		if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
-			writeError(w, http.StatusForbidden, chatLaneTokenRequired)
-			return
-		}
-	} else if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+	// The rule is authorizeLane's (the reachability condition is consulted, never re-derived: the same
+	// expression ChatLaneAdmissible applies to the same resolved listener, so this refusal can never
+	// disagree with what health advertised), and a refusal writes its journal line.
+	if !s.authorizeLane(w, r, chatRefusalLabel, chatLaneTokenRequired) {
 		return
 	}
 	if !s.chatLane {

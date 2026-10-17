@@ -839,11 +839,18 @@ The rule is one rule for every route that does work or returns a result. Three c
   oversized body are all `401`, not `400`, it learns no job state, and a task type the node does not serve is
   refused for the credential before it is refused for being unserved. The `400` answers (and the 1 MiB, vision and text
   body caps) are what a bearer holder gets. The stt upload, chat, kvslot, PAIR relay, compose-project and media-job doors
-  checked the credential before their body read already. Each refusal is logged (the caller's address, the door or task
-  type, which of "no bearer", "wrong bearer" or "no token configured" it was; never the credential or the payload). What
-  throttles the journal is never a field the caller chooses (the task type is the caller's own text): one line per caller
-  address and reason every ten seconds, at most twenty lines a minute across callers, and the first refusal after that
-  minute writes one line counting the rest.
+  checked the credential before their body read already.
+- **Every refusal of a credential is logged, at every door that checks one.** The dispatch, vision, text, stt upload,
+  PAIR relay, chat, kvslot, compose-project and media-job doors, the poll and withdraw of a job, the artifact read and the
+  five queue routes each write one line per refused request (subject to the throttle below) and keep the status and body
+  they always answered with. The line carries the caller's address, the door (the task type for a lane; `dispatch` for
+  `/fleet/dispatch`, whose task type is in a body the node has not read; `poll`, `withdraw`, `chat`, `kvslot` and
+  `fleet-queue` for the others) and which of "no bearer", "wrong bearer" or "no token configured" it was; never the
+  credential presented, the configured one or the payload. A door that is closed (compose-project and media-job on a node
+  that has not opted in) answers `403` whatever the caller holds; that is not a credential refusal and it writes no line.
+  What throttles the journal is never a field the caller chooses (the door and the task type are the caller's own text): one
+  line per caller address and reason every ten seconds, shared by all the doors, at most twenty lines a minute across
+  callers, and the first refusal after that minute writes one line counting the rest.
 - **Jobs and artifacts follow the dispatch.** A poll or withdraw of any job answers `401` without the bearer before any of the
   job's state crosses the wire, a re-dispatch of a known job id gets the same verdict, `GET /fleet/media/{name}` needs the
   bearer for every name (the outputs of a plain dispatch included; the check precedes the file lookup, so the answer never

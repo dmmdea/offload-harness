@@ -10,11 +10,19 @@
   and every read of `GET /fleet/media/{name}` follow the same rule, and the jobs feed omits every row's `error` text without it.
   The check runs first, before the request body is read on `/fleet/dispatch`, `/fleet/vision` and `/fleet/text` (a caller
   without the credential costs the node no buffering, and a malformed body, a wrong content type or an oversized body is `401`,
-  not `400`), before validation and before the task type is looked up, so such a caller learns nothing about the node's
-  lanes. `admit` keeps its own check as a backstop. Each refusal is logged with the caller's address and the door or task type (never the credential or the payload). The journal
-  cannot be grown by a caller: the throttle is keyed on the caller's address and the reason, never on the task type (which the
-  caller chooses), at most twenty lines are written a minute across callers, and the first refusal after that minute writes one
-  line counting the rest.
+  not `400`), before the envelope and task validation and before the task type is looked up, so such a caller learns nothing
+  about the node's lanes. `admit` keeps its own check as a backstop.
+- **Every refusal of a credential is journaled, at every door.** The dispatch, vision, text, stt upload, PAIR relay, chat, kvslot,
+  compose-project and media-job doors, the poll and withdraw of a job, the artifact read and the five queue routes each write one
+  line per refused request (subject to the throttle) and keep the status and body they answered with. The line carries the
+  caller's address, the door (the task type for a lane, `dispatch` for `/fleet/dispatch`, whose task type is in a body the
+  node no longer reads for a caller without the credential) and the reason (no bearer, a wrong one, or no token configured),
+  never the credential or the payload. Before this, only the lanes that go through `authorizeGated` wrote a line; chat, kvslot,
+  compose-project, media-job, poll, withdraw and the queue routes answered `401` in silence. A closed door (`403` for
+  compose-project and media-job on a node that has not opted in) is not a credential refusal and writes no line. The journal
+  cannot be grown by a caller: the throttle is keyed on the caller's address and the reason, shared by all the doors, never
+  on the door or the task type (which the caller chooses), at most twenty lines are written a minute across callers, and the
+  first refusal after that minute writes one line counting the rest.
 - **Loopback stays tokenless; everything else fails closed.** A loopback node with no token serves as before, with a
   byte-identical ack and poll (pinned). A node that listens anywhere else with no token refuses every task type with `403 fleet
   lanes require fleet_auth_token on a non-loopback listener` (the status is unchanged; the sentence no longer says "agent lane"),
@@ -70,7 +78,14 @@
   file, the refusal journal bounded against a caller who varies the task type, and the installer's key precondition. Mutants
   each turn their test red: the `tokenGated` widening removed, the Go pack check removed, the Node pack check removed, the
   startup refusal removed, the Go model check removed, the Node model check removed, the config path dropped from the refusal,
-  the journal's task-type key restored, the node-swap key check removed.
+  the journal's task-type key restored, the node-swap key check removed. A third red series pins the order and the journal:
+  a counting body reader that must be read zero bytes of a 20 MiB body on `/fleet/dispatch`, `/fleet/vision` and `/fleet/text`
+  without the credential (the node read 1048577 bytes on dispatch and text and 8065537 on vision before it answered), a malformed, wrong-type and oversized body without the
+  credential that must each be `401`, the answers a bearer holder and a loopback node with no token still get, and a table over
+  every door (a node with a token, no bearer and a wrong one; a node with none beyond loopback) asserting the door's status and
+  body and exactly one journal line, with the throttle shared across the doors. Mutants each turn their test red: the check
+  taken out of the text route, the withdraw's and the queue's and the no-token refusal's line dropped, the throttle keyed on
+  the door again, `admit`'s backstop removed.
 - **Pins to confirm.** The MultiGPU pin is the documented one. The VideoHelperSuite and GGUF commits are the ones one reference
   node's checkout was at, not documented anywhere (`"pin": "unverified"` in the file); confirm them against the fleet before a
   workflow depends on them, and add a row for any other pack a workflow needs.

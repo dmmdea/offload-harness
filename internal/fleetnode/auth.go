@@ -5,7 +5,8 @@
 // boundary of the local MCP surface). Health and the jobs feed stay readable without it, with the private
 // fields of each withheld (healthPayload.withoutPrivateFields, handleJobs). The guards themselves live at the
 // decision points in server.go (authorizeGated, handleJob, handleMedia) because their PLACEMENT in the handler
-// sequence is load-bearing and documented there; this file holds the shared credential check.
+// sequence is load-bearing and documented there; this file holds the shared credential check and the one way a door
+// refuses a credential: a 401 or 403 and one journal line (refuseBearer, refuseNoToken, authorizeLane).
 
 package fleetnode
 
@@ -20,6 +21,75 @@ import (
 // non-loopback listener with no fleet_auth_token configured — a loud
 // misconfiguration signal. Callers key on the status (403), not the words.
 const fleetTokenRequired = "fleet lanes require fleet_auth_token on a non-loopback listener"
+
+// The words the journal uses for the doors that refuse a credential themselves. The lanes that go through
+// authorizeGated are named by their task type, and the dispatch door by dispatchRefusalLabel. A label is a fixed word
+// for the door, never text the caller supplies.
+const (
+	chatRefusalLabel     = "chat"
+	kvslotRefusalLabel   = "kvslot"
+	pollRefusalLabel     = "poll"
+	withdrawRefusalLabel = "withdraw"
+	queueRefusalLabel    = "fleet-queue"
+)
+
+// Why a request was refused, as the journal says it. The reason is half of the refusal throttle's key, so there are
+// three and the caller cannot add a fourth.
+const (
+	refusedNoBearer    = "no fleet bearer presented"
+	refusedWrongBearer = "the fleet bearer presented is not this node's"
+	refusedNoToken     = "no fleet_auth_token is set on this non-loopback listener"
+)
+
+// bearerRefusalReason names why r failed the bearer check: it presented nothing, or something that is not this
+// node's. The value presented is never read into the reason.
+func bearerRefusalReason(r *http.Request) string {
+	if r.Header.Get("Authorization") != "" {
+		return refusedWrongBearer
+	}
+	return refusedNoBearer
+}
+
+// refuseBearer answers a request that failed the bearer check with 401 and the standard error envelope, and writes
+// its journal line (throttled, see refusalLog). Every door that checks the bearer itself ends here, so no door can
+// refuse a credential and leave the journal silent.
+func (s *Server) refuseBearer(w http.ResponseWriter, r *http.Request, label string) {
+	s.refusals.note(r, label, bearerRefusalReason(r))
+	writeError(w, http.StatusUnauthorized, "unauthorized")
+}
+
+// refuseNoToken answers a request to a node that has no fleet_auth_token and listens beyond loopback with 403 and the
+// door's own message, and writes its journal line.
+func (s *Server) refuseNoToken(w http.ResponseWriter, r *http.Request, label, message string) {
+	s.refusals.note(r, label, refusedNoToken)
+	writeError(w, http.StatusForbidden, message)
+}
+
+// authorizeLane is the rule every lane applies, in one place: with a fleet_auth_token the bearer is required (401
+// without it); with none, a loopback listener is open and any other is refused with 403 and the door's own message.
+// It writes the refusal and its journal line itself and reports whether the request may go on.
+//
+// The reachability condition is CONSULTED, never re-derived: AgentLaneSafelyReachable is the same expression
+// AgentLaneAdmissible applies to the same resolved listener, so this refusal can never disagree with what health
+// advertised. (With no token configured it reduces to "is the listener loopback?" — a tokenless lane beyond
+// loopback runs renders, installs node packs and drives a coding-agent loop for whoever can reach the port.
+// Misconfiguration must fail here, visibly, at ack time; fleet-serve refuses to start in this state.)
+func (s *Server) authorizeLane(w http.ResponseWriter, r *http.Request, label, noTokenMessage string) bool {
+	if s.opts.Cfg.FleetAuthToken == "" {
+		if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
+			s.refuseNoToken(w, r, label, noTokenMessage)
+			return false
+		}
+		// Loopback + no token: the lanes are reachable only from this box — the same trust boundary as the
+		// local MCP surface.
+		return true
+	}
+	if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
+		s.refuseBearer(w, r, label)
+		return false
+	}
+	return true
+}
 
 // bearerOK reports whether r carries `Authorization: Bearer <token>`. Both
 // sides are SHA-256 hashed before subtle.ConstantTimeCompare: the hash makes
