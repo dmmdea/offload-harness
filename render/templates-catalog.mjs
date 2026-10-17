@@ -1405,7 +1405,11 @@ function checkRequirement(req, inv, mode, asFile = false) {
   const cls = mapLegacyClass(directory);
   const c = idx.byClass.get(cls);
   if (!c) { result.status = "class_unregistered"; return result; }
-  if (cls === "embeddings" && !asFile) return checkEmbedding(name, directory, c, inv, mode, result, Array.isArray(req.embedding_refs) ? req.embedding_refs : []);
+  // The prompt tokenizer's lookup is for a name a prompt gives: an unannotated requirement, or an annotation that records the names it covers.
+  // An annotation with none is a file a loader widget names (ConditioningLoader): the node lists the directories by relative path and opens
+  // the value with get_full_path, the exact path under the first root, which is the rule of every other class and the code below.
+  const refs = Array.isArray(req.embedding_refs) ? req.embedding_refs : [];
+  if (cls === "embeddings" && !asFile && (req.annotated !== true || refs.length > 0)) return checkEmbedding(name, directory, c, inv, mode, result, refs);
   if (!extListed(name, c.exts)) { result.status = "extension_not_listed"; return result; }
   if (c.exact.has(name)) { result.status = "present"; return result; }
   const cased = c.lower.get(name.toLowerCase());

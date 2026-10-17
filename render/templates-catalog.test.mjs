@@ -3936,7 +3936,7 @@ test("readiness: an annotated embedding is met only when it is the file ComfyUI 
   assert.deepEqual(embGot([EMB("evil_ti.pt")], "evil_ti.pt", covers), ["present", "evil_ti.pt", null]);
   assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.pt", covers), ["shadowed", null, ["evil_ti.safetensors"]], "ComfyUI tries .safetensors first in one directory");
   assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.safetensors", covers), ["present", "evil_ti.safetensors", null], "the annotation names the file ComfyUI opens");
-  assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.pt", { annotated: true }), ["present", "evil_ti.pt", null], "an annotation that covers no prompt name is checked as before");
+  assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.pt", { annotated: true }), ["present", null, null], "an annotation that covers no prompt name is a loader widget's file: its exact path, with no file of the prompt lookup resolved");
   assert.equal(embGot([EMB("evil_ti.pt"), EMB("sd15/evil_ti.bin")], "evil_ti.pt", covers)[0], "ambiguous", "another directory holds a file for the name");
   assert.equal(embGot([EMB("Evil_TI.pt")], "Evil_TI.pt", covers)[0], "case_mismatch", "the prompt's name is not that file's spelling");
 });
