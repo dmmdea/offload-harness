@@ -4029,6 +4029,31 @@ test("readiness: a link inside an embeddings root is one directory with its targ
   assert.equal(linkedGot([EMB("sd15/e.pt"), EMB("alias/e.pt")], { [EMB("alias")]: EMB("sd15") }, "e", [])[0], "present", "alias is sd15 again");
 });
 
+// An annotation must be the file ComfyUI opens for the name a prompt gives. When one file has two paths under the roots (a root registered
+// inside another, a link inside a root), the annotation can name it by either, and the name a prompt gives resolves to one of them: it is the
+// same file, so the annotation is not shadowed.
+const annotatedGot = (files, links, name, extra, yamls = []) => {
+  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls }), linkedIo({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) }, links));
+  const r = C.readiness([req("embeddings", name, { annotated: true, ...extra })], inv).requirements[0];
+  return [r.status, r.found ?? null];
+};
+
+test("readiness: an annotation that names a file by a longer path is the file a prompt's bare name opens, when a root lies inside another root", () => {
+  const nested = [{ text: "p:\n  base_path: D:/x/comfy/models/embeddings\n  embeddings: sd15/neg\n", dir: "D:/x/comfy" }];
+  const files = [EMB("sd15/neg/foo.pt")];
+  assert.deepEqual(annotatedGot(files, {}, "sd15/neg/foo.pt", { embedding_refs: ["foo"] }, nested), ["present", null], "the long path, a prompt that gives the bare name");
+  assert.deepEqual(annotatedGot(files, {}, "foo.pt", { embedding_refs: ["foo"] }, nested), ["present", null], "the short path");
+  assert.deepEqual(annotatedGot(files, {}, "sd15/neg/foo.pt", { embedding_refs: ["sd15/neg/foo.pt"] }, nested), ["present", null], "the long path both ways");
+  assert.equal(annotatedGot([...files, EMB("sd15/neg/foo.safetensors")], {}, "sd15/neg/foo.pt", { embedding_refs: ["foo"] }, nested)[0], "shadowed", "a different file in that directory, tried first, still shadows it");
+});
+
+test("readiness: an annotation that names a file by one path of a link inside the root is not shadowed by the other path of the same file", () => {
+  const links = { [EMB("alias")]: EMB("sd15") };
+  const files = [EMB("sd15/e.pt"), EMB("alias/e.pt")];
+  assert.deepEqual(annotatedGot(files, links, "sd15/e.pt", { embedding_refs: ["e"] }), ["present", null], "alias/e.pt is sd15/e.pt");
+  assert.deepEqual(annotatedGot(files, links, "alias/e.pt", { embedding_refs: ["e"] }), ["present", null]);
+});
+
 test("readiness: a registered root inside another registered root is the same directory string, which ComfyUI's set holds once", () => {
   const nested = [{ text: "p:\n  base_path: D:/x/comfy/models\n  embeddings: embeddings/s2\n", dir: "D:/x/comfy" }];
   const [status, resolved] = linkedGot([EMB("s2/foo.bin")], {}, "foo", nested);
