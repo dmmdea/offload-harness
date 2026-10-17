@@ -65,6 +65,12 @@ func hostRAMSplit(defers bool, needGiB float64) (gate, later float64) {
 	return needGiB, 0
 }
 
+// hostRAMLoadSplit is hostRAMSplit for both quantities (scaffold: the commit follows the touched figure).
+func hostRAMLoadSplit(defers bool, load gpuprobe.HostLoad) (gate, later gpuprobe.HostLoad) {
+	g, l := hostRAMSplit(defers, load.TouchGiB)
+	return gpuprobe.HostLoad{TouchGiB: g, CommitGiB: g}, gpuprobe.HostLoad{TouchGiB: l, CommitGiB: l}
+}
+
 // unloadReachesLease says whether the unload that --unload-seat asks for can take down anything on the cards a lease holds
 // (lease ids; none = the whole node, or the cards an allocation has not chosen yet): the agent seat, or a model the roster
 // lists that is placed on those cards or placed nowhere. It is the question maintainSeatScoped answers when it runs, put

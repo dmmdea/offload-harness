@@ -415,6 +415,7 @@ func runGPUReserve(args []string) (retErr error) {
 	groupFlag := fs.String("group", "", "label for leases taken together for one job (shown in `gpu status`)")
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card (0 = not declared)")
 	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the job will load, declared on the lease and admitted against committed memory (0 = needs no host RAM). Unset, it is estimated: from the model files of a render helper call whose weights do not fit the card (render/comfy-generate.mjs, comfy-edit, comfy-video, comfy-inpaint, comfy-render), else for a media lease the largest ComfyUI render family this box binds (an sd.cpp binding is not counted: a node that binds only sd.cpp declares 0), and 0 for a text lease. A grant waits, in the same queue, while committed memory + this + what running leases have yet to load would exceed physical RAM less gpu_host_ram_headroom_gib, or while the available RAM less this and the unloaded part would fall under that headroom. With --unload-seat the host is asked AFTER the seat is unloaded, while the cards are held, because the memory it needs may be the seat's own (F82)")
+	ramCommitFlag := fs.Float64("ram-commit", 0, "GiB of commit the job will be charged (scaffold)")
 	holdMaxFlag := fs.Duration("ram-hold-max", 0, "with --unload-seat: the most the lease may hold its cards waiting for the host to have the RAM it declared, counted from the unload; past it the lease is released (the seat warmed back), the command never runs and the reserve exits non-zero. Unset = config gpu_hostram_hold_max_sec (default 600 s); 0 = no bound, --wait alone ends the wait")
 	owner := addOwnershipFlags(fs)
 	releaseAtExpiry := fs.Bool("release-at-expiry", false, "with --detach: the hidden holder releases the card at --for, as it did before leases had terms (default: it renews its term while the owner vouches for the job, else labels the lease expired and keeps holding; nothing is ever released by a deadline)")
@@ -446,6 +447,7 @@ func runGPUReserve(args []string) (retErr error) {
 	if *ramFlag < 0 {
 		return errors.New("--ram must be 0 (needs no host RAM) or a number of GiB")
 	}
+	_ = ramCommitFlag
 	if *holdMaxFlag < 0 {
 		return errors.New("--ram-hold-max must be 0 (no bound: the wait after the unload runs the whole --wait) or a duration such as 10m")
 	}
@@ -1363,6 +1365,9 @@ func runGPUHold(args []string) (retErr error) {
 	cardsFlag := fs.String("cards", "", "hold N cards (or MIN..MAX) chosen by the allocator, allocating and claiming in this process (the parent passes its --cards)")
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card")
 	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the lease declares (the parent resolved it: its --ram, the estimate, or the class default)")
+	ramCommitFlag := fs.Float64("ram-commit", 0, "scaffold")
+	ramWaitCommitFlag := fs.Float64("ram-wait-commit", 0, "scaffold")
+	_, _ = ramCommitFlag, ramWaitCommitFlag
 	ramWaitFlag := fs.Float64("ram-wait", 0, "GiB of host RAM the lease will ask the host for AFTER the parent has unloaded the agent seat (the parent passes it for --unload-seat): stamped on the record, never compared in the grant")
 	groupFlag := fs.String("group", "", "label for leases taken together for one job")
 	releaseAtExpiry := fs.Bool("release-at-expiry", false, "release the lease at --for (the pre-terms behaviour; the parent passes its --release-at-expiry)")

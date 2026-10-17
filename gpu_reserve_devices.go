@@ -54,6 +54,8 @@ type reserveDeviceFlags struct {
 	wholeNode bool
 	vramGiB   float64
 	ramGiB    float64
+	// ramCommitGiB is the commit the job declares beside the working set ramGiB (0 = the same figure).
+	ramCommitGiB float64
 }
 
 // devicePlan is the decision: a concrete set (IDs, nil = whole node), or an allocation
