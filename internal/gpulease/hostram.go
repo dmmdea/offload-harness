@@ -801,6 +801,7 @@ func readSharedFile(path string) ([]byte, error) {
 		f, err := openSharedFile(path)
 		if err == nil {
 			forgetRefusedFile(path)
+			forgetAbsentExpiry(path)
 			defer f.Close()
 			return io.ReadAll(f)
 		}

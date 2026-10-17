@@ -8,6 +8,7 @@ package gpulease
 // (deniedOpenMayClear): on a platform where rename(2) is atomic there is nothing to wait for, and the read answers at once.
 
 import (
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -66,7 +67,11 @@ func (w *gateWatch) afterAbsentRead(path string) gateVerdict {
 		return gateNoStaging
 	}
 	if !stagedInFlight(path) {
+		forgetAbsentExpiry(path) // the staged file is gone: whatever was stuck has ended
 		return gateClear
+	}
+	if absentExpiryRemembered(path) {
+		return gateExpired // this name outlasted a whole wait a moment ago
 	}
 	now := gateNow()
 	if w.first.IsZero() {
@@ -74,6 +79,7 @@ func (w *gateWatch) afterAbsentRead(path string) gateVerdict {
 	}
 	if now.Sub(w.first) >= absentBudget {
 		gateExpiries.Add(1)
+		rememberAbsentExpiry(path)
 		return gateExpired
 	}
 	gatePauses.Add(1)
@@ -98,4 +104,56 @@ func (w *gateWatch) nameIsThere() gateVerdict {
 	}
 	w.rechecks++
 	return gateWaited
+}
+
+// The memory of a wait that ran out. A staged file that stays fresh beside an absent name (a writer that died a moment ago) is not a
+// rename in flight, and the wait for it must be paid once for the name and not once for each read of it: a grant reads each record about
+// five times and each heartbeat about seven inside one hold of the epoch lock, so a budget per read held it for 1.75 s for a single such
+// heartbeat, and eight of them for far longer than the 2 s a second acquirer's spin allows. For absentMemory after a wait ran out, a read
+// of the same name that still finds a fresh staged file beside it answers the same I/O failure at once. The memory is only a way to skip
+// the wait: it ends when the staged file is gone, when a read of the name succeeds, and when its time is up. It is a different thing from
+// refusedFiles (hostram.go), which is for a lasting permission fault, and an absence is never fed to that.
+var (
+	absentMu      sync.Mutex
+	absentExpired = map[string]time.Time{}
+	absentCount   atomic.Int64 // len(absentExpired), so the common read (nothing remembered) takes no lock
+)
+
+func rememberAbsentExpiry(path string) {
+	now := gateNow()
+	absentMu.Lock()
+	defer absentMu.Unlock()
+	for p, until := range absentExpired { // drop what has run out, so names that are never read again do not pile up
+		if !now.Before(until) {
+			delete(absentExpired, p)
+		}
+	}
+	absentExpired[path] = now.Add(absentMemory)
+	absentCount.Store(int64(len(absentExpired)))
+}
+
+func absentExpiryRemembered(path string) bool {
+	if absentCount.Load() == 0 {
+		return false
+	}
+	absentMu.Lock()
+	defer absentMu.Unlock()
+	until, ok := absentExpired[path]
+	if ok && !gateNow().Before(until) {
+		delete(absentExpired, path)
+		absentCount.Store(int64(len(absentExpired)))
+		return false
+	}
+	return ok
+}
+
+// forgetAbsentExpiry is called when a read of the name succeeds and when no fresh staged file stands beside it.
+func forgetAbsentExpiry(path string) {
+	if absentCount.Load() == 0 {
+		return
+	}
+	absentMu.Lock()
+	defer absentMu.Unlock()
+	delete(absentExpired, path)
+	absentCount.Store(int64(len(absentExpired)))
 }
