@@ -75,7 +75,7 @@ func TestTheNodeReaderLooksForEverySuffixAGoWriterStagesUnder(t *testing.T) {
 		body = body[:end]
 	}
 	var goSuffixes []string
-	for _, m := range regexp.MustCompile(`"(\.[a-z]+)"`).FindAllStringSubmatch(body, -1) {
+	for _, m := range regexp.MustCompile(`\+ "(\.[a-z]+)"`).FindAllStringSubmatch(body, -1) { // what is appended, not the claim test
 		goSuffixes = append(goSuffixes, m[1])
 	}
 	if len(goSuffixes) < 2 {
