@@ -19,7 +19,8 @@ import (
 //
 // These tests count, for each ask, how many times each file is OPENED and how many pauses the wait took (readRetries), with the
 // wait switched ON on every platform (waitOutDeniedOpens), so a read that retried a missing file would show as 21 opens and 20
-// pauses. Counts are the pin; the time is a loose bound beside them (a mutant that waits on every missing file costs 100 ms each).
+// pauses. Counts are the pin. There is no bound on the wall clock beside them: a loaded runner stalls a test for longer than one wait costs
+// (a mutant that waits on every missing file costs 100 ms each, and shows as those 21 opens and 20 pauses); the times are logged.
 
 // openLog is what recordOpens saw: opens per path, those made while the epoch lock file existed, and how many failed: refused with a
 // permission error (the failure the wait is for), or in some other way than the file being absent (a missing file is an ordinary answer).

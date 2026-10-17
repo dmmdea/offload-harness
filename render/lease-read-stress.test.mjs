@@ -3,34 +3,64 @@
 // The stress half of lease-read.test.mjs: the real Node readers against a writer in another process that keeps replacing
 // the lease files by a rename over the live name, as internal/gpulease does for a record and the heartbeat (write beside,
 // rename over). A reader that answers null for a file that is there is a lease read as gone: the fence (checkInheritedLease)
-// calls a held lease not current and the render aborts. No miss is allowed. Go never renames over a card claim (it creates one
+// calls a held lease not current and the render aborts. The test wants no miss. Go never renames over a card claim (it creates one
 // once and deletes it); the claim is renamed over here as well, which is harder on its reader than production and keeps the
 // reader in the loop.
+//
+// WHAT IT PINS. One thing: at its size (600 renames over 18 files, 150 loops of the five readers; LONG MODE below multiplies it),
+// no reader answers null for a file that is there while a writer replaces it by rename-over. Plain readFileSync missed nothing
+// either, so this test is a guard against the readers starting to miss and is not a red on the old ones.
+//
+// WHAT IT DOES NOT PIN. None of the waits in lease-read.mjs. Node opens with FILE_SHARE_DELETE, so a rename over a name a reader has
+// open does not refuse that reader, and the refusals counted below are the writer's. With the wait for a refused open taken out (REFUSALS
+// empty, so a refusal reads as absent at once) this test still passed 5 of 5 on Windows. The proofs are the tests that put a reader in
+// the state and count what it does:
+//   - the wait for a refused open (EPERM, EACCES): the injected-refusal tests in lease-read.test.mjs, gpu-lock.test.mjs and
+//     lease-progress.test.mjs, which went red, 10 of 81, with the wait out;
+//   - the wait for an absent name with a fresh staged file beside it (the ENOENT of a rename that was not refused, 11 to 75 ms as a
+//     reader sees it, about once in 74,000 renames on the host that showed it): lease-read-gate.test.mjs here, and
+//     internal/gpulease/gate_test.go for the Go readers;
+//   - the reclaim rule, under which a lease whose heartbeat cannot be read is never made stale by it: heartbeat_unknown_test.go,
+//     keeper_unknown_test.go and tree_marker_unknown_test.go in internal/gpulease.
+// A run of this test cannot be counted on to meet either state naturally. The Go reader met the delete-pending refusal 5 times in
+// about 124,000 reads of a heartbeat renamed in a loop on a loaded host, Node not once in about a million reads, and removing a
+// record or a claim leaves that state too, which this loop never does. The Go control for it is readretry_windows_test.go (a real
+// delete-pending file refuses even an open that shares delete); for Node it is the injected-refusal tests, and the Node probe of a
+// held delete-pending file is a measurement in the change fragment, not a test.
+//
+// WHERE IT RUNS. CI runs this file on Linux only (the build job's `node --test render/*.test.mjs` is on ubuntu-latest), so the
+// Windows assertions below (some of the writer's renames refused) run on the gated hosts and the workstations only.
 //
 // EVERY RENAME REPLACES. The writer links a seed file to <live>.tmp and renames that over the live name, a hard link in place of
 // a fresh file so that the loop makes thousands of renames in seconds (a fresh file costs tens of milliseconds on a host with a
 // scanner). A link is only a stand-in for a fresh file while it is a DIFFERENT inode from the one in place: renaming a link over
 // another name of the same inode replaces nothing. On POSIX rename(2) then does nothing at all and leaves <live>.tmp where it was
 // (the next link of it fails with EEXIST); on Windows it succeeds even over a name a reader holds open, so no reader ever meets a
-// refusal. A first form linked ONE seed: after the first pass the live name and the seed were the same inode, only that pass
-// replaced anything (9 of 4,761 renames on Windows), the test proved nothing there, and on Linux it died on the second pass.
-// So each file has two seeds (<live>.seed and <live>.seed2, two inodes, one body) and the writer alternates them, which leaves the
-// file in place never the inode being installed. The writer checks that against the inodes themselves and reports `replaced`.
+// refusal. A first form linked ONE seed: after the first pass the live name and the seed were the same inode and only that pass
+// replaced anything (18 of 11,052 renames at the six roots below; a reviewer's run counted 9 of 4,761, nine being one replacement
+// for each of nine files), so the test proved nothing there, and on Linux the writer died at the link of the third pass
+// (EEXIST, 36 renames in). So each file has two seeds (<live>.seed and <live>.seed2, two inodes, one body) and the writer
+// alternates them, which leaves the file in place never the inode being installed. The writer OBSERVES it: after each rename it
+// takes the inode of the live name, and counts a replacement only when that is the seed it just installed and not the inode it saw in
+// place before. It reports the count as `replaced`.
 //
 // WHAT RENAMING OVER A READER DOES. Windows: a rename over a name a reader has open is refused (EPERM, EACCES or EBUSY), and the
-// writer retries it as renameReplacing does; `retries` counts those, and the test requires some, so the readers and the rename
-// really did meet (the writer keeps going until the first one, within the cap). Elsewhere rename(2) is atomic and is never
-// refused, so `retries` must be 0. A run that would not have met a reader fails instead of passing.
+// writer retries it as renameReplacing does; `retries` counts those, and the test requires some, so the writer and the readers
+// really met (the writer keeps going until the first one, within the cap). Elsewhere rename(2) is atomic and is never refused, so
+// `retries` must be 0. A run that would not have met a reader fails instead of passing.
 //
 // Several lease roots are rotated so a reader holding one file open does not hold the whole loop up. The test is sized by WORK,
 // not by the clock, so a loaded host (the gate hosts are) makes it longer and not vacuous: the writer makes MIN_RENAMES renames
 // and stops only once the reader has made MIN_LOOPS loops (a marker file says so), and the reader loops until the writer says it
 // is done; a cap of CAP_MS ends a run that cannot get there. The writer is a child that is killed by pid if the test ends early.
-// A writer that throws still writes `done` and reports the error, so the test fails at once with the cause and not at the cap.
+// A writer that throws, in its setup as well as its loop, still writes `done` and reports the error, so the test fails at once with
+// the cause and not at the cap.
+//
+// LONG MODE. LEASE_READ_STRESS_SCALE=<n> (a whole number, default 1) multiplies the renames, the loops and the cap by n, for a gated
+// host that wants a longer run. Unset, the committed size runs, which is small and fast.
 //
 // MEASURED (a 36-thread Windows host; the same loop, 40 s per run, with 4 reader processes and a Go or a Node writer, the
-// readers as they were before lease-read.mjs and as they are now) is in the change fragment. On a quiet host the plain
-// readFileSync missed nothing, so this test is a guard on the fixed readers and not a red on the old ones.
+// readers as they were before lease-read.mjs and as they are now) is in the change fragment.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -41,14 +71,21 @@ import { checkInheritedLease, readCardClaim, readEpochRecord, readLease } from "
 import { leaseProgressFile } from "./lease-progress.mjs";
 
 const ROOTS = 6;
-const MIN_RENAMES = 600;
-const MIN_LOOPS = 150;
-const CAP_MS = 60_000;
+const SCALE = Math.max(1, Math.floor(Number(process.env.LEASE_READ_STRESS_SCALE)) || 1); // long mode (see the header)
+const MIN_RENAMES = 600 * SCALE;
+const MIN_LOOPS = 150 * SCALE;
+const CAP_MS = 60_000 * SCALE;
+// File reads one loop of the five readers makes: readEpochRecord 1 (e/7.json), readLease 1 (meta.json), readCardClaim 1 (the claim),
+// checkInheritedLease 2 (the record and the one claim it names), leaseProgressFile 1 (the record, which names the progress file).
+const READS_PER_LOOP = 6;
 const WINDOWS = process.platform === "win32";
 const nap = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // argv: root, roots, minRenames, capMs, minRetries. Stops when it has made minRenames renames AND met minRetries refusals AND the reader
-// has left <root>/enough, or at the cap. Writes <root>/done, then prints {renames, replaced, retries, linkRetries, fails, capped, crashed}.
+// has left <root>/enough, or at the cap. Writes <root>/done, then prints {renames, replaced, absentAfter, retries, linkRetries, fails,
+// capped, crashed}. `replaced` is what it OBSERVED: renames after which the live name has the inode just installed and not the one seen
+// in place before. `absentAfter` is how often the live name was absent when it looked right after its own successful rename (the
+// episode of the read gate, seen from the writer; it looks again until the name is back).
 const WRITER = `
 const { linkSync, renameSync, unlinkSync, existsSync, statSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
@@ -60,11 +97,22 @@ for (let r = 1; r <= Number(rootsArg); r++) {
 }
 const SEEDS = [".seed", ".seed2"];
 const ino = (p) => statSync(p, { bigint: true }).ino;
-const seedIno = new Map(files.map((p) => [p, SEEDS.map((s) => ino(p + s))]));
-const inPlace = new Map(files.map((p) => [p, ino(p)]));
-const side = new Map(files.map((p) => [p, 0]));
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const stats = { renames: 0, replaced: 0, retries: 0, linkRetries: 0, fails: 0, capped: false, crashed: null };
+const stats = { renames: 0, replaced: 0, absentAfter: 0, retries: 0, linkRetries: 0, fails: 0, capped: false, crashed: null };
+// The inode of the live name, looked at right after the writer's own rename. The name can be absent for tens of milliseconds after
+// a rename that was not refused (the episode the read gate waits for), so an ENOENT is looked at again, counted, and only a name that
+// stays absent for 5 s is an error.
+function observe(path) {
+  for (let attempt = 0; attempt < 5000; attempt++) {
+    try { return ino(path); }
+    catch (e) {
+      if (e.code !== "ENOENT") throw e;
+      if (attempt === 0) stats.absentAfter++;
+      pause(1);
+    }
+  }
+  throw new Error("the live name " + path + " stayed absent for 5 s after a rename");
+}
 // Run op until it is not refused (EPERM, EACCES, EBUSY: a reader holds the name); each refusal is counted under counter. Any other
 // error is real and ends the writer. True when op ran.
 function unrefused(op, counter) {
@@ -79,6 +127,9 @@ function unrefused(op, counter) {
   return false;
 }
 try {
+  const seedIno = new Map(files.map((p) => [p, SEEDS.map((s) => ino(p + s))]));
+  const inPlace = new Map(files.map((p) => [p, ino(p)])); // the inode last SEEN in place, not the one expected there
+  const side = new Map(files.map((p) => [p, 0]));
   const cap = Date.now() + Number(capArg);
   for (;;) {
     if (stats.renames >= Number(minArg) && stats.retries >= Number(needRetriesArg) && existsSync(join(root, "enough"))) break;
@@ -93,8 +144,9 @@ try {
         continue;
       }
       stats.renames++;
-      if (seedIno.get(path)[i] !== inPlace.get(path)) stats.replaced++;
-      inPlace.set(path, seedIno.get(path)[i]);
+      const seen = observe(path);
+      if (seen === seedIno.get(path)[i] && seen !== inPlace.get(path)) stats.replaced++;
+      inPlace.set(path, seen);
       side.set(path, 1 - i);
     }
   }
@@ -159,10 +211,10 @@ test("the readers never answer null for a lease file that is there while a write
   await closed;
   assert.ok(out.trim(), "the writer printed nothing: it never ran (its own stderr is above)");
   const w = JSON.parse(out.trim());
-  t.diagnostic(`${loops} loops of the five readers (about ${loops * 12} file reads) against ${w.renames} renames (${w.replaced} replaced a different inode than the one in place, ${w.retries} refused and retried, ${w.linkRetries} link refusals, ${w.fails} given up): ${JSON.stringify(miss)}`);
+  t.diagnostic(`${loops} loops of the five readers (about ${loops * READS_PER_LOOP} file reads) against ${w.renames} renames (${w.replaced} observed to replace a different inode than the one in place, ${w.retries} refused and retried, ${w.linkRetries} link refusals, ${w.absentAfter} met the live name absent right after the writer's own rename, ${w.fails} given up): ${JSON.stringify(miss)}`);
 
   assert.equal(w.crashed, null, `the writer stopped on an error after ${w.renames} renames: ${w.crashed}`);
-  assert.equal(w.replaced, w.renames, `only ${w.replaced} of ${w.renames} renames installed a different inode than the one in place: a rename of a link over its own inode replaces nothing and no reader can be refused by it`);
+  assert.equal(w.replaced, w.renames, `only ${w.replaced} of ${w.renames} renames were observed to put a different inode than the one in place under the live name: a rename of a link over its own inode replaces nothing and no reader can be refused by it`);
   if (WINDOWS) {
     assert.ok(w.retries > 0, `no rename was refused in ${w.renames} renames against ${loops} reader loops (capped: ${w.capped}): the writer and the readers never met, so this run proves nothing`);
   } else {
