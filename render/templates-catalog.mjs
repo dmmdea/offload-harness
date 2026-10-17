@@ -1328,19 +1328,25 @@ const byRel = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
 // scanModelInventory: what each class would list. A file reachable through several directories is
 // one entry that names them all (a junction to a model drive makes the same file appear twice).
 // Files with an extension the class's core loaders do not accept are only counted in `unlisted`.
+// The embeddings class also records, for each file and each directory that shows it, where the file really is (`reals`, parallel to `dirs`):
+// ComfyUI's lookup is by directory, and a link makes one directory, or one file, appear under several names (embeddingHits).
 export function scanModelInventory(roots, io = nodeIo) {
   const classes = {};
   const missing_dirs = [];
   for (const [cls, spec] of Object.entries(roots.classes)) {
     const listed = new Map();
     let unlisted = 0;
+    const real = cls === "embeddings";
     for (const d of spec.dirs) {
       if (!io.list(d.path)) { missing_dirs.push({ class: cls, path: d.path }); continue; }
       for (const f of walkFiles(d.path, io, { follow: true, excludeDirs: [".git"] })) {
         if (!extListed(f.rel, spec.exts)) { unlisted++; continue; }
         const seen = listed.get(f.rel);
-        if (seen) { if (!seen.dirs.includes(d.path)) seen.dirs.push(d.path); continue; }
-        listed.set(f.rel, { rel: f.rel, dirs: [d.path], size: io.stat(f.abs)?.size ?? null });
+        if (seen) {
+          if (!seen.dirs.includes(d.path)) { seen.dirs.push(d.path); if (real) seen.reals.push(io.realpath(f.abs)); }
+          continue;
+        }
+        listed.set(f.rel, { rel: f.rel, dirs: [d.path], ...(real ? { reals: [io.realpath(f.abs)] } : {}), size: io.stat(f.abs)?.size ?? null });
       }
     }
     classes[cls] = { dirs: spec.dirs.map((d) => d.path), exts: spec.exts, files: [...listed.values()].sort(byRel), unlisted };
@@ -1433,7 +1439,11 @@ const MET = new Set(["present", "present_class_unknown"]);
 // `<sub>/<candidate>` is what the directory `<root>/<sub>` holds for that candidate, and a path equal to the candidate is the root's own; a
 // candidate is the name as written, then the name with .safetensors, .pt and .bin appended, and one directory answers with the first of
 // those it holds. The match is on whole path segments. `fold` compares in lower case, for the diagnosis of a name in another case.
-// A file that several roots hold under one path is several directories: the inventory lists it once and cannot tell a link from a copy.
+// A directory is one entry of the set however it is reached, so a hit is keyed by the directory string (a registered root that lies inside
+// another root is the same string as the subfolder walked from it), and hits that open the same file are one hit: the inventory records
+// where a file really is (`reals`, one per directory that shows it), and a root that is a link to another root, a link inside a root, or a
+// file linked into two directories answers with the same bytes from either. Two copies are two files and stay two hits. Without `reals`
+// (an inventory that carries none) every directory is taken as distinct.
 function embeddingHits(files, name, fold = false) {
   const norm = fold ? (s) => s.toLowerCase() : (s) => s;
   const candidates = [name, ...EMBEDDING_EXTS.map((e) => name + e)].map(norm);
@@ -1443,14 +1453,21 @@ function embeddingHits(files, name, fold = false) {
     const rank = candidates.findIndex((c) => rel === c || rel.endsWith("/" + c));
     if (rank < 0) continue;
     const sub = rel.slice(0, rel.length - candidates[rank].length);
-    for (const root of f.dirs) {
-      const key = `${root}\u0000${sub}`;
-      const prev = byDir.get(key);
-      if (!prev || rank < prev.rank) byDir.set(key, { rank, rel: f.rel, dir: sub === "" ? root : `${root}/${sub.slice(0, -1)}` });
-    }
+    f.dirs.forEach((root, i) => {
+      const dir = sub === "" ? root : `${root}/${sub.slice(0, -1)}`;
+      const prev = byDir.get(dir);
+      if (!prev || rank < prev.rank) byDir.set(dir, { rank, rel: f.rel, dir, real: f.reals?.[i] ?? null });
+    });
   }
   const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-  return [...byDir.values()].sort((a, b) => order(a.rel, b.rel) || order(a.dir, b.dir));
+  const sorted = [...byDir.values()].sort((a, b) => order(a.rel, b.rel) || order(a.dir, b.dir));
+  const opened = new Set();
+  return sorted.filter((h) => {
+    if (h.real === null) return true;
+    if (opened.has(h.real)) return false;
+    opened.add(h.real);
+    return true;
+  });
 }
 
 // resolveEmbedding: what ComfyUI does with one name on this node: `present` (exactly one directory holds a file for it: `resolved` is

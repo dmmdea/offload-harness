@@ -3927,7 +3927,7 @@ test("readiness: one embedding name held in more than one directory is ambiguous
   assert.deepEqual(embGot([EMB("e.pt"), EMB("sd15/e.safetensors")], "e"), ["ambiguous", null, ["e.pt", "sd15/e.safetensors"]], "the root and a subfolder");
   assert.deepEqual(embGot([EMB("a/e.pt"), EMB("b/e.pt")], "e"), ["ambiguous", null, ["a/e.pt", "b/e.pt"]], "two subfolders");
   assert.deepEqual(embGot([EMB("e.pt"), EMB2("e.safetensors")], "e", {}, OVERFLOW), ["ambiguous", null, ["e.pt", "e.safetensors"]], "two registered roots");
-  assert.deepEqual(embGot([EMB("e.pt"), EMB2("e.pt")], "e", {}, OVERFLOW), ["ambiguous", null, ["e.pt"]], "one name in both roots: the inventory lists it once and cannot tell a link from a copy");
+  assert.deepEqual(embGot([EMB("e.pt"), EMB2("e.pt")], "e", {}, OVERFLOW), ["ambiguous", null, ["e.pt"]], "one name in both roots, two files (two copies: the inventory tells a link from a copy by where each file really is)");
   assert.deepEqual(embGot([EMB("e.pt"), EMB("e.safetensors")], "e"), ["present", "e.safetensors", null], "one directory holding two extensions is not ambiguous: the order decides");
 });
 
@@ -4009,8 +4009,9 @@ const linkedIo = (files, links) => {
   };
   return io;
 };
-const linkedGot = (files, links, name, yamls = OVERFLOW) => {
+const linkedGot = (files, links, name, yamls = OVERFLOW, { strip = false } = {}) => {
   const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls }), linkedIo({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) }, links));
+  if (strip) for (const f of inv.classes.embeddings.files) delete f.reals; // an inventory that records no real paths
   const r = C.readiness([req("embeddings", name, { annotated: false })], inv).requirements[0];
   return [r.status, r.resolved ?? null, r.found ?? null];
 };
@@ -4032,6 +4033,8 @@ test("readiness: a registered root inside another registered root is the same di
   const [status, resolved] = linkedGot([EMB("s2/foo.bin")], {}, "foo", nested);
   assert.equal(status, "present", "the set holds the string for s2 once, whether it is a registered root or walked from the other");
   assert.match(resolved, /foo\.bin$/);
+  assert.equal(linkedGot([EMB("s2/foo.bin")], {}, "foo", nested, { strip: true })[0], "present", "by the directory string alone, in an inventory that records no real paths");
+  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt")], {}, "e", OVERFLOW, { strip: true })[0], "ambiguous", "without real paths two roots are taken as two directories");
 });
 
 test("readiness (real filesystem): an embeddings directory that is a junction to a second registered root reads present, and a real second copy reads ambiguous", async (t) => {
