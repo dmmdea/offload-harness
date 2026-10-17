@@ -1045,20 +1045,155 @@ func took(s time.Time, fast bool, cfg time.Duration) time.Duration {
 	return time.Since(s)
 }
 func g(s time.Time) bool { return took(s, true, 0) > 100*time.Millisecond }`}, map[string]int{}},
-		{"a helper name declared twice with different results is not trusted", map[string]string{"p/a_test.go": `package p
+		{"a method of the same name on another type is not the helper, the measuring type first", map[string]string{"p/a_test.go": `package p
 import "time"
 type a struct{}
 type b struct{}
 func (a) took() time.Duration { return time.Since(time.Now()) }
 func (b) took() time.Duration { return 5 * time.Millisecond }
-func g(x a) bool { return x.took() > 100*time.Millisecond }`}, map[string]int{}},
-		{"a helper name declared twice, the measuring declaration last, is not trusted either", map[string]string{"p/a_test.go": `package p
+func g(x b) bool { return x.took() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a method of the same name on another type is not the helper, the measuring type last", map[string]string{"p/a_test.go": `package p
 import "time"
 type a struct{}
 type b struct{}
 func (a) took() time.Duration { return 5 * time.Millisecond }
 func (b) took() time.Duration { return time.Since(time.Now()) }
-func g(x b) bool { return x.took() > 100*time.Millisecond }`}, map[string]int{}},
+func g(x a) bool { return x.took() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a method declared twice for one type with different results is not trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+type a struct{}
+func g(x a) bool { return x.took() > 100*time.Millisecond }`, "p/a_linux_test.go": `package p
+import "time"
+func (a) took() time.Duration { return time.Since(time.Now()) }`, "p/a_windows_test.go": `package p
+import "time"
+func (a) took() time.Duration { return 5 * time.Millisecond }`}, map[string]int{}},
+		{"the same method name on two types is told apart by the receiver", map[string]string{"p/a_test.go": `package p
+import "time"
+type a struct{}
+type b struct{}
+func (a) took() time.Duration { return 5 * time.Millisecond }
+func (b) took() time.Duration { return time.Since(time.Now()) }
+func g(x a) bool { return x.took() > 100*time.Millisecond }
+func h(y b) bool { return y.took() > 101*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>101ms": 1}},
+		{"a method of an imported type with the name of a local helper is not the helper", map[string]string{"p/a_test.go": `package p
+import (
+	"time"
+	"other/trace"
+)
+type rig struct{ s time.Time }
+func (r *rig) Elapsed() time.Duration { return time.Since(r.s) }
+func g(span trace.Span) bool { return span.Elapsed() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a closure with the name of a local helper is not the helper", map[string]string{"p/a_test.go": `package p
+import "time"
+func measure() time.Duration { return time.Since(time.Now()) }
+func g() bool { measure := func() time.Duration { return 5 * time.Millisecond }; return measure() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a parameter with the name of a local helper is not the helper", map[string]string{"p/a_test.go": `package p
+import "time"
+func measure() time.Duration { return time.Since(time.Now()) }
+func g(measure func() time.Duration) bool { return measure() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a func field with the name of a method of another type is not the method", map[string]string{"p/a_test.go": `package p
+import "time"
+type other struct{ s time.Time }
+func (o *other) took() time.Duration { return time.Since(o.s) }
+type rig struct{ took func() time.Duration }
+func g(r *rig) bool { return r.took() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a method called through a field or a call result is not read", map[string]string{"p/a_test.go": `package p
+import "time"
+type rig struct{ s time.Time }
+func (r *rig) took() time.Duration { return time.Since(r.s) }
+type wrap struct{ r *rig }
+func newRig() *rig { return &rig{} }
+func g(w wrap) bool { return w.r.took() > 100*time.Millisecond || newRig().took() > 100*time.Millisecond }`}, map[string]int{}},
+		{"a method called through a parameter of the declaring type", map[string]string{"p/a_test.go": `package p
+import "time"
+type rig struct{ s time.Time }
+func (r *rig) took() time.Duration { return time.Since(r.s) }
+func g(r *rig) bool { return r.took() > 120*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>120ms": 1}},
+		{"a method called through a var of the declaring type", map[string]string{"p/a_test.go": `package p
+import "time"
+type rig struct{ s time.Time }
+func (r rig) took() time.Duration { return time.Since(r.s) }
+func g() bool { var r rig; return r.took() > 121*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>121ms": 1}},
+		{"a method called through a composite literal of the declaring type", map[string]string{"p/a_test.go": `package p
+import "time"
+type rig struct{ s time.Time }
+func (r *rig) took() time.Duration { return time.Since(r.s) }
+func g() bool { r := &rig{}; q := rig{}; return r.took() > 122*time.Millisecond || q.took() > 122*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>122ms": 2}},
+		{"a method called through new of the declaring type", map[string]string{"p/a_test.go": `package p
+import "time"
+type rig struct{ s time.Time }
+func (r *rig) took() time.Duration { return time.Since(r.s) }
+func g() bool { r := new(rig); return r.took() > 123*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>123ms": 1}},
+		{"a method called on its own receiver", map[string]string{"p/a_test.go": `package p
+import "time"
+type rig struct{ s time.Time }
+func (r *rig) took() time.Duration { return time.Since(r.s) }
+func (r *rig) slow() bool { return r.took() > 124*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>124ms": 1}},
+		{"a method of a generic type", map[string]string{"p/a_test.go": `package p
+import "time"
+type rig[T any] struct{ s time.Time }
+func (r *rig[T]) took() time.Duration { return time.Since(r.s) }
+func g(r *rig[int]) bool { return r.took() > 125*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>125ms": 1}},
+		{"a generic helper called with an explicit instantiation", map[string]string{"p/a_test.go": `package p
+import "time"
+func measure[T any](f func() T) (T, time.Duration) { s := time.Now(); v := f(); return v, time.Since(s) }
+func g() bool { _, d := measure[int](func() int { return 1 }); return d > 126*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>126ms": 1}},
+		{"Duration.Abs of the elapsed time", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start).Abs() > 140*time.Millisecond }`}, map[string]int{"p/a_test.go:elapsed>140ms": 1}},
+		{"math.Abs of the elapsed time as a float", map[string]string{"p/a_test.go": `package p
+import (
+	"math"
+	"time"
+)
+func f(start time.Time) bool { return math.Abs(float64(time.Since(start))) > 141e6 }`}, map[string]int{"p/a_test.go:elapsed>141ms": 1}},
+		{"math.Round of the elapsed time in milliseconds", map[string]string{"p/a_test.go": `package p
+import (
+	"math"
+	"time"
+)
+func f(start time.Time) bool { return math.Round(float64(time.Since(start))/float64(time.Millisecond)) > 142 }`}, map[string]int{"p/a_test.go:elapsed>142ms": 1}},
+		{"math.Floor of the elapsed time in seconds", map[string]string{"p/a_test.go": `package p
+import (
+	"math"
+	"time"
+)
+func f(start time.Time) bool { return math.Floor(time.Since(start).Seconds()*1000) > 143 }`}, map[string]int{"p/a_test.go:elapsed>143ms": 1}},
+		{"a const also declared as a var in a file for another system is not trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start) > poll/2 }`, "p/a_linux.go": `package p
+import "time"
+const poll = time.Second`, "p/a_windows.go": `package p
+import "time"
+var poll = pollFromEnv()`}, map[string]int{}},
+		{"a const also declared with a value the lint cannot evaluate is not trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start) > poll/2 }`, "p/a_linux.go": `package p
+import "time"
+const poll = time.Second`, "p/a_windows.go": `package p
+import "time"
+const poll = platformPoll`}, map[string]int{}},
+		{"a const also declared as a function is not trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start) > poll/2 }`, "p/a_linux.go": `package p
+import "time"
+const poll = time.Second`, "p/a_windows.go": `package p
+func poll() int { return 1 }`}, map[string]int{}},
+		{"a const declared in two files with one value is trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start) > poll/2 }`, "p/a_linux.go": `package p
+import "time"
+const poll = time.Second`, "p/a_windows.go": `package p
+import "time"
+const poll = 1000 * time.Millisecond`}, map[string]int{"p/a_test.go:elapsed>500ms": 1}},
+		{"a const next to an unevaluable one of another name is still trusted", map[string]string{"p/a_test.go": `package p
+import "time"
+func f(start time.Time) bool { return time.Since(start) > poll/2 }`, "p/a.go": `package p
+import "time"
+const (
+	poll  = time.Second
+	other = platformValue
+)`}, map[string]int{"p/a_test.go:elapsed>500ms": 1}},
 		{"a function of another package with the name of a local helper is not the helper", map[string]string{"p/a_test.go": `package p
 import (
 	"time"
@@ -1237,5 +1372,90 @@ func TestTestsPutNoSubSecondCeilingOnMeasuredTime(t *testing.T) {
 	}
 	for _, p := range clockBoundProblems(got, clockBoundAllowlist) {
 		t.Error(p)
+	}
+}
+
+// clockChain builds a function of n locals that each depend on the one before, ending in a bound on time.Since.
+func clockChain(n int) string {
+	var b strings.Builder
+	b.WriteString(`package p
+import "time"
+func f(start time.Time) bool {
+	a1 := 8 * time.Second
+`)
+	for i := 2; i <= n; i++ {
+		fmt.Fprintf(&b, `	a%d := a%d / 2
+`, i, i-1)
+	}
+	fmt.Fprintf(&b, `	return time.Since(start) > a%d
+}
+`, n)
+	return b.String()
+}
+
+// clockRenameChain builds a function of n locals that are each the one before, ending in a bound on time.Since.
+func clockRenameChain(n int) string {
+	var b strings.Builder
+	b.WriteString(`package p
+import "time"
+func f(start time.Time) bool {
+	a1 := 800 * time.Millisecond
+`)
+	for i := 2; i <= n; i++ {
+		fmt.Fprintf(&b, `	a%d := a%d
+`, i, i-1)
+	}
+	fmt.Fprintf(&b, `	return time.Since(start) > a%d
+}
+`, n)
+	return b.String()
+}
+
+// clockAliasChain builds a function whose measured time and whose stamp each pass through n renamings.
+func clockAliasChain(n int) string {
+	var b strings.Builder
+	b.WriteString(`package p
+import "time"
+func f() bool {
+	s1 := time.Now()
+	d1 := time.Since(s1)
+`)
+	for i := 2; i <= n; i++ {
+		fmt.Fprintf(&b, `	s%d := s%d
+	d%d := d%d
+`, i, i-1, i, i-1)
+	}
+	fmt.Fprintf(&b, `	return d%d > 150*time.Millisecond || time.Now().Sub(s%d) > 151*time.Millisecond
+}
+`, n, n)
+	return b.String()
+}
+
+// TestClockLintResolvesALongChainOfLocalsTheSameWayEveryTime pins that the names of a function are settled to a fixed
+// point and not in a fixed number of passes over a map: a chain longer than the passes resolved on some runs and not on
+// others, which is a lint that passes and fails on the same tree. The loop runs the scan many times because the order of a
+// Go map changes from one iteration to the next.
+func TestClockLintResolvesALongChainOfLocalsTheSameWayEveryTime(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{"twelve dependent constants", clockChain(12), "map[p/a_test.go:elapsed>3.90625ms:1]"},
+		{"forty constants renamed in turn", clockRenameChain(40), "map[p/a_test.go:elapsed>800ms:1]"},
+		{"a measured time and a stamp renamed twelve times", clockAliasChain(12), "map[p/a_test.go:elapsed>150ms:1 p/a_test.go:elapsed>151ms:1]"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for i := 0; i < 100; i++ {
+				files, err := clockParse(map[string]string{"p/a_test.go": tc.src})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := fmt.Sprint(clockSites(files)); got != tc.want {
+					t.Fatalf("run %d: sites = %s, want %s", i, got, tc.want)
+				}
+			}
+		})
 	}
 }
