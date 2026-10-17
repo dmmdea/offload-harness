@@ -4156,3 +4156,46 @@ test("readiness: on a volume that folds case a second file differing only in cas
   assert.deepEqual(foldGot([EMB("foo.pt"), EMB("sd15/FOO.pt")], "foo"), ["ambiguous", null, ["foo.pt", "sd15/FOO.pt"]], "ComfyUI opens either, by set order");
   assert.deepEqual(foldGot([EMB("foo.pt"), EMB("sd15/FOO.pt")], "foo", {}, { fold: false }), ["present", "foo.pt", null], "on a case-sensitive volume sd15/FOO.pt is another name");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// _try_get_embedding asks load_embed for the name AS WRITTEN first (the first word after the identifier, cut at `<` or `[`), and strips
+// commas from both ends only if that finds nothing. `embedding:foo, a cat` is the name `foo,` first, so a file called `foo,.safetensors` is
+// opened in preference to `foo.safetensors`. embeddingRefs names the stripped name (what the template needs); embeddingProbes names the other
+// names ComfyUI may try, which are not requirements (a node holds no `foo,` file, nearly always) but are refused when a file answers them.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test("embeddingProbes: the name as written, when commas make it differ from the name embeddingRefs gives", () => {
+  const probesOf = (cases) => { for (const [text, want] of cases) assert.deepEqual(C.embeddingProbes(text), want, JSON.stringify(text)); };
+  probesOf([
+    ["embedding:evil_ti, a cat", ["evil_ti,"]],
+    ["embedding:evil_ti,, a cat", ["evil_ti,,"]],
+    ["embedding:,evil_ti a cat", [",evil_ti"]],
+    ["embedding:evil_ti a cat", []],
+    ["embedding:evil_ti, embedding:other, embedding:plain", ["evil_ti,", "other,"]],
+    ["(embedding:evil_ti,:1.2) cat", ["evil_ti,"]],
+    ["embedding:evil_ti,<lora:x:1>", ["evil_ti,"]],
+    ["an embedding of a cat", []],
+    ["embedding:,,", []], // the empty name is refused by every caller, not probed
+  ]);
+  assert.deepEqual(C.embeddingProbes(7), []);
+  assert.deepEqual(C.embeddingRefs("embedding:evil_ti, a cat"), ["evil_ti"], "the name the template needs is unchanged");
+});
+
+test("models: the names ComfyUI may also try are recorded beside the requirements, once each, for active nodes only, and not as requirements", () => {
+  const r = C.requiredModels({ nodes: [promptNode(1, "embedding:evil_ti, a cat"), promptNode(2, "embedding:evil_ti, again"), promptNode(3, "embedding:muted,", { mode: 2 })] });
+  assert.deepEqual(r.active.map((m) => m.name), ["evil_ti"], "the requirement is the stripped name");
+  assert.deepEqual(r.embedding_probes, ["evil_ti,"]);
+  assert.deepEqual(C.requiredModels({ nodes: [promptNode(1, "embedding:evil_ti a cat")] }).embedding_probes, []);
+});
+
+test("readiness: a file that answers a probe name is a file ComfyUI may open in place of the required one, so the template is not ready", () => {
+  const run = (files, probes) => {
+    const inv = invFrom({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) });
+    const r = C.readiness([req("embeddings", "evil_ti", { annotated: false })], inv, { probes });
+    return [r.ready, r.not_ready_count, r.requirements.slice(1).map((x) => [x.name, x.status, x.found])];
+  };
+  assert.deepEqual(run([EMB("evil_ti.safetensors")], ["evil_ti,"]), [true, 0, []], "no file answers the probe: nothing to report, and no requirement was added");
+  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("evil_ti,.safetensors")], ["evil_ti,"]), [false, 1, [["evil_ti,", "shadowed", ["evil_ti,.safetensors"]]]], "ComfyUI asks for the name as written first");
+  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("sd15/evil_ti,.pt")], ["evil_ti,"]), [false, 1, [["evil_ti,", "shadowed", ["sd15/evil_ti,.pt"]]]], "in a subfolder too");
+  assert.equal(C.readiness([req("embeddings", "evil_ti", { annotated: false })], invFrom({ ...TREE, [EMB("evil_ti,.pt")]: { size: 1 } }), { mode: "basename-only", probes: ["evil_ti,"] }).requirements.length, 1, "the older shortcut does not look at probes");
+});

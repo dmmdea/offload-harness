@@ -558,6 +558,34 @@ test("resolve: a file of no extension that ComfyUI opens first for the name refu
   assert.deepEqual([p.status, p.resolved_path], ["present", "models/embeddings/evil_ti"], "an unannotated prompt name resolves to the file ComfyUI opens, so the manifest names that file");
 });
 
+// ComfyUI asks for `evil_ti,` (the name as written, comma and all) before it strips the comma, so the template whose prompt says
+// `embedding:evil_ti, a cat` may open a file called `evil_ti,.safetensors`, which no manifest names. The catalog row records the name as a probe.
+
+test("catalog: a row records the names ComfyUI may also try for its prompts, and a row without any has no such field", () => {
+  const catalog = catalogOf(embeddingIo(null));
+  assert.deepEqual(rowOf(catalog, "tt_emb").embedding_probes, ["evil_ti,"]);
+  assert.ok(catalog.templates.length > 0);
+  assert.ok(!("embedding_probes" in rowOf(catalogOf(), "tt_open")), "a template with no embedding in its prompt keeps the row it had");
+});
+
+test("resolve: a file ComfyUI opens first for the name as written (a comma after the name) refuses the run, because the manifest names another file", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  for (const extra of ["embeddings/evil_ti,.safetensors", "embeddings/sd15/evil_ti,.pt"]) {
+    const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", extra]);
+    const row = rowOf(catalogOf(io), "tt_emb");
+    const gone = M.resolveRun(row, snapshotOf(io), { io });
+    assert.deepEqual([gone.ok, gone.class], [false, "models_missing"], extra);
+    assert.deepEqual(gone.missing, ["models/embeddings/evil_ti,"], extra);
+    assert.match(gone.detail, /held in more than one directory or shadowed/, "the refusal says why");
+    const r = M.readinessFor(row, snapshotOf(io), { io });
+    assert.deepEqual(r.embedding_probes.map((p) => [p.name, p.status, p.found]), [["evil_ti,", "shadowed", [extra.replace("embeddings/", "")]]]);
+    assert.equal(r.ready, false);
+  }
+  const alone = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"]);
+  const ok = M.resolveRun(rowOf(catalogOf(alone), "tt_emb"), snapshotOf(alone), { io: alone });
+  assert.equal(ok.ok, true, "with no file of the written name the run is allowed");
+});
+
 // An io over the same tree whose volume looks names up without regard to case (NTFS by default): a path in any case finds the entry stored
 // in its own. Only exists and stat fold, which is what the inventory's probe and a file lookup use.
 const foldingIo = (io) => {
