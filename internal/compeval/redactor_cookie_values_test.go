@@ -2,13 +2,16 @@ package compeval
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 )
 
 // TestCookieValuesReadsEveryValueOfASpan: the values the value-tail gate remembers, as they stand in the text: a bare
-// value to the first space, quote, comma, semicolon, ampersand or backslash (a backslash-u escape is part of
-// it); a quoted value between its quotes at the level it was opened, whatever stands inside, to the end of the
-// line when the quote is never closed. Short values and the Set-Cookie attributes are not values.
+// value to the first white space, quote, comma, semicolon or ampersand, and to a backslash that does not begin an
+// escape the class takes into a bare value (a shell escape or a unicode escape, behind up to sixteen backslashes;
+// not the escape of a quote, an apostrophe or a line break); a quoted value between its quotes at the level it was
+// opened, whatever stands inside, to the end of the span when the quote is never closed. Short values (under 12
+// characters) and the Set-Cookie attributes are not values.
 func TestCookieValuesReadsEveryValueOfASpan(t *testing.T) {
 	a, b := tailFake(931, 16, tailAlnum), tailFake(932, 16, tailAlnum)
 	v := tailFake(933, 32, tailAlnum)
@@ -43,6 +46,19 @@ func TestCookieValuesReadsEveryValueOfASpan(t *testing.T) {
 		{"bare takes a shell escape", "Cookie: sid=" + a + `\$` + b, []string{a + `\$` + b}},
 		{"bare takes a backslash and a space", "Cookie: sid=" + a + `\ ` + b, []string{a + `\ ` + b}},
 		{"bare ends at an escaped line break", "Cookie: sid=" + a + `\n` + b, []string{a}},
+		{"bare ends at an escaped carriage return", "Cookie: sid=" + a + `\r` + b, []string{a}},
+		{"bare ends at an escaped apostrophe", "Cookie: sid=" + a + `\'` + b, []string{a}},
+		{"bare ends at an escaped quote", "Cookie: sid=" + a + `\"` + b, []string{a}},
+		{"bare ends at an apostrophe", "Cookie: sid=" + a + `'` + b, []string{a}},
+		{"bare ends at a quote", "Cookie: sid=" + a + `"` + b, []string{a}},
+		{"bare ends at a tab", "Cookie: sid=" + a + "\t" + b, []string{a}},
+		{"bare ends at a carriage return", "Cookie: sid=" + a + "\r" + b, []string{a}},
+		{"bare ends at a line feed", "Cookie: sid=" + a + "\n" + b, []string{a}},
+		{"bare takes an escape behind sixteen backslashes", "Cookie: sid=" + a + strings.Repeat(`\`, 16) + "u0026" + b, []string{a + strings.Repeat(`\`, 16) + "u0026" + b}},
+		{"bare ends at a run of seventeen backslashes", "Cookie: sid=" + a + strings.Repeat(`\`, 17) + "u0026" + b, []string{a}},
+		{"twelve characters are a value, eleven are not", "Cookie: a=" + a[:11] + "; b=" + a[:12], []string{a[:12]}},
+		{"quoted, an equals sign inside is not another cookie", `Cookie: m="` + a + "=" + b + `"`, []string{a + "=" + b}},
+		{"an attribute with a long value is not a value", spanSetCk + ": sid=" + v + "; Expires=Wed-21-Oct-2015-07:28:00-GMT", []string{v}},
 		{"quoted at level 7", `Cookie: m=\\\\\\\"` + a + ` ` + b + `\\\\\\\"; x=` + v, []string{a + ` ` + b, v}},
 		{"quoted at level 15", `Cookie: m=\\\\\\\\\\\\\\\"` + a + ` ` + b + `\\\\\\\\\\\\\\\"; x=` + v, []string{a + ` ` + b, v}},
 		{"two values, the second quoted", `Cookie: sid=` + v + `; m="` + a + ` ` + b + `"`, []string{v, a + ` ` + b}},

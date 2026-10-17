@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -110,9 +111,10 @@ func TestCookieSpanContinuesAcrossALineBreakInsideAnOpenQuote(t *testing.T) {
 		{"carriage return and line feed", ckName + `: m="` + a + "\r\n" + b + `"; sid=` + v},
 		{"obs-fold", ckName + `: m="` + a + "\r\n " + b + `"; sid=` + v},
 		{"two line breaks", ckName + `: m="` + a + "\n" + b + "\n" + a + `"; sid=` + v},
+		{"three line breaks, carriage return and line feed", ckName + `: m="` + a + "\r\n" + b + "\r\n" + a + "\r\n" + b + `"; sid=` + v},
 	} {
-		assertSpan(t, "raw, "+c.name, "x\n"+c.line+"\nmore sid="+v, c.line, false, v, w, a, b)
-		assertSpan(t, "args, "+c.name, argsOf("x\n"+c.line+"\nmore sid="+v), enc(c.line), true, v, w, a, b)
+		assertSpan(t, "raw, "+c.name, "x\n"+c.line+"\nmore text", c.line, false, v, w, a, b)
+		assertSpan(t, "args, "+c.name, argsOf("x\n"+c.line+"\nmore text"), enc(c.line), true, v, w, a, b)
 	}
 	// No quote is open at the line break: the span ends there, and the next line stays.
 	span := ckName + ": sid=" + v + `; m="short"`
@@ -175,11 +177,85 @@ func TestCookieListOpenersAndTruncation(t *testing.T) {
 		{"cut in the second element", `{"` + sckName + `":["sid=` + v + `","b=` + w, sckName + `":["sid=` + v + `","b=` + w},
 		{"cut in the second element, single quotes", `{'` + sckName + `': ['sid=` + v + `', 'b=` + w, sckName + `': ['sid=` + v + `', 'b=` + w},
 		{"cut in the first element", `{"` + sckName + `":["sid=` + v, sckName + `":["sid=` + v},
+		{"slice literal, colon", `{"` + sckName + `":[]string{"sid=` + v + `", "b=` + w + `"}}`, sckName + `":[]string{"sid=` + v + `", "b=` + w + `"`},
+		{"slice literal, equals", sckName + `=[]string{"sid=` + v + `", "b=` + w + `"}`, sckName + `=[]string{"sid=` + v + `", "b=` + w + `"`},
+		{"slice literal, spaced", sckName + `: []string{"theme=dark", "b=` + w + `"}`, sckName + `: []string{"theme=dark", "b=` + w + `"`},
 	} {
 		m := cookieMatch(c.text)
 		if got := m[len(Lead(m)):]; got != c.want {
 			t.Errorf("%s: matched %q, want %q", c.name, got, c.want)
 		}
+	}
+}
+
+// TestCookieSpanEndsInFrontOfTheQuoteBeforeEveryCloser: a quote after an equals sign opens a value only when a value can
+// start behind it. Behind white space, a separator (a comma, a semicolon, a colon, an ampersand, a pipe), a closer
+// (a paren, a brace, a bracket) or an angle bracket it is the quote that closes the string the header sits in, and
+// the span ends in front of it, on a line, in a shell command and in a command in Args.
+func TestCookieSpanEndsInFrontOfTheQuoteBeforeEveryCloser(t *testing.T) {
+	v, _, _, _ := spanValues()
+	header := ckName + ": sid=" + v + "; flag="
+	for _, c := range []string{" ", "\t", ",", ";", ":", ")", "}", "]", "|", "&", "<", ">"} {
+		name := strings.NewReplacer(" ", "space", "\t", "tab").Replace(c)
+		assertSpan(t, "quote then "+name, `say "`+header+`"`+c+`tail text`, header, false, v)
+		assertSpan(t, "quote then "+name+", in args", argsOf(`say "`+header+`"`+c+`tail text`), enc(header), true, v)
+	}
+	// The escapes Go's encoder writes for an ampersand and the angle brackets, as they stand in text that is not
+	// JSON, in either case; and an escape of a tab.
+	for _, esc := range []string{bsu + "0026", bsu + "003c", bsu + "003C", bsu + "003e", bsu + "003E", `\t`} {
+		assertSpan(t, "quote then "+esc, `say "`+header+`"`+esc+`tail text`, header, false, v)
+	}
+	// A quoted value that starts with an escape of a letter is a value, and the cookies behind it are in the span.
+	_, w, a, _ := spanValues()
+	quoted := ckName + ": sid=" + v + `; m="` + bsu + "00e9" + a + `"; z=` + w
+	assertSpan(t, "value that starts with an escape", `say "`+quoted+`" and more`, quoted, false, v, w, a)
+}
+
+// TestCookieBodyUnitsKeepALineBreakOutOfTheValue: in escaped text the escape of a line break, a run of backslashes and an
+// n or an r, is not a piece of a quoted value, and a longer run is (it is the escaped backslashes of the value and a
+// character after them). The run that is a line break is one backslash after one layer of escaping and doubles with
+// each layer: 1, 2, 4, 8 at the levels 1, 3, 7, 15.
+func TestCookieBodyUnitsKeepALineBreakOutOfTheValue(t *testing.T) {
+	for _, c := range []struct{ level, shortest int }{{1, 1}, {3, 2}, {7, 4}, {15, 8}} {
+		re := regexp.MustCompile(`\A(?:` + cookieSpanUnit(c.level) + `)*\z`)
+		for run := 1; run <= 2*c.level+1; run++ {
+			for _, ch := range []string{"n", "r"} {
+				got := re.MatchString(strings.Repeat(`\`, run) + ch)
+				if want := run > c.shortest; got != want {
+					t.Errorf("level %d, %d backslashes and %s: a piece of the value is %v, want %v", c.level, run, ch, got, want)
+				}
+			}
+		}
+	}
+}
+
+// TestCookieSpanEndsAtAQuoteOfNoLevel: a quote with two backslashes in front of it, or four, five or six, is no quote of
+// the levels of escaping that occur (0, 1, 3, 7 and 15 backslashes), so it is not a pair and it ends the span, with its
+// backslashes, on a line and in a list. A named limit, pinned so a change to it is a decision.
+func TestCookieSpanEndsAtAQuoteOfNoLevel(t *testing.T) {
+	v, w, _, _ := spanValues()
+	for _, run := range []int{2, 4, 5, 6} {
+		q := strings.Repeat(`\`, run) + `"`
+		line := ckName + ": sid=" + v
+		if m := cookieMatch(line + q + "; z=" + w); m != line {
+			t.Errorf("%d backslashes, line: matched %q, want %q", run, m, line)
+		}
+		list := ckName + ":[sid=" + v
+		if m := cookieMatch(list + q + "; z=" + w + "]"); m != list {
+			t.Errorf("%d backslashes, list: matched %q, want %q", run, m, list)
+		}
+	}
+}
+
+// TestCookieSpanEndsAtAnEscapedApostrophe: an apostrophe ends the span, with the backslashes in front of it. This is a
+// named limit of the class (an apostrophe in an unquoted value cannot be told from the quote that closes a header
+// written in single quotes), pinned so a change to it is a decision.
+func TestCookieSpanEndsAtAnEscapedApostrophe(t *testing.T) {
+	v, w, _, _ := spanValues()
+	text := ckName + ": sid=" + v + `; a=x\'y; z=` + w
+	want := ckName + ": sid=" + v + `; a=x`
+	if m := cookieMatch(text); m != want {
+		t.Errorf("matched %q, want %q", m, want)
 	}
 }
 

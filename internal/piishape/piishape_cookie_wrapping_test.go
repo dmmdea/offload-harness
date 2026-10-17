@@ -295,11 +295,20 @@ func cookieClass() Class {
 	panic("no cookie-header class in the table")
 }
 
-// survivingRun reports the first run of n characters of v that appears in out.
+// survivingRun reports the first run of n characters of v that appears in out. A run of mostly escape characters
+// (the backslashes of an escaped quote in text that was escaped four times) says nothing, because the text around the
+// span is full of them; a run counts when four or more of its characters are letters or digits.
 func survivingRun(v, out string, n int) (string, bool) {
 	for i := 0; i+n <= len(v); i++ {
-		if strings.Contains(out, v[i:i+n]) {
-			return v[i : i+n], true
+		run := v[i : i+n]
+		alnum := 0
+		for _, c := range run {
+			if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' {
+				alnum++
+			}
+		}
+		if alnum >= 4 && strings.Contains(out, run) {
+			return run, true
 		}
 	}
 	return "", false

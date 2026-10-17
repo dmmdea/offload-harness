@@ -32,6 +32,7 @@ func reviewShapes() []cookieShape {
 		{"short, base64 padding", "p=QUJD==", nil, false},
 		{"short, one padding sign", "p=QUJD=", nil, false},
 		{"empty last cookie", "flag=", nil, false},
+		{"empty quoted value", `e=""`, nil, false},
 		{"bare ending in padding", "t=" + A + B + "==", []string{A, B}, true},
 		{"bare with a dollar sign", "d=" + A + "$HOME" + B, []string{A, B}, true},
 		{"bare with a backtick", "d=" + A + "`id`" + B, []string{A, B}, true},
