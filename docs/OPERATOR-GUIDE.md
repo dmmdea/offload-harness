@@ -77,7 +77,7 @@ start; port **18811**, **never `0.0.0.0`**):
 
 ```powershell
 local-offload fleet-serve                                                    # loopback smoke
-local-offload fleet-serve --listen 100.64.0.10:18811 --listen-trusted-network   # production (Tailscale addr)
+local-offload fleet-serve --listen 192.0.2.7:18811 --listen-trusted-network      # production (Tailscale addr)
 ```
 
 **Verify:**
