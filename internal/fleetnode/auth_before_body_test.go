@@ -58,12 +58,12 @@ var bodyLanes = []struct {
 	tooBigMessage     string // what a holder is told when the body is over the cap
 	badBodyMessage    string
 }{
-	{"dispatch", "/fleet/dispatch", `{"job_id":"m1-d","task_type":"image-gen","payload":{"prompt":"hi"}}`,
-		`{"job_id":"m1-d","task_type":"image-gen","payload":{},"surprise":1}`, "request body too large", "malformed dispatch body"},
-	{"vision", "/fleet/vision", visionBody("m1-v", "vqa", tinyPNG(), map[string]string{"question": "what is it?"}),
-		`{"job_id":"m1-v","task":"vqa","image":"x","surprise":1}`, "request body too large", "malformed vision body"},
-	{"text", "/fleet/text", textBody("m1-t", "classify", "an invoice is overdue", classifyParams()),
-		`{"job_id":"m1-t","task":"classify","input":"x","surprise":1}`, "request body too large", "malformed text body"},
+	{"dispatch", "/fleet/dispatch", `{"job_id":"lane-d","task_type":"image-gen","payload":{"prompt":"hi"}}`,
+		`{"job_id":"lane-d","task_type":"image-gen","payload":{},"surprise":1}`, "request body too large", "malformed dispatch body"},
+	{"vision", "/fleet/vision", visionBody("lane-v", "vqa", tinyPNG(), map[string]string{"question": "what is it?"}),
+		`{"job_id":"lane-v","task":"vqa","image":"x","surprise":1}`, "request body too large", "malformed vision body"},
+	{"text", "/fleet/text", textBody("lane-t", "classify", "an invoice is overdue", classifyParams()),
+		`{"job_id":"lane-t","task":"classify","input":"x","surprise":1}`, "request body too large", "malformed text body"},
 }
 
 func bodyLaneCfg(key string) config.Config {
@@ -208,11 +208,11 @@ func TestAdmitRefusesABearerlessRequestEvenWhenItsCallerDidNotCheck(t *testing.T
 	s, jobs := newTestServer(t, tokenCfg(holderKey), &fakeRunner{}, authOpts(false))
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/fleet/dispatch", nil)
-	s.admit(rec, req, dispatchEnvelope{JobID: "m1-backstop", TaskType: "image-gen", Payload: json.RawMessage(`{"prompt":"hi"}`)})
+	s.admit(rec, req, dispatchEnvelope{JobID: "admit-backstop", TaskType: "image-gen", Payload: json.RawMessage(`{"prompt":"hi"}`)})
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
 	}
-	if _, ok := jobs.Get("m1-backstop"); ok {
+	if _, ok := jobs.Get("admit-backstop"); ok {
 		t.Fatal("a refused request left a job behind")
 	}
 }
