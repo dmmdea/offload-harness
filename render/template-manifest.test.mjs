@@ -455,17 +455,17 @@ test("verdict: a loader whose widgets_values is an object names its file too: re
 // An embedding the template's own prompt names is a model file the gate reads
 // ---------------------------------------------------------------------------------------------------------------------
 
-const embeddingTemplate = (annotation) => JSON.stringify({
+const embeddingTemplate = (annotation, prompt = "embedding:evil_ti, a cat") => JSON.stringify({
   version: 0.4,
   nodes: [
     nestLoader(1, "UNETLoader", "a.safetensors", "diffusion_models"),
-    { id: 2, type: "CLIPTextEncode", mode: 0, widgets_values: ["embedding:evil_ti, a cat"], properties: { cnr_id: "comfy-core", ...(annotation ? { models: [annotation] } : {}) } },
+    { id: 2, type: "CLIPTextEncode", mode: 0, widgets_values: [prompt], properties: { cnr_id: "comfy-core", ...(annotation ? { models: [annotation] } : {}) } },
   ],
 });
-// A tree holding the one template, with the model files given (paths under models/).
-const embeddingIo = (annotation, models = ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"]) => {
+// A tree holding the one template, with the model files given (paths under models/) and the prompt text.
+const embeddingIo = (annotation, models = ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"], prompt = undefined) => {
   const index = JSON.stringify([{ moduleName: "default", category: "Fixture", title: "Fixture", type: "image", templates: [{ name: "tt_emb", mediaType: "image", mediaSubtype: "webp", openSource: true, title: "tt_emb", tags: ["Image"], models: ["A"] }] }]);
-  return memIo(fixtureFiles({ models, extra: { [`${TEMPLATES}/index.json`]: index, [`${TEMPLATES}/tt_emb.json`]: embeddingTemplate(annotation) } }));
+  return memIo(fixtureFiles({ models, extra: { [`${TEMPLATES}/index.json`]: index, [`${TEMPLATES}/tt_emb.json`]: embeddingTemplate(annotation, prompt) } }));
 };
 const WEIGHTS_A = (name) => `https://huggingface.co/example-org/weights-a/resolve/main/${name}`;
 
@@ -584,6 +584,18 @@ test("resolve: a file ComfyUI opens first for the name as written (a comma after
   const alone = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"]);
   const ok = M.resolveRun(rowOf(catalogOf(alone), "tt_emb"), snapshotOf(alone), { io: alone });
   assert.equal(ok.ok, true, "with no file of the written name the run is allowed");
+});
+
+test("resolve: a file the reading without weights would open (an LLM-based text encoder: no cut at parentheses) refuses the run", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const prompt = "embedding:evil_ti(blue) a cat";
+  const files = ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"];
+  const ok = embeddingIo(annotation, files, prompt);
+  assert.deepEqual(rowOf(catalogOf(ok), "tt_emb").embedding_probes, ["evil_ti(blue)"]);
+  assert.equal(M.resolveRun(rowOf(catalogOf(ok), "tt_emb"), snapshotOf(ok), { io: ok }).ok, true, "no file answers the other reading: the run is allowed");
+  const io = embeddingIo(annotation, [...files, "embeddings/evil_ti(blue).safetensors"], prompt);
+  const gone = M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti(blue)"]]);
 });
 
 test("readiness table: a file that answers a probe name keeps the template out of the ready list, like the run gate", () => {

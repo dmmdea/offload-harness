@@ -4181,6 +4181,38 @@ test("embeddingProbes: the name as written, when commas make it differ from the 
   assert.deepEqual(C.embeddingRefs("embedding:evil_ti, a cat"), ["evil_ti"], "the name the template needs is unchanged");
 });
 
+// The LLM-based text encoders (Z-Image, Flux.2, ERNIE and others) hand their embeddings directory to the same loader and call
+// tokenize_with_weights with disable_weights: the text is not cut at parentheses and no group weight is read, so `embedding:foo(bar)` is the
+// name `foo(bar)` there and `a cat ( embedding:1.2 )` names `1.2`. A template does not say which encoder runs, so the CLIP reading stays the
+// requirement and the other reading's names are probes: refused when a file of the node answers one.
+
+test("embeddingProbes: the names the reading without weights takes, where it differs from the CLIP reading", () => {
+  const probesOf = (cases) => { for (const [text, want] of cases) assert.deepEqual(C.embeddingProbes(text), want, JSON.stringify(text)); };
+  probesOf([
+    ["embedding:foo(bar) a cat", ["foo(bar)"]],
+    ["a cat ( embedding:1.2 )", ["1.2"]], // CLIP reads 1.2 as the group's weight and names nothing
+    ["a (masterpiece, embedding:foo:1.2)", ["foo:1.2)"]],
+    ["embedding:foo\\(bar\\)", []], // an escaped parenthesis is a character of the name in both readings
+    ["(embedding:foo:1.2) cat", []], // the identifier does not follow whitespace or start the text, so only the CLIP reading finds it
+    ["embedding:foo, embedding:foo(x)", ["foo,", "foo(x)"]],
+    ["embedding:evil_ti a cat", []],
+  ]);
+  assert.deepEqual(C.embeddingRefs("embedding:foo(bar) a cat"), ["foo"], "the requirement is still the CLIP reading's name");
+  assert.deepEqual(C.embeddingRefs("a cat ( embedding:1.2 )"), []);
+});
+
+test("readiness: a file the reading without weights would open is a file ComfyUI may open, so the template is not ready", () => {
+  const run = (files, text) => {
+    const probes = C.requiredModels({ nodes: [promptNode(1, text)] }).embedding_probes;
+    const inv = invFrom({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) });
+    const r = C.readiness([req("embeddings", "foo", { annotated: false })], inv, { probes });
+    return [r.ready, r.requirements.slice(1).map((x) => [x.name, x.status, x.found])];
+  };
+  assert.deepEqual(run([EMB("foo.safetensors")], "embedding:foo(bar) a cat"), [true, []], "no file answers foo(bar)");
+  assert.deepEqual(run([EMB("foo.safetensors"), EMB("foo(bar).safetensors")], "embedding:foo(bar) a cat"), [false, [["foo(bar)", "shadowed", ["foo(bar).safetensors"]]]]);
+  assert.deepEqual(run([EMB("foo.safetensors"), EMB("1.2.safetensors")], "embedding:foo a cat ( embedding:1.2 )"), [false, [["1.2", "shadowed", ["1.2.safetensors"]]]], "a name only that reading gives");
+});
+
 test("models: the names ComfyUI may also try are recorded beside the requirements, once each, for active nodes only, and not as requirements", () => {
   const r = C.requiredModels({ nodes: [promptNode(1, "embedding:evil_ti, a cat"), promptNode(2, "embedding:evil_ti, again"), promptNode(3, "embedding:muted,", { mode: 2 })] });
   assert.deepEqual(r.active.map((m) => m.name), ["evil_ti"], "the requirement is the stripped name");
