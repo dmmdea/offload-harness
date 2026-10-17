@@ -101,6 +101,24 @@ binary once left 22,434 folders and about 70 GB in under two hours. Two things g
   and `TMPDIR`: a child started with a scrubbed environment, or a test that names a fixed directory such as `/dev/shm`, writes
   elsewhere and a `CLEAN` says nothing about it (the lint's relaunch-proof test is what covers the scrubbed copy).
 
+## Keeping tests from failing on a slow machine
+
+A test must not fail because the machine it ran on was slow. A suite that goes red once on a loaded host and green again
+alone is nearly always a test that put a number on the clock: an upper bound on a measured time ("it returned within
+200 ms"), a window shorter than the work it starts, or a fixed sleep followed by an assertion. A slow runner stretches every
+one of those, and the product was right each time. Prefer to wait on the event the product signals (a channel, a barrier a
+fake holds until the test releases it, a count of calls), and bound the wait with a generous hang guard, not a short window.
+
+- **The lint, `clock_lint_test.go` in the root package.** It reads every `*_test.go` file of the module and fails on an
+  upper bound on a measured elapsed time under one second (`time.Since`, or a difference of two `time.Now()` stamps,
+  compared with `>` or `>=` against a constant it can evaluate) that `clock_lint_allowlist_test.go` does not list with its
+  count and its reason: what the bound rules out, and how wide the margin to it is. A bound of a second or more is a hang
+  guard and is left to you. Fixing a listed site (waiting on an event instead) means deleting its entry, and the lint fails
+  until you do. It does not see a bound against a value it cannot evaluate (a field, a parameter, a poll interval), a fixed
+  sleep, or a short window handed to the code under test; those stay a review duty. To regenerate the keys, run
+  `CLOCK_LINT_PRINT=1 go test . -run TestTestsPutNoSubSecondCeilingOnMeasuredTime -v` and write the reasons after reading
+  the code.
+
 ## Documentation
 
 Documentation lives in [`docs/`](docs/README.md) and is part of the change, not a follow-up.
