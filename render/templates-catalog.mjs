@@ -337,12 +337,37 @@ function maxNesting(string) {
 }
 
 // _try_get_embedding of sd1_clip.py: what follows the identifier is split on whitespace, the first word is the name, it is cut at the first
-// `<` or `[`, and a retry strips commas from both ends. An empty rest or word is the empty name.
-function embeddingNameIn(rest) {
+// `<` or `[`, and a retry strips commas from both ends. `written` is the name load_embed is asked for first, `name` the one after the comma
+// retry. An empty rest or word is the empty name.
+function embeddingWordIn(rest) {
   const first = rest.split(SPACE_RUN).find((w) => w !== "");
-  if (first === undefined) return "";
+  if (first === undefined) return { written: "", name: "" };
   const cut = first.search(/[<[]/);
-  return (cut >= 0 ? first.slice(0, cut) : first).replace(/^,+|,+$/g, "");
+  const written = cut >= 0 ? first.slice(0, cut) : first;
+  return { written, name: written.replace(/^,+|,+$/g, "") };
+}
+
+// The words a reading of a text takes as references, {written, name} each, in order of appearance.
+function referenceWords(segments) {
+  const out = [];
+  for (const segment of segments) {
+    const pieces = unescapeImportant(segment).split(AFTER_SPACE_ID);
+    if (pieces[0].startsWith(EMBEDDING_ID)) out.push(embeddingWordIn(pieces[0].slice(EMBEDDING_ID.length)));
+    for (let i = 1; i < pieces.length; i++) out.push(embeddingWordIn(pieces[i]));
+  }
+  return out;
+}
+
+// The CLIP tokenizer's reading of a text (cut at parentheses, a closed group loses a numeric tail), or null when the text is nested too deep.
+function clipWords(text) {
+  const escaped = escapeImportant(text);
+  try {
+    if (maxNesting(escaped) > MAX_GROUP_DEPTH) throw new UnreadableText("nested too deep");
+    return referenceWords(tokenSegments(escaped));
+  } catch (e) {
+    if (e instanceof UnreadableText) return null;
+    throw e;
+  }
 }
 
 // embeddingRefs: the file names a text asks ComfyUI to load, each once, in order of appearance. This is ComfyUI's reading, ported from
@@ -353,31 +378,36 @@ function embeddingNameIn(rest) {
 //
 // Where it differs from ComfyUI, and why:
 //  - The name returned is the one after the comma retry (commas off both ends). ComfyUI asks for the name as it stands first, so a file
-//    whose own name ends in a comma, which it would open before the stripped one, is not looked for.
+//    whose own name ends in a comma is opened before the stripped one: that name is not a requirement (a node holds no such file, nearly
+//    always) and is returned by embeddingProbes, which readiness refuses when a file answers it.
 //  - `embedding:` with nothing readable after it, and a text nested more than MAX_GROUP_DEPTH groups deep, are the empty name. ComfyUI
 //    raises on the first (and asks for a file named after the directory on a name cut to nothing) and reads the second up to about nine
 //    hundred groups. The empty name is refused by every caller, which is the side that fails closed.
 //  - Tokenizers built with disable_weights (the LLM-based text encoders) do not cut the text at parentheses, so `embedding:foo(bar)` is the
-//    name `foo(bar)` there and `(embedding:foo)` is no reference. This reads the CLIP tokenizer's way, the one embeddings are made for.
+//    name `foo(bar)` there and `(embedding:foo)` is no reference. The names this gives are not requirements either; see embeddingProbes.
 //  - A tokenizer without an embeddings directory loads nothing; the file is still listed (the side that lists more).
 // A value that is not a string names nothing.
 export function embeddingRefs(text) {
   if (typeof text !== "string" || !text.includes(EMBEDDING_ID)) return [];
-  const escaped = escapeImportant(text);
-  let segments;
-  try {
-    if (maxNesting(escaped) > MAX_GROUP_DEPTH) throw new UnreadableText("nested too deep");
-    segments = tokenSegments(escaped);
-  } catch (e) {
-    if (e instanceof UnreadableText) return [""];
-    throw e;
-  }
+  const words = clipWords(text);
+  if (words === null) return [""];
   const out = [];
-  const add = (name) => { if (!out.includes(name)) out.push(name); };
-  for (const segment of segments) {
-    const pieces = unescapeImportant(segment).split(AFTER_SPACE_ID);
-    if (pieces[0].startsWith(EMBEDDING_ID)) add(embeddingNameIn(pieces[0].slice(EMBEDDING_ID.length)));
-    for (let i = 1; i < pieces.length; i++) add(embeddingNameIn(pieces[i]));
+  for (const { name } of words) if (!out.includes(name)) out.push(name);
+  return out;
+}
+
+// embeddingProbes: the names ComfyUI may try for a text beyond the ones embeddingRefs gives, each once. They are not requirements: a
+// template does not need a file called `foo,`. But a node that holds one may have ComfyUI open it, in place of the file the template
+// needs, and no manifest names it, so readiness refuses a template when a file of the node answers one (readiness, `probes`). The empty
+// name is not probed (embeddingRefs gives it, and every caller refuses it).
+//  - The name as written. `embedding:foo, a cat` asks load_embed for `foo,` first and strips the comma only when no file answers.
+export function embeddingProbes(text) {
+  if (typeof text !== "string" || !text.includes(EMBEDDING_ID)) return [];
+  const refs = embeddingRefs(text);
+  const out = [];
+  for (const { written, name } of clipWords(text) ?? []) {
+    if (name === "") continue;
+    for (const n of [written, name]) if (n !== "" && !refs.includes(n) && !out.includes(n)) out.push(n);
   }
   return out;
 }
@@ -430,6 +460,8 @@ export function requiredModels(workflow) {
   // The annotations of the embeddings class, by lower-cased name. A prompt reference one of them covers is recorded on it (embedding_refs),
   // so that readiness can check that the annotated file is the one ComfyUI opens for that reference on the node.
   const annotatedEmbeddings = new Map();
+  // The other names ComfyUI may try for the prompts of active nodes (embeddingProbes): not requirements, checked against a node's files.
+  const probes = new Set();
   for (const m of active.values()) {
     if (mapLegacyClass(m.directory ?? "") !== "embeddings") continue;
     const key = slash(m.name).toLowerCase();
@@ -454,6 +486,7 @@ export function requiredModels(workflow) {
       // the annotation records the name (embedding_refs). The extension and the directory are resolved against a node's files by the
       // readiness check, which is the one place that knows them. A text that only looks like a reference to a wider matcher (another letter
       // case, glued to a word) names nothing here, and a value with no reference goes on to the file-name test below.
+      for (const probe of embeddingProbes(v)) probes.add(probe);
       const refs = embeddingRefs(v);
       if (refs.length > 0) {
         for (const ref of refs) {
@@ -479,7 +512,7 @@ export function requiredModels(workflow) {
   };
   for (const { node, active: on } of leaves) if (on) addWidgetFiles(node);
   for (const { node, active: on } of instances) if (on) addWidgetFiles(node);
-  return { active: [...active.values()], inactive: [...inactive.values()] };
+  return { active: [...active.values()], inactive: [...inactive.values()], embedding_probes: [...probes] };
 }
 
 // parseNoteSizes: newer templates list each file's size in the model note as
@@ -930,6 +963,7 @@ function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
   let graph = emptyGraph();
   let models = [];
   let inactive = [];
+  let probes = [];
   let surface = [];
   let noteSizes = {};
   let customPacks = [];
@@ -958,6 +992,7 @@ function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
     const withSize = (m) => ({ ...m, note_size_bytes: Object.hasOwn(noteSizes, m.name) ? noteSizes[m.name] : null });
     models = req.active.map(withSize);
     inactive = req.inactive.map(withSize);
+    probes = req.embedding_probes;
     surface = paramSurface(workflow);
     graph = {
       ui_version: workflow.version ?? null,
@@ -1002,6 +1037,7 @@ function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
     graph,
     models,
     models_inactive: inactive,
+    ...(probes.length > 0 ? { embedding_probes: probes } : {}),
     note_sizes: noteSizes,
     param_surface: surface,
     license,
@@ -1549,17 +1585,33 @@ function checkEmbedding(name, directory, c, inv, mode, result, refs = []) {
 // readiness: whether every file a template needs is usable. `directory-aware` (the default) is the
 // method above. `basename-only` is the older shortcut, kept so its numbers can be reproduced and
 // compared: any file with that name, in any class, any folder, any case.
-export function readiness(models, inv, { mode = "directory-aware" } = {}) {
+// `probes` are the other names ComfyUI may try for a template's prompts (embeddingProbes, recorded on the catalog row). They are not
+// requirements, so a name no file answers adds nothing; one a file answers adds an entry after the requirements (`probe: true`, status
+// `shadowed`, `found` the file), because ComfyUI may open that file in place of the one the template needs and no manifest names it.
+export function readiness(models, inv, { mode = "directory-aware", probes = [] } = {}) {
   const requirements = (Array.isArray(models) ? models : []).map((m) => checkRequirement(m, inv, mode));
+  if (mode === "directory-aware") requirements.push(...probeFindings(inv, probes));
   const not_ready_count = requirements.filter((r) => !MET.has(r.status)).length;
   return { mode, ready: not_ready_count === 0, requirements, not_ready_count };
+}
+
+// probeFindings: the probe names that a file of the node answers, as requirement entries that are not met.
+function probeFindings(inv, probes) {
+  const c = Array.isArray(probes) && probes.length > 0 ? indexInventory(inv).byClass.get("embeddings") : undefined;
+  if (!c) return [];
+  const out = [];
+  for (const name of probes) {
+    const r = resolveEmbedding(c, name);
+    if (r.status === "present" || r.status === "ambiguous") out.push({ name, directory: "embeddings", status: "shadowed", found: r.status === "present" ? [r.resolved] : r.found, probe: true });
+  }
+  return out;
 }
 
 // catalogReadiness: readiness of every LOCAL template (core nodes only; paid and custom-node
 // templates are not runnable by this route), keyed by template name.
 export function catalogReadiness(catalog, inv, { mode = "directory-aware" } = {}) {
   const out = {};
-  for (const row of catalog.templates) if (row.kind === "local") out[row.name] = readiness(row.models, inv, { mode });
+  for (const row of catalog.templates) if (row.kind === "local") out[row.name] = readiness(row.models, inv, { mode, probes: row.embedding_probes ?? [] });
   return out;
 }
 

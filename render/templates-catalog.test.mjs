@@ -266,7 +266,7 @@ test("note sizes: `- [file](url) (7.49 GB)` lines in a model note are the author
 
 test("models (real): a template with no weights has no requirements", () => {
   const r = C.requiredModels(realWorkflow("utility_interpolation_image_upscale"));
-  assert.deepEqual(r, { active: [], inactive: [] });
+  assert.deepEqual(r, { active: [], inactive: [], embedding_probes: [] });
 });
 
 // ---------------------------------------------------------------------------------------------

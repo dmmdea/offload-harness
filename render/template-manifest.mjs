@@ -286,7 +286,10 @@ export function readinessFor(row, snapshot, { io }) {
   // embedding_refs are the prompt names an annotation of the embeddings class covers (the catalog records them): readiness checks that the
   // annotated file is the one ComfyUI opens for each. An annotation with none is a loader widget's file, read by the plain loader rule, and
   // `annotated` is what tells it from a name a prompt gives. The manifest and the row list the same models in the same order.
-  const checked = modelReadiness(manifest.models.map((m, i) => ({ name: m.name, directory: m.directory, annotated: row.models?.[i]?.annotated, embedding_refs: row.models?.[i]?.embedding_refs })), snapshot.inventory, { mode: "directory-aware" });
+  // embedding_probes are the other names ComfyUI may try for the template's prompts (the name as written before its commas are stripped):
+  // not requirements, but a file of the node that answers one is a file ComfyUI may open that no manifest names. They follow the models.
+  const checked = modelReadiness(manifest.models.map((m, i) => ({ name: m.name, directory: m.directory, annotated: row.models?.[i]?.annotated, embedding_refs: row.models?.[i]?.embedding_refs })), snapshot.inventory, { mode: "directory-aware", probes: row.embedding_probes ?? [] });
+  const embedding_probes = checked.requirements.slice(manifest.models.length).map((p) => ({ name: p.name, directory: p.directory, status: p.status, found: p.found }));
   const models = manifest.models.map((m, i) => {
     const req = checked.requirements[i];
     return {
@@ -295,7 +298,7 @@ export function readinessFor(row, snapshot, { io }) {
       resolved_path: MET.has(req.status) ? resolvedPath(m, req) : null,
     };
   });
-  const models_missing = models.filter((m) => !MET.has(m.status)).map((m) => m.path ?? m.name);
+  const models_missing = [...models.filter((m) => !MET.has(m.status)).map((m) => m.path ?? m.name), ...embedding_probes.map((p) => `models/${p.directory}/${p.name}`)];
   const inputs = manifest.input_files.map((e) => inputStatus(e, snapshot, io));
   const inputs_missing = inputs.filter((i) => i.status === "missing").map((i) => i.name);
   const comfyui = comfyStatus(row, snapshot);
@@ -314,6 +317,7 @@ export function readinessFor(row, snapshot, { io }) {
     verdict: { outcome: verdict.outcome, class: verdict.class },
     license: { class: manifest.license.class, class_strict: manifest.license.class_strict, verdict: lic },
     models,
+    ...(embedding_probes.length > 0 ? { embedding_probes } : {}),
     models_missing,
     inputs,
     inputs_missing,
@@ -359,7 +363,7 @@ export function resolveRun(row, snapshot, { io }) {
   if (ready.models_missing.length > 0) {
     // An embedding the node holds more than once, or one a file ComfyUI tries first shadows, is not missing; it is refused because the file
     // ComfyUI opens for it is not the one file the manifest would name (it picks the directory by set order), and the entry says which.
-    const unclear = ready.models.filter((m) => m.status === "ambiguous" || m.status === "shadowed");
+    const unclear = [...ready.models, ...(ready.embedding_probes ?? [])].filter((m) => m.status === "ambiguous" || m.status === "shadowed");
     const why = unclear.length === 0 ? "" : `; ${unclear.length} of them ${unclear.length === 1 ? "is" : "are"} held in more than one directory or shadowed by a file ComfyUI tries first, so the file ComfyUI opens is not the one file the manifest would name (${unclear.map((m) => m.path ?? m.name).join(", ")})`;
     return typed("refuse", CLASS.MODELS_MISSING, row.name, `${ready.models_missing.length} model file(s) are not where ComfyUI would load them from; this release never downloads a model${why}`, { missing: ready.models_missing });
   }

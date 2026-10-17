@@ -586,6 +586,17 @@ test("resolve: a file ComfyUI opens first for the name as written (a comma after
   assert.equal(ok.ok, true, "with no file of the written name the run is allowed");
 });
 
+test("readiness table: a file that answers a probe name keeps the template out of the ready list, like the run gate", () => {
+  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+  const state = (files) => {
+    const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", ...files]);
+    const r = C.catalogReadiness(catalogOf(io), snapshotOf(io).inventory).tt_emb;
+    return [r.ready, r.not_ready_count];
+  };
+  assert.deepEqual(state([]), [true, 0]);
+  assert.deepEqual(state(["embeddings/evil_ti,.safetensors"]), [false, 1]);
+});
+
 // An io over the same tree whose volume looks names up without regard to case (NTFS by default): a path in any case finds the entry stored
 // in its own. Only exists and stat fold, which is what the inventory's probe and a file lookup use.
 const foldingIo = (io) => {
