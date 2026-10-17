@@ -78,9 +78,16 @@ var fleetBearerAllowlist = map[string]string{
 
 func fleetRequestSitesWithoutBearer(t *testing.T) map[string]string {
 	t.Helper()
+	return fleetRequestSitesIn(t, ".")
+}
+
+// fleetRequestSitesIn reads the Go files under root. The repo's own scan starts at the repo root; the fixtures of the
+// lint's own test start at their directories.
+func fleetRequestSitesIn(t *testing.T, root string) map[string]string {
+	t.Helper()
 	fset := token.NewFileSet()
 	sites := map[string]string{}
-	err := filepath.Walk(".", func(path string, info os.FileInfo, err error) error {
+	err := filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -146,4 +153,49 @@ func fleetRequestSitesWithoutBearer(t *testing.T) map[string]string {
 		t.Fatal(err)
 	}
 	return sites
+}
+
+// TestTheFleetBearerLintReportsEachShapeItShouldCatch runs the lint over the fixtures in testdata/fleetbearerlint: every
+// function in red/ is a request that goes to a fleet node without the bearer, in a shape the lint must report, and nothing
+// else in red/ may be reported; green/ is requests that do carry it, and none may be.
+func TestTheFleetBearerLintReportsEachShapeItShouldCatch(t *testing.T) {
+	const redDir, greenDir = "testdata/fleetbearerlint/red", "testdata/fleetbearerlint/green"
+	want := map[string]bool{}
+	fset := token.NewFileSet()
+	entries, err := os.ReadDir(redDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), ".go") {
+			continue
+		}
+		path := redDir + "/" + e.Name()
+		f, perr := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
+		if perr != nil {
+			t.Fatal(perr)
+		}
+		for _, decl := range f.Decls {
+			if fd, ok := decl.(*ast.FuncDecl); ok && strings.HasPrefix(fd.Name.Name, "Red") {
+				want[path+":"+fd.Name.Name] = true
+			}
+		}
+	}
+	if len(want) < 15 {
+		t.Fatalf("the red fixtures hold %d shapes, want the whole set", len(want))
+	}
+	got := fleetRequestSitesIn(t, redDir)
+	for key := range want {
+		if _, ok := got[key]; !ok {
+			t.Errorf("the lint does not report the red fixture %s", key)
+		}
+	}
+	for key := range got {
+		if !want[key] {
+			t.Errorf("the lint reports %s in the red fixtures, and it is not one of their shapes", key)
+		}
+	}
+	for key := range fleetRequestSitesIn(t, greenDir) {
+		t.Errorf("the lint reports %s in the green fixtures, and that request carries the bearer", key)
+	}
 }
