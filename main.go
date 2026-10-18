@@ -3661,6 +3661,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// config: pure config plus one file, informational like the skew and token rows, and silent without an
 	// agent seat.
 	writeFleetCapacitySection(w, cfg)
+	// The host RAM a vLLM agent seat holds, against the figure the node declares for it (agent_seat_host_ram_gib): pure
+	// config, informational, and silent on a box with no vLLM seat.
+	writeSeatHostRAMSection(w, cfg)
 	// Whether the GPU power limit and clock lock a box applies at boot were applied this boot, from the state record the applier
 	// writes: one file, informational (a WARN or UNKNOWN never changes the exit code), and one line where nothing is recorded.
 	writePowerProfileRow(w)

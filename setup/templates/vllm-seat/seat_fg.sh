@@ -733,6 +733,26 @@ if [ -n "${SEAT_KV_HEADROOM_GIB:-}" ] && [ -n "$NVSMI" ]; then
 fi
 KV_POLICY_JSON=""; [ -n "$KV_POLICY" ] && KV_POLICY_JSON=",\"kv_load_failure_policy\":\"$KV_POLICY\""
 [ -n "$KV_POLICY" ] && echo "seat_fg: kv_load_failure_policy=$KV_POLICY (SEAT_KV_LOAD_FAILURE_POLICY)"
+# Host RAM the seat holds, logged once per start on ONE line (register B-56 / H-08). The seat's host memory was declared nowhere
+# and bounded by nothing: the VM that carries it (vmmem on WSL2), the pinned L1 staging buffer (SEAT_L1_GB) and about 1.1 GiB of
+# process overhead on top (B-27: RSS = L1 + ~1.1 GiB), and on 2026-10-18 the host's commit reached 168 of 171.7 GiB. The figure is
+# the resident set of the MP server unit and its children, summed from ps (shared pages are counted once per process, so it
+# is an upper bound for a tree that maps the same memory twice). It is read HERE, after the MP server is up and before the exec,
+# because this script becomes `vllm serve` on the next line and nothing of it survives to log later: no loop, no sampler, no
+# new process. So the engine's own resident set is not in it, and the line says so; the loaded seat's whole figure is what
+# `agent_seat_host_ram_gib` states (doctor warns while it is unset). Never a refusal, never a wait; an unreadable figure is said.
+rss_kib=0
+rss_walk() { local p k; for p in "$@"; do k="$(ps -o rss= -p "$p" 2>/dev/null | tr -d ' ')"
+  case "$k" in ''|*[!0-9]*) ;; *) rss_kib=$(( rss_kib + 10#$k )) ;; esac
+  rss_walk $(pgrep -P "$p" 2>/dev/null); done; }
+mp_pid="$(systemctl show -p MainPID --value "$MP_UNIT" 2>/dev/null | head -1)"
+case "$mp_pid" in ''|*[!0-9]*|0) mp_pid="$(pgrep -f "lmcache server .*--port $MP_PORT( |\$)" 2>/dev/null | head -1)" ;; esac
+if [ -n "$mp_pid" ] && [ "$mp_pid" -gt 1 ] 2>/dev/null; then
+  rss_walk "$mp_pid"
+  echo "seat_fg: host rss $(awk -v k="$rss_kib" 'BEGIN{printf "%.1f", k/1048576}') GiB (L1 ${L1_GB} GiB) — the MP server unit $MP_UNIT and its children at seat start; the engine is not loaded yet and this script becomes vllm serve, so its resident set is not in this figure"
+else
+  echo "seat_fg: host rss not read — the MP server unit $MP_UNIT has no main pid (L1 ${L1_GB} GiB)"
+fi
 exec "$VENV/bin/vllm" serve "$MODEL" \
   --host 127.0.0.1 --port "$PORT" --served-model-name "$NAME" "${SEAT_ALIAS:-agent-pool}" \
   --max-model-len "$MAXLEN" "${PAR[@]}" --gpu-memory-utilization "${SEAT_UTIL:-0.88}" \
