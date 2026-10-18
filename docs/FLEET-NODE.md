@@ -405,7 +405,7 @@ rules as `local-agent --serve` apply, enforced by the same shared guard:
   `warn`, logs a request that `enforce` would refuse and serves it, so a node you bind beyond loopback is open to a
   browser page until you run `warn`, read the log and set `enforce`. The node prints `ingress guard: <mode>` at start
   (and `doctor` prints it), so read that line. `enforce` stops a browser page and a DNS-rebinding name; a tailnet peer
-  that is not a browser still reaches the media lane. A node shared in from another tailnet needs that tailnet's zone in
+  that is not a browser still reaches the listener, where the fleet bearer is the check. A node shared in from another tailnet needs that tailnet's zone in
   `tailnet_suffixes` first. See [systems/fleet-node.md](systems/fleet-node.md) for the three rules and the edges.
 
 ## Footprints — measured, not guessed

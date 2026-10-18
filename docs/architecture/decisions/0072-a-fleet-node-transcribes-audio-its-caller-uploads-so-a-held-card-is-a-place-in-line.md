@@ -145,7 +145,7 @@ card per remote call on the serving node, one asker ledger row; `pair-workloads.
 
 ## Amendment (2026-10-17): every lane needs the fleet bearer
 
-Where this record calls the media names and lanes it calls tokenless tokenless, it describes the node when the decision was taken. Since the amendment of 2026-10-15 to
+Where this record calls media names and lanes tokenless, it describes the node when the decision was taken. Since the amendment of 2026-10-15 to
 [ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token
 (dispatch of any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on
 loopback. The decision recorded here is otherwise unchanged.

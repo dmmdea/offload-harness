@@ -2950,8 +2950,8 @@ func (s *Server) answerKnownJob(w http.ResponseWriter, r *http.Request, view *Jo
 }
 
 // pollDenied reports whether a request that names an existing job must be refused
-// with 401 before any of the job's state crosses the wire: the job is an agent (or
-// vision) job, a token is configured, and the request does not carry it. It is the
+// with 401 before any of the job's state crosses the wire: the job is gated (a job of
+// any task type is), a token is configured, and the request does not carry it. It is the
 // rule handleJob has always applied to a poll, in one place because every route
 // that takes a job id applies it — the poll, the withdraw, a re-dispatch of a known
 // id. No token configured is the loopback-only posture, where the lane is open by
@@ -3077,7 +3077,7 @@ type withdrawWire struct {
 // cannot both succeed.
 //
 // Auth is handleJob's rule, checked before any state crosses the wire: a caller
-// without the token for an agent (or vision) job gets the auth verdict, never the
+// without the token for a job of any task type gets the auth verdict, never the
 // job's state. An id the store does not hold is a plain 404 either way. Only an
 // agent job can be withdrawn; a media job's dispatcher is another client this node
 // does not control, so it answers 405 whatever the caller holds.

@@ -147,3 +147,10 @@ its runner.
 - [ADR 0026 — text load admissions wait for the media lease](0026-text-load-admissions-wait-for-the-media-lease.md)
 - [ADR 0023 — agent lane tailnet auth and locality](0023-agent-lane-tailnet-auth-and-locality.md)
 - [Glossary: Composition](../../glossary.md)
+
+## Amendment (2026-10-17): every lane needs the fleet bearer
+
+Where this record says media dispatch on the fleet is not token-gated, it describes the node when the decision was taken. Since the amendment of 2026-10-15 to
+[ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token
+(dispatch of any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on
+loopback. The template door still accepts only the node's vetted templates, and the decision recorded here is otherwise unchanged.

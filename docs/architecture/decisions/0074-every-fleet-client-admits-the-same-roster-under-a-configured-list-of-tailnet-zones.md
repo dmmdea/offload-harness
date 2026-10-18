@@ -153,3 +153,10 @@ every lane the harness has, and a roster entry must mean the same thing to all o
 - [ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md) — the guard this amends.
 - [ADR 0042](0042-no-bare-http-client-on-a-caller-named-host.md) — the dial-time half.
 - [`docs/OPERATOR-GUIDE.md`](../../OPERATOR-GUIDE.md) — operator view of the zone keys.
+
+## Amendment (2026-10-17): every lane needs the fleet bearer
+
+Where this record says `/fleet/health` ignores the bearer, it describes the node when the decision was taken. Since the amendment of 2026-10-15 to
+[ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token
+(dispatch of any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on
+loopback. Health stays readable without it: it reads the bearer to decide which private fields to withhold, answers `200` either way, and leaves one journal line for a bearer that is presented and is not the node's. A wrong or missing token therefore still reads healthy to a caller that does not look at which fields are missing, so `doctor` still asks the node the dispatch question. The decision recorded here is otherwise unchanged.

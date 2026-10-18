@@ -522,8 +522,9 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 
 // A remote media task's output path is the NODE's choice, never the caller's.
 //
-// Media dispatch is not token-gated (ADR 0023), so a caller-supplied `out` (or
-// run-graph's `out_dir`) would let any tailnet peer that reaches /fleet/dispatch make
+// Media dispatch needs the fleet bearer like every lane (ADR 0023), but a holder of it is
+// trusted to render, not to choose where the node writes: a caller-supplied `out` (or
+// run-graph's `out_dir`) would let any holder that reaches /fleet/dispatch make
 // this node write — and overwrite — any file its account can write. Every media
 // builder below therefore drops those keys and the pipeline derives the path itself:
 // `<media_dir>/<task>-<hash8>.<ext>` (run-graph: <media_dir>). Nothing a current caller

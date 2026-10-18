@@ -203,7 +203,7 @@ distinction below trustworthy: a job still `accepted` when shutdown begins prova
 
 **Duplicate dispatch is idempotent, with one deliberate exception.** Re-dispatching a job id that is
 `accepted`, `running`, or `done` re-acks `202` and does **not** start a second run. A job in `error`
-returns `409`. For an agent or vision job on a node with a `fleet_auth_token`, all of it is answered only to
+returns `409`. For a job of any task type on a node with a `fleet_auth_token`, all of it is answered only to
 a caller carrying the bearer, whatever `task_type` the duplicate declares (`401` otherwise): the job's own
 record decides.
 
