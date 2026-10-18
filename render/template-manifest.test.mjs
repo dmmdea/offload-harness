@@ -718,3 +718,23 @@ test("readiness table: a template with an unverified embedding is not ready, lik
   assert.deepEqual(state(["embeddings/sd15/evil_ti.safetensors"]), [false, 1, false]);
   assert.deepEqual(state(["embeddings/EVIL_TI.pt"]), [false, 1, false], "a case variant beside the exact file");
 });
+
+// One annotation covers every name the prompt gives it (`embedding_refs`), and the run is allowed only when the annotated file is the one
+// case-exact file for each of them: a later name that a case variant or a second file answers refuses the run, in either order.
+test("resolve: an annotated embedding whose prompt gives it two names is refused when the second is a case variant or has a second file, and runs when one file answers both", () => {
+  const verdict = (files, prompt) => {
+    const gone = gateOf(embeddingIo(EVIL, [A_FILE, ...files], prompt));
+    return gone.ok ? [true] : [gone.class, gone.embedding_unverified.map((e) => [e.path, e.reason, e.found])];
+  };
+  const evil = "embeddings/evil_ti.safetensors";
+  const entry = (reason, found) => ["embedding_unverified", [["models/embeddings/evil_ti.safetensors", reason, found]]];
+  assert.deepEqual(verdict([evil], "embedding:evil_ti, a cat"), [true], "control: one name");
+  assert.deepEqual(verdict([evil], "embedding:evil_ti, embedding:evil_ti.safetensors"), [true], "two names, one file answers both");
+  assert.deepEqual(verdict([evil], "embedding:evil_ti, embedding:EVIL_TI"), entry(WHY_CASE, ["evil_ti.safetensors"]), "the second name is a case variant");
+  assert.deepEqual(verdict([evil], "embedding:EVIL_TI, embedding:evil_ti"), entry(WHY_CASE, ["evil_ti.safetensors"]), "the first is");
+  assert.deepEqual(verdict([evil, "embeddings/evil_ti.pt"], "embedding:evil_ti.safetensors, embedding:evil_ti"), entry(WHY_MANY, ["evil_ti.pt", "evil_ti.safetensors"]), "the second name has a second file");
+  assert.deepEqual(verdict([evil, "embeddings/evil_ti.pt"], "embedding:evil_ti, embedding:evil_ti.safetensors"), entry(WHY_MANY, ["evil_ti.pt", "evil_ti.safetensors"]), "the first does");
+  assert.deepEqual(verdict([evil], "embedding:evil_ti, embedding:evil_ti.safetensors, embedding:Evil_TI"), entry(WHY_CASE, ["evil_ti.safetensors"]), "only the third name is a case variant");
+  const r = readyOf(embeddingIo(EVIL, [A_FILE, evil], "embedding:evil_ti, embedding:EVIL_TI"));
+  assert.deepEqual([r.ready, r.blocking], [false, ["embedding_unverified"]], "readiness says the same");
+});

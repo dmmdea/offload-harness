@@ -4524,3 +4524,40 @@ test("readiness: a root holding Foo.pt beside a subfolder holding Zed.pt: foo is
   assert.deepEqual(embGot([EMB("EasyNeg.safetensors"), EMB("aaa/Zed.pt")], "EasyNeg"), ["present", "EasyNeg.safetensors", null], "a root holding EasyNeg.safetensors and a subfolder holding Zed.pt");
   assert.deepEqual(unv([EMB("EasyNeg.safetensors"), EMB("aaa/Zed.pt")], "easyneg"), ["embedding_unverified", WHY_CASE, ["EasyNeg.safetensors"]]);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// One annotation can cover several names a prompt gives (requiredModels appends each to `embedding_refs`, and covering ignores case), so the
+// annotation must be the one case-exact file for EVERY ref, not only the first: a ref that a case variant or a second file answers refuses it,
+// in whatever position that ref stands.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test("readiness: an annotation with several prompt refs is refused when ANY ref is answered by a case variant or a second file, whichever position it stands in", () => {
+  const covers = (...refs) => ({ annotated: true, embedding_refs: refs });
+  const one = [EMB("foo.safetensors")];
+  assert.deepEqual(embGot(one, "foo.safetensors", covers("foo")), ["present", "foo.safetensors", null], "control: one ref, the file");
+  assert.deepEqual(embGot(one, "foo.safetensors", covers("foo", "foo.safetensors")), ["present", "foo.safetensors", null], "two refs, both answered by the one file");
+  assert.deepEqual(unv(one, "foo.safetensors", covers("foo", "FOO")), ["embedding_unverified", WHY_CASE, ["foo.safetensors"]], "the later ref is a case variant");
+  assert.deepEqual(unv(one, "foo.safetensors", covers("FOO", "foo")), ["embedding_unverified", WHY_CASE, ["foo.safetensors"]], "the earlier ref is");
+  assert.deepEqual(unv(one, "foo.safetensors", covers("foo", "foo.safetensors", "Foo")), ["embedding_unverified", WHY_CASE, ["foo.safetensors"]], "only the third ref is");
+  const two = [EMB("foo.safetensors"), EMB("foo.pt")];
+  assert.deepEqual(unv(two, "foo.safetensors", covers("foo.safetensors", "foo")), ["embedding_unverified", WHY_MANY, ["foo.pt", "foo.safetensors"]], "the later ref has a second file");
+  assert.deepEqual(unv(two, "foo.safetensors", covers("foo", "foo.safetensors")), ["embedding_unverified", WHY_MANY, ["foo.pt", "foo.safetensors"]], "the earlier ref has");
+  const deep = [EMB("sub/foo.safetensors"), EMB("foo.pt")];
+  assert.deepEqual(embGot(deep, "sub/foo.safetensors", covers("sub/foo.safetensors", "sub/foo")), ["present", "sub/foo.safetensors", null], "control: neither of these refs reaches the root file");
+  assert.deepEqual(unv(deep, "sub/foo.safetensors", covers("sub/foo.safetensors", "sub/foo", "foo")), ["embedding_unverified", WHY_MANY, ["foo.pt", "sub/foo.safetensors"]], "only the third ref has");
+});
+
+test("models + readiness: two prompt names one annotation covers, the second in another case or answered by a second file, leave the annotated embedding unverified", () => {
+  const withPrompt = (text, name) => C.requiredModels({ nodes: [promptNode(1, text, { properties: { models: [{ name, url: hf("example-org/w", name), directory: "embeddings" }] } })] }).active;
+  const verdict = (models, files) => {
+    const r = C.readiness(models, invFrom({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) })).requirements[0];
+    return [r.status, r.reason ?? null, r.found ?? null];
+  };
+  const cased = withPrompt("embedding:foo, a cat, embedding:FOO", "foo.safetensors");
+  assert.deepEqual(cased.map((m) => [m.name, m.embedding_refs]), [["foo.safetensors", ["foo", "FOO"]]], "one annotation, two refs: the prompt is what puts the second there");
+  assert.deepEqual(verdict(cased, [EMB("foo.safetensors")]), ["embedding_unverified", WHY_CASE, ["foo.safetensors"]]);
+  const nested = withPrompt("embedding:sub/foo, embedding:foo", "sub/foo.safetensors");
+  assert.deepEqual(nested.map((m) => [m.name, m.embedding_refs]), [["sub/foo.safetensors", ["sub/foo", "foo"]]]);
+  assert.deepEqual(verdict(nested, [EMB("sub/foo.safetensors")]), ["present", null, null], "control: the one file answers both names");
+  assert.deepEqual(verdict(nested, [EMB("sub/foo.safetensors"), EMB("foo.safetensors")]), ["embedding_unverified", WHY_MANY, ["foo.safetensors", "sub/foo.safetensors"]]);
+});
