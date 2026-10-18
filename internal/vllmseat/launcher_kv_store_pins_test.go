@@ -93,6 +93,11 @@ func TestLauncherStoreAddressChoiceIsBoundedAndScoped(t *testing.T) {
 		`os.environ.get("SEAT_FG_TEST_MDNS_DEST", "224.0.0.251:5353")`,
 		`0x8001`,                                 // class IN with the QU (unicast-response) bit
 		`SEAT_FG_TEST_MDNS_DEST`,                 // the helper's destination, a test seam
+		`*.local) ;;`,                            // only .local names are looked up
+		`"${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]`, // and only for a cifs mount
+		`[ -n "$SRCADDR" ]`,                      // and only when a source address is pinned
+		`${L2_ON:+ addr=$L2_ON}`,                 // the status file records the address the share is on (chosen, or read from the mount)
+		`findmnt -n -o SOURCE,OPTIONS -M "$SEAT_L2_MOUNT_DIR"`, // a share that is already mounted is described, not re-chosen
 		// The tie-break among several answers inside the network (the lowest minimum round-trip time): the ping line as the
 		// whole command (from the pinned source address, 5 probes 0.2 s apart, quiet, 1 s wait for each) under the same hard
 		// bound as the lookup, and the same bound around the test seam that stands in for it.
@@ -102,11 +107,6 @@ func TestLauncherStoreAddressChoiceIsBoundedAndScoped(t *testing.T) {
 		`[ "${#inside[@]}" -eq 1 ]`,            // one answer inside the network: no ping, the choice made before the tie-break
 		`[ "$us" -lt "$best_us" ]`,             // strictly lower: on equal times the earlier answer stays
 		`min/avg/max[^=]*=[[:space:]]*([0-9]+`, // the MINIMUM of the summary line (the first number after =), not the average
-		`*.local) ;;`,                            // only .local names are looked up
-		`"${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]`, // and only for a cifs mount
-		`[ -n "$SRCADDR" ]`,                      // and only when a source address is pinned
-		`${L2_ON:+ addr=$L2_ON}`,                 // the status file records the address the share is on (chosen, or read from the mount)
-		`findmnt -n -o SOURCE,OPTIONS -M "$SEAT_L2_MOUNT_DIR"`, // a share that is already mounted is described, not re-chosen
 	} {
 		if !strings.Contains(s, must) {
 			t.Errorf("seat_fg.sh lost %q", must)
