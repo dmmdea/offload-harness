@@ -4000,7 +4000,7 @@ const LOADER_ENTRY = { annotated: true, node_types: ["ConditioningLoader"] };
 
 test("readiness: an annotated embeddings file that no prompt name covers (a loader widget's) is met by its exact path, as for every other class", () => {
   assert.deepEqual(embGot([EMB("sd15/cond.safetensors")], "cond.safetensors", LOADER_ENTRY), ["in_subfolder", null, ["sd15/cond.safetensors"]], "the combo offers sd15/cond.safetensors, so the bare widget value is rejected");
-  assert.deepEqual(embGot([EMB("cond.safetensors"), EMB("sd15/cond.safetensors")], "cond.safetensors", LOADER_ENTRY), ["present", null, null], "the root file is the exact path; a copy in a subfolder is another entry of the combo, not an ambiguity");
+  assert.deepEqual(embGot([EMB("cond.safetensors"), EMB("sd15/cond.safetensors")], "cond.safetensors", LOADER_ENTRY), ["present", null, null], "the root file is the exact path; a copy in a subfolder is another entry of the combo, not a second answer");
   assert.deepEqual(embGot([EMB("cond.safetensors"), EMB2("cond.safetensors")], "cond.safetensors", LOADER_ENTRY, OVERFLOW), ["present", null, null], "one relative path under two registered roots: the first root answers, deterministically");
   assert.deepEqual(embGot([EMB("cond.safetensors")], "cond.safetensors", LOADER_ENTRY), ["present", null, null]);
   assert.equal(embGot([EMB("Cond.safetensors")], "cond.safetensors", LOADER_ENTRY)[0], "case_mismatch", "the widget value is compared as a string");
@@ -4015,7 +4015,7 @@ test("readiness: an annotated embeddings entry that carries prompt names keeps t
 
 // ---------------------------------------------------------------------------------------------------------------------------------
 // One physical directory is one directory to ComfyUI, however many ways it is registered or reached. Its set holds a directory string once,
-// and two strings that name the same directory open the same file, so neither is an ambiguity: only distinct files are.
+// and two strings that name the same directory open the same file, so neither is a second file: only distinct files are.
 // ---------------------------------------------------------------------------------------------------------------------------------
 
 // An io in which some directories are links: realpath sends the link to its target, as the real one does.
@@ -4069,9 +4069,9 @@ test("readiness: a link inside the embeddings root is followed, so a different f
   assert.deepEqual(symGot([EMB("foo.pt")], "foo"), ["present", "foo.pt", null, null], "control: with nothing behind the link the one file is present");
 });
 
-// An annotation must be the file ComfyUI opens for the name a prompt gives. When one file has two paths under the roots (a root registered
+// An annotation must be the one file that answers the name a prompt gives. When one file has two paths under the roots (a root registered
 // inside another, a link inside a root), the annotation can name it by either, and the name a prompt gives resolves to one of them: it is the
-// same file, so the annotation is not shadowed.
+// same file, so the annotation is not refused.
 const annotatedGot = (files, links, name, extra, yamls = []) => {
   const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls }), linkedIo({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) }, links));
   const r = C.readiness([req("embeddings", name, { annotated: true, ...extra })], inv).requirements[0];
@@ -4087,7 +4087,7 @@ test("readiness: an annotation that names a file by a longer path is the file a 
   assert.equal(annotatedGot([...files, EMB("sd15/neg/foo.safetensors")], {}, "sd15/neg/foo.pt", { embedding_refs: ["foo"] }, nested)[0], "embedding_unverified", "a different file in that directory also answers the name");
 });
 
-test("readiness: an annotation that names a file by one path of a link inside the root is not shadowed by the other path of the same file", () => {
+test("readiness: an annotation that names a file by one path of a link inside the root is not refused for the other path of the same file", () => {
   const links = { [EMB("alias")]: EMB("sd15") };
   const files = [EMB("sd15/e.pt"), EMB("alias/e.pt")];
   assert.deepEqual(annotatedGot(files, links, "sd15/e.pt", { embedding_refs: ["e"] }), ["present", null], "alias/e.pt is sd15/e.pt");
@@ -4264,7 +4264,7 @@ test("nodeIo.realpath: on a local volume that keeps one spelling on disk, two sp
 // ---------------------------------------------------------------------------------------------------------------------------------
 
 test("readiness: an embeddings file with no extension, or one the class does not list, answers the bare name, as isfile does", () => {
-  assert.deepEqual(embGot([EMB("foo")], "foo"), ["present", "foo", null], "alone, it is the file ComfyUI opens");
+  assert.deepEqual(embGot([EMB("foo")], "foo"), ["present", "foo", null], "alone, it is the one file that answers");
   assert.deepEqual(embGot([EMB("foo.v2")], "foo.v2"), ["present", "foo.v2", null], "a name that already has an unlisted extension is the same case");
   assert.equal(embGot([EMB("foo"), EMB("foo.safetensors")], "foo")[0], "embedding_unverified", "ComfyUI opens the extension-less file first; the harness does not replicate the preference, and two files could answer");
   assert.deepEqual(embGot([EMB("sd15/foo")], "foo"), ["present", "sd15/foo", null], "in a subfolder too");
@@ -4698,7 +4698,7 @@ test("readiness: a file of the name under a .git directory of the embeddings roo
   assert.deepEqual(unv([EMB("Foo.pt"), EMB(".git/refs/Foo.pt")], "Foo"), ["embedding_unverified", WHY_MANY, [".git/refs/Foo.pt", "Foo.pt"]]);
   assert.deepEqual(unv([EMB("main.pt"), EMB("pack/.git/refs/heads/main")], "main"), ["embedding_unverified", WHY_MANY, ["main.pt", "pack/.git/refs/heads/main"]], "a work tree inside a subfolder, the name a branch file carries");
   assert.deepEqual(unv([EMB("Foo.pt"), EMB("sd15/.git/Foo.safetensors")], "Foo"), ["embedding_unverified", WHY_MANY, ["Foo.pt", "sd15/.git/Foo.safetensors"]], "another extension, one folder deeper");
-  assert.deepEqual(embGot([EMB(".git/refs/Foo.pt")], "Foo"), ["present", ".git/refs/Foo.pt", null], "alone it is the one file ComfyUI would open");
+  assert.deepEqual(embGot([EMB(".git/refs/Foo.pt")], "Foo"), ["present", ".git/refs/Foo.pt", null], "alone it is the one file that answers");
   assert.equal(embGot([EMB("Foo.pt"), EMB(".git/refs/Other.pt")], "Foo")[0], "present", "a .git file that answers another name is no second answer");
 });
 

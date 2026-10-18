@@ -75,7 +75,7 @@
     directory of that set that holds the name, so the directory that answers is chosen by hash order and differs from one process to the next.
     Two things follow. A file that sits only in a subfolder (`sd15/foo.safetensors`, a common layout) is the file `embedding:foo` loads. And a
     name that more than one directory holds (the root and a subfolder, two subfolders, two registered roots) is not one file: the trust record,
-    the hash and the licence approval would attach to a file ComfyUI may not open. The harness does not replicate that choice (next bullet).
+    the hash and the licence approval would attach to a file ComfyUI may not open. The harness does not replicate that choice (see the fail-closed bullet below).
   - Override: any string value that contains `embedding:`, in any letter case, is refused as `override_is_file`. ComfyUI matches a lower-case
     word that starts with the identifier; matching it anywhere and in any case is the fail-closed side.
   - Runner: a string input of the converted graph that names an embedding the way ComfyUI reads it is read as text and no longer as a file
@@ -117,7 +117,10 @@
     A node with no file for the name is `missing`, listed by the name the text gives (`models_missing` at the gate). The gate answers
     `models_missing` first when both apply, then `embedding_unverified` (the class, the code `TEMPLATE_EMBEDDING_UNVERIFIED`, the detail
     `embedding lookup not verified by the harness: <name>: <reason> (<files>)`, and the list in `embedding_unverified`); `readiness` blocks on
-    both, in that order, and the readiness table, `nodeReadiness` and `summarizeReadiness` do not count such a template as ready. Deliberately
+    both, in that order, and the readiness table, `nodeReadiness` and `summarizeReadiness` do not count such a template as ready. They do not count it as files
+    short either: a template held back only by an embedding the harness cannot verify is in no bucket of the files-short histogram (nor of the
+    table's nearest-node histogram), and is counted in `embedding_unverified` (`nearest_embedding_unverified`), which the text table prints as
+    `embedding not verified (local)`. Deliberately
     not replicated: ComfyUI's choice between the directories that hold a name, its preference of one extension over another within a
     directory, and the case rule of the volume. The full replica is a later row, to be taken when the first real template needs it; no template
     of the installed package names an embedding in an active prompt.
@@ -154,11 +157,12 @@
     gate, the hash and the trust record never see the file it loads. "An override never retargets a file or names an embedding" is true of the
     values an override sets, not of text built from them.
   - Measured read only on the installed package (`json 0.1.96`: 594 `.json` files, which are the 578 templates of the index, `fuse_options.json` and 15 index-family files, `index.json`,
-    twelve localized or mcp indexes, the schema and the logo): the catalog is
-    byte-identical before and after the simplification (897 model entries, 3 of them annotations of the embeddings class, the loader-widget
-    conditioning files that the prompt lookup does not touch; no row carries `embedding_probes` or an annotation `embedding_refs`), and so are
-    the per-template verdicts and the readiness per template on a snapshot of the measuring machine (649 requirements missing, 214 present;
-    the snapshot itself differs only by the dropped `case_insensitive_dirs` field). The only `embedding:` text in the package is in the
+    twelve localized or mcp indexes, the schema and the logo): the package holds
+    897 model entries, 3 of them annotations of the embeddings class (the loader-widget conditioning files that the prompt lookup does not
+    touch), and no row carries `embedding_probes` or an annotation `embedding_refs`, so the prompt lookup has nothing to read in it. The
+    per-template verdicts and the readiness per template on a snapshot of the measuring machine (`readiness --snapshot <file> --json --detail`,
+    run before the simplification and at its head) are the same: 649 requirements missing, 214 present; the snapshot itself differs only by the
+    dropped `case_insensitive_dirs` field. The only `embedding:` text in the package is in the
     markdown notes of four `video_minimax_h3_*` templates, which are not read (they are refused as `license_conditional`). That snapshot
     holds no embedding file, so the lookup was tested on fixture trees and on real files, links and hard links in a scratch directory (see
     the tests below).
@@ -255,6 +259,15 @@
   refusing the class, the gate checking it before `models_missing`, unverified entries also listed as `models_missing`, probe hits missing
   from the list, the reason missing from the entries, and the class constant misspelled; one of them (the case flag of a file under two
   names) survived the first set of tests and has a test of its own.
+- **Proof gaps found by the next read of the simplified lookup.** A one-token change of each of these left every test file green and gave a
+  wrong `ready` or a wrong label, and each has tests now, shown red against the change in a scratch copy of `render/`: a probe loop capped at
+  the first two or three probes (a prompt with four probes and a file that answers only the last, in the catalog and the manifest test
+  files, with each position walked); the annotated file compared with the file that answers a name it covers, by identity (an annotation
+  `foo.pt` that covers `foo`, with `foo.pt.safetensors` and `foo.bin` on the node: ComfyUI loads `foo.bin`); a walk that stopped following
+  links for the embeddings class (a link inside the root: a different file of the name behind it is a second answer, and a name held only
+  behind it is found; on an in-memory io that lists one entry as a link and on real files, the latter skipping where no link can be made); and
+  the name reported for a file reached under several names (the first in path order, not the last). The readiness summary no longer counts an
+  unverified embedding as a file short (see above).
 - **Manifest-side normalisation tests.** `unlistedModels` lower-cases the manifest path, turns its backslashes into slashes and drops the
   `models/<class>/` prefix, and every test manifest was lower case with forward slashes, so no test could fail on that step. Both fixtures
   (`LISTED_MODELS` in `template-run.test.mjs`, `LISTED` in `comfy-run-graph.test.mjs`) now hold a mixed-case entry

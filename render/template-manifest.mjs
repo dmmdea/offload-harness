@@ -289,7 +289,7 @@ export function readinessFor(row, snapshot, { io }) {
   const manifest = manifestFor(row);
   const verdict = verdictFor(row);
   // embedding_refs are the prompt names an annotation of the embeddings class covers (the catalog records them): readiness checks that the
-  // annotated file is the one ComfyUI opens for each. An annotation with none is a loader widget's file, read by the plain loader rule, and
+  // annotated file is the one file that answers each. An annotation with none is a loader widget's file, read by the plain loader rule, and
   // `annotated` is what tells it from a name a prompt gives. The manifest and the row list the same models in the same order.
   // embedding_probes are the other names ComfyUI may try for the template's prompts (the name as written before its commas are stripped, and
   // what the encoders that read a prompt without weights take): not requirements, but a file of the node that answers one is a file ComfyUI

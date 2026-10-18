@@ -459,8 +459,8 @@ export function embeddingCoveringNames(names, ref) {
 }
 
 // embeddingCovered: does any name of the set cover the reference (embeddingCoveringNames)? That says a file of the right name is listed, not
-// that it is the file ComfyUI opens on a node: readiness checks that (checkEmbedding), and for an annotation it checks the reference
-// requiredModels records on it.
+// that it is the one file that answers the reference on a node: readiness checks that (checkEmbedding), and for an annotation it checks the
+// reference requiredModels records on it.
 export const embeddingCovered = (names, ref) => embeddingCoveringNames(names, ref).length > 0;
 
 // requiredModels: the files a template needs. `active` are the files of active nodes: the
@@ -492,7 +492,7 @@ export function requiredModels(workflow) {
   for (const key of active.keys()) inactive.delete(key);
   const annotated = new Set([...active.values()].map((m) => m.name.toLowerCase()));
   // The annotations of the embeddings class, by lower-cased name. A prompt reference one of them covers is recorded on it (embedding_refs),
-  // so that readiness can check that the annotated file is the one ComfyUI opens for that reference on the node.
+  // so that readiness can check that the annotated file is the one file that answers that reference on the node.
   const annotatedEmbeddings = new Map();
   // The other names ComfyUI may try for the prompts of active nodes (embeddingProbes): not requirements, checked against a node's files.
   const probes = new Set();
