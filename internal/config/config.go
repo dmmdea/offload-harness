@@ -1432,7 +1432,9 @@ type Config struct {
 	// KV cache, GiB): what the warm-back of a seat a lease unloaded must find room for before it loads the seat
 	// again (gpu_drain.go; internal/hostneed.SeatNeed). It is a figure to MEASURE on the node that runs the seat
 	// and to record beside the value as `measured <date> <node>`; 0 = unset, and an unset seat is not assumed to
-	// be small: hostneed.DefaultSeatHostGiB stands in, a chosen fail-closed figure and never 0.
+	// be small: hostneed.DefaultSeatHostGiB stands in, a chosen fail-closed figure and never 0. The vLLM seat launcher
+	// (setup/templates/vllm-seat/seat_fg.sh) logs `host rss N GiB (L1 N GiB)` for its LMCache MP server at every start,
+	// and `doctor` warns while this key is unset on a box that runs a vLLM seat (register B-56 / H-08).
 	AgentSeatHostRAMGiB float64 `json:"agent_seat_host_ram_gib,omitempty"`
 	// GPUOrphanGraceMin (plan P8, default 15) is how many minutes an attended lease's
 	// owner may be gone before `gpu status`, offload_status and the fleet health read the

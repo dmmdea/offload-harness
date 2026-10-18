@@ -2307,7 +2307,13 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   incident recorded 44 GB of host RAM for a seat, the note that carries it attributes that to LMCache staging plus page cache,
   and whether the page-cache part is memory the OS can drop is not verified here. So with the key unset the warm-back is
   admitted against a figure below the incident's, and a node that runs a seat sets `agent_seat_host_ram_gib` from its own
-  measurement before it relies on the check.
+  measurement before it relies on the check. Two readers help the node do that (register B-56 / H-08). The vLLM seat launcher
+  (`seat_fg.sh`) logs `host rss N GiB (L1 N GiB)` to the seat log at every start: the resident set of the LMCache MP server unit
+  and its children, i.e. the pinned L1 staging buffer plus about 1.1 GiB, read before the launcher becomes `vllm serve`, so the
+  engine's own resident set (and the VM that carries both) is added by measuring the loaded seat. And `doctor` prints a
+  `seat ram:` row on a box that runs a vLLM seat (`vllm_seats`, or the tier table's vLLM seat as `agent_model`): WARN while
+  the key is unset, OK once it is declared. The row does not compare the declaration with a live reading, because the seat's
+  memory is read inside its own distro and the harness holds no cheap read of it; it never changes doctor's exit code.
 * **The warm passes the grant's admission.** The seat's footprint, taken for both quantities and with no commit stated, plus
   what the *other* live leases have yet to load, must leave the headroom of the available RAM and keep the commit charge under
   physical RAM less the headroom: the warm-back states no commit, so it is held to physical RAM and not to the commit limit

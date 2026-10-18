@@ -33,7 +33,10 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
 
 - **Seat** — a llama-swap model entry; here a vLLM engine with the LMCache MP connector.
 - **L1 staging** — LMCache MP's pinned host buffer beside the engine. 2 GB is the default for a seat with no measured value (since 0.130.4; register B-02's 24-contract run on 2026-09-18 restored the same context at 2 / 4 / 8 GB, 3.1 / 5.1 / 9.1 GiB of RSS). Measured seats carry their own: the pair 8 (a 2 GB cut starved its staging under production load on 2026-09-21: the stores came up short by 34 blocks and nothing reached L2) and the reference box's hand-wired three-card seat 16 (opencode's model since 2026-10-04; no tier seeds it). A staging
-  area, not the tier.
+  area, not the tier. Its host memory is part of what the seat holds, so `seat_fg.sh` logs one line at every start,
+  `seat_fg: host rss 9.3 GiB (L1 8 GiB) ...`, the resident set of the MP server unit and its children read just before the
+  launcher becomes `vllm serve` (the engine's own resident set is not in it); the node states the loaded seat's whole figure
+  in `agent_seat_host_ram_gib` (see [GPU lease, "The agent seat and its warm-back"](gpu-lease.md)).
 - **Store (L2)** — the second device's memory behind LMCache's L2 adapter: Valkey (Redis protocol,
   measured) or a filesystem export (`fs_native`).
 - **Chunk** — LMCache's unit of KV, in tokens; must equal the engine's unified block size for the
