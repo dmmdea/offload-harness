@@ -276,6 +276,12 @@ type Meta struct {
 	// hold it. Additive and omitempty: a record without it declares nothing, which every reader
 	// (including a binary that predates the field, which ignores it) takes to mean "adds no host RAM".
 	HostRAMGiB float64 `json:"host_ram_gib,omitempty"`
+	// HostRAMCommitGiB is the commit the holder stated it will be charged (hostram.go), beside the working set HostRAMGiB
+	// it will touch: the grant admits the first against the available memory and this against the OS commit limit. 0 or absent
+	// = nothing stated: the same figure as HostRAMGiB, admitted against physical RAM less the headroom (a record from before the
+	// field, and a holder that declared one figure). Present, it is stated even when equal to HostRAMGiB. Additive and
+	// omitempty: an older reader ignores it and judges the lease by HostRAMGiB alone.
+	HostRAMCommitGiB float64 `json:"host_ram_commit_gib,omitempty"`
 	// HostRAMWaitGiB (F82) is host RAM the holder will ask the host for AFTER it has cleared the agent seat
 	// (`gpu reserve --unload-seat`): the grant took the cards without comparing it to the host, because the
 	// memory it waits for is held by the seat its own unload frees. It is not a claim. HostRAMGiB stays 0, so
@@ -284,6 +290,10 @@ type Meta struct {
 	// lock, the same admission rule at the same point in every other lease's view. Additive and omitempty:
 	// an older reader ignores it and reads a lease that declares nothing yet.
 	HostRAMWaitGiB float64 `json:"host_ram_wait_gib,omitempty"`
+	// HostRAMWaitCommitGiB is the commit twin of HostRAMWaitGiB: the commit the holder will ask the host for after the seat is
+	// cleared. AwaitHostRAM moves it into HostRAMCommitGiB in the same critical section that moves HostRAMWaitGiB into HostRAMGiB.
+	// 0 or absent = the same figure as HostRAMWaitGiB. Additive and omitempty.
+	HostRAMWaitCommitGiB float64 `json:"host_ram_wait_commit_gib,omitempty"`
 	// HostRAMHoldUntilMs (F82 hold bound) is when the hold bound ends the wait of a lease that holds its cards while the
 	// host is asked for HostRAMWaitGiB: unix milliseconds, stamped when that wait begins and taken off only by admission (a
 	// wait that ends any other way leaves it: a lease that still asks for the host must carry a moment by which somebody
@@ -407,8 +417,16 @@ type Info struct {
 	Command string
 	// HostRAMGiB mirrors Meta.HostRAMGiB: the host RAM the holder declared (0 = none declared).
 	HostRAMGiB float64
+	// HostRAMCommitGiB mirrors Meta.HostRAMCommitGiB, read as the commit the holder declared: the field when the record has one,
+	// else HostRAMGiB (a holder that declared one figure declared it for both).
+	HostRAMCommitGiB float64
 	// HostRAMWaitGiB mirrors Meta.HostRAMWaitGiB: host RAM the holder asked for and the host has not admitted yet.
 	HostRAMWaitGiB float64
+	// HostRAMWaitCommitGiB mirrors Meta.HostRAMWaitCommitGiB, read the same way (the field, else HostRAMWaitGiB).
+	HostRAMWaitCommitGiB float64
+	// HostRAMWaitCommitStated says the record carries a wait commit (Meta.HostRAMWaitCommitGiB above 0), which is a stated one,
+	// as against the touched figure HostRAMWaitCommitGiB reads as when the record has none. AwaitHostRAM puts it to the rule.
+	HostRAMWaitCommitStated bool `json:"-"`
 	// HostRAMHoldUntil mirrors Meta.HostRAMHoldUntilMs: when the hold bound releases a lease that is waiting for the host
 	// with its cards held (the outer bound a detached reserve stamps before its drain, then the wait's own end). Zero = no bound
 	// is on the record.
@@ -581,13 +599,21 @@ type Options struct {
 	Draining bool
 	// Command is recorded as Meta.Command (clipped to commandClip runes).
 	Command string
-	// HostRAMGiB is the host RAM the holder declares it will load (stamped as Meta.HostRAMGiB). The
-	// grant is admitted against it (hostram.go): committed memory now, plus this, plus what leases
-	// already granted have yet to load, must stay under physical RAM less the headroom. 0 declares
+	// HostRAMGiB is the host RAM the holder declares it will touch: its working set (stamped as Meta.HostRAMGiB). The
+	// grant is admitted against it (hostram.go): the available RAM less this and what leases already granted have yet
+	// to touch must stay at or above the headroom (and see HostRAMCommitGiB for the commit side). 0 declares
 	// nothing and is never read against the host. The callers resolve it: an explicit `gpu reserve
 	// --ram`, else an estimate from the model files of the render call, else a class default
 	// (internal/hostneed).
 	HostRAMGiB float64
+	// HostRAMCommitGiB is the commit the holder STATES it will be charged (stamped as Meta.HostRAMCommitGiB), admitted against the
+	// OS commit limit where the OS enforces one. 0 = nothing stated: the commit is the same figure as HostRAMGiB and is admitted
+	// against physical RAM less the headroom, the line a caller that declares one figure has always been held to. Above 0 it is
+	// stated, even when it equals HostRAMGiB. The two differ for a job that commits more than it touches (a process tree measured
+	// at 27.8 GiB touched and 58.1 GiB charged), and a stated commit is how such a job is judged on what it measured. A job whose
+	// commit is smaller than its working set (mapped files count in the working set and not in the commit) cannot say so by leaving
+	// this at 0, which reads as the touched figure; a commit stated below the working set is taken as stated.
+	HostRAMCommitGiB float64
 	// OnHostRAMWait, when set, is called ONCE per Acquire, at the first refusal on host-RAM grounds
 	// of a request that will keep waiting (Wait > 0): the CLI prints the "waiting for host RAM" line
 	// from it. Once, because a line per poll is a notification per second in the session that wraps
@@ -600,6 +626,8 @@ type Options struct {
 	// rule, while the cards are still held. A caller sets either this or HostRAMGiB, not both: HostRAMGiB wins (the
 	// grant admits it as always) and this is then ignored.
 	HostRAMWaitGiB float64
+	// HostRAMWaitCommitGiB is the commit twin of HostRAMWaitGiB (0 = the same figure, nothing stated; above 0 it is stated).
+	HostRAMWaitCommitGiB float64
 	// Devices names the cards the lease holds, by GPU UUID (plan invariant I2). Empty
 	// is a WHOLE-NODE lease, the only kind that existed before record v2. A non-empty
 	// set writes a v2 lease (per-card claims) and is refused unless the host has
@@ -713,13 +741,42 @@ type Manager struct {
 	// process-wide one config.Load installed (SetDefaultHostRAMHeadroom).
 	hostHeadroomGiB float64
 	// hostMem and workload are test seams for the host-RAM term: the host's memory reading (nil = the
-	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold RESIDENT
-	// (nil = the real process-tree reader, descendantsResidentGiB). Production never sets them.
+	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold: TouchGiB is their
+	// working set (resident) and CommitGiB their private bytes (nil = the real process-tree reader,
+	// descendantsHeld). Production never sets them.
 	hostMem  func() (gpuprobe.HostMemory, bool)
-	workload func(holderPID int) (float64, bool)
+	workload func(holderPID int) (gpuprobe.HostLoad, bool)
 	// readOnly marks a view made by ReadOnly: the readers that prune a record they find dead or expired leave it.
 	readOnly bool
 }
+
+// effectiveCommit is the commit a declaration stands for: the commit when one was declared, else the touched figure (a holder
+// that declared one figure declared it for both quantities).
+func effectiveCommit(touch, commit float64) float64 {
+	if commit > 0 {
+		return commit
+	}
+	return max(touch, 0)
+}
+
+// storedCommit is what goes on a record for a commit: the figure when one was stated, else nothing (the reader takes the touched
+// figure, and a record of a holder that declared one figure is the record it always was). A stated commit equal to the touched
+// figure is kept: it is stated, and a reader would take its absence for the default, which is judged against another line.
+func storedCommit(commit float64) float64 { return max(commit, 0) }
+
+// hostLoad is what the options declare of the host's memory: the working set, and the commit (the touched figure when no
+// commit was declared). The commit is STATED when the options carry one above 0, even one equal to the working set; only a stated
+// commit is judged against the OS commit limit (gpuprobe.HostLoad.CommitStated).
+func (o Options) hostLoad() gpuprobe.HostLoad {
+	return gpuprobe.HostLoad{TouchGiB: max(o.HostRAMGiB, 0), CommitGiB: effectiveCommit(o.HostRAMGiB, o.HostRAMCommitGiB), CommitStated: o.HostRAMCommitGiB > 0}
+}
+
+// DeclaresHostRAM says the lease declared any host memory (either quantity).
+func (i Info) DeclaresHostRAM() bool { return i.HostRAMGiB > 0 || i.HostRAMCommitGiB > 0 }
+
+// AsksForHostRAM says the lease waits to have host memory admitted (either quantity): it holds its cards and has not yet
+// declared the figure (Meta.HostRAMWaitGiB).
+func (i Info) AsksForHostRAM() bool { return i.HostRAMWaitGiB > 0 || i.HostRAMWaitCommitGiB > 0 }
 
 // ErrCardScopedOff is returned by an acquisition that names devices on a host that
 // has not enabled card-scoped leases.
@@ -1252,21 +1309,26 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		expires = time.UnixMilli(meta.ExpiresAtMs)
 	}
 	return Info{
-		Held:       true,
-		Class:      meta.Class,
-		Epoch:      meta.Epoch,
-		PID:        meta.Holder.PID,
-		Age:        age,
-		Reason:     meta.Reason,
-		Origin:     meta.Origin,
-		JobID:      meta.JobID,
-		ExpiresAt:  expires,
-		Exclusive:  meta.Exclusive,
-		Draining:   meta.Draining,
-		Command:    meta.Command,
-		HostRAMGiB: meta.HostRAMGiB,
+		Held:             true,
+		Class:            meta.Class,
+		Epoch:            meta.Epoch,
+		PID:              meta.Holder.PID,
+		Age:              age,
+		Reason:           meta.Reason,
+		Origin:           meta.Origin,
+		JobID:            meta.JobID,
+		ExpiresAt:        expires,
+		Exclusive:        meta.Exclusive,
+		Draining:         meta.Draining,
+		Command:          meta.Command,
+		HostRAMGiB:       meta.HostRAMGiB,
+		HostRAMCommitGiB: effectiveCommit(meta.HostRAMGiB, meta.HostRAMCommitGiB),
 
-		HostRAMWaitGiB: meta.HostRAMWaitGiB,
+		HostRAMWaitGiB:       meta.HostRAMWaitGiB,
+		HostRAMWaitCommitGiB: effectiveCommit(meta.HostRAMWaitGiB, meta.HostRAMWaitCommitGiB),
+
+		HostRAMWaitCommitStated: meta.HostRAMWaitCommitGiB > 0,
+
 		Devices:        append([]string(nil), meta.Devices...),
 		Epochs:         []uint64{meta.Epoch},
 		Group:          meta.Group,
@@ -1837,9 +1899,9 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 	now := m.now()
 	start, _ := m.procStart(m.pid)
 	// A need the grant admits (HostRAMGiB) is not also one to await: the admitted figure wins.
-	awaiting := 0.0
-	if opts.HostRAMGiB <= 0 {
-		awaiting = max(opts.HostRAMWaitGiB, 0)
+	awaiting, awaitingCommit := 0.0, 0.0
+	if !opts.hostLoad().Declares() {
+		awaiting, awaitingCommit = max(opts.HostRAMWaitGiB, 0), max(opts.HostRAMWaitCommitGiB, 0)
 	}
 	meta := Meta{
 		Epoch:        epoch,
@@ -1856,10 +1918,12 @@ func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error
 		Command:      clipCommand(opts.Command),
 		HostRAMGiB:   max(opts.HostRAMGiB, 0),
 
-		HostRAMWaitGiB: awaiting,
-		Group:          strings.TrimSpace(opts.Group),
-		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),
-		Yields:         strings.TrimSpace(opts.Yields),
+		HostRAMCommitGiB:     storedCommit(opts.HostRAMCommitGiB),
+		HostRAMWaitGiB:       awaiting,
+		HostRAMWaitCommitGiB: storedCommit(awaitingCommit),
+		Group:                strings.TrimSpace(opts.Group),
+		WrapperVersion:       strings.TrimSpace(opts.WrapperVersion),
+		Yields:               strings.TrimSpace(opts.Yields),
 	}
 	m.stampOwnership(&meta, opts)
 	m.stampTerm(&meta, opts, ttl)

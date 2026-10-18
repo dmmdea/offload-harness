@@ -40,7 +40,7 @@ func useSeatBackedHost(t *testing.T, loaded func() bool, withSeat, withoutSeat f
 		if loaded() {
 			c = withSeat
 		}
-		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - c/2, CommitUsedGiB: c, CommitLimitGiB: 160}, true
+		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - c/2, CommitUsedGiB: c, CommitLimitGiB: 100}, true
 	}
 	restore := gpuprobe.UseHostMemoryReader(read)
 	old := hostMemoryFn

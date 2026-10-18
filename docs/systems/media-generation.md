@@ -1635,11 +1635,11 @@ declares the weight files its loaders name, in full when they do not fit the car
 declare the larger of that and the weights they park themselves** (the bound files in full when the lane's extra args carry
 `--offload-to-cpu`, an estimate from their sizes until three measured runs raise it, F60), so an sd.cpp-only node's spill is inside
 the guard; nothing for upscale and voice) and the grant admits it
-against committed memory plus what the leases already granted have yet to load, under physical RAM less
-`gpu_host_ram_headroom_gib` (default 8), as a brake on declared loads (the declaration is an estimate until three measured runs
-raise it, and an admitted lane can still read OVER): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
+as one figure taken for both quantities, the working set against the available memory and the commit (stated by nobody) against
+physical RAM, each with what the leases already granted have yet to load and `gpu_host_ram_headroom_gib` (default 8) kept, as a brake on declared
+loads (the declaration is an estimate until three measured runs raise it, and an admitted lane can still leave the box close to a line): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
 24.48 + 8.27 GiB, on a host that fits one: the first is admitted, the second finds idle cards and waits in the same line with
-`waiting for host RAM: needs 32.8 GiB, committed X of Y GiB physical, Z GiB headroom` (a queued place in line for a door that
+`waiting for host RAM: needs 32.8 GiB, only X GiB of Y GiB physical is available, Z GiB headroom` (or `needs 32.8 GiB, committed X of Y GiB physical, Z GiB headroom` when the commit charge is what refused; a queued place in line for a door that
 can resume, a busy defer for the rest) until the first is done
 (`TestTheSecondLaneWaitsWhileTheFirstIsStillLoading`). A need no state of the host admits is `gpu_lease_unavailable`, naming
 `--ram` and the headroom key.

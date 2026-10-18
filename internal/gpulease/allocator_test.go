@@ -121,7 +121,7 @@ func TestAllocatorSkipsWhenVRAMDoesNotFit(t *testing.T) {
 
 func TestAllocatorSkipsWhenHostRamHeadroomLow(t *testing.T) {
 	in := baseInput()
-	in.HostMem = gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 10, CommitUsedGiB: 90, CommitLimitGiB: 160}
+	in.HostMem = gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 10, CommitUsedGiB: 90, CommitLimitGiB: 100}
 	in.HostNeedGiB = 8
 	in.HostHeadroomGiB = 4 // 90 + 8 = 98 > 100 - 4
 	_, err := Allocate(in)
@@ -143,11 +143,11 @@ func TestAllocatorSkipsWhenHostRamHeadroomLow(t *testing.T) {
 		t.Fatalf("with RAM to spare: %v %v", a.Devices, err)
 	}
 	// The part of leases already granted that has not loaded counts, as it does at the grant.
-	in.HostPendingGiB = 60
+	in.HostPending = gpuprobe.HostLoad{TouchGiB: 60, CommitGiB: 60}
 	if _, err := Allocate(in); err == nil {
 		t.Fatal("what leases already granted have yet to load must count against the host")
 	}
-	in.HostPendingGiB = 0
+	in.HostPending = gpuprobe.HostLoad{}
 	// A need no state of this host admits is impossible: no card makes it fit.
 	in.HostNeedGiB = 99
 	_, err = Allocate(in)

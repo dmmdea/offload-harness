@@ -99,7 +99,7 @@ type mediaNeed struct {
 	// RAM resolves the host RAM this call declares once the card it will run on is known (the
 	// estimate depends on whether its weights fit that card, internal/hostneed). nil declares
 	// nothing: a route whose weights always sit on the card (upscale, voice) adds no host memory the
-	// grant needs to see. The grant admits it against committed memory (gpulease/hostram.go).
+	// grant needs to see. The grant admits it against the available memory and the commit charge against physical RAM, the one figure taken for both and no commit stated (gpulease/hostram.go).
 	RAM func(vramGiB float64) hostneed.Need
 	// Foot is the footprint-store key this call's renders are recorded under (the key the same route's sampling
 	// hook uses), so a declaration can be raised to what those renders were measured to hold (calibratedRAM). The
@@ -149,9 +149,9 @@ const hostPeakMaxRaise = 2.0
 //   - It leaves 0 alone. A render whose weights fit its card streams nothing from RAM; the measured tree carries
 //     the runtime's own baseline and, on a driver that charges card allocations to the process, the card's memory,
 //     neither of which the guard is for.
-//   - It is RESIDENT, not private, because a declaration is in RAM units and the not-yet-loaded sum subtracts
-//     resident memory from it (gpulease.descendantsResidentGiB). The private peak is recorded beside it for the
-//     commit question and not consumed here.
+//   - It is RESIDENT, not private, because a declaration is in RAM units and the touched half of the not-yet-loaded
+//     sum subtracts resident memory from it (gpulease.descendantsHeld). The private peak is recorded beside it for
+//     the commit question and not consumed here.
 //
 // The unit that is still open is whether a declaration should ALSO cover the card memory a render's commit
 // carries; the commit term of the admission reads actual commit, so a lane already running is counted whole.

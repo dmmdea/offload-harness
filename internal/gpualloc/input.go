@@ -44,8 +44,10 @@ const (
 type Need struct {
 	// VRAMGiB is the VRAM the job needs free on EACH card (0 = not declared).
 	VRAMGiB float64
-	// RAMGiB is the host RAM the job declares (0 = not declared).
+	// RAMGiB is the host RAM the job declares: the working set it will touch (0 = not declared).
 	RAMGiB float64
+	// RAMCommitGiB is the commit the job declares (0 = the same figure as RAMGiB).
+	RAMCommitGiB float64
 	// Claimed names cards the caller already holds on behalf of work the lease directory cannot
 	// show (the media path's in-process per-card slots): they are not allocatable.
 	Claimed map[string]bool
@@ -200,16 +202,17 @@ func BuildInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, nee
 		return gpulease.AllocInput{}, &CardTableError{Err: err}
 	}
 	in := gpulease.AllocInput{
-		Cards:           cards,
-		Quarantined:     m.QuarantinedCards(),
-		ForeignBusy:     deps.ForeignBusy(ctx, cfg),
-		Resident:        deps.Resident(ctx, cfg, cards),
-		FootprintGiB:    need.VRAMGiB,
-		HostNeedGiB:     need.RAMGiB,
-		HostHeadroomGiB: cfg.GPUHostRAMHeadroom(),
+		Cards:             cards,
+		Quarantined:       m.QuarantinedCards(),
+		ForeignBusy:       deps.ForeignBusy(ctx, cfg),
+		Resident:          deps.Resident(ctx, cfg, cards),
+		FootprintGiB:      need.VRAMGiB,
+		HostNeedGiB:       need.RAMGiB,
+		HostNeedCommitGiB: need.RAMCommitGiB,
+		HostHeadroomGiB:   cfg.GPUHostRAMHeadroom(),
 		// The part of the leases already granted that has not loaded: without it the allocator would
-		// pick cards for a job the grant is about to refuse (the two apply one rule, gpuprobe.HostRAMAdmits).
-		HostPendingGiB: m.HostRAMPending(),
+		// pick cards for a job the grant is about to refuse (the two apply one rule, gpuprobe.HostRAMAdmitsLoad).
+		HostPending: m.HostRAMPendingLoad(),
 	}
 	in.WholeNodeHeld, in.Claimed = Claims(m, need)
 	in.HostMem, in.HostMemOK = deps.HostMemory()

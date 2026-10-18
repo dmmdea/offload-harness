@@ -585,7 +585,7 @@ func TestAReleaseOfALeaseTheHolderAlreadyReleasedIsNotAFailure(t *testing.T) {
 // at the moment --wait would have ended the wait too, not only at the hold bound.
 func TestTheStampedEndOfTheWaitIsWhicheverOfTheBoundAndWaitComesFirst(t *testing.T) {
 	short := &gpulease.ErrHostRAM{}
-	short.Why = "waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical, 8.0 GiB headroom"
+	short.Why = "waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
 	for _, tc := range []struct {
 		name     string
 		max      time.Duration

@@ -30,28 +30,26 @@ type memoryStatusEx struct {
 	AvailExtendedVirtual uint64
 }
 
+// globalMemoryStatus fills m from GlobalMemoryStatusEx (m.Length already set) and says whether the call succeeded. A variable so a
+// test can stand a MEMORYSTATUSEX in and pin which counter reaches which field of the reading; production never replaces it.
+var globalMemoryStatus = func(m *memoryStatusEx) bool {
+	r, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(m)))
+	return r != 0
+}
+
 // readHostMemory reads GlobalMemoryStatusEx. AvailPhys is the memory Windows can hand out
 // without paging, which is what a multi-GB expert load actually needs. On this call ullTotalPageFile
 // is the system COMMIT LIMIT (physical plus page file, not the page file alone) and ullAvailPageFile
 // is the commit still available, so commit used is their difference: the figure Task Manager shows
-// as "Committed". (The API documents both as "for the system or the current process, whichever
-// is smaller"; a harness process has no job-object commit quota, so they are the system's.)
+// as "Committed". The limit is the CURRENT one: with a system-managed page file Windows grows the file as the charge nears
+// it and the next call returns a larger limit (see the header of hostmemory.go); the configured maximum is not read. (The API
+// documents both counters as "for the system or the current process, whichever is smaller": they are the system's unless the
+// process runs under a job object with a commit limit, which the harness does not set up and this reader does not check.)
 func readHostMemory() (HostMemory, bool) {
 	var m memoryStatusEx
 	m.Length = uint32(unsafe.Sizeof(m))
-	r, _, _ := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&m)))
-	if r == 0 || m.TotalPhys == 0 {
+	if !globalMemoryStatus(&m) {
 		return HostMemory{}, false
 	}
-	const gib = 1 << 30
-	used := uint64(0)
-	if m.TotalPageFile > m.AvailPageFile {
-		used = m.TotalPageFile - m.AvailPageFile
-	}
-	return HostMemory{
-		PhysicalGiB:    float64(m.TotalPhys) / gib,
-		AvailableGiB:   float64(m.AvailPhys) / gib,
-		CommitUsedGiB:  float64(used) / gib,
-		CommitLimitGiB: float64(m.TotalPageFile) / gib,
-	}, true
+	return hostMemoryFromStatus(m.TotalPhys, m.AvailPhys, m.TotalPageFile, m.AvailPageFile)
 }

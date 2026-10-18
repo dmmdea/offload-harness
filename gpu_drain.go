@@ -1083,8 +1083,10 @@ type warmGuard struct {
 // one live lease when the release accepts it). Two refusals, both leaving the warm owed:
 //   - a lane that declared host RAM and is still live: a seat is not loaded while a lane streams, whatever the
 //     numbers say, because the lane's own growth is not in any counter yet;
-//   - the admission rule: committed memory now, plus the seat's footprint, plus what the other leases have yet to
-//     load, must stay under physical RAM less the headroom (so a host that reads NEAR or OVER never warms).
+//   - the admission rule: the seat's footprint, taken for both quantities (the working set it touches and the commit it is
+//     charged) and with no commit stated, plus what the other leases have yet to load, must leave the headroom of the available
+//     RAM and keep the commit charge under physical RAM less the headroom, as a caller that declares one figure always has (so a
+//     host that reads NEAR or OVER never warms).
 //
 // The lease being released is left out of both: its command has exited and it will load nothing more.
 func hostRAMWarmCheck(m *gpulease.Manager, epoch uint64) func(need hostneed.Need) string {
@@ -1095,8 +1097,8 @@ func hostRAMWarmCheck(m *gpulease.Manager, epoch uint64) func(need hostneed.Need
 			self = live[0].Epoch
 		}
 		for _, l := range live {
-			if l.Epoch != self && l.HostRAMGiB > 0 {
-				return fmt.Sprintf("a lane that declared %.1f GiB of host RAM is still live (%s lease epoch %d), and a seat is not loaded while a lane streams", l.HostRAMGiB, l.Class, l.Epoch)
+			if l.Epoch != self && l.DeclaresHostRAM() {
+				return fmt.Sprintf("a lane that declared %.1f GiB of host RAM is still live (%s lease epoch %d), and a seat is not loaded while a lane streams", max(l.HostRAMGiB, l.HostRAMCommitGiB), l.Class, l.Epoch)
 			}
 		}
 		if chk := m.HostRAMCheckWithout(need.GiB, self); !chk.OK {

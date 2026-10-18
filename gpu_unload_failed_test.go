@@ -81,7 +81,7 @@ func TestAFailedUnloadOfAnotherResidentIsCountedAndNeverReadAsFreedNothing(t *te
 func TestTheWaitLineAndTheBoundSayWhenAnUnloadFailedInsteadOfClaimingNothingWasThere(t *testing.T) {
 	short := &gpulease.ErrHostRAM{}
 	short.NeedGiB = 30
-	short.Why = "waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical, 8.0 GiB headroom"
+	short.Why = "waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
 	failed := unloadOutcome{ran: true, failed: 2, why: "the seat was not loaded"}
 	var out bytes.Buffer
 	await := func(o gpulease.AwaitHostRAMOptions) error {

@@ -27,7 +27,7 @@ import (
 func hostAt(t *testing.T, commit float64) {
 	t.Helper()
 	restore := gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) {
-		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 160}, true
+		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 100}, true
 	})
 	t.Cleanup(restore)
 }
@@ -408,7 +408,7 @@ func useHostCommit(t *testing.T, commit *hostCommit) {
 	read := func() (gpuprobe.HostMemory, bool) {
 		c := commit.get()
 		// Available moves with commit (a host that commits more has less left): the rule reads both terms.
-		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - c/2, CommitUsedGiB: c, CommitLimitGiB: 160}, true
+		return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - c/2, CommitUsedGiB: c, CommitLimitGiB: 100}, true
 	}
 	restore := gpuprobe.UseHostMemoryReader(read)
 	old := hostMemoryFn
@@ -480,7 +480,7 @@ func TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict(t *testing.T) {
 	cfg, m := scopedLeaseFixture(t)
 	useQuietStatus(t, statusCards(), nil)
 	restore := gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) {
-		return gpuprobe.HostMemory{PhysicalGiB: 127.7, AvailableGiB: 3.2, CommitUsedGiB: 162.9, CommitLimitGiB: 187.7}, true
+		return gpuprobe.HostMemory{PhysicalGiB: 127.7, AvailableGiB: 3.2, CommitUsedGiB: 187.9, CommitLimitGiB: 187.7}, true
 	})
 	defer restore()
 	// A live lease that declared 30 GiB of host RAM (neither admitted nor refused by this test's host:
@@ -498,14 +498,14 @@ func TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict(t *testing.T) {
 	if hm == nil {
 		t.Fatalf("gpu status --json carries no host_memory block: %v", doc)
 	}
-	for k, want := range map[string]any{"verdict": "OVER", "physical_gib": 127.7, "commit_used_gib": 162.9, "commit_limit_gib": 187.7, "available_gib": 3.2, "declared_live_gib": 30.0, "headroom_gib": 8.0} {
+	for k, want := range map[string]any{"verdict": "OVER", "physical_gib": 127.7, "commit_used_gib": 187.9, "commit_limit_gib": 187.7, "available_gib": 3.2, "declared_live_gib": 30.0, "declared_live_commit_gib": 30.0, "headroom_gib": 8.0} {
 		if hm[k] != want {
 			t.Errorf("host_memory.%s = %v, want %v", k, hm[k], want)
 		}
 	}
-	// What it says is what the reading shows: committed memory above physical RAM. It does not say the box
-	// is paging, which no reading here can know (G5).
-	if note, _ := hm["note"].(string); !strings.Contains(note, "committed memory (162.9 GiB) exceeds the 127.7 GiB of physical RAM") || !strings.Contains(note, "cannot say whether the box is paging now") {
+	// What it says is what the reading shows: which line is gone, with its numbers. It does not say the box
+	// is paging, which no reading here can know.
+	if note, _ := hm["note"].(string); !strings.Contains(note, "committed 187.9 of the 187.7 GiB commit limit") || !strings.Contains(note, "cannot say whether the box is paging now") {
 		t.Errorf("an OVER verdict says what it means and no more: %q", note)
 	}
 	leases, _ := doc["leases"].([]any)
@@ -518,7 +518,7 @@ func TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict(t *testing.T) {
 			t.Fatal(err)
 		}
 	})
-	for _, want := range []string{"host memory: OVER", "127.7 GiB physical", "commit 162.9 of 187.7 GiB", "live leases declared 30.0 GiB", "host RAM 30.0 GiB", "exceeds the 127.7 GiB of physical RAM"} {
+	for _, want := range []string{"host memory: OVER", "127.7 GiB physical", "commit 187.9 of 187.7 GiB", "live leases declared 30.0 GiB touched, 30.0 GiB commit", "host RAM 30.0 GiB touched, 30.0 GiB commit", "committed 187.9 of the 187.7 GiB commit limit"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("the text status lacks %q:\n%s", want, out)
 		}
