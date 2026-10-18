@@ -243,6 +243,10 @@ type NodeView struct {
 	// a worker is free (omitempty). publishedStartWait prefers it as-is; without it the older
 	// estimate gets the slot added.
 	NewJobWaitSec *float64
+	// PowerProfile is whether the node's boot-time GPU power profile took (health `power_profile`, register A-103).
+	// nil on a node too old to publish it, which is unknown, never "no profile". Shown by offload_status; placement
+	// never reads it.
+	PowerProfile *PowerProfileView
 }
 
 // LeaseView is one live lease of a node, as its health leases[] publishes it.
@@ -484,6 +488,17 @@ func (v NodeView) RouteState(route string) (state string, known bool) {
 // cannot be shared from there because rosterprobe imports this package.
 func refuseRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 
+// PowerProfileView mirrors fleetnode.PowerProfileHealth: State is "ok", "skipped" or "unknown", Reason the short token
+// that says why a node is not ok, LimitW the cards' power limits as the node's state record read them, ClockLock whether
+// a clock-lock step returned success and AppliedAt the record's own time (RFC 3339, UTC).
+type PowerProfileView struct {
+	State     string `json:"state"`
+	Reason    string `json:"reason"`
+	LimitW    []int  `json:"limit_w"`
+	ClockLock bool   `json:"clock_lock"`
+	AppliedAt string `json:"applied_at"`
+}
+
 // SeatRateView mirrors fleetnode.SeatRateHealth.
 type SeatRateView struct {
 	TokS        float64 `json:"tok_s"`
@@ -616,6 +631,8 @@ type healthWire struct {
 	RecentAgentWallSec   float64  `json:"recent_agent_wall_sec"`
 	QueueWaitEstimateSec *float64 `json:"queue_wait_estimate_sec"`
 	NewJobWaitSec        *float64 `json:"new_job_wait_sec"`
+	// Additive (register A-103). nil on a node that does not publish whether its boot-time power profile took.
+	PowerProfile *PowerProfileView `json:"power_profile"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -705,6 +722,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		RecentAgentWallSec:   w.RecentAgentWallSec,
 		QueueWaitEstimateSec: w.QueueWaitEstimateSec,
 		NewJobWaitSec:        w.NewJobWaitSec,
+		PowerProfile:         w.PowerProfile,
 	}
 	if w.MediaRoutes != nil {
 		v.MediaRoutes, v.MediaRoutesKnown = *w.MediaRoutes, true

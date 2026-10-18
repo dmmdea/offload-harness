@@ -3219,6 +3219,10 @@ func runFleetServe(args []string) error {
 		// existing /fleet/health payload, never a new listener. nil when
 		// serving_config_path is unset, which omits both fields.
 		ServingConfig: servingConfigReporter(cfg.ServingConfigPath),
+		// Whether the boot-time GPU power profile took (register A-103): the doctor's power row as a health field,
+		// read from the state file LOCAL_OFFLOAD_POWER_PROFILE_STATE names. "unknown" with a reason, never an error,
+		// on a node that applies no profile.
+		PowerProfile: powerProfileHealthReporter(),
 		Footprints: func() []fleetnode.FootprintEntry {
 			if st := p.FootprintStore(); st != nil {
 				// Pick up records written by OTHER processes (fleet-measure while
