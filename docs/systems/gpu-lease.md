@@ -1735,7 +1735,8 @@ and a coder-model arm that touches 27.8 GiB and is charged 58.1 GiB was refused 
 **states** its commit is judged against the commit limit: the same arm needs 128.6 of 163.7, and against the available memory 27.8
 of 67.6: admitted (`TestMeasuredCoderArmIsAdmittedAgainstTheCommitLimit`). The commit charge cannot simply be dropped: on Windows it,
 not the physical availability, is what can run out, because a job that commits about twice what it touches can push the charge
-past the limit (physical RAM plus the page file) and then other processes' allocations fail with plenty of RAM free. And what a
+past the limit (physical RAM plus the page file) and, once the page file has reached its maximum, other processes' allocations fail
+with plenty of RAM free (before that Windows grows a system-managed file: "The commit limit moves", below). And what a
 job touches cannot be judged against the commit limit, because the available memory is what pages when it runs out. Each quantity
 is held to the line that is real for it.
 

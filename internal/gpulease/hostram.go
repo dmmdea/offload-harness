@@ -17,7 +17,8 @@ package gpulease
 // of the memory that is available; and the commit charge now, plus what it will be charged, must stay under a line that depends
 // on who said what the commit is. A commit STATED (Options.HostRAMCommitGiB above 0) is judged where the OS enforces a commit
 // limit, with what the leases already granted have yet to be charged, against that limit less the headroom: committed memory is
-// not memory in use, and the limit is what the OS refuses allocations at. A commit nobody stated (a caller that declares one
+// not memory in use, and the limit is the line the OS enforces (it refuses allocations there once the page file has reached its
+// maximum, and the current limit moves with a system-managed file). A commit nobody stated (a caller that declares one
 // figure) is that figure standing in for a commit, and is judged as it always was, with what the leases already granted have
 // yet to touch, against physical RAM less the headroom, because a job can commit more than it touches. The check runs on
 // EVERY grant path:

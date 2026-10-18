@@ -15,7 +15,8 @@ import (
 //   - the working set it TOUCHES: the physical RAM it occupies. The line is the memory that is AVAILABLE now (what can be
 //     handed out without paging; standby and cache that can be dropped count). Past it the OS pages.
 //   - the commit it is CHARGED: memory the OS has promised it, touched or not. On Windows the line is the commit limit
-//     (physical RAM plus the page file): past it OTHER processes' allocations fail while physical RAM may sit free.
+//     (physical RAM plus the page file): past it, once the page file has reached its maximum, OTHER processes cannot allocate
+//     while physical RAM may sit free (before that Windows grows a system-managed file: THE LIMIT MOVES, below).
 //
 // They differ by a lot on the hosts this harness runs on. Measured on the reference 3-card Windows box (127.7 GiB RAM,
 // 171.7 GiB commit limit), the process tree of one coder-model arm touched at most 27.8 GiB and was charged 58.1 GiB; a
@@ -126,7 +127,8 @@ const (
 	// HostNear: one of them is inside the headroom, so a lease that declares any host RAM waits.
 	HostNear HostVerdict = "NEAR"
 	// HostOver: one of them is gone: no memory is available, or the commit charge is above physical RAM (the line a commit nobody
-	// stated is held to), or it has reached a commit limit the OS enforces (allocations by other processes can fail). Whether the
+	// stated is held to), or it has reached a commit limit the OS enforces (allocations by other processes can fail once the page
+	// file has reached its maximum; before that Windows grows a system-managed file). Whether the
 	// box is paging NOW is not something this reading can say (that takes page-file growth or the pages-out rate), so nothing
 	// built on the verdict claims it.
 	HostOver HostVerdict = "OVER"
@@ -226,7 +228,8 @@ type HostRAMCheck struct {
 // headroom, is Impossible: it cannot be admitted however long it waits.
 //
 // WHY THE LINES ARE THESE (see the file header). A STATED commit is compared to the commit limit, not to physical RAM: committed
-// memory is not memory in use, and only the limit is what the OS refuses allocations at. A commit nobody stated is the touched
+// memory is not memory in use, and the limit is the line the OS enforces (it refuses allocations there once the page file has
+// reached its maximum; see THE LIMIT MOVES in the file header). A commit nobody stated is the touched
 // figure standing in for one, and keeps the line it always had: its stand-in can understate a job that commits more than it touches.
 // What a job TOUCHES is compared to the memory that is available, because that is what pages when it runs out. A declaration is
 // an estimate (the model files' size, or the largest working set a render's tree reached): this rule is a brake on DECLARED loads,
