@@ -75,7 +75,8 @@
     directory of that set that holds the name, so the directory that answers is chosen by hash order and differs from one process to the next.
     Two things follow. A file that sits only in a subfolder (`sd15/foo.safetensors`, a common layout) is the file `embedding:foo` loads. And a
     name that more than one directory holds (the root and a subfolder, two subfolders, two registered roots) is not one file: the trust record,
-    the hash and the licence approval would attach to a file ComfyUI may not open. The harness does not replicate that choice (see the fail-closed bullet below).
+    the hash and the licence approval would attach to a file ComfyUI may not open. The harness does not replicate
+    that choice (see the fail-closed bullet below).
   - Override: any string value that contains `embedding:`, in any letter case, is refused as `override_is_file`. ComfyUI matches a lower-case
     word that starts with the identifier; matching it anywhere and in any case is the fail-closed side.
   - Runner: a string input of the converted graph that names an embedding the way ComfyUI reads it is read as text and no longer as a file
@@ -117,8 +118,8 @@
     A node with no file for the name is `missing`, listed by the name the text gives (`models_missing` at the gate). The gate answers
     `models_missing` first when both apply, then `embedding_unverified` (the class, the code `TEMPLATE_EMBEDDING_UNVERIFIED`, the detail
     `embedding lookup not verified by the harness: <name>: <reason> (<files>)`, and the list in `embedding_unverified`); `readiness` blocks on
-    both, in that order, and the readiness table, `nodeReadiness` and `summarizeReadiness` do not count such a template as ready. They do not count it as files
-    short either: a template held back only by an embedding the harness cannot verify is in no bucket of the files-short histogram (nor of the
+    both, in that order, and the readiness table, `nodeReadiness` and `summarizeReadiness` do not count such a template as ready.
+    They do not count it as files short either: a template held back only by an embedding the harness cannot verify is in no bucket of the files-short histogram (nor of the
     table's nearest-node histogram), and is counted in `embedding_unverified` (`nearest_embedding_unverified`), which the text table prints as
     `embedding not verified (local)`. Deliberately
     not replicated: ComfyUI's choice between the directories that hold a name, its preference of one extension over another within a
@@ -169,9 +170,10 @@
 - **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
   profile and 672 compact, so one more tool is about +3.2% of the 31-tool full list. The registered design accepts that cost, and the
   `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 3,092 bytes of `tools/list` in
-  the full profile and 2,930 compact, against means of 4,110 and 2,639 over the 32 tools of the default box (bytes, not tokens; the `tools/list` dump of
-  `toolsprofile_dump_test.go`). It has a reviewed compact keep-list entry (four sentences: what a run is allowed for and refused with, that it never downloads a model, that an embedding the
-  harness cannot verify is refused as `embedding_unverified`, where it runs).
+  the full profile and 2,930 compact, against means of 4,110 and 2,639 over the 32 tools of the default box (bytes, not tokens; the
+  `tools/list` dump of `toolsprofile_dump_test.go`). It has a reviewed compact keep-list entry (four sentences: what a run is allowed for and
+  refused with, that it never downloads a model, that an embedding the harness cannot verify is refused as `embedding_unverified`, where it
+  runs).
 - **Trust on first use for model files.** Most template annotations carry no hash (10 of 1,135 do). The first run that meets a model with no
   declared hash records its sha256, size and modification time in `<file>.tofu` beside it; a later run with the same size and time trusts the
   record without hashing, a changed file is hashed again, and a hash that is not the recorded one defers `MODEL_SHA_MISMATCH`, naming both. The
@@ -265,7 +267,8 @@
   files, with each position walked); the annotated file compared with the file that answers a name it covers, by identity (an annotation
   `foo.pt` that covers `foo`, with `foo.pt.safetensors` and `foo.bin` on the node: ComfyUI loads `foo.bin`); a walk that stopped following
   links for the embeddings class (a link inside the root: a different file of the name behind it is a second answer, and a name held only
-  behind it is found; on an in-memory io that lists one entry as a link and on real files, the latter skipping where no link can be made); and
+  behind it is found; on an in-memory io that lists one entry as a link and on real files, the latter skipping where no link can be made);
+  and
   the name reported for a file reached under several names (the first in path order, not the last). The readiness summary no longer counts an
   unverified embedding as a file short (see above).
 - **Manifest-side normalisation tests.** `unlistedModels` lower-cases the manifest path, turns its backslashes into slashes and drops the
