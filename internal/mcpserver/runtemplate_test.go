@@ -209,7 +209,7 @@ func TestRunTemplateAPaidTemplateIsAnswered_NotDispatched(t *testing.T) {
 }
 
 func TestRunTemplateRefusalsAreAnsweredNotDispatched(t *testing.T) {
-	for _, class := range []string{"license_unknown", "license_conditional", "license_non_commercial", "flux_barred", "custom_nodes", "models_missing", "inputs_missing", "comfyui_too_old", "unknown_template"} {
+	for _, class := range []string{"license_unknown", "license_conditional", "license_non_commercial", "flux_barred", "custom_nodes", "models_missing", "embedding_unverified", "inputs_missing", "comfyui_too_old", "unknown_template"} {
 		reply := `{"ok":false,"outcome":"refuse","refused":true,"class":"` + class + `","code":"TEMPLATE_X","template":"t"}`
 		h := newTplHarness(t, map[string]string{"resolve": reply})
 		if out := h.call(t, `{"action":"run","template":"t"}`); out != reply {

@@ -687,3 +687,88 @@ test("resolve: a name only the reading without weights takes (`a cat ( embedding
   assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/1.2"]]);
   assert.equal(C.catalogReadiness(catalogOf(io), snapshotOf(io).inventory).tt_emb.ready, false, "and the readiness table agrees");
 });
+
+// ---------------------------------------------------------------------------------------------------------------------
+// The prompt lookup fails closed. A name a prompt gives is accepted only when exactly one physical file answers it, case-exactly; a case
+// variant, more than one file, or a file that answers a probe name is refused under its own class, `embedding_unverified`, with the reason
+// (not `models_missing`: nothing is missing, the harness cannot say which file ComfyUI would open). Nothing answering is `models_missing`.
+// ---------------------------------------------------------------------------------------------------------------------
+
+const WHY_CASE = "a case variant answers it";
+const WHY_MANY = "more than one file could answer it";
+const WHY_PROBE = "a probe name (embedding_probes) is answered by a file of the node";
+const A_FILE = "diffusion_models/a.safetensors";
+const EVIL = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+const gateOf = (io) => M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+const readyOf = (io) => M.readinessFor(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+const PREFIX = "embedding lookup not verified by the harness: ";
+
+test("resolve: a name that more than one file could answer is refused as embedding_unverified, not models_missing, and the entry says which files", () => {
+  const io = embeddingIo(EVIL, [A_FILE, "embeddings/evil_ti.safetensors", "embeddings/sd15/evil_ti.safetensors"]);
+  const gone = gateOf(io);
+  assert.deepEqual([gone.ok, gone.refused, gone.class, gone.code, gone.missing], [false, true, "embedding_unverified", "TEMPLATE_EMBEDDING_UNVERIFIED", undefined]);
+  assert.ok(gone.detail.startsWith(PREFIX), gone.detail);
+  assert.ok(gone.detail.includes(WHY_MANY), gone.detail);
+  assert.deepEqual(gone.embedding_unverified, [{ path: "models/embeddings/evil_ti.safetensors", reason: WHY_MANY, found: ["evil_ti.safetensors", "sd15/evil_ti.safetensors"] }]);
+  const r = readyOf(io);
+  assert.deepEqual([r.ready, r.blocking, r.models_missing], [false, ["embedding_unverified"], []]);
+  const m = r.models.find((x) => x.name === "evil_ti.safetensors");
+  assert.deepEqual([m.status, m.reason, m.resolved_path, m.found], ["embedding_unverified", WHY_MANY, null, ["evil_ti.safetensors", "sd15/evil_ti.safetensors"]]);
+});
+
+test("resolve: an annotated embedding beside a second file ComfyUI could open for the same name is refused as embedding_unverified (the file ComfyUI tries first is not chosen for it)", () => {
+  const pt = { name: "evil_ti.pt", directory: "embeddings", url: WEIGHTS_A("evil_ti.pt") };
+  const twice = gateOf(embeddingIo(pt, [A_FILE, "embeddings/evil_ti.pt", "embeddings/evil_ti.safetensors"]));
+  assert.deepEqual([twice.class, twice.embedding_unverified.map((e) => [e.path, e.reason, e.found])], ["embedding_unverified", [["models/embeddings/evil_ti.pt", WHY_MANY, ["evil_ti.pt", "evil_ti.safetensors"]]]]);
+  const bare = gateOf(embeddingIo(EVIL, [A_FILE, "embeddings/evil_ti.safetensors", "embeddings/evil_ti"]));
+  assert.deepEqual([bare.class, bare.embedding_unverified.map((e) => [e.reason, e.found])], ["embedding_unverified", [[WHY_MANY, ["evil_ti", "evil_ti.safetensors"]]]], "an extension-less file of the same stem");
+  assert.equal(gateOf(embeddingIo(pt, [A_FILE, "embeddings/evil_ti.pt"])).ok, true, "with only the annotated file the run is allowed");
+});
+
+test("resolve: a node whose only file for the name is in another case is refused as embedding_unverified (a case variant), on any file system", () => {
+  const io = embeddingIo(EVIL, [A_FILE, "embeddings/Evil_TI.safetensors"]);
+  const gone = gateOf(io);
+  assert.deepEqual([gone.class, gone.missing, gone.embedding_unverified], ["embedding_unverified", undefined, [{ path: "models/embeddings/evil_ti.safetensors", reason: WHY_CASE, found: ["Evil_TI.safetensors"] }]]);
+  assert.ok(gone.detail.startsWith(PREFIX) && gone.detail.includes(WHY_CASE), gone.detail);
+});
+
+test("resolve: a file that answers a probe name refuses the run as embedding_unverified with the probe reason, not as models_missing", () => {
+  const io = embeddingIo(EVIL, [A_FILE, "embeddings/evil_ti.safetensors", "embeddings/evil_ti,.safetensors"]);
+  const gone = gateOf(io);
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "embedding_unverified", undefined]);
+  assert.deepEqual(gone.embedding_unverified, [{ path: "models/embeddings/evil_ti,", reason: WHY_PROBE, found: ["evil_ti,.safetensors"] }]);
+  const r = readyOf(io);
+  assert.deepEqual([r.ready, r.blocking, r.models_missing], [false, ["embedding_unverified"], []]);
+  assert.deepEqual(r.embedding_probes.map((p) => [p.name, p.status, p.reason, p.found]), [["evil_ti,", "embedding_unverified", WHY_PROBE, ["evil_ti,.safetensors"]]]);
+});
+
+test("resolve: a file that answers only the SECOND probe of a prompt refuses the run", () => {
+  const prompt = "embedding:evil_ti, a cat ( embedding:1.2 )";
+  const files = [A_FILE, "embeddings/evil_ti.safetensors"];
+  const ok = embeddingIo(EVIL, files, prompt);
+  assert.deepEqual(rowOf(catalogOf(ok), "tt_emb").embedding_probes, ["evil_ti,", "1.2"]);
+  assert.equal(gateOf(ok).ok, true, "no file answers either probe");
+  const gone = gateOf(embeddingIo(EVIL, [...files, "embeddings/1.2.pt"], prompt));
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "embedding_unverified", undefined]);
+  assert.deepEqual(gone.embedding_unverified, [{ path: "models/embeddings/1.2", reason: WHY_PROBE, found: ["1.2.pt"] }]);
+});
+
+test("resolve: a node that lacks a model file and also holds an embedding twice is answered as models_missing first, and readiness blocks on both, in that order", () => {
+  const io = embeddingIo(EVIL, ["embeddings/evil_ti.safetensors", "embeddings/sd15/evil_ti.safetensors"]);
+  const gone = gateOf(io);
+  assert.deepEqual([gone.class, gone.missing], ["models_missing", ["models/diffusion_models/a.safetensors"]], "what the node lacks is the first thing that stops the run");
+  const r = readyOf(io);
+  assert.deepEqual([r.blocking, r.models_missing, r.embedding_unverified.map((e) => e.path)], [["models_missing", "embedding_unverified"], ["models/diffusion_models/a.safetensors"], ["models/embeddings/evil_ti.safetensors"]]);
+});
+
+test("readiness table: a template with an unverified embedding is not ready, like the run gate, and a single exact file beside unrelated ones is", () => {
+  const state = (files) => {
+    const io = embeddingIo(EVIL, [A_FILE, "embeddings/evil_ti.safetensors", ...files]);
+    const r = C.catalogReadiness(catalogOf(io), snapshotOf(io).inventory).tt_emb;
+    return [r.ready, r.not_ready_count, gateOf(io).ok];
+  };
+  assert.deepEqual(state([]), [true, 0, true]);
+  assert.deepEqual(state(["embeddings/aaa/zed.pt"]), [true, 0, true], "a file that answers another name is no second answer");
+  assert.deepEqual(state(["embeddings/sd15/evil_ti.safetensors"]), [false, 1, false]);
+  assert.deepEqual(state(["embeddings/EVIL_TI.pt"]), [false, 1, false], "a case variant beside the exact file");
+});
