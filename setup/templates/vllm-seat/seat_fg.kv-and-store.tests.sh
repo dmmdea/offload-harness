@@ -36,7 +36,14 @@ stub bin/systemctl 'exit 0'
 stub bin/systemd-run 'exit 0'
 stub bin/pgrep 'exit 1'
 stub bin/ps 'exit 0'
-stub bin/mountpoint 'exit 1'
+# Not mounted unless a run says so (MOUNTED_RC=0): the share's mount state is a file the stand-in reads.
+stub bin/mountpoint 'exit "$(cat "$SEAT_TEST_DIR/mountpoint.rc" 2>/dev/null || echo 1)"'
+# What the kernel says about the mounted share: `findmnt -n -o SOURCE,OPTIONS -M <dir>` prints the source and the option list.
+stub bin/findmnt 'printf "%s\n" "$@" > "$SEAT_TEST_DIR/findmnt.argv"
+cat "$SEAT_TEST_DIR/findmnt.out" 2>/dev/null
+exit 0'
+# The launcher must never unmount a share: this stand-in only leaves a mark, and a case that finds the mark fails.
+stub bin/umount 'printf "%s\n" "$@" > "$SEAT_TEST_DIR/umount.argv"; exit 0'
 stub bin/dmesg 'exit 0'
 # One listener line, the scratch MP port, so the launcher's wait for the MP server passes and none of its refusals do.
 stub bin/ss 'echo "LISTEN 0 4096 127.0.0.1:48796 0.0.0.0:*"'
@@ -53,7 +60,9 @@ stub bin/ip 'case "$*" in
     echo "1: lo    inet 127.0.0.1/8 scope host lo\       valid_lft forever preferred_lft forever"
     echo "2: eth0    inet 192.0.2.10/24 brd 192.0.2.255 scope global eth0\       valid_lft forever preferred_lft forever"
     echo "3: wlan0    inet 192.0.2.11/24 brd 192.0.2.255 scope global wlan0\       valid_lft forever preferred_lft forever"
-    echo "4: docker0    inet 198.51.100.1/24 brd 198.51.100.255 scope global docker0\       valid_lft forever preferred_lft forever" ;;
+    echo "4: docker0    inet 198.51.100.1/24 brd 198.51.100.255 scope global docker0\       valid_lft forever preferred_lft forever"
+    echo "5: br28    inet 203.0.113.17/28 brd 203.0.113.31 scope global br28\       valid_lft forever preferred_lft forever"
+    echo "6: tun16    inet 10.0.1.10/16 brd 10.0.255.255 scope global tun16\       valid_lft forever preferred_lft forever" ;;
 esac
 exit 0'
 # What the system resolver says for the store name: ONE address, and not necessarily the right one.
@@ -74,7 +83,8 @@ echo "stand-in vllm exec ed"'
 # ---- the runner --------------------------------------------------------------------------------------------------------------
 # run_seat <name> [KEY=VALUE ...]: the extra lines go into the seat env after the defaults (a later assignment wins; @R@ is the
 # run's directory). Per-run inputs are variables set for the call: USED (MiB the card already holds), MDNS_ANSWERS (lines the
-# mDNS stand-in prints), MDNS_RC, MDNS_MODE (hang), MOUNT_RC, NO_MDNS_SEAM (1 = leave the test seam unset, the production
+# mDNS stand-in prints), MDNS_RC, MDNS_MODE (hang), MOUNT_RC, MOUNTED_RC (0 = the share is already mounted) with FINDMNT_OUT
+# (what findmnt then reports for it), NO_MDNS_SEAM (1 = leave the test seam unset, the production
 # shape) and EXTRA_ENV (more NAME=value words for the launcher's environment). Leaves $R (the run's directory), $RC (the
 # launcher's exit status) and $ELAPSED (seconds) behind.
 run_seat() {
@@ -90,6 +100,7 @@ run_seat() {
   } > "$R/seat.env"
   printf '%s\n' "${MDNS_ANSWERS:-}" > "$R/mdns.answers"
   echo "${MDNS_RC:-0}" > "$R/mdns.rc"; echo "${MDNS_MODE:-normal}" > "$R/mdns.mode"; echo "${MOUNT_RC:-0}" > "$R/mount.rc"
+  echo "${MOUNTED_RC:-1}" > "$R/mountpoint.rc"; printf '%s\n' "${FINDMNT_OUT:-}" > "$R/findmnt.out"
   local seam=(); [ -z "${NO_MDNS_SEAM:-}" ] && seam=(SEAT_FG_TEST_MDNS_CMD="$T/bin/mdns-stub")
   local t0 t1
   t0=$(date +%s.%N)
@@ -287,6 +298,75 @@ has "CACHE SERVER DEGRADED — share writes at ~"; has "below SEAT_L2_MIN_MBPS=1
 case "$(status_line)" in degraded*) ;; *) PROBLEMS="$PROBLEMS [status file says '$(status_line)']" ;; esac
 verdict "the write-floor degrade keeps its text and names the address the share was mounted at"
 
+# The pinned address's network is its OWN prefix, not a fixed /24: a /28 and a /16 pinned address (the ip stand-in lists
+# 203.0.113.17/28 and 10.0.1.10/16). An answer that shares the /24 with the pinned /28 address is NOT on its network, and an
+# answer on a /16 pinned address's network is on it whatever its third octet.
+MDNS_ANSWERS=$'203.0.113.50\n203.0.113.20' run_seat s12 "${STORE[@]}" SEAT_L2_MOUNT_SRCADDR=203.0.113.17
+mounted_ok; mount_is //203.0.113.20/kvcache; has "inside 203.0.113.17/28"
+verdict "a /28 pinned address: the answer inside the /28 is mounted, the one outside it (same /24) is passed over"
+
+MDNS_ANSWERS=$'203.0.113.50' run_seat s12b "${STORE[@]}" SEAT_L2_MOUNT_SRCADDR=203.0.113.17
+mounted_ok; mount_is //store.local/kvcache; has "none inside 203.0.113.17/28"; has "mounting by name as before"
+verdict "a /28 pinned address: an answer only elsewhere in its /24 is no answer on its network, the mount is by name"
+
+MDNS_ANSWERS=$'172.16.0.9\n10.0.5.9' run_seat s12c "${STORE[@]}" SEAT_L2_MOUNT_SRCADDR=10.0.1.10
+mounted_ok; mount_is //10.0.5.9/kvcache; has "inside 10.0.1.10/16"
+verdict "a /16 pinned address: an answer in its /16 beyond its /24 is mounted"
+
+# ---- B-55: a share that is ALREADY mounted ---------------------------------------------------------------------------------
+# The store address is chosen when the share is mounted, which is once per WSL session: a later start (llama-swap restarts the
+# seat on a swap) finds it mounted. It must not mount again and must not unmount (another seat may be using the share, and with
+# two addresses of the store on one network a re-pick at every start could trade a good mount for the Wi-Fi one); it asks no
+# mDNS, says where the share IS (source and server address, read from the mount), how to choose again, and records the address.
+BYNAME='//store.local/kvcache rw,relatime,vers=3.1.1,cache=none,addr=192.0.2.51,srcaddr=192.0.2.10,file_mode=0755'
+mounted_left_alone() {
+  [ "$RC" = 0 ] && [ -s "$R/vllm.args" ] || PROBLEMS="$PROBLEMS [the seat did not start (exit $RC)]"
+  [ ! -e "$R/mount.args" ] || PROBLEMS="$PROBLEMS [a mount command ran on a share that was already mounted]"
+  [ ! -e "$R/umount.argv" ] || PROBLEMS="$PROBLEMS [the launcher unmounted the share]"
+  no_helper; lacks "CACHE SERVER DEGRADED"
+}
+MOUNTED_RC=0 FINDMNT_OUT="$BYNAME" MDNS_ANSWERS=$'192.0.2.50' run_seat m1 "${STORE[@]}"
+mounted_left_alone
+has "cache-server share $R/mnt is already mounted from //store.local/kvcache (server address 192.0.2.51)"
+has "not looked up again"; has "unmount the share while no seat uses it"; has "restart the seat"
+grep -qxF "$R/mnt" "$R/findmnt.argv" 2>/dev/null || PROBLEMS="$PROBLEMS [findmnt was not asked about the mount directory]"
+status_is "ok * mbps=unmeasured addr=192.0.2.51"
+verdict "a share already mounted by name: no mount, no unmount, no lookup; the line names its source and server address and how to choose again; the status file records the address"
+
+MOUNTED_RC=0 FINDMNT_OUT='//192.0.2.50/kvcache rw,relatime,vers=3.1.1,cache=none,addr=192.0.2.50,srcaddr=192.0.2.10' MDNS_ANSWERS=$'192.0.2.50' run_seat m2 "${STORE[@]}"
+mounted_left_alone
+has "is already mounted from //192.0.2.50/kvcache (server address 192.0.2.50)"; lacks "unmount the share"
+status_is "ok * mbps=unmeasured addr=192.0.2.50"
+verdict "a share already mounted at an address an earlier start chose: left alone, the address is recorded, no advice to unmount"
+
+MOUNTED_RC=0 FINDMNT_OUT='' MDNS_ANSWERS=$'192.0.2.50' run_seat m3 "${STORE[@]}"
+mounted_left_alone
+has "cache-server share $R/mnt is already mounted"; lacks "server address"
+status_is "ok * mbps=unmeasured"
+case "$(status_line)" in *addr=*) PROBLEMS="$PROBLEMS [the status file names an address nobody read]" ;; esac
+verdict "a share already mounted that findmnt cannot describe: left alone, said so, no address recorded"
+
+MOUNTED_RC=0 FINDMNT_OUT="$BYNAME" MDNS_ANSWERS=$'192.0.2.50' run_seat m4 "${STORE[@]}" SEAT_L2_MOUNT_SRC=//nas.example.test/kvcache
+mounted_left_alone; lacks "already mounted"; [ ! -e "$R/findmnt.argv" ] || PROBLEMS="$PROBLEMS [findmnt ran for a name that is not .local]"
+status_is "ok * mbps=unmeasured"; case "$(status_line)" in *addr=*) PROBLEMS="$PROBLEMS [the status file names an address]" ;; esac
+verdict "a mounted share whose name is not .local: untouched and unreported, as before"
+
+MOUNTED_RC=0 FINDMNT_OUT="$BYNAME" MDNS_ANSWERS=$'192.0.2.50' run_seat m5 "${STORE[@]}" SEAT_L2_MOUNT_SRCADDR=
+mounted_left_alone; lacks "already mounted"; [ ! -e "$R/findmnt.argv" ] || PROBLEMS="$PROBLEMS [findmnt ran without a source pin]"
+verdict "a mounted share with no source pin: untouched and unreported, as before"
+
+MOUNTED_RC=0 FINDMNT_OUT="$BYNAME" MDNS_ANSWERS=$'192.0.2.50' run_seat m6 "${STORE[@]}" SEAT_L2_MOUNT_TYPE=nfs SEAT_L2_MOUNT_SRC=store.local:/srv/store
+mounted_left_alone; lacks "already mounted"; [ ! -e "$R/findmnt.argv" ] || PROBLEMS="$PROBLEMS [findmnt ran for an nfs mount]"
+verdict "a mounted nfs share: untouched and unreported, as before"
+
+MOUNTED_RC=0 FINDMNT_OUT="$BYNAME" MDNS_ANSWERS=$'192.0.2.50' run_seat m7 "${STORE[@]}" SEAT_L2_MIN_MBPS=100000000
+[ "$RC" = 0 ] && [ -s "$R/vllm.args" ] || PROBLEMS="$PROBLEMS [the seat did not start (exit $RC)]"
+[ ! -e "$R/umount.argv" ] || PROBLEMS="$PROBLEMS [the launcher unmounted the share]"
+has "CACHE SERVER DEGRADED — share writes at ~"; has "below SEAT_L2_MIN_MBPS=100000000"
+has "the share was already mounted at server address 192.0.2.51; a start does not choose the address again"
+case "$(status_line)" in degraded*"already mounted at server address 192.0.2.51"*) ;; *) PROBLEMS="$PROBLEMS [status file says '$(status_line)']" ;; esac
+verdict "the write-floor degrade of an already-mounted share keeps its text and says the share was mounted at that address before this start"
+
 # ---- B-55: the embedded mDNS helper itself --------------------------------------------------------------------------------
 # The helper is a here-doc inside seat_fg.sh, run as `python - <name> <source address>`. Its destination is the mDNS group unless
 # SEAT_FG_TEST_MDNS_DEST says otherwise (a test-only seam), so it is driven here against a responder on loopback that answers
@@ -362,6 +442,73 @@ PYEOF
   NO_MDNS_SEAM=1 EXTRA_ENV="SEAT_FG_TEST_MDNS_DEST=127.0.0.1:$RESP_PORT" run_seat s13 "${STORE[@]}"
   mounted_ok; mount_is //192.0.2.50/kvcache; has "chose 192.0.2.50"
   verdict "the launcher with the real embedded helper, no stand-in: the on-network answer is mounted"
+
+  # The helper's DEFAULT destination, how often it asks and how long it listens cannot be driven through a loopback responder
+  # (every case above moves the destination with SEAT_FG_TEST_MDNS_DEST, and real time makes a window test flaky). So the helper
+  # runs here, unmodified, on a simulated clock and a simulated socket: sendto records the destination and the time, recv
+  # advances the clock to the next scheduled datagram or by its timeout. Scenarios: silent (nobody answers), instant, drop-first
+  # (the first query is lost, as one UDP datagram can be), delayed (every answer comes 0.7 s after its query).
+  cat > "$T/sim.py" <<'PYEOF'
+import json, socket, struct, sys, time
+scenario, helper, out, name, src = sys.argv[1:6]
+clock, pending, record, count = [0.0], [], {"sends": [], "binds": []}, [0]
+def reply(query, addr):
+    return query[:2] + struct.pack(">HHHHH", 0x8400, 1, 1, 0, 0) + query[12:] + b"\xc0\x0c" + struct.pack(">HHIH", 1, 0x8001, 120, 4) + socket.inet_aton(addr)
+class Sock:
+    def __init__(self, *a, **k): self.t = None
+    def bind(self, a): record["binds"].append(list(a))
+    def setsockopt(self, *a): pass
+    def settimeout(self, t): self.t = t
+    def sendto(self, data, dest):
+        record["sends"].append([round(clock[0], 3), dest[0], dest[1]])
+        count[0] += 1
+        if scenario == "instant" or (scenario == "drop-first" and count[0] > 1) or scenario == "delayed":
+            pending.append((clock[0] + (0.7 if scenario == "delayed" else 0.0), reply(data, "192.0.2.50")))
+        return len(data)
+    def recv(self, n):
+        pending.sort(key=lambda p: p[0])
+        if pending and pending[0][0] <= clock[0] + self.t + 1e-9:
+            at, data = pending.pop(0)
+            clock[0] = max(clock[0], at)
+            return data
+        clock[0] += self.t
+        raise socket.timeout()
+socket.socket = Sock
+time.monotonic = lambda: clock[0]
+time.sleep = lambda s: clock.__setitem__(0, clock[0] + s)
+sys.argv = [helper, name, src]
+rc = 0
+try:
+    exec(compile(open(helper).read(), helper, "exec"), {"__name__": "__main__"})
+except SystemExit as e:
+    rc = e.code if isinstance(e.code, int) else 1
+record["end"] = round(clock[0], 3)
+json.dump(record, open(out, "w"))
+sys.exit(rc)
+PYEOF
+  sim_run() {   # sim_run <scenario>: SOUT (what the helper printed), SRC (its exit status); the record is in $T/sim.json
+    rm -f "$T/sim.json"
+    SOUT="$(env -i PATH=/usr/bin:/bin timeout -s KILL 20 python3 -I "$T/sim.py" "$1" "$T/helper.py" "$T/sim.json" store.local 192.0.2.10 2>"$T/sim.err")"; SRC=$?
+    [ -s "$T/sim.json" ] || PROBLEMS="$PROBLEMS [the simulation produced no record: $(head -c 300 "$T/sim.err")]"
+  }
+  sim_val() { python3 -I -c 'import json, sys; r = json.load(open(sys.argv[1])); print(eval(sys.argv[2]))' "$T/sim.json" "$1" 2>/dev/null; }
+
+  sim_run silent
+  [ "$SRC" != 0 ] && [ -z "$SOUT" ] || PROBLEMS="$PROBLEMS [exit $SRC, printed '$SOUT']"
+  [ "$(sim_val 'sorted(set((s[1], s[2]) for s in r["sends"]))')" = "[('224.0.0.251', 5353)]" ] || PROBLEMS="$PROBLEMS [the default destination is $(sim_val 'sorted(set((s[1], s[2]) for s in r["sends"]))'), want the mDNS group 224.0.0.251 port 5353]"
+  [ "$(sim_val '2 <= len(r["sends"]) <= 3')" = True ] || PROBLEMS="$PROBLEMS [the helper asked $(sim_val 'len(r["sends"])') times, want 2 or 3]"
+  [ "$(sim_val 'max(s[0] for s in r["sends"]) < 1.0')" = True ] || PROBLEMS="$PROBLEMS [a query went out after the listen window]"
+  [ "$(sim_val '0.9 <= r["end"] <= 1.5')" = True ] || PROBLEMS="$PROBLEMS [the helper listened for $(sim_val 'r["end"]') s, want about 1 s]"
+  verdict "the helper's default destination is the mDNS group and port, it asks 2 or 3 times and listens for about 1 s"
+
+  sim_run drop-first
+  [ "$SRC" = 0 ] && [ "$SOUT" = 192.0.2.50 ] || PROBLEMS="$PROBLEMS [exit $SRC, printed '$SOUT': one lost datagram must not lose the answer]"
+  verdict "the first query is lost: the next one still brings the answer"
+
+  sim_run delayed
+  [ "$SRC" = 0 ] && [ "$SOUT" = 192.0.2.50 ] || PROBLEMS="$PROBLEMS [exit $SRC, printed '$SOUT': an answer 0.7 s after the query must be heard]"
+  [ "$(sim_val 'r["end"] < 3')" = True ] || PROBLEMS="$PROBLEMS [the helper ran $(sim_val 'r["end"]') s]"
+  verdict "an answer that takes 0.7 s is heard inside the window"
 fi
 
 # ---- done ------------------------------------------------------------------------------------------------------------------

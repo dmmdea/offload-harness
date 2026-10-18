@@ -102,9 +102,33 @@ func TestSeatLauncherMountsTheCacheServerAtAnAddressOnThePinnedNetwork(t *testin
 		"no source pin: the mount is by name, as before, and nothing is looked up",
 		"a chosen address that does not mount: the seat degrades, the message keeps its text and names the address",
 		"the write-floor degrade keeps its text and names the address the share was mounted at",
+		"a /28 pinned address: the answer inside the /28 is mounted, the one outside it (same /24) is passed over",
+		"a /28 pinned address: an answer only elsewhere in its /24 is no answer on its network, the mount is by name",
+		"a /16 pinned address: an answer in its /16 beyond its /24 is mounted",
 		"the helper prints each A answer of the asked name once, in arrival order, and ignores other names, other types and junk",
 		"no answer: the helper prints nothing, exits non-zero and ends by itself inside 3 s",
 		"nothing listening at the destination: same, inside 3 s",
 		"the launcher with the real embedded helper, no stand-in: the on-network answer is mounted",
+		"the helper's default destination is the mDNS group and port, it asks 2 or 3 times and listens for about 1 s",
+		"the first query is lost: the next one still brings the answer",
+		"an answer that takes 0.7 s is heard inside the window",
+	})
+}
+
+// TestSeatLauncherLeavesAnAlreadyMountedCacheServerShareAlone (register B-55, the other half). The address is chosen when the
+// share is mounted, which is once per WSL session; llama-swap restarts the seat on a swap and the next start finds the share
+// mounted. That start must not mount again, must not unmount (another seat may be using the share, and with two addresses of the
+// store on one network a new pick at every start could trade a good mount for the Wi-Fi one) and must not ask mDNS; it says where
+// the share is and how to choose again, the status file records the address, and a write-floor degrade names it.
+func TestSeatLauncherLeavesAnAlreadyMountedCacheServerShareAlone(t *testing.T) {
+	out := kvStoreShellRun(t)
+	requirePassLines(t, out, []string{
+		"a share already mounted by name: no mount, no unmount, no lookup; the line names its source and server address and how to choose again; the status file records the address",
+		"a share already mounted at an address an earlier start chose: left alone, the address is recorded, no advice to unmount",
+		"a share already mounted that findmnt cannot describe: left alone, said so, no address recorded",
+		"a mounted share whose name is not .local: untouched and unreported, as before",
+		"a mounted share with no source pin: untouched and unreported, as before",
+		"a mounted nfs share: untouched and unreported, as before",
+		"the write-floor degrade of an already-mounted share keeps its text and says the share was mounted at that address before this start",
 	})
 }

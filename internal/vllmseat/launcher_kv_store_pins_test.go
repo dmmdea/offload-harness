@@ -1,6 +1,7 @@
 package vllmseat
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -85,17 +86,30 @@ func TestLauncherStoreAddressChoiceIsBoundedAndScoped(t *testing.T) {
 	for _, must := range []string{
 		`timeout -s KILL 3 "$py" - "$1" "$2" <<'PYEOF'`, // the hard bound: 3 s, then SIGKILL, around the embedded helper
 		`timeout -s KILL 3 "$SEAT_FG_TEST_MDNS_CMD"`,    // and around the test seam, so a stand-in cannot hold a start either
-		`224.0.0.251:5353`,                              // the mDNS group
-		`0x8001`,                                        // class IN with the QU (unicast-response) bit
-		`SEAT_FG_TEST_MDNS_DEST`,                        // the helper's destination, a test seam
-		`*.local) ;;`,                                   // only .local names are looked up
-		`"${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]`,        // and only for a cifs mount
-		`[ -n "$SRCADDR" ]`,                             // and only when a source address is pinned
-		`${L2_ADDR:+ addr=$L2_ADDR}`,                    // the status file records the chosen address
+		`224.0.0.251:5353`, // the mDNS group
+		// The helper's DEFAULT destination, as the code line that reads it. The comment above the helper also says
+		// `224.0.0.251:5353`, so the bare literal pin cannot tell a wrong port in the code (every behavioural case moves the
+		// destination with the test seam); the whole expression can.
+		`os.environ.get("SEAT_FG_TEST_MDNS_DEST", "224.0.0.251:5353")`,
+		`0x8001`,                                 // class IN with the QU (unicast-response) bit
+		`SEAT_FG_TEST_MDNS_DEST`,                 // the helper's destination, a test seam
+		`*.local) ;;`,                            // only .local names are looked up
+		`"${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]`, // and only for a cifs mount
+		`[ -n "$SRCADDR" ]`,                      // and only when a source address is pinned
+		`${L2_ON:+ addr=$L2_ON}`,                 // the status file records the address the share is on (chosen, or read from the mount)
+		`findmnt -n -o SOURCE,OPTIONS -M "$SEAT_L2_MOUNT_DIR"`, // a share that is already mounted is described, not re-chosen
 	} {
 		if !strings.Contains(s, must) {
 			t.Errorf("seat_fg.sh lost %q", must)
 		}
+	}
+	// A share that is already mounted is reported from the else branch of the mount check, never mounted again or unmounted: no
+	// line of the launcher runs umount (the hint text names the command; a command line starts with it).
+	if m := regexp.MustCompile(`(?m)^\s*(?:timeout\s+\S+\s+)*umount\b`).FindString(s); m != "" {
+		t.Errorf("the launcher unmounts a share: %q", strings.TrimSpace(m))
+	}
+	if !regexp.MustCompile(`(?s)mountpoint -q "\$SEAT_L2_MOUNT_DIR"; then.*?\n  elif \[ -n "\$SRCADDR" \] && \[ "\$\{SEAT_L2_MOUNT_TYPE:-cifs\}" = cifs \]; then\n    l2_report_mounted\n  fi`).MatchString(s) {
+		t.Error("l2_report_mounted is not the else branch of the mountpoint check (for a cifs mount with a pinned source address)")
 	}
 	// The seams are for tests: the script says so where it reads them.
 	for _, seam := range []string{"SEAT_FG_TEST_MDNS_CMD", "SEAT_FG_TEST_MDNS_DEST"} {
