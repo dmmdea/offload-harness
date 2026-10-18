@@ -9,6 +9,7 @@ package gpulease
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -140,6 +141,7 @@ var lockCapHits atomic.Int64
 
 // beginEpochHold records that this process holds the epoch lock of the lease directory dir from now. The returned function ends the hold.
 func beginEpochHold(dir string) (end func()) {
+	dir = filepath.Clean(dir) // the lease directory as it was given may be spelled any way; the paths read inside it are built clean
 	holdsMu.Lock()
 	epochHolds[dir] = gateNow()
 	holdCount.Store(int64(len(epochHolds)))
@@ -157,6 +159,7 @@ func epochHoldExhausted(path string) bool {
 	if holdCount.Load() == 0 {
 		return false
 	}
+	path = filepath.Clean(path)
 	holdsMu.Lock()
 	defer holdsMu.Unlock()
 	now := gateNow()
