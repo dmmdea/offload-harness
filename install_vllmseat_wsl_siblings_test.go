@@ -111,7 +111,8 @@ func TestInstallVLLMSeatStubsServeEveryWindowsSeatOfTheTier(t *testing.T) {
 	if strings.Contains(readRendered(t, r.out, "seat-cmd.ps1"), "gamma-vllm") {
 		t.Errorf("a seat that starts through systemd runs no PowerShell stub and must not be in its table")
 	}
-	if !strings.Contains(r.stdout, "serve every Windows seat of the tier ("+lane.ID+", beta-vllm)") {
+	// The ids are listed sorted, like the table.
+	if !strings.Contains(r.stdout, "serve every Windows seat of the tier (beta-vllm, "+lane.ID+")") {
 		t.Errorf("the next steps must say the stubs serve both seats:\n%s", r.stdout)
 	}
 	// This command writes the lane seat's env and tasks script; the other seat's are not its output.
