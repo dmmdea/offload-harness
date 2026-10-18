@@ -39,3 +39,22 @@ func RedOneNameTwoRequests(c *http.Client, base, key string) error {
 	_, err = c.Do(req)
 	return err
 }
+
+// RedBareThenAuthedOneName sends the first request bare and sets the bearer only on the second, under one name: the
+// bearer set later does not reach the request sent before the name was assigned again.
+func RedBareThenAuthedOneName(c *http.Client, base, key string) error {
+	req, err := http.NewRequest(http.MethodGet, base+"/fleet/health", nil)
+	if err != nil {
+		return err
+	}
+	if _, err := c.Do(req); err != nil {
+		return err
+	}
+	req, err = http.NewRequest(http.MethodGet, base+"/fleet/jobs", nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	_, err = c.Do(req)
+	return err
+}
