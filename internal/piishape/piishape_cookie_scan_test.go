@@ -37,6 +37,10 @@ func TestCookieClassScansLinearly(t *testing.T) {
 	for name, unit := range map[string]string{
 		"apostrophe and escaped equals sign": "t-" + ckName + `:['` + bs + `="`,
 		"escaped equals sign and a value":    ckName + `:[` + bs + `="0123456789ab"`,
+		"equals signs and escaped quotes":    ckName + "==" + bs + `"=` + bs + `"]t-` + ckName + ":",
+		"a slice literal behind them":        ckName + "==" + bs + `"=` + bs + `"][]string{e:`,
+		"a slice literal, two headers":       bs + `"=` + bs + `"[]string{->` + ckName + ": " + sckName + ":" + bs + `"` + bs + bs,
+		"quotes, backslashes and an escape":  sckName + ":=" + strings.Repeat(bs, 3) + `"=` + strings.Repeat(bs, 3) + `"]<` + bs + "u0026|",
 		"quotes, backslashes and brackets": strings.Join([]string{
 			ckName + ": ", `" => [`, `"`, `=` + strings.Repeat(bs, 15) + `"`, `: `, `a=`, `]`, strings.Repeat(bs, 4), `u0026`, `|`,
 			sckName + `":[`, strings.Repeat(bs, 3) + `"`, `'`, bs, `=` + strings.Repeat(bs, 3) + `"`, `]`, `[]string{`}, ""),
@@ -56,5 +60,24 @@ func TestCookieClassScansHostileTextInTimeOfBenignText(t *testing.T) {
 	h, b := scanTime(hostile), scanTime(benign)
 	if ratio := float64(h) / float64(b+time.Microsecond); ratio > 9 {
 		t.Errorf("256 KiB of hostile text took %v and the same of source text %v, a factor of %.1f", h, b, ratio)
+	}
+}
+
+// TestCookieQuotedValueThatStartsWithACloserIsNoLongValue: a quote after an equals sign opens a value only when a value can
+// start behind it, which is the rule that tells the quote that opens a value from the one that closes the string the header
+// sits in. The long value that starts a match follows the same rule: a quote followed by a closer or a separator is the
+// closing quote of what came before, and the 12 characters behind it are not a cookie value. Counted from that quote they made a
+// match where the span's own walk saw no pair, so a text of short pairs and such quotes held a thread alive that found no
+// long value while another route found one, and every match waited for it.
+func TestCookieQuotedValueThatStartsWithACloserIsNoLongValue(t *testing.T) {
+	v := valueFixture(881, 24, alnum)
+	re := cookieClass().Re
+	for _, first := range []string{"]", ")", "}", ";", ",", "|", "&", "<", ">", ":", " "} {
+		if m := re.FindString(ckName + `: m="` + first + v + `"`); m != "" {
+			t.Errorf("a quote followed by %q: matched %q", first, m)
+		}
+	}
+	if m := re.FindString(ckName + `: m="x` + v + `"`); m == "" {
+		t.Errorf("a quote followed by a word character: no match")
 	}
 }
