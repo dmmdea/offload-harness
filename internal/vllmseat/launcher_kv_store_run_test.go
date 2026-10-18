@@ -75,3 +75,36 @@ func TestSeatLauncherAutoFitsTheContextToAPinnedPoolBelowTheKnob(t *testing.T) {
 		"SEAT_MAX_LEN empty and the pool enough: the 131072 default is kept",
 	})
 }
+
+// TestSeatLauncherMountsTheCacheServerAtAnAddressOnThePinnedNetwork (register B-55). The store host answers mDNS for its .local
+// name from two responders: one pinned to its wired NIC (the right answer) and another agent that answers on every interface
+// with that interface's own address (a Wi-Fi address on the same /24, container bridges, a VPN address). The name resolver
+// returns ONE of them, so the mount landed on the Wi-Fi path (writes ~24 MB/s, so the launcher degraded L2 under
+// SEAT_L2_MIN_MBPS), on an unreachable bridge address, or on the VPN address that refuses the pinned source: every start for
+// three days ran without L2. The launcher now collects all the answers, mounts the first one inside the pinned source
+// address's network, and mounts by name exactly as before whenever it cannot.
+func TestSeatLauncherMountsTheCacheServerAtAnAddressOnThePinnedNetwork(t *testing.T) {
+	out := kvStoreShellRun(t)
+	requirePassLines(t, out, []string{
+		"an off-network answer first and an on-network one second: the mount uses the on-network address, one line names every answer and the choice, the status file records it",
+		"an explicit source address picks the address the same way",
+		"the FIRST answer inside the network wins",
+		"a share path below the share name is kept",
+		"the helper fails: the mount is by name exactly as before, the reason is printed, the status line is unchanged",
+		"the helper finds no answer: the mount is by name, the reason is printed",
+		"the helper exits 0 with nothing usable: the mount is by name",
+		"no answer on the source address's network: the mount is by name and the line lists what was heard",
+		"lines that are not IPv4 addresses are ignored",
+		"a helper that hangs is cut off at 3 s and the mount is by name",
+		"a name that is not .local is not looked up",
+		"an address literal is mounted as given",
+		"an nfs mount is untouched",
+		"no source pin: the mount is by name, as before, and nothing is looked up",
+		"a chosen address that does not mount: the seat degrades, the message keeps its text and names the address",
+		"the write-floor degrade keeps its text and names the address the share was mounted at",
+		"the helper prints each A answer of the asked name once, in arrival order, and ignores other names, other types and junk",
+		"no answer: the helper prints nothing, exits non-zero and ends by itself inside 3 s",
+		"nothing listening at the destination: same, inside 3 s",
+		"the launcher with the real embedded helper, no stand-in: the on-network answer is mounted",
+	})
+}
