@@ -1892,8 +1892,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	// A caller without the bearer, on a node that has a token, gets the node's description and not its operator's
 	// words or its disk (withoutPrivateFields). A node with no token is a loopback node (fleet-serve refuses to
-	// start otherwise), where the caller is this box.
-	if tok := s.opts.Cfg.FleetAuthToken; tok != "" && !bearerOK(r, tok) {
+	// start otherwise), where the caller is this box. A bearer that is presented and is not the node's writes the
+	// journal's usual throttled line (a request with none writes nothing: this route is open on purpose).
+	if !s.holdsBearer(r, healthRefusalLabel) {
 		payload = payload.withoutPrivateFields()
 	}
 	writeJSON(w, http.StatusOK, payload)
@@ -3145,8 +3146,9 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	// authed: true when no token is configured (loopback-trust posture) or
 	// the request carries a valid bearer — the same rule handleJob applies
-	// per job. Computed once per request, not per row.
-	authed := s.opts.Cfg.FleetAuthToken == "" || bearerOK(r, s.opts.Cfg.FleetAuthToken)
+	// per job. Computed once per request, not per row. A bearer that is presented and is not the node's
+	// is journaled (holdsBearer); a request with none is not, because this route is open on purpose.
+	authed := s.holdsBearer(r, jobsFeedRefusalLabel)
 	rows := make([]jobFeedRow, 0, limit)
 	for _, v := range s.jobs.Recent(limit) {
 		errStr := v.Error

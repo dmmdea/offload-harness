@@ -3,7 +3,8 @@
 // read of any rendered artifact need the fleet bearer on a node that has a fleet_auth_token, and a node that
 // listens beyond loopback with none refuses them all. A loopback node with no token stays open (the trust
 // boundary of the local MCP surface). Health and the jobs feed stay readable without it, with the private
-// fields of each withheld (healthPayload.withoutPrivateFields, handleJobs). The guards themselves live at the
+// fields of each withheld (healthPayload.withoutPrivateFields, handleJobs); a bearer presented there that is not the node's
+// is answered the same way and is journaled like any other (holdsBearer). The guards themselves live at the
 // decision points in server.go (authorizeGated, handleJob, handleMedia) because their PLACEMENT in the handler
 // sequence is load-bearing and documented there; this file holds the shared credential check and the one way a door
 // refuses a credential: a 401 or 403 and one journal line (refuseBearer, refuseNoToken, authorizeLane).
@@ -31,6 +32,9 @@ const (
 	pollRefusalLabel     = "poll"
 	withdrawRefusalLabel = "withdraw"
 	queueRefusalLabel    = "fleet-queue"
+	// The two routes that are readable without the bearer, for a caller that presents one that is not the node's.
+	healthRefusalLabel   = "health"
+	jobsFeedRefusalLabel = "jobs-feed"
 )
 
 // Why a request was refused, as the journal says it. The reason is half of the refusal throttle's key, so there are
@@ -56,6 +60,22 @@ func bearerRefusalReason(r *http.Request) string {
 func (s *Server) refuseBearer(w http.ResponseWriter, r *http.Request, label string) {
 	s.refusals.note(r, label, bearerRefusalReason(r))
 	writeError(w, http.StatusUnauthorized, "unauthorized")
+}
+
+// holdsBearer is the check the routes that stay readable without the bearer (health, the jobs feed) apply to decide
+// which view to answer: true when the node has no token (a loopback node, whose caller is this box) or the request carries
+// the bearer. A caller that sends none is simply reading what is public and writes nothing. A caller that presents a bearer
+// which is not the node's is trying a credential, so it gets the throttled journal line every other door writes for that,
+// and is still answered the view a caller without the bearer gets.
+func (s *Server) holdsBearer(r *http.Request, label string) bool {
+	tok := s.opts.Cfg.FleetAuthToken
+	if tok == "" || bearerOK(r, tok) {
+		return true
+	}
+	if r.Header.Get("Authorization") != "" {
+		s.refusals.note(r, label, refusedWrongBearer)
+	}
+	return false
 }
 
 // refuseNoToken answers a request to a node that has no fleet_auth_token and listens beyond loopback with 403 and the
