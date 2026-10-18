@@ -1090,19 +1090,35 @@ func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err er
 }
 
 // unreadableCardRecords lists, lowest epoch first, the card-lease records (e/<epoch>.json) that exist and cannot be READ: an I/O
-// failure, a directory where the file was. The reader skips them ("the sweep deals with it once it is old"), which is right for a
-// judgement of who holds the cards and wrong for a question of whether anything is held.
+// failure, a directory where the file was, or a record whose rename is installing it. The reader skips them ("the sweep deals with it
+// once it is old"), which is right for a judgement of who holds the cards and wrong for a question of whether anything is held.
+//
+// The last of those is not in the listing under its own name: a record that a rename is installing has its live name absent and only its
+// staged file in the listing, so a fresh staged record whose live name is not listed counts as a record that cannot be read (stagedInFlight).
 func (m *Manager) unreadableCardRecords() []uint64 {
 	entries, err := os.ReadDir(filepath.Join(m.leaseDir(), v2DirName))
 	if err != nil {
 		return nil
 	}
+	listed := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		listed[e.Name()] = true
+	}
 	var bad []uint64
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
+		name := e.Name()
+		if live := withoutStagedSuffix(name); live != name {
+			if !e.IsDir() && strings.HasSuffix(live, ".json") && !listed[live] && stagedInFlight(epochRecordPathByName(m.leaseDir(), live)) {
+				if epoch, perr := strconv.ParseUint(strings.TrimSuffix(live, ".json"), 10, 64); perr == nil {
+					bad = append(bad, epoch)
+				}
+			}
 			continue
 		}
-		epoch, perr := strconv.ParseUint(strings.TrimSuffix(e.Name(), ".json"), 10, 64)
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		epoch, perr := strconv.ParseUint(strings.TrimSuffix(name, ".json"), 10, 64)
 		if perr != nil {
 			continue
 		}
@@ -1112,6 +1128,11 @@ func (m *Manager) unreadableCardRecords() []uint64 {
 	}
 	sort.Slice(bad, func(i, j int) bool { return bad[i] < bad[j] })
 	return bad
+}
+
+// epochRecordPathByName is the path of the card record with this file name (<epoch>.json) in the lease directory.
+func epochRecordPathByName(leaseDir, name string) string {
+	return filepath.Join(leaseDir, v2DirName, name)
 }
 
 func errUnreadableCardRecord(epoch uint64) error {
