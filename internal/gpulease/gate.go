@@ -8,6 +8,8 @@ package gpulease
 // (deniedOpenMayClear): on a platform where rename(2) is atomic there is nothing to wait for, and the read answers at once.
 
 import (
+	"os"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,6 +75,10 @@ func (w *gateWatch) afterAbsentRead(path string) gateVerdict {
 	if absentExpiryRemembered(path) {
 		return gateExpired // this name outlasted a whole wait a moment ago
 	}
+	if epochHoldExhausted(path) {
+		lockCapHits.Add(1)
+		return gateExpired // the hold of the epoch lock this read is part of has spent what the gate may take of it
+	}
 	now := gateNow()
 	if w.first.IsZero() {
 		w.first = now
@@ -89,7 +95,7 @@ func (w *gateWatch) afterAbsentRead(path string) gateVerdict {
 
 // nameIsThere is called when the look at the name found it there although the read of it found it absent: the rename ended between the
 // two. The caller reads again at once; if that keeps happening the same deadline ends it.
-func (w *gateWatch) nameIsThere() gateVerdict {
+func (w *gateWatch) nameIsThere(path string) gateVerdict {
 	now := gateNow()
 	if w.first.IsZero() {
 		w.first = now
@@ -98,12 +104,68 @@ func (w *gateWatch) nameIsThere() gateVerdict {
 		gateExpiries.Add(1)
 		return gateExpired
 	}
+	if epochHoldExhausted(path) {
+		lockCapHits.Add(1)
+		return gateExpired
+	}
 	if w.rechecks > 0 {
 		gatePauses.Add(1)
 		gateSleep(absentPause)
 	}
 	w.rechecks++
 	return gateWaited
+}
+
+// The gate time one hold of the epoch lock may take. A second acquirer spins for the lock for epochLockAttempts x epochLockPause (2 s) and
+// then gives up on a lock held by a live process, and a hold reads the heartbeat of every lease: with a fresh staged leftover beside each
+// of N of them and nothing remembered, the hold was N budgets long, past the spin from the ninth. The memory of a wait that ran out
+// (below) makes it one wait per file, which is not a bound; this is: once a hold has run for lockGateCap on the gate's clock, every
+// further read it makes of a lease file with a fresh staged file beside an absent name answers the I/O failure at once, with no wait.
+// That is the answer a wait that ran out gives, and every decision made under the lock reads it as held (unknown is never stale), so
+// nothing is decided differently: the wait would only have turned "unknown" into a heartbeat that is fresh. The cap applies to the reads
+// of the lease directory the hold is of, by whoever makes them in this process, and never to a read outside a hold.
+//
+// One second is half the spin, and leaves the rest of the hold (a few file operations) and the wait for a refused open (readSharedFile,
+// remembered after the first wait) well inside it.
+var lockGateCap = 1 * time.Second
+
+var (
+	holdsMu    sync.Mutex
+	epochHolds = map[string]time.Time{} // lease directory -> when the hold of its epoch lock in progress began, on the gate's clock
+	holdCount  atomic.Int64             // len(epochHolds), so a read outside any hold takes no lock
+)
+
+// lockCapHits counts the reads the cap answered at once: a test seam and not a metric.
+var lockCapHits atomic.Int64
+
+// beginEpochHold records that this process holds the epoch lock of the lease directory dir from now. The returned function ends the hold.
+func beginEpochHold(dir string) (end func()) {
+	holdsMu.Lock()
+	epochHolds[dir] = gateNow()
+	holdCount.Store(int64(len(epochHolds)))
+	holdsMu.Unlock()
+	return func() {
+		holdsMu.Lock()
+		delete(epochHolds, dir)
+		holdCount.Store(int64(len(epochHolds)))
+		holdsMu.Unlock()
+	}
+}
+
+// epochHoldExhausted says whether a hold of the epoch lock of the lease directory that path is in has run for lockGateCap.
+func epochHoldExhausted(path string) bool {
+	if holdCount.Load() == 0 {
+		return false
+	}
+	holdsMu.Lock()
+	defer holdsMu.Unlock()
+	now := gateNow()
+	for dir, began := range epochHolds {
+		if strings.HasPrefix(path, dir+string(os.PathSeparator)) && now.Sub(began) >= lockGateCap {
+			return true
+		}
+	}
+	return false
 }
 
 // The memory of a wait that ran out. A staged file that stays fresh beside an absent name (a writer that died a moment ago) is not a

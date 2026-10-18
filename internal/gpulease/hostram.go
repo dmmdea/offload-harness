@@ -817,7 +817,7 @@ func readSharedFile(path string) ([]byte, error) {
 				if _, serr := statFile(path); serr != nil && errors.Is(serr, fs.ErrNotExist) {
 					return nil, err // settled: nothing is installing it and the name is not there
 				}
-				if watch.nameIsThere() == gateExpired {
+				if watch.nameIsThere(path) == gateExpired {
 					return nil, &fs.PathError{Op: "open", Path: path, Err: errRenameInFlight}
 				}
 				continue

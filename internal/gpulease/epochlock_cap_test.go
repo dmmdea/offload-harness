@@ -1,7 +1,10 @@
 package gpulease
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"testing"
 	"time"
 )
@@ -75,3 +78,85 @@ func TestTheGateWaitsOfACardGrantThatMeetsLeftoversAfterItsProbeStayInsideTheSpi
 		t.Errorf("the grant waited %v (%d pauses) on the gate with the epoch lock held, want some, and less than the spin of a second acquirer, %v: the test must observe the waits it bounds", under, p.under.Load(), spin)
 	}
 }
+
+// The cap belongs to a hold and ends with it: a read outside any hold waits its whole budget, a read of another directory is not
+// counted against a hold of this one, and the hold is forgotten when the lock is let go, however the function inside it ended.
+func TestTheCapOfAHoldOfTheEpochLockIsPerHoldAndEndsWithIt(t *testing.T) {
+	t.Run("a read outside any hold waits its whole budget", func(t *testing.T) {
+		c := onGateClock(t)
+		m := scopedRealClock(t)
+		l := mustDevices(t, m, card0)
+		defer l.Release()
+		hb := m.heartbeatPath(l.Epoch())
+		stuckBeside(t, c, hb)
+		_ = removeIfExists(hb)
+		gatePauses.Store(0)
+		if _, err := readSharedFile(hb); err == nil {
+			t.Fatal("the read of a heartbeat with only a stuck leftover beside it succeeded")
+		}
+		if got, want := gatePauses.Load(), int64(absentBudget/absentPause); got != want {
+			t.Errorf("a read outside any hold paused %d times, want %d (the whole budget)", got, want)
+		}
+	})
+	t.Run("a hold of another directory does not shorten a wait here", func(t *testing.T) {
+		c := onGateClock(t)
+		m := scopedRealClock(t)
+		other := scopedRealClock(t)
+		end := beginEpochHold(other.leaseDir())
+		defer end()
+		c.sleep(2 * lockGateCap) // that hold is long over its cap
+		l := mustDevices(t, m, card0)
+		defer l.Release()
+		hb := m.heartbeatPath(l.Epoch())
+		stuckBeside(t, c, hb)
+		_ = removeIfExists(hb)
+		gatePauses.Store(0)
+		_, _ = readSharedFile(hb)
+		if got, want := gatePauses.Load(), int64(absentBudget/absentPause); got != want {
+			t.Errorf("a read in one lease directory paused %d times while another directory's hold was over its cap, want %d", got, want)
+		}
+	})
+	t.Run("the hold is forgotten when the lock is let go, and the cap answered at once while it ran", func(t *testing.T) {
+		c := onGateClock(t)
+		m := scopedRealClock(t)
+		l := mustDevices(t, m, card0)
+		defer l.Release()
+		hb := m.heartbeatPath(l.Epoch())
+		stuckBeside(t, c, hb)
+		_ = removeIfExists(hb)
+		var inside error
+		lockCapHits.Store(0)
+		gatePauses.Store(0)
+		if err := m.withEpochLock(func() error {
+			c.sleep(lockGateCap) // the hold has run for its cap
+			_, inside = readSharedFile(hb)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if !errorsIsInFlight(inside) {
+			t.Errorf("a read inside a hold that had spent its cap = %v, want the I/O failure of a wait that ran out", inside)
+		}
+		if gatePauses.Load() != 0 || lockCapHits.Load() != 1 {
+			t.Errorf("the read inside the spent hold paused %d times and hit the cap %d times, want 0 and 1", gatePauses.Load(), lockCapHits.Load())
+		}
+		if holdCount.Load() != 0 {
+			t.Errorf("%d holds are still registered after the lock was let go", holdCount.Load())
+		}
+		if _, err := readSharedFile(hb); !errorsIsInFlight(err) {
+			t.Fatalf("a read after the hold = %v", err)
+		}
+		if got := gatePauses.Load(); got == 0 {
+			t.Errorf("a read after the hold took no pause: the cap outlived the hold")
+		}
+	})
+}
+
+func removeIfExists(path string) error {
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func errorsIsInFlight(err error) bool { return errors.Is(err, errRenameInFlight) }

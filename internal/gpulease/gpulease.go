@@ -2006,6 +2006,7 @@ func (m *Manager) withEpochLock(fn func() error) error {
 		if err == nil {
 			_ = f.Close()
 			defer os.Remove(lock)
+			defer beginEpochHold(m.leaseDir())() // the gate takes no more than lockGateCap of this hold (gate.go)
 			return fn()
 		}
 		// CONTENTION ON WINDOWS DOES NOT ALWAYS LOOK LIKE EEXIST. Deleting a file whose
