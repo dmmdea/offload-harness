@@ -164,9 +164,10 @@
     the tests below).
 - **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
   profile and 672 compact, so one more tool is about +3.2% of the 31-tool full list. The registered design accepts that cost, and the
-  `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 2,833 bytes of `tools/list` in
-  the full profile and 2,671 compact, against means of 4,102 and 2,631 over the 32 tools of the default box (bytes, not tokens). It has a
-  reviewed compact keep-list entry (three sentences: what a run is allowed for and refused with, that it never downloads a model, where it runs).
+  `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 3,092 bytes of `tools/list` in
+  the full profile and 2,930 compact, against means of 4,110 and 2,639 over the 32 tools of the default box (bytes, not tokens; the `tools/list` dump of
+  `toolsprofile_dump_test.go`). It has a reviewed compact keep-list entry (four sentences: what a run is allowed for and refused with, that it never downloads a model, that an embedding the
+  harness cannot verify is refused as `embedding_unverified`, where it runs).
 - **Trust on first use for model files.** Most template annotations carry no hash (10 of 1,135 do). The first run that meets a model with no
   declared hash records its sha256, size and modification time in `<file>.tofu` beside it; a later run with the same size and time trusts the
   record without hashing, a changed file is hashed again, and a hash that is not the recorded one defers `MODEL_SHA_MISMATCH`, naming both. The

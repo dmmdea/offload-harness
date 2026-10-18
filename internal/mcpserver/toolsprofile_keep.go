@@ -402,6 +402,11 @@ var compactKeep = []compactKeepEntry{
 	},
 	{
 		Tools:    []string{"offload_run_template"},
+		Sentence: "A prompt embedding the harness cannot verify (a file of the name in another case, more than one file that could answer it, or a file that answers another name the prompt may give) is refused with the class embedding_unverified, and nothing is run on a guess.",
+		Why:      "a node that holds an embedding in a way the harness cannot verify is refused under embedding_unverified, a class of its own that is not a missing file: a caller that never saw it would read the refusal as one and go to fetch a file",
+	},
+	{
+		Tools:    []string{"offload_run_template"},
 		Sentence: "Every run stays on this machine's lane, and a template that reads input files is never sent to the fleet.",
 		Why:      "where a run goes: this machine only, and a template that reads input files is never sent to the fleet",
 	},

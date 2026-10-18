@@ -1087,9 +1087,10 @@ so one more tool is about +3.2% of the 31-tool full list. That is a cost the reg
 `template=` argument was only ever its fallback for a cost that proved unacceptable; a template is also a different object
 from a graph (a UI-format workflow, converted on the node that runs it with that node's own listing of its nodes, and gated
 by licence), and the run-graph schema is already the longest of the media doors. The tool has a reviewed entry in the compact
-profile's keep-list, and a test (`toolsprofile_runtemplate_test.go`) pins the three sentences that carry its rules. Measured
-in bytes of the `tools/list` JSON on the default box at this head (tokens not counted), its own entry is 2,833 bytes in the
-full profile and 2,671 in the compact one, against means of 4,102 and 2,631 over the 32 tools.
+profile's keep-list, and a test (`toolsprofile_runtemplate_test.go`) pins the four sentences that carry its rules (what a run is allowed
+for and refused with, that it never downloads a model, that an embedding the harness cannot verify is refused as `embedding_unverified`,
+where it runs). Measured in bytes of the `tools/list` JSON on the default box at this head (tokens not counted), its own entry is 3,092
+bytes in the full profile and 2,930 in the compact one, against means of 4,110 and 2,639 over the 32 tools.
 
 **The gate: what a run is allowed for.** `run` asks the script to resolve the template first
 (`render/template-manifest.mjs`, `resolveRun`). Nothing is leased, started or sent for a template this release will not run;
