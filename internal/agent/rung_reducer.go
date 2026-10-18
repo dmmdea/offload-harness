@@ -46,8 +46,11 @@ import (
 //     claims, more than 8, a seat error, a deferral, an answer that is not the
 //     requested JSON, a panic or a timeout leaves the raw output.
 //   - Credential-shaped output never reaches the seat: the output is checked
-//     with the corpus vet's table (piishape.Matching) before the call, and the
-//     receipt is checked again before it replaces anything.
+//     with the corpus vet's table (piishape.Matching) and with the residual
+//     gate's keyword check (piishape.KeywordRun: a credential header keyword
+//     with a long value run a few characters behind it, whatever shape stands
+//     between them) before the call, and the receipt is checked again before it
+//     replaces anything.
 //   - Smaller or nothing: a receipt that is not strictly shorter than the output
 //     it replaces is discarded.
 //   - A repeat is honoured: a receipt is not the output, so an exact repeat of
@@ -248,6 +251,9 @@ func (r *evidenceReducer) reduce(ctx context.Context, body string) (receipt, why
 	if classes := piishape.Matching(body); len(classes) > 0 {
 		return "", "the output looks like it carries a credential or an address (" + strings.Join(classes, ", ") + ")"
 	}
+	if piishape.KeywordRun(body) {
+		return "", "the output holds a credential header keyword with a long value behind it"
+	}
 
 	cctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
@@ -321,6 +327,9 @@ func (r *evidenceReducer) reduce(ctx context.Context, body string) (receipt, why
 
 	if classes := piishape.Matching(receipt); len(classes) > 0 {
 		return "", "the receipt looks like it carries a credential or an address (" + strings.Join(classes, ", ") + ")"
+	}
+	if piishape.KeywordRun(receipt) {
+		return "", "the receipt holds a credential header keyword with a long value behind it"
 	}
 	if len(receipt) >= len(body) {
 		return "", fmt.Sprintf("the receipt (%d chars) is not smaller than the output (%d)", len(receipt), len(body))

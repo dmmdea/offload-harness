@@ -688,9 +688,12 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 		// still in the text means the redactor stopped short of the value, or that
 		// ordinary text (source code assigning to a name that holds "token") reuses a
 		// piece of what was taken as a value. Either way this trace is left out with
-		// a note; one such trace never costs the others.
-		if redactorLeftATail(red, turns) {
-			stats.Skipped = append(stats.Skipped, HarvestNote{File: filepath.Base(p), Reason: fmt.Sprintf("still holds %d or more characters of a redacted credential value after redaction (the text is not echoed)", tailWindow)})
+		// a note; one such trace never costs the others. The same goes for a credential
+		// header keyword that still has a long value run a few characters behind it,
+		// whatever shape stands between them (piishape.KeywordRun): the classes read
+		// shapes, and a shape they do not know leaves the value in the text.
+		if why := redactorLeft(red, turns); why != "" {
+			stats.Skipped = append(stats.Skipped, HarvestNote{File: filepath.Base(p), Reason: why})
 			continue
 		}
 		for class, n := range red.Hits {
@@ -716,20 +719,33 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 	return entries, stats, nil
 }
 
-// redactorLeftATail reports whether any turn still holds a surviving piece of a credential value
-// the redactor replaced.
-func redactorLeftATail(red *redactor, turns []Turn) bool {
+// redactorLeft says why a trace cannot be kept after redaction, or "" when it can: a turn still holds a
+// surviving piece of a credential value the redactor replaced, or a credential header keyword with a long
+// value run behind it. The note does not echo the text.
+func redactorLeft(red *redactor, turns []Turn) string {
+	left := func(s string) string {
+		switch {
+		case red.survivingTail(s):
+			return fmt.Sprintf("still holds %d or more characters of a redacted credential value after redaction (the text is not echoed)", tailWindow)
+		case piishape.KeywordRun(s):
+			return "still holds a credential keyword (cookie, authorization, api key, auth token, security token) with a long value behind it after redaction (the text is not echoed)"
+		}
+		return ""
+	}
 	for _, t := range turns {
-		if red.survivingTail(t.Content) {
-			return true
+		if why := left(t.Content); why != "" {
+			return why
 		}
 		for _, c := range t.ToolCalls {
-			if red.survivingTail(c.Name) || red.survivingTail(c.Args) {
-				return true
+			if why := left(c.Name); why != "" {
+				return why
+			}
+			if why := left(c.Args); why != "" {
+				return why
 			}
 		}
 	}
-	return false
+	return ""
 }
 
 // countCompactionArtifacts counts tool turns whose body is a PRODUCT of the

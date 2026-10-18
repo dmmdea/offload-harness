@@ -37,14 +37,22 @@ func (x *Redactor) Hits() map[string]int {
 func PIIClasses(s string) []string { return piishape.Matching(s) }
 
 // Residual names what is still wrong with s after this redactor has run over it: the vet classes
-// that still match, and "value-tail" when 12 or more consecutive characters of a credential value
-// this redactor replaced are still in s (a tail such as ".payload.signature" matches no vet class).
+// that still match; "value-tail" when 12 or more consecutive characters of a credential value
+// this redactor replaced are still in s (a tail such as ".payload.signature" matches no vet class);
+// and the name of the keyword check (piishape.KeywordRunClass) when a credential header keyword
+// (cookie, authorization, api key, auth token, security token) is followed within a few characters
+// by a long value run, whatever shape stands between them. The last one fails closed: it does not
+// read shapes, so it catches the ones the classes do not know, and it also stops text that merely
+// follows a keyword (see piishape.KeywordRun).
 // Run it over every string about to be written; a non-empty answer means nothing may be written.
 func (x *Redactor) Residual(s string) []string {
 	out := PIIClasses(s)
 	if x.r.survivingTail(s) {
 		out = append(out, "value-tail")
-		sort.Strings(out)
 	}
+	if piishape.KeywordRun(s) {
+		out = append(out, piishape.KeywordRunClass)
+	}
+	sort.Strings(out)
 	return out
 }
