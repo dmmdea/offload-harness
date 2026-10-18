@@ -754,6 +754,20 @@ test("resolve: an annotated embedding whose prompt gives it two names is refused
   assert.deepEqual([r.ready, r.blocking], [false, ["embedding_unverified"]], "readiness says the same");
 });
 
+// The annotated file has to be the file that answers the covered name, not only one file for each: `foo.pt` covers `foo`, but the file that
+// answers `foo.pt` can be `foo.pt.safetensors` while the file that answers `foo` is `foo.bin`, which is the one ComfyUI loads.
+test("resolve: an annotation named foo.pt, covering the prompt name foo, is refused when foo.bin answers foo and foo.pt.safetensors answers foo.pt", () => {
+  const dbl = { name: "foo.pt", directory: "embeddings", url: WEIGHTS_A("foo.pt") };
+  const prompt = "embedding:foo, a cat";
+  assert.equal(gateOf(embeddingIo(dbl, [A_FILE, "embeddings/foo.pt"], prompt)).ok, true, "control: foo.pt answers both names");
+  const io = embeddingIo(dbl, [A_FILE, "embeddings/foo.pt.safetensors", "embeddings/foo.bin"], prompt);
+  const gone = gateOf(io);
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "embedding_unverified", undefined]);
+  assert.deepEqual(gone.embedding_unverified, [{ path: "models/embeddings/foo.pt", reason: WHY_MANY, found: ["foo.bin", "foo.pt.safetensors"] }]);
+  const r = readyOf(io);
+  assert.deepEqual([r.ready, r.blocking], [false, ["embedding_unverified"]], "readiness says the same");
+});
+
 // A file under a `.git` directory of the embeddings root is a second answer for the run gate too (ComfyUI's embedding search walks it).
 test("resolve: a second file for the annotated embedding under a .git directory refuses the run as embedding_unverified, and the readiness table agrees", () => {
   const evil = "embeddings/evil_ti.safetensors";

@@ -4562,6 +4562,17 @@ test("readiness: an annotation with several prompt refs is refused when ANY ref 
   assert.deepEqual(unv(deep, "sub/foo.safetensors", covers("sub/foo.safetensors", "sub/foo", "foo")), ["embedding_unverified", WHY_MANY, ["foo.pt", "sub/foo.safetensors"]], "only the third ref has");
 });
 
+// The annotated file must be THE file that answers each name it covers, compared by identity, not merely have one answer for the annotation's
+// own name and one for the covered name. The annotation `foo.pt` covers the prompt name `foo` (foo and .pt), yet the file that answers `foo.pt`
+// can be `foo.pt.safetensors` while the file that answers `foo` is another: two present answers, two different files, and the name a prompt
+// gives opens the second.
+test("readiness: an annotation whose own file is not the file that answers a name it covers is unverified, though each name has exactly one answer", () => {
+  const covers = { annotated: true, embedding_refs: ["foo"] };
+  assert.deepEqual(unv([EMB("foo.pt.safetensors"), EMB("foo.bin")], "foo.pt", covers), ["embedding_unverified", WHY_MANY, ["foo.bin", "foo.pt.safetensors"]], "the name foo is answered by foo.bin alone");
+  assert.deepEqual(unv([EMB("foo.pt.safetensors"), EMB("foo")], "foo.pt", covers), ["embedding_unverified", WHY_MANY, ["foo", "foo.pt.safetensors"]], "or by an extension-less foo alone");
+  assert.deepEqual(embGot([EMB("foo.pt")], "foo.pt", covers), ["present", "foo.pt", null], "control: one file answers the annotation's name and the covered name");
+});
+
 test("models + readiness: two prompt names one annotation covers, the second in another case or answered by a second file, leave the annotated embedding unverified", () => {
   const withPrompt = (text, name) => C.requiredModels({ nodes: [promptNode(1, text, { properties: { models: [{ name, url: hf("example-org/w", name), directory: "embeddings" }] } })] }).active;
   const verdict = (models, files) => {
