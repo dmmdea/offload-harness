@@ -432,7 +432,10 @@ func runInstallVLLMSeat(args []string) error {
 	if dir == "" {
 		dir = filepath.Join(*home, "seat")
 	}
-	files, err := s.Artifacts(s.TemplatesDir(*root), rt)
+	// The two PowerShell stubs are one file for every Windows seat of the tier (each seat's llama-swap entry runs the same
+	// seat-cmd.ps1 with its own seat id), so the render that writes them is given the tier's other Windows seats too.
+	siblings := windowsSiblings(s, p)
+	files, err := s.ArtifactsWith(s.TemplatesDir(*root), rt, siblings)
 	if err != nil {
 		return err
 	}
@@ -464,7 +467,7 @@ func runInstallVLLMSeat(args []string) error {
 	}
 
 	if s.Launch == vllmseat.LaunchWindowsWSL {
-		fmt.Print(wslNextSteps(s, rt, dir, names))
+		fmt.Print(wslNextSteps(s, rt, dir, names, siblings))
 	} else {
 		unit := s.Unit + ".service"
 		rules := "50-llama-swap-" + s.Unit + ".rules"
@@ -487,12 +490,31 @@ func runInstallVLLMSeat(args []string) error {
 	return nil
 }
 
+// windowsSiblings are the tier's other Windows seats: its extra vLLM seats that start through WSL, in the tier's order.
+// They share the lane seat's seat directory and its two PowerShell stubs, so the render of those stubs must hold them
+// (vllmseat.Spec.ArtifactsWith). Nil for a lane seat that starts through systemd, which renders no stub, and for a tier
+// with no extra Windows seat. A sibling is listed whether or not this box can run it: the table is the same on every box
+// of the tier, and an entry for a seat that never starts is read by nothing.
+func windowsSiblings(s vllmseat.Spec, p servingProfile) []vllmseat.Spec {
+	if s.Launch != vllmseat.LaunchWindowsWSL {
+		return nil
+	}
+	var out []vllmseat.Spec
+	for _, e := range p.ExtraVLLMSeats {
+		if e.Launch == vllmseat.LaunchWindowsWSL {
+			out = append(out, e)
+		}
+	}
+	return out
+}
+
 // wslNextSteps is what is left to do after a windows-wsl render, which writes files and takes no
 // step itself: nothing is copied into the distro and no task is registered. The engine starts
 // through a scheduled task in the operator's interactive session (a WSL distro belongs to that
 // user, and llama-swap runs as SYSTEM), so the steps are a copy into the distro, an elevated
-// registration, and the llama-swap entry that drives the stubs. names are the files this run wrote.
-func wslNextSteps(s vllmseat.Spec, rt vllmseat.Runtime, dir string, names []string) string {
+// registration, and the llama-swap entry that drives the stubs. names are the files this run wrote;
+// siblings are the tier's other Windows seats, which the two stubs also serve.
+func wslNextSteps(s vllmseat.Spec, rt vllmseat.Runtime, dir string, names []string, siblings []vllmseat.Spec) string {
 	into := fmt.Sprintf("  1. In the distro %s, put these in %s (copy; this command copies nothing into the distro):\n"+
 		"       %s/%s.env", rt.Distro, rt.DistroSeatDir(), filepath.ToSlash(dir), s.ID)
 	for _, n := range names {
@@ -506,14 +528,26 @@ func wslNextSteps(s vllmseat.Spec, rt vllmseat.Runtime, dir string, names []stri
 	if filepath.ToSlash(filepath.Clean(dir)) != path.Clean(rt.SeatDir) {
 		where = fmt.Sprintf("were written to %s: copy them there", filepath.ToSlash(dir))
 	}
+	stubs := ""
+	if len(siblings) > 0 {
+		ids := []string{s.ID}
+		for _, o := range siblings {
+			ids = append(ids, o.ID)
+		}
+		sort.Strings(ids)
+		stubs = fmt.Sprintf("     The two stubs serve every Windows seat of the tier (%s): each seat's llama-swap entry passes its own seat id, and a\n"+
+			"     seat id they were not rendered for is refused (exit 5). Every render of the tier writes them whole, so a later\n"+
+			"     render does not drop a seat. This run wrote the env file and the tasks script of %s only.\n", strings.Join(ids, ", "), s.ID)
+	}
 	return "\nSTEPS REMAIN (this command only writes files):\n" + into +
 		fmt.Sprintf("  2. The four Windows scripts (seat-cmd.ps1, seat-cmdstop.ps1, hidden.vbs, register-seat-tasks.ps1) belong in %s,\n"+
 			"     the directory the llama-swap entry runs them from; they %s. Run register-seat-tasks.ps1 once from an\n"+
 			"     elevated PowerShell: it registers the two interactive-session tasks for the account %s.\n"+
+			"%s"+
 			"  3. Add the seat's llama-swap entry from setup/templates/vllm-seat/llama-swap-entry.yaml: cmd and cmdStop run the\n"+
 			"     two PowerShell stubs, ttl is the 300 s idle window and concurrencyLimit equals max_num_seqs (%d).\n"+
 			"Then start the seat once and confirm its /health answers before binding the agent lane to it.\n",
-			rt.SeatDir, where, rt.User, s.MaxNumSeqs)
+			rt.SeatDir, where, rt.User, stubs, s.MaxNumSeqs)
 }
 
 // extraSeatsNote says what this command did NOT render for the tier's extra vLLM seats, at the
@@ -523,7 +557,16 @@ func wslNextSteps(s vllmseat.Spec, rt vllmseat.Runtime, dir string, names []stri
 // unit template cannot express, so those stay the operator's step. "" for a tier with none.
 func extraSeatsNote(p servingProfile) string {
 	var b strings.Builder
+	windowsLane := p.VLLMSeat != nil && p.VLLMSeat.Launch == vllmseat.LaunchWindowsWSL
 	for _, e := range p.ExtraVLLMSeats {
+		if windowsLane && e.Launch == vllmseat.LaunchWindowsWSL {
+			// A Windows seat has no unit, wrapper scripts or polkit rule: it shares the lane seat's two PowerShell stubs, whose
+			// table this run wrote (windowsSiblings). What it still needs is its own env file and scheduled tasks.
+			fmt.Fprintf(&b, "NOTE  the tier's extra vLLM seat %s starts through WSL: it is in the table of the two PowerShell stubs this command wrote, "+
+				"but its env file (%s.env) and its two scheduled tasks (register-seat-tasks.ps1) are NOT rendered by this command, which renders the lane seat's.\n",
+				e.ID, e.ID)
+			continue
+		}
 		fmt.Fprintf(&b, "NOTE  the tier's extra vLLM seat %s is NOT rendered by this command: its launch line carries flags the shared "+
 			"unit template cannot express.\n"+
 			"      Install its unit (%s.service, no [Install] section), its wrapper scripts (%s-run.sh, %s-cmd.sh, %s-cmdstop.sh) and its "+

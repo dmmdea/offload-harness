@@ -1,5 +1,12 @@
 # seat-cmd.ps1 <seat> — llama-swap `cmd` for a vLLM seat whose engine runs in WSL. RENDERED; do not
-# hand-edit (see __SEAT_ENV__).
+# hand-edit (each seat's operating point is in its own <seat>.env).
+#
+# ONE file serves every Windows seat of the tier. Every such seat's llama-swap entry runs this same file from this same
+# directory, passing its own seat id, so the seat id, the port it answers on and its load budget are not baked into the
+# file: the table below maps each seat argument to them. A seat argument the table does not hold logs the refusal and exits
+# 5 before anything is started (a stub that waited for another seat's id would sit out its whole load budget and report a
+# fault that is not the seat's). The render holds every Windows seat the tier declares, whichever one it was run for, so
+# rendering the seats one after the other writes the same file each time.
 #
 # Why a stub and not the engine itself: llama-swap runs as SYSTEM, and a WSL distro belongs to the
 # interactive user. SYSTEM and S4U both measured unable to start the distro, so the engine is started
@@ -18,6 +25,16 @@
 # Invoke-CrashCleanup.
 param([Parameter(Mandatory)][string]$Seat)
 $ErrorActionPreference = 'Continue'
+$seats = @{
+__SEAT_MAP__
+}
+$want = $seats[$Seat]
+if ($null -eq $want) {
+  # A fixed log name: a seat argument that is not in the table is not trusted into a file name.
+  "[$(Get-Date -Format s)] unknown seat '$Seat': this stub serves $((@($seats.Keys) | Sort-Object) -join ', ') - nothing started" | Out-File -Append (Join-Path '__SEAT_DIR__' 'seat-cmd.log')
+  exit 5
+}
+$base = "http://__PROXY_HOST__:$($want.Port)"
 $task = "vllm-seat-$Seat"
 $log = Join-Path '__SEAT_DIR__' "seat-cmd-$Seat.log"
 # seat-cmdstop.ps1 (llama-swap's cmdStop) leaves this file when it is asked to stop the seat: the mark of an unload.
@@ -91,13 +108,13 @@ try { Start-ScheduledTask -TaskName $task -ErrorAction Stop } catch {
   exit 2
 }
 # Stay under llama-swap's healthCheckTimeout so IT reports the failure, not us.
-$deadline = (Get-Date).AddSeconds([Math]::Max(60, __HEALTH_TIMEOUT__ - 20))
+$deadline = (Get-Date).AddSeconds([Math]::Max(60, $want.HealthTimeout - 20))
 $up = $false
 while ((Get-Date) -lt $deadline) {
   Start-Sleep 5
   try {
-    $m = Invoke-RestMethod -Uri 'http://__PROXY_HOST__:__PORT__/v1/models' -TimeoutSec 4
-    if ($m.data.id -contains '__SEAT_ID__') { $up = $true; break }
+    $m = Invoke-RestMethod -Uri "$base/v1/models" -TimeoutSec 4
+    if ($m.data.id -contains $want.Id) { $up = $true; break }
   } catch {}
   $st = (Get-ScheduledTask -TaskName $task -ErrorAction SilentlyContinue).State
   if ($st -and $st -ne 'Running') {
@@ -112,7 +129,7 @@ Remove-Item -LiteralPath $stopMarker -Force -ErrorAction SilentlyContinue
 $miss = 0
 while ($true) {
   Start-Sleep 5
-  try { $null = Invoke-RestMethod -Uri 'http://__PROXY_HOST__:__PORT__/health' -TimeoutSec 4; $miss = 0 } catch { $miss++ }
+  try { $null = Invoke-RestMethod -Uri "$base/health" -TimeoutSec 4; $miss = 0 } catch { $miss++ }
   if ($miss -ge 6) {
     "[$(Get-Date -Format s)] seat stopped answering (30 s) - exiting so llama-swap sees it" | Out-File -Append $log
     Invoke-CrashCleanup
