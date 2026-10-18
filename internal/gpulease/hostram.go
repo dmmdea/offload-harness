@@ -14,10 +14,13 @@ package gpulease
 // touch (Options.HostRAMGiB, stamped on the record as Meta.HostRAMGiB) and the commit it will be charged
 // (Options.HostRAMCommitGiB, stamped as Meta.HostRAMCommitGiB; 0 = the same figure). The grant admits both by
 // gpuprobe.HostRAMAdmitsLoad: what it touches, plus what the leases already granted have yet to touch, must leave the headroom
-// of the memory that is available; and, where the OS enforces a commit limit, the commit charge now, plus what it will be
-// charged, plus what the leases already granted have yet to be charged, must stay under that limit less the headroom. (The
-// commit charge used to be compared to physical RAM, which refused work while most of the RAM was free: committed memory is
-// not memory in use.) The check runs on EVERY grant path:
+// of the memory that is available; and the commit charge now, plus what it will be charged, must stay under a line that depends
+// on who said what the commit is. A commit STATED (Options.HostRAMCommitGiB above 0) is judged where the OS enforces a commit
+// limit, with what the leases already granted have yet to be charged, against that limit less the headroom: committed memory is
+// not memory in use, and the limit is what the OS refuses allocations at. A commit nobody stated (a caller that declares one
+// figure) is that figure standing in for a commit, and is judged as it always was, with what the leases already granted have
+// yet to touch, against physical RAM less the headroom, because a job can commit more than it touches. The check runs on
+// EVERY grant path:
 //
 //   - a card-scoped grant (--devices, --cards, the media admission): inside grantDevicesLocked,
 //     under the epoch lock, after the cards are shown free and before the epoch is issued. The
@@ -67,7 +70,8 @@ const WaitHostRAM = "host-ram"
 // ErrHostRAM is the refusal of a grant on host-RAM grounds. The embedded check carries the numbers
 // the decision rested on; Error() is the sentence, which names the condition that refused and its numbers
 // ("waiting for host RAM: needs N GiB, only X GiB of Y GiB physical is available, Z GiB headroom" for the touched set,
-// "waiting for host RAM: needs N GiB of commit, committed X of Y GiB commit limit, Z GiB headroom" for the commit).
+// "waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB headroom" for a commit nobody stated, and
+// "waiting for host RAM: needs N GiB of commit, committed X of Y GiB commit limit, Z GiB headroom" for a stated one).
 type ErrHostRAM struct {
 	gpuprobe.HostRAMCheck
 }
@@ -444,7 +448,8 @@ func (m *Manager) HostRAMCheckLoad(need gpuprobe.HostLoad) gpuprobe.HostRAMCheck
 	return m.hostRAMCheckAgainst(need, m.Leases())
 }
 
-// HostRAMCheck is HostRAMCheckLoad for a caller that declares one figure, taken for both quantities.
+// HostRAMCheck is HostRAMCheckLoad for a caller that declares one figure, taken for both quantities. It states no commit, so the
+// commit is judged against physical RAM less the headroom, the line such a caller has always been held to.
 func (m *Manager) HostRAMCheck(needGiB float64) gpuprobe.HostRAMCheck {
 	return m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: needGiB, CommitGiB: needGiB})
 }
@@ -467,7 +472,7 @@ func (m *Manager) HostRAMCheckLoadWithout(need gpuprobe.HostLoad, epoch uint64) 
 	return m.hostRAMCheckAgainst(need, live)
 }
 
-// HostRAMCheckWithout is HostRAMCheckLoadWithout for one figure, taken for both quantities.
+// HostRAMCheckWithout is HostRAMCheckLoadWithout for one figure, taken for both quantities (and, as HostRAMCheck, with no commit stated).
 func (m *Manager) HostRAMCheckWithout(needGiB float64, epoch uint64) gpuprobe.HostRAMCheck {
 	return m.HostRAMCheckLoadWithout(gpuprobe.HostLoad{TouchGiB: needGiB, CommitGiB: needGiB}, epoch)
 }
@@ -660,7 +665,10 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 			}
 			return m.restampLocked(epoch, func(mt *Meta) {
 				mt.HostRAMGiB = cur.TouchGiB
-				mt.HostRAMCommitGiB = storedCommit(cur.TouchGiB, cur.CommitGiB)
+				mt.HostRAMCommitGiB = 0
+				if cur.CommitStated {
+					mt.HostRAMCommitGiB = storedCommit(cur.CommitGiB)
+				}
 				mt.HostRAMWaitGiB = 0
 				mt.HostRAMWaitCommitGiB = 0
 				mt.HostRAMHoldUntilMs = 0
@@ -747,7 +755,7 @@ func holdUntilOf(ms int64) time.Time {
 func awaitedLoad(live []Info, epoch uint64) (gpuprobe.HostLoad, bool) {
 	for _, l := range live {
 		if l.Epoch == epoch {
-			return gpuprobe.HostLoad{TouchGiB: l.HostRAMWaitGiB, CommitGiB: effectiveCommit(l.HostRAMWaitGiB, l.HostRAMWaitCommitGiB)}, true
+			return gpuprobe.HostLoad{TouchGiB: l.HostRAMWaitGiB, CommitGiB: effectiveCommit(l.HostRAMWaitGiB, l.HostRAMWaitCommitGiB), CommitStated: l.HostRAMWaitCommitStated}, true
 		}
 	}
 	return gpuprobe.HostLoad{}, false

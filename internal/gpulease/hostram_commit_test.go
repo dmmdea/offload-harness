@@ -250,14 +250,14 @@ func TestACommitOnlyDeclarationIsStillJudged(t *testing.T) {
 // The read-only check takes both figures; the single-figure form declares one for both.
 func TestHostRAMCheckLoadPutsBothFigures(t *testing.T) {
 	m, _ := commitScoped(t, commitHostMem(80, 130))
-	if chk := m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: 10, CommitGiB: 60}); chk.OK || !chk.CommitShort || chk.TouchShort {
+	if chk := m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: 10, CommitGiB: 60, CommitStated: true}); chk.OK || !chk.CommitShort || chk.TouchShort {
 		t.Fatalf("10 touched fits, 60 committed over 130 does not: %+v", chk)
 	}
-	if chk := m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: 10, CommitGiB: 10}); !chk.OK {
+	if chk := m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: 10, CommitGiB: 10, CommitStated: true}); !chk.OK {
 		t.Fatalf("10 and 10 fit: %+v", chk)
 	}
-	if chk := m.HostRAMCheck(30); chk.OK || !chk.CommitShort {
-		t.Fatalf("one figure of 30 is a commit of 30 (130 + 30 > 152): %+v", chk)
+	if chk := m.HostRAMCheck(30); chk.OK || !chk.CommitShort || chk.CommitStated {
+		t.Fatalf("one figure of 30 is a commit of 30, not stated, held to physical RAM (130 + 30 > 92): %+v", chk)
 	}
 }
 

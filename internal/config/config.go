@@ -1384,9 +1384,10 @@ type Config struct {
 	// GPUHostRAMHeadroomGiB is the host memory every GPU lease grant keeps free beyond what
 	// the lease declares (`gpu reserve --ram` and --ram-commit, the estimate from its model files, the class
 	// default; internal/hostneed): a grant is admitted only while the available RAM, less the working set it
-	// touches and what the leases already granted have yet to touch, stays at or above this, and (where the OS
-	// enforces a commit limit) the commit charge now, plus the commit it declares and what the leases already granted
-	// have yet to be charged, stays at or under the commit limit less this. It is also the margin of the NEAR verdict
+	// touches and what the leases already granted have yet to touch, stays at or above this, and the commit charge now, plus the
+	// commit it declares, stays at or under physical RAM less this (a commit nobody stated, which is the --ram figure), or, for a
+	// commit stated with --ram-commit where the OS enforces a commit limit, under the commit limit less this with what the leases
+	// already granted have yet to be charged. It is also the margin of the NEAR verdict
 	// `gpu status` reports. The card allocator applies the same rule before it picks cards. A load that pushes the host
 	// into paging stalls every seat on the box, so a DECLARED load is held back while it would pass either line. That
 	// bounds declarations, not what a lane then commits (gpu-lease.md, "Known limits").

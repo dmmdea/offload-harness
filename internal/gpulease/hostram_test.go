@@ -117,7 +117,7 @@ func TestACardScopedGrantIsRefusedWhenTheHostCannotTakeItsDeclaredNeed(t *testin
 	before := epochNow(t, m)
 	_, err := m.TryAcquire(ClassMedia, Options{Reason: "krea2", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: 30})
 	short := asHostRAM(t, err)
-	want := "waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
+	want := "waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical, 8.0 GiB headroom"
 	if err.Error() != want {
 		t.Fatalf("refusal text\n got: %s\nwant: %s", err.Error(), want)
 	}
@@ -368,7 +368,7 @@ func TestAcquireWithNoWaitRefusesWithTheHostRAMText(t *testing.T) {
 	_, err := m.Acquire(ClassMedia, Options{Reason: "krea2", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: 30,
 		OnHostRAMWait: func(*ErrHostRAM) { told.Add(1) }})
 	asHostRAM(t, err)
-	if want := "waiting for host RAM: needs 30.0 GiB of commit, committed 80.0 of 100.0 GiB commit limit, 8.0 GiB headroom"; err.Error() != want {
+	if want := "waiting for host RAM: needs 30.0 GiB, committed 80.0 of 100.0 GiB physical, 8.0 GiB headroom"; err.Error() != want {
 		t.Fatalf("refusal text\n got: %s\nwant: %s", err.Error(), want)
 	}
 	if told.Load() != 0 {

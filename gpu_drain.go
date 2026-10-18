@@ -1084,8 +1084,9 @@ type warmGuard struct {
 //   - a lane that declared host RAM and is still live: a seat is not loaded while a lane streams, whatever the
 //     numbers say, because the lane's own growth is not in any counter yet;
 //   - the admission rule: the seat's footprint, taken for both quantities (the working set it touches and the commit it is
-//     charged), plus what the other leases have yet to load, must leave the headroom of the available RAM and stay under the
-//     commit limit less the headroom (so a host that reads NEAR or OVER never warms).
+//     charged) and with no commit stated, plus what the other leases have yet to load, must leave the headroom of the available
+//     RAM and keep the commit charge under physical RAM less the headroom, as a caller that declares one figure always has (so a
+//     host that reads NEAR or OVER never warms).
 //
 // The lease being released is left out of both: its command has exited and it will load nothing more.
 func hostRAMWarmCheck(m *gpulease.Manager, epoch uint64) func(need hostneed.Need) string {

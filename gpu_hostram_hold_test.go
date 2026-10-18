@@ -153,7 +153,7 @@ func TestAHoldBoundOfZeroKeepsTheWholeWait(t *testing.T) {
 			if took := time.Since(start); took < waitFor-500*time.Millisecond {
 				t.Errorf("with no bound the cards are held for the whole --wait (%s), the reserve ended after %s: %v", waitFor, took, err)
 			}
-			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit", "--wait " + waitFor.String(), "pass a longer --wait"} {
+			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical", "--wait " + waitFor.String(), "pass a longer --wait"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the old refusal says %q: %v", want, err)
 				}

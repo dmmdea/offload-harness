@@ -13,9 +13,16 @@ import (
 // were physically free, and a coder-model arm whose process tree touched at most 27.8 GiB but was charged 58.1 GiB.
 var referenceWindowsHost = HostMemory{PhysicalGiB: 127.7, AvailableGiB: 75.6, CommitUsedGiB: 70.5, CommitLimitGiB: 171.7}
 
+// statedAdmits is the single-figure form with the commit STATED: the figure goes to both quantities, and the commit is judged
+// against the commit limit (a caller that measured its commit). hostRAMAdmits is the same figure with no commit stated, which is
+// judged against physical RAM (hostmemory_defaulted_test.go).
+func statedAdmits(mem HostMemory, readable, supported bool, needGiB, pendingGiB, headroomGiB float64) HostRAMCheck {
+	return hostRAMAdmitsLoad(mem, readable, supported, HostLoad{TouchGiB: needGiB, CommitGiB: needGiB, CommitStated: true}, HostLoad{TouchGiB: pendingGiB, CommitGiB: pendingGiB}, headroomGiB)
+}
+
 func TestMeasuredCoderArmIsAdmittedAgainstTheCommitLimit(t *testing.T) {
-	need := HostLoad{TouchGiB: 27.8, CommitGiB: 58.1}
-	// The comparison this replaces: commit now + the declared need against PHYSICAL RAM less the headroom. It refused the arm.
+	need := HostLoad{TouchGiB: 27.8, CommitGiB: 58.1, CommitStated: true} // the measured charge, stated
+	// The comparison this replaces for a job that states its commit: commit now + the declared need against PHYSICAL RAM less the headroom. It refused the arm.
 	if old := referenceWindowsHost.CommitUsedGiB + need.CommitGiB; old <= referenceWindowsHost.PhysicalGiB-8 {
 		t.Fatalf("the fixture is wrong: %.1f GiB projected fits %.1f GiB of physical RAM less the headroom, so the old comparison admitted it too", old, referenceWindowsHost.PhysicalGiB)
 	}
@@ -72,6 +79,7 @@ func TestEachConditionRefusesAlone(t *testing.T) {
 			HostLoad{TouchGiB: 10, CommitGiB: 34}, HostLoad{}, false, false, true, []string{"commit limit"}},
 	}
 	for _, c := range cases {
+		c.need.CommitStated = true // these cases put a STATED commit to the commit limit
 		got := hostRAMAdmitsLoad(c.mem, true, true, c.need, c.pending, 8)
 		if got.OK != c.wantOK || got.Impossible || got.TouchShort != c.wantTouchShort || got.CommitShort != c.wantCommit {
 			t.Errorf("%s: ok=%v impossible=%v touchShort=%v commitShort=%v, want ok=%v touchShort=%v commitShort=%v (%s)",
@@ -94,7 +102,7 @@ func TestEachConditionRefusesAlone(t *testing.T) {
 // The same numbers, a hard commit limit and a soft one: the commit condition is applied only where the OS enforces it.
 func TestTheCommitConditionIsAppliedOnlyWhereTheLimitIsHard(t *testing.T) {
 	mem := HostMemory{PhysicalGiB: 128, AvailableGiB: 100, CommitUsedGiB: 150, CommitLimitGiB: 192}
-	need := HostLoad{TouchGiB: 10, CommitGiB: 40} // 150 + 40 = 190 > 192 - 8
+	need := HostLoad{TouchGiB: 10, CommitGiB: 40, CommitStated: true} // 150 + 40 = 190 > 192 - 8
 	strict := hostRAMAdmitsLoad(mem, true, true, need, HostLoad{}, 8)
 	if strict.OK || !strict.CommitShort || !strict.CommitApplies {
 		t.Fatalf("a hard commit limit refuses 190 against a bound of 184: %+v (%s)", strict, strict.Why)
@@ -129,7 +137,7 @@ func TestAQuantityDeclaredAsZeroIsNotJudged(t *testing.T) {
 // A commit no state of the box can ever admit ends the request at once, as a touched set above physical RAM always did.
 func TestACommitAboveTheLimitLessHeadroomIsImpossible(t *testing.T) {
 	mem := HostMemory{PhysicalGiB: 128, AvailableGiB: 100, CommitUsedGiB: 30, CommitLimitGiB: 192}
-	got := hostRAMAdmitsLoad(mem, true, true, HostLoad{TouchGiB: 10, CommitGiB: 190}, HostLoad{}, 8)
+	got := hostRAMAdmitsLoad(mem, true, true, HostLoad{TouchGiB: 10, CommitGiB: 190, CommitStated: true}, HostLoad{}, 8)
 	if got.OK || !got.Impossible || !got.CommitShort {
 		t.Fatalf("190 GiB of commit can never fit 192 less 8: want impossible on commit, got %+v (%s)", got, got.Why)
 	}
@@ -137,8 +145,12 @@ func TestACommitAboveTheLimitLessHeadroomIsImpossible(t *testing.T) {
 		t.Errorf("an impossible commit says what to change: %q", got.Why)
 	}
 	mem.CommitLimitSoft = true
-	if soft := hostRAMAdmitsLoad(mem, true, true, HostLoad{TouchGiB: 10, CommitGiB: 190}, HostLoad{}, 8); !soft.OK {
-		t.Fatalf("a soft limit makes no commit impossible: %+v (%s)", soft, soft.Why)
+	if soft := hostRAMAdmitsLoad(mem, true, true, HostLoad{TouchGiB: 10, CommitGiB: 190, CommitStated: true}, HostLoad{}, 8); !soft.OK {
+		t.Fatalf("a soft limit makes no stated commit impossible: %+v (%s)", soft, soft.Why)
+	}
+	// A commit nobody stated is held to physical RAM on every reading, so 190 against 128 less 8 is impossible on a soft one too.
+	if unstated := hostRAMAdmitsLoad(mem, true, true, HostLoad{TouchGiB: 10, CommitGiB: 190}, HostLoad{}, 8); !unstated.Impossible || !unstated.CommitShort || !strings.Contains(unstated.Why, "physical RAM") {
+		t.Fatalf("an unstated commit above physical RAM less the headroom is impossible, naming the line: %+v (%s)", unstated, unstated.Why)
 	}
 	// A touched set above physical RAM less the headroom stays impossible, whatever the commit says.
 	if got := hostRAMAdmitsLoad(mem, true, true, HostLoad{TouchGiB: 125, CommitGiB: 1}, HostLoad{}, 8); got.OK || !got.Impossible || !got.TouchShort {
@@ -146,20 +158,24 @@ func TestACommitAboveTheLimitLessHeadroomIsImpossible(t *testing.T) {
 	}
 }
 
-// HostRAMAdmits, the single-figure form every existing caller uses, declares the same figure for both quantities: a check
-// at least as strict on commit as on touch. On the reference host a 72 GiB declaration is refused on the AVAILABLE
-// memory (75.6 less 72 leaves 3.6 of the 8 GiB headroom), not on the commit charge it used to be refused on.
+// HostRAMAdmits, the single-figure form every existing caller uses, declares the same figure for both quantities and states no
+// commit: the commit is judged against physical RAM less the headroom, as it always was. On the reference host a 72 GiB declaration
+// is refused on both conditions, and a 60 GiB one on the commit charge alone (70.5 + 60 > 119.7) although the available memory has
+// room (75.6 - 60 >= 8); the same 60 GiB STATED as a commit fits the commit limit (70.5 + 60 <= 163.7).
 func TestTheSingleFigureFormDeclaresTheSameFigureForBoth(t *testing.T) {
 	// Not the coder arm's figures: one number, the old caller's.
 	got := hostRAMAdmits(referenceWindowsHost, true, true, 72, 0, 8)
-	if got.OK || !got.TouchShort || got.CommitShort {
-		t.Fatalf("72 GiB declared once: refused on the available memory alone, got %+v (%s)", got, got.Why)
+	if got.OK || !got.TouchShort || !got.CommitShort {
+		t.Fatalf("72 GiB declared once: refused on the available memory and on the commit charge, got %+v (%s)", got, got.Why)
 	}
-	if got.CommitNeedGiB != 72 {
-		t.Errorf("the commit declaration defaults to the touched figure, got %.1f", got.CommitNeedGiB)
+	if got.CommitNeedGiB != 72 || got.CommitStated {
+		t.Errorf("the commit declaration defaults to the touched figure and is not stated, got %.1f stated=%v", got.CommitNeedGiB, got.CommitStated)
 	}
-	if fits := hostRAMAdmits(referenceWindowsHost, true, true, 60, 0, 8); !fits.OK {
-		t.Fatalf("60 GiB declared once fits both conditions on the reference host (75.6 - 60 >= 8; 70.5 + 60 <= 163.7): %+v (%s)", fits, fits.Why)
+	if refused := hostRAMAdmits(referenceWindowsHost, true, true, 60, 0, 8); refused.OK || !refused.CommitShort || refused.TouchShort {
+		t.Fatalf("60 GiB declared once: refused on the commit charge against physical RAM less the headroom (70.5 + 60 > 119.7): %+v (%s)", refused, refused.Why)
+	}
+	if fits := statedAdmits(referenceWindowsHost, true, true, 60, 0, 8); !fits.OK || !fits.CommitStated {
+		t.Fatalf("60 GiB stated as the commit fits both conditions on the reference host (75.6 - 60 >= 8; 70.5 + 60 <= 163.7): %+v (%s)", fits, fits.Why)
 	}
 }
 
@@ -287,8 +303,12 @@ func TestTheQuotedCounterexampleIsAdmittedOnBothConditions(t *testing.T) {
 	if !got.OK || got.Impossible {
 		t.Fatalf("the quoted reading admits a 32.8 GiB declaration, got ok=%v impossible=%v (%s)", got.OK, got.Impossible, got.Why)
 	}
-	if math.Abs(got.CommitProjectedGiB-114.4) > 1e-6 || math.Abs(got.CommitBoundGiB-179.7) > 1e-6 {
-		t.Errorf("projected commit = %v against a bound of %v, want 114.4 against 179.7", got.CommitProjectedGiB, got.CommitBoundGiB)
+	if math.Abs(got.CommitProjectedGiB-114.4) > 1e-6 || math.Abs(got.CommitBoundGiB-119.7) > 1e-6 {
+		t.Errorf("declared once, the commit is held to physical RAM: projected commit = %v against a bound of %v, want 114.4 against 119.7", got.CommitProjectedGiB, got.CommitBoundGiB)
+	}
+	stated := statedAdmits(mem, true, true, 32.8, 0, 8)
+	if !stated.OK || math.Abs(stated.CommitProjectedGiB-114.4) > 1e-6 || math.Abs(stated.CommitBoundGiB-179.7) > 1e-6 {
+		t.Errorf("stated, it is held to the commit limit: ok=%v projected %v bound %v, want 114.4 against 179.7 (%s)", stated.OK, stated.CommitProjectedGiB, stated.CommitBoundGiB, stated.Why)
 	}
 	if math.Abs(got.AvailableAfterGiB-50.2) > 1e-6 || got.AvailableAfterGiB < 8 {
 		t.Errorf("available after = %v, want 50.2, above the 8 GiB floor", got.AvailableAfterGiB)
@@ -303,11 +323,15 @@ func TestTheDocumentedReadingsAgreeWithTheRule(t *testing.T) {
 	if v := mem.Verdict(8); v != HostOK {
 		t.Errorf("129.3 GiB committed with 49.1 available under a 187.7 limit is OK, not %s", v)
 	}
-	over := hostRAMAdmits(mem, true, true, 41.2, 0, 8)
+	over := statedAdmits(mem, true, true, 41.2, 0, 8)
 	if over.OK || !over.TouchShort || over.CommitShort {
-		t.Errorf("41.2 GiB is refused on the available memory alone: %+v (%s)", over, over.Why)
+		t.Errorf("41.2 GiB stated is refused on the available memory alone: %+v (%s)", over, over.Why)
 	}
-	if fits := hostRAMAdmits(mem, true, true, 41.0, 0, 8); !fits.OK {
-		t.Errorf("41.0 GiB leaves 8.1 GiB of the available memory and 170.3 of 179.7 commit: %+v (%s)", fits, fits.Why)
+	if fits := statedAdmits(mem, true, true, 41.0, 0, 8); !fits.OK {
+		t.Errorf("41.0 GiB stated leaves 8.1 GiB of the available memory and 170.3 of 179.7 commit: %+v (%s)", fits, fits.Why)
+	}
+	// Declared once it is also over the commit charge's old line, which this reading is already past (129.3 > 119.7).
+	if once := hostRAMAdmits(mem, true, true, 41.0, 0, 8); once.OK || !once.CommitShort {
+		t.Errorf("41.0 GiB declared once is refused on the commit charge: %+v (%s)", once, once.Why)
 	}
 }

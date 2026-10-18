@@ -22,7 +22,7 @@ import (
 // and the pending commit of the lease is that figure, not the touched one.
 func TestACommitBelowTheTouchedSetIsTakenAsStated(t *testing.T) {
 	m, _ := commitScoped(t, commitHostMem(90, 140))
-	if chk := m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: 60, CommitGiB: 5}); !chk.OK {
+	if chk := m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: 60, CommitGiB: 5, CommitStated: true}); !chk.OK {
 		t.Fatalf("the read-only check takes the commit as stated: %+v", chk)
 	}
 	l, err := m.TryAcquire(ClassMedia, Options{Reason: "mapped", TTL: time.Hour, Devices: []string{card0}, HostRAMGiB: 60, HostRAMCommitGiB: 5})

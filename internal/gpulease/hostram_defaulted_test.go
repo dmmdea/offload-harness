@@ -6,10 +6,22 @@ package gpulease
 // RAM, a 160 GiB commit limit, 8 GiB of headroom, so the unstated line is 92 and the stated one 152.
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+// recordText is the lease's record file as written: Info reads an absent commit as the touched figure, so only the file says
+// whether a commit was stated.
+func recordText(t *testing.T, m *Manager, epoch uint64) string {
+	t.Helper()
+	raw, err := os.ReadFile(epochRecordPath(m.leaseDir(), epoch))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(raw)
+}
 
 func TestAGrantThatStatesNoCommitIsJudgedAgainstPhysicalRAMLessTheHeadroom(t *testing.T) {
 	m, _ := commitScoped(t, commitHostMem(80, 70))
@@ -33,8 +45,8 @@ func TestAGrantThatStatesNoCommitIsJudgedAgainstPhysicalRAMLessTheHeadroom(t *te
 		t.Fatalf("a stated commit of 30 fits the commit limit (70 + 30 <= 152): %v", err)
 	}
 	defer func() { _ = l.Release() }()
-	if rec := recordOf(t, m, l.Epoch()); rec.HostRAMGiB != 30 || rec.HostRAMCommitGiB != 30 {
-		t.Fatalf("a stated commit is on the record even when it equals the touched figure, or a reader would take it for the default: %+v", rec)
+	if raw := recordText(t, m, l.Epoch()); !strings.Contains(raw, `"host_ram_commit_gib":30`) {
+		t.Fatalf("a stated commit is on the record even when it equals the touched figure, or a reader would take it for the default: %s", raw)
 	}
 }
 
@@ -57,8 +69,8 @@ func TestADeferredCommitKeepsBeingStatedOrNotThroughTheAwait(t *testing.T) {
 	if err := l.AwaitHostRAM(AwaitHostRAMOptions{}); err != nil {
 		t.Fatalf("50 + 30 fits the 92 GiB line: %v", err)
 	}
-	if rec := recordOf(t, m, l.Epoch()); rec.HostRAMGiB != 30 || rec.HostRAMCommitGiB != 0 {
-		t.Fatalf("an unstated commit stays unstated on the record: %+v", rec)
+	if raw := recordText(t, m, l.Epoch()); !strings.Contains(raw, `"host_ram_gib":30`) || strings.Contains(raw, "host_ram_commit_gib") {
+		t.Fatalf("an unstated commit stays unstated on the record: %s", raw)
 	}
 
 	m2, _ := commitScoped(t, commitHostMem(80, 70))
@@ -70,7 +82,7 @@ func TestADeferredCommitKeepsBeingStatedOrNotThroughTheAwait(t *testing.T) {
 	if err := l2.AwaitHostRAM(AwaitHostRAMOptions{}); err != nil {
 		t.Fatalf("a stated wait of 30 fits the commit limit (70 + 30 <= 152): %v", err)
 	}
-	if rec := recordOf(t, m2, l2.Epoch()); rec.HostRAMGiB != 30 || rec.HostRAMCommitGiB != 30 {
-		t.Fatalf("a stated commit stays stated through the await: %+v", rec)
+	if raw := recordText(t, m2, l2.Epoch()); !strings.Contains(raw, `"host_ram_commit_gib":30`) {
+		t.Fatalf("a stated commit stays stated through the await: %s", raw)
 	}
 }

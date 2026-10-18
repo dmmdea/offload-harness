@@ -4,7 +4,7 @@ package pipeline
 //
 // A cluster placement (and `offload_*` with gpu_wait_ms 0) asks the node for ONE gated try. When the cards are
 // free and only the host's memory is short, the grant refuses with the sentence the operator reads ("waiting for
-// host RAM: needs N GiB of commit, committed X of Y GiB commit limit, Z GiB headroom"). That sentence is the node's verdict:
+// host RAM: needs N GiB, committed X of Y GiB physical, Z GiB headroom"). That sentence is the node's verdict:
 // every queued answer that explains itself, and a placer that quotes the node, depends on it reaching the caller.
 // On a call that had waited, hostRAMAnswer carried it; on a call that could not wait, the pinned and the auto plan
 // fell through the queue step with held=nil and said "promised to callers ahead of this one", which is false and
@@ -26,7 +26,7 @@ import (
 
 // waitZeroSentence is what the grant says for the krea2 lane (32.8 GiB declared on a 16 GiB card) on a
 // 100 GiB host with 95 GiB committed and the default 8 GiB headroom.
-const waitZeroSentence = "waiting for host RAM: needs 32.8 GiB of commit, committed 95.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
+const waitZeroSentence = "waiting for host RAM: needs 32.8 GiB, committed 95.0 of 100.0 GiB physical, 8.0 GiB headroom"
 
 // noWait binds the krea2 lane and a wait of zero: one gated try, no queue.
 func noWait(extra func(*config.Config)) func(*config.Config) {

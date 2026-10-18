@@ -224,7 +224,8 @@ func Allocate(in AllocInput) (Allocation, error) {
 	sort.SliceStable(claimedFit, func(i, j int) bool { return less(claimedFit[i], claimedFit[j]) })
 	sort.SliceStable(skipped, func(i, j int) bool { return skipped[i].Index < skipped[j].Index })
 
-	hostNeed := gpuprobe.HostLoad{TouchGiB: in.HostNeedGiB, CommitGiB: in.HostNeedCommitGiB}
+	// The commit is stated when the input carries one above 0 (the grant reads Options.HostRAMCommitGiB the same way).
+	hostNeed := gpuprobe.HostLoad{TouchGiB: in.HostNeedGiB, CommitGiB: in.HostNeedCommitGiB, CommitStated: in.HostNeedCommitGiB > 0}
 	if hostNeed.CommitGiB <= 0 {
 		hostNeed.CommitGiB = hostNeed.TouchGiB
 	}

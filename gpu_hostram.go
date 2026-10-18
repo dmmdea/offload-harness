@@ -21,31 +21,34 @@ import (
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 )
 
-// resolveReserveHostCommit is the commit a reserve declares beside the working set need: the operator's --ram-commit when given,
-// else the same figure (so a job that states one number is judged on commit at least as strictly as on what it touches). A commit
-// is declared beside the working set it goes with, so it needs a declaration above 0 (--ram given or estimated); it says on out
-// when it differs from the working set. A job whose commit is smaller than its working set (mapped files count in the working set
-// and not in the commit) cannot say so: --ram-commit below --ram is taken as stated, but unset is never below it.
-func resolveReserveHostCommit(given bool, commitGiB float64, need hostneed.Need, out io.Writer) (float64, error) {
+// resolveReserveHostLoad is what a reserve declares of the host's memory: the working set need and the commit beside it. The commit
+// is the operator's --ram-commit when given, and then STATED (judged against the OS commit limit, even when it equals the working
+// set); else it is the same figure as the working set and NOT stated (judged against physical RAM less the headroom, the line a job
+// that declares one number has always been held to). A commit is declared beside the working set it goes with, so it needs a
+// declaration above 0 (--ram given or estimated); it says on out when it differs from the working set. A job whose commit is smaller
+// than its working set (mapped files count in the working set and not in the commit) cannot say so by leaving it unset:
+// --ram-commit below --ram is taken as stated, but unset is never below it.
+func resolveReserveHostLoad(given bool, commitGiB float64, need hostneed.Need, out io.Writer) (gpuprobe.HostLoad, error) {
 	if !given {
-		return need.GiB, nil
+		return gpuprobe.HostLoad{TouchGiB: need.GiB, CommitGiB: need.GiB}, nil
 	}
 	if commitGiB <= 0 {
-		return 0, errors.New("--ram-commit must be a number of GiB above 0 (unset = the --ram figure); a job that is charged no commit declares no host RAM at all, which is --ram 0")
+		return gpuprobe.HostLoad{}, errors.New("--ram-commit must be a number of GiB above 0 (unset = the --ram figure); a job that is charged no commit declares no host RAM at all, which is --ram 0")
 	}
 	if need.GiB <= 0 {
-		return 0, fmt.Errorf("--ram-commit %s GiB needs a host-RAM declaration above 0 to go with, and --ram resolved to 0 for this reserve: a commit is declared beside the working set the job touches (pass --ram <GiB>)", strconv.FormatFloat(commitGiB, 'f', -1, 64))
+		return gpuprobe.HostLoad{}, fmt.Errorf("--ram-commit %s GiB needs a host-RAM declaration above 0 to go with, and --ram resolved to 0 for this reserve: a commit is declared beside the working set the job touches (pass --ram <GiB>)", strconv.FormatFloat(commitGiB, 'f', -1, 64))
 	}
 	if commitGiB != need.GiB {
 		fmt.Fprintf(out, "gpu reserve: declaring %.1f GiB of commit (--ram-commit), beside %.1f GiB touched\n", commitGiB, need.GiB)
 	}
-	return commitGiB, nil
+	return gpuprobe.HostLoad{TouchGiB: need.GiB, CommitGiB: commitGiB, CommitStated: true}, nil
 }
 
-// commitDeclared is the commit to put on the options of a declaration: nothing when it is the touched figure (the lease takes
-// that default), so a reserve that stated one figure declares exactly what it always did.
+// commitDeclared is the commit to put on the options of a declaration: the stated commit (even one equal to the touched figure,
+// which is judged against another line than the default), and nothing when none was stated (the lease takes the touched figure),
+// so a reserve that declared one figure declares exactly what it always did.
 func commitDeclared(l gpuprobe.HostLoad) float64 {
-	if l.CommitGiB != l.TouchGiB {
+	if l.CommitStated {
 		return l.CommitGiB
 	}
 	return 0

@@ -171,7 +171,7 @@ func TestReserveWaitZeroRefusesWithTheHostRAMText(t *testing.T) {
 	if !errors.As(err, &short) {
 		t.Fatalf("want the host-RAM refusal, got %T: %v", err, err)
 	}
-	for _, want := range []string{"waiting for host RAM: needs 30.0 GiB of commit, committed 90.0 of 100.0 GiB commit limit, 8.0 GiB headroom", "--wait", "--ram"} {
+	for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical, 8.0 GiB headroom", "--wait", "--ram"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the refusal must contain %q: %v", want, err)
 		}
@@ -424,7 +424,7 @@ func TestReserveCardsWaitZeroRefusesWithTheHostRAMText(t *testing.T) {
 	commit := newHostCommit(90)
 	useHostCommit(t, commit)
 	err := runGPUReserve(reserveWithCmd(cfg, []string{"--class", "media", "--cards", "1", "--wait", "0", "--ram", "30"}))
-	if err == nil || !strings.Contains(err.Error(), "waiting for host RAM: needs 30.0 GiB of commit, committed 90.0 of 100.0 GiB commit limit, 8.0 GiB headroom") {
+	if err == nil || !strings.Contains(err.Error(), "waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical, 8.0 GiB headroom") {
 		t.Fatalf("--cards on a host without the room must refuse with the host-RAM text, got: %v", err)
 	}
 	if l := m.Leases(); len(l) != 0 {

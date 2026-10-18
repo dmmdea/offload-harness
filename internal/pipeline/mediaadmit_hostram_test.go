@@ -80,7 +80,7 @@ func TestAGrantTimeShortageOnAFreeCardWaitsWithTheHostRAMText(t *testing.T) {
 	if res.Meta.ErrClass != "gpu_queued" {
 		t.Fatalf("want a queued answer, got ok=%v class=%q: %s", res.OK, res.Meta.ErrClass, res.Reason)
 	}
-	if !strings.Contains(res.Reason, "waiting for host RAM: needs 32.8 GiB of commit, committed 95.0 of 100.0 GiB commit limit, 8.0 GiB headroom") {
+	if !strings.Contains(res.Reason, "waiting for host RAM: needs 32.8 GiB, committed 95.0 of 100.0 GiB physical, 8.0 GiB headroom") {
 		t.Errorf("the reason must be the grant's refusal: %s", res.Reason)
 	}
 	if got := len(f.started()); got != 0 {

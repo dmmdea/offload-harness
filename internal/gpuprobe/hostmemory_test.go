@@ -15,9 +15,9 @@ func host128(commitUsed, available float64) HostMemory {
 
 func near(a, b float64) bool { return math.Abs(a-b) < 1e-9 }
 
-// The single-figure form of the rule, every term: a figure declared once is taken for both quantities, and an admission needs
-// available - need - pending >= headroom AND commit used + need + pending <= commit limit - headroom (here 192 - 8 = 184 GiB).
-// The numbers are the incident's: a 56 GiB baseline (so 72 GiB of 128 available) and two 32.75 GiB krea2 lanes.
+// The single-figure form of the rule, every term: a figure declared once is taken for both quantities and states no commit, and an
+// admission needs available - need - pending >= headroom AND commit used + need + pending <= physical RAM - headroom (here 128 - 8 =
+// 120 GiB). The numbers are the incident's: a 56 GiB baseline (so 72 GiB of 128 available) and two 32.75 GiB krea2 lanes.
 func TestHostRAMAdmitsTheRule(t *testing.T) {
 	cases := []struct {
 		name            string
@@ -35,10 +35,10 @@ func TestHostRAMAdmitsTheRule(t *testing.T) {
 		{"a quarter GiB under the available floor is refused", 50, 17.75, 10, 0, 8, false, false, "waiting for host RAM"},
 		{"the part of a granted lease that has not loaded counts", 80, 60, 10, 43, 8, false, false, "+43.0 GiB still to load"},
 		{"the same lease fits when nothing granted before it is still loading", 80, 60, 10, 0, 8, true, false, ""},
-		{"the commit limit refuses a lease the available memory would admit", 170, 100, 20, 0, 8, false, false, "committed 170.0 of 192.0 GiB commit limit"},
+		{"the commit charge refuses a lease the available memory would admit", 170, 100, 20, 0, 8, false, false, "committed 170.0 of 128.0 GiB physical"},
 		{"a lease that declares nothing is admitted even when the box is over", 190, 0, 0, 40, 8, true, false, ""},
 		{"a need above physical less headroom is impossible, not queued", 10, 100, 130, 0, 8, false, true, "can never admit"},
-		{"zero headroom admits up to the available memory itself", 50, 100, 100, 0, 0, true, false, ""},
+		{"zero headroom admits up to the available memory itself", 20, 100, 100, 0, 0, true, false, ""},
 	}
 	for _, c := range cases {
 		got := hostRAMAdmits(host128(c.commit, c.avail), true, true, c.need, c.pending, c.headroom)
@@ -57,7 +57,7 @@ func TestHostRAMAdmitsTheRule(t *testing.T) {
 // The refusal reads as the operator asked for it: what the lease needs, what is available of what is physical, and the
 // headroom, in one line a person can act on; the commit sentence carries the commit limit it was judged against.
 func TestHostRAMRefusalTextNamesTheNumbers(t *testing.T) {
-	mem := HostMemory{PhysicalGiB: 127.7, AvailableGiB: 31, CommitUsedGiB: 96.4, CommitLimitGiB: 187.7}
+	mem := HostMemory{PhysicalGiB: 127.7, AvailableGiB: 31, CommitUsedGiB: 40, CommitLimitGiB: 187.7}
 	got := hostRAMAdmits(mem, true, true, 33.4, 0, 8)
 	want := "waiting for host RAM: needs 33.4 GiB, only 31.0 GiB of 127.7 GiB physical is available, 8.0 GiB headroom"
 	if got.Why != want {
@@ -70,13 +70,22 @@ func TestHostRAMRefusalTextNamesTheNumbers(t *testing.T) {
 		t.Fatalf("available after %.1f limit %.1f: the check must carry the arithmetic it decided on", got.AvailableAfterGiB, got.LimitGiB)
 	}
 	mem = HostMemory{PhysicalGiB: 127.7, AvailableGiB: 90, CommitUsedGiB: 160, CommitLimitGiB: 171.7}
-	got = hostRAMAdmits(mem, true, true, 33.4, 0, 8)
+	got = statedAdmits(mem, true, true, 33.4, 0, 8)
 	want = "waiting for host RAM: needs 33.4 GiB of commit, committed 160.0 of 171.7 GiB commit limit, 8.0 GiB headroom"
 	if got.Why != want {
 		t.Fatalf("commit refusal text\n got: %s\nwant: %s", got.Why, want)
 	}
 	if !near(got.CommitProjectedGiB, 160+33.4) || !near(got.CommitBoundGiB, 171.7-8) {
 		t.Fatalf("projected %.1f bound %.1f: the check must carry the arithmetic it decided on", got.CommitProjectedGiB, got.CommitBoundGiB)
+	}
+	// The same figure with no commit stated names the physical line it was held to, and says what states one.
+	got = hostRAMAdmits(mem, true, true, 33.4, 0, 8)
+	want = "waiting for host RAM: needs 33.4 GiB, committed 160.0 of 127.7 GiB physical, 8.0 GiB headroom (no commit stated, so it is held to physical RAM; a stated commit is held to the 171.7 GiB commit limit)"
+	if got.Why != want {
+		t.Fatalf("unstated commit refusal text\n got: %s\nwant: %s", got.Why, want)
+	}
+	if !near(got.CommitProjectedGiB, 160+33.4) || !near(got.CommitBoundGiB, 127.7-8) || got.CommitStated {
+		t.Fatalf("projected %.1f bound %.1f stated %v: the unstated line is physical RAM less the headroom", got.CommitProjectedGiB, got.CommitBoundGiB, got.CommitStated)
 	}
 }
 
@@ -245,7 +254,7 @@ func TestHostRAMAdmitsAlsoRequiresTheAvailableFloor(t *testing.T) {
 			HostMemory{PhysicalGiB: 128, AvailableGiB: 0, CommitUsedGiB: 128, CommitLimitGiB: 192}, 0, 0, true, ""},
 	}
 	for _, c := range cases {
-		got := hostRAMAdmits(c.mem, true, true, c.need, c.pending, 8)
+		got := statedAdmits(c.mem, true, true, c.need, c.pending, 8) // a STATED commit, judged against the commit limit
 		if got.OK != c.wantOK || got.Impossible {
 			t.Errorf("%s: ok=%v impossible=%v, want ok=%v (%s)", c.name, got.OK, got.Impossible, c.wantOK, got.Why)
 		}
