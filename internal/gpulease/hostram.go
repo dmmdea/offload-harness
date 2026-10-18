@@ -124,7 +124,8 @@ func (m *Manager) hostMemory() (gpuprobe.HostMemory, bool) {
 }
 
 // heldLoad is what the processes under a lease holder hold right now, and whether that could be read: TouchGiB is their
-// working set (resident) and CommitGiB their private bytes (the currency of the system commit charge).
+// working set (resident) and CommitGiB their private bytes (the currency of the system commit charge: PrivateUsage on
+// Windows, the private writable mappings on Linux).
 func (m *Manager) heldLoad(holderPID int) (gpuprobe.HostLoad, bool) {
 	if m.workload != nil {
 		return m.workload(holderPID)
@@ -207,7 +208,9 @@ func membersResidentGiB(members []TreeMember) (float64, bool) {
 // EACH QUANTITY IS SUBTRACTED FROM ITS OWN DECLARATION. A lease declares the host RAM it
 // will touch, in RAM units (the files that stream from RAM, hostneed), and the working set is what is subtracted from it to
 // find what is still to be touched. It declares the commit it will be charged, and the private bytes are what is subtracted
-// from that: private bytes ARE the currency of the commit charge, memory a process has been promised, resident or not. On
+// from that: private bytes ARE the currency of the commit charge, memory a process has been promised, resident or not (on
+// Linux that is VmData, the private writable mappings, because Committed_AS charges a mapping when it is made; the touched
+// part, RssAnon, would count an untouched mapping once in the charge and again here). On
 // Windows a process's GPU allocations may be charged to it without ever occupying system RAM (a llama-server with every
 // layer on the card was reported at 29.2 GiB private beside 25.7 GiB of VRAM), which is exactly why private bytes must not be
 // subtracted from a touched-set declaration (a lane would read as fully loaded while most of its RAM was still to come, and
