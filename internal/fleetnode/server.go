@@ -1011,6 +1011,31 @@ func (s *Server) RefreshAgentResidency() {
 // Handler returns the routed mux for the three contract endpoints.
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
+	s.registerRoutes(mux)
+	// SF-16: every route sits behind the ingress guard: a Host outside loopback, the tailnet
+	// and every zone in tailnet_suffix / tailnet_suffixes (unless it is the address the
+	// connection arrived on), any Origin
+	// header, and a POST that is not application/json (the lanes' own Content-Type checks
+	// are uneven: the queue lane has none). fleet_ingress_guard: warn (default) logs,
+	// enforce refuses.
+	return netguard.IngressGuard(netguard.IngressOptions{
+		Mode:            s.opts.Cfg.FleetIngressGuardMode(),
+		RequireJSONPost: true,
+		Key:             "fleet_ingress_guard",
+		Logf:            log.Printf,
+	}, mux)
+}
+
+// routeRegistrar is the one way a route reaches the node's mux: registerRoutes and fleetqueue.Mount take it and nothing
+// wider, so a test can hand them a registrar that records every pattern and hold each route to the credential rules
+// (route_table_test.go). A route added through any other call has to widen this interface, and so the test, first.
+type routeRegistrar interface {
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}
+
+// registerRoutes registers every route the node serves. Add a route here and the credential tests insist it is a row
+// of the tables they run over (refusalDoors, or publicRoutes for a route that answers without the bearer).
+func (s *Server) registerRoutes(mux routeRegistrar) {
 	mux.HandleFunc("GET /fleet/health", s.handleHealth)
 	mux.HandleFunc("POST /fleet/dispatch", s.handleDispatch)
 	// The vision lane (0.116.0): its own route ONLY because its body is an
@@ -1071,18 +1096,6 @@ func (s *Server) Handler() http.Handler {
 		// surface the agent lane refuses).
 		fleetqueue.Mount(mux, s.queue, s.queueAuthOK)
 	}
-	// SF-16: every route sits behind the ingress guard: a Host outside loopback, the tailnet
-	// and every zone in tailnet_suffix / tailnet_suffixes (unless it is the address the
-	// connection arrived on), any Origin
-	// header, and a POST that is not application/json (the lanes' own Content-Type checks
-	// are uneven: the queue lane has none). fleet_ingress_guard: warn (default) logs,
-	// enforce refuses.
-	return netguard.IngressGuard(netguard.IngressOptions{
-		Mode:            s.opts.Cfg.FleetIngressGuardMode(),
-		RequireJSONPost: true,
-		Key:             "fleet_ingress_guard",
-		Logf:            log.Printf,
-	}, mux)
 }
 
 // queueAuthOK is the queue holder surface's rule, handed to fleetqueue.Mount: the bearer when a token is configured,

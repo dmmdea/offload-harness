@@ -4,7 +4,8 @@ package fleetnode
 // admission path (auth_before_body_test.go). The chat lane, both kvslot routes, the PAIR relay, the compose-project door
 // and the four queue routes that carry a body each answer a caller without the credential before they have buffered a
 // byte of it, so what such a caller costs the node is the auth verdict and nothing else. The table is refusalDoors (every
-// door that refuses a credential, in refusal_every_door_test.go): a door added there is held to this rule too.
+// door that refuses a credential, in refusal_every_door_test.go), and route_table_test.go holds it complete: a route the
+// node serves that takes a body has a row there, so it is held to this rule too.
 
 import (
 	"net/http"
@@ -15,7 +16,7 @@ import (
 func bodyDoors() []refusalDoor {
 	var out []refusalDoor
 	for _, d := range refusalDoors {
-		if d.method == http.MethodPost {
+		if takesBody(d.method) {
 			out = append(out, d)
 		}
 	}
@@ -24,9 +25,6 @@ func bodyDoors() []refusalDoor {
 
 func TestABearerlessPostToEveryDoorReadsNoBodyBytes(t *testing.T) {
 	const size = 20 << 20
-	if len(bodyDoors()) < 14 {
-		t.Fatalf("the door table holds %d doors that take a body, want every one of them (dispatch, vision, text, stt, pair relay, chat, kvslot save and restore, compose-project, media-job and the four queue routes)", len(bodyDoors()))
-	}
 	for _, door := range bodyDoors() {
 		for name, hdr := range map[string]map[string]string{
 			"no bearer":    nil,
@@ -35,7 +33,7 @@ func TestABearerlessPostToEveryDoorReadsNoBodyBytes(t *testing.T) {
 			t.Run(door.name+" with "+name, func(t *testing.T) {
 				s := refusalServer(t, holderKey)
 				cb := &countingBody{left: size}
-				rec := post(s, door.path, cb, size, "application/json", hdr)
+				rec := send(s, door.method, door.path, cb, size, "application/json", hdr)
 				if cb.read != 0 {
 					t.Errorf("the node read %d byte(s) of a body it was going to refuse for its credential", cb.read)
 				}
@@ -57,7 +55,7 @@ func TestAPostToEveryDoorOfATokenlessNodeBeyondLoopbackReadsNoBodyBytes(t *testi
 		t.Run(door.name, func(t *testing.T) {
 			s := refusalServer(t, "")
 			cb := &countingBody{left: size}
-			rec := post(s, door.path, cb, size, "application/json", nil)
+			rec := send(s, door.method, door.path, cb, size, "application/json", nil)
 			if cb.read != 0 {
 				t.Errorf("the node read %d byte(s) of a body it was going to refuse for want of a token", cb.read)
 			}
