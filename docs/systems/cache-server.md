@@ -92,11 +92,24 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    The seat wrapper mounts the share before the MP server starts when `SEAT_L2_MOUNT_SRC` / `SEAT_L2_MOUNT_DIR`
    (and optionally `SEAT_L2_MOUNT_OPTS`, `SEAT_L2_MOUNT_TYPE`, default `cifs`, and `SEAT_L2_MOUNT_SRCADDR` — `auto` pins the
    CIFS source address to the lowest-metric default-route interface, for a box with a wired and a Wi-Fi NIC on one subnet
-   whose store allow-list names only the wired address) are set. When the mount fails the
+   whose store allow-list names only the wired address) are set. With a `.local` store name and a pinned source address the
+   wrapper does not leave the choice of the store's address to the system resolver, which returns ONE of the several addresses
+   the store's mDNS responders answer with (its wired NIC, its Wi-Fi NIC, container bridges, a VPN: register B-55 measured
+   starts on the Wi-Fi path at ~24 MB/s, on an unreachable bridge address and on a VPN address that refuses the pinned
+   source, three days without L2). It collects all the A answers itself (an embedded python helper, a raw mDNS query with
+   the QU bit sent out of the pinned source address three times in about a second, `timeout -s KILL 3` around it), takes the
+   FIRST answer inside the pinned source address's IPv4 network (prefix from `ip -4 -o addr`) and mounts `//<address>/<share>`
+   with the same options, printing one `seat_fg:` line with every answer and the choice; the status file then reads
+   `ok <when> mbps=<n> addr=<address>`. No python, no answer, nothing on that network or a helper that fails or times out
+   keeps the mount by name exactly as before (the line says why); a name that is not `.local`, an IPv4 literal, an `nfs` mount
+   and an unset pin are untouched. If the store's wired and Wi-Fi addresses share one network the choice cannot tell them
+   apart: put the wired address in `SEAT_L2_MOUNT_SRC`. Proven by `setup/templates/vllm-seat/seat_fg.kv-and-store.tests.sh`,
+   which runs the whole launcher against stand-ins for the mount, the network and mDNS, and drives the helper alone against a
+   loopback responder. When the mount fails the
    seat **degrades to the same-box tier** (0.115.1): `SEAT_L2` is emptied so the MP server registers no store — an
    unmounted base_path is a local directory the adapter would write into while the tier held nothing — the log says
    `CACHE SERVER DEGRADED — <why>`, and the seat's `SEAT_L2_STATUS_FILE` (default `$WORK/seat-l2.status`) records `degraded <when> reason=<why>` (or `ok <when>
-   mbps=<n>`) for readback. Refusing to start was the 0.113.x behaviour; on 2026-09-09 it took the whole agent lane
+   mbps=<n>`, with ` addr=<address>` appended when the launcher chose the address over mDNS) for readback. Refusing to start was the 0.113.x behaviour; on 2026-09-09 it took the whole agent lane
    down for hours (llama-swap turns every start failure into HTTP 500) over a cache accelerator that was merely slow. The share is named by a hostname the box resolves (tailnet
    MagicDNS or static DNS), never a DHCP address — a vanished lease refused every seat start for hours on
    2026-09-04 — and the refusal message says why (does not resolve / port unreachable / share refused).

@@ -1697,10 +1697,25 @@ SEAT_L2_MOUNT_SRC=//cache-server/kvcache   # a HOSTNAME this box resolves (tailn
 SEAT_L2_MOUNT_DIR=/mnt/kvcache
 SEAT_L2_MOUNT_OPTS=credentials=/root/.smbcred,vers=3.1.1,rsize=4194304,wsize=4194304,cache=none,actimeo=1,noserverino,nobrl
 SEAT_L2_MIN_MBPS=200                       # optional write floor: refuse to start on a crawling path (0 = off)
-SEAT_L2_MOUNT_SRCADDR=auto                 # optional: pin the CIFS source to the lowest-metric default route (two NICs on one subnet)
+SEAT_L2_MOUNT_SRCADDR=auto                 # optional: pin the CIFS source to the lowest-metric default route (two NICs on one subnet);
+                                           # with a .local store name the launcher also mounts the mDNS answer on that network (below)
 SEAT_LMCACHE_PYTHONPATH=<seat-dir>/lmcache-overlay   # optional: load LMCache from an overlay (an unreleased fix), not the venv
 ```
 
+- A `.local` store name with a pinned source address (`SEAT_L2_MOUNT_SRCADDR`, `cifs` only; register B-55). The system resolver
+  returns ONE of the addresses the store's mDNS responders answer with, and a store host that has two responders (one pinned to
+  its wired NIC, another that answers on every interface with that interface's own address: Wi-Fi, container bridges, a VPN)
+  makes that one arbitrary. The mount landed on the Wi-Fi path (~24 MB/s, so the write floor degraded L2), on an unreachable
+  bridge address, or on the VPN address that refuses the pinned source, and every start for three days ran without L2. The
+  launcher now asks mDNS itself for all the A answers (a raw query to `224.0.0.251:5353` with the QU bit, three times in about
+  a second, sent out of the pinned source address; the embedded helper runs under `timeout -s KILL 3`, so a seat start never
+  hangs on it) and mounts `//<address>/<share>` at the FIRST answer inside the pinned source address's IPv4 network (the prefix
+  comes from `ip -4 -o addr`). One `seat_fg:` line names every answer and the choice, and the status file reads
+  `ok <stamp> mbps=<n> addr=<address>`. Whatever else happens (no python, no answer, nothing on that network, a helper that
+  fails or times out) leaves the mount by name exactly as before, and the line printed says why. A name that is not `.local`,
+  an IPv4 literal, an `nfs` mount and an unset pin are never touched. **Limit:** when the store's wired and Wi-Fi addresses sit
+  on ONE network, "first inside the network" cannot tell them apart; name the wired address in `SEAT_L2_MOUNT_SRC` (a literal
+  is mounted as given). The degrade messages keep their text and name the address when the launcher chose it.
 - `SEAT_LMCACHE_PYTHONPATH` (optional, 0.113.13): a directory prepended to `PYTHONPATH` for BOTH the LMCache
   MP server and the vLLM engine, so the seat imports LMCache from an overlay copy that carries a not-yet-released
   upstream fix, leaving the installed package untouched. Empty/unset = the installed package. The server and the
@@ -1762,6 +1777,19 @@ line names every input. Off unless the headroom knob is set; measured on the ref
 under daytime co-resident growth. Prove the tier with vLLM's own `vllm:external_prefix_cache_hits` counter around an
 after-eviction request, and prove fidelity with a planted needle retrieved verbatim after eviction
 and after a restart — hit counters alone do not prove the context came back intact.
+
+**A pinned pool the floor raised can be too small for `SEAT_MAX_LEN` (register B-54, `SEAT_KV_NEED_GIB`):** a card holding ~2.2 GB of
+desktop graphics memory gave a pool of 1.95 GiB, floored to 2.0, and vLLM 0.28 refused every start (`2.66 GiB KV cache is needed,
+which is larger than the available KV cache memory (2.0 GiB)` for 163,840 tokens) while llama-swap restarted the seat on every
+request (about 98 failed starts in two days). Set the optional `SEAT_KV_NEED_GIB` to that `N GiB KV cache is needed` figure,
+rounded up. When the pinned pool is below it the launcher passes `--max-model-len -1` instead of `SEAT_MAX_LEN`, and vLLM picks the
+largest context that fits the PINNED pool (never above the model's own maximum), so the seat serves LESS than `SEAT_MAX_LEN`; one
+`seat_fg:` line says so and vLLM logs the length it chose (`Auto-fit max_model_len`). Pool at or above the knob: nothing changes.
+Knob unset and the pool floored: `SEAT_MAX_LEN` is kept (an auto-fit could exceed the length you set) and a WARNING names the
+knob. A non-number is a warning and is ignored. The knob only acts while the pin is on. No renderer emits the pin family
+(`SEAT_KV_HEADROOM_GIB`, `SEAT_NONKV_GIB`, `SEAT_KV_FLOOR_GIB`, `SEAT_KV_CAP_GIB`, `SEAT_KV_NEED_GIB`): they are per-box measured
+figures, so the template seat env lists them commented out. Proven by `setup/templates/vllm-seat/seat_fg.kv-and-store.tests.sh`,
+which runs the whole launcher against stand-ins and reads the argument list vllm was started with.
 
 **Pipeline seats and the store (measured 2026-09-03, served since 2026-09-22):** stock LMCache sizes L2
 reads from one layout per model, but the stages of a pipeline-parallel seat hold different numbers of

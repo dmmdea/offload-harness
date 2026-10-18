@@ -90,7 +90,8 @@ type KVCacheServer struct {
 	KVDtype        string `json:"kv_dtype,omitempty"`
 	TensorParallel int    `json:"tensor_parallel,omitempty"`
 	// StatusFile is the seat wrapper's own L2 verdict file: seat_fg.sh writes the
-	// file SEAT_L2_STATUS_FILE names ("ok <stamp> mbps=<n>" after the share mounted
+	// file SEAT_L2_STATUS_FILE names ("ok <stamp> mbps=<n>", plus " addr=<address>" when the launcher
+	// chose the store's address over mDNS (B-55), after the share mounted
 	// and the write probe passed, "degraded <stamp> reason=<why>" when it fell back
 	// to L1 only). A rendered seat env names one file PER SEAT,
 	// `seat-l2-<seat id>.status` beside the env; `$WORK/seat-l2.status` is only the
