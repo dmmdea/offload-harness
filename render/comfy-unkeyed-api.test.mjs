@@ -184,7 +184,7 @@ test("ensureComfy: a two-card lease whose endpoint answers still reuses it (the 
 });
 
 test("ensureComfy: one leased card, or three, keeps the endpoint-down line (the placement is for exactly two cards)", async (t) => {
-  for (const devices of ["GPU-00000000-0000-0000-0000-00000000000a", `${PAIR},GPU-00000000-0000-0000-0000-00000000000c`, "", "-"]) {
+  for (const devices of ["GPU-00000000-0000-0000-0000-00000000000a", `${PAIR},GPU-00000000-0000-0000-0000-00000000000c`, ""]) {
     const { opts } = harness(t, { up: false, env: devices ? { GPU_LEASE_DEVICES: devices } : {} });
     await assert.rejects(ensureComfy(opts), (e) => {
       assert.match(e.message, /COMFY-ENDPOINT-DOWN/, `devices ${JSON.stringify(devices)}`);

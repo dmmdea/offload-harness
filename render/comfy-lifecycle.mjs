@@ -857,6 +857,16 @@ function leaseEpochOf(env) {
 }
 
 /**
+ * leasedPair: the two cards the lease this process runs under holds (GPU_LEASE_DEVICES, which `gpu reserve --devices` and the media admission both export), or
+ * null when the lease holds any other number of cards or none. The card-only placement (`--placement multicard`) is for exactly two, so three or one is not
+ * the case it is named for. Read from the env only: render/gpu-lock.mjs leaseDevices also reads the lease record, but that file imports this one.
+ */
+export function leasedPair(env = process.env) {
+  const ids = String((env && env.GPU_LEASE_DEVICES) || "").split(",").map((s) => s.trim()).filter(Boolean);
+  return ids.length === 2 ? ids : null;
+}
+
+/**
  * warnWithoutIdleBound: a running instance a kept or warm runner reuses, said once per runner start when its argv lacks the idle yaml (a hand-started
  * instance, or one an older build kept). It is reused all the same: it keeps whatever it holds until its lease ends, as it always did.
  * An argv ComfyUI does not report is unknown, not missing, and says nothing.
@@ -958,7 +968,16 @@ export async function ensureComfy(opts = {}) {
   // section 7, finding 7: a stray instance inside a card lease, then COMFY-PROFILE-MISMATCH).
   const canLaunchHere = Boolean(key) || instance.port === DEFAULT_COMFY_PORT
     || argvFlagValue(String(env.COMFY_EXTRA_ARGS || "").split(/\s+/).filter(Boolean), "--port") === String(instance.port);
+  // A two-card lease with no multicard launch: only --placement multicard keys the pair's own instance and launches it on the pair's port, so a call aimed
+  // at a port nothing answers on is missing that placement, and the generic line (key the instance, which pins ONE card) misleads (PF-4). endpointDown is
+  // reached only by an unkeyed call (canLaunchHere is true for a keyed one), so there is no key to test here.
+  const pair = launch ? null : leasedPair(env);
   const endpointDown = () => {
+    if (pair) {
+      const line = `COMFY-PLACEMENT-MISSING: ComfyUI is not answering on ${api}, and this call holds a lease on two cards (${pair.join(", ")}) without asking for the card-only placement: only --placement multicard keys the pair's own instance and launches it on its own port, and an unkeyed runner can launch only the default endpoint (port ${DEFAULT_COMFY_PORT}), so nothing was started. Run it with --placement multicard (with the DiT and text encoder of a recipe, render/multicard-recipes.json), or start ComfyUI on that port yourself`;
+      log(line);
+      return new Error(line);
+    }
     const line = `COMFY-ENDPOINT-DOWN: ComfyUI is not answering on ${api}, and an unkeyed runner can launch only the default endpoint (port ${DEFAULT_COMFY_PORT}): a launch with no --port would start 8188 while this run submits to ${api}. Start ComfyUI on that port yourself, or key the instance (COMFY_INSTANCE=<name>, or COMFY_CARD_UUID with this --api), which makes the runner launch it on its own port`;
     log(line);
     return new Error(line);
