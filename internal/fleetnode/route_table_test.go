@@ -218,6 +218,91 @@ func parseSources(fset *token.FileSet, srcs map[string]string) ([]*ast.File, []s
 	return files, problems
 }
 
+// inspectWithAncestors calls visit for every node under root with the nodes above it, the nearest last.
+func inspectWithAncestors(root ast.Node, visit func(n ast.Node, ancestors []ast.Node)) {
+	var stack []ast.Node
+	ast.Inspect(root, func(n ast.Node) bool {
+		if n == nil {
+			stack = stack[:len(stack)-1]
+			return true
+		}
+		visit(n, stack)
+		stack = append(stack, n)
+		return true
+	})
+}
+
+// calleeIs reports whether call is a call of x.name, with x the identifier pkg (any x when pkg is empty).
+func calleeIs(call *ast.CallExpr, pkg, name string) bool {
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != name {
+		return false
+	}
+	if pkg == "" {
+		return true
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == pkg
+}
+
+// isArgOf reports whether id is one of call's arguments.
+func isArgOf(call *ast.CallExpr, id *ast.Ident) bool {
+	for _, a := range call.Args {
+		if a == ast.Expr(id) {
+			return true
+		}
+	}
+	return false
+}
+
+// handlerMuxProblems follows the mux Handler builds: every use of it must be an argument of registerRoutes, handed to it once, or
+// of netguard.IngressGuard. A use of any other kind (a call that takes the mux and mounts routes on it, a copy under another
+// name, a closure that captures it, a bare return) is a way to put a route on the served mux that registerRoutes does not hold.
+func handlerMuxProblems(fset *token.FileSet, fd *ast.FuncDecl) []string {
+	var problems []string
+	built, handed := 0, 0
+	var def *ast.Ident
+	inspectWithAncestors(fd.Body, func(n ast.Node, up []ast.Node) {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !calleeIs(call, "http", "NewServeMux") {
+			return
+		}
+		built++
+		if as, ok := up[len(up)-1].(*ast.AssignStmt); ok && len(as.Lhs) == 1 && len(as.Rhs) == 1 && as.Rhs[0] == ast.Expr(call) {
+			if id, ok := as.Lhs[0].(*ast.Ident); ok {
+				def = id
+			}
+		}
+	})
+	if built != 1 || def == nil {
+		return append(problems, fmt.Sprintf("%s: %s, and the check cannot follow it: Handler does not build exactly one mux with `mux := http.NewServeMux()` (it builds %d)",
+			fset.Position(fd.Pos()), wantMuxFlow, built))
+	}
+	inspectWithAncestors(fd.Body, func(n ast.Node, up []ast.Node) {
+		id, ok := n.(*ast.Ident)
+		if !ok || id.Name != def.Name || id == def {
+			return
+		}
+		if sel, ok := up[len(up)-1].(*ast.SelectorExpr); ok && sel.Sel == id {
+			return // a field or method of that name, not the variable
+		}
+		if call, ok := up[len(up)-1].(*ast.CallExpr); ok && isArgOf(call, id) {
+			switch {
+			case calleeIs(call, "", "registerRoutes"):
+				handed++
+				return
+			case calleeIs(call, "netguard", "IngressGuard"):
+				return
+			}
+		}
+		problems = append(problems, fmt.Sprintf("%s: %s, and here it is used some other way; a route mounted from there never reaches the route table", fset.Position(id.Pos()), wantMuxFlow))
+	})
+	if handed != 1 {
+		problems = append(problems, fmt.Sprintf("%s: %s, and Handler hands it to registerRoutes %d times, not once", fset.Position(fd.Pos()), wantMuxFlow, handed))
+	}
+	return problems
+}
+
 // routeSourceProblems reads the sources and says, one line each, where a route could be registered that the route table
 // does not see.
 func routeSourceProblems(src routeSources) []string {
@@ -229,6 +314,9 @@ func routeSourceProblems(src routeSources) []string {
 			inside := ""
 			if fd, ok := decl.(*ast.FuncDecl); ok {
 				inside = fd.Name.Name
+				if inside == "Handler" && fd.Body != nil {
+					problems = append(problems, handlerMuxProblems(fset, fd)...)
+				}
 			}
 			ast.Inspect(decl, func(n ast.Node) bool {
 				call, ok := n.(*ast.CallExpr)
