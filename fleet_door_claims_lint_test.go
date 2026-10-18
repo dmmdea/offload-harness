@@ -97,6 +97,12 @@ var staleFleetDoorClaims = []staleDoorClaim{
 		was: "MiB), the door that asks is open to any peer on the tailnet, and a"},
 	{file: "internal/mediacap/graphfiles_test.go", phrase: "a door open to any peer",
 		was: "shows, not by the graph: a door open to any peer takes a graph of thousands"},
+	{file: "internal/fleetnode/server.go", phrase: "media polls never see this branch",
+		was: "agent dispatch are gated — media polls never see this branch, so the deployed media"},
+	{file: "internal/fleetnode/stt_upload_test.go", phrase: "keeps its behaviour (the lane stays open beyond loopback)",
+		was: "A node with NO token keeps its behaviour (the lane stays open beyond loopback), so no deployed tokenless"},
+	{file: "internal/fleetnode/auth_test.go", phrase: "(media polls must stay open)",
+		was: "Agent marker set, want false (media polls must stay open)\") } } agentLaneCfg is"},
 }
 
 var lineCommentPrefix = regexp.MustCompile(`(?m)^[ 	]*//+`)
