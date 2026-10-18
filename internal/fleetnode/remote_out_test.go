@@ -53,8 +53,8 @@ func remoteOutCfg(t *testing.T) config.Config {
 	return cfg
 }
 
-// TestRemoteMediaTaskOutNeverReachesThePipeline: media dispatch is not token-gated
-// (ADR 0023), so a remote caller's `out` / `out_dir` must never reach the pipeline —
+// TestRemoteMediaTaskOutNeverReachesThePipeline: a holder of the fleet bearer is trusted to
+// render (ADR 0023), not to name the file the node writes, so a remote caller's `out` / `out_dir` must never reach the pipeline —
 // the pipeline then derives the path under media_dir itself. Every hostile shape is
 // tried against every writer: an absolute path outside media_dir, `..` traversal, a UNC
 // share, a drive-relative path, an EXISTING file, and even a harmless-looking bare name.

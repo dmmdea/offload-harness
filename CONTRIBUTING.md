@@ -60,6 +60,26 @@ tests caught it) or `SURVIVED` (they did not); and restores the file byte for by
 `MUTATION-VERDICT:` line, with the mutation it printed, in the pull request. `bash scripts/mutation-check-selftest.sh` (or
 `pwsh -File scripts/mutation-check-selftest.ps1`) shows every verdict on a fixture under `scripts/testdata/`.
 
+## Tests that certify a seam
+
+A seam is the place where one part of the harness hands work to another: a function variable or an interface that production
+code fills in, a config key that picks an engine, a door that calls a lane. A test that certifies a seam says the two sides
+are wired together and behave across it, and it proves nothing if it injects the very thing it certifies. A test that assigns
+a stand-in to the seam, runs the code, and asserts on the value it just put there passes with the production wiring deleted;
+a mutation of exactly that kind once survived a green seam test here. It matters most in red-first work: the behaviour-free
+stub that lets the first test compile is what the test must go red against, not what it certifies.
+
+- **Fake the far side of the seam, never the seam.** Stand in for what lies beyond it (a node, an engine, a clock source) and
+  let the production code on the near side run, so the path under test is the path production takes.
+- **Assert on something the production path produces,** not on a value the test supplied, and not on a count of calls to a
+  stand-in that only the test drives. You must be able to name the production line whose removal turns the test red.
+- **Show that it goes red.** Remove or neutralise that line with `scripts/mutation-check.sh` (see "Proving a test can fail")
+  and quote the `RED` verdict in the pull request; a seam test whose mutation `SURVIVED` is certifying its stand-in.
+  `TestRunNoEligibleRemoteNamesTheRealCause` in `internal/delegate/run_test.go` is a worked example: it drives `Run` against
+  fake nodes (or none) and asserts the reason and the `Unplaced` flag that the production path reports.
+- **Reviewer's check:** for each test that claims to cover a wiring, ask which production line it goes red without. If the
+  answer is none, or only a line inside the test, it does not certify the seam.
+
 ## Keeping tests out of the OS temp dir
 
 A test takes its scratch space from `t.TempDir()`, which `testing` removes when the test ends. A test that makes a folder
@@ -100,6 +120,41 @@ binary once left 22,434 folders and about 70 GB in under two hours. Two things g
   stops go test and every test binary it started, and exits 130. The tripwire sees only what a child writes under `TMP`, `TEMP`
   and `TMPDIR`: a child started with a scrubbed environment, or a test that names a fixed directory such as `/dev/shm`, writes
   elsewhere and a `CLEAN` says nothing about it (the lint's relaunch-proof test is what covers the scrubbed copy).
+
+## Keeping tests from failing on a slow machine
+
+A test must not fail because the machine it ran on was slow. A suite that goes red once on a loaded host and green again
+alone is nearly always a test that put a number on the clock: an upper bound on a measured time ("it returned within
+200 ms"), a window shorter than the work it starts, or a fixed sleep followed by an assertion. A slow runner stretches every
+one of those, and the product was right each time. Prefer to wait on the event the product signals (a channel, a barrier a
+fake holds until the test releases it, a count of calls), and bound the wait with a generous hang guard, not a short window.
+
+- **The lint, `clock_lint_test.go` in the root package.** It judges every `*_test.go` file of the module (and reads the
+  constants a test refers to from the package's other files too) and fails on an upper bound on a measured elapsed time
+  under one second that `clock_lint_allowlist_test.go` does not list with its count and its reason: what the bound rules
+  out, and how wide the margin to it is. The measured time is `time.Since`, a difference with a `time.Now()` stamp, a name
+  that holds one, that value read as a number, rounded, made absolute, converted or multiplied or divided by a constant, or
+  the result of a helper of the package that returns one (`measure(f) > C`, `results, sum, elapsed := runWithin(...)`; a
+  method counts only when it is called on a local name that holds a value of the type that declares it); the bound is `>`
+  or `>=` against a constant it can evaluate (a package const is trusted only when every declaration of the name agrees). A bound of a second or more is not reviewed by the lint. That is where a
+  bound starts to be a hang guard, but the line is a ratchet and not a proof of safety (a 2.5 s ceiling failed under
+  starvation too), so such a bound is still yours to judge. Fixing a listed site (waiting on an event instead) means
+  lowering its count, or deleting the entry when it was the last, and the lint fails until you do. A test file that imports
+  `time` with a dot fails the lint by name. To regenerate the keys, run
+  `CLOCK_LINT_PRINT=1 go test . -run TestTestsPutNoSubSecondCeilingOnMeasuredTime -v` and write the reasons after reading
+  the code.
+- **What it does not see** (the header of the file has the full list). It reads Go only: the JavaScript tests under
+  `render/` and the shell scripts have the same fault and no lint here. It does not see a bound against a value it cannot
+  evaluate (a field, a parameter, a poll interval, a constant of another package, a const written with `iota` or by
+  repetition of the line above); a measured time it cannot follow (a sum with another duration, `max` or `min` of it, a
+  helper kept in a closure variable or in another package, a method called through a package-level variable, a field or
+  an interface, a value stored in a field or sent on a channel, and an instant held as an integer: an atomic `UnixNano`
+  stored from `time.Now()` and subtracted later, of which `internal/delegate/callwait_test.go` holds a live 400 ms
+  ceiling); `elapsed < C` when it is not a lower bound, namely a fixture schedule (a fake that answers one way until `C` has
+  passed and another way after) and a poll deadline written as a loop condition (`for time.Since(start) < C { ... }`
+  followed by a failure); or the lower edge of a sampling window. It does not see the other shapes of the same fault
+  either: a fixed sleep before an assertion, a short call or context window handed to the code under test, a poll deadline
+  taken from `time.Now().Add(C)`. Those stay a review duty.
 
 ## Documentation
 

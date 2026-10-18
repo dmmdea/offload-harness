@@ -31,6 +31,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -195,9 +196,10 @@ func runGPUStatus(args []string) error {
 	}
 	leases := modelaffinity.ScopeLeases(m.Dir(), m.Leases())
 	// The host's memory and what the live leases declared of it (internal/gpulease/hostram.go): the
-	// verdict OK / NEAR / OVER, OVER being committed memory above physical RAM.
+	// verdict OK / NEAR / OVER, OVER being no memory available, the commit charge above physical RAM (the line a commit nobody
+	// stated is held to), or the commit charge reaching an enforced commit limit.
 	hostMem, hostOK := gpuprobe.ReadHostMemory()
-	host := gpucards.NewHostView(hostMem, hostOK, loadCfg(fs).GPUHostRAMHeadroom(), gpulease.DeclaredHostRAMGiB(leases), m.HostRAMPending())
+	host := gpucards.NewHostView(hostMem, hostOK, loadCfg(fs).GPUHostRAMHeadroom(), gpulease.DeclaredHostRAMLoad(leases), m.HostRAMPendingLoad())
 	if *asJSON {
 		queued := gpucards.QueueRows(waiters)
 		foreignJSON := make([]map[string]any, 0, len(foreign))
@@ -318,11 +320,11 @@ func runGPUStatus(args []string) error {
 	if info.Draining {
 		excl += "  (draining: new runs wait, in-flight runs complete)"
 	}
-	if info.HostRAMWaitGiB == 0 && !info.HolderGaveUp.IsZero() {
+	if !info.AsksForHostRAM() && !info.HolderGaveUp.IsZero() {
 		excl += "  (" + holderGaveUpNote(info.HolderGaveUp, info.HolderGaveUpWhy, info.Epoch, m.SeatWarmOwed() != "") + ")"
 	}
-	if info.HostRAMWaitGiB > 0 {
-		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.Age, info.HostRAMHoldUntil, info.HostRAMHoldPhase, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", info.HolderGaveUp, info.HolderGaveUpWhy) + ")"
+	if info.AsksForHostRAM() {
+		excl += "  (" + hostRAMAskedStatus(info.HostRAMWaitGiB, info.HostRAMWaitCommitGiB, info.Age, info.HostRAMHoldUntil, info.HostRAMHoldPhase, time.Now(), true, info.Epoch, info.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", info.HolderGaveUp, info.HolderGaveUpWhy) + ")"
 	}
 	if info.Command != "" {
 		excl += "\n  running: " + info.Command
@@ -364,14 +366,14 @@ func runGPUStatus(args []string) error {
 				group = " group " + l.Group
 			}
 			declared := ""
-			if l.HostRAMGiB > 0 {
-				declared = fmt.Sprintf(", host RAM %.1f GiB", l.HostRAMGiB)
+			if l.DeclaresHostRAM() {
+				declared = fmt.Sprintf(", host RAM %.1f GiB touched, %.1f GiB commit", l.HostRAMGiB, l.HostRAMCommitGiB)
 			}
-			if l.HostRAMWaitGiB == 0 && !l.HolderGaveUp.IsZero() {
+			if !l.AsksForHostRAM() && !l.HolderGaveUp.IsZero() {
 				declared += ", " + holderGaveUpNote(l.HolderGaveUp, l.HolderGaveUpWhy, l.Epoch, m.SeatWarmOwed() != "")
 			}
-			if l.HostRAMWaitGiB > 0 {
-				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.Age, l.HostRAMHoldUntil, l.HostRAMHoldPhase, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", l.HolderGaveUp, l.HolderGaveUpWhy)
+			if l.AsksForHostRAM() {
+				declared = ", " + hostRAMAskedStatus(l.HostRAMWaitGiB, l.HostRAMWaitCommitGiB, l.Age, l.HostRAMHoldUntil, l.HostRAMHoldPhase, time.Now(), false, l.Epoch, l.Yields == gpulease.YieldsWrapper, m.SeatWarmOwed() != "", l.HolderGaveUp, l.HolderGaveUpWhy)
 			}
 			fmt.Printf("  lease epoch %d: %s pid %d, %s%s%s\n", l.Epoch, l.Class, l.PID, scope, group, declared)
 		}
@@ -395,6 +397,10 @@ const queueHint = gpulease.QueueHint
 // before it as a rule.
 const defaultReserveWait = 8 * time.Hour
 
+// ramCommitHelp is the usage text of `gpu reserve --ram-commit` (a constant so a test reads it: the flag set exits the
+// process on --help).
+const ramCommitHelp = "GiB of commit the job will be charged, STATED on the lease beside --ram and admitted against the OS commit limit less gpu_host_ram_headroom_gib (the limit is always enforced on Windows; on Linux only with vm.overcommit_memory=2, elsewhere a stated commit is not judged). Commit is memory the OS has promised the job, touched or not, so it can be much more than the working set --ram states (a process tree measured at 27.8 GiB touched was charged 58.1 GiB). State it from a measurement. Unset, no commit is stated: the --ram figure, estimated or given, stands in for it and is admitted against physical RAM less that headroom, as a job that declares one figure always was, because the commit limit lies further out than physical RAM and a job that commits more than it touches would be admitted past it. A commit stated equal to --ram is still stated. A job whose commit is smaller than its working set (mapped files count in the working set and not in the commit) cannot say so by leaving the flag out; --ram-commit below --ram is taken as stated. Needs a host-RAM declaration above 0"
+
 func runGPUReserve(args []string) (retErr error) {
 	fs := flag.NewFlagSet("gpu reserve", flag.ExitOnError)
 	fs.String("config", "", "config file path")
@@ -414,7 +420,8 @@ func runGPUReserve(args []string) (retErr error) {
 	wholeNode := fs.Bool("whole-node", false, "hold the whole node (the default when the command names no card)")
 	groupFlag := fs.String("group", "", "label for leases taken together for one job (shown in `gpu status`)")
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card (0 = not declared)")
-	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the job will load, declared on the lease and admitted against committed memory (0 = needs no host RAM). Unset, it is estimated: from the model files of a render helper call whose weights do not fit the card (render/comfy-generate.mjs, comfy-edit, comfy-video, comfy-inpaint, comfy-render), else for a media lease the largest ComfyUI render family this box binds (an sd.cpp binding is not counted: a node that binds only sd.cpp declares 0), and 0 for a text lease. A grant waits, in the same queue, while committed memory + this + what running leases have yet to load would exceed physical RAM less gpu_host_ram_headroom_gib, or while the available RAM less this and the unloaded part would fall under that headroom. With --unload-seat the host is asked AFTER the seat is unloaded, while the cards are held, because the memory it needs may be the seat's own (F82)")
+	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the job will TOUCH (its working set), declared on the lease and admitted against the RAM that is available (0 = needs no host RAM). Unset, it is estimated: from the model files of a render helper call whose weights do not fit the card (render/comfy-generate.mjs, comfy-edit, comfy-video, comfy-inpaint, comfy-render), else for a media lease the largest ComfyUI render family this box binds (an sd.cpp binding is not counted: a node that binds only sd.cpp declares 0), and 0 for a text lease. A grant waits, in the same queue, while the available RAM less this and what running leases have yet to touch would fall under gpu_host_ram_headroom_gib, or while the commit charge + the job's commit + what running leases have yet to touch would exceed physical RAM less that headroom (the OS commit limit instead, with what running leases have yet to be charged, when --ram-commit states the commit). With --unload-seat the host is asked AFTER the seat is unloaded, while the cards are held, because the memory it needs may be the seat's own")
+	ramCommitFlag := fs.Float64("ram-commit", 0, ramCommitHelp)
 	holdMaxFlag := fs.Duration("ram-hold-max", 0, "with --unload-seat: the most the lease may hold its cards waiting for the host to have the RAM it declared, counted from the unload; past it the lease is released (the seat warmed back), the command never runs and the reserve exits non-zero. Unset = config gpu_hostram_hold_max_sec (default 600 s); 0 = no bound, --wait alone ends the wait")
 	owner := addOwnershipFlags(fs)
 	releaseAtExpiry := fs.Bool("release-at-expiry", false, "with --detach: the hidden holder releases the card at --for, as it did before leases had terms (default: it renews its term while the owner vouches for the job, else labels the lease expired and keeps holding; nothing is ever released by a deadline)")
@@ -432,19 +439,30 @@ func runGPUReserve(args []string) (retErr error) {
 	// but its window is still the term the lease is judged by, so the requirement stays: the
 	// default would read a long job as overdue from the 45th minute. The wrapper form ties the
 	// hold to a process and needs no window, so the requirement lands only on --detach.
-	forGiven, ramGiven, holdMaxGiven := false, false, false
+	forGiven, ramGiven, ramCommitGiven, holdMaxGiven := false, false, false, false
 	fs.Visit(func(f *flag.Flag) {
 		switch f.Name {
 		case "for":
 			forGiven = true
 		case "ram":
 			ramGiven = true
+		case "ram-commit":
+			ramCommitGiven = true
 		case "ram-hold-max":
 			holdMaxGiven = true
 		}
 	})
+	if math.IsNaN(*ramFlag) || math.IsInf(*ramFlag, 0) {
+		return errors.New("--ram must be a finite number of GiB (0 = needs no host RAM): NaN and Inf compare against nothing, so a lease declaring one would never be refused or admitted by the numbers")
+	}
 	if *ramFlag < 0 {
 		return errors.New("--ram must be 0 (needs no host RAM) or a number of GiB")
+	}
+	if ramCommitGiven && (math.IsNaN(*ramCommitFlag) || math.IsInf(*ramCommitFlag, 0)) {
+		return errors.New("--ram-commit must be a finite number of GiB above 0: NaN and Inf compare against nothing, so a lease declaring one would never be refused or admitted by the numbers")
+	}
+	if ramCommitGiven && *ramCommitFlag <= 0 {
+		return errors.New("--ram-commit must be a number of GiB above 0 (unset = the --ram figure); a job that is charged no commit declares no host RAM at all, which is --ram 0")
 	}
 	if *holdMaxFlag < 0 {
 		return errors.New("--ram-hold-max must be 0 (no bound: the wait after the unload runs the whole --wait) or a duration such as 10m")
@@ -593,9 +611,14 @@ func runGPUReserve(args []string) (retErr error) {
 	}
 	// The host RAM this lease declares (internal/hostneed): the operator's --ram, else an estimate
 	// from the render helper it wraps, else the class default. Declared on EVERY path (named cards,
-	// allocated cards, the whole node, the detached holder), because the grant admits it against
-	// committed memory wherever the cards came from.
+	// allocated cards, the whole node, the detached holder), because the grant admits it against the
+	// available memory (and its commit against the commit limit if stated, else against physical RAM) wherever the cards came from.
 	need := resolveReserveHostRAMWith(ramGiven, *ramFlag, gpulease.Class(*class), cmdArgs, plan.IDs, reserveCfg, m.CardScoped(), planCards, os.Stderr)
+	// The commit it is charged, beside the working set: the operator's --ram-commit (stated), else the same figure (not stated).
+	declared, cerr := resolveReserveHostLoad(ramCommitGiven, *ramCommitFlag, need, os.Stderr)
+	if cerr != nil {
+		return cerr
+	}
 	// F82: a lease that unloads the seat itself is compared to the host AFTER the unload, not in the grant: the memory
 	// it would wait for is held by the seat its own unload frees (gpu_hostram_await.go). The grant, the card
 	// allocator's host term and the queue's pass rule see a lease that declares nothing; the figure travels as
@@ -606,13 +629,15 @@ func runGPUReserve(args []string) (retErr error) {
 		fmt.Fprintf(os.Stderr, "gpu reserve: --unload-seat reaches no model on the leased cards (%s), so nothing it frees can make room for this lease: its %.1f GiB of host RAM is compared in the grant, as for a lease that unloads nothing\n", strings.Join(plan.IDs, ", "), need.GiB)
 		defers = false
 	}
-	gateRAM, awaitRAM := hostRAMSplit(defers, need.GiB)
-	gateRAM, awaitRAM, herr := screenDeferredHostRAM(m, gateRAM, awaitRAM, *wait, os.Stderr)
+	gate, later := hostRAMLoadSplit(defers, declared)
+	gate, later, herr := screenDeferredHostRAM(m, gate, later, *wait, os.Stderr)
 	if herr != nil {
 		return herr
 	}
+	gateRAM, awaitRAM := gate.TouchGiB, later.TouchGiB
 	opts.HostRAMGiB, opts.HostRAMWaitGiB = gateRAM, awaitRAM
-	devFlags.ramGiB = gateRAM // the card allocator's pre-filter reads the same figure
+	opts.HostRAMCommitGiB, opts.HostRAMWaitCommitGiB = commitDeclared(gate), commitDeclared(later)
+	devFlags.ramGiB, devFlags.ramCommitGiB = gateRAM, commitDeclared(gate) // the card allocator's pre-filter reads the same figures
 	buildAlloc := func() (gpulease.AllocInput, error) {
 		return buildAllocInput(context.Background(), m, reserveCfg, devFlags)
 	}
@@ -1053,10 +1078,13 @@ func acquireQueued(m *gpulease.Manager, class gpulease.Class, opts gpulease.Opti
 	// treated as a verdict — holders release before it as a rule, and a waiter that
 	// left the line on the declaration was the refusal this verb exists to end.
 	opts.Wait, opts.WaitOut = wait, true
-	// The cards can be free while the HOST is what is short: committed memory plus this lease's
-	// declared RAM plus what the running leases have yet to load would pass physical RAM less the
-	// headroom. The request keeps its place in the same line and says so once (never per poll: a line
-	// per second is a notification per second in the session that wrapped this).
+	// The cards can be free while the HOST is what is short: the available memory less this lease's
+	// working set and what the running leases have yet to touch would fall under the headroom, or the
+	// commit charge plus its commit would pass the line that commit is judged against less the headroom:
+	// the commit limit for a commit it states (where the OS enforces one), with what the running leases
+	// have yet to be charged, or physical RAM for one nobody stated, with what they have yet to touch.
+	// The request keeps its place in the same line and says so once (never per poll: a line per
+	// second is a notification per second in the session that wrapped this).
 	waitedRAM := false
 	if opts.OnHostRAMWait == nil && wait > 0 {
 		opts.OnHostRAMWait = func(e *gpulease.ErrHostRAM) {
@@ -1126,10 +1154,16 @@ func heldHint(err error, wait time.Duration) error {
 		if short.Impossible {
 			return err
 		}
-		if wait <= 0 {
-			return fmt.Errorf("%w; pass --wait <duration> (default %s) to queue until the host has the room, or --ram <GiB> if the estimate is wrong (0 = needs no host RAM)", err, defaultReserveWait)
+		// A commit shortage on a STATED commit is cured by a smaller one as well. One nobody stated is the --ram figure held to physical
+		// RAM, and the refusal's own sentence says what a stated commit is judged against instead.
+		commitHint := ""
+		if short.CommitShort && short.CommitStated {
+			commitHint = "; --ram-commit <GiB> states the commit (lower it if the command is charged less)"
 		}
-		return fmt.Errorf("%w; the host did not have the room within --wait %s — pass a longer --wait to keep waiting, or --ram <GiB> if the estimate is wrong", err, wait)
+		if wait <= 0 {
+			return fmt.Errorf("%w; pass --wait <duration> (default %s) to queue until the host has the room, or --ram <GiB> if the estimate is wrong (0 = needs no host RAM)%s", err, defaultReserveWait, commitHint)
+		}
+		return fmt.Errorf("%w; the host did not have the room within --wait %s — pass a longer --wait to keep waiting, or --ram <GiB> if the estimate is wrong%s", err, wait, commitHint)
 	}
 	var held *gpulease.ErrHeld
 	if !errors.As(err, &held) {
@@ -1326,10 +1360,22 @@ func holdArgs(class string, dur, wait time.Duration, opts gpulease.Options, auto
 		ram = auto.ramGiB
 	}
 	args = append(args, "--ram", strconv.FormatFloat(ram, 'f', -1, 64))
+	// The commit travels whenever one was stated, one equal to the touched figure too (the holder reads an absent flag as no commit
+	// stated, which is judged against another line).
+	commit := opts.HostRAMCommitGiB
+	if auto != nil {
+		commit = auto.ramCommitGiB
+	}
+	if commit > 0 {
+		args = append(args, "--ram-commit", strconv.FormatFloat(commit, 'f', -1, 64))
+	}
 	// A lease that unloads the seat declares nothing in the grant (F82): the holder takes its cards with the figure on
 	// the record as a wait, and the parent asks the host after the unload (gpu_hostram_await.go).
 	if opts.HostRAMWaitGiB > 0 {
 		args = append(args, "--ram-wait", strconv.FormatFloat(opts.HostRAMWaitGiB, 'f', -1, 64))
+	}
+	if opts.HostRAMWaitCommitGiB > 0 {
+		args = append(args, "--ram-wait-commit", strconv.FormatFloat(opts.HostRAMWaitCommitGiB, 'f', -1, 64))
 	}
 	switch {
 	case auto != nil:
@@ -1363,6 +1409,8 @@ func runGPUHold(args []string) (retErr error) {
 	cardsFlag := fs.String("cards", "", "hold N cards (or MIN..MAX) chosen by the allocator, allocating and claiming in this process (the parent passes its --cards)")
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card")
 	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the lease declares (the parent resolved it: its --ram, the estimate, or the class default)")
+	ramCommitFlag := fs.Float64("ram-commit", 0, "GiB of commit the lease states beside --ram (0 = none stated; the parent passes it whenever one was stated)")
+	ramWaitCommitFlag := fs.Float64("ram-wait-commit", 0, "GiB of commit the lease will state to the host after the seat is unloaded, beside --ram-wait (0 = none stated)")
 	ramWaitFlag := fs.Float64("ram-wait", 0, "GiB of host RAM the lease will ask the host for AFTER the parent has unloaded the agent seat (the parent passes it for --unload-seat): stamped on the record, never compared in the grant")
 	groupFlag := fs.String("group", "", "label for leases taken together for one job")
 	releaseAtExpiry := fs.Bool("release-at-expiry", false, "release the lease at --for (the pre-terms behaviour; the parent passes its --release-at-expiry)")
@@ -1384,6 +1432,7 @@ func runGPUHold(args []string) (retErr error) {
 		Reason: *reason, Origin: *origin, TTL: *dur, Wait: *wait, WaitOut: true, Exclusive: *exclusive, Draining: *draining,
 		WrapperVersion: version, Devices: holdDevices, Group: strings.TrimSpace(*groupFlag),
 		HostRAMGiB: max(*ramFlag, 0), HostRAMWaitGiB: max(*ramWaitFlag, 0),
+		HostRAMCommitGiB: max(*ramCommitFlag, 0), HostRAMWaitCommitGiB: max(*ramWaitCommitFlag, 0),
 		// This process's stderr is what the parent reads back (childReason), so the wait is told there once.
 		OnHostRAMWait: func(e *gpulease.ErrHostRAM) { fmt.Fprintf(os.Stderr, "gpu hold: %s\n", e.Error()) },
 	}
@@ -1401,7 +1450,7 @@ func runGPUHold(args []string) (retErr error) {
 			return perr
 		}
 		holdCfg := loadCfg(fs)
-		holdFlags := reserveDeviceFlags{cards: *cardsFlag, vramGiB: *vramFlag, ramGiB: *ramFlag}
+		holdFlags := reserveDeviceFlags{cards: *cardsFlag, vramGiB: *vramFlag, ramGiB: *ramFlag, ramCommitGiB: *ramCommitFlag}
 		lease, err = acquireAutoCards(m, gpulease.Class(*class), holdOpts, devicePlan{Auto: true, Min: min, Max: max, Source: "--cards " + strings.TrimSpace(*cardsFlag)}, *wait,
 			func() (gpulease.AllocInput, error) {
 				return buildAllocInput(context.Background(), m, holdCfg, holdFlags)

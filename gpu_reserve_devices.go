@@ -54,6 +54,8 @@ type reserveDeviceFlags struct {
 	wholeNode bool
 	vramGiB   float64
 	ramGiB    float64
+	// ramCommitGiB is the commit the job declares beside the working set ramGiB (0 = the same figure).
+	ramCommitGiB float64
 }
 
 // devicePlan is the decision: a concrete set (IDs, nil = whole node), or an allocation
@@ -463,11 +465,11 @@ var (
 func buildAllocInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, f reserveDeviceFlags) (gpulease.AllocInput, error) {
 	deps := cardTableDeps()
 	deps.ForeignBusy, deps.Resident, deps.HostMemory = foreignBusyFn, residentSeatsFn, hostMemoryFn
-	in, err := gpualloc.BuildInput(ctx, m, cfg, gpualloc.Need{VRAMGiB: f.vramGiB, RAMGiB: f.ramGiB}, deps)
+	in, err := gpualloc.BuildInput(ctx, m, cfg, gpualloc.Need{VRAMGiB: f.vramGiB, RAMGiB: f.ramGiB, RAMCommitGiB: f.ramCommitGiB}, deps)
 	if err != nil {
 		return in, err
 	}
-	for id := range gpualloc.QueuedClaims(m, in.Cards, "", f.ramGiB > 0) {
+	for id := range gpualloc.QueuedClaims(m, in.Cards, "", f.ramGiB > 0 || f.ramCommitGiB > 0) {
 		in.Claimed[id] = true
 	}
 	return in, nil

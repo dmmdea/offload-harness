@@ -213,7 +213,7 @@ func TestRunTierRefusesAnEntryProducedByADifferentTier(t *testing.T) {
 	// pre-0.63 entry cannot reach the guard either, since it misses at the lookup.
 	// This asserts the guard still fails CLOSED against a HAND-CRAFTED or
 	// externally written entry, which is why it is kept as defence in depth.
-	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.Model, built)
+	ck := cacheKeyForTier(req.Task, req.Input, cacheParams(req.Params), cfg.Model, built)
 	seeded, _ := json.Marshal(cacheVal{
 		Data:     json.RawMessage(`{"verdict":"STALE-FROM-ANOTHER-TIER","reason":"x"}`),
 		TokensIn: 5,
@@ -268,7 +268,7 @@ func TestRunTierKeyBindsThePromptTemplateAtTheCallSite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tasks.Build: %v", err)
 	}
-	paramsKey := tasks.StableParamsKey(req.Params)
+	paramsKey := cacheParams(req.Params)
 
 	// POSITIVE direction first — this is the half that actually falsifies.
 	// Seed under the key derived from the REAL Built. The live call site must find
@@ -334,7 +334,7 @@ func TestDeferredRunTierResultIsNotCached(t *testing.T) {
 	if err != nil {
 		t.Fatalf("tasks.Build: %v", err)
 	}
-	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.TriageModel, built)
+	ck := cacheKeyForTier(req.Task, req.Input, cacheParams(req.Params), cfg.TriageModel, built)
 	if _, ok := ca.Get(ck); ok {
 		t.Fatal("a deferred result was cached — the defer would become permanent for this input")
 	}
@@ -421,7 +421,7 @@ func TestInLoopProvenanceIsStampedAndSurfacedOnAHit(t *testing.T) {
 	}
 
 	built, _ := tasks.Build(req)
-	ck := cacheKeyForTier(req.Task, req.Input, tasks.StableParamsKey(req.Params), cfg.TriageModel, built)
+	ck := cacheKeyForTier(req.Task, req.Input, cacheParams(req.Params), cfg.TriageModel, built)
 	raw, ok := ca.Get(ck)
 	if !ok {
 		t.Fatal("entry missing")
@@ -450,7 +450,7 @@ func TestRunAndRunTierNeverComputeTheSameKey(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	paramsKey := tasks.StableParamsKey(req.Params)
+	paramsKey := cacheParams(req.Params)
 
 	// The exact coincidence that used to collide: the pinned tier IS the primary
 	// model, no exemplars, identical Built.

@@ -2,7 +2,8 @@ package pipeline
 
 // The host-RAM term of the media admission (the paging incident of 2026-10-09). A generation call
 // declares the host RAM its weights will stream from (internal/hostneed), the grant admits it
-// against committed memory plus what the leases already granted have yet to load
+// against the available memory (and its commit against the commit limit where the OS enforces one),
+// less what the leases already granted have yet to load
 // (internal/gpulease/hostram.go), and a call that does not fit waits in the same line with the
 // reason. The fixture's image route is bound to bf16 Krea 2 (krea2Binding), which declares the
 // documented 24.5 + 8.3 = 32.8 GiB on its 16 GiB cards.

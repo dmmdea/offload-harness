@@ -87,27 +87,23 @@ func visionTaskServed(cfg config.Config, task core.TaskType) bool {
 	return false
 }
 
-// tokenGated reports whether a task_type rides the bearer rule on a node configured as cfg: the
-// agent lane (v1 scope), since 0.116.0 the vision lane, since 0.154.0 the text lane, the
-// project-bundle door (compose-project, ADR 0071), the media-input door (media-job, ADR 0077:
-// it writes a caller's bytes to this node's disk, like compose-project), the
-// stt upload door (ADR 0072) and the PAIR card relay (pair-relay, D26: not a job, the door's own name).
-// The legacy path-taking "stt" lane joins them when the node HAS a fleet_auth_token (D17): it reads an
-// arbitrary path on this node's disk, which is the shape the other lanes were gated to avoid. A node
-// with no token keeps its legacy stt lane open, so no deployed tokenless node starts refusing. Every
-// other media task stays tokenless so deployed media clients keep working byte-identically.
+// tokenGated reports whether a task_type rides the bearer rule on a node configured as cfg. Every one does: the
+// agent, vision, text, stt upload, project, media-job and PAIR relay doors, and equally the media tasks
+// (image-gen, video-gen, animate, audio-gen, run-graph, the legacy path-taking stt lane, accel, compose-video)
+// and any task type a later release adds. A task type that skipped the check was a lane any peer that could
+// reach a listener beyond loopback could use: a run-graph dispatch, for one, makes the node fetch and install
+// what its manifest names.
+//
+// The rule it selects (authorizeGated): with a fleet_auth_token the bearer is required, 401 without it; with none,
+// a loopback listener is open (the trust boundary of the local MCP surface) and any other is refused with 403.
+// The function stays so its callers (authorizeGated, trustsWire, gatedJob) read as before, and so a task type
+// that must ever be exempt has one place to say so.
 func tokenGated(cfg config.Config, taskType string) bool {
-	switch taskType {
-	case string(core.TaskAgentRun), VisionTask, TextTask, ComposeProjectTask, MediaJobTask, STTUploadTask, PairRelayTask:
-		return true
-	case "stt":
-		return cfg.FleetAuthToken != ""
-	}
-	return false
+	return true
 }
 
 // gatedJob reports whether a job of this task type is masked from a poller or feed reader without the
-// bearer (JobView.Gated): every token-gated lane but the agent lane, which has its own marker. Derived
+// bearer (JobView.Gated): every job but an agent run, which has its own marker. Derived
 // from tokenGated so a door that needs the token can never leave its jobs' state, error text or output
 // paths readable without it, whichever path admitted them (dispatch, the project door, a queue claim).
 func gatedJob(cfg config.Config, taskType string) bool {

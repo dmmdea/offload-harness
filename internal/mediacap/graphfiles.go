@@ -165,7 +165,7 @@ var statModel = osStatSize
 // name). A limit of 0 or less means no limit, and more is then false.
 //
 // The cost of a call is bounded by the limit and not by the graph. A graph can name thousands of files (a dispatch body may
-// be 1 MiB), the door that asks is open to any peer on the tailnet, and a name that is missing costs one stat per class
+// be 1 MiB), the door that asks answers any holder of the fleet bearer on the tailnet, and a name that is missing costs one stat per class
 // directory of every root, so a name-by-name resolve of a 16,875-name graph took 3.5 s on a 20-class-directory tree (a
 // scratch measurement, 2026-10-10, one host) before it ruled. Two things bound it now: each root's class directories are
 // listed ONCE per call, not once per name (the listing of a root is a directory read plus a stat for every entry that is

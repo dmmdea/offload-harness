@@ -249,8 +249,9 @@ var standingLead = map[string]string{
 // line, so the line always ends in how to join it.
 func gpuLeaseVerdictLine(view map[string]any) string {
 	var b strings.Builder
-	// A host whose committed memory is above physical RAM leads the line, whatever the cards are doing:
-	// "free" at the head of it would read as "the box has room".
+	// A host that is OVER (no memory available, the commit charge above physical RAM, or the commit charge reaching an enforced
+	// commit limit) leads the line,
+	// whatever the cards are doing: "free" at the head of it would read as "the box has room".
 	hostLead, hostLoud, hostTail := hostMemoryClauses(view)
 	if hostLoud {
 		b.WriteString(hostLead + "; ")
@@ -337,9 +338,9 @@ func gpuLeaseVerdictLine(view map[string]any) string {
 // hostMemoryView builds the host_memory block of the gpu_lease view (m is nil when the lease
 // directory could not be opened: then nothing is declared and nothing is pending).
 func hostMemoryView(cfg config.Config, m *gpulease.Manager) map[string]any {
-	var declared, pending float64
+	var declared, pending gpuprobe.HostLoad
 	if m != nil {
-		declared, pending = gpulease.DeclaredHostRAMGiB(m.Leases()), m.HostRAMPending()
+		declared, pending = gpulease.DeclaredHostRAMLoad(m.Leases()), m.HostRAMPendingLoad()
 	}
 	mem, ok := gpuprobe.ReadHostMemory()
 	return gpucards.NewHostView(mem, ok, cfg.GPUHostRAMHeadroom(), declared, pending).Map()
@@ -353,12 +354,12 @@ func hostMemoryClauses(view map[string]any) (lead string, loud bool, tail string
 	if hm == nil {
 		return "", false, ""
 	}
-	num := func(k string) float64 { f, _ := hm[k].(float64); return f }
+	why, _ := hm["verdict_why"].(string)
 	switch hm["verdict"] {
 	case string(gpuprobe.HostOver):
-		return fmt.Sprintf("HOST RAM OVER (committed memory %.1f GiB exceeds the %.1f GiB of physical RAM)", num("commit_used_gib"), num("physical_gib")), true, ""
+		return fmt.Sprintf("HOST RAM OVER (%s)", why), true, ""
 	case string(gpuprobe.HostNear):
-		return "", false, fmt.Sprintf("host RAM NEAR the limit (committed %.1f of %.1f GiB physical, %.1f GiB headroom)", num("commit_used_gib"), num("physical_gib"), num("headroom_gib"))
+		return "", false, fmt.Sprintf("host RAM NEAR the limit (%s)", why)
 	}
 	return "", false, ""
 }

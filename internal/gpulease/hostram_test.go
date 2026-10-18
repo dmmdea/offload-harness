@@ -26,11 +26,17 @@ type fakeHost struct {
 	mem      gpuprobe.HostMemory
 	memOK    bool
 	reads    atomic.Int32
-	heldByPD map[int]float64
+	heldByPD map[int]float64 // working set (resident) below a holder
+	privByPD map[int]float64 // private bytes below a holder, where a test says they differ from the working set
 }
 
 func newFakeHost(commit float64) *fakeHost {
-	return &fakeHost{mem: gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 160}, memOK: true, heldByPD: map[int]float64{}}
+	return &fakeHost{mem: gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 100}, memOK: true, heldByPD: map[int]float64{}, privByPD: map[int]float64{}}
+}
+
+// newFakeHostMem is a fake host with exactly this reading.
+func newFakeHostMem(mem gpuprobe.HostMemory) *fakeHost {
+	return &fakeHost{mem: mem, memOK: true, heldByPD: map[int]float64{}, privByPD: map[int]float64{}}
 }
 
 func (f *fakeHost) setCommit(commit float64) {
@@ -39,10 +45,19 @@ func (f *fakeHost) setCommit(commit float64) {
 	f.mem.CommitUsedGiB = commit
 }
 
+// setHeld says the processes below pid hold gib resident AND privately (the two coincide unless a test says otherwise).
 func (f *fakeHost) setHeld(pid int, gib float64) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.heldByPD[pid] = gib
+	delete(f.privByPD, pid)
+}
+
+// setHeldPrivate says the processes below pid are charged gib of private bytes, whatever they hold resident.
+func (f *fakeHost) setHeldPrivate(pid int, gib float64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.privByPD[pid] = gib
 }
 
 // arm installs the fake on m: memory reader and the holder-memory reader.
@@ -54,10 +69,14 @@ func (f *fakeHost) arm(m *Manager) {
 		defer f.mu.Unlock()
 		return f.mem, f.memOK
 	}
-	m.workload = func(pid int) (float64, bool) {
+	m.workload = func(pid int) (gpuprobe.HostLoad, bool) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		return f.heldByPD[pid], true
+		load := gpuprobe.HostLoad{TouchGiB: f.heldByPD[pid], CommitGiB: f.heldByPD[pid]}
+		if p, ok := f.privByPD[pid]; ok {
+			load.CommitGiB = p
+		}
+		return load, true
 	}
 }
 
@@ -413,30 +432,36 @@ func TestHostRAMOnTheRecordIsAdditive(t *testing.T) {
 	}
 }
 
-// pendingGiB pools leases that share a holder (the pipeline's one server process holds one lease per
+// pendingLoad pools leases that share a holder (the pipeline's one server process holds one lease per
 // card, and all their runners are below it), never goes below zero, and counts the whole declared
-// need of a holder whose memory cannot be read.
+// need of a holder whose memory cannot be read. Each quantity is its own sum: the working set against the
+// resident figure, the commit against the private one.
 func TestPendingPoolsLeasesByHolder(t *testing.T) {
-	held := func(m map[int]float64, unreadable ...int) func(Info) (float64, bool) {
+	held := func(m map[int]gpuprobe.HostLoad, unreadable ...int) func(Info) (gpuprobe.HostLoad, bool) {
 		bad := map[int]bool{}
 		for _, p := range unreadable {
 			bad[p] = true
 		}
-		return func(l Info) (float64, bool) { return m[l.PID], !bad[l.PID] }
+		return func(l Info) (gpuprobe.HostLoad, bool) { return m[l.PID], !bad[l.PID] }
 	}
 	live := []Info{
 		{Epoch: 1, PID: 100, HostRAMGiB: 20},
 		{Epoch: 2, PID: 100, HostRAMGiB: 20}, // same holder: the runners below pid 100 are both jobs
 		{Epoch: 3, PID: 200, HostRAMGiB: 10},
-		{Epoch: 4, PID: 300, HostRAMGiB: 0}, // declares nothing
-		{Epoch: 5, PID: 400, HostRAMGiB: 8}, // holder unreadable
+		{Epoch: 4, PID: 300, HostRAMGiB: 0},                        // declares nothing
+		{Epoch: 5, PID: 400, HostRAMGiB: 8},                        // holder unreadable
+		{Epoch: 6, PID: 500, HostRAMGiB: 10, HostRAMCommitGiB: 50}, // a commit declared apart from the working set
+		{Epoch: 7, PID: 600, HostRAMCommitGiB: 12},                 // a commit and no working set
 	}
-	got := pendingGiB(live, held(map[int]float64{100: 25, 200: 30}, 400))
-	// holder 100: 40 declared - 25 held = 15; holder 200: 10 - 30 -> 0; holder 400 unreadable: all 8.
-	if got != 15+0+8 {
-		t.Fatalf("pending = %.1f, want 23", got)
+	got := pendingLoad(live, held(map[int]gpuprobe.HostLoad{
+		100: {TouchGiB: 25, CommitGiB: 25}, 200: {TouchGiB: 30, CommitGiB: 30}, 500: {TouchGiB: 10, CommitGiB: 20}, 600: {TouchGiB: 0, CommitGiB: 4},
+	}, 400))
+	// working set: holder 100: 40 declared - 25 held = 15; 200: 10 - 30 -> 0; 400 unreadable: all 8; 500: 10 - 10 = 0; 600: none.
+	// commit: 100: 15; 200: 0; 400: 8; 500: 50 - 20 = 30; 600: 12 - 4 = 8.
+	if want := (gpuprobe.HostLoad{TouchGiB: 15 + 0 + 8, CommitGiB: 15 + 0 + 8 + 30 + 8}); got != want {
+		t.Fatalf("pending = %+v, want %+v", got, want)
 	}
-	if pendingGiB(nil, held(nil)) != 0 {
+	if pendingLoad(nil, held(nil)) != (gpuprobe.HostLoad{}) {
 		t.Fatal("no leases, nothing pending")
 	}
 }
@@ -552,7 +577,7 @@ func TestHostRAMCheckIsTheRuleTheGrantApplies(t *testing.T) {
 					t.Errorf("%s: HostRAMCheck.OK = %v but the grant's refusal = %v", name, chk.OK, refusal)
 					continue
 				}
-				if refusal != nil && (chk.Why != refusal.Why || chk.Impossible != refusal.Impossible || chk.ProjectedGiB != refusal.ProjectedGiB || chk.PendingGiB != refusal.PendingGiB) {
+				if refusal != nil && (chk.Why != refusal.Why || chk.Impossible != refusal.Impossible || chk.CommitProjectedGiB != refusal.CommitProjectedGiB || chk.AvailableAfterGiB != refusal.AvailableAfterGiB || chk.PendingGiB != refusal.PendingGiB) {
 					t.Errorf("%s: the check and the grant disagree\n check: %+v\n grant: %+v", name, chk, refusal.HostRAMCheck)
 				}
 				if declared > 0 && need > 0 && chk.PendingGiB != declared {

@@ -276,6 +276,12 @@ type Meta struct {
 	// hold it. Additive and omitempty: a record without it declares nothing, which every reader
 	// (including a binary that predates the field, which ignores it) takes to mean "adds no host RAM".
 	HostRAMGiB float64 `json:"host_ram_gib,omitempty"`
+	// HostRAMCommitGiB is the commit the holder stated it will be charged (hostram.go), beside the working set HostRAMGiB
+	// it will touch: the grant admits the first against the available memory and this against the OS commit limit. 0 or absent
+	// = nothing stated: the same figure as HostRAMGiB, admitted against physical RAM less the headroom (a record from before the
+	// field, and a holder that declared one figure). Present, it is stated even when equal to HostRAMGiB. Additive and
+	// omitempty: an older reader ignores it and judges the lease by HostRAMGiB alone.
+	HostRAMCommitGiB float64 `json:"host_ram_commit_gib,omitempty"`
 	// HostRAMWaitGiB (F82) is host RAM the holder will ask the host for AFTER it has cleared the agent seat
 	// (`gpu reserve --unload-seat`): the grant took the cards without comparing it to the host, because the
 	// memory it waits for is held by the seat its own unload frees. It is not a claim. HostRAMGiB stays 0, so
@@ -284,6 +290,10 @@ type Meta struct {
 	// lock, the same admission rule at the same point in every other lease's view. Additive and omitempty:
 	// an older reader ignores it and reads a lease that declares nothing yet.
 	HostRAMWaitGiB float64 `json:"host_ram_wait_gib,omitempty"`
+	// HostRAMWaitCommitGiB is the commit twin of HostRAMWaitGiB: the commit the holder will ask the host for after the seat is
+	// cleared. AwaitHostRAM moves it into HostRAMCommitGiB in the same critical section that moves HostRAMWaitGiB into HostRAMGiB.
+	// 0 or absent = the same figure as HostRAMWaitGiB. Additive and omitempty.
+	HostRAMWaitCommitGiB float64 `json:"host_ram_wait_commit_gib,omitempty"`
 	// HostRAMHoldUntilMs (F82 hold bound) is when the hold bound ends the wait of a lease that holds its cards while the
 	// host is asked for HostRAMWaitGiB: unix milliseconds, stamped when that wait begins and taken off only by admission (a
 	// wait that ends any other way leaves it: a lease that still asks for the host must carry a moment by which somebody
@@ -381,6 +391,10 @@ type Meta struct {
 	// Tree is the process tree the wrapper started, recorded by the wrapper (plan P10): pid and
 	// start identity of each member, rewritten when the set changes. See tree.go.
 	Tree []TreeMember `json:"tree,omitempty"`
+
+	// treeUnknown is set on the reader's copy of a record (reader.judge, never on disk): a launch marker that may tie a live instance to
+	// a lease whose wrapper is gone is being installed and cannot be read. Reclaimable reads it as "an instance may be running".
+	treeUnknown bool
 }
 
 // RecordFormat is the Meta.Format every binary that understands card-scoped leases stamps.
@@ -407,8 +421,16 @@ type Info struct {
 	Command string
 	// HostRAMGiB mirrors Meta.HostRAMGiB: the host RAM the holder declared (0 = none declared).
 	HostRAMGiB float64
+	// HostRAMCommitGiB mirrors Meta.HostRAMCommitGiB, read as the commit the holder declared: the field when the record has one,
+	// else HostRAMGiB (a holder that declared one figure declared it for both).
+	HostRAMCommitGiB float64
 	// HostRAMWaitGiB mirrors Meta.HostRAMWaitGiB: host RAM the holder asked for and the host has not admitted yet.
 	HostRAMWaitGiB float64
+	// HostRAMWaitCommitGiB mirrors Meta.HostRAMWaitCommitGiB, read the same way (the field, else HostRAMWaitGiB).
+	HostRAMWaitCommitGiB float64
+	// HostRAMWaitCommitStated says the record carries a wait commit (Meta.HostRAMWaitCommitGiB above 0), which is a stated one,
+	// as against the touched figure HostRAMWaitCommitGiB reads as when the record has none. AwaitHostRAM puts it to the rule.
+	HostRAMWaitCommitStated bool `json:"-"`
 	// HostRAMHoldUntil mirrors Meta.HostRAMHoldUntilMs: when the hold bound releases a lease that is waiting for the host
 	// with its cards held (the outer bound a detached reserve stamps before its drain, then the wait's own end). Zero = no bound
 	// is on the record.
@@ -581,13 +603,21 @@ type Options struct {
 	Draining bool
 	// Command is recorded as Meta.Command (clipped to commandClip runes).
 	Command string
-	// HostRAMGiB is the host RAM the holder declares it will load (stamped as Meta.HostRAMGiB). The
-	// grant is admitted against it (hostram.go): committed memory now, plus this, plus what leases
-	// already granted have yet to load, must stay under physical RAM less the headroom. 0 declares
+	// HostRAMGiB is the host RAM the holder declares it will touch: its working set (stamped as Meta.HostRAMGiB). The
+	// grant is admitted against it (hostram.go): the available RAM less this and what leases already granted have yet
+	// to touch must stay at or above the headroom (and see HostRAMCommitGiB for the commit side). 0 declares
 	// nothing and is never read against the host. The callers resolve it: an explicit `gpu reserve
 	// --ram`, else an estimate from the model files of the render call, else a class default
 	// (internal/hostneed).
 	HostRAMGiB float64
+	// HostRAMCommitGiB is the commit the holder STATES it will be charged (stamped as Meta.HostRAMCommitGiB), admitted against the
+	// OS commit limit where the OS enforces one. 0 = nothing stated: the commit is the same figure as HostRAMGiB and is admitted
+	// against physical RAM less the headroom, the line a caller that declares one figure has always been held to. Above 0 it is
+	// stated, even when it equals HostRAMGiB. The two differ for a job that commits more than it touches (a process tree measured
+	// at 27.8 GiB touched and 58.1 GiB charged), and a stated commit is how such a job is judged on what it measured. A job whose
+	// commit is smaller than its working set (mapped files count in the working set and not in the commit) cannot say so by leaving
+	// this at 0, which reads as the touched figure; a commit stated below the working set is taken as stated.
+	HostRAMCommitGiB float64
 	// OnHostRAMWait, when set, is called ONCE per Acquire, at the first refusal on host-RAM grounds
 	// of a request that will keep waiting (Wait > 0): the CLI prints the "waiting for host RAM" line
 	// from it. Once, because a line per poll is a notification per second in the session that wraps
@@ -600,6 +630,8 @@ type Options struct {
 	// rule, while the cards are still held. A caller sets either this or HostRAMGiB, not both: HostRAMGiB wins (the
 	// grant admits it as always) and this is then ignored.
 	HostRAMWaitGiB float64
+	// HostRAMWaitCommitGiB is the commit twin of HostRAMWaitGiB (0 = the same figure, nothing stated; above 0 it is stated).
+	HostRAMWaitCommitGiB float64
 	// Devices names the cards the lease holds, by GPU UUID (plan invariant I2). Empty
 	// is a WHOLE-NODE lease, the only kind that existed before record v2. A non-empty
 	// set writes a v2 lease (per-card claims) and is refused unless the host has
@@ -693,8 +725,12 @@ type Manager struct {
 	cardScoped bool
 	// afterClaimHook, when set, runs right after a whole-node acquisition has made its
 	// meta.json claim and before it verifies there is no device lease. Tests use it to
-	// land a device lease in exactly that window; production never sets it.
+	// land a device lease in exactly that window; production never sets it. The epoch lock is already let go when it runs, so it may
+	// take the lock itself (a device grant does).
 	afterClaimHook func()
+	// beforeClaimHook, when set, runs just before a whole-node acquisition creates its meta.json claim. A test uses it to look at
+	// what is held at that instant (the epoch lock). Production never sets it.
+	beforeClaimHook func()
 	// legacyWriter makes this Manager write records the way a binary that predates card-scoped
 	// leases did (no Format stamp). A test seam: production never sets it.
 	legacyWriter bool
@@ -713,13 +749,42 @@ type Manager struct {
 	// process-wide one config.Load installed (SetDefaultHostRAMHeadroom).
 	hostHeadroomGiB float64
 	// hostMem and workload are test seams for the host-RAM term: the host's memory reading (nil = the
-	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold RESIDENT
-	// (nil = the real process-tree reader, descendantsResidentGiB). Production never sets them.
+	// real reader, gpuprobe.ReadHostMemory) and what the processes below a holder pid hold: TouchGiB is their
+	// working set (resident) and CommitGiB their private bytes (nil = the real process-tree reader,
+	// descendantsHeld). Production never sets them.
 	hostMem  func() (gpuprobe.HostMemory, bool)
-	workload func(holderPID int) (float64, bool)
+	workload func(holderPID int) (gpuprobe.HostLoad, bool)
 	// readOnly marks a view made by ReadOnly: the readers that prune a record they find dead or expired leave it.
 	readOnly bool
 }
+
+// effectiveCommit is the commit a declaration stands for: the commit when one was declared, else the touched figure (a holder
+// that declared one figure declared it for both quantities).
+func effectiveCommit(touch, commit float64) float64 {
+	if commit > 0 {
+		return commit
+	}
+	return max(touch, 0)
+}
+
+// storedCommit is what goes on a record for a commit: the figure when one was stated, else nothing (the reader takes the touched
+// figure, and a record of a holder that declared one figure is the record it always was). A stated commit equal to the touched
+// figure is kept: it is stated, and a reader would take its absence for the default, which is judged against another line.
+func storedCommit(commit float64) float64 { return max(commit, 0) }
+
+// hostLoad is what the options declare of the host's memory: the working set, and the commit (the touched figure when no
+// commit was declared). The commit is STATED when the options carry one above 0, even one equal to the working set; only a stated
+// commit is judged against the OS commit limit (gpuprobe.HostLoad.CommitStated).
+func (o Options) hostLoad() gpuprobe.HostLoad {
+	return gpuprobe.HostLoad{TouchGiB: max(o.HostRAMGiB, 0), CommitGiB: effectiveCommit(o.HostRAMGiB, o.HostRAMCommitGiB), CommitStated: o.HostRAMCommitGiB > 0}
+}
+
+// DeclaresHostRAM says the lease declared any host memory (either quantity).
+func (i Info) DeclaresHostRAM() bool { return i.HostRAMGiB > 0 || i.HostRAMCommitGiB > 0 }
+
+// AsksForHostRAM says the lease waits to have host memory admitted (either quantity): it holds its cards and has not yet
+// declared the figure (Meta.HostRAMWaitGiB).
+func (i Info) AsksForHostRAM() bool { return i.HostRAMWaitGiB > 0 || i.HostRAMWaitCommitGiB > 0 }
 
 // ErrCardScopedOff is returned by an acquisition that names devices on a host that
 // has not enabled card-scoped leases.
@@ -1148,7 +1213,15 @@ func probeWritable(dir string) error {
 // pid is dead or recycled is reclaimable only if no member of the tree it recorded is still the
 // process that was recorded. This pure rule reads the record alone: a lease that recorded no tree has no member to hold it,
 // so it is freed at once. The reader (reader.judge in tree.go) first folds in the other evidence that ties a live process to
-// such a lease (a launch marker, or on Windows a child of the dead wrapper), and a lease with none alive is freed as before.
+// such a lease (a launch marker, or on Windows a child of the dead wrapper), and a lease with none alive is freed as before. A launch
+// marker that is being installed cannot be read and so cannot say that none is alive: the reader sets treeUnknown on its copy of the
+// record, and the lease is held for as long as the marker is (at most the freshness of its staged file, tree.go).
+//
+// A heartbeat that is UNKNOWN is not stale. The reader (reader.judge) passes it as RenewedAtMs 0, "no stamp", and a heartbeat nobody
+// could read or examine (a rename is installing it, an I/O error that outlasted its wait) says nothing about the holder. What frees
+// such a lease is the first half of the rule (the wrapper is gone: pid and start time) or `gpu release`; a heartbeat that stays unknown
+// for good on a holder that is alive but hung keeps its lease until then. A file that can be examined is aged by its modification time,
+// so a corrupt heartbeat nobody renews still goes stale (heartbeatAt).
 func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart func(int) (int64, bool)) bool {
 	if m == nil {
 		return true // no/unreadable meta => stale, same rule the .mjs used
@@ -1163,9 +1236,11 @@ func Reclaimable(m *Meta, now time.Time, heartbeatTTL time.Duration, procStart f
 		// the tree it recorded is still alive the card is in use and the claim is kept (plan
 		// P10, tree.go). With no recorded member alive this rule frees the lease at once; the reader that has found a
 		// live process by the other evidence passes it in Tree, so it is held.
-		return len(liveMembers(m.Tree, procStart)) == 0
+		return len(liveMembers(m.Tree, procStart)) == 0 && !m.treeUnknown
 	}
 	nowMs := now.UnixMilli()
+	// RenewedAtMs <= 0 is no stamp: the reader (reader.judge) leaves it 0 when the heartbeat is UNKNOWN, and a heartbeat nobody could
+	// read is not evidence of a dead holder. Only the wrapper-gone half above frees such a lease (pid and start time), or `gpu release`.
 	heartbeatStale := m.RenewedAtMs > 0 && nowMs-m.RenewedAtMs > heartbeatTTL.Milliseconds()
 	windowExpired := nowMs > m.ExpiresAtMs
 	return heartbeatStale && windowExpired
@@ -1223,18 +1298,49 @@ func inspectDirDetailAt(leaseDir string, now time.Time, hbTTL time.Duration) (In
 	return reader{dir: leaseDir, now: now, hbTTL: hbTTL, procStart: processStart}.detail()
 }
 
-// heartbeatAt reads the per-epoch heartbeat beside a lease record, falling back to the
-// value stamped at acquisition when nothing has renewed yet.
-func heartbeatAt(leaseDir string, meta *Meta) int64 {
-	b, err := os.ReadFile(filepath.Join(leaseDir, "hb."+strconv.FormatUint(meta.Epoch, 10)))
-	if err != nil {
-		return meta.RenewedAtMs
+// heartbeatAt reads the per-epoch heartbeat beside a lease record and says whether it could tell. The second result is false when the
+// heartbeat is UNKNOWN, and the reclaim rule reads unknown as "not stale" (see reader.judge): a heartbeat that cannot be read says
+// nothing about the holder, and the cost of acting on it is a live lease handed to a second job.
+//
+// The value, known, is:
+//
+//   - the content of hb.<epoch> when it reads and is a number not earlier than the stamp from the acquisition;
+//   - the file's modification time when the file is there but its content is no use (empty, not a number, or a number earlier than the
+//     acquisition, which no renewal can be: a torn write leaves a prefix of the digits, and a prefix of a number is a number) or the read
+//     failed for any reason but the file being absent (a permission error that outlasted its wait, an I/O error). The file is aged like any
+//     heartbeat: Renew writes a staged file and renames it over the live name, so a heartbeat renewed a moment ago has the time of that
+//     write, and one nobody renews goes stale after the TTL, corrupt or not. The time is never earlier than the stamp either;
+//   - the stamp from the acquisition when the read found the name absent and the file is SETTLED absent (no fresh staged file beside
+//     the name, and the name still not there on a second look: statSettled), which is a holder that never renewed;
+//   - unknown otherwise: the name is absent with a fresh staged file beside it (a rename is installing it), the read failed with
+//     something other than an absence (or read a body that says nothing) and the file is then gone, or the read and the look at the file
+//     both failed. A read that said absent and a look that then finds the file (the rename landed between the two) is the file's
+//     modification time, above, and is known.
+//
+// It reads through a handle that shares delete (readSharedFile). Renew replaces the file by a rename over the live name, WITHOUT the
+// epoch lock, so the sweep that reads it under that lock is not protected from it: an acquirer's probe and its locked sweep each meet
+// the heartbeat, and a lease past its window is kept by nothing else. A read that met the rename and fell back to the acquisition stamp
+// (hours old by then) called a live lease stale and let it be reclaimed.
+func heartbeatAt(leaseDir string, meta *Meta) (at int64, known bool) {
+	path := filepath.Join(leaseDir, "hb."+strconv.FormatUint(meta.Epoch, 10))
+	b, err := readSharedFile(path)
+	if err == nil {
+		// A genuine renewal is never earlier than the moment the lease was taken. A number below that (a prefix of the digits of a
+		// renewal that was torn, zero, a negative number) parses and is still no heartbeat: it says nothing, like an empty file.
+		floor := max(meta.RenewedAtMs, meta.AcquiredAtMs, 1)
+		if v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil && v >= floor {
+			return v, true
+		}
+		// read, but it says nothing: age the file itself
 	}
-	v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-	if perr != nil || v < meta.RenewedAtMs {
-		return meta.RenewedAtMs
+	fi, serr := statSettled(path)
+	switch {
+	case serr == nil:
+		return max(fi.ModTime().UnixMilli(), meta.RenewedAtMs), true
+	case err != nil && errors.Is(err, fs.ErrNotExist) && errors.Is(serr, fs.ErrNotExist):
+		return meta.RenewedAtMs, true // settled absent: the holder never renewed
 	}
-	return v
+	return 0, false
 }
 
 // infoFrom builds the public view. Age is time HELD, from the acquirer's own stamp.
@@ -1252,21 +1358,26 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		expires = time.UnixMilli(meta.ExpiresAtMs)
 	}
 	return Info{
-		Held:       true,
-		Class:      meta.Class,
-		Epoch:      meta.Epoch,
-		PID:        meta.Holder.PID,
-		Age:        age,
-		Reason:     meta.Reason,
-		Origin:     meta.Origin,
-		JobID:      meta.JobID,
-		ExpiresAt:  expires,
-		Exclusive:  meta.Exclusive,
-		Draining:   meta.Draining,
-		Command:    meta.Command,
-		HostRAMGiB: meta.HostRAMGiB,
+		Held:             true,
+		Class:            meta.Class,
+		Epoch:            meta.Epoch,
+		PID:              meta.Holder.PID,
+		Age:              age,
+		Reason:           meta.Reason,
+		Origin:           meta.Origin,
+		JobID:            meta.JobID,
+		ExpiresAt:        expires,
+		Exclusive:        meta.Exclusive,
+		Draining:         meta.Draining,
+		Command:          meta.Command,
+		HostRAMGiB:       meta.HostRAMGiB,
+		HostRAMCommitGiB: effectiveCommit(meta.HostRAMGiB, meta.HostRAMCommitGiB),
 
-		HostRAMWaitGiB: meta.HostRAMWaitGiB,
+		HostRAMWaitGiB:       meta.HostRAMWaitGiB,
+		HostRAMWaitCommitGiB: effectiveCommit(meta.HostRAMWaitGiB, meta.HostRAMWaitCommitGiB),
+
+		HostRAMWaitCommitStated: meta.HostRAMWaitCommitGiB > 0,
+
 		Devices:        append([]string(nil), meta.Devices...),
 		Epochs:         []uint64{meta.Epoch},
 		Group:          meta.Group,
@@ -1431,26 +1542,56 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		// grace period reads that as debris and deletes a live claim. A failed claim
 		// therefore burns an epoch number, which is harmless: the counter only has to
 		// be monotonic, never gapless.
-		epoch, eerr := m.bumpEpoch()
-		if eerr != nil {
-			return nil, eerr
-		}
-		rec, rerr := m.record(epoch, class, opts)
-		if rerr != nil {
-			return nil, rerr
-		}
+		//
+		// THE EPOCH, THE RECORD AND THE CLAIM ARE ONE CRITICAL SECTION under the epoch
+		// lock, as a card grant's are. The claim is an exclusive create of the name a
+		// holder's restamp replaces by a rename, and the restamp holds this lock: with
+		// the lock let go as the epoch was issued, a create could land inside the
+		// restamp (on Windows a rename over a name can leave it absent for tens of
+		// milliseconds while it runs) and the rename then replaced the created claim
+		// with the holder's record, a claim made and gone with the grant told it held
+		// the card. What the record needs from the process and from files (the holder's
+		// process start, the session registry) is read before the lock is taken
+		// (draftRecord), so the section is the epoch's two file operations, the record's
+		// encoding and the create. Nothing that takes the lock again runs inside it
+		// (the verification and the reclaim below do, after it).
+		draft := m.draftRecord(class, opts)
+		var epoch uint64
+		var claimErr error // the exclusive create's answer: nil is a claim made
+		lerr := m.withEpochLock(func() error {
+			m.sweepStagedMetaLocked() // a dead restamp's leftover beside meta.json: one remove (devices.go)
+			var berr error
+			if epoch, berr = m.bumpEpochLocked(); berr != nil {
+				return berr
+			}
+			rec, rerr := m.finishRecord(draft, epoch)
+			if rerr != nil {
+				return rerr
+			}
 
-		// THE CLAIM: exclusive creation of meta.json, written complete in one call.
-		// This single token is what makes cross-language mutual exclusion real rather
-		// than merely documented.
-		f, err := createClaim(m.metaPath())
-		if err == nil {
+			// THE CLAIM: exclusive creation of meta.json, written complete in one call.
+			// This single token is what makes cross-language mutual exclusion real rather
+			// than merely documented.
+			if m.beforeClaimHook != nil {
+				m.beforeClaimHook()
+			}
+			f, cerr := createClaim(m.metaPath())
+			if cerr != nil {
+				claimErr = cerr
+				return nil
+			}
 			_, werr := f.Write(rec)
-			cerr := f.Close()
+			cerr = f.Close()
 			if werr != nil || cerr != nil {
 				_ = removeClaim(m.metaPath()) // drop a claim we could not complete
-				return nil, fmt.Errorf("gpulease: writing lease claim: %w", errors.Join(werr, cerr))
+				return fmt.Errorf("gpulease: writing lease claim: %w", errors.Join(werr, cerr))
 			}
+			return nil
+		})
+		if lerr != nil {
+			return nil, lerr
+		}
+		if claimErr == nil {
 			if m.afterClaimHook != nil {
 				m.afterClaimHook()
 			}
@@ -1468,8 +1609,8 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 			m.sweepSeen(map[uint64]bool{epoch: true})
 			return &Lease{mgr: m, epoch: epoch, class: class}, nil
 		}
-		if !os.IsExist(err) {
-			return nil, fmt.Errorf("gpulease: could not claim the lease: %w", err)
+		if !os.IsExist(claimErr) {
+			return nil, fmt.Errorf("gpulease: could not claim the lease: %w", claimErr)
 		}
 
 		// Someone else holds the claim.
@@ -1820,57 +1961,82 @@ const claimGrace = 10 * time.Second
 // claimIsFresh reports whether the claim file was created recently enough to be a
 // write in progress.
 func (m *Manager) claimIsFresh() bool {
-	fi, err := os.Stat(m.metaPath())
+	fi, err := statSettled(m.metaPath())
 	if err != nil {
-		return false
+		// The claim is replaced by a rename over the live name (restampWholeLocked). One that cannot be examined because a rename may be
+		// installing it is a claim in progress, held and not debris: calling it stale would have it removed.
+		return errors.Is(err, errRenameInFlight)
 	}
 	return m.now().Sub(fi.ModTime()) < claimGrace
 }
 
-// record builds the complete lease record, so the claim can be created and filled in
-// by a single write. Nothing observes a partially written token.
-func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error) {
+// recordDraft is a lease record without what only the grant itself can say: the epoch it is issued and the instant it is granted at.
+// Everything else in it (the holder's process start, the owner and the session registry behind it, the term plan) is read from the
+// process and from files, which takes time, and none of it needs the epoch. A grant that holds the epoch lock builds the draft before
+// it takes the lock and only finishes it inside, so those reads are not paid while every other acquirer on the machine waits.
+type recordDraft struct {
+	meta Meta
+	ttl  time.Duration
+}
+
+// draftRecord builds the part of a lease record that does not need the epoch or the instant of the grant (see recordDraft).
+func (m *Manager) draftRecord(class Class, opts Options) *recordDraft {
 	ttl := opts.TTL
 	if ttl <= 0 {
 		ttl = DefaultTTL
 	}
-	now := m.now()
 	start, _ := m.procStart(m.pid)
 	// A need the grant admits (HostRAMGiB) is not also one to await: the admitted figure wins.
-	awaiting := 0.0
-	if opts.HostRAMGiB <= 0 {
-		awaiting = max(opts.HostRAMWaitGiB, 0)
+	awaiting, awaitingCommit := 0.0, 0.0
+	if !opts.hostLoad().Declares() {
+		awaiting, awaitingCommit = max(opts.HostRAMWaitGiB, 0), max(opts.HostRAMWaitCommitGiB, 0)
 	}
 	meta := Meta{
-		Epoch:        epoch,
-		Class:        class,
-		Holder:       Holder{PID: m.pid, StartTimeMs: start},
-		JobID:        opts.JobID,
-		Origin:       opts.Origin,
-		Reason:       opts.Reason,
-		AcquiredAtMs: now.UnixMilli(),
-		ExpiresAtMs:  now.Add(ttl).UnixMilli(),
-		RenewedAtMs:  now.UnixMilli(),
-		Exclusive:    opts.Exclusive && class == ClassText,
-		Draining:     opts.Draining,
-		Command:      clipCommand(opts.Command),
-		HostRAMGiB:   max(opts.HostRAMGiB, 0),
+		Class:      class,
+		Holder:     Holder{PID: m.pid, StartTimeMs: start},
+		JobID:      opts.JobID,
+		Origin:     opts.Origin,
+		Reason:     opts.Reason,
+		Exclusive:  opts.Exclusive && class == ClassText,
+		Draining:   opts.Draining,
+		Command:    clipCommand(opts.Command),
+		HostRAMGiB: max(opts.HostRAMGiB, 0),
 
-		HostRAMWaitGiB: awaiting,
-		Group:          strings.TrimSpace(opts.Group),
-		WrapperVersion: strings.TrimSpace(opts.WrapperVersion),
-		Yields:         strings.TrimSpace(opts.Yields),
+		HostRAMCommitGiB:     storedCommit(opts.HostRAMCommitGiB),
+		HostRAMWaitGiB:       awaiting,
+		HostRAMWaitCommitGiB: storedCommit(awaitingCommit),
+		Group:                strings.TrimSpace(opts.Group),
+		WrapperVersion:       strings.TrimSpace(opts.WrapperVersion),
+		Yields:               strings.TrimSpace(opts.Yields),
 	}
 	m.stampOwnership(&meta, opts)
 	m.stampTerm(&meta, opts, ttl)
 	if !m.legacyWriter {
 		meta.Format = RecordFormat
 	}
+	return &recordDraft{meta: meta, ttl: ttl}
+}
+
+// finishRecord puts the epoch and the instant of the grant on a draft and encodes it. RenewedAtMs is written here and nowhere else:
+// it is the acquisition stamp, and the heartbeat is its own file (heartbeatAt).
+func (m *Manager) finishRecord(d *recordDraft, epoch uint64) ([]byte, error) {
+	now := m.now()
+	meta := d.meta
+	meta.Epoch = epoch
+	meta.AcquiredAtMs = now.UnixMilli()
+	meta.ExpiresAtMs = now.Add(d.ttl).UnixMilli()
+	meta.RenewedAtMs = now.UnixMilli()
 	b, err := json.Marshal(&meta)
 	if err != nil {
 		return nil, fmt.Errorf("gpulease: encoding lease record: %w", err)
 	}
 	return b, nil
+}
+
+// record builds the complete lease record, so the claim can be created and filled in
+// by a single write. Nothing observes a partially written token.
+func (m *Manager) record(epoch uint64, class Class, opts Options) ([]byte, error) {
+	return m.finishRecord(m.draftRecord(class, opts), epoch)
 }
 
 // bumpEpoch issues the next fencing token. The counter lives OUTSIDE the lease dir so
@@ -1906,6 +2072,7 @@ func (m *Manager) withEpochLock(fn func() error) error {
 		if err == nil {
 			_ = f.Close()
 			defer os.Remove(lock)
+			defer beginEpochHold(m.leaseDir())() // the gate takes no more than lockGateCap of this hold (gate.go)
 			return fn()
 		}
 		// CONTENTION ON WINDOWS DOES NOT ALWAYS LOOK LIKE EEXIST. Deleting a file whose
@@ -2018,7 +2185,7 @@ func (m *Manager) readEpoch() (uint64, error) {
 
 // writeEpoch publishes a counter value atomically. Callers must hold the epoch lock.
 func (m *Manager) writeEpoch(v uint64) error {
-	tmp := m.epochPath() + ".tmp"
+	tmp := stagingPath(m.epochPath())
 	if err := os.WriteFile(tmp, []byte(strconv.FormatUint(v, 10)), 0o666); err != nil {
 		return fmt.Errorf("gpulease: writing epoch: %w", err)
 	}
@@ -2091,7 +2258,10 @@ func (l *Lease) Renew() error {
 	// the heartbeat.
 	path := l.mgr.heartbeatPath(l.epoch)
 	b := []byte(strconv.FormatInt(l.mgr.now().UnixMilli(), 10))
-	tmp := path + ".tmp"
+	tmp := stagingPath(path) // the reader that asks whether this rename is in flight takes the name from the same place
+	// The file time is the one this write gives the staged file, and the rename carries it to the live name (nothing here sets a time
+	// by hand): a heartbeat renewed a moment ago is never older than the renewal. A heartbeat whose content cannot be read is aged by
+	// that time (heartbeatAt).
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return err
 	}
@@ -2166,7 +2336,7 @@ func (m *Manager) restampWholeLocked(epoch uint64, fn func(*Meta)) error {
 	if merr != nil {
 		return fmt.Errorf("gpulease: encoding lease record: %w", merr)
 	}
-	tmp := m.metaPath() + ".restamp"
+	tmp := stagingPath(m.metaPath())
 	if werr := os.WriteFile(tmp, b, 0o666); werr != nil {
 		return fmt.Errorf("gpulease: restamp: %w", werr)
 	}
@@ -2204,17 +2374,13 @@ func (m *Manager) heartbeatPath(epoch uint64) string {
 }
 
 // lastHeartbeat returns the most recent heartbeat for this epoch, falling back to the
-// value stamped into the record at acquisition when nothing has renewed yet.
+// value stamped into the record at acquisition when nothing has renewed yet or when the
+// heartbeat is unknown (heartbeatAt: it reads the heartbeat the one way, so the two cannot drift).
 func (m *Manager) lastHeartbeat(meta *Meta) int64 {
-	b, err := os.ReadFile(m.heartbeatPath(meta.Epoch))
-	if err != nil {
-		return meta.RenewedAtMs
+	if at, known := heartbeatAt(m.leaseDir(), meta); known {
+		return at
 	}
-	v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-	if perr != nil || v < meta.RenewedAtMs {
-		return meta.RenewedAtMs
-	}
-	return v
+	return meta.RenewedAtMs
 }
 
 // ReleaseByEpoch drops the CURRENT lease from a process that does not hold it (the

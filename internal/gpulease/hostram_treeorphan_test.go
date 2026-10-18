@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
@@ -87,8 +88,9 @@ func TestTreeOrphanDeclaredNeedIsNotChargedAgainAsUnloaded(t *testing.T) {
 		t.Fatalf("pending = %.3f GiB: a 96 MiB member cannot have loaded 0.5 GiB", pending)
 	}
 	// The grant path reads the holders early (before the epoch lock) and compares inside it: the same figure.
-	r := m.readHost(1)
-	chk := m.hostRAMCheckWith(1, live, r)
+	need := gpuprobe.HostLoad{TouchGiB: 1, CommitGiB: 1}
+	r := m.readHost(need)
+	chk := m.hostRAMCheckWith(need, live, r)
 	if chk.PendingGiB > declared-0.05 {
 		t.Fatalf("the grant's check charged %.3f GiB pending for the orphan, want the same measured figure (< %.2f)", chk.PendingGiB, declared-0.05)
 	}

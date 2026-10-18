@@ -20,11 +20,12 @@
 //   - the ComfyUI lifecycle and the guarded teardown.
 //
 // No npm dependencies.
-import { writeFileSync, readFileSync, unlinkSync } from "node:fs";
+import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance, DEFAULT_COMFY_PORT, COMFY_DIR } from "./comfy-lifecycle.mjs";
 import { settleInstanceFamily, releaseInstanceFamily } from "./comfy-family.mjs";
 import { leaseBeat } from "./lease-progress.mjs";
+import { readSharedJson, readSharedSync } from "./lease-read.mjs";
 
 // LEASE_FORMAT_SIGNATURE is what `local-offload gpu doctor` looks for in a copy of this
 // file (internal/gpulease/audit.go, FormatSignature, pinned by a Go test): a reader that
@@ -38,11 +39,13 @@ function metaPath(lockPath) {
 }
 
 // readLease parses the shared lease record written by internal/gpulease. Node only ever
-// READS it — the schema is owned on the Go side.
+// READS it — the schema is owned on the Go side. Every read of a lease file here goes through
+// lease-read.mjs: Go replaces these files by rename-over, and on Windows an open that meets the
+// instant of the rename fails with EPERM although the file is there a moment later, which is
+// waited out, as is an absent name with a fresh staged file beside it (a rename that left the live name
+// absent for a moment). A missing file with nothing staged beside it is not waited for: it reads null at once.
 export function readLease(lockPath) {
-  try {
-    return JSON.parse(readFileSync(metaPath(lockPath), "utf8"));
-  } catch { return null; }
+  return readSharedJson(metaPath(lockPath));
 }
 
 // inheritedLease: the Go holder threads its lease down. Absent env means no lease, which
@@ -58,22 +61,20 @@ export function inheritedLease(env = process.env) {
 // A card-scoped lease never writes meta.json; this file and the per-card claims are its
 // whole record. Null when there is no such lease.
 export function readEpochRecord(lockPath, epoch) {
-  try {
-    return JSON.parse(readFileSync(join(lockPath, "e", `${epoch}.json`), "utf8"));
-  } catch { return null; }
+  return readSharedJson(join(lockPath, "e", `${epoch}.json`));
 }
 
 // readCardClaim parses cards/<uuid>.claim: {epoch, at_ms}, or a bare epoch number.
 export function readCardClaim(lockPath, device) {
+  const text = readSharedSync(join(lockPath, "cards", `${device}.claim`));
+  if (text === null) return null;
+  const raw = text.trim();
   try {
-    const raw = readFileSync(join(lockPath, "cards", `${device}.claim`), "utf8").trim();
-    try {
-      const j = JSON.parse(raw);
-      if (j && typeof j === "object") return j;
-      if (typeof j === "number") return { epoch: j };
-    } catch { /* fall through to null */ }
-    return null;
-  } catch { return null; }
+    const j = JSON.parse(raw);
+    if (j && typeof j === "object") return j;
+    if (typeof j === "number") return { epoch: j };
+  } catch { /* fall through to null */ }
+  return null;
 }
 
 // A device id names a file under cards/, so it must be a plain token (mirrors

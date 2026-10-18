@@ -42,8 +42,8 @@ func mediaGETs(n *node) []seen {
 
 // The output of a job sent through the media-job door is rendered from the caller's private files, so the
 // node serves it only to a holder of the fleet token (ADR 0077): the client sends the bearer when it fetches
-// it, and the same file read without the token is refused. The output of a plain dispatch stays readable by
-// bare name.
+// it, and the same file read without the token is refused. So is the output of a plain dispatch: a node that has
+// a token serves no rendered file without it.
 func TestAMediaJobOutputIsFetchedWithTheBearerAndRefusedWithout(t *testing.T) {
 	n := startNode(t, nodeOpts{mediaInputs: true})
 	cfg := clientCfg(t, n)
@@ -75,7 +75,8 @@ func TestAMediaJobOutputIsFetchedWithTheBearerAndRefusedWithout(t *testing.T) {
 		t.Errorf("a read with the token = %d %q", code, body)
 	}
 
-	// A job with no input file goes through the tokenless dispatch; its output keeps its bare-name read.
+	// A job with no input file goes through the plain dispatch; its output keeps the pipeline's own name and needs
+	// the bearer to read, like every file the node serves.
 	plain := Run(context.Background(), cfg, &recordingRunner{}, video(nil), "remote", nil)
 	if !plain.OK {
 		t.Fatalf("%+v", plain)
@@ -84,7 +85,10 @@ func TestAMediaJobOutputIsFetchedWithTheBearerAndRefusedWithout(t *testing.T) {
 	if strings.HasPrefix(pname, "mediajob-") {
 		t.Fatalf("a plain dispatch output was given the media-job stem: %q", pname)
 	}
-	if code, _ := get(t, n, "/fleet/media/"+pname, ""); code != http.StatusOK {
-		t.Errorf("a tokenless read of a plain dispatch output = %d, want 200", code)
+	if code, _ := get(t, n, "/fleet/media/"+pname, ""); code != http.StatusUnauthorized {
+		t.Errorf("a tokenless read of a plain dispatch output = %d, want 401", code)
+	}
+	if code, body := get(t, n, "/fleet/media/"+pname, "Bearer tok"); code != http.StatusOK || body != "VIDEO" {
+		t.Errorf("a read of a plain dispatch output with the token = %d %q", code, body)
 	}
 }

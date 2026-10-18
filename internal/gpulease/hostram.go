@@ -10,10 +10,18 @@ package gpulease
 // which is what every owner wrapper takes, bypassed it, and it read FREE RAM, which says nothing
 // about jobs that have been granted and have not loaded yet.
 //
-// So a lease now DECLARES the host RAM it will load (Options.HostRAMGiB, stamped on the record as
-// Meta.HostRAMGiB), and the grant admits it by gpuprobe.HostRAMAdmits: committed memory now, plus
-// the need, plus the part of the leases already granted that has not loaded, must stay under
-// physical RAM less the headroom. The check runs on EVERY grant path:
+// So a lease now DECLARES the host memory it will take, in the two quantities the OS accounts apart: the working set it will
+// touch (Options.HostRAMGiB, stamped on the record as Meta.HostRAMGiB) and the commit it will be charged
+// (Options.HostRAMCommitGiB, stamped as Meta.HostRAMCommitGiB; 0 = the same figure). The grant admits both by
+// gpuprobe.HostRAMAdmitsLoad: what it touches, plus what the leases already granted have yet to touch, must leave the headroom
+// of the memory that is available; and the commit charge now, plus what it will be charged, must stay under a line that depends
+// on who said what the commit is. A commit STATED (Options.HostRAMCommitGiB above 0) is judged where the OS enforces a commit
+// limit, with what the leases already granted have yet to be charged, against that limit less the headroom: committed memory is
+// not memory in use, and the limit is the line the OS enforces (it refuses allocations there once the page file has reached its
+// maximum, and the current limit moves with a system-managed file). A commit nobody stated (a caller that declares one
+// figure) is that figure standing in for a commit, and is judged as it always was, with what the leases already granted have
+// yet to touch, against physical RAM less the headroom, because a job can commit more than it touches. The check runs on
+// EVERY grant path:
 //
 //   - a card-scoped grant (--devices, --cards, the media admission): inside grantDevicesLocked,
 //     under the epoch lock, after the cards are shown free and before the epoch is issued. The
@@ -45,11 +53,13 @@ package gpulease
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -61,8 +71,10 @@ import (
 const WaitHostRAM = "host-ram"
 
 // ErrHostRAM is the refusal of a grant on host-RAM grounds. The embedded check carries the numbers
-// the decision rested on; Error() is the sentence ("waiting for host RAM: needs N GiB, committed X
-// of Y GiB physical, Z GiB headroom").
+// the decision rested on; Error() is the sentence, which names the condition that refused and its numbers
+// ("waiting for host RAM: needs N GiB, only X GiB of Y GiB physical is available, Z GiB headroom" for the touched set,
+// "waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB headroom" for a commit nobody stated, and
+// "waiting for host RAM: needs N GiB of commit, committed X of Y GiB commit limit, Z GiB headroom" for a stated one).
 type ErrHostRAM struct {
 	gpuprobe.HostRAMCheck
 }
@@ -118,13 +130,14 @@ func (m *Manager) hostMemory() (gpuprobe.HostMemory, bool) {
 	return gpuprobe.ReadHostMemory()
 }
 
-// heldGiB is what the processes under a lease holder hold RESIDENT right now, and whether that could be
-// read.
-func (m *Manager) heldGiB(holderPID int) (float64, bool) {
+// heldLoad is what the processes under a lease holder hold right now, and whether that could be read: TouchGiB is their
+// working set (resident) and CommitGiB their private bytes (the currency of the system commit charge: PrivateUsage on
+// Windows, the private writable mappings on Linux).
+func (m *Manager) heldLoad(holderPID int) (gpuprobe.HostLoad, bool) {
 	if m.workload != nil {
 		return m.workload(holderPID)
 	}
-	return descendantsResidentGiB(holderPID)
+	return descendantsHeld(holderPID)
 }
 
 // holderKey is what the memory a lease has loaded is measured from, and what leases are pooled by. A live holder is its
@@ -143,21 +156,23 @@ func holderOf(l Info) holderKey {
 	return holderKey{pid: l.PID}
 }
 
-// heldOf is what the processes of a lease's job hold RESIDENT right now: below its holder (heldGiB), or, for a tree-orphan,
-// the live members the reader found for it and everything below them (membersResidentGiB).
-func (m *Manager) heldOf(l Info) (float64, bool) {
+// heldOf is what the processes of a lease's job hold right now: below its holder (heldLoad), or, for a tree-orphan, the live
+// members the reader found for it and everything below them (membersHeld).
+func (m *Manager) heldOf(l Info) (gpuprobe.HostLoad, bool) {
 	if l.TreeOrphan {
-		return membersResidentGiB(l.TreeLive)
+		return membersHeld(l.TreeLive)
 	}
-	return m.heldGiB(l.PID)
+	return m.heldLoad(l.PID)
 }
 
-// membersResidentGiB sums the resident memory of every listed member and of each process below it (a member can have
-// started more since the record was written), counting a process once. Unlike descendantsResidentGiB the roots are counted:
+const gibBytes = 1 << 30
+
+// membersHeld sums the resident and the private memory of every listed member and of each process below it (a member can have
+// started more since the record was written), counting a process once. Unlike descendantsHeld the roots are counted:
 // they are the job itself, not a long-lived holder.
-func membersResidentGiB(members []TreeMember) (float64, bool) {
+func membersHeld(members []TreeMember) (gpuprobe.HostLoad, bool) {
 	seen := map[int]bool{}
-	var bytes uint64
+	var priv, res uint64
 	readAny := false
 	for _, mem := range members {
 		if mem.PID <= 0 {
@@ -173,46 +188,63 @@ func membersResidentGiB(members []TreeMember) (float64, bool) {
 				continue
 			}
 			seen[p.PID] = true
-			if _, res, ok := processMemory(p.PID); ok {
-				bytes += res
+			if pv, rs, ok := processMemory(p.PID); ok {
+				priv += pv
+				res += rs
 			}
 		}
 	}
 	if !readAny && len(members) > 0 {
-		return 0, false
+		return gpuprobe.HostLoad{}, false
 	}
-	return float64(bytes) / (1 << 30), true
+	return gpuprobe.HostLoad{TouchGiB: float64(res) / gibBytes, CommitGiB: float64(priv) / gibBytes}, true
 }
 
-// descendantsResidentGiB sums the resident memory (the working set) of every process below holderPID, not
+// membersResidentGiB is the working-set half of membersHeld.
+func membersResidentGiB(members []TreeMember) (float64, bool) {
+	l, ok := membersHeld(members)
+	return l.TouchGiB, ok
+}
+
+// descendantsHeld sums the resident memory (the working set) and the private bytes of every process below holderPID, not
 // the holder itself. A wrapper lease's holder is `gpu reserve`, a few MiB, and the job is below it; a pipeline
 // lease's holder is the long-lived server, whose own memory is not the job's and must not be subtracted from
 // it. A process whose memory cannot be read (another security context) counts 0, which leaves more of the
 // declared need pending: the conservative reading.
 //
-// RESIDENT, not private (G3 of the P0 plan). A lease declares the host RAM it will load, in RAM units
-// (the files that stream from RAM, hostneed), and this is what is subtracted from it to find what is still to
-// come. Private bytes are commit: memory a process has been promised, resident or not, and on Windows a
-// process's GPU allocations may be charged to it without ever occupying system RAM (a llama-server with every
-// layer on the card was reported at 29.2 GiB private beside 25.7 GiB of VRAM). Subtracting a figure that
-// includes that from a need that does not would call a lane fully loaded while most of its RAM was still to
-// come, and the second lane would be admitted into the gap. The working set is the RAM the tree occupies now;
-// where private and resident coincide (no card memory in commit) the two readings are the same.
-func descendantsResidentGiB(holderPID int) (float64, bool) {
+// EACH QUANTITY IS SUBTRACTED FROM ITS OWN DECLARATION. A lease declares the host RAM it
+// will touch, in RAM units (the files that stream from RAM, hostneed), and the working set is what is subtracted from it to
+// find what is still to be touched. It declares the commit it will be charged, and the private bytes are what is subtracted
+// from that: private bytes ARE the currency of the commit charge, memory a process has been promised, resident or not (on
+// Linux that is VmData, the private writable mappings, because Committed_AS charges a mapping when it is made; the touched
+// part, RssAnon, would count an untouched mapping once in the charge and again here). On
+// Windows a process's GPU allocations may be charged to it without ever occupying system RAM (a llama-server with every
+// layer on the card was reported at 29.2 GiB private beside 25.7 GiB of VRAM), which is exactly why private bytes must not be
+// subtracted from a touched-set declaration (a lane would read as fully loaded while most of its RAM was still to come, and
+// the second lane would be admitted into the gap) and why they are the right figure against a commit declaration. Where
+// private and resident coincide (no card memory in commit) the two readings are the same.
+func descendantsHeld(holderPID int) (gpuprobe.HostLoad, bool) {
 	tree, err := ProcessTree(holderPID)
 	if err != nil {
-		return 0, false
+		return gpuprobe.HostLoad{}, false
 	}
-	var bytes uint64
+	var priv, res uint64
 	for _, p := range tree {
 		if p.PID == holderPID {
 			continue
 		}
-		if _, res, ok := processMemory(p.PID); ok {
-			bytes += res
+		if pv, rs, ok := processMemory(p.PID); ok {
+			priv += pv
+			res += rs
 		}
 	}
-	return float64(bytes) / (1 << 30), true
+	return gpuprobe.HostLoad{TouchGiB: float64(res) / gibBytes, CommitGiB: float64(priv) / gibBytes}, true
+}
+
+// descendantsResidentGiB is the working-set half of descendantsHeld.
+func descendantsResidentGiB(holderPID int) (float64, bool) {
+	l, ok := descendantsHeld(holderPID)
+	return l.TouchGiB, ok
 }
 
 // TreeMemory is the private and the resident memory (GiB) of root and every process below it: what a render's
@@ -236,21 +268,25 @@ func TreeMemory(root int) (privateGiB, residentGiB float64, err error) {
 	return float64(priv) / (1 << 30), float64(res) / (1 << 30), nil
 }
 
-// pendingGiB is the part of the declared needs of leases ALREADY GRANTED that has not loaded yet:
-// the memory those jobs are about to commit that the commit charge does not include. Leases that
+// pendingLoad is the part of the declared needs of leases ALREADY GRANTED that has not loaded yet, in both quantities: the memory
+// those jobs are about to touch that the available figure does not yet lose, and the commit they are about to be charged that
+// the commit charge does not include. Leases that
 // share a holder pid are pooled (the pipeline holds one lease per card in one server process, and
 // their runners are all below it, so a lease-by-lease subtraction would credit each lease with the
-// others' memory and count nothing pending): declared minus held, per holder, never below zero.
-// held reports what the processes of a lease's job hold RESIDENT now, the unit a declaration is in: the ones below its
-// holder (descendantsResidentGiB), or, for a tree-orphan whose holder is dead, its recorded live members (heldOf). A
+// others' memory and count nothing pending): declared minus held, per holder and per quantity, never below zero.
+// held reports what the processes of a lease's job hold now, in the unit each declaration is in: the ones below its
+// holder (descendantsHeld), or, for a tree-orphan whose holder is dead, its recorded live members (heldOf). A
 // holder it cannot read holds nothing, so its whole declared need is pending.
-func pendingGiB(live []Info, held func(l Info) (float64, bool)) float64 {
-	declared := map[holderKey]float64{}
+func pendingLoad(live []Info, held func(l Info) (gpuprobe.HostLoad, bool)) gpuprobe.HostLoad {
+	declared := map[holderKey]gpuprobe.HostLoad{}
 	probe := map[holderKey]Info{}
 	for _, l := range live {
-		if l.HostRAMGiB > 0 {
+		if l.DeclaresHostRAM() {
 			k := holderOf(l)
-			declared[k] += l.HostRAMGiB
+			d := declared[k]
+			d.TouchGiB += l.HostRAMGiB
+			d.CommitGiB += effectiveCommit(l.HostRAMGiB, l.HostRAMCommitGiB)
+			declared[k] = d
 			if _, ok := probe[k]; !ok {
 				probe[k] = l
 			}
@@ -266,45 +302,58 @@ func pendingGiB(live []Info, held func(l Info) (float64, bool)) float64 {
 		}
 		return keys[i].epoch < keys[j].epoch
 	})
-	var pending float64
+	var pending gpuprobe.HostLoad
 	for _, k := range keys {
-		have := 0.0
+		var have gpuprobe.HostLoad
 		if k.pid > 0 || k.epoch > 0 {
 			if g, ok := held(probe[k]); ok {
 				have = g
 			}
 		}
-		if rest := declared[k] - have; rest > 0 {
-			pending += rest
+		if rest := declared[k].TouchGiB - have.TouchGiB; rest > 0 {
+			pending.TouchGiB += rest
+		}
+		if rest := declared[k].CommitGiB - have.CommitGiB; rest > 0 {
+			pending.CommitGiB += rest
 		}
 	}
 	return pending
 }
 
-// HostRAMPending is pendingGiB over the leases live right now, for the readers that apply the same
+// HostRAMPendingLoad is pendingLoad over the leases live right now, for the readers that apply the same
 // rule before a grant (the card allocator's pre-filter) or report it (status).
-func (m *Manager) HostRAMPending() float64 { return pendingGiB(m.Leases(), m.heldOf) }
+func (m *Manager) HostRAMPendingLoad() gpuprobe.HostLoad { return pendingLoad(m.Leases(), m.heldOf) }
 
-// DeclaredHostRAMGiB is the sum of the host RAM the live leases declared.
-func DeclaredHostRAMGiB(leases []Info) float64 {
-	var sum float64
+// HostRAMPending is the touched-set half of HostRAMPendingLoad: what the live leases have yet to touch.
+func (m *Manager) HostRAMPending() float64 { return m.HostRAMPendingLoad().TouchGiB }
+
+// HostRAMPendingCommit is the commit half of HostRAMPendingLoad: what the live leases have yet to be charged.
+func (m *Manager) HostRAMPendingCommit() float64 { return m.HostRAMPendingLoad().CommitGiB }
+
+// DeclaredHostRAMLoad is the sum of what the live leases declared, per quantity.
+func DeclaredHostRAMLoad(leases []Info) gpuprobe.HostLoad {
+	var sum gpuprobe.HostLoad
 	for _, l := range leases {
-		sum += l.HostRAMGiB
+		sum.TouchGiB += l.HostRAMGiB
+		sum.CommitGiB += effectiveCommit(l.HostRAMGiB, l.HostRAMCommitGiB)
 	}
 	return sum
 }
 
+// DeclaredHostRAMGiB is the sum of the working set the live leases declared.
+func DeclaredHostRAMGiB(leases []Info) float64 { return DeclaredHostRAMLoad(leases).TouchGiB }
+
 // hostReading is the machine's side of a host-RAM check: the host's memory counters and what the processes below each
-// declaring lease holder hold resident. A card-scoped grant takes it BEFORE the epoch lock (readHost) and compares it
+// declaring lease holder hold. A card-scoped grant takes it BEFORE the epoch lock (readHost) and compares it
 // inside (hostRAMCheckWith): the counters are syscalls, but the holders' process trees are a walk with a memory read per
 // process (measured by the reviewer at about 26 ms median and 63 ms worst for one holder), and that walk used to run inside
 // the machine-wide lock on every grant attempt and every waiter poll (F57).
 //
 // What is read early is only the machine's side. The leases a need is judged against, and so the declared need of every one
 // of them, are still read under the lock, so a grant that lands between the reading and the lock is counted. The stale parts
-// err the conservative way: a resident figure read a moment early is lower, which leaves more of a declared need still to
+// err the conservative way: a figure read a moment early is lower, which leaves more of a declared need still to
 // load; a holder that appeared after the reading has no figure at all and counts as having loaded nothing, which is also
-// the reading the guard takes of a process it cannot read (descendantsResidentGiB).
+// the reading the guard takes of a process it cannot read (descendantsHeld).
 type hostReading struct {
 	mem   gpuprobe.HostMemory
 	memOK bool
@@ -312,31 +361,31 @@ type hostReading struct {
 }
 
 type heldReading struct {
-	gib float64
-	ok  bool
+	load gpuprobe.HostLoad
+	ok   bool
 }
 
 // heldOf is Manager.heldOf from the reading: the figure taken early for a holder that was live then, else "cannot be read".
-func (r *hostReading) heldOf(l Info) (float64, bool) {
+func (r *hostReading) heldOf(l Info) (gpuprobe.HostLoad, bool) {
 	h, ok := r.held[holderOf(l)]
 	if !ok {
-		return 0, false
+		return gpuprobe.HostLoad{}, false
 	}
-	return h.gib, h.ok
+	return h.load, h.ok
 }
 
-// readHost takes the readings a check of needGiB will compare: the host's memory and the resident memory below the holder of
-// every live lease that declared a need. A need of 0 is admitted without reading anything (hostRAMCheckAgainst's rule), so it
-// takes none (nil).
-func (m *Manager) readHost(needGiB float64) *hostReading {
-	if needGiB <= 0 {
+// readHost takes the readings a check of need will compare: the host's memory and what is held below the holder of
+// every live lease that declared a need. A need that declares nothing is admitted without reading anything
+// (hostRAMCheckAgainst's rule), so it takes none (nil).
+func (m *Manager) readHost(need gpuprobe.HostLoad) *hostReading {
+	if !need.Declares() {
 		return nil
 	}
 	r := &hostReading{held: map[holderKey]heldReading{}}
 	r.mem, r.memOK = m.hostMemory()
 	for _, l := range m.Leases() {
 		k := holderOf(l)
-		if l.HostRAMGiB <= 0 || (k.pid <= 0 && k.epoch == 0) {
+		if !l.DeclaresHostRAM() || (k.pid <= 0 && k.epoch == 0) {
 			continue
 		}
 		if _, done := r.held[k]; done {
@@ -351,23 +400,23 @@ func (m *Manager) readHost(needGiB float64) *hostReading {
 // hostRAMCheckWith is hostRAMCheckAgainst over a reading taken earlier: the same function of the same four things (the
 // host's memory, the need, the not-yet-loaded part of the leases in live, the headroom), with no machine read of its own. It
 // is what the grant calls under the epoch lock.
-func (m *Manager) hostRAMCheckWith(needGiB float64, live []Info, r *hostReading) gpuprobe.HostRAMCheck {
-	if needGiB <= 0 {
+func (m *Manager) hostRAMCheckWith(need gpuprobe.HostLoad, live []Info, r *hostReading) gpuprobe.HostRAMCheck {
+	if !need.Declares() {
 		return gpuprobe.HostRAMCheck{OK: true}
 	}
 	if r == nil {
-		return m.hostRAMCheckAgainst(needGiB, live) // a caller that took no reading reads here: correct, only not early
+		return m.hostRAMCheckAgainst(need, live) // a caller that took no reading reads here: correct, only not early
 	}
-	var pending float64
+	var pending gpuprobe.HostLoad
 	if len(live) > 0 {
-		pending = pendingGiB(live, r.heldOf)
+		pending = pendingLoad(live, r.heldOf)
 	}
-	return gpuprobe.HostRAMAdmits(r.mem, r.memOK, needGiB, pending, m.HostRAMHeadroom())
+	return gpuprobe.HostRAMAdmitsLoad(r.mem, r.memOK, need, pending, m.HostRAMHeadroom())
 }
 
 // hostRAMRefusalWith is hostRAMRefusal over a reading taken earlier.
 func (m *Manager) hostRAMRefusalWith(opts Options, live []Info, r *hostReading) *ErrHostRAM {
-	if chk := m.hostRAMCheckWith(opts.HostRAMGiB, live, r); !chk.OK {
+	if chk := m.hostRAMCheckWith(opts.hostLoad(), live, r); !chk.OK {
 		return &ErrHostRAM{chk}
 	}
 	return nil
@@ -377,36 +426,42 @@ func (m *Manager) hostRAMRefusalWith(opts Options, live []Info, r *hostReading) 
 // reads now, the not-yet-loaded part of the leases in live, this Manager's headroom. The grant
 // (hostRAMRefusal, inside its critical section, with the leases it just read) and the read-only
 // per-node check (HostRAMCheck) both call it, so a placement that asks before it asks the node and the
-// node's own grant cannot disagree: there is one rule and one place that applies it. A need of 0 is
+// node's own grant cannot disagree: there is one rule and one place that applies it. A need that declares nothing is
 // admitted without reading anything: it adds no memory, so a box that is already over is not made to
 // wait for a job that adds nothing to it.
-func (m *Manager) hostRAMCheckAgainst(needGiB float64, live []Info) gpuprobe.HostRAMCheck {
-	if needGiB <= 0 {
+func (m *Manager) hostRAMCheckAgainst(need gpuprobe.HostLoad, live []Info) gpuprobe.HostRAMCheck {
+	if !need.Declares() {
 		return gpuprobe.HostRAMCheck{OK: true}
 	}
 	mem, ok := m.hostMemory()
-	var pending float64
+	var pending gpuprobe.HostLoad
 	if len(live) > 0 {
-		pending = pendingGiB(live, m.heldOf)
+		pending = pendingLoad(live, m.heldOf)
 	}
-	return gpuprobe.HostRAMAdmits(mem, ok, needGiB, pending, m.HostRAMHeadroom())
+	return gpuprobe.HostRAMAdmitsLoad(mem, ok, need, pending, m.HostRAMHeadroom())
 }
 
-// HostRAMCheck is the admission rule put to a need as it stands right now on THIS node: the host's
-// memory, the leases live now and this Manager's headroom, the sentence a refusal would carry. It is
-// read-only (it takes no lease, registers no waiter, spends no epoch and writes nothing), so a placer
+// HostRAMCheckLoad is the admission rule put to a declaration as it stands right now on THIS node: the host's
+// memory, the leases live now and this Manager's headroom, the sentence a refusal would carry. It
+// is read-only (it takes no lease, registers no waiter, spends no epoch and writes nothing), so a placer
 // can ask whether a lane would be admitted here before it asks the node to take it; the node's own
 // grant stays the authority, because a lease can land between this answer and the grant, and the grant
-// re-checks under the epoch lock. needGiB <= 0 is always admitted.
-func (m *Manager) HostRAMCheck(needGiB float64) gpuprobe.HostRAMCheck {
-	return m.hostRAMCheckAgainst(needGiB, m.Leases())
+// re-checks under the epoch lock. A need that declares nothing is always admitted.
+func (m *Manager) HostRAMCheckLoad(need gpuprobe.HostLoad) gpuprobe.HostRAMCheck {
+	return m.hostRAMCheckAgainst(need, m.Leases())
 }
 
-// HostRAMCheckWithout is HostRAMCheck for a load that follows a lease which is about to be released: the
+// HostRAMCheck is HostRAMCheckLoad for a caller that declares one figure, taken for both quantities. It states no commit, so the
+// commit is judged against physical RAM less the headroom, the line such a caller has always been held to.
+func (m *Manager) HostRAMCheck(needGiB float64) gpuprobe.HostRAMCheck {
+	return m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: needGiB, CommitGiB: needGiB})
+}
+
+// HostRAMCheckLoadWithout is HostRAMCheckLoad for a load that follows a lease which is about to be released: the
 // lease with that epoch is left out of the not-yet-loaded sum, because its command has exited and it will
 // load nothing more, so counting its declared need as still to come would refuse the very load its release
 // makes room for (the warm-back of a seat is such a load). epoch 0 leaves nothing out.
-func (m *Manager) HostRAMCheckWithout(needGiB float64, epoch uint64) gpuprobe.HostRAMCheck {
+func (m *Manager) HostRAMCheckLoadWithout(need gpuprobe.HostLoad, epoch uint64) gpuprobe.HostRAMCheck {
 	live := m.Leases()
 	if epoch != 0 {
 		kept := live[:0:0]
@@ -417,13 +472,18 @@ func (m *Manager) HostRAMCheckWithout(needGiB float64, epoch uint64) gpuprobe.Ho
 		}
 		live = kept
 	}
-	return m.hostRAMCheckAgainst(needGiB, live)
+	return m.hostRAMCheckAgainst(need, live)
 }
 
-// hostRAMRefusal applies the rule to a grant that declares opts.HostRAMGiB, given the leases live
+// HostRAMCheckWithout is HostRAMCheckLoadWithout for one figure, taken for both quantities (and, as HostRAMCheck, with no commit stated).
+func (m *Manager) HostRAMCheckWithout(needGiB float64, epoch uint64) gpuprobe.HostRAMCheck {
+	return m.HostRAMCheckLoadWithout(gpuprobe.HostLoad{TouchGiB: needGiB, CommitGiB: needGiB}, epoch)
+}
+
+// hostRAMRefusal applies the rule to a grant that declares opts.HostRAMGiB (and opts.HostRAMCommitGiB), given the leases live
 // at the moment (the caller reads them inside its critical section). nil admits.
 func (m *Manager) hostRAMRefusal(opts Options, live []Info) *ErrHostRAM {
-	if chk := m.hostRAMCheckAgainst(opts.HostRAMGiB, live); !chk.OK {
+	if chk := m.hostRAMCheckAgainst(opts.hostLoad(), live); !chk.OK {
 		return &ErrHostRAM{chk}
 	}
 	return nil
@@ -496,7 +556,7 @@ func (m *Manager) StampHostRAMHoldPhase(epoch uint64, until time.Time, phase str
 	}
 	ms := until.UnixMilli()
 	return m.Restamp(epoch, func(mt *Meta) {
-		if mt.HostRAMWaitGiB <= 0 {
+		if mt.HostRAMWaitGiB <= 0 && mt.HostRAMWaitCommitGiB <= 0 {
 			return // admitted (or nothing was deferred): no bound is running
 		}
 		mt.HostRAMHoldUntilMs = ms
@@ -528,7 +588,7 @@ func UseStampFault(fn func(epoch uint64) error) (restore func()) {
 // returns the *ErrHostRAM it last had when the Deadline passes (Impossible at once when no state of the box could
 // ever admit the figure), ErrCancelled when Cancel closes, and an error when the lease is gone.
 //
-// It is the grant's comparison at a later moment, not a looser one. The figure is put to HostRAMAdmits with the
+// It is the grant's comparison at a later moment, not a looser one. Both figures are put to HostRAMAdmitsLoad with the
 // same host reading, the same headroom and the not-yet-loaded part of every lease that HAS been admitted, and
 // the decision and the stamp that makes the figure the lease's declared need (HostRAMGiB, the field every other
 // grant counts) happen under the epoch lock, so two leases cannot both take the last headroom: the second one's
@@ -541,14 +601,14 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 	told := false
 	stamped := false
 	for {
-		need, found := awaitedFigure(m.Leases(), epoch)
+		need, found := awaitedLoad(m.Leases(), epoch)
 		if !found {
 			if err := m.leaseMissing(epoch); err != nil {
 				return err
 			}
 			continue // it turned up again: a read that failed for a moment
 		}
-		if need <= 0 {
+		if !need.Declares() {
 			return nil // admitted already (or nothing was deferred)
 		}
 		if cancelled(o.Cancel) {
@@ -578,7 +638,7 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 				}
 			}
 			if !stamped && o.RequireStamp {
-				if _, live := awaitedFigure(m.Leases(), epoch); !live {
+				if _, live := awaitedLoad(m.Leases(), epoch); !live {
 					if err := m.leaseMissing(epoch); err != nil {
 						return err // that, not the stamp, is what failed
 					}
@@ -594,21 +654,26 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 		var gone bool
 		err := m.withEpochLock(func() error {
 			live := m.Leases()
-			cur, still := awaitedFigure(live, epoch)
+			cur, still := awaitedLoad(live, epoch)
 			if !still {
 				gone = true
 				return nil
 			}
-			if cur <= 0 {
+			if !cur.Declares() {
 				return nil // another caller of this epoch admitted it between the read and the lock
 			}
-			if r := m.hostRAMRefusalWith(Options{HostRAMGiB: cur}, live, reading); r != nil {
-				refused = r
+			if chk := m.hostRAMCheckWith(cur, live, reading); !chk.OK {
+				refused = &ErrHostRAM{chk}
 				return nil
 			}
 			return m.restampLocked(epoch, func(mt *Meta) {
-				mt.HostRAMGiB = cur
+				mt.HostRAMGiB = cur.TouchGiB
+				mt.HostRAMCommitGiB = 0
+				if cur.CommitStated {
+					mt.HostRAMCommitGiB = storedCommit(cur.CommitGiB)
+				}
 				mt.HostRAMWaitGiB = 0
+				mt.HostRAMWaitCommitGiB = 0
 				mt.HostRAMHoldUntilMs = 0
 				mt.HostRAMHoldPhase = ""
 			})
@@ -658,7 +723,7 @@ func (m *Manager) leaseMissing(epoch uint64) error {
 		if i > 0 {
 			m.pause(missingRecheckPause)
 		}
-		if _, found := awaitedFigure(m.Leases(), epoch); found {
+		if _, found := awaitedLoad(m.Leases(), epoch); found {
 			return nil
 		}
 		st, cause = m.RecordState(epoch)
@@ -688,15 +753,15 @@ func holdUntilOf(ms int64) time.Time {
 	return time.UnixMilli(ms)
 }
 
-// awaitedFigure is the host RAM the live lease with this epoch is waiting to have admitted (0 = none), and whether the
-// lease is live at all.
-func awaitedFigure(live []Info, epoch uint64) (float64, bool) {
+// awaitedLoad is the host memory the live lease with this epoch is waiting to have admitted (both quantities; nothing
+// declared = none), and whether the lease is live at all.
+func awaitedLoad(live []Info, epoch uint64) (gpuprobe.HostLoad, bool) {
 	for _, l := range live {
 		if l.Epoch == epoch {
-			return l.HostRAMWaitGiB, true
+			return gpuprobe.HostLoad{TouchGiB: l.HostRAMWaitGiB, CommitGiB: effectiveCommit(l.HostRAMWaitGiB, l.HostRAMWaitCommitGiB), CommitStated: l.HostRAMWaitCommitStated}, true
 		}
 	}
-	return 0, false
+	return gpuprobe.HostLoad{}, false
 }
 
 // AwaitHostRAM is Manager.AwaitHostRAM for the lease's own holder.
@@ -735,14 +800,171 @@ func UseRemoveFault(fn func(path string) error) (restore func()) {
 // readFaultHook, when set, is consulted by readRecordFile before the real read: a test seam (UseReadFault).
 var readFaultHook func(path string) error
 
-// readRecordFile is os.ReadFile of a lease record (meta.json, e/<epoch>.json), with the test seam in front of it.
+// readRecordFile reads a lease record (meta.json, e/<epoch>.json), with the test seam in front of the real read.
+//
+// It reads through a handle that shares delete (OpenShared), and that is what makes the READ side of a record rewrite safe.
+// A record is replaced in place while its lease is held (the grant's granting-to-active write, every Restamp), by a rename over
+// the live name. On Windows a plain os.ReadFile that meets that rename fails with ERROR_SHARING_VIOLATION (rarely ERROR_ACCESS_DENIED)
+// although the record is there and good a moment later. The rename holds a handle with DELETE access on the old entry, and an open
+// whose own share mode lacks FILE_SHARE_DELETE collides with it. A reader that gave up on that failure answered "no lease" for a
+// lease that was held: v2() dropped the record, so Leases() was empty and EpochIsCurrent said the render child's lease was not its
+// own. A reader that shares delete does not collide, and reads the old record whole until the new one is in place, as a POSIX reader
+// does. (A rename still waits for any handle open on the old entry, this one included, which is why renameReplacing retries; a
+// record read is short.) Off Windows this is os.Open.
 func readRecordFile(path string) ([]byte, error) {
 	if readFaultHook != nil {
 		if err := readFaultHook(path); err != nil {
 			return nil, err
 		}
 	}
-	return os.ReadFile(path)
+	return readSharedFile(path)
+}
+
+// openSharedFile is OpenShared, as a variable so a test can make the open fail the way it fails while a rename replaces the file.
+var openSharedFile = OpenShared
+
+// readSharedFile reads a whole file through a handle that shares delete (OpenShared), for a file its writer replaces by a rename over
+// the live name: a lease record (through readRecordFile) and the heartbeat hb.<epoch> (Renew). It does not pass through the record's
+// read fault seam (UseReadFault): the heartbeat is read without the record's on purpose, because a record that cannot be read is
+// exactly when the heartbeat is the evidence of life (keeper.go).
+//
+// The heartbeat matters more than the record here. A record that cannot be read is skipped, and the lease is only briefly missing from
+// a listing. A heartbeat that cannot be read used to fall back to the stamp written at acquisition, which for a lease past its declared
+// window is stale: the reclaim rule (stale heartbeat AND expired window) then called a live lease debris, the acquirer's sweep removed
+// it, and the card was granted to a second job while the first still ran on it. It no longer does: heartbeatAt takes the file's own
+// modification time when it can be examined and calls the heartbeat UNKNOWN when it cannot, and the reclaim rule never reads unknown as
+// stale. The stamp from the acquisition stays only for a file that is settled absent (settled.go). So the wait below narrows the
+// window in which a heartbeat is unknown, and no longer carries the weight of keeping a live lease from being reclaimed.
+//
+// On Windows an open that fails with a permission error is tried again, removeAttempts times at removePause (about 100 ms in all, the
+// bound the claim removal uses). An open that finds the name ABSENT is not an answer while a rename may be installing it: with a fresh
+// staged file beside the name (stagingPath, settled.go) the read waits for the rename to end, up to absentBudget, and if the budget runs
+// out it returns an I/O failure (errRenameInFlight) and never "not found"; with none it looks once at the name itself, and answers
+// absent only when that finds nothing too (gate.go). Any other failure is returned at once. A file that is never replaced by a rename (a
+// card claim) costs one open and nothing else. The shared open takes the sharing violation away, but not
+// the instant the rename has marked the old entry for deletion and the new one has not taken its name: the file is delete-pending, and
+// every open of the name fails with ERROR_ACCESS_DENIED until the rename ends, a few milliseconds. Measured on a loaded host, with the
+// shared open in, that was 5 failed reads in about 124,000 of a heartbeat that was renewed in a loop.
+//
+// A file that is still refused when the wait ends is not a rename in flight but a lasting fault (a deny-read ACL, a foreign delete
+// whose handle never closes), and it is waited out ONCE: refusedFiles remembers it for refusedMemory, and a read of it in that time
+// opens it once, so a repair is seen at once, and takes no pause if it is still refused. Without that the cost is per read, not per
+// file: a grant reads each record five times and each heartbeat seven inside one hold of the epoch lock (the sweep, the scan for the
+// unreadable and the verify each go over them), so one refused record held the lock for about 500 ms, and eight refused files for 4.4
+// s, longer than the 2 s a second acquirer's spin allows. A refusal that passes inside the wait (the rename case) is never
+// remembered, so it keeps the full wait.
+//
+// Off Windows there is no such instant, so a permission error is returned at once (sharedOpenMeetsDeletePending, beside OpenShared).
+// It is a lasting refusal there, a record written with a mode the reader cannot read, and the wait cost about 108 ms per unreadable
+// record per read: Leases() and the acquirer, which reads the records under the epoch lock, paid it for every one.
+func readSharedFile(path string) ([]byte, error) {
+	var watch gateWatch
+	denied := 0 // the refusals met so far: the wait for a refused open is counted apart from the gate's
+	for {
+		f, err := openSharedFile(path)
+		if err == nil {
+			forgetRefusedFile(path)
+			forgetAbsentExpiry(path)
+			defer f.Close()
+			return io.ReadAll(f)
+		}
+		if deniedOpenMayClear && errors.Is(err, fs.ErrNotExist) {
+			// Absent. For the instant a rename installs the file that is not an answer yet (gate.go): wait while a fresh staged file
+			// stands beside the name, and look at the name itself once when none does.
+			switch watch.afterAbsentRead(path) {
+			case gateWaited:
+				continue
+			case gateExpired:
+				return nil, &fs.PathError{Op: "open", Path: path, Err: errRenameInFlight}
+			case gateClear:
+				if _, serr := statFile(path); serr != nil && errors.Is(serr, fs.ErrNotExist) {
+					return nil, err // settled: nothing is installing it and the name is not there
+				}
+				if watch.nameIsThere(path) == gateExpired {
+					return nil, &fs.PathError{Op: "open", Path: path, Err: errRenameInFlight}
+				}
+				continue
+			}
+			return nil, err // a file that is never replaced by a rename (a card claim): absent is the answer
+		}
+		if !deniedOpenMayClear || !errors.Is(err, os.ErrPermission) {
+			return nil, err
+		}
+		if denied == 0 && refusedFileRemembered(path) {
+			return nil, err // it outlasted a whole wait a moment ago: this open was the look at whether it has been repaired
+		}
+		if denied >= removeAttempts {
+			rememberRefusedFile(path)
+			return nil, err
+		}
+		denied++
+		readRetries.Add(1)
+		time.Sleep(removePause)
+	}
+}
+
+// ReadSharedFile is readSharedFile for a reader in another package of a file its writer replaces by a rename over the live name: the
+// ComfyUI launch markers (internal/comfyinst), which render/comfy-ownership.mjs restamps through a staged .tmp file.
+func ReadSharedFile(path string) ([]byte, error) { return readSharedFile(path) }
+
+// readRetries counts the pauses readSharedFile has taken waiting out a refused open, since the process started: a test seam, not a
+// metric (readrace_linux_test.go asserts it stays 0 where no rename can cause a refusal; readrelease_test.go, that a missing file never adds to it).
+var readRetries atomic.Int64
+
+// deniedOpenMayClear says whether a permission error on the open is worth waiting out: sharedOpenMeetsDeletePending on the build, as a
+// variable so a test can run the wait off Windows and the refusal on it (readretry_test.go).
+var deniedOpenMayClear = sharedOpenMeetsDeletePending
+
+// refusedMemory is how long a file that outlasted the whole wait is read without a new wait. Long enough to cover the grants and
+// the polls of a burst of acquirers that meet one lasting fault, short enough that a refusal which starts again much later is a
+// new thing to wait for.
+var refusedMemory = 5 * time.Second
+
+// refusedFiles holds the files readSharedFile gave up waiting for, with the time its memory of each ends. refusedCount mirrors the
+// size of the map, so the common read (nothing remembered) takes no lock.
+var (
+	refusedFilesMu sync.Mutex
+	refusedFiles   = map[string]time.Time{}
+	refusedCount   atomic.Int64
+)
+
+func rememberRefusedFile(path string) {
+	now := time.Now()
+	refusedFilesMu.Lock()
+	defer refusedFilesMu.Unlock()
+	for p, until := range refusedFiles { // drop what has run out, so files that are never read again do not pile up
+		if !now.Before(until) {
+			delete(refusedFiles, p)
+		}
+	}
+	refusedFiles[path] = now.Add(refusedMemory)
+	refusedCount.Store(int64(len(refusedFiles)))
+}
+
+func refusedFileRemembered(path string) bool {
+	if refusedCount.Load() == 0 {
+		return false
+	}
+	refusedFilesMu.Lock()
+	defer refusedFilesMu.Unlock()
+	until, ok := refusedFiles[path]
+	if ok && !time.Now().Before(until) {
+		delete(refusedFiles, path)
+		refusedCount.Store(int64(len(refusedFiles)))
+		return false
+	}
+	return ok
+}
+
+// forgetRefusedFile is called on every open that succeeds: a file that can be read again is no longer a lasting fault.
+func forgetRefusedFile(path string) {
+	if refusedCount.Load() == 0 {
+		return
+	}
+	refusedFilesMu.Lock()
+	defer refusedFilesMu.Unlock()
+	delete(refusedFiles, path)
+	refusedCount.Store(int64(len(refusedFiles)))
 }
 
 // UseReadFault makes the READ of a lease record fail with what fn returns for the path (nil from fn lets the real read run), until the
@@ -758,14 +980,12 @@ func UseReadFault(fn func(path string) error) (restore func()) {
 // statFaultHook, when set, is consulted by statRecord before the real stat: a test seam (UseStatFault).
 var statFaultHook func(path string) error
 
-// statRecord is os.Stat of a lease record, with the test seam in front of it.
+// statRecord is the stat of a lease record, with the test seam in front of it. A record is replaced by a rename over the live name, and a
+// stat that met the instant the name is absent would call a held lease absent: it goes through statSettled, which waits for the rename
+// (Windows) and answers an I/O failure, never an absence, when the wait runs out. Every caller already reads an error that is not "absent"
+// as "cannot be examined".
 func statRecord(path string) error {
-	if statFaultHook != nil {
-		if err := statFaultHook(path); err != nil {
-			return err
-		}
-	}
-	_, err := os.Stat(path)
+	_, err := statSettled(path)
 	return err
 }
 
@@ -834,7 +1054,7 @@ func (l *Lease) HostRAMHold() (askedGiB float64, until time.Time, err error) {
 			return 0, time.Time{}, fmt.Errorf("gpulease: fenced out: our epoch %d, current epoch %d", l.epoch, meta.Epoch)
 		}
 	}
-	return meta.HostRAMWaitGiB, holdUntilOf(meta.HostRAMHoldUntilMs), nil
+	return max(meta.HostRAMWaitGiB, meta.HostRAMWaitCommitGiB), holdUntilOf(meta.HostRAMHoldUntilMs), nil
 }
 
 // RecordState is what the record of one lease epoch says about whether that lease is held, as far as a release can tell.

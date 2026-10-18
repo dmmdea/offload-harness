@@ -58,16 +58,23 @@ func TestKeyChangesWithEveryOtherInput(t *testing.T) {
 	if Key("what is the cap", "/repo", append(append([]core.ContextDoc(nil), base...), doc("b.go", "x"))) == k {
 		t.Fatal("attaching another file must be a different key")
 	}
-	// Field-boundary safety: this is what field()'s length-prefixing actually buys, and the
-	// fixture has to put a NUL byte INSIDE a field to prove it. cache.Key joins parts with a
-	// NUL separator on its own, so Key("ab","c",nil) vs Key("a","bc",nil) would already
-	// differ ("ab\x00c" vs "a\x00bc") even without field() — that pair proves nothing about
-	// length-prefixing. Without field(), a NUL embedded IN a value collides with the
-	// separator itself: Key("a\x00b","c",nil) and Key("a","b\x00c",nil) would both raw-join
-	// to the identical byte string "a\x00b\x00c". field()'s length prefix is what keeps them
-	// apart. Strip field() from Key and this is the assertion that goes red.
+	// Field-boundary safety, and the fixture has to put a NUL byte INSIDE a field to prove
+	// it: a pair like Key("ab","c",nil) vs Key("a","bc",nil) differs under almost any scheme
+	// and proves nothing. A NUL embedded IN a value is what slides a field boundary under a
+	// NUL-separated join: Key("a\x00b","c",nil) and Key("a","b\x00c",nil) would both raw-join
+	// to the identical byte string "a\x00b\x00c", which is how cache.Key combined its parts
+	// before it length-prefixed them.
+	//
+	// Two layers keep these apart now: field()'s length prefix here, and cache.Key's own
+	// framing of its parts (its collision test lives in internal/cache). This assertion holds
+	// while either one is intact, so it guards the key as a whole; it does not isolate
+	// field() on its own, and stripping field() alone no longer turns it red. field() stays
+	// anyway, so askcache's keys do not rest on one layer.
 	if Key("a\x00b", "c", nil) == Key("a", "b\x00c", nil) {
 		t.Fatal("key fields must not run together")
+	}
+	if Key("ab", "c", nil) == Key("a", "bc", nil) {
+		t.Fatal("a field boundary moved without changing the key")
 	}
 }
 

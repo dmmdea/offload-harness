@@ -26,7 +26,10 @@ package gpulease
 //     instance can sit outside the wrapper's job (a launcher that broke away), and the marker
 //     is the only thing that ties it to the lease. A marker with no lease epoch (the default
 //     instance, or one kept outside any lease) ties only to a lease that recorded no tree, when
-//     it began at or after that lease and no other lease record exists in the directory;
+//     it began at or after that lease and no other lease record exists in the directory. Node
+//     restamps a marker through a staged .tmp file and a rename over the live name, and a marker
+//     that is being installed cannot be told: it is UNKNOWN, and the lease is held while it is
+//     (at most as long as the staged file is fresh, stagingFresh), never read as "no instance";
 //  3. for a lease that recorded no tree (a wrapper that predates this change), the children of
 //     the dead wrapper's pid in the process table. Windows keeps a child's parent link when the
 //     parent dies, so the children are found; Linux reparents them and the walk finds none. A
@@ -44,6 +47,8 @@ package gpulease
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
@@ -209,15 +214,23 @@ type treeReading struct {
 // process table for a healthy lease.
 func (r reader) judge(meta *Meta) (Meta, treeReading) {
 	eff := *meta
-	eff.RenewedAtMs = heartbeatAt(r.dir, meta)
+	// An UNKNOWN heartbeat (it could not be read or examined, or a rename is installing it) is no stamp at all: RenewedAtMs 0 is
+	// what Reclaimable reads as "nothing to call stale". The record on disk is not touched, this is the reader's copy.
+	if at, known := heartbeatAt(r.dir, meta); known {
+		eff.RenewedAtMs = at
+	} else {
+		eff.RenewedAtMs = 0
+	}
 	if !wrapperGone(&eff, r.procStart) {
 		return eff, treeReading{}
 	}
 	if live := liveMembers(eff.Tree, r.procStart); len(live) > 0 {
 		return eff, treeReading{Orphan: true, Live: live, Why: "a process the wrapper recorded is still running (" + pidList(live) + ")"}
 	}
-	live, why := r.extraEvidence(&eff)
+	live, why, unknown := r.extraEvidence(&eff)
 	if len(live) == 0 {
+		// A launch marker that is being installed may tie a live instance to the lease: unknown is not "no instance" (Reclaimable).
+		eff.treeUnknown = unknown
 		return eff, treeReading{}
 	}
 	eff.Tree = append(append([]TreeMember(nil), eff.Tree...), live...)
@@ -234,8 +247,9 @@ func pidList(ms []TreeMember) string {
 
 // extraEvidence looks beyond the record for members of a dead wrapper's tree: the launch markers
 // tied to the lease, then (for a lease that recorded no tree) the dead wrapper's children in the
-// process table. Both are read only on this path.
-func (r reader) extraEvidence(eff *Meta) ([]TreeMember, string) {
+// process table. Both are read only on this path. The third result is true when a launch marker could not be told because it is being
+// installed: there may be a live instance the reader did not see.
+func (r reader) extraEvidence(eff *Meta) ([]TreeMember, string, bool) {
 	var live []TreeMember
 	var why []string
 	seen := map[int]bool{}
@@ -255,7 +269,8 @@ func (r reader) extraEvidence(eff *Meta) ([]TreeMember, string) {
 			add(mem, "a child of the dead wrapper found in the process table is still running ("+pidList([]TreeMember{mem})+")")
 		}
 	}
-	for _, mk := range readLaunchMarkers(armedComfyDir()) {
+	markers, unknown := readLaunchMarkers(armedComfyDir())
+	for _, mk := range markers {
 		mem, ok := r.markerMember(eff, mk, legacyShape, walked)
 		if !ok {
 			continue
@@ -263,7 +278,7 @@ func (r reader) extraEvidence(eff *Meta) ([]TreeMember, string) {
 		reason := "its ComfyUI launch marker (" + pidList([]TreeMember{mem}) + ") is tied to this lease and the process is alive"
 		add(mem, reason)
 	}
-	return live, strings.Join(why, "; ")
+	return live, strings.Join(why, "; "), unknown
 }
 
 // walkDeadWrapper lists the children of the dead wrapper's pid that began at or after the lease.
@@ -302,23 +317,46 @@ type launchMarker struct {
 }
 
 // readLaunchMarkers reads every launch marker in the ComfyUI directory: the default instance's
-// and each keyed instance's. An unreadable one is skipped.
-func readLaunchMarkers(dir string) []launchMarker {
+// and each keyed instance's. An unreadable one is skipped, except that a marker which is being
+// installed is UNKNOWN, and the second result says so: Node restamps a marker through a staged
+// .tmp file and a rename over the live name, so a marker is being installed when its name is listed
+// and its read ends as a rename in flight (or finds it gone with a fresh staged file beside it), and
+// when its name is not listed at all but a fresh staged file stands where it was (a directory
+// listing taken in that instant does not show it). The staged file is fresh for stagingFresh at
+// most, so the unknown ends by itself.
+func readLaunchMarkers(dir string) (out []launchMarker, unknown bool) {
 	if strings.TrimSpace(dir) == "" {
-		return nil
+		return nil, false
 	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil
+		return nil, false
 	}
-	var out []launchMarker
+	listed := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		listed[e.Name()] = true
+	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, ".offload-launch") || !strings.HasSuffix(name, ".json") {
+		if e.IsDir() || !strings.HasPrefix(name, ".offload-launch") {
 			continue
 		}
-		b, rerr := os.ReadFile(filepath.Join(dir, name))
+		if live := withoutStagedSuffix(name); live != name {
+			if strings.HasSuffix(live, ".json") && !listed[live] && stagedInFlight(filepath.Join(dir, live)) {
+				unknown = true
+			}
+			continue
+		}
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		// The shared open does not hold that rename up, and an absence is only an answer once it is settled (gate.go).
+		path := filepath.Join(dir, name)
+		b, rerr := readSharedFile(path)
 		if rerr != nil {
+			if errors.Is(rerr, errRenameInFlight) || (errors.Is(rerr, fs.ErrNotExist) && stagedInFlight(path)) {
+				unknown = true
+			}
 			continue
 		}
 		var mk launchMarker
@@ -327,7 +365,7 @@ func readLaunchMarkers(dir string) []launchMarker {
 		}
 		out = append(out, mk)
 	}
-	return out
+	return out, unknown
 }
 
 // markerMember decides whether a launch marker ties a live process to the lease. The marker's

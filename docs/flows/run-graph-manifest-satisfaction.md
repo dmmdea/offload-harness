@@ -29,11 +29,28 @@ environment.
    are required per pack; `name` is derived from the repository when absent. Only `path` is required
    per model — `sha256` defaults to null.
 
+1a. **Refuse any pack that is not pinned.** A pack makes the node clone its repository and install its requirements, which is
+   the caller's code running on the node, so a pack is taken only when its `repo` AND `commit` are a row of
+   `render/node-packs.json` (exact strings, a full 40-digit commit, the row's directory name or the one the repository gives
+   it). A fleet node refuses an unpinned pack at the door (`400` naming the pack, before a job or a temp file exists:
+   `mediacap.CheckManifestNodePacks`), and the satisfier refuses again before the first tooling probe, model download or git
+   command with the typed defer `NODE_PACK_NOT_ALLOWED` (`ref` = the pack). The table holds the packs the shipped graph builders
+   need; a workflow that needs another adds a reviewed row to the file and to its Go copy.
+
 2. **Check tooling.** The satisfier's hard requirement is `uv` alongside the ComfyUI virtual
    environment's Python. Missing → `SATISFIER_UNAVAILABLE`. Skipped entirely for models-only or empty
    manifests.
 
 3. **Check the ComfyUI version** against `comfyui_min_version` → `COMFY_VERSION_BELOW_MIN`.
+
+3a. **Refuse any model that is not under `models/` from a listed host.** A `models[]` entry is downloaded into the ComfyUI
+   tree before ComfyUI starts, so its `path` must be `models/<class>/<file>` (backslashes read as separators; no empty, `.` or
+   `..` segment, nothing beginning with a space or ending with a space or a dot, no control character or `:*?"<>|`) and its
+   `source_url`, when it has one, must be `https://<host>/...` on a plain DNS name that is, or is a subdomain of, a
+   `model_hosts` entry of `render/node-packs.json`. A fleet node refuses an entry that is not (`400` naming it, before a job
+   or a temp file exists: `mediacap.CheckManifestModels`), and the satisfier refuses again, before it looks for, hashes or
+   fetches any file, with the typed defer `MODEL_NOT_ALLOWED` (`ref` = the path). Every entry is read before the first is
+   provisioned. `render/testdata/manifest-model-cases.json` is the one table both checks are tested against.
 
 4. **Satisfy models.** Presence is resolved across ComfyUI's **full model search path** — the
    canonical `<comfy_dir>/<model.path>` first, then every directory registered for that model class

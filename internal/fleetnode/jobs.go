@@ -65,9 +65,10 @@ type JobView struct {
 	// that ran and broke without reading the reason's words (see classedError).
 	ErrClass string
 	// Agent marks a job created by an AGENT dispatch (AcceptAgent). The server
-	// keys /fleet/jobs/{id} bearer auth on it — media-created jobs stay
-	// tokenless (auth scope v1 = the agent lane only). Never serialized to the
-	// wire: jobWire's shape is unchanged.
+	// keys /fleet/jobs/{id} bearer auth on it, together with Gated (a job of
+	// any other task type is gated too); Agent alone says which rows of the
+	// jobs feed are agent runs. Never serialized to the wire: jobWire's shape
+	// is unchanged.
 	Agent bool
 	// WallSec (register D-116) is the wall the RUNNING job is executing under,
 	// as the executing lane reported it (core.ReportWall). 0 = not reported
@@ -83,7 +84,7 @@ type JobView struct {
 	Progress *core.LiveProgress
 	// Gated marks a job whose poll rides the SAME bearer rule as an agent
 	// job without being one (0.116.0: the vision lane — its result is the
-	// caller's image judged in prose). Kept apart from Agent so the jobs feed
+	// caller's image judged in prose; every task type since, see tokenGated). Kept apart from Agent so the jobs feed
 	// still says truthfully which rows are agent runs. Never serialized.
 	Gated bool
 	// Task/Model/AcceptedAt/StartedAt/FinishedAt are the /fleet/jobs feed's

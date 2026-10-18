@@ -661,8 +661,18 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	// is a correctness change, not a hit-rate optimisation: old entries are not
 	// wiped, they simply stop being reachable from a prompt that no longer matches
 	// the template which produced them — which is exactly the intent.
-	ck := cacheKeyFor(req.Task, orig, tasks.StableParamsKey(req.Params), p.cfg.Model, built, shots)
-	if p.cache != nil {
+	//
+	// The params ingredient is tasks.CacheParamsKey, the typed canonical form, and NOT
+	// StableParamsKey: that one prints nested values with %v, which is type-erased, so a
+	// schema's "required":["a b"] and "required":["a","b"] rendered alike and one request
+	// was served the other's cached answer before its own schema was ever checked.
+	// ck == "" means the params cannot be keyed at all (resultCacheParamsKey): this call
+	// then neither reads nor writes the cache.
+	ck := ""
+	if paramsKey, keyable := p.resultCacheParamsKey(req.Task, req.Params, &meta); keyable {
+		ck = cacheKeyFor(req.Task, orig, paramsKey, p.cfg.Model, built, shots)
+	}
+	if p.cache != nil && ck != "" {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
 			if json.Unmarshal(raw, &cv) == nil && len(cv.Data) > 0 {
@@ -995,8 +1005,20 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	// field semantics — so editing one used to leave this cache serving pre-edit
 	// transcriptions forever, silently. No exemplars are injected on the vision
 	// path, so the exemplar tag is not an ingredient here.
-	ck := cache.Key(string(req.Task), req.Input+"|"+cacheKeyExtra, tasks.StableParamsKey(req.Params), meta.Model, built.Grammar,
+	//
+	// Input and cacheKeyExtra are separate PARTS of the key, not one part joined with
+	// "|": req.Input is arbitrary caller text, so joined, the input "x|y" with the extra
+	// "z" was the same key as the input "x" with the extra "y|z". The extra is the only
+	// carrier of the source file's identity, so that is one file's cached result served
+	// for another.
+	//
+	// The params ingredient is the typed canonical form (tasks.CacheParamsKey); params
+	// that cannot be keyed make the call uncacheable, like an unknown file identity does
+	// (resultCacheParamsKey says why).
+	paramsKey, keyable := p.resultCacheParamsKey(req.Task, req.Params, &meta)
+	ck := cache.Key(string(req.Task), req.Input, cacheKeyExtra, paramsKey, meta.Model, built.Grammar,
 		templateCacheTag(built.System, built.Grammar, built.User, req.Input))
+	cacheable = cacheable && keyable
 	// cacheable is false when the caller could not establish the source file's
 	// CONTENT identity (T2-A2). Keying on anything else — a path, or a synthetic
 	// error token — makes a transient read failure write a durable entry that a
@@ -1299,9 +1321,10 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	}
 	defer cleanup()
 
-	// Identity = source file CONTENT (sha256 of its bytes) + model + lang. Used for BOTH the
-	// cache key AND the on-disk media filename so they agree and never collide
-	// across distinct sources that share a basename (recording.m4a is common in
+	// Identity = source file CONTENT (sha256 of its bytes) + model + lang. The same fields
+	// feed BOTH the cache key (transcribeCacheKey, each one a separate key part) AND the
+	// on-disk media filename (the joined `ident` string below) so they agree and never
+	// collide across distinct sources that share a basename (recording.m4a is common in
 	// field audio) or across model/lang variants of the same source.
 	// The protocol is part of the result's identity: the same alias re-bound across
 	// protocols (whisper <-> mtmd) produces differently-shaped results (timestamped
@@ -1347,9 +1370,15 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		meta.CacheBypass = "media identity: " + why
 		log.Printf("transcribe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Audio, why)
 	}
+	// ident names the on-disk stem (mediaBase) and nothing else, so no output file is
+	// renamed by the key fix.
 	ident := fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", audioID.Digest, model, identLang, proto)
-	ck := cache.Key("transcribe", ident, tasks.StableParamsKey(req.Params), model, "")
-	if p.cache != nil && identifiable {
+	// The params ingredient is the typed canonical form; params that cannot be keyed make
+	// the call uncacheable, like an unknown file identity does (resultCacheParamsKey says why).
+	paramsKey, keyable := p.resultCacheParamsKey(req.Task, req.Params, &meta)
+	ck := transcribeCacheKey(audioID.Digest, model, identLang, proto, paramsKey)
+	storeable := identifiable && keyable
+	if p.cache != nil && storeable {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal
 			// A hit names transcript files on disk: one whose files are gone (a fleet node removes an
@@ -1512,7 +1541,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	// Storing under a non-content key is what turns a transient read failure into
 	// a permanent wrong answer — so an unidentifiable input is computed, returned,
 	// and deliberately not persisted.
-	if p.cache != nil && identifiable {
+	if p.cache != nil && storeable {
 		if b, e := json.Marshal(cacheVal{Data: data, Model: model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
@@ -1566,8 +1595,9 @@ type transcribeResult struct {
 // output stem. The ident hash disambiguates distinct sources that share a
 // basename (e.g. two different recording.m4a) or model/lang variants of one
 // source, so the returned .srt/.txt/.segments.json pointers never reference a
-// different audio's transcript. ident is the SAME identity used for the cache
-// key, so on-disk files and cache entries agree.
+// different audio's transcript. ident carries the SAME identity fields the cache
+// key is built from (transcribeCacheKey passes them as separate parts, this stem
+// hashes the joined string), so on-disk files and cache entries agree.
 func mediaBase(mediaDir, audioPath, ident string) string {
 	name := filepath.Base(audioPath)
 	if ext := filepath.Ext(name); ext != "" {
@@ -3761,8 +3791,8 @@ func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wai
 }
 
 // acquireWholeNodeWith is acquireWholeNode for a call that declares hostRAMGiB of host RAM: the grant
-// admits it against committed memory (gpulease/hostram.go) and keeps the call in the queue while the
-// host is short.
+// admits it against the available memory and the commit charge against physical RAM (the one figure, no commit stated;
+// gpulease/hostram.go) and keeps the call in the queue while the host is short.
 func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl, wait time.Duration, resume string, hostRAMGiB float64) ([]string, func(), error) {
 	noop := func() {}
 	start := time.Now()
@@ -4758,7 +4788,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 			// and exemplar harvest. Pass record=false for counterfactual RunTier calls
 			// that must produce a gradeable result without any production side-effects.
 			if record {
-				if p.cache != nil {
+				if p.cache != nil && ck != "" {
 					if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 						_ = p.cache.Put(ck, b)
 					}
@@ -4771,7 +4801,10 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 				// the unbounded original (sidecar bloat) or a cut carrying
 				// repackMarker, which future prompts would re-inject as few-shot
 				// CONTENT (round-1 review finding).
-				if p.cfg.ExemplarsDir != "" && p.goodExemplar(meta) && meta.TierPack == "" {
+				// Params that cannot be keyed (tasks.CacheParamsKey) are not harvested either:
+				// the row's StableParamsKey prints them with %v, which has no cycle guard, so
+				// a params value that holds itself would kill the process here.
+				if p.cfg.ExemplarsDir != "" && p.goodExemplar(meta) && meta.TierPack == "" && paramsKeyable(req.Params) {
 					_ = exemplars.Append(p.cfg.ExemplarsDir, string(req.Task), tasks.StableParamsKey(req.Params), req.Input, data, meta.Margin)
 				}
 			}
@@ -4876,7 +4909,7 @@ func (p *Pipeline) attemptReasoningOn(ctx context.Context, model string, req cor
 	if !v.OK {
 		return core.Deferf("reasoning tier: "+v.Reason, gen.Content, meta), false
 	}
-	if p.cache != nil {
+	if p.cache != nil && ck != "" {
 		if b, e := json.Marshal(cacheVal{Data: data, TokensIn: gen.TokensIn, Model: meta.Model, InLoop: p.tierCache}); e == nil {
 			_ = p.cache.Put(ck, b)
 		}
@@ -5731,7 +5764,7 @@ func (p *Pipeline) RunTierWith(ctx context.Context, req core.Request, model stri
 	// ...and it lives in RunTier's OWN keyspace, so Run and RunTier can never
 	// compute the same key and overwrite each other's entries. See
 	// tierKeyspaceTag for why guarding only the read was not enough.
-	ck := cacheKeyForTierRender(req.Task, req.Input, tasks.StableParamsKey(req.Params), model, built, llamaclient.RenderKey(opts...))
+	var ck string // set below, once the call is known to use the cache and its params can be keyed
 	meta := core.Meta{Model: model, Feat: feat}
 	meta.InputSHA256 = inputFingerprint(req.Input)
 	meta.PromptPrefixSHA256 = promptPrefixFingerprint(built.System, userPreambleOf(built.User, req.Input))
@@ -5743,6 +5776,15 @@ func (p *Pipeline) RunTierWith(ctx context.Context, req core.Request, model stri
 	// writing them — would corrupt the very measurement it exists to produce. Only
 	// NewInLoopPipeline sets tierCache.
 	useCache := p.tierCache && p.cache != nil
+	if useCache {
+		// The typed canonical params, as for Run. Params that cannot be keyed switch the
+		// cache off for this call: no read, no write (resultCacheParamsKey says why).
+		if paramsKey, keyable := p.resultCacheParamsKey(req.Task, req.Params, &meta); keyable {
+			ck = cacheKeyForTierRender(req.Task, req.Input, paramsKey, model, built, llamaclient.RenderKey(opts...))
+		} else {
+			useCache = false
+		}
+	}
 	if useCache {
 		if raw, ok := p.cache.Get(ck); ok {
 			var cv cacheVal

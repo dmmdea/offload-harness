@@ -990,7 +990,9 @@ seat keeps `compute cuda:0`). **Fallback source once upstream goes read-only:** 
 plus this pinned commit). `render/comfy-nodes.mjs` (`NODE_PACKS`) and
 `internal/mediacap/routeneeds.go` (`nodePacks`/`packHint`) both carry the pin+mirror note in the
 operator-facing `MISSING_NODE` hint, so a box missing the pack is told where to get the frozen,
-patched code, not just the (soon read-only) upstream URL. All four fleet Windows/Linux ComfyUI
+patched code, not just the (soon read-only) upstream URL. The same pin (upstream and mirror) is a row of
+`render/node-packs.json`, the table a run-graph manifest's `node_packs` is checked against (a pack is taken only at a
+pinned repository and commit; see the [manifest flow](../flows/run-graph-manifest-satisfaction.md)). All four fleet Windows/Linux ComfyUI
 installs (<node-b>, <node-e>, <node-a>, <node-c>) are aligned to this commit (2026-09-24) — see the
 per-node rev table and the A/B seat-switch decision in
 `Ecosystem/Benchmarks and Optimizations/2026-09-22-qwen-image-21-hyperframes/infra/multigpu-archival-actions-2026-09-24.md`
@@ -1633,11 +1635,11 @@ declares the weight files its loaders name, in full when they do not fit the car
 declare the larger of that and the weights they park themselves** (the bound files in full when the lane's extra args carry
 `--offload-to-cpu`, an estimate from their sizes until three measured runs raise it, F60), so an sd.cpp-only node's spill is inside
 the guard; nothing for upscale and voice) and the grant admits it
-against committed memory plus what the leases already granted have yet to load, under physical RAM less
-`gpu_host_ram_headroom_gib` (default 8), as a brake on declared loads (the declaration is an estimate until three measured runs
-raise it, and an admitted lane can still read OVER): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
+as one figure taken for both quantities, the working set against the available memory and the commit (stated by nobody) against
+physical RAM, each with what the leases already granted have yet to load and `gpu_host_ram_headroom_gib` (default 8) kept, as a brake on declared
+loads (the declaration is an estimate until three measured runs raise it, and an admitted lane can still leave the box close to a line): see "Host RAM" in [gpu-lease.md](gpu-lease.md). Two Krea 2 bf16 lanes, each
 24.48 + 8.27 GiB, on a host that fits one: the first is admitted, the second finds idle cards and waits in the same line with
-`waiting for host RAM: needs 32.8 GiB, committed X of Y GiB physical, Z GiB headroom` (a queued place in line for a door that
+`waiting for host RAM: needs 32.8 GiB, only X GiB of Y GiB physical is available, Z GiB headroom` (or `needs 32.8 GiB, committed X of Y GiB physical, Z GiB headroom` when the commit charge is what refused; a queued place in line for a door that
 can resume, a busy defer for the rest) until the first is done
 (`TestTheSecondLaneWaitsWhileTheFirstIsStillLoading`). A need no state of the host admits is `gpu_lease_unavailable`, naming
 `--ram` and the headroom key.
@@ -2428,10 +2430,13 @@ an editor; the overlay itself is silent.
 ### Security
 
 - **Compositions are trusted code.** HyperFrames' Chrome launches with `--no-sandbox` and site
-  isolation disabled. `html` and `project_dir` are accepted only from the local MCP and CLI doors, the
-  same trusted-caller posture as `run-graph`. The fleet door is not token-gated
-  ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)), so it refuses
-  both at ack time and renders only the node's vetted templates. It also ignores a caller's `out`:
+  isolation disabled. `html` and `project_dir` are accepted from the local MCP and CLI doors, the
+  same trusted-caller posture as `run-graph`, and over the fleet only by a node that opted in to the project door
+  (`fleet_compose_projects`, [ADR 0071](../architecture/decisions/0071-a-fleet-token-holder-may-send-a-whole-composition-project-to-render.md)),
+  which takes a whole project from a holder of the fleet bearer at `POST /fleet/compose-project`. The dispatch door
+  needs the fleet bearer like every lane
+  ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)) and renders only the node's
+  vetted templates, so it refuses both at ack time. It also ignores a caller's `out`:
   the node writes `<media_dir>/compose-<hash8>.<ext>`, the same rule every fleet media task follows
   ([fleet-node.md](fleet-node.md)). Template variables reach the page
   as text (`data-var-text`) and as sanitized CSS custom properties, never as markup.
@@ -2522,7 +2527,7 @@ with `Retry-After`. The client reads that as a `capacity` defer but does not rea
 picked, so the call returns the defer and a later call places the job again.
 The node also names a media-job's render itself (`mediajob-<16 hex>.<ext>`) and serves it only to a holder of the fleet token,
 because it is rendered from the caller's private files: the client sends the bearer on every output fetch, a tokenless read of
-that name is refused, and the outputs of a job with no input file (the tokenless dispatch) are still read by bare name.
+that name is refused, as it is for every name the node serves (the outputs of a plain dispatch need the bearer too).
 
 **What comes back.** The client polls `/fleet/jobs/{id}` every 2 seconds inside a budget when the caller gave no deadline
 (image 2 h, video and animate 6 h, audio 1 h, run-graph 2 h), then fetches every output the result names by bare name from
@@ -3048,7 +3053,7 @@ that it keeps no queue, a busy graph is no longer offered to the fleet (it waits
 
 A node that lacks any of them answers **503** with the existing route-not-ready refusal, naming what is missing (up to six names
 of each kind), and **no job, temp file or lease exists**. Past six missing weight files it says `7 or more files ... and more` and
-gives no count: the node stops looking at the seventh (the door is open to any peer and a graph can name thousands of files, and a
+gives no count: the node stops looking at the seventh (any holder of the fleet bearer can send a graph and a graph can name thousands of files, and a
 missing name costs a stat in every class directory of every models root, so the work is bounded by the six shown and not by the
 graph); a list of missing input files is short and is counted exactly. The 503 body is `{status, error, refusal}`, and `refusal` is
 `"not_capable"` (the node is not full and not out of route: it cannot run THIS graph). The delegator's `cluster[]` row quotes the

@@ -66,7 +66,7 @@ func TestTheHoldBoundReleasesTheCardsAndRunsNothingWhenTheHostNeverHasTheRoom(t 
 	for _, want := range []string{
 		"hold bound",                  // what ended it
 		"30.0 GiB",                    // the need
-		"committed 70.0 of 100.0 GiB", // the host's committed and physical figures
+		"committed 70.0 of 100.0 GiB", // the host's commit charge and commit limit
 		"8.0 GiB headroom",            // and its headroom
 		"held the cards for",          // how long
 		"--ram <GiB>",                 // what to do about a figure that was a guess
@@ -380,7 +380,7 @@ func TestARamHoldMaxAboveTheCeilingIsRefusedBeforeAnythingIsTaken(t *testing.T) 
 // fail: the stamp leaves the record only with admission.
 func TestAFailedStampIsSaidOnce(t *testing.T) {
 	short := &gpulease.ErrHostRAM{}
-	short.Why = "waiting for host RAM: needs 30.0 GiB, committed 70.0 of 100.0 GiB physical, 8.0 GiB headroom"
+	short.Why = "waiting for host RAM: needs 30.0 GiB of commit, committed 70.0 of 100.0 GiB commit limit, 8.0 GiB headroom"
 	await := func(o gpulease.AwaitHostRAMOptions) error {
 		if o.OnStampError == nil {
 			return nil // the CLI wired nothing: the failures below would be swallowed

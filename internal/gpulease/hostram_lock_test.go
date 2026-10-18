@@ -41,7 +41,7 @@ func TestTheHostReadingsAreTakenBeforeTheEpochLockAndOnlyComparedInside(t *testi
 		return base()
 	}
 	baseTree := m.workload
-	m.workload = func(pid int) (float64, bool) {
+	m.workload = func(pid int) (gpuprobe.HostLoad, bool) {
 		if locked() {
 			treeIn.Add(1)
 		} else {

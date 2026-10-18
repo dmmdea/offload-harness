@@ -1,13 +1,12 @@
-// Agent-lane bearer-auth tests (multi-node delegation plan, Task 3; auth
-// scope v1 = reshape delta 10: the AGENT lane ONLY). Two invariants carry the
-// whole feature:
+// Agent-lane bearer-auth tests (multi-node delegation plan, Task 3), as the rule stands now: every lane of a
+// node is bearer-gated, not the agent lane alone (the media rule is bearer_every_lane_test.go). Two invariants carry
+// the agent lane's tests:
 //
-//  1. The agent lane is never reachable un-authed beyond loopback — token
-//     wrong/missing ⇒ 401 before ANY validation or job-state disclosure, and
+//  1. The agent lane is never reachable un-authed beyond loopback: token
+//     wrong/missing => 401 before ANY validation or job-state disclosure, and
 //     a tokenless non-loopback listener refuses agent dispatch outright (403).
-//  2. Every media path (dispatch, job poll, media file, health) is
-//     BYTE-IDENTICAL with or without a token configured — the deployed 0.62.1
-//     media clients are tokenless and must never start 401ing.
+//  2. The auth verdict precedes envelope validation and the known-job re-ack,
+//     so an unauthorized caller learns nothing about a job or an envelope.
 //
 // task_type "agent" is not registered in tasks.go yet (Task 4 adds it), so an
 // AUTHORIZED agent dispatch 400s at BuildRequest ("unsupported task_type").
@@ -16,13 +15,10 @@
 package fleetnode
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -78,8 +74,8 @@ func TestAgentDispatchAuthMatrix(t *testing.T) {
 		{"no token, loopback", "", true, "", http.StatusBadRequest, "unsupported task_type", false},
 		// No token + non-loopback: loud refusal, header or not — there is no
 		// credential that COULD authorize this listener.
-		{"no token, non-loopback", "", false, "", http.StatusForbidden, "agent lane requires fleet_auth_token on a non-loopback listener", true},
-		{"no token, non-loopback, header presented", "", false, "Bearer anything", http.StatusForbidden, "agent lane requires fleet_auth_token on a non-loopback listener", true},
+		{"no token, non-loopback", "", false, "", http.StatusForbidden, fleetTokenRequired, true},
+		{"no token, non-loopback, header presented", "", false, "Bearer anything", http.StatusForbidden, fleetTokenRequired, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -118,16 +114,18 @@ func TestAgentAuthPrecedesEnvelopeValidation(t *testing.T) {
 
 // TestAgentAuthPrecedesKnownJobReack: re-dispatching a job id this node
 // already owns AS task_type "agent" without the token must 401, never re-ack
-// — the auth check sits after decode but BEFORE the known-job lookup, so an
-// unauthorized caller cannot use the agent lane to probe job existence/state.
+// — the auth check sits before the body is read, and so before the known-job
+// lookup, so an unauthorized caller cannot use the agent lane to find out
+// whether a job exists or what state it is in.
 func TestAgentAuthPrecedesKnownJobReack(t *testing.T) {
 	s, _ := newTestServer(t, tokenCfg("s3cret"), &fakeRunner{}, authOpts(true))
+	holder := map[string]string{"Authorization": "Bearer s3cret"}
 	rec := do(t, s, http.MethodPost, "/fleet/dispatch",
-		`{"job_id":"reack-1","task_type":"image-gen","payload":{"prompt":"hi"}}`, nil)
+		`{"job_id":"reack-1","task_type":"image-gen","payload":{"prompt":"hi"}}`, holder)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("media dispatch status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
 	}
-	pollJob(t, s, "reack-1", JobDone)
+	pollJobWith(t, s, "reack-1", JobDone, holder)
 
 	rec = do(t, s, http.MethodPost, "/fleet/dispatch",
 		`{"job_id":"reack-1","task_type":"agent","payload":{}}`, nil)
@@ -136,63 +134,15 @@ func TestAgentAuthPrecedesKnownJobReack(t *testing.T) {
 	}
 }
 
-// TestMediaLaneByteIdenticalWithTokenConfigured is the deployed-client pin
-// (reshape delta 10): the SAME media dispatch + poll, against a server with a
-// token configured vs one without, must produce byte-for-byte identical
-// responses — auth v1 touches the agent lane only, and the <node-a> 0.62.1 media
-// client (which sends no Authorization header) must never 401.
-func TestMediaLaneByteIdenticalWithTokenConfigured(t *testing.T) {
-	const dispatchBody = `{"job_id":"media-1","task_type":"image-gen","payload":{"prompt":"hi"}}`
-	run := func(cfg config.Config, hdr map[string]string) (ack, done []byte) {
-		s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
-		rec := do(t, s, http.MethodPost, "/fleet/dispatch", dispatchBody, hdr)
-		if rec.Code != http.StatusAccepted {
-			t.Fatalf("dispatch status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
-		}
-		ack = append([]byte(nil), rec.Body.Bytes()...)
-		pollJob(t, s, "media-1", JobDone)
-		rec = do(t, s, http.MethodGet, "/fleet/jobs/media-1", "", hdr)
-		if rec.Code != http.StatusOK {
-			t.Fatalf("poll status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
-		}
-		done = append([]byte(nil), rec.Body.Bytes()...)
-		return ack, done
-	}
-
-	ackPlain, donePlain := run(imageCfg(), nil)
-	ackToken, doneToken := run(tokenCfg("s3cret"), nil)
-	if !bytes.Equal(ackPlain, ackToken) {
-		t.Errorf("dispatch ack diverged with token configured:\n  no token: %s\n  token:    %s", ackPlain, ackToken)
-	}
-	if !bytes.Equal(donePlain, doneToken) {
-		t.Errorf("job poll diverged with token configured:\n  no token: %s\n  token:    %s", donePlain, doneToken)
-	}
-
-	// A media client sending a BOGUS Authorization header (proxies do) must
-	// also be untouched: the media lane ignores the header entirely.
-	ackBogus, doneBogus := run(tokenCfg("s3cret"), map[string]string{"Authorization": "Bearer wrong"})
-	if !bytes.Equal(ackPlain, ackBogus) || !bytes.Equal(donePlain, doneBogus) {
-		t.Errorf("media lane inspected the Authorization header (must ignore it):\n  ack %s\n  done %s", ackBogus, doneBogus)
-	}
-}
-
-// TestHealthAndMediaFilesNeverRequireAuth: /fleet/health (capability
-// advertisement — the dispatcher must keep routing) and /fleet/media/{f}
-// (the deployed media client's artifact fetch) stay open with a token set.
-func TestHealthAndMediaFilesNeverRequireAuth(t *testing.T) {
-	mediaDir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(mediaDir, "render-x.png"), []byte("png"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	cfg := tokenCfg("s3cret")
-	cfg.MediaDir = mediaDir
-	s, _ := newTestServer(t, cfg, &fakeRunner{}, authOpts(true))
-
+// TestHealthNeverRequiresAuth: /fleet/health (capability advertisement — a
+// roster read must keep working before it holds a credential) stays open
+// with a token set. What it carries without the bearer is pinned in
+// bearer_health_test.go; a media artifact needs the bearer on a node that has
+// a token (TestMediaFilesNeedTheBearerOnATokenedNode).
+func TestHealthNeverRequiresAuth(t *testing.T) {
+	s, _ := newTestServer(t, tokenCfg("s3cret"), &fakeRunner{}, authOpts(true))
 	if rec := do(t, s, http.MethodGet, "/fleet/health", "", nil); rec.Code != http.StatusOK {
 		t.Errorf("health without auth = %d, want 200 (body %s)", rec.Code, rec.Body.String())
-	}
-	if rec := do(t, s, http.MethodGet, "/fleet/media/render-x.png", "", nil); rec.Code != http.StatusOK {
-		t.Errorf("media file without auth = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 }
 
@@ -265,7 +215,7 @@ func TestJobsAgentMarker(t *testing.T) {
 		t.Errorf("AcceptAgent job: Agent = %v (ok=%v), want true", v != nil && v.Agent, ok)
 	}
 	if v, ok := j.Get("m"); !ok || v.Agent {
-		t.Errorf("Accept job: Agent marker set, want false (media polls must stay open)")
+		t.Errorf("Accept job: Agent marker set, want false (only an agent run carries the agent marker)")
 	}
 }
 

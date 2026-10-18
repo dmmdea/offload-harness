@@ -260,10 +260,10 @@ dispatch or drain anything from here.
 **Unauthenticated on purpose, and safe because of what it carries.** `GET /fleet/jobs` (node side) is
 deliberately unauthenticated for id/task/model/state/timestamps — metadata only, and never a job's
 `payload` or result, so there is nothing there the per-job bearer gate (`handleJob`) exists to
-protect. Its `error` string is the one exception: an AGENT row's error text can echo contract content
-(the goal, a tool-result fragment) the way a media row's never does, so `handleJobs` applies the SAME
-bearer check `handleJob` uses — when a token is configured and the request carries no valid bearer, an
-agent row's `error` is omitted while every other field on every row (media rows included) stays as it
+protect. Its `error` string is the one exception: a row's error text can echo contract content
+(the goal, a tool-result fragment) or a path on the node's disk, so `handleJobs` applies the SAME
+bearer check `handleJob` uses — when a token is configured and the request carries no valid bearer, every
+row's `error` is omitted (every job is gated, agent or not) while every other field on every row stays as it
 was. `fleet-ui`'s own page and `/api/overview` are equally unauthenticated for the fields they carry:
 the aggregate adds only delegator-local placement/defer metadata on top of what the node routes already
 publish (`internal/fleetview/errors.go`'s `delegationRowFields` — timing, placement, pass/fail, never

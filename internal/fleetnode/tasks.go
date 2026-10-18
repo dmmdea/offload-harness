@@ -28,6 +28,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/jobdir"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
@@ -521,8 +522,9 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 
 // A remote media task's output path is the NODE's choice, never the caller's.
 //
-// Media dispatch is not token-gated (ADR 0023), so a caller-supplied `out` (or
-// run-graph's `out_dir`) would let any tailnet peer that reaches /fleet/dispatch make
+// Media dispatch needs the fleet bearer like every lane (ADR 0023), but a holder of it is
+// trusted to render, not to choose where the node writes: a caller-supplied `out` (or
+// run-graph's `out_dir`) would let any holder that reaches /fleet/dispatch make
 // this node write — and overwrite — any file its account can write. Every media
 // builder below therefore drops those keys and the pipeline derives the path itself:
 // `<media_dir>/<task>-<hash8>.<ext>` (run-graph: <media_dir>). Nothing a current caller
@@ -830,6 +832,21 @@ func buildRunGraph(cfg config.Config, payload json.RawMessage) (core.Request, fu
 		var manifestObj map[string]json.RawMessage
 		if err := json.Unmarshal(in.Manifest, &manifestObj); err != nil {
 			return core.Request{}, noop, fmt.Errorf("run-graph payload: manifest must be a JSON object: %v", err)
+		}
+		// A manifest that names a node pack makes this node clone its repository and install its requirements:
+		// the caller's code, run here. The bearer lets a caller run renders, not that, so a pack is taken only
+		// at a pinned repository and commit (mediacap.NodePackPins), refused here with the pack named, before a
+		// file is written, a job exists or a lease is taken. The runner refuses on the same table again
+		// (render/manifest-satisfy.mjs) for a manifest that reaches it another way.
+		if err := mediacap.CheckManifestNodePacks(in.Manifest); err != nil {
+			return core.Request{}, noop, err
+		}
+		// A models[] entry makes the node download its source_url into the ComfyUI tree at its path before ComfyUI
+		// starts: a path outside models/<class>/ would place a file where ComfyUI loads code (or above the tree), and
+		// a source that is not a listed https host is a fetch from where the caller chose. Refused here on the same
+		// grounds, again with the entry named, and again in the runner's satisfier.
+		if err := mediacap.CheckManifestModels(in.Manifest); err != nil {
+			return core.Request{}, noop, err
 		}
 	}
 	if nre := graphFilesRefusal(cfg, in.Graph, in.Manifest); nre != nil {

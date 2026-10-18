@@ -421,7 +421,7 @@ func TestSTTUploadOfAJobCancelledAtTheGateIsRemoved(t *testing.T) {
 
 // D17: the legacy path-taking stt lane joins the bearer rule when the node has a token, so a tailnet
 // peer cannot make the node convert and transcribe an arbitrary node-local file. A node with NO token
-// keeps its behaviour (the lane stays open beyond loopback), so no deployed tokenless node breaks.
+// answers it only on loopback, like every lane (403 beyond it: TestATokenlessNodeBeyondLoopbackRefusesEveryTaskTypeWith403).
 func TestLegacySTTDispatchIsTokenGatedWhenTheNodeHasAToken(t *testing.T) {
 	const body = `{"job_id":"stt-legacy-1","task_type":"stt","payload":{"audio":"/node/local/a.wav"}}`
 	t.Run("token set, no bearer", func(t *testing.T) {
@@ -438,10 +438,14 @@ func TestLegacySTTDispatchIsTokenGatedWhenTheNodeHasAToken(t *testing.T) {
 			t.Fatalf("status = %d (body %s)", rec.Code, rec.Body.String())
 		}
 	})
-	t.Run("no token, beyond loopback: unchanged", func(t *testing.T) {
+	t.Run("no token, beyond loopback: refused", func(t *testing.T) {
 		s, _ := newTestServer(t, sttCfg(t, ""), &sttRunner{res: sttOK}, authOpts(false))
+		wantErrorShape(t, do(t, s, http.MethodPost, "/fleet/dispatch", body, nil), http.StatusForbidden, fleetTokenRequired)
+	})
+	t.Run("no token, loopback: open", func(t *testing.T) {
+		s, _ := newTestServer(t, sttCfg(t, ""), &sttRunner{res: sttOK}, authOpts(true))
 		if rec := do(t, s, http.MethodPost, "/fleet/dispatch", body, nil); rec.Code != http.StatusAccepted {
-			t.Fatalf("a tokenless node's stt lane changed behaviour: status = %d (body %s)", rec.Code, rec.Body.String())
+			t.Fatalf("a loopback node with no token must take its stt lane: status = %d (body %s)", rec.Code, rec.Body.String())
 		}
 	})
 }
@@ -459,7 +463,7 @@ func TestLegacySTTJobPollIsMaskedWhenTheNodeHasAToken(t *testing.T) {
 	if m := pollDone(t, s, "stt-legacy-2", auth); m["state"] != "done" {
 		t.Fatalf("state = %v", m["state"])
 	}
-	open, _ := newTestServer(t, sttCfg(t, ""), &sttRunner{res: sttOK}, authOpts(false))
+	open, _ := newTestServer(t, sttCfg(t, ""), &sttRunner{res: sttOK}, authOpts(true))
 	if rec := do(t, open, http.MethodPost, "/fleet/dispatch", strings.Replace(body, "stt-legacy-2", "stt-legacy-3", 1), nil); rec.Code != http.StatusAccepted {
 		t.Fatalf("tokenless dispatch: %d", rec.Code)
 	}
@@ -668,8 +672,9 @@ func TestPulledSTTJobIsGatedAndMaskedLikeAPushedOne(t *testing.T) {
 		t.Error("a pulled stt-upload job is not marked Gated")
 	}
 	open, _ := newTestServer(t, sttCfg(t, ""), &sttRunner{res: sttOK}, authOpts(true))
-	if open.claimSpec("stt", func() {}).Gated {
-		t.Error("a tokenless node's pulled stt job became Gated")
+	// Every job is marked Gated now; the mark only masks a poll on a node that has a token to ask for.
+	if !open.claimSpec("stt", func() {}).Gated {
+		t.Error("a tokenless loopback node's pulled stt job is not marked Gated like every other")
 	}
 }
 

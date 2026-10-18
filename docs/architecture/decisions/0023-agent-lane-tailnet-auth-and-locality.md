@@ -214,3 +214,46 @@ real use says what the loop actually needs.
 - [systems/coding-agent.md](../../systems/coding-agent.md) — the loop a contract executes on
 - [../../FLEET-NODE.md](../../FLEET-NODE.md), [../../OPERATOR-GUIDE.md](../../OPERATOR-GUIDE.md)
   — operator enablement
+
+## Amendment 2026-10-15 (the bearer covers every lane, not the agent lane alone)
+
+Decision 2 above made the agent lane the only bearer-gated lane in v1, so that already-deployed tokenless media clients kept
+working, and recorded whole-fleet enforcement as a follow-up. The follow-up is this amendment, and the v1 scope is withdrawn.
+The reason is what a tokenless media lane let through: a `run-graph` dispatch carries a manifest whose `node_packs` the
+node clones and pip-installs, so any peer that could reach a node's listener could make it run the peer's code, token or no
+token. A scope that was a compatibility concession became a hole once a media task could install code.
+
+- **Every lane is gated.** `tokenGated` returns true for every task type (the media tasks, `run-graph`, the legacy `stt`
+  lane, `accel`, and any later one), a poll or withdraw of any job needs the bearer, and so does every read of
+  `GET /fleet/media/{name}`, whichever task wrote the file. With a `fleet_auth_token`, a request without it is `401`.
+- **No version exception.** A client that does not yet send the token cannot be told from an attacker sending an old
+  version string, so the transition is by order, not by a compatibility carve-out: delegators first (every fleet client
+  already sends the bearer whenever a token is configured, and tests pin it), then nodes.
+- **Loopback stays open; everything else fails closed.** With no token, a loopback listener serves as before (the local MCP
+  trust boundary) and any other listener refuses every task type with `403`. `fleet-serve` does not start on a non-loopback
+  address with no `fleet_auth_token`, naming the key, the listen address and the config file it read, rather than serve a
+  port that refuses everything. The node installers store the key (`setup/install.sh --token-file`) or refuse to register
+  the unit, so an install no longer produces a node that cannot start.
+- **Health and the jobs feed stay readable without the bearer**, with their private fields withheld (a lease's free-text
+  reason, the store steward's status and root path, the weight-file rows of the recipes; a job's error text), so a roster read
+  works before it holds a credential.
+- **A token holder is trusted to run renders, not code.** A run-graph manifest may name a node pack only at a repository and
+  commit pinned in `render/node-packs.json`; the node refuses anything else before a job or a clone exists, and the runner's
+  satisfier refuses again before its first git command. The same holds for a manifest's `models[]`: an entry is taken only
+  under `models/<class>/`, fetched over https from a host listed in the same file (`model_hosts`), so the download that runs
+  before ComfyUI starts cannot place a file where ComfyUI loads code or outside the install.
+- **The refusal journal cannot be grown by a caller.** Its throttle is keyed on the caller's address and the reason, never on
+  a field the caller chooses, with a cap on lines per minute and one summary line for the rest. A line is the door, the caller's
+  host and one of three constant reasons, nothing else. Health and the jobs feed write the same line for a bearer that is
+  presented and is not the node's (a request with no bearer there is the route working as designed and writes nothing).
+- **The token's strength is the operator's to choose.** The bearer opens every lane and a node does not slow repeated wrong
+  bearers, so the docs say to generate a long random value (`openssl rand -hex 32`); the installer and the config check accept
+  any non-empty value.
+- **What the rollout breaks.** A delegator with no `fleet_auth_token` (a media-only box included), a delegator older than the
+  release that added the bearer to its client, and any software outside this repo that sends no bearer are refused on every lane
+  once the node gains the rule. The release floors are in `docs/FLEET-NODE.md`.
+- **Two answers precede the `401` on some routes.** A door that is closed on the node (`compose-project`, `media-job`) answers
+  `403` first, which health already publishes; under `fleet_ingress_guard: enforce` the guard answers `415`, `421` or `403`
+  before any route runs.
+
+The two accepted weaknesses above (one shared token, no rotation) stand.

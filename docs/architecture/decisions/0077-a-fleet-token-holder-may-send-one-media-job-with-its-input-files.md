@@ -147,3 +147,10 @@ Three sentences above change; nothing else does.
   and a run-graph's `devices` still defer by name.
 - **The `waiter_token` consequence stands.** A call that goes to a node leaves the place it held in the local line, and a call
   that carries a `waiter_token` stays in the local line (it is not overflowed).
+
+## Amendment (2026-10-17): every lane needs the fleet bearer
+
+Where this record calls media dispatch and the `/fleet/dispatch` door tokenless, it describes the node when the decision was taken. Since the amendment of 2026-10-15 to
+[ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token
+(dispatch of any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on
+loopback. The decision recorded here is otherwise unchanged.

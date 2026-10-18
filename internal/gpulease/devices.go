@@ -186,7 +186,7 @@ func writeEpochRecord(leaseDir string, rec *Meta) error {
 		return fmt.Errorf("gpulease: encoding lease record: %w", err)
 	}
 	path := epochRecordPath(leaseDir, rec.Epoch)
-	tmp := path + ".tmp"
+	tmp := stagingPath(path)
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return fmt.Errorf("gpulease: writing lease record: %w", err)
 	}
@@ -299,7 +299,9 @@ func (r reader) live() []liveLease {
 	var out []liveLease
 	if meta, ok, tree := r.legacy(); ok {
 		info := infoFrom(meta, r.now)
-		info.HeartbeatAt = time.UnixMilli(heartbeatAt(r.dir, meta))
+		if at, known := heartbeatAt(r.dir, meta); known {
+			info.HeartbeatAt = time.UnixMilli(at)
+		}
 		info.applyTree(tree)
 		out = append(out, liveLease{Meta: *meta, Info: info})
 	}
@@ -309,7 +311,9 @@ func (r reader) live() []liveLease {
 		}
 		rec := j.Meta
 		info := infoFrom(&rec, r.now)
-		info.HeartbeatAt = time.UnixMilli(heartbeatAt(r.dir, &rec))
+		if at, known := heartbeatAt(r.dir, &rec); known {
+			info.HeartbeatAt = time.UnixMilli(at)
+		}
 		info.applyTree(j.Tree)
 		out = append(out, liveLease{Meta: rec, Info: info, V2: true})
 	}
@@ -534,7 +538,7 @@ func (m *Manager) tryAcquireDevices(class Class, opts Options, devs []string) (*
 	}
 	// The host's readings come BEFORE the lock (F57): the walk of each declaring holder's process tree does not belong in a
 	// critical section every other acquirer on the machine spins on for two seconds. They are compared inside it.
-	reading := m.readHost(opts.HostRAMGiB)
+	reading := m.readHost(opts.hostLoad())
 	if m.afterHostReadHook != nil {
 		m.afterHostReadHook()
 	}
@@ -742,13 +746,15 @@ func (m *Manager) verifyNoDeviceLeases(epoch uint64) error {
 //   - an active lease the shared rule judges reclaimable (holder gone), with its claims;
 //   - an unreadable record file once it is older than claimGrace;
 //   - a card claim whose record is gone, or does not name that card, once its own
-//     timestamp is older than claimGrace.
+//     timestamp is older than claimGrace;
+//   - the staged files whose writers hold the epoch lock, at any age (sweepStagedLeftoversLocked).
 //
 // A removal that fails here is left for the next sweep: it is debris, no reader treats
 // it as a live lease, and a claim it leaves behind only delays a grant for claimGrace
 // ("claim in progress"), never double-books a card. Unlike a release, nobody is waiting
 // to be told it worked.
 func (m *Manager) sweepDebrisLocked() {
+	m.sweepStagedLeftoversLocked() // first: the reads below would otherwise wait for a rename a dead writer began
 	r := m.reader()
 	liveEpoch := map[uint64]*Meta{}
 	for _, j := range r.v2() {
@@ -831,6 +837,53 @@ func (m *Manager) sweepDebrisLocked() {
 	}
 }
 
+// sweepStagedLeftoversLocked removes the staged files left by writers that hold the epoch lock: meta.json.restamp (restampWholeLocked)
+// and e/<epoch>.json.tmp (writeEpochRecord). The caller holds the epoch lock, so none of those writers is running: a writer that
+// holds the lock does so from before it stages the file until after its rename returns (the stall of a Windows rename over a name is
+// inside that call, measured), so a staged file found here is a dead writer's, whatever its age. Left alone, a fresh one reads as a
+// rename in flight beside an absent name, and every reader of that name waits a whole budget for a rename that will never end
+// (gate.go).
+//
+// THE HEARTBEAT'S STAGED FILE (hb.<epoch>.tmp) IS NOT SWEPT. Renew replaces the heartbeat without the epoch lock, so that file may be
+// a rename that is landing at this instant, and removing it could cost a live holder its renewal. The same goes for every staged file
+// whose writer does not hold the lock: they are not in this list.
+//
+// Best-effort and one try: a file that cannot be removed now (a scanner holds it) is left for the next sweep, and the lock is not held
+// longer for it.
+func (m *Manager) sweepStagedLeftoversLocked() {
+	m.sweepStagedMetaLocked()
+	m.sweepStagedRecordsLocked()
+}
+
+// sweepStagedMetaLocked is the whole-node record's half of sweepStagedLeftoversLocked: one remove, no listing, so a whole-node grant
+// can do it inside its own short critical section.
+func (m *Manager) sweepStagedMetaLocked() {
+	_ = os.Remove(stagingPath(m.metaPath()))
+}
+
+// sweepStagedRecordsLocked is the card records' half: the staged files of e/<epoch>.json. A host that never wrote a card lease has no
+// e/ and the listing fails at once.
+func (m *Manager) sweepStagedRecordsLocked() {
+	entries, err := os.ReadDir(m.v2Dir())
+	if err != nil {
+		return
+	}
+	for _, e := range entries {
+		name := e.Name()
+		live := withoutStagedSuffix(name)
+		if e.IsDir() || live == name || !strings.HasSuffix(live, ".json") {
+			continue
+		}
+		epoch, perr := strconv.ParseUint(strings.TrimSuffix(live, ".json"), 10, 64)
+		if perr != nil {
+			continue
+		}
+		if staged := stagingPath(epochRecordPath(m.leaseDir(), epoch)); filepath.Base(staged) == name {
+			_ = os.Remove(staged)
+		}
+	}
+}
+
 // sweepSeen removes the inferred-scope sidecars (seen.<epoch>) of every lease not in keep. The
 // listing is cheap and unlocked; the removal runs under the epoch lock, so a reader that is
 // persisting a sidecar for a lease it just saw live cannot be raced into recreating one.
@@ -862,7 +915,7 @@ func (m *Manager) staleSeen(keep map[uint64]bool) []string {
 		if e.IsDir() || !strings.HasPrefix(name, seenPrefix) {
 			continue
 		}
-		rest := strings.TrimSuffix(strings.TrimPrefix(name, seenPrefix), ".tmp")
+		rest := withoutStagedSuffix(strings.TrimPrefix(name, seenPrefix))
 		epoch, perr := strconv.ParseUint(rest, 10, 64)
 		if perr != nil || keep[epoch] {
 			continue
@@ -921,8 +974,12 @@ func (m *Manager) removeLeaseFilesLocked(epoch uint64) error {
 // sibling's heartbeat and make it reclaimable.
 func (m *Manager) clearEpochMarkers(epoch uint64) {
 	e := strconv.FormatUint(epoch, 10)
-	for _, name := range []string{"unloaded." + e, "hb." + e, "hb." + e + ".tmp", orphanMarkPrefix + e, orphanMarkPrefix + e + ".tmp", yieldPrefix + e, yieldPrefix + e + ".tmp"} {
-		_ = m.remove(filepath.Join(m.leaseDir(), name))
+	unloaded := filepath.Join(m.leaseDir(), "unloaded."+e)
+	hb := filepath.Join(m.leaseDir(), "hb."+e)
+	orphan := filepath.Join(m.leaseDir(), orphanMarkPrefix+e)
+	yield := filepath.Join(m.leaseDir(), yieldPrefix+e)
+	for _, path := range []string{unloaded, hb, stagingPath(hb), orphan, stagingPath(orphan), yield, stagingPath(yield)} {
+		_ = m.remove(path)
 	}
 }
 
@@ -1033,19 +1090,35 @@ func (m *Manager) releaseByEpochV2(epoch uint64) (released, handled bool, err er
 }
 
 // unreadableCardRecords lists, lowest epoch first, the card-lease records (e/<epoch>.json) that exist and cannot be READ: an I/O
-// failure, a directory where the file was. The reader skips them ("the sweep deals with it once it is old"), which is right for a
-// judgement of who holds the cards and wrong for a question of whether anything is held.
+// failure, a directory where the file was, or a record whose rename is installing it. The reader skips them ("the sweep deals with it
+// once it is old"), which is right for a judgement of who holds the cards and wrong for a question of whether anything is held.
+//
+// The last of those is not in the listing under its own name: a record that a rename is installing has its live name absent and only its
+// staged file in the listing, so a fresh staged record whose live name is not listed counts as a record that cannot be read (stagedInFlight).
 func (m *Manager) unreadableCardRecords() []uint64 {
 	entries, err := os.ReadDir(filepath.Join(m.leaseDir(), v2DirName))
 	if err != nil {
 		return nil
 	}
+	listed := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		listed[e.Name()] = true
+	}
 	var bad []uint64
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".json") {
+		name := e.Name()
+		if live := withoutStagedSuffix(name); live != name {
+			if !e.IsDir() && strings.HasSuffix(live, ".json") && !listed[live] && stagedInFlight(epochRecordPathByName(m.leaseDir(), live)) {
+				if epoch, perr := strconv.ParseUint(strings.TrimSuffix(live, ".json"), 10, 64); perr == nil {
+					bad = append(bad, epoch)
+				}
+			}
 			continue
 		}
-		epoch, perr := strconv.ParseUint(strings.TrimSuffix(e.Name(), ".json"), 10, 64)
+		if !strings.HasSuffix(name, ".json") {
+			continue
+		}
+		epoch, perr := strconv.ParseUint(strings.TrimSuffix(name, ".json"), 10, 64)
 		if perr != nil {
 			continue
 		}
@@ -1055,6 +1128,11 @@ func (m *Manager) unreadableCardRecords() []uint64 {
 	}
 	sort.Slice(bad, func(i, j int) bool { return bad[i] < bad[j] })
 	return bad
+}
+
+// epochRecordPathByName is the path of the card record with this file name (<epoch>.json) in the lease directory.
+func epochRecordPathByName(leaseDir, name string) string {
+	return filepath.Join(leaseDir, v2DirName, name)
 }
 
 func errUnreadableCardRecord(epoch uint64) error {

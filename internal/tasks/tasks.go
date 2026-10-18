@@ -285,7 +285,50 @@ func paramMap(p map[string]any, k string) map[string]any {
 	return nil
 }
 
-// stableParamsKey renders params deterministically for cache keying.
+// paramsEscaper percent-escapes the characters StableParamsKey's format gives a meaning
+// to: ";" and "=" are its separators, and "%" is the escape character, so it has to be
+// written too or a value that spells an escape ("%3B") could not be told from the
+// character it spells (";"). One pass, so the "%" an escape adds is not escaped again.
+// Backslashes are deliberately not special: params carry Windows paths, and those
+// must render as they always did.
+var paramsEscaper = strings.NewReplacer("%", "%25", ";", "%3B", "=", "%3D")
+
+// StableParamsKey renders params deterministically: "<key>=<value>;" per entry, in
+// key order, the value as %v prints it.
+//
+// It names the render-, video- and edit- output files (a stem is a hash of the prompt
+// and this string) and it is recorded on the persisted exemplar rows. It is NOT part of
+// the result-cache key: that carries CacheParamsKey, the typed canonical form, because
+// the %v rendering below is type-erased and let a request shape its params to share
+// another request's cache entry.
+//
+// The format alone left the top-level structure ambiguous: a key or a value holding "="
+// or ";" could stand in for the structure around it, so {"a": "1;b=2"} and
+// {"a": "1", "b": "2"} were both "a=1;b=2;". Each key and each rendered value is
+// therefore percent-escaped (paramsEscaper) before it is written, which makes every
+// top-level entry unambiguous.
+//
+// That is the whole guarantee. Nested and non-string values keep Go's %v rendering,
+// which is type-erased and separates elements with a space: {"seed": "5"} and
+// {"seed": 5} render alike, so do []any{"a b"} and []any{"a", "b"}, and so do a map
+// value that holds "k2:v2" and a map with a second entry. That limit is documented and
+// pinned by TestStableParamsKeyNestedAndNonStringValuesKeepGoRendering; lifting it
+// would give every params map with such a value a new file name. It matters only for
+// file stems and exemplar rows now that the result cache has its own key.
+//
+// Nor does the escaping make output file names injective. A stem is
+// sha256hex(prompt + this string)[:8] with no boundary between the prompt and the
+// string, so the two can still run together. That is older than the escaping and out
+// of its scope: a stem collision only reuses or overwrites a file under a truncated
+// 32-bit name.
+//
+// The output is byte-identical to the unescaped format for every map whose keys and
+// rendered values contain none of "%", ";" and "=" — prompts, numbers, bools, paths
+// of either slash direction (a Windows path with backslashes included), nested maps
+// and slices of those — so the file names and stored keys of ordinary params did not
+// move. A key or value that does contain one of the three renders differently from
+// before (a negative prompt with a semicolon, a URL with a query string such as
+// "?a=b", a percent-encoded URL), and its output stem and recorded key change once.
 func StableParamsKey(p map[string]any) string {
 	if len(p) == 0 {
 		return ""
@@ -297,7 +340,10 @@ func StableParamsKey(p map[string]any) string {
 	sort.Strings(keys)
 	var b strings.Builder
 	for _, k := range keys {
-		fmt.Fprintf(&b, "%s=%v;", k, p[k])
+		b.WriteString(paramsEscaper.Replace(k))
+		b.WriteByte('=')
+		b.WriteString(paramsEscaper.Replace(fmt.Sprintf("%v", p[k])))
+		b.WriteByte(';')
 	}
 	return b.String()
 }

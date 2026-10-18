@@ -118,7 +118,7 @@ eligible). The fleet text lane behind it is dark until a node's tier declares te
 stays local and `remote` defers. summarize and triage take no `route`. See
 [FLEET-NODE.md](../FLEET-NODE.md#the-text-task-post-fleettext).
 
-`offload_transcribe` takes an optional `route` too (0.164.0, [ADR 0072](../architecture/decisions/0072-a-fleet-node-transcribes-audio-its-caller-uploads-so-a-held-card-is-a-place-in-line.md);
+`offload_transcribe` takes an optional `route` too (0.165.0, [ADR 0072](../architecture/decisions/0072-a-fleet-node-transcribes-audio-its-caller-uploads-so-a-held-card-is-a-place-in-line.md);
 this changed `tools/list` on every box), with one difference from the vision and text tools: **the default is `auto`**,
 not `local`. Every fleet node serves the same whisper family, so a spill costs no quality, and a transcription held
 behind a render's lease is the failure the route removes (a caller that never passed a route used to wait the whole

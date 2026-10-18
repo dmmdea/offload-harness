@@ -1,9 +1,10 @@
 // Package netguard holds the shared loopback listen-address guard.
 //
 // Extracted 2026-07-17 from cmd/local-agent (validateListenAddr) for
-// fleet-serve; behavior identical. Both unauthenticated HTTP servers
-// (local-agent's OpenAI shim and fleet-serve) refuse to bind beyond loopback
-// unless the operator explicitly opts into a trusted network.
+// fleet-serve; behavior identical. Both HTTP servers (local-agent's OpenAI
+// shim, which is unauthenticated, and fleet-serve, which needs the fleet
+// bearer on every lane) refuse to bind beyond loopback unless the operator
+// explicitly opts into a trusted network.
 package netguard
 
 import (
@@ -12,10 +13,11 @@ import (
 	"strings"
 )
 
-// Validate refuses any listen host that is not loopback. The servers using it
-// are UNAUTHENTICATED by design, so binding beyond loopback exposes an
-// RCE-class surface to the local network — a footgun for anyone publishing
-// this repo.
+// Validate refuses any listen host that is not loopback. The local agent's
+// server using it is UNAUTHENTICATED by design, so binding beyond loopback
+// exposes an RCE-class surface to the local network — a footgun for anyone
+// publishing this repo; a fleet node behind it requires the fleet bearer on
+// every lane, and refuses to start beyond loopback without one.
 //
 // Empty-host forms ("", ":18800") are treated as non-loopback: Go's net.Listen
 // binds ALL interfaces when the host is empty, so they are exactly as exposed as
@@ -49,16 +51,17 @@ func Validate(addr string, allowNonLocal bool) error {
 	if allowNonLocal || isLoopbackHost(host) {
 		return nil
 	}
-	return fmt.Errorf("refusing to bind --listen %q: this endpoint is UNAUTHENTICATED and "+
-		"each request drives the agent's write/GitHub tools; binding beyond loopback exposes "+
-		"an RCE-class surface to your network. Use a loopback address (127.0.0.1, [::1], localhost) "+
+	return fmt.Errorf("refusing to bind --listen %q: binding beyond loopback exposes this endpoint to your network. "+
+		"The local agent's endpoint is UNAUTHENTICATED and each request drives its write/GitHub tools (an RCE-class "+
+		"surface); a fleet node requires the fleet bearer on every lane and will not start beyond loopback without "+
+		"fleet_auth_token. Use a loopback address (127.0.0.1, [::1], localhost) "+
 		"or pass --listen-trusted-network to override (only on a network you fully trust)", addr)
 }
 
 // LoopbackAddr reports whether a "host:port" listen address is bound to
 // loopback — the same notion Validate enforces, exported as a FACT for
 // callers that need the answer rather than the refusal (fleet-serve's
-// agent-lane auth gate: a tokenless agent lane is acceptable only on a
+// lane auth gate: a node with no fleet_auth_token is acceptable only on a
 // loopback listener). Malformed/unprovable addresses report false — a
 // listener we cannot prove loopback must be treated as exposed, so the
 // caller fails closed.

@@ -23,8 +23,10 @@ prints human-readable progress and then **one machine-readable JSON line as its 
 that line is your input signal.
 
 **Fleet node (optional, post-install):** `local-offload fleet-serve` joins this box to the
-fleet-dispatcher fleet — an unauthenticated HTTP server (default `127.0.0.1:18811`; production
-binds the **Tailscale** address behind `--listen-trusted-network`, never `0.0.0.0`) that accepts
+fleet-dispatcher fleet — an HTTP server (default `127.0.0.1:18811`, tokenless on loopback; production
+binds the **Tailscale** address behind `--listen-trusted-network`, never `0.0.0.0`, and every lane there
+requires the fleet bearer: the node will not start without `fleet_auth_token` in its config, and
+`setup/install.sh --token-file PATH` stores it on a Linux node) that accepts
 dispatched GPU renders through the same pipeline. Measured per-model VRAM footprints live at
 `~/.local-offload/footprints.json` (prime a fresh box with `local-offload fleet-measure`). **MSI
 Afterburner is the recommended companion** on a fleet box — its per-process VRAM display (which

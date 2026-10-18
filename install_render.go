@@ -823,6 +823,9 @@ func renderGate(res renderResult) error {
 			return fmt.Errorf("tier %s: the rendered config parks every expert in host RAM (INV-1: the cards do the inference, RAM is overflow only) — not written:\n%s", res.TierID, servingtmpl.Violations(vs))
 		}
 	}
+	if err := refuseLlamaCppNineBAgentSeat(res); err != nil {
+		return err
+	}
 	if len(res.Profile.Composes) > 0 || len(res.Layers) > 0 {
 		if err := servingtmpl.CheckComposite(res.Config, servingtmpl.CompositeDecl{
 			Tier: res.TierID, Composes: res.Profile.Composes, Layers: res.Layers, MediaKinds: seatKinds(res.Profile.MediaSeats),
@@ -832,6 +835,44 @@ func renderGate(res renderResult) error {
 		}
 	}
 	return nil
+}
+
+// nineBAgentSeatEntries are the llama.cpp 9B agent seats the shipped templates can render.
+var nineBAgentSeatEntries = []string{"mimo-9b-agent", "qwen3.5-9b-agent"}
+
+// noNineBAgentSeatTiers are the tiers that must not offer a llama.cpp 9B agent seat, with the measurement behind
+// each. ampere-16 is the A2 (a 16 GB card): the 9B under vLLM ties the 4B at a 4096 window and the 9B under
+// llama.cpp fails (register A-07); the tier's agent answer is the 27B GSQ seat, with the 4B as its fallback.
+var noNineBAgentSeatTiers = map[string]string{
+	"ampere-16": "measured on the A2: the 9B under llama.cpp fails, and the 9B under vLLM only ties the 4B (register A-07)",
+}
+
+// refuseLlamaCppNineBAgentSeat is the render-time form of register A-40, which recorded the A2 prohibition and
+// never gated it: a rendered config for a tier in noNineBAgentSeatTiers that carries a 9B agent entry is not
+// written. It reads the rendered models, not the profile keys, so a template change that adds the entry to a
+// tier is refused as surely as a profile edit that turns it on.
+func refuseLlamaCppNineBAgentSeat(res renderResult) error {
+	why, ok := noNineBAgentSeatTiers[res.TierID]
+	if !ok {
+		return nil
+	}
+	var doc struct {
+		Models map[string]yaml.Node `yaml:"models"`
+	}
+	if err := yaml.Unmarshal([]byte(res.Config), &doc); err != nil {
+		return nil // an unparsable config is servingtmpl.Audit's finding, already reported by the caller
+	}
+	var found []string
+	for _, seat := range nineBAgentSeatEntries {
+		if _, has := doc.Models[seat]; has {
+			found = append(found, seat)
+		}
+	}
+	if len(found) == 0 {
+		return nil
+	}
+	return fmt.Errorf("tier %s: the rendered config offers a llama.cpp 9B agent seat (%s) — %s (register A-40) — not written",
+		res.TierID, strings.Join(found, ", "), why)
 }
 
 const eg2MinLlamaBuild = 11452

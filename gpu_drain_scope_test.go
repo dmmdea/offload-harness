@@ -390,11 +390,11 @@ func TestLeaseDevicesOfFindsTheEpochsCards(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = l.Release() })
-	if got := leaseDevicesOf(m, l.Epoch()); len(got) != 1 || got[0] != leaseCard2ID {
-		t.Fatalf("leaseDevicesOf = %v", got)
+	if got, err := leaseDevicesOf(m, l.Epoch()); err != nil || len(got) != 1 || got[0] != leaseCard2ID {
+		t.Fatalf("leaseDevicesOf = %v, %v", got, err)
 	}
-	if got := leaseDevicesOf(m, l.Epoch()+99); got != nil {
-		t.Fatalf("an epoch that is not live has no cards, got %v", got)
+	if got, err := leaseDevicesOf(m, l.Epoch()+99); err != nil || got != nil {
+		t.Fatalf("an epoch that is not live has no cards, got %v, %v", got, err)
 	}
 }
 
@@ -676,7 +676,11 @@ func TestWrapperUnloadEnvForACardLeaseIsNeverUnset(t *testing.T) {
 func TestLeaseDevicesOfSaysWhenTheEpochIsNotLive(t *testing.T) {
 	_, m := scopedLeaseFixture(t)
 	var got []string
-	out := captureStderr(t, func() { got = leaseDevicesOf(m, 4242) })
+	var err error
+	out := captureStderr(t, func() { got, err = leaseDevicesOf(m, 4242) })
+	if err != nil {
+		t.Fatalf("an epoch that is not live is not an error, got %v", err)
+	}
 	if got != nil {
 		t.Fatalf("an epoch that is not live has no cards, got %v", got)
 	}

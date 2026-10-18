@@ -37,6 +37,15 @@ var (
 	livenessFloor = 60 * time.Second
 	// livenessSlack pads the prefill estimate and a tool's own cap.
 	livenessSlack = 30 * time.Second
+	// livenessAdmissionFloor is the least stall allowance of the ADMISSION phase:
+	// the run's own setup between the monitor's start and the loop's first request,
+	// and the loop's pre-step probes. That is not a seat's silence, so it is not
+	// livenessFloor: a test that compresses the floor to see a wedged seat in a
+	// fraction of a second would otherwise give a starved process 200 ms to get its
+	// first request out, and with the admission gate off (budget 0) the floor is all
+	// the phase has. The same 60 s as the floor in production, so nothing changes
+	// there. Tests leave it alone.
+	livenessAdmissionFloor = 60 * time.Second
 	// livenessRepack is the flat re-pack bound (StallPolicy.Repack): the least a
 	// re-pack may go silent, 120 s in production. The allowance rises above it
 	// with the expected answer and the seat's rate (agent.StallPolicy.Allowance).
@@ -93,6 +102,9 @@ func LivenessPolicyFor(cfg config.Config, known seatrate.Seat, admission time.Du
 		tokS = cfg.AgentSeatTokS
 	}
 	coldLoad, basis := coldLoadCeiling(known)
+	if admission < livenessAdmissionFloor {
+		admission = livenessAdmissionFloor
+	}
 	return agent.StallPolicy{
 		Admission: admission,
 		// The prefill clock is a STALL bound, so it holds the seat's slow recent rate, not its

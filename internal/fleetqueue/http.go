@@ -17,9 +17,15 @@ import (
 
 const maxQueueBody = 1 << 20 // mirror the dispatch cap: 1 MiB
 
+// Router is what Mount registers the queue routes on: an *http.ServeMux, or anything that takes a pattern and a handler
+// (the fleet node hands it a registrar that records the patterns, so a test can enumerate the routes it serves).
+type Router interface {
+	HandleFunc(pattern string, handler func(http.ResponseWriter, *http.Request))
+}
+
 // Mount registers the queue routes on mux. authOK decides bearer acceptance
 // (the fleet node passes its existing check so the two surfaces cannot drift).
-func Mount(mux *http.ServeMux, q *Queue, authOK func(*http.Request) bool) {
+func Mount(mux Router, q *Queue, authOK func(*http.Request) bool) {
 	guard := func(h http.HandlerFunc) http.HandlerFunc {
 		return func(w http.ResponseWriter, r *http.Request) {
 			if !authOK(r) {

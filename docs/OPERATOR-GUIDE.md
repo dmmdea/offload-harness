@@ -72,12 +72,12 @@ Logs: `/tmp/agent-server.log`, `/tmp/openwebui.log`.
 Full guide: `docs/FLEET-NODE.md`. The short operating loop:
 
 **Start** (loopback for a local check; the **Tailscale address** for production — the
-endpoints are unauthenticated, so the tailnet is the trust boundary; port **18811**,
-**never `0.0.0.0`**):
+lanes all require the fleet bearer, so a node there needs `fleet_auth_token` in its config or it will not
+start; port **18811**, **never `0.0.0.0`**):
 
 ```powershell
 local-offload fleet-serve                                                    # loopback smoke
-local-offload fleet-serve --listen 100.64.0.10:18811 --listen-trusted-network   # production (Tailscale addr)
+local-offload fleet-serve --listen 192.0.2.7:18811 --listen-trusted-network      # production (Tailscale addr)
 ```
 
 **Verify:**
@@ -372,31 +372,38 @@ the binary is present, and on that path the harness has already taken the lease,
 inherits it. Invoking `comfyui-pp-cli` **standalone** against a live box is the bypass — wrap
 it in `gpu reserve --class media` if you need to.
 
-**Host RAM is part of the lease (2026-10-09).** A lease declares the host RAM it will load, and the grant holds it back when
-that declaration would pass a line the harness chose. Two readings of the OS are compared, and a grant needs both:
-`committed now + the lease's need + what running leases have yet to load` at or under physical RAM less
-`gpu_host_ram_headroom_gib` (default 8, a floor the harness chose and has not yet measured), and `available RAM now - the need -
-what running leases have yet to load` at or above the same headroom. **This is a brake on declared loads, not a guarantee about
+**Host RAM is part of the lease (2026-10-09).** A lease declares the host memory it will take, in two quantities, and the grant holds
+it back when that declaration would pass a line the harness chose. Two readings of the OS are compared, and a grant needs both:
+`available RAM now - the lease's touched need - what running leases have yet to touch` at or above `gpu_host_ram_headroom_gib`
+(default 8, a floor the harness chose and has not yet measured), and the commit line. A commit you **state** with `--ram-commit` is
+held to the OS commit limit: `commit charge now + the lease's commit + what running leases have yet to be charged` at or under the
+limit less the same headroom (where the OS enforces one: always on Windows, on Linux only with `vm.overcommit_memory` = 2; the
+Windows limit moves with a system-managed page file, so "other processes' allocations fail past it" holds once the file has reached
+its maximum). A lease that states **no** commit (a bare `--ram`, the media admission, the seat warm-back) declares one figure,
+and that figure is held to the line it always had: `commit charge now + the figure + what running leases have yet to touch` at or
+under physical RAM less the headroom, on every OS. **This is a brake on declared loads, not a guarantee about
 the box.** A declaration is an estimate: the size of the model files, until three measured runs of that family on the node raise
 it to the resident memory they reached (the 90th percentile of the last twenty runs, so one inflated run does not stick, and never above twice the files). A lane's commit can carry its card allocations on top, so a lane can commit more
 than it declared: the rule applied to a commit reading of 81.6 GiB on the 127.7 GiB reference box admits a 32.8 GiB Krea 2 bf16
-declaration (114.4 GiB projected against a 119.7 GiB limit), and a ComfyUI lane holding 57.7 GiB private bytes (its family is not
-recorded) read 129.3 GiB committed on that box some hours later, above its physical RAM (readings measured on the reference box on
-2026-10-10 from session readings that are not recorded in this repository). The available-RAM term refuses against the declared loads at the moment of the decision; it
+declaration (114.4 GiB projected against a 119.7 GiB bound declared once, 179.7 stated), and a ComfyUI lane holding 57.7 GiB private bytes (its family is not
+recorded) read 129.3 GiB committed on that box some hours later (readings measured on the reference box on
+2026-10-10 from session readings that are not recorded in this repository). The rule refuses against the declared loads at the moment of the decision; it
 does not bound a lane that holds more than it declared, and nothing here bounds a process that holds no lease. A lane already
-running is counted whole in the next decision, so the next lease waits, but the guard does not stop the lane that took the box
-over: read `gpu status` (below), not the admission, as the state of the box. `gpu reserve --ram <GiB>` states the need (0 =
-needs no host RAM); unset, it is estimated from the model files of a render helper call whose weights do not fit the card
+running is counted in the next decision, so the next lease waits when its declaration would pass a line, but the guard does not stop the lane that took the box
+close: read `gpu status` (below), not the admission, as the state of the box. `gpu reserve --ram <GiB>` states the working set the job touches (0 =
+needs no host RAM) and `--ram-commit <GiB>` the commit it is charged, which can be much more (a coder-model arm touched 27.8 GiB and was
+charged 58.1 GiB: `--ram 28 --ram-commit 58`; a commit equal to `--ram` is still stated, and `--ram-commit` must be finite and above 0);
+unset, the commit is the `--ram` figure and is not stated (held to physical RAM, as above); `--ram` unset, it is estimated from the model files of a render helper call whose weights do not fit the card
 (a Krea 2 bf16 call on a 16 GiB card is about 33 GiB), else for a media lease the largest ComfyUI render family the box binds (a
 binding on the sd.cpp engine is not counted, whichever route it is on, so for `gpu reserve` a node that binds only sd.cpp declares 0
 unless `--ram` says; the pipeline's own sd.cpp lanes are different: they declare the weights `--offload-to-cpu` parks in RAM,
-sized from their bound files as an estimate; a file that cannot be sized is named in a log line and the figure is a lower bound), and 0 for a text lease. A lease that has to wait says `waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB
-headroom` once and keeps its place in the same queue; `--wait 0` refuses with that text. A lease that asks for `--unload-seat` is the one exception to when the host is asked: it takes its place in line and its cards first, the seat is drained and unloaded, and only then is the need compared (the memory it needs may be the seat's own), still holding the cards and inside the same `--wait`, by the same rule and with the same words (F82). The exception holds only while the unload reaches a model on the cards the lease holds and the host can be read; a lease whose unload reaches nothing on its cards, or on a host whose memory cannot be read, is compared in the grant like any other, and a shortage the unload does not cure leaves the cards held and the seat cold for at most the hold bound (`gpu_hostram_hold_max_sec`, default 600 seconds, a chosen figure; `gpu reserve --ram-hold-max <duration>` overrides it for one reserve, and 0 means no bound, so only `--wait` ends the wait). Past the bound the lease is released, the seat is warmed back as for any release (a `--detach` hold's automatic release warms it only if the lease owes the warm-back, so a seat that was never loaded is not loaded), the command never runs and the reserve exits non-zero with one line naming the need, the host's committed, physical and headroom figures and how long the cards were held. A `--detach` lease is released in the same way when `--wait` ends its host-RAM wait, and by its own hidden holder if the reserve dies (during the wait, or during the drain or the unload before it: the reserve keeps a moment of now plus the hold bound plus 60 s on the lease record, re-stamped every 30 s while it drains and unloads, so a dead reserve is covered within about the bound whatever `--wait` says; with the bound off there is no such backstop). If the hold bound cannot be written on the lease record, the detached wait is not run and the lease is released. If the holder cannot release its own lease it retries, exits non-zero, and `gpu status` says that it gave up and that `gpu release --epoch N` frees the lease. A figure that is only the media class default (a wrapped command that is not a render helper, no `--ram`) prints a `WARNING` line when it is declared, because on 2026-10-14 such a lease held three cards idle for about 50 minutes behind a figure the host could not meet: pass `--ram <GiB>` with the real figure (`--ram 0` when the weights sit on the cards). The warm-back of the agent seat after a
+sized from their bound files as an estimate; a file that cannot be sized is named in a log line and the figure is a lower bound), and 0 for a text lease. A lease that has to wait says `waiting for host RAM: needs N GiB, only X GiB of Y GiB physical is available, Z GiB
+headroom` (or `needs N GiB, committed X of Y GiB physical, Z GiB headroom` for a commit you did not state, or `needs N GiB of commit, committed X of Y GiB commit limit, Z GiB headroom` for one you did, naming the condition that refused) once and keeps its place in the same queue; `--wait 0` refuses with that text. A lease that asks for `--unload-seat` is the one exception to when the host is asked: it takes its place in line and its cards first, the seat is drained and unloaded, and only then is the need compared (the memory it needs may be the seat's own), still holding the cards and inside the same `--wait`, by the same rule and with the same words (F82). The exception holds only while the unload reaches a model on the cards the lease holds and the host can be read; a lease whose unload reaches nothing on its cards, or on a host whose memory cannot be read, is compared in the grant like any other, and a shortage the unload does not cure leaves the cards held and the seat cold for at most the hold bound (`gpu_hostram_hold_max_sec`, default 600 seconds, a chosen figure; `gpu reserve --ram-hold-max <duration>` overrides it for one reserve, and 0 means no bound, so only `--wait` ends the wait). Past the bound the lease is released, the seat is warmed back as for any release (a `--detach` hold's automatic release warms it only if the lease owes the warm-back, so a seat that was never loaded is not loaded), the command never runs and the reserve exits non-zero with one line naming the need, the figures of the condition that refused and the headroom, and how long the cards were held. A `--detach` lease is released in the same way when `--wait` ends its host-RAM wait, and by its own hidden holder if the reserve dies (during the wait, or during the drain or the unload before it: the reserve keeps a moment of now plus the hold bound plus 60 s on the lease record, re-stamped every 30 s while it drains and unloads, so a dead reserve is covered within about the bound whatever `--wait` says; with the bound off there is no such backstop). If the hold bound cannot be written on the lease record, the detached wait is not run and the lease is released. If the holder cannot release its own lease it retries, exits non-zero, and `gpu status` says that it gave up and that `gpu release --epoch N` frees the lease. A figure that is only the media class default (a wrapped command that is not a render helper, no `--ram`) prints a `WARNING` line when it is declared, because on 2026-10-14 such a lease held three cards idle for about 50 minutes behind a figure the host could not meet: pass `--ram <GiB>` with the real figure (`--ram 0` when the weights sit on the cards). The warm-back of the agent seat after a
 lease is admitted the same way against `agent_seat_host_ram_gib` (the host RAM the seat holds once loaded; unset, a chosen 21 GiB
 stands in: not a measurement, and below the 44 GB the 2026-09-10 incident recorded for a seat, so set the key from the node's own
 measurement before relying on the check) and never runs while another lane that declared host RAM is live. `gpu status` and `offload_status`
-show the host's memory with one verdict: `OK`, `NEAR` (within the headroom of physical RAM) or `OVER` (committed above
-physical RAM; the brief status line then starts `HOST RAM OVER`). Details:
+show the host's memory with one verdict: `OK`, `NEAR` (the available RAM, the room under physical RAM for the commit charge, or the room under an enforced commit limit, is inside the headroom) or `OVER` (one of them is gone, the commit charge above physical RAM included;
+the brief status line then starts `HOST RAM OVER`). Details:
 [GPU lease, "Host RAM"](systems/gpu-lease.md).
 
 Two escape hatches, both of which keep the lease:
@@ -475,7 +482,7 @@ younger calls on this machine's lane queue behind it. A call that must leave thi
 `auto` on a machine with no graph lane) still sends it, with the node's check by name only. On every route that sends a graph to
 a node, the node must run this machine's own release (the file check ships with it): a node on another release, or one that
 publishes none, is skipped by name, so a fleet part-way through an upgrade takes graphs only on the nodes already upgraded. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
-is satisfied BEFORE ComfyUI starts: packs cloned at their pinned commits with all deps
+is satisfied BEFORE ComfyUI starts (a pack is taken only at a repository and commit pinned in `render/node-packs.json`, and a model only under `models/<class>/` from a listed https host; anything else is refused before the first clone or download): packs cloned at their pinned commits with all deps
 resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
 installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and
 sha-verified when a hash is given (`sha256: null` downloads are reported in
@@ -772,7 +779,12 @@ the files), `node_lacks_media_job` (the call carries a still, a reference or a c
 `node_lacks_model` (the node's row for the family you asked for lacks a file) or `node_below_min_vram` (`--min-vram-gb N`). A node that
 is down or busy with a text job is a retryable `capacity` defer instead. `--route local` with `--node` is refused. Without
 `--model` the node renders its own default family, and the answer's `rendered_family` and `rendered_files` say which. Read a node's rows with
-`curl http://node-b:18811/fleet/health` (`media_recipes`; `bytes` -1 is a missing weight). This is the named-node release only: a
+`curl -H @fleet-auth.hdr http://node-b:18811/fleet/health` (`media_recipes`; `bytes` -1 is a missing
+weight), where `fleet-auth.hdr` is a file only you can read that holds one line, `Authorization: Bearer <the node's fleet_auth_token>`
+(the token stays off the command line, where the process list and the shell history would keep it). A node that has a token withholds `media_recipes`
+(with `image_recipes`, the store and the lease's reason) from a request without the bearer: a bare `curl` answers `200` with
+the rest of the document and no `media_recipes` key, and a wrong bearer gets that same answer and leaves one line in the
+node's journal. This is the named-node release only: a
 busy lane still does not send a video, animation or audio call to another node by itself.
 
 **Adding a template.** Follow the contract in
@@ -1495,7 +1507,7 @@ re-pack (ADR 0066); a 429 is contention by definition and is never second-guesse
 | `audit_all_doors` | `""` → `off` | the broker decision AUDIT TRAIL on every agent door (register SF-02): `off` = a trail only when browse asks for one (unchanged); `warn` = `agent_run`, `agent_delegate` and fleet contracts all write `~/.local-offload/agent-audit.jsonl`, a failed write is logged once and never changes a decision; `enforce` = a failed write denies the action and a door with no resolvable trail defers `config`. An unknown value refuses the config load (and a verb that runs on past the load error refuses the door). Rows come only from brokered actions (write, delete, fetch, shell, run, browse), so a read-only run attaches the trail and writes no broker rows (read-floor rows aside, see `agent_read_floor`). Move to `enforce` only after a clean window under `warn` |
 | `fleet_ingress_guard` | `""` → `warn` | the INGRESS GUARD on the fleet node, `fleet-ui` and `local-agent --serve` (register SF-16): a `Host` outside loopback, the tailnet CGNAT range, a dotless MagicDNS name and every zone listed in `tailnet_suffix` / `tailnet_suffixes` (the rule a `seat_endpoints` URL takes; a node shared in from another tailnet is named under that tailnet's zone, so list it in `tailnet_suffixes` before you set `enforce`), any `Origin` header (`fleet-ui`: other than its own page's), and (fleet node, local-agent) a POST that is not `application/json`. `warn` logs what `enforce` would refuse and serves it (bounded: each offender once per 5 minute window, at most 64 per peer and 4096 in all, values clipped, a summary line a minute for the rest), `enforce` refuses (421 / 403 / 415; the body does not name your tailnet zones), `off` skips; `fleet-serve`, `fleet-ui` and `doctor` print `ingress guard: <mode>`, and `local-agent --serve` prints the mode in its banner; a mistyped mode fails the load, and `fleet-ui` and `local-agent --serve` refuse a config that failed to load |
 | `agent_coherence_probe` | `""` → `cold` | post-warm SEAT COHERENCE probe (register D-118): after a cold load, ask the seat one ≤ 96-token question BEFORE the wall starts and defer `infrastructure` if it answers with the NaN shape. `cold` = only when this run loaded the seat, `always` = every run warm or cold, `off` = never. `coherence_note` on the wire reports the verdict |
-| `gpu_hostram_hold_max_sec` | unset → `600` (`0` = no bound) | the HOLD BOUND of a `gpu reserve --unload-seat` lease (F82, 2026-10-14 incident): the most it may hold its cards, counted from the unload, while it waits for the host to have the RAM it declared. Past it the lease is released (the seat warmed back only if the lease owes it), nothing runs, and the reserve exits non-zero with one line (the need, the host's committed / physical / headroom figures, how long the cards were held, what to do). A `--detach` hold is released the same way, and also when `--wait` ends the wait first; if the reserve dies (mid-wait, or earlier, during the drain or the unload: the live reserve keeps now plus this bound plus 60 s on the record, re-stamped every 30 s), the hidden holder releases the lease itself 30 s after the stamped moment. With the bound at 0 the outer stamp is the `--wait` deadline (a dead parent's lease ends then). `gpu reserve --ram-hold-max <duration>` overrides it for one reserve; `0` (key or flag) is a value: no bound, only `--wait` ends the wait. A negative value, or one above 7 days (604800 s, a chosen ceiling that also keeps the conversion from wrapping), is refused by name. 600 is a chosen figure, not a measurement. `gpu status` shows how long a waiting lease has held its cards and, once the wait for the host has begun, when it is released if the host still lacks the room (during the drain and the unload it says the seat is cleared first and the host asked after, and when the holder releases the lease if the reserve dies; the lease row's `host_ram_hold_phase` is `outer`, `wait` or `release`); a release that fails prints `LEASE NOT RELEASED (epoch N)` and the command that frees it (`gpu release --epoch N`, with `--warm-seat` only when a warm-back is owed), and the error the command returns ends with that failure; `gpu release` no longer says `no lease is held` over a lease that is held |
+| `gpu_hostram_hold_max_sec` | unset → `600` (`0` = no bound) | the HOLD BOUND of a `gpu reserve --unload-seat` lease (F82, 2026-10-14 incident): the most it may hold its cards, counted from the unload, while it waits for the host to have the RAM it declared. Past it the lease is released (the seat warmed back only if the lease owes it), nothing runs, and the reserve exits non-zero with one line (the need, the figures of the condition that refused and the headroom, how long the cards were held, what to do). A `--detach` hold is released the same way, and also when `--wait` ends the wait first; if the reserve dies (mid-wait, or earlier, during the drain or the unload: the live reserve keeps now plus this bound plus 60 s on the record, re-stamped every 30 s), the hidden holder releases the lease itself 30 s after the stamped moment. With the bound at 0 the outer stamp is the `--wait` deadline (a dead parent's lease ends then). `gpu reserve --ram-hold-max <duration>` overrides it for one reserve; `0` (key or flag) is a value: no bound, only `--wait` ends the wait. A negative value, or one above 7 days (604800 s, a chosen ceiling that also keeps the conversion from wrapping), is refused by name. 600 is a chosen figure, not a measurement. `gpu status` shows how long a waiting lease has held its cards and, once the wait for the host has begun, when it is released if the host still lacks the room (during the drain and the unload it says the seat is cleared first and the host asked after, and when the holder releases the lease if the reserve dies; the lease row's `host_ram_hold_phase` is `outer`, `wait` or `release`); a release that fails prints `LEASE NOT RELEASED (epoch N)` and the command that frees it (`gpu release --epoch N`, with `--warm-seat` only when a warm-back is owed), and the error the command returns ends with that failure; `gpu release` no longer says `no lease is held` over a lease that is held |
 | `tools_schema_profile` | `"full"` | how much prose the MCP `tools/list` carries. `full` (the default, and what an unset key means) advertises every description as written. `compact` keeps every tool and every parameter name, type, enum, `required` entry and bound, so any call valid under `full` is valid under `compact`, and cuts each description (a tool's and each parameter's) to its opening sentence plus the sentences a reviewed per-tool keep-list names (prohibitions, trust and privacy boundaries, cost rules, the "if it cannot, it returns deferred:true and you do the work yourself" protocol of every lane, the acceptance-authoring rules, how to read `offload_status`, warnings that a result is not a verdict, the result-reading sentences that stop a misreading such as a partial result being a successful call), and drops examples. A test reads every sentence of every description, exactly as `tools/list` emits them (each accelerator alone too, as a local and as a fleet device), and fails for any sentence outside the opening ones that is neither on the keep-list nor on the reviewed dropped list (one row per sentence, with a reason class), whatever words the sentence holds: a rule reworded as "Always ...", "You should ..." or "Make sure ..." is caught as much as one with "never" in it. A dropped sentence that carries a rule word (`never`, `only`, `must`, `should`, `always`, `avoid`, `defer`, `forwarded`, `travels`, `sent`, `cloud`, ...) needs a reason of its own on its row; the acceptance-authoring sentences cannot be dropped at all; and an enum value the full list explains (in the parameter's description or the tool's) is explained in the compact list unless it is on a short reviewed list. The forwarding note of a fleet accelerator is on the keep-list. Meant for a client that sends every tool schema up front on every call and has no deferred tool search (opencode), where the advertised list is prompt tokens on every turn; the measured table is in [opencode-integration.md](systems/opencode-integration.md). Only the advertised list changes: the registered schema, the handlers and the call-time checks are untouched. A value other than `full` or `compact` fails the config load by name. The profile is read once, when the MCP server starts (the rewrite is a middleware installed at that moment): changing it takes an MCP server restart or a client reconnect |
 
 What you will see on the wire and in the ledger: `contention_wait_sec` and `admission_wait_sec`
@@ -1697,10 +1709,48 @@ SEAT_L2_MOUNT_SRC=//cache-server/kvcache   # a HOSTNAME this box resolves (tailn
 SEAT_L2_MOUNT_DIR=/mnt/kvcache
 SEAT_L2_MOUNT_OPTS=credentials=/root/.smbcred,vers=3.1.1,rsize=4194304,wsize=4194304,cache=none,actimeo=1,noserverino,nobrl
 SEAT_L2_MIN_MBPS=200                       # optional write floor: refuse to start on a crawling path (0 = off)
-SEAT_L2_MOUNT_SRCADDR=auto                 # optional: pin the CIFS source to the lowest-metric default route (two NICs on one subnet)
+SEAT_L2_MOUNT_SRCADDR=auto                 # optional: pin the CIFS source to the lowest-metric default route (two NICs on one subnet);
+                                           # with a .local store name the launcher also mounts the mDNS answer on that network (below)
 SEAT_LMCACHE_PYTHONPATH=<seat-dir>/lmcache-overlay   # optional: load LMCache from an overlay (an unreleased fix), not the venv
 ```
 
+- A `.local` store name with a pinned source address (`SEAT_L2_MOUNT_SRCADDR`, `cifs` only; register B-55). The system resolver
+  returns ONE of the addresses the store's mDNS responders answer with, and a store host that has two responders (one pinned to
+  its wired NIC, another that answers on every interface with that interface's own address: Wi-Fi, container bridges, a VPN)
+  makes that one arbitrary. The mount landed on the Wi-Fi path (~24 MB/s, so the write floor degraded L2), on an unreachable
+  bridge address, or on the VPN address that refuses the pinned source, and every start for three days ran without L2. The
+  launcher now asks mDNS itself for all the A answers (a raw query to `224.0.0.251:5353` with the QU bit, three times in about
+  a second, sent out of the pinned source address; the embedded helper runs under `timeout -s KILL 3`, so a seat start never
+  hangs on it) and mounts `//<address>/<share>` at an answer inside the pinned source address's IPv4 network (the prefix
+  comes from `ip -4 -o addr`). With ONE answer inside the network that is the address. With SEVERAL (the store's wired and
+  Wi-Fi addresses on one network, where arrival order cannot tell them apart) the launcher pings each one from the pinned
+  source address (`ping -I <source address> -c 5 -i 0.2 -q -W 1 <address>`, each ping under `timeout -s KILL 3`, one after
+  the other, so at most 3 s per candidate) and mounts the one with the lowest MINIMUM round-trip time; equal minimums go to
+  the earlier answer. On the reference workstation the wired address measured a minimum RTT of 0.425-0.477 ms and the Wi-Fi
+  one 0.983-2.288 ms (three runs each, more than 2x apart on every run; the averages, 0.57-0.62 ms against 1.5-26 ms, were
+  much noisier, so the minimum is what is compared). A candidate whose ping fails shows `no reply` and is never chosen over
+  one that replied. If ping is missing, no candidate replies or no time can be read, the choice is the first answer inside
+  the network by arrival order, the rule in force before this tie-break. One `seat_fg:` line names every answer, the
+  candidates with their results and the rule that chose, for example `mDNS answers: A B C, inside N/P: A (min RTT 0.43 ms)
+  B (min RTT 1.10 ms); chose A, the lowest round-trip time` (the fallback reads `chose A, the first inside the network in
+  arrival order (round-trip times could not be compared: <why>)`), and the status file reads
+  `ok <stamp> mbps=<n> addr=<address>`. Whatever else happens (no python, no answer, nothing on that network, a helper that
+  fails or times out) leaves the mount by name exactly as before, and the line printed says why. A name that is not `.local`,
+  an IPv4 literal, an `nfs` mount and an unset pin are never touched. **The address is chosen when the share is mounted** (once
+  per WSL session). A start that finds the share already mounted does not mount again, does not unmount it (another seat may be
+  using it, and a new pick at every start could trade a good mount for the Wi-Fi one) and asks no mDNS; it prints one `seat_fg:`
+  line saying where the share is (source and server address, read with `findmnt`) and how to choose again, the status file then
+  reads `addr=<that server address>`, and a write-floor degrade names it. **A share an earlier start mounted at the wrong address
+  (for example by name, before this change) stays there** until you unmount it while no seat uses it (`umount
+  <SEAT_L2_MOUNT_DIR>`) and start the seat again; restarting the WSL distro does the same. **Limit:** the round-trip time is a
+  heuristic for the better path, not a throughput measurement. When the store's wired and Wi-Fi addresses sit on ONE network
+  the minimum RTT separated them on the reference workstation, but a store whose fast path has a higher latency than its slow
+  path would be picked wrong, and a store whose fast path drops ICMP loses to a slow path that answers it (the line shows
+  `no reply` for it). Name the wired address in `SEAT_L2_MOUNT_SRC` to override all of it, as a reserved or static address of
+  the store (a literal is mounted as given; a DHCP lease is what the rule above forbids) or as a name that is not `.local`
+  which this box resolves to it (a static DNS entry or a hosts-file line: such a name is not looked up and nothing is pinged,
+  and a `.local` name pinned in `/etc/hosts` is NOT honoured, because the lookup asks mDNS directly).
+  The degrade messages keep their text and name the address when the launcher chose it or found the share mounted at it.
 - `SEAT_LMCACHE_PYTHONPATH` (optional, 0.113.13): a directory prepended to `PYTHONPATH` for BOTH the LMCache
   MP server and the vLLM engine, so the seat imports LMCache from an overlay copy that carries a not-yet-released
   upstream fix, leaving the installed package untouched. Empty/unset = the installed package. The server and the
@@ -1762,6 +1812,23 @@ line names every input. Off unless the headroom knob is set; measured on the ref
 under daytime co-resident growth. Prove the tier with vLLM's own `vllm:external_prefix_cache_hits` counter around an
 after-eviction request, and prove fidelity with a planted needle retrieved verbatim after eviction
 and after a restart — hit counters alone do not prove the context came back intact.
+
+**A pinned pool the floor raised can be too small for `SEAT_MAX_LEN` (register B-54, `SEAT_KV_NEED_GIB`):** a card holding ~2.2 GB of
+desktop graphics memory gave a pool of 1.95 GiB, floored to 2.0, and vLLM 0.28 refused every start (`2.66 GiB KV cache is needed,
+which is larger than the available KV cache memory (2.0 GiB)` for 163,840 tokens) while llama-swap restarted the seat on every
+request (about 98 failed starts in two days). Set the optional `SEAT_KV_NEED_GIB` to that `N GiB KV cache is needed` figure,
+rounded UP past the second decimal (vLLM prints it to two decimals, rounded to nearest: a need of 2.664 prints as `2.66`, and a
+knob typed as `2.66` would then leave a pool of 2.663 GiB "enough" and the refusal in place; write `2.67` or `2.7`). The figure
+belongs to one `SEAT_MAX_LEN`, parallelism, speculative-decoding setting and model: measure it again when any of them changes (a
+stale figure that is too low leaves the refusal in place with no line from the launcher; one that is too high auto-fits a
+context longer than a lowered `SEAT_MAX_LEN`, because `-1` is capped at the model's own maximum, not at `SEAT_MAX_LEN`). When the pinned pool is below it the launcher passes `--max-model-len -1` instead of `SEAT_MAX_LEN`, and vLLM picks the
+largest context that fits the PINNED pool (never above the model's own maximum), so the seat serves LESS than `SEAT_MAX_LEN`; one
+`seat_fg:` line says so and vLLM logs the length it chose (`Auto-fit max_model_len`). Pool at or above the knob: nothing changes.
+Knob unset and the pool floored: `SEAT_MAX_LEN` is kept (an auto-fit could exceed the length you set) and a WARNING names the
+knob. A non-number is a warning and is ignored. The knob only acts while the pin is on. No renderer emits the pin family
+(`SEAT_KV_HEADROOM_GIB`, `SEAT_NONKV_GIB`, `SEAT_KV_FLOOR_GIB`, `SEAT_KV_CAP_GIB`, `SEAT_KV_NEED_GIB`): they are per-box measured
+figures, so the template seat env lists them commented out. Proven by `setup/templates/vllm-seat/seat_fg.kv-and-store.tests.sh`,
+which runs the whole launcher against stand-ins and reads the argument list vllm was started with.
 
 **Pipeline seats and the store (measured 2026-09-03, served since 2026-09-22):** stock LMCache sizes L2
 reads from one layout per model, but the stages of a pipeline-parallel seat hold different numbers of
@@ -1994,6 +2061,31 @@ there REPLACES the roster for that call rather than merging with it, so a one-no
 subtask to that node. The CLI's `--remote` (repeatable) is the operator's own: it names any tailnet node,
 which is how a node that has not joined the roster yet is smoke-tested (`fleet-smoke --remote`).
 
+**`fleet_auth_token` covers every lane of a node** (a dispatch of any task type, media and `run-graph` included, the poll and
+withdraw of any job, and the read of any rendered file); it used to cover only the agent lane and the doors that take a caller's
+bytes. With the token set, a request without it is `401`; with none set, a node answers only on loopback (the box's own trust
+boundary), refuses everything with `403` on any other listener, and `fleet-serve` will not start there. `/fleet/health` and the
+jobs feed stay readable without the token, with the lease's free-text reason, the store path and the weight-file rows (and a
+job's error text) left out. A run-graph manifest may name a node pack only at a pinned repository and commit
+(`render/node-packs.json`), and a model only under `models/<class>/` from an https host listed there (`model_hosts`): a token
+holder can have the node render, not run code of its choosing or write files where it chooses.
+**Choose a long random value** for it: it is the one secret behind every lane, and a node does not slow down repeated wrong
+bearers. Generate it with `openssl rand -hex 32` (64 hex characters) and use the output as the value of `fleet_auth_token`,
+the same on every node and every delegator; the installer and the config check accept any non-empty value, so a weak one is
+not caught.
+**Roll it out in this order: every delegator first, then every node**, each with the same value. This repo's clients already
+send the token whenever it is set, but a node that gains the rule refuses three kinds of caller, and they must be put right
+first. (1) A delegator with no `fleet_auth_token`, or a wrong one, a media-only box included (media, stt and compose-video
+calls needed none before): every dispatch, poll and artifact fetch is `401`, the media client reports that as a `config`
+defer, and the node's `/fleet/health` reaches it without the lease reason, the store and the weight-file rows, so its node view
+degrades with no error. (2) A delegator older than the first release whose client sends the bearer on a lane: withdraw
+0.146.0, text 0.154.0, compose 0.163.0, stt 0.165.0, the roster probe's token check 0.167.0 and media 0.173.0. (3) Software outside this repo
+that sends no bearer, which stops working on every lane. Before the node change is deployed to a node, `fleet_auth_token` must
+be present in the config its `fleet-serve` reads. A node that already
+listens beyond loopback with no token will not start after the upgrade, so give it the token before it; its refusal names the
+key and the config file it read. `setup/install.sh --token-file PATH` stores the key in a Linux node's config and refuses to
+register the unit without one. `local-offload doctor`'s `fleet token` rows show a mismatch before a call is spent.
+
 **One token goes to every node you list.** `fleet_auth_token` is a single value, and every request to a roster node
 (`delegate_remotes`, and the nodes named per call) carries it as the bearer, whichever tailnet zone the entry sits
 under. A node shared in from another tailnet, admitted by listing that tailnet's zone in `tailnet_suffixes`, is sent the
@@ -2212,8 +2304,8 @@ a terminal line under a job id of its own (a capacity defer, or the "placement r
 
 | Failure | Fix |
 |---|---|
-| `403 agent lane requires fleet_auth_token on a non-loopback listener` | The worker is bound beyond loopback with no token. Set `fleet_auth_token` (same value) on both sides and restart `fleet-serve`. |
-| `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. `local-offload doctor` shows it before a call is spent: its `fleet token` rows ask each reachable node whether it accepts this box's token (`OK`, `MISMATCH` = the node has another token, `NO-TOKEN` = the node listens beyond loopback with none, `UNKNOWN`, `UNCHECKED` = refused or unreachable, not asked), one row per `delegate_remotes` slot, never printing a token; a box with no `fleet_auth_token` prints one `NOT SET` line instead. `/fleet/health` ignores the token, so every other row reads healthy either way. |
+| `403 fleet lanes require fleet_auth_token on a non-loopback listener` | The node is bound beyond loopback with no token, so it refuses every lane (a current `fleet-serve` will not start in that state and says so, naming the config file it read: `refusing to serve on ...: ... fleet_auth_token is not set (the config this node read is ...)`). Set `fleet_auth_token` (same value) in that file and on the delegators, and restart `fleet-serve`. |
+| `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. `local-offload doctor` shows it before a call is spent: its `fleet token` rows ask each reachable node whether it accepts this box's token (`OK`, `MISMATCH` = the node has another token, `NO-TOKEN` = the node listens beyond loopback with none, `UNKNOWN`, `UNCHECKED` = refused or unreachable, not asked), one row per `delegate_remotes` slot, never printing a token; a box with no `fleet_auth_token` prints one `NOT SET` line instead. `/fleet/health` is readable without the token (it reads the bearer to decide which private fields to leave out, and a wrong one leaves one line in the node's journal), so every other row reads healthy either way. A media call that gets the `401` is a `config` defer on the delegator, and its node view of this node loses the weight-file rows and the lease reason until the token matches. |
 | `agent delegation is disabled on this box` | Set `"agent_delegation_enabled": true` in the **delegator's** config. |
 | Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote --pin-reason operator` to surface the gate's verdict (without a reason `remote` is a hint and the idle local seat takes what no remote can): the defer reason now names the actual cause — no remotes configured, every remote failing its health probe (each error quoted), or a healthy remote failing the gate (`agent_enabled` + `agent_seat_resident` + `output_schema` + the ctx arithmetic above). |
 | `remote "…": hostname … not allowed` | Non-tailnet URL. Loopback, a tailnet CGNAT-range address, a dotless MagicDNS name, or a hostname under a tailnet zone you listed only: `tailnet_suffix` for your own tailnet, `tailnet_suffixes` for another tailnet that shared a node in (it names that node under the SHARER's zone, ADR 0074). `doctor` prints the zones it read. |
