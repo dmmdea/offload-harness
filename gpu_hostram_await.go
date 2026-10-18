@@ -151,8 +151,8 @@ type hostRAMHold struct {
 }
 
 // errHostRAMHoldBound is the failure of a wait that the hold bound ended: the lease is released and its command never ran.
-// It wraps the host's last refusal (errors.As still finds the *gpulease.ErrHostRAM, whose text carries the need and the
-// committed, physical and headroom figures), and it is deliberately not given heldHint's advice to pass a longer --wait:
+// It wraps the host's last refusal (errors.As still finds the *gpulease.ErrHostRAM, whose text carries the need, the
+// figures of the condition that refused and the headroom), and it is deliberately not given heldHint's advice to pass a longer --wait:
 // --wait did not end this wait.
 type errHostRAMHoldBound struct {
 	short        *gpulease.ErrHostRAM

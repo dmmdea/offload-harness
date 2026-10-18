@@ -29,7 +29,7 @@ other on a single shared card.
 | `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmitsLoad` (the ONE admission rule, over the working set a job touches and the commit it is charged, apart), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
-| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
+| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB` and `Options.HostRAMCommitGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases, per quantity (the working set less what the processes below the holder hold RESIDENT; the commit less what they hold PRIVATELY), `Manager.HostRAMPendingLoad`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card (for its own `--graph`, the files that graph's loaders name), else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
@@ -1733,7 +1733,8 @@ nothing enforces. The reading says so (`HostMemory.CommitLimitSoft`, read from `
 
 **The not-yet-loaded part, per quantity.** What running leases have yet to touch is their declared working set less what the
 processes below their holders hold *resident*; what they have yet to be charged is their declared commit less what those
-processes hold *privately* (private bytes are the currency of the commit charge). Each is never below zero and pooled per holder
+processes hold *privately* (private bytes are the currency of the commit charge: `PrivateUsage` on Windows and, on Linux, the private
+writable mappings, `VmData`, which is what `Committed_AS` charges when a mapping is made). Each is never below zero and pooled per holder
 (see the bullet below). A declaration is an estimate, so this rule is a brake on declared loads: it does not bound what a lane then
 commits, and neither condition sees a process that holds no lease.
 
@@ -1781,11 +1782,15 @@ commits, and neither condition sees a process that holds no lease.
   `TestReserveGrantsAgainstTheConfiguredHeadroom`, `TestTheMediaAdmissionKeepsTheConfiguredHeadroom`).
 * **The not-yet-loaded part.** A granted lease's declared working set minus what the processes below its holder hold RESIDENT
   right now (`WorkingSetSize` through `K32GetProcessMemoryInfo` on Windows, `VmRSS` on Linux), and its declared commit minus what
-  those processes hold PRIVATELY (`PrivateUsage` on Windows, `RssAnon` plus `VmSwap` on Linux), each never below zero. Each against
+  those processes hold PRIVATELY (`PrivateUsage` on Windows, `VmData` on Linux: the private writable mappings, touched or not), each never below zero. Each against
   its own declaration, because a declaration is in RAM units and committed-but-unoccupied memory (a card allocation charged to the
   process's commit, an untouched reservation) is not RAM that has loaded: a real child that was committed 256 MiB it never
   touched read private 305 MiB and resident 13 MiB on the reference box, 2026-10-10
-  (`TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted`). Subtracting the private bytes from the working-set declaration would call a
+  (`TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted`, which runs on Linux too). On Linux the touched part of the mappings
+  (`RssAnon` plus `VmSwap`) read 2.1 MiB for such a child while `Committed_AS` moved 333 MiB, so on a strict host the rest would have
+  been counted twice, once inside the charge and once as still to be charged; the reader returns `VmData`
+  (`TestLinuxHeldCommitCarriesWhatTheKernelAlreadyCharges`). `VmData` leaves out the main thread's stack and shared memory, which the kernel
+  charges and it does not, so it can read a little low, which leaves more pending: it can over-refuse and never over-admits. Subtracting the private bytes from the working-set declaration would call a
   lane loaded while most of its RAM was still to come; subtracting the working set from the commit declaration would call a lane
   uncharged while its process already held the charge (`TestWhatARunningLeaseHasYetToBeChargedCountsAgainstTheCommitLimit`).
   Leases that share a holder pid are pooled (the pipeline holds one lease per card in one server process, and all their
@@ -2002,7 +2007,7 @@ can be read (`gpu_hostram_await.go`):
    the same reason until its deadline with the seat cycled, so that lease keeps the grant's comparison too
    (`TestAnUnreadableHostKeepsTheGrantsComparisonForALeaseThatUnloadsTheSeat`).
 1. **A need no state of the box could ever admit is refused at once**, before anything is taken or unloaded (`screenDeferredHostRAM`,
-   `Manager.HostRAMCheck`): waiting cannot help, and a seat cycle for a lease that can never run is bought for nothing.
+   `Manager.HostRAMCheckLoad`, with both figures): waiting cannot help, and a seat cycle for a lease that can never run is bought for nothing.
 2. **The grant takes the place in line and the cards and compares nothing.** `Options.HostRAMGiB` is 0 for it and the figure
    travels as `Options.HostRAMWaitGiB`, stamped on the record as `host_ram_wait_gib` (additive and omitted when 0: an older reader
    ignores it and reads a lease that declares nothing yet). The card allocator's host term is off for the same reason
@@ -2019,7 +2024,7 @@ can be read (`gpu_hostram_await.go`):
 5. **The command starts.**
 
 **It is a reorder, not a looser check.** `AwaitHostRAM` puts the figure to the same function the grant does
-(`gpuprobe.HostRAMAdmits` through `hostRAMRefusalWith`): the same host reading, the same headroom, the not-yet-loaded part of every
+(`gpuprobe.HostRAMAdmitsLoad` through `hostRAMCheckWith`): the same host reading, the same headroom, the not-yet-loaded part of every
 lease that has been admitted, the same sentence. Over a table of hosts, needs and running leases it admits and refuses exactly
 where the grant does (`TestTheAwaitAdmitsExactlyWhereTheGrantDoes`). If the unload frees too little the lease keeps its cards,
 keeps waiting inside `--wait` and the hold bound, and ends with the host-RAM refusal (when `--wait` ends it) or the hold bound's
@@ -2075,8 +2080,8 @@ host's admission:
 2. **Nothing runs and nothing re-queues.** The command never starts; the bound's failure is not a lost lease, so the requeue branch
    of the drain loop is never taken.
 3. **The reserve exits non-zero with one line** (`errHostRAMHoldBound`): the hold bound that passed; how long the cards were held
-   and how much of it was the wait after the unload; the host's own refusal, which carries the need and the committed, physical and
-   headroom figures (the wording of that day was `waiting for host RAM: needs 46.8 GiB, committed 84.6 of 127.7 GiB physical, 8.0 GiB headroom`; the sentence now names the condition that refused); that nothing ran
+   and how much of it was the wait after the unload; the host's own refusal, which carries the need, the figures of the condition that refused and the
+   headroom (the wording of that day was `waiting for host RAM: needs 46.8 GiB, committed 84.6 of 127.7 GiB physical, 8.0 GiB headroom`; the sentence now names the condition that refused); that nothing ran
    under it and the lease **is being released** (the text is built before the release runs and claims no more; see "Releasing on its
    own" below for the outcome); what to do (a figure that is only the media class default: pass `--ram <GiB>` with the real figure, `--ram 0` when
    the weights sit on the cards; any other figure: a smaller `--ram`, or wait for the host to free memory); and the lever that
@@ -2365,8 +2370,8 @@ Once admitted the row shows `host_ram_gib` alone.
   this reorder exists for on a node that states no figure, and any prediction made when the reserve starts is stale when the grant
   comes, hours later, so one that sent the lease back to the grant would bring the deadlock back whenever the cause changed in
   between. The comparison after the unload is the decision. The only screens before the grant are the ones that do not depend
-  on the host's state: a need above physical RAM less the headroom, an unload that reaches nothing on the lease's cards, a host that
-  cannot be read. The levers are the hold bound (`--ram-hold-max`, `gpu_hostram_hold_max_sec`), `--wait`, and `--ram` when the
+  on the host's state: a need above physical RAM less the headroom, a commit above the commit limit less the headroom (where the OS
+  enforces one), an unload that reaches nothing on the lease's cards, a host that cannot be read. The levers are the hold bound (`--ram-hold-max`, `gpu_hostram_hold_max_sec`), `--wait`, and `--ram` when the
   figure is a guess (and Ctrl-C, which ends the wait and releases the wrapper's lease).
 
 **Not covered.** The media admission in `internal/pipeline` takes its lease with the declared figure compared in the grant, and the

@@ -14,7 +14,7 @@ import (
 // offload_status and the host's memory (the paging incident of 2026-10-09). The gpu_lease block
 // carries the reading, the headroom, what the live leases declared and the verdict OK / NEAR / OVER;
 // the one-line brief names OVER first, in capitals, because "free" at the head of that line reads as
-// "the box has room" while committed memory is above physical RAM.
+// "the box has room" while the host has no memory available or its commit charge is at an enforced limit.
 
 func withHost(t *testing.T, mem gpuprobe.HostMemory, ok bool) {
 	t.Helper()

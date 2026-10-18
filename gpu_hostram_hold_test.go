@@ -66,7 +66,7 @@ func TestTheHoldBoundReleasesTheCardsAndRunsNothingWhenTheHostNeverHasTheRoom(t 
 	for _, want := range []string{
 		"hold bound",                  // what ended it
 		"30.0 GiB",                    // the need
-		"committed 70.0 of 100.0 GiB", // the host's committed and physical figures
+		"committed 70.0 of 100.0 GiB", // the host's commit charge and commit limit
 		"8.0 GiB headroom",            // and its headroom
 		"held the cards for",          // how long
 		"--ram <GiB>",                 // what to do about a figure that was a guess

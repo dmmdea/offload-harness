@@ -195,7 +195,7 @@ func runGPUStatus(args []string) error {
 	}
 	leases := modelaffinity.ScopeLeases(m.Dir(), m.Leases())
 	// The host's memory and what the live leases declared of it (internal/gpulease/hostram.go): the
-	// verdict OK / NEAR / OVER, OVER being committed memory above physical RAM.
+	// verdict OK / NEAR / OVER, OVER being no memory available, or the commit charge at an enforced commit limit.
 	hostMem, hostOK := gpuprobe.ReadHostMemory()
 	host := gpucards.NewHostView(hostMem, hostOK, loadCfg(fs).GPUHostRAMHeadroom(), gpulease.DeclaredHostRAMLoad(leases), m.HostRAMPendingLoad())
 	if *asJSON {
@@ -603,8 +603,8 @@ func runGPUReserve(args []string) (retErr error) {
 	}
 	// The host RAM this lease declares (internal/hostneed): the operator's --ram, else an estimate
 	// from the render helper it wraps, else the class default. Declared on EVERY path (named cards,
-	// allocated cards, the whole node, the detached holder), because the grant admits it against
-	// committed memory wherever the cards came from.
+	// allocated cards, the whole node, the detached holder), because the grant admits it against the
+	// available memory (and its commit against the commit limit) wherever the cards came from.
 	need := resolveReserveHostRAMWith(ramGiven, *ramFlag, gpulease.Class(*class), cmdArgs, plan.IDs, reserveCfg, m.CardScoped(), planCards, os.Stderr)
 	// The commit it is charged, beside the working set: the operator's --ram-commit, else the same figure.
 	commitGiB, cerr := resolveReserveHostCommit(ramCommitGiven, *ramCommitFlag, need, os.Stderr)
@@ -1070,10 +1070,12 @@ func acquireQueued(m *gpulease.Manager, class gpulease.Class, opts gpulease.Opti
 	// treated as a verdict — holders release before it as a rule, and a waiter that
 	// left the line on the declaration was the refusal this verb exists to end.
 	opts.Wait, opts.WaitOut = wait, true
-	// The cards can be free while the HOST is what is short: committed memory plus this lease's
-	// declared RAM plus what the running leases have yet to load would pass physical RAM less the
-	// headroom. The request keeps its place in the same line and says so once (never per poll: a line
-	// per second is a notification per second in the session that wrapped this).
+	// The cards can be free while the HOST is what is short: the available memory less this lease's
+	// working set and what the running leases have yet to touch would fall under the headroom, or (where
+	// the OS enforces a commit limit) the commit charge plus its commit and what the running leases have
+	// yet to be charged would pass the limit less the headroom. The request keeps its place in the same
+	// line and says so once (never per poll: a line per second is a notification per second in the
+	// session that wrapped this).
 	waitedRAM := false
 	if opts.OnHostRAMWait == nil && wait > 0 {
 		opts.OnHostRAMWait = func(e *gpulease.ErrHostRAM) {
