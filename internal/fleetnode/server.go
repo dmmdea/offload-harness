@@ -3033,17 +3033,13 @@ func (s *Server) handleJob(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "unknown job")
 		return
 	}
-	// Agent-lane poll auth (v1 scope): only jobs CREATED by an agent dispatch
-	// are gated — media polls never see this branch, so the deployed media
-	// clients stay byte-identical (pinned in auth_test.go). Checked AFTER the
-	// store lookup because the job RECORD carries the marker (see AcceptAgent):
-	// an unknown/evicted id stays a plain 404 — job ids are caller-generated
-	// ULIDs, so a 404 discloses nothing — while a live agent job answers 401
-	// before any state or data crosses the wire. No token configured = the
-	// loopback-only posture, where the lane is open by design (dispatch
-	// enforces that a tokenless listener IS loopback).
-	// view.Gated (0.116.0) is the vision lane's job: the same rule, the same
-	// reason (its data is the caller's image judged in prose).
+	// Poll auth: a job of any task type is gated (pollDenied). Checked AFTER the
+	// store lookup because the job RECORD carries the marker (see AcceptAgent for
+	// an agent run, Gated for every other task type): an unknown/evicted id stays
+	// a plain 404 — job ids are caller-generated ULIDs, so a 404 discloses
+	// nothing — while a live job answers 401 before any state or data crosses the
+	// wire. No token configured = the loopback-only posture, where the lane is
+	// open by design (dispatch enforces that a tokenless listener IS loopback).
 	if s.pollDenied(view, r) {
 		s.refuseBearer(w, r, pollRefusalLabel)
 		return

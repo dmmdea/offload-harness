@@ -74,8 +74,8 @@
   first. A delegator with no `fleet_auth_token`, or a wrong one, a media-only box included (media, stt and compose-video calls
   needed none before), gets `401` on every dispatch, poll and artifact fetch; the media client reports that as a `config`
   defer, and the node's `/fleet/health` reaches it without the lease reason, the store and the weight-file rows, so its node
-  view degrades with no error. A delegator older than the release that added the bearer to its client is refused the same way:
-  text 0.154.0, withdraw 0.143.1, compose 0.160.0, media and stt 0.163.1, and the roster probe's token check 0.167.0. Software
+  view degrades with no error. A delegator older than the first release whose client sends the bearer on a lane has no client that
+  sends it: withdraw 0.146.0, text 0.154.0, compose 0.163.0, stt 0.165.0, the roster probe's token check 0.167.0 and media 0.173.0. Software
   outside this repo that sends no bearer stops working on every lane. The delegator change is deployed fleet-wide first; before
   the node change is deployed to a node, `fleet_auth_token` must be present in the config its `fleet-serve` reads. A node that listens beyond loopback with no
   token will not start after the upgrade, so give it the token first. `setup/install.sh` takes `--token-file PATH` on a node
@@ -134,11 +134,11 @@
   table of sentences that no longer hold must be absent from the files that carried them, and a decision record that still
   calls a lane tokenless must carry the amendment section that links ADR 0023's.
 - **Every description of the node says each lane needs the bearer.** The error a caller reads when it sends a composition's own
-  `html` or `project_dir` over the fleet says compositions are trusted code and the fleet bearer lets a caller render a vetted
-  template, not run code of its own. The code comments, the node guides, the systems pages and the decision records that called
+  `html` or `project_dir` over the fleet says compositions are trusted code, that the dispatch door renders only the node's vetted
+  templates, and that a whole project goes to a node that opted in to the project door. The code comments, the node guides, the systems pages and the decision records that called
   a media door open, said health ignores the bearer, or named the agent and vision jobs as the only gated ones now say what
-  the node does, and four more decision records (the external-CLI media tool, the delegator's take-back, the roster zones and
-  the asker's origin) carry the dated amendment that points at ADR 0023's. Nothing else about the node changes.
+  the node does, and every decision record that calls a lane tokenless or open carries the dated amendment that points at ADR 0023's.
+  Nothing else about the node changes.
 - **Pins to confirm.** The MultiGPU pin is the documented one. The VideoHelperSuite and GGUF commits are the ones one reference
   node's checkout was at, not documented anywhere (`"pin": "unverified"` in the file); confirm them against the fleet before a
   workflow depends on them, and add a row for any other pack a workflow needs.

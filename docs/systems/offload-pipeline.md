@@ -250,7 +250,7 @@ transcriptions therefore shares one load and pays one cold start (register C-91;
 follow every call and landed on the next call's inference, which llama-swap answers
 `matrix: model unloaded`). A card a render holds is waited for
 `gpu_wait_ms` like every other GPU door (the HTTP timeout, `stt_request_timeout_sec`, only caps that wait), and the
-refusal is a `capacity` defer, `gpu busy: …` (register C-89). Since 0.164.0 the call can leave the box:
+refusal is a `capacity` defer, `gpu busy: …` (register C-89). Since 0.165.0 the call can leave the box:
 `offload_transcribe`'s `route` (default `auto`) runs the pipeline here or sends the audio to a fleet node through
 `internal/sttremote` (see [mcp-server.md](mcp-server.md) and
 [FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt)); the node runs this same branch over the uploaded

@@ -395,7 +395,7 @@ func TestMissingModelFilesListsEachRootOnceNotOncePerName(t *testing.T) {
 	}
 }
 
-// The cost of the check is bounded by what the refusal shows, not by the graph: a door open to any peer takes a graph of
+// The cost of the check is bounded by what the refusal shows, not by the graph: a door that answers any holder of the fleet bearer takes a graph of
 // thousands of names, and a name that is missing costs a stat in every class directory. The search stops at the seventh missing
 // name when six are shown, and says there was more.
 func TestMissingModelFilesUpToStopsLookingPastTheLimit(t *testing.T) {

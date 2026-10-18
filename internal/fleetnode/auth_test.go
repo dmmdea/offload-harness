@@ -215,7 +215,7 @@ func TestJobsAgentMarker(t *testing.T) {
 		t.Errorf("AcceptAgent job: Agent = %v (ok=%v), want true", v != nil && v.Agent, ok)
 	}
 	if v, ok := j.Get("m"); !ok || v.Agent {
-		t.Errorf("Accept job: Agent marker set, want false (media polls must stay open)")
+		t.Errorf("Accept job: Agent marker set, want false (only an agent run carries the agent marker)")
 	}
 }
 
