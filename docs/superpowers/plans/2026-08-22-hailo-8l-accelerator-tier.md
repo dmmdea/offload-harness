@@ -1,6 +1,8 @@
 # Hailo-8L Accelerator Tier Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Superseded 2026-10-18 by the no-more-testing rule (AGENTS.md, Testing rule):** skip every step below that writes a test, proves red-first, runs a mutation check, runs a review round or runs a gate beyond CI. The check is one real run of the change.
 
 **Goal:** Give the offload-harness a `hailo-8l` *accelerator* that coexists with a box's GPU tier, so `<node-e>` runs `blackwell-8` + `hailo-8l` and Claude's `offload_*` vision calls for face identity, object detection, re-id, depth, low-light and image embeddings run on the NPU through a harness-spawned HTTP sidecar.
 

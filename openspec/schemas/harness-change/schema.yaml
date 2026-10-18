@@ -252,18 +252,19 @@ artifacts:
         this change to be archived, preserve those steps as plain bullets in an
         optional `## Workflow follow-up` section at the end of tasks.md. These
         bullets are reference information outside tracked task progress.
-      - Each task MUST state how to verify completion (a test, command,
+      - Each task MUST state how to verify completion (a command,
         observable behavior, or delivered artifact). Put the verification in
         that task's checkbox description. Use a separate verification task only
         when it checks broader integration or system behavior that spans
         multiple implementation tasks.
-      - Each task group MUST land the tests and documentation its own work
-        calls for. Do NOT collect testing or documentation into a final group -
-        when a late group first exercises work from an early one, the failures
-        cascade back through every group in between and force rework. A group
-        whose work calls for neither, such as scaffolding or dependency setup,
-        carries neither. A final group is for integration checks only, not for
-        the tests and docs an earlier group owed.
+      - Each task group MUST land the documentation its own work calls for.
+        No task adds a test; a group is checked by one real run of its change.
+        Do NOT collect documentation into a final group - when a late group
+        first exercises work from an early one, the failures cascade back
+        through every group in between and force rework. A group whose work
+        calls for no documentation, such as scaffolding or dependency setup,
+        carries none. A final group is for one real integration run only, not
+        for the docs an earlier group owed.
 
       Example:
       ```
@@ -276,8 +277,8 @@ artifacts:
 
       ## 2. Core Implementation
 
-      - [ ] 2.1 Implement data export function and verify the export test passes
-      - [ ] 2.2 Add CSV formatting utilities and verify unit tests cover quoting and delimiters
+      - [ ] 2.1 Implement data export function and verify a real export writes the file
+      - [ ] 2.2 Add CSV formatting utilities and verify a real export quotes and delimits fields
       - [ ] 2.3 Document the export API in docs/export.md and verify the documented command runs as written
       ```
 

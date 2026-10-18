@@ -16,14 +16,14 @@ overwrite are gone.
 adds `<slug>-2.md`, or puts two `###` sections in one file.
 
 The body is **exactly the text that will appear in `CHANGELOG.md`**, written the way the entries there are written:
-what changed, why, how it was proved (the red-first note, the mutations that were run), where the details are.
+what changed, why, the one real run that checked it, where the details are.
 
 ```markdown
 ### Added - one line that says what changed
 
 - **What it does.** ...
 - **Why.** ...
-- **Tests.** ...
+- **Check.** ...
 ```
 
 The rules, all checked by `go run ./cmd/changelog check` and by `go test` (the root package, through the same code):
@@ -93,7 +93,7 @@ The version is the `VERSION` file's, so the order is **bump first, assemble last
    earlier, through a fragment-only pull request that did not bump the version: then this commit deletes files
    `main` has, and `scripts/check-deletions.sh` wants the deletion declared. A fragment that is added and consumed
    inside the same pull request, or on the release branch, is no deletion against `main` and needs no line.
-5. `go test -count=1 ./...`, unpiped.
+5. Push and let CI run the tests; do not run the suite by hand.
 
 Assemble is the last step, because it writes the top of `CHANGELOG.md`: a `git merge origin/main` after it
 conflicts in exactly the hunk the tool wrote, and the same goes for renumbering the version after it.

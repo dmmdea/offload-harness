@@ -23,18 +23,12 @@ refuses any gate that interrupts work before it has counted its own false positi
 | I2 | **Tighten-only.** | Rules, monitors and delegated contracts only remove authority (ADR 0003, ADR 0036). Nothing auto-approves; an approval is one-shot, exact-scope and expiring. Risk signals only ever reduce authority. |
 | I3 | **Fail loud.** | A missing, stale or unreadable control reads RED in the posture report, never a silent pass. It fails closed only where the failure is detectable and the operator has said so. |
 | I4 | **Audit, then warn, then enforce.** | Every new rule logs would-be denials first. Promotion is a pull request carrying the counted would-denies and false positives (proposed bar: at least 14 days, at least 200 decisions, zero unexplained denials). No gate interrupts work without that data. |
-| I5 | **Every control has a gate that can fail.** | A test that passes with the control and goes red under a mutation that removes it, with the mutation shown applied. |
+| I5 | **A control is shown working by one real run.** | Run the control once on a real input and read the result back. No new tests and no mutation proof. Superseded 2026-10-18 by the no-more-testing rule (AGENTS.md, Testing rule). |
 | I6 | **Additive, flag-gated, reversible.** | Capabilities default off; each change reverts with one commit or one config key. No new daemon, listener, scheduler or route without the operator's yes. |
 | I7 | **Public/private split.** | Framework docs in a public repository carry no hostnames, paths or secrets; per-node facts live in the private operations notes. |
 
-**Proving I5.** The way to show a gate can fail is [`scripts/mutation-check.sh`](../../scripts/mutation-check.sh) (PowerShell twin
-`scripts/mutation-check.ps1`), not an ad hoc script that counts any failing test as a kill: that scored a mutant that did not
-compile as killed, and let an LF pattern that missed a CRLF file report the unchanged tree's result. The harness runs the
-unmutated control arm, applies one single-line mutation and asserts it landed (line endings compared normalised), compiles the
-test binary before running the tests (a mutant that does not build is `BAD-MUTANT`, never `RED`), reports `RED` or `SURVIVED`,
-and restores the file byte for byte even when interrupted. It prints the applied mutation with every verdict, which is the
-"mutation shown applied" this invariant asks for, so a gate's proof quotes its `MUTATION-VERDICT:` line. The self-test
-(`scripts/mutation-check-selftest.sh` and `.ps1`) exercises it on the fixture module `scripts/testdata/mutfixture`.
+**Proving I5.** Superseded 2026-10-18 by the no-more-testing rule (AGENTS.md, Testing rule). The mutation-proof scripts (`scripts/mutation-check.sh` and its twins) stay in the tree
+until the maintainer prunes them, and are not run for new changes.
 
 ## The layers
 

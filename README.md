@@ -585,8 +585,8 @@ root `go build ./...`.
 Between them these cover both halves of what the harness talks to — ComfyUI for media, llama-swap for
 everything the cascade serves.
 
-Build and test one from its own directory (`cd tools/comfyui && go test ./...`) — the root module
-does not reach into it. Generated files are not hand-edited here; fixes go upstream and the tree is
+Build one from its own directory (`cd tools/comfyui && go build ./...`) — the root module
+does not reach into it, and CI runs each tool's tests in its own job. Generated files are not hand-edited here; fixes go upstream and the tree is
 re-vendored. Some `llamaswap` tests are acceptance gates against a real deployment and `t.Skip` when
 the model volume or reference corpus is absent — that is expected on a bare machine. See
 **[`docs/systems/printed-clis.md`](docs/systems/printed-clis.md)** for the adoption cycle and the
@@ -601,7 +601,7 @@ here. Start at [`docs/README.md`](docs/README.md).
 
 ## Contributing
 
-Contributions welcome. Run `go test ./...` and `go vet ./...` before opening a PR, and keep changes scoped. See `CONTRIBUTING.md` for build/test details — including the rule that documentation is updated in the same PR as the change it describes.
+Contributions welcome. Run `go build ./...` and `go vet ./...` before opening a PR (CI runs the tests and is the gate; a change carries no new tests), and keep changes scoped. See `CONTRIBUTING.md` for build details — including the rule that documentation is updated in the same PR as the change it describes.
 
 ## Security
 

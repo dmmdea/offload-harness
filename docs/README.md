@@ -8,7 +8,7 @@ need before changing it: what each part does, how the important flows work, what
 where the code lives.
 
 - **How to write docs here:** [STYLE.md](STYLE.md) · **Shapes to fill in:** [templates/](templates/)
-- **Structural gate:** `go test -run TestDocsLint .` — links must resolve, ADR frontmatter must be
+- **Structural gate:** `TestDocsLint`, run by CI — links must resolve, ADR frontmatter must be
   schema-valid, system and flow docs must keep their navigational sections.
 
 ## Systems — how each part works

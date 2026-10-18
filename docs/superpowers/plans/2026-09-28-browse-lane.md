@@ -1,6 +1,8 @@
 # Browse lane (offload_browse + agent `browse`) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Superseded 2026-10-18 by the no-more-testing rule (AGENTS.md, Testing rule):** skip every step below that writes a test, proves red-first, runs a mutation check, runs a review round or runs a gate beyond CI. The check is one real run of the change.
 
 **Goal:** Let an MCP caller and the coding-agent seat drive the operator's own, already-running
 Chromium browser toward a natural-language goal, as an explicit opt-in lane.

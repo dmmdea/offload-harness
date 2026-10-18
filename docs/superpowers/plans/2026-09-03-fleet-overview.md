@@ -1,6 +1,8 @@
 # Fleet Overview (PAIR-inspired operator surface) Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Superseded 2026-10-18 by the no-more-testing rule (AGENTS.md, Testing rule):** skip every step below that writes a test, proves red-first, runs a mutation check, runs a review round or runs a gate beyond CI. The check is one real run of the change.
 
 **Goal:** Give the offload harness the operator surface the operator liked in NVIDIA PAIR — a live per-node overview page, a cluster-wide jobs and errors feed, a `fleet-smoke` traffic test, a `top` terminal view — plus two placement signals (served-model gate, GPU-utilization tie-breaker), without adopting PAIR.
 
