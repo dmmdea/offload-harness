@@ -48,6 +48,7 @@
     "layers[].seats[].host_ram_gib": "host RAM the seat holds while loaded (experts on CPU: flash-next-262k ~70 GB). The host_ram guard refuses when free host RAM is below it. REQUIRED (> 0) on every seat of a host_ram-guarded layer - the guard is free >= this, and a 0 admits the load on every box; config refuses the omission at load and the table at parse.",
     "layers[].seats[].prefill_tps": "measured prompt-processing rate. The long seats are entered only when tokens / this <= the contract's budget: flash-next-262k prefills at 69 t/s, so a 200k prompt is ~48 min against a 900 s cap; the pair's 27b-262k at 1,197 t/s takes window overflow instead. REQUIRED (> 0) on every long seat - a 0 rate is a division by zero on the first long placement; config refuses the omission at load and the table at parse.",
     "layers[].seats[].model_map": "router role only: route key (workhorse | triage) -> the twin model served on THIS layer, so the dormant display layer can substitute its device-1 twins for the cascade's rungs.",
+    "agent_budget_policy": "optional, per tier: the one value \"loop-default-chosen\". It marks a tier that binds an agent model, seeds no agent_max_tokens and is not agent_thinking off, and says the loop default (1,024 completion tokens) is that tier's agent budget BY CHOICE, not by accident. The figure is CHOSEN, not measured: a thinking seat spends its reasoning inside this budget, so the value is a property of the seat and only a seat window can measure it (the 9B gained +0.62 going 1024 to 4096 while the 4B lost 0.88 on the same move). When one measures a budget for the tier, seed agent_max_tokens and delete this marker. A tier whose vllm_seat declares a reasoning_parser may not carry it and must seed a number. Enforced by TestEveryAgentSeatingTierStatesItsCompletionBudget (agent_budget_policy_test.go). Not a config_seed key: it never reaches a node's config.json. Adding or removing it changes a tier entry, so a config rendered from the old entry reads STALE in audit-yaml --against-render until it is re-rendered.",
     "notes": "operator-facing caveats."
   },
   "_accelerator_fields": {
@@ -251,6 +252,7 @@
         "CUDA_VISIBLE_DEVICES=0",
         "CUDA_MODULE_LOADING=LAZY"
       ],
+      "agent_budget_policy": "loop-default-chosen",
       "config_seed": {
         "compose_script": "render/compose-hyperframes.mjs",
         "imagegen_script": "render/comfy-generate.mjs",
@@ -740,6 +742,7 @@
         "CUDA_VISIBLE_DEVICES=0",
         "CUDA_MODULE_LOADING=LAZY"
       ],
+      "agent_budget_policy": "loop-default-chosen",
       "config_seed": {
         "compose_script": "render/compose-hyperframes.mjs",
         "imagegen_script": "render/comfy-generate.mjs",
@@ -826,6 +829,7 @@
         "CUDA_VISIBLE_DEVICES=0",
         "CUDA_MODULE_LOADING=LAZY"
       ],
+      "agent_budget_policy": "loop-default-chosen",
       "config_seed": {
         "compose_script": "render/compose-hyperframes.mjs",
         "imagegen_script": "render/comfy-generate.mjs",
@@ -1450,6 +1454,7 @@
       "n_cpu_moe_max": 40,
       "flash_attn": "on",
       "backend": "cuda",
+      "agent_budget_policy": "loop-default-chosen",
       "config_seed": {
         "memory_stack": [
           "embeddinggemma",

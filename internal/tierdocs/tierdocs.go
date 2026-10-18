@@ -31,18 +31,22 @@ import (
 // struct and rendered below — `Extra json.RawMessage` used to claim otherwise
 // and was never populated or read (removed 0.120.0).
 type Profile struct {
-	CtxSize        int            `json:"ctx_size"`
-	LongCtxSize    int            `json:"long_ctx_size"`
-	KVType         string         `json:"kv_type"`
-	AgentCtxTokens int            `json:"agent_ctx_tokens"`
-	ResidentTier   string         `json:"resident_tier"`
-	Include26B     bool           `json:"include_26b"`
-	MoE26B         string         `json:"moe_26b"`
-	FlashAttn      string         `json:"flash_attn"`
-	Backend        string         `json:"backend"`
-	DualResident   bool           `json:"dual_resident"`
-	Notes          string         `json:"notes"`
-	ConfigSeed     map[string]any `json:"config_seed"`
+	CtxSize        int    `json:"ctx_size"`
+	LongCtxSize    int    `json:"long_ctx_size"`
+	KVType         string `json:"kv_type"`
+	AgentCtxTokens int    `json:"agent_ctx_tokens"`
+	ResidentTier   string `json:"resident_tier"`
+	Include26B     bool   `json:"include_26b"`
+	MoE26B         string `json:"moe_26b"`
+	FlashAttn      string `json:"flash_attn"`
+	Backend        string `json:"backend"`
+	DualResident   bool   `json:"dual_resident"`
+	Notes          string `json:"notes"`
+	// AgentBudgetPolicy is the tier-level marker "loop-default-chosen" (register D-24): the tier keeps
+	// the loop default completion budget on purpose, a figure chosen and not measured. It is not a
+	// config_seed key and never reaches a node's config.json.
+	AgentBudgetPolicy string         `json:"agent_budget_policy"`
+	ConfigSeed        map[string]any `json:"config_seed"`
 	// ConfigSeedMidHigh is the RAM-gated overlay. It was absent here, so a tier whose
 	// ONLY media binding is RAM-gated (ampere-8, blackwell-8 — one of them the 8 GB
 	// reference laptop) had its page claim it "ships no media configuration" while the
