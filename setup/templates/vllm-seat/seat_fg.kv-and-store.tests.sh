@@ -308,6 +308,11 @@ while True:
     data, peer = s.recvfrom(4096)
     if len(data) < 17 or not specs:
         continue                                  # a silent responder when it has nothing to say
+    i = 12                                        # answer only the question the helper must ask: <name> type A, class IN + QU bit
+    while i < len(data) and data[i]:
+        i += data[i] + 1
+    if data[12:i + 1] != enc(name) or data[i + 1:i + 5] != struct.pack(">HH", 1, 0x8001):
+        continue
     s.sendto(b"junk", peer)
     for spec in specs:
         owner, _, addr = spec.rpartition("=")
