@@ -3,7 +3,7 @@ package fleetnode
 // The project-bundle door (ADR 0071): POST /fleet/compose-project renders a whole HyperFrames
 // project a holder of the fleet token sends, so a machine with no composition lane of its own (a
 // thin client) can have any composition rendered on a node that has one. The template door
-// (compose-video over /fleet/dispatch) stays as it was: tokenless and vetted templates only.
+// (compose-video over /fleet/dispatch) stays as it was: vetted templates only (it needs the bearer too).
 //
 // A project is trusted code — HyperFrames' Chrome runs without a sandbox and executes it — so the
 // door is closed unless the node opted in (fleet_compose_projects), holds a fleet token and has the
@@ -196,7 +196,7 @@ func buildComposeProject(_ context.Context, cfg config.Config, payload json.RawM
 		params["snapshots"] = in.Snapshots
 	}
 	// The render is written under a stem of the door's own choosing, never the pipeline's
-	// compose-<hash8> (which the tokenless compose-video lane shares): /fleet/media then tells a
+	// compose-<hash8> (which the compose-video lane shares): /fleet/media then tells a
 	// project render by its name alone and serves it only to a bearer holder (media_gate.go). The
 	// renderer names its snapshots <stem>-snap-<n>.png beside it, so they carry the stem too.
 	if out, oerr := projectOutputPath(cfg, in.Format); oerr != nil {

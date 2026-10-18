@@ -5,7 +5,7 @@
 // the job with the fleet bearer, poll it, and map every failure to a typed defer.
 //
 // Two paths carry a job:
-//   - a job with no input file goes through POST /fleet/dispatch, the tokenless door every node with the
+//   - a job with no input file goes through POST /fleet/dispatch, the door every node with the
 //     task serves (image-gen and run-graph always; video, animate and audio when no still, reference,
 //     driver or clone sample is given);
 //   - a job with input files packs them into a bundle (internal/composebundle) and goes through the
@@ -812,7 +812,7 @@ func post(ctx context.Context, cfg config.Config, base, route string, body []byt
 	hreq.Header.Set("Content-Type", "application/json")
 	auth(cfg, hreq)
 	// Who asked, and whether the serving node must card the job because this box will not. Both doors
-	// (the tokenless dispatch and the token-gated media-job) are work-creating requests.
+	// (the dispatch and the media-job) are work-creating requests.
 	pairworkloads.WireHeadersFor(cfg, hreq.Header)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {

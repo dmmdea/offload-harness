@@ -18,10 +18,11 @@ import (
 // gates on, so health never promises a lane dispatch would defer.
 //
 // Template-only, deliberately. A composition is trusted code: HyperFrames' Chrome
-// runs with --no-sandbox and site isolation off, and media dispatch is not
-// token-gated (ADR 0023). A free-form `html` or a node-local `project_dir` from an
-// unauthenticated tailnet caller would therefore be arbitrary code in an unsandboxed
-// browser on this node, so both are refused at ack time; the node's own vetted
+// runs with --no-sandbox and site isolation off. Dispatch needs the fleet bearer
+// like every lane, but a holder of it is trusted to render, not to run code of its
+// own: a free-form `html` or a node-local `project_dir` sent here would be arbitrary
+// code in an unsandboxed browser on this node, so both are refused at ack time (a
+// whole project goes through the opt-in project door, ADR 0071); the node's own vetted
 // templates (render/compose-templates) with typed, escaped variables are the fleet
 // surface. png-sequence is refused too: it writes a DIRECTORY, which /fleet/media
 // (bare file names only) cannot serve back.

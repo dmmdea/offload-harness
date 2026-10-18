@@ -18,8 +18,8 @@ package fleetnode
 //   - the media-job door's outputs (ADR 0077): mediajob-<16 hex>.<ext>. They are rendered from the caller's
 //     PRIVATE input files (a still, a driver video, a voice sample), so they ride the bearer the way a project
 //     render does; the door sets the output path itself (mediaJobOutputPath), so a name alone says which door
-//     wrote it. A job of the tokenless /fleet/dispatch door keeps the pipeline's own name (render-<hash8>.png,
-//     video-<hash8>.mp4, ...), which stays readable by bare name as before.
+//     wrote it. A job of the /fleet/dispatch door keeps the pipeline's own name (render-<hash8>.png,
+//     video-<hash8>.mp4, ...), which needs the bearer to read like every other name.
 //
 //   - the legacy path-taking stt lane's transcripts (<basename>-<8 hex>.srt|txt|segments.json): that
 //     lane is token-gated on a node with a token, so its outputs ride the bearer too (they are never

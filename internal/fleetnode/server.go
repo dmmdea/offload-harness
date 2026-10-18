@@ -2926,13 +2926,14 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 // duplicate an Admit race turns up) end.
 //
 // The bearer rule is the JOB's, not the request's. The dispatch door checks the
-// token when the request DECLARES a token-gated task_type, and a media task_type
-// is tokenless by design, so a caller that re-sent an agent job's id as a media
-// task skipped that check and was answered: 202 (which restarted the job's poll
-// lease, so anyone able to read ids off the unauthenticated jobs feed could keep a
-// ghost alive), or 409 carrying the agent error text the feed withholds from a
-// caller without the token. pollDenied applies the record's own marker, as the poll
-// and the withdraw do, so the caller gets the auth verdict and nothing else.
+// token for the task_type the request DECLARES, and the known job carries its own
+// marker, so a re-send of an id under another task_type must not get another
+// verdict (it once did: a media task_type was ungated, and a caller that re-sent an
+// agent job's id as one was answered 202, which restarted the job's poll lease for
+// anyone able to read ids off the public jobs feed, or 409 carrying the error text
+// the feed withholds). Every task type is gated now, so the two agree for a request
+// that passed authorizeGated; pollDenied still applies the record's own marker, as
+// the poll and the withdraw do, so the caller gets the auth verdict and nothing else.
 func (s *Server) answerKnownJob(w http.ResponseWriter, r *http.Request, view *JobView) {
 	if s.pollDenied(view, r) {
 		s.refuseBearer(w, r, dispatchRefusalLabel)
@@ -3194,7 +3195,7 @@ func truncateRunes(s string, n int) string {
 // pipeline.go's runImageGen joins onto for GenerateSdcpp's `out` argument
 // (see `filepath.Join(p.cfg.MediaDir, "render-"+hash+".png")`). Read-only and
 // deliberately narrow: a single path segment inside the configured media
-// dir, so the fleet's unauthenticated surface gains a file reader, never a
+// dir, so the fleet's surface (behind the bearer) gains a file reader, never a
 // browser. A name containing a separator or ".." dies at validation before
 // any filesystem call; what's left is resolved through symlinks and its
 // resolved path is checked for containment under the resolved media dir, so
