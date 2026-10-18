@@ -211,8 +211,8 @@ const cookieGapPiece = `(?:[^\w\r\n]|` + jsonEscape + `)`
 // cookieGap is up to eight of those pieces, as few as possible.
 const cookieGap = cookieGapPiece + `{0,8}?`
 
-// cookieLineGap is the same for the opener of a header line, which takes no opening bracket except one right behind the name
-// (a subscript): a header that a bracket after its punctuation opens is a list (below), and a line that could also read the bracket as part of its own gap would match twice, a
+// cookieLineGap is the same for the opener of a header line, which takes no opening bracket: a header that a bracket
+// opens, behind its punctuation or right behind its name (a subscript, a printed slice), is a list (below), and a line that could also read the bracket as part of its own gap would match twice, a
 // long list-shaped span at a higher priority and a short line behind it. Every match then waits for the list to end
 // or the text to run out, and a text that repeats a header over and over, each one opening a list that never closes,
 // is scanned to its end once per match.
@@ -226,12 +226,12 @@ const cookieLineGap = `(?:[^\w\r\n\[]|` + jsonEscape + `){0,8}?`
 // cookies, the form of a call that takes the name and the value as two arguments (Header.Set("Cookie", "...")).
 // A bare comma stays quiet: "the cookie, path=/some/long/path" is prose. A header fold may stand before the
 // punctuation and after it.
-const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieLineGap + `[:=>]|\[|` + cookieLineGap + `,\s*\\*['"])` + cookieLineGap + `(?:` + cookieFold + cookieLineGap + `)?`
+const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieLineGap + `[:=>]|` + cookieLineGap + `,\s*\\*['"])` + cookieLineGap + `(?:` + cookieFold + cookieLineGap + `)?`
 
 // cookieListOpener is the opener of a list: the punctuation, which a line break may precede or follow, then an
 // opening bracket. The white space behind the bracket, a pretty-printed list's line breaks and indentation
 // included, is taken by the steps of the list.
-const cookieListOpener = `(?:` + cookieFold + `)?` + cookieGap + `[:=](?:` + cookieGapPiece + `|[\r\n]){0,8}?\[`
+const cookieListOpener = `(?:` + cookieFold + `)?` + cookieGap + `(?:[:=](?:` + cookieGapPiece + `|[\r\n]){0,8}?)?\[`
 
 // cookieGoListOpener is the opener of a Go slice literal, the way the Go-syntax print of a header writes it
 // (http.Header{"Set-Cookie":[]string{"a=b", "c=d"}}): the punctuation, then the type, then the brace. The list ends

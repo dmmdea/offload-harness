@@ -6,15 +6,19 @@ import (
 	"time"
 )
 
-// scanTime is the shortest of three scans of s for every match of the cookie-header class, the way a redactor makes
-// them.
+// scanTime is the time of one scan of s for every match of the cookie-header class, the way a redactor makes them: the
+// shortest of three trials, each the mean of as many scans as fit in 30 ms (the clock of some machines is too coarse for
+// one scan of a short text).
 func scanTime(s string) time.Duration {
 	re := cookieClass().Re
 	best := time.Duration(1<<63 - 1)
-	for i := 0; i < 3; i++ {
-		t0 := time.Now()
-		re.FindAllStringIndex(s, -1)
-		if d := time.Since(t0); d < best {
+	for trial := 0; trial < 3; trial++ {
+		n, t0 := 0, time.Now()
+		for n < 1000 && time.Since(t0) < 30*time.Millisecond {
+			re.FindAllStringIndex(s, -1)
+			n++
+		}
+		if d := time.Since(t0) / time.Duration(n); d < best {
 			best = d
 		}
 	}
