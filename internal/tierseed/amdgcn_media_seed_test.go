@@ -180,8 +180,8 @@ func TestAmdGcnMediaSeedValues(t *testing.T) {
 			t.Errorf("%s = %q kept an unexpanded token", name, p)
 		}
 	}
-	// No licence is invented: audio.cpp lanes carry no commercial_use key at all, and the profile
-	// says the ACE-Step licence is unverified.
+	// No licence is invented: audio.cpp lanes carry no commercial_use key at all (the config schema has no licence key for an audio lane), so the ACE-Step licence
+	// is recorded in the profile's notes, as the one the source states: MIT, read from the project's LICENSE file and its Hugging Face card on 2026-10-18.
 	raw, err := os.ReadFile(filepath.Join("..", "..", "setup", "templates", "profiles.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -203,8 +203,11 @@ func TestAmdGcnMediaSeedValues(t *testing.T) {
 			}
 		}
 	}
-	if !strings.Contains(gcn.Notes, "ACE-STEP LICENCE IS NOT VERIFIED") {
-		t.Error("the amd-gcn notes must say the ACE-Step licence is unverified")
+	if !strings.Contains(gcn.Notes, "ACE-STEP LICENCE VERIFIED 2026-10-18: MIT") {
+		t.Error("the amd-gcn notes must record the ACE-Step licence as verified MIT (LICENSE file and Hugging Face card, read 2026-10-18)")
+	}
+	if strings.Contains(gcn.Notes, "NOT VERIFIED") || strings.Contains(gcn.Notes, "deliberately left UNSET") {
+		t.Error("the amd-gcn notes still say the ACE-Step licence is unverified")
 	}
 }
 
