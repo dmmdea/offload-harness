@@ -29,7 +29,7 @@ func krea2Binding(c *config.Config) {
 // committed more has less left), because the admission rule reads both: a fixed small figure would make every
 // lane wait on the physical term whatever the commit said.
 func shortHost(commit float64) gpuprobe.HostMemory {
-	return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 160}
+	return gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 100 - commit/2, CommitUsedGiB: commit, CommitLimitGiB: 100}
 }
 
 // useHost puts both doors onto one host reading: the allocator's pre-filter (the pipeline's own

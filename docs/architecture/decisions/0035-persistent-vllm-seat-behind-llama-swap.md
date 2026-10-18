@@ -122,6 +122,33 @@ then fails loudly instead of the start refusing on a cause the operator cannot c
 next natural engine death: the seat ready again within 6 minutes, no refusal whose holder is the seat's own MP server, and
 no `VLLM::Worker` process 60 s after the API server exits.
 
+## Update 2026-10-18 — the Windows stubs serve every Windows seat of the tier, and refuse any other
+
+Every Windows seat's llama-swap entry runs the same two files from one seat directory, `seat-cmd.ps1` and `seat-cmdstop.ps1`,
+and passes its own seat id. The render baked ONE seat's id (the model id the stub waits for in `/v1/models`), port and load
+budget into them, so a box with two Windows seats could not use the rendered stubs: the second seat's stub waited for the first
+seat's id for its whole load budget and failed. The way out was a hand-made stub with a map from the seat argument to the id
+(register B-57), which has none of the template's later fixes (the crash cleanup, the stop marker, the stop-result read).
+
+**Decision.** The stubs carry a table, `seat id → { id served, port, load budget }`, rendered from every Windows seat of the tier
+(`Spec.ArtifactsWith`; `install vllm-seat` passes the lane seat's tier mates, the `extra_vllm_seats` that start through WSL). The
+table is sorted by seat id and says nothing of which seat the render was run for, so rendering the seats one after the other
+writes byte-identical stubs and the last render drops nobody. A seat argument the table does not hold is logged to
+`seat-cmd.log` (a fixed name: the argument is not trusted into a file name) and exits 5 before anything is started; for
+`seat-cmdstop.ps1` that is before the marker is written or the stop task is started. Everything else is unchanged: the crash
+cleanup, the marker, the bounds.
+
+**What this does not cover.** Only seats the tier declares. A tier cannot declare a seat on other cards than its lane seat
+(`validateVLLMSeats` refuses an extra on other devices: extras are alternatives of the lane seat), so a box that also serves a
+seat of its own on other cards, one the tier does not know, still needs that seat in the stub by hand until the tier can declare
+it. The render writes the stubs only: an extra Windows seat's own env file and registered tasks (`register-seat-tasks.ps1`)
+are not written by `install vllm-seat`, which renders the lane seat's.
+
+**Consequences.** A box that renders its stubs this way must deploy BOTH, as for the 2026-09-30 change: `seat-cmd.ps1` and
+`seat-cmdstop.ps1` agree on the table and on the marker name. The seat argument must be the seat id the entry passes (the
+rendered entries do), and a hand-made entry that passes a short name now exits 5 instead of waiting for an id it was never
+given: either pass the seat id or keep the hand-made stub.
+
 ## Context
 
 The `ampere-16` reference box (NVIDIA A2 16 GB at a 40 W / 1200 MHz lock) served its agent lane from a

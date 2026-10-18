@@ -258,7 +258,7 @@ never the entry tier's correctness-label snapshot, whose `cards_tokens` is the 0
 5. **Calls routed to a fleet node** (unreleased, `internal/pairworkloads/remote.go`). A remote or
    auto-spilled `compose_video`, vision (`vqa`, `ocr`, `assess_image`, ...), text (`classify`,
    `extract`), media (`generate_image`, `generate_video`, `animate_character`, `generate_audio`, `run_graph`) or `transcribe` call (the card's engine is `whispercpp`) never goes through `Pipeline.Run` on the asking box (`composeremote.Run`,
-   `visionremote.Run`, `textremote.Run`, `mediaremote.Run` and, since 0.164.0, `sttremote.Run` send the job and poll it), so before this the asker wrote
+   `visionremote.Run`, `textremote.Run`, `mediaremote.Run` and, since 0.165.0, `sttremote.Run` send the job and poll it), so before this the asker wrote
    neither a ledger row nor a card for work it had spilled, and a plain row would have carded the
    asker itself (`ledger.Entry` named no node). The lanes now report through
    `core.RemoteAttribution`, which the `Runner` they receive (`*pipeline.Pipeline`) provides:

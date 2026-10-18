@@ -65,6 +65,15 @@ func hostRAMSplit(defers bool, needGiB float64) (gate, later float64) {
 	return needGiB, 0
 }
 
+// hostRAMLoadSplit is hostRAMSplit for a declaration of both quantities: they move together, to the grant or to the look after
+// the unload. A declaration that declares nothing is compared in the grant, as it always was.
+func hostRAMLoadSplit(defers bool, load gpuprobe.HostLoad) (gate, later gpuprobe.HostLoad) {
+	if defers && load.Declares() {
+		return gpuprobe.HostLoad{}, load
+	}
+	return load, gpuprobe.HostLoad{}
+}
+
 // unloadReachesLease says whether the unload that --unload-seat asks for can take down anything on the cards a lease holds
 // (lease ids; none = the whole node, or the cards an allocation has not chosen yet): the agent seat, or a model the roster
 // lists that is placed on those cards or placed nowhere. It is the question maintainSeatScoped answers when it runs, put
@@ -101,17 +110,17 @@ func unloadReachesLease(ctx context.Context, cfg config.Config, ids []string, ca
 // bought for nothing). A host whose memory cannot be read is not asked after the unload either: the look would refuse for
 // the same reason until its deadline, with the seat cycled and the cards held, so the lease keeps the grant's comparison,
 // which waits in the queue for a readable host as it did before F82. Anything else passes unchanged.
-func screenDeferredHostRAM(m *gpulease.Manager, gate, later float64, wait time.Duration, out io.Writer) (float64, float64, error) {
-	if later <= 0 {
+func screenDeferredHostRAM(m *gpulease.Manager, gate, later gpuprobe.HostLoad, wait time.Duration, out io.Writer) (gpuprobe.HostLoad, gpuprobe.HostLoad, error) {
+	if !later.Declares() {
 		return gate, later, nil
 	}
-	chk := m.HostRAMCheck(later)
+	chk := m.HostRAMCheckLoad(later)
 	switch {
 	case !chk.OK && chk.Impossible:
 		return gate, later, heldHint(&gpulease.ErrHostRAM{HostRAMCheck: chk}, wait)
 	case !chk.OK && chk.Unreadable:
-		fmt.Fprintf(out, "gpu reserve: the host's memory cannot be read, so nothing can show that the unload makes room for the %.1f GiB: it is compared in the grant, as for a lease that unloads nothing, and the seat is left alone until the host can be read\n", later)
-		return later, 0, nil
+		fmt.Fprintf(out, "gpu reserve: the host's memory cannot be read, so nothing can show that the unload makes room for the %.1f GiB: it is compared in the grant, as for a lease that unloads nothing, and the seat is left alone until the host can be read\n", max(later.TouchGiB, later.CommitGiB))
+		return later, gpuprobe.HostLoad{}, nil
 	}
 	return gate, later, nil
 }
@@ -142,8 +151,8 @@ type hostRAMHold struct {
 }
 
 // errHostRAMHoldBound is the failure of a wait that the hold bound ended: the lease is released and its command never ran.
-// It wraps the host's last refusal (errors.As still finds the *gpulease.ErrHostRAM, whose text carries the need and the
-// committed, physical and headroom figures), and it is deliberately not given heldHint's advice to pass a longer --wait:
+// It wraps the host's last refusal (errors.As still finds the *gpulease.ErrHostRAM, whose text carries the need, the
+// figures of the condition that refused and the headroom), and it is deliberately not given heldHint's advice to pass a longer --wait:
 // --wait did not end this wait.
 type errHostRAMHoldBound struct {
 	short        *gpulease.ErrHostRAM
@@ -172,6 +181,10 @@ func (e *errHostRAMHoldBound) Error() string {
 	need := e.short.NeedGiB
 	if e.classDefault {
 		fmt.Fprintf(&b, " The declared %.1f GiB is the media class default, not a measure of this command: pass --ram <GiB> with the real figure (--ram 0 when the weights sit on the cards).", need)
+	} else if e.short.CommitShort && !e.short.TouchShort && e.short.CommitStated {
+		fmt.Fprintf(&b, " If %.1f GiB of commit is more than the command is charged, pass a smaller --ram-commit <GiB>; otherwise wait for the host to free commit and reserve again.", e.short.CommitNeedGiB)
+	} else if e.short.CommitShort && !e.short.TouchShort {
+		fmt.Fprintf(&b, " If %.1f GiB is more than the command is charged, pass a smaller --ram <GiB> (no commit was stated, so the --ram figure is held to physical RAM, or to the commit limit where an enforced one sits below it; --ram-commit <GiB> states a measured one); otherwise wait for the host to free commit and reserve again.", e.short.CommitNeedGiB)
 	} else {
 		fmt.Fprintf(&b, " If %.1f GiB is more than the command loads, pass a smaller --ram <GiB>; otherwise wait for the host to free memory and reserve again.", need)
 	}
@@ -439,9 +452,12 @@ func holderGaveUpNote(gaveUp time.Time, why string, epoch uint64, warmOwed bool)
 // The stamp is one of three moments (phase, the record's Meta.HostRAMHoldPhase): the OUTER bound a live detached reserve keeps moving
 // while it clears the seat (the host has not been asked, nothing releases the lease unless the reserve dies), the end of the WAIT
 // for the host (the sentence above), or the RELEASE push-out of a reserve that is letting the lease go. Without a phase it is the wait's.
-func hostRAMAskedStatus(giB float64, held time.Duration, until time.Time, phase string, now time.Time, long bool, epoch uint64, byWrapper, warmOwed bool, gaveUp time.Time, gaveUpWhy string) string {
+func hostRAMAskedStatus(giB, commitGiB float64, held time.Duration, until time.Time, phase string, now time.Time, long bool, epoch uint64, byWrapper, warmOwed bool, gaveUp time.Time, gaveUpWhy string) string {
 	release := releaseCommand(epoch, warmOwed)
 	s := fmt.Sprintf("host RAM %.1f GiB asked, not yet admitted", giB)
+	if commitGiB > 0 && commitGiB != giB {
+		s = fmt.Sprintf("host RAM %.1f GiB touched, %.1f GiB commit asked, not yet admitted", giB, commitGiB)
+	}
 	heldFor := held.Round(time.Second)
 	switch {
 	case !gaveUp.IsZero():

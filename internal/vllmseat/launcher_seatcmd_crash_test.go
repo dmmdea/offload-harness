@@ -95,7 +95,7 @@ function Invoke-RestMethod {
   [CmdletBinding()] param([string]$Uri, [int]$TimeoutSec)
   if ($Uri -like '*/v1/models') {
     if ($global:Scn -eq 'task-ended-early') { throw 'Unable to connect to the remote server' }
-    return [pscustomobject]@{ data = @([pscustomobject]@{ id = 'qwen3.8-27b-vllm' }) }
+    return [pscustomobject]@{ data = @([pscustomobject]@{ id = 'pp3' }) }
   }
   if ($global:Scn -like 'cmdstop*') { throw 'Unable to connect to the remote server' }
   $global:Probes++
@@ -194,7 +194,11 @@ func runStub(t *testing.T, host, artifact, scenario, readCost string, pre func(d
 	rt := wslRT()
 	rt.SeatDir = filepath.ToSlash(dir)
 	rt.ProxyHost = "192.0.2.10"
-	files, err := pinned().Artifacts(wslTemplatesDir(), rt)
+	// The stub serves the seats it was rendered for and refuses any other seat argument, so the seat the driver runs it
+	// for (pp3) is the seat it is rendered for, and the model id the driver's /v1/models answers is that seat's id.
+	seat := pinned()
+	seat.ID = "pp3"
+	files, err := seat.Artifacts(wslTemplatesDir(), rt)
 	if err != nil {
 		t.Fatal(err)
 	}

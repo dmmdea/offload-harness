@@ -67,8 +67,8 @@ endpoint. A dispatch is now **admitted** and waits its turn.
 |---|---|---|---|
 | `fleet_max_queue_depth` | `accepted` + `running` (health's `queue_depth`), **all task types** | 2x `fleet_max_concurrent_jobs` (8 with the default 4 workers, 2 with one — register S-04/C-25) | Yes — `503 queue full` |
 | `fleet_max_concurrent_jobs` | jobs actually executing, **`agent` and `text` jobs** (every task type that reaches the shared text endpoint, and a task type nobody has listed yet; media, stt, accel, compose and configured pipeline routes are exempt) | 4 (1 on a tier whose agent seat serves one slot: a node publishes the workers its seat really has, see [OPERATOR-GUIDE](OPERATOR-GUIDE.md)) | No — extra jobs WAIT in `accepted` |
-| `fleet_stt_max_concurrent` (0.164.0) | stt jobs actually executing, **both stt lanes** (`stt` and `stt-upload`, pushed and pulled) | 1 | No — extra jobs WAIT, in arrival order, inside their run (their card stays queued). Inference stays serialized by the whisper client's process-wide mutex whatever the value, so above 1 it only overlaps conversions and queue time |
-| `fleet_stt_upload_max_mb` (0.164.0) | the largest audio file `POST /fleet/stt` takes (decoded MiB; the body is that in base64 plus slack) | 48 | Yes — `400` naming the key |
+| `fleet_stt_max_concurrent` (0.165.0) | stt jobs actually executing, **both stt lanes** (`stt` and `stt-upload`, pushed and pulled) | 1 | No — extra jobs WAIT, in arrival order, inside their run (their card stays queued). Inference stays serialized by the whisper client's process-wide mutex whatever the value, so above 1 it only overlaps conversions and queue time |
+| `fleet_stt_upload_max_mb` (0.165.0) | the largest audio file `POST /fleet/stt` takes (decoded MiB; the body is that in base64 plus slack) | 48 | Yes — `400` naming the key |
 | `fleet_stt_transcript_ttl_min` | how long an stt upload job's transcript files stay under `media_dir` (minutes); `0` = 30, negative = keep | 30 | No — files are removed at the next sweep after they pass it |
 
 **The concurrency cap governs the text lane only.** It exists to protect one thing — the shared
@@ -513,8 +513,8 @@ is missing what): a bound script or engine over a missing weight drops the task,
 | `image-gen` | `generate_image` | `imagegen_script`/sdcpp engine bound (the default binding) OR any `imagegen_families` entry configured — a family-only node (no default binding, e.g. an opt-in-family-only node) is advertised too | `imagegen_family` (else `sdxl`, only when the default binding is actually configured); quant `bf16` for the HiDream-O1 binding |
 | `video-gen` | `generate_video` | `videogen_script` set, **or** the default family bound to the sd.cpp engine (`videogen_families.<name>.engine: sdcpp`) — and `generate_video` CONFIGURED | the `videogen_family` binding (`ltx25`, …), else `wan2.2` for the runner default; an sd.cpp default family advertises its own name (the `wan22` sentinel keeps `wan2.2`); quant `q8_0` only for the Wan family, when the bound unets are the Q8_0 GGUFs |
 | `animate` | `animate_character` | `animategen_script` set, **or** `animategen_engine: sdcpp` — and `animate_character` CONFIGURED | `wan-animate2` (ComfyUI WAN-Animate-2); `wan-vace` for the sd.cpp Wan2.1 VACE lane (`config.AnimateSdcppFootprintFamily`, the family that lane records its footprint under) |
-| `stt` | `transcribe` (a path on THIS node's disk) | `stt_model` set | `whisper` (llama-swap-resident — no footprint sampling). Bearer-gated when the node has a `fleet_auth_token` (0.164.0); shares the stt concurrency cap below. |
-| `stt-upload` (own route `POST /fleet/stt`, 0.164.0) | `transcribe` over audio bytes the caller sends | `stt_model` set **and** (loopback listener **or** `fleet_auth_token` set) | `whisper`, as `stt` |
+| `stt` | `transcribe` (a path on THIS node's disk) | `stt_model` set | `whisper` (llama-swap-resident — no footprint sampling). Bearer-gated when the node has a `fleet_auth_token` (0.165.0); shares the stt concurrency cap below. |
+| `stt-upload` (own route `POST /fleet/stt`, 0.165.0) | `transcribe` over audio bytes the caller sends | `stt_model` set **and** (loopback listener **or** `fleet_auth_token` set) | `whisper`, as `stt` |
 | `audio-gen` | `generate_audio` | a voice renderer (`voicegen_script`, `tts_endpoint` or `voicegen_engine: audiocpp`) or a music renderer (`musicgen_script` or `musicgen_engine: audiocpp`) bound — and at least one of `generate_audio:voice`, `generate_audio:voice:endpoint`, `generate_audio:music` CONFIGURED | `acestep` (ComfyUI music, and the only family a box with no audio.cpp engine advertises); with audio.cpp, the engine's own family names: `ace_step` (music) and `chatterbox` (voice) |
 | `run-graph` | `run_graph` | `run_graph_script` set (ComfyUI only: no native engine runs a graph) — and `run_graph` CONFIGURED | payload-declared `model_family`, else `comfy-graph` |
 | `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
@@ -549,7 +549,7 @@ models roots (`<comfy_dir>/models/*`, every `extra_model_paths.yaml` entry; a cl
 file must be in `<comfy_dir>/input` (`output` or `temp` when its `[output]` / `[temp]` annotation says so). A node
 that lacks one answers **503** (the re-placeable "this node cannot run this now", the same status as a route that is not CONFIGURED)
 naming what is missing, up to six names of each kind (past six weight files it says `7 or more files ... and more` and gives no
-count: the node stops looking at the seventh, because the door is open to any peer and a graph can name thousands of files; the
+count: the node stops looking at the seventh, because any holder of the fleet bearer can send a graph and a graph can name thousands of files; the
 delegator's `cluster[]` row quotes the body's `error` sentence cut at 600 bytes, so it shows the first few of a long list), and
 creates no job. The body is `{"status":"error","error":"...","refusal":"not_capable"}`: the `refusal` member is the node's word that
 it is not full and not out of route but cannot run THIS graph (a route that is not CONFIGURED and a full queue leave it out), so a
@@ -909,9 +909,9 @@ The rule is one rule for every route that does work or returns a result. Three c
     media client classifies a `401` or `403` as a `config` defer, so the caller sees config defers, and the node's
     `/fleet/health` reaches that delegator with the lease reason, the store and the weight-file rows withheld, so its node
     view degrades without an error.
-  - **A delegator must be new enough to send it.** The releases that added the bearer to each client are: text 0.154.0,
-    withdraw 0.143.1, compose 0.160.0, media and stt 0.163.1 and the roster probe's token check 0.167.0. An older delegator
-    gets the same `401` on that lane.
+  - **A delegator must be new enough to send it.** The first release whose client sends the bearer on each lane is:
+    withdraw 0.146.0, text 0.154.0, compose 0.163.0, stt 0.165.0, the roster probe's token check 0.167.0 and media 0.173.0.
+    A delegator older than that has no client that sends it for the lane.
   - **Software outside this repo that sends no bearer stops working on every lane**, dispatch, poll and artifact fetch alike
     (the only external stt dispatcher known sends none, see the stt-upload section).
 
@@ -1431,7 +1431,7 @@ seat; measure through that same path.
 
 ## The stt upload door (`POST /fleet/stt`)
 
-Since 0.164.0 a node transcribes audio its caller SENDS, so a box whose own whisper is held (a render owns its cards) can
+Since 0.165.0 a node transcribes audio its caller SENDS, so a box whose own whisper is held (a render owns its cards) can
 have an idle node do it. The legacy `stt` task of `/fleet/dispatch` takes only a path on the node's own disk under a
 1 MiB body cap and cannot be sent bytes. The delegator side is `internal/sttremote` (the `route` parameter on
 `offload_transcribe`, `--route` on `local-offload transcribe`); decision and alternatives in
@@ -1478,7 +1478,7 @@ node has an hq model; `false` is published, so an asker can tell it from a node 
 (loopback, or a `fleet_auth_token`). `stt` is NOT the signal: every node with a whisper model lists it.
 
 **Auth.** `stt-upload` is token-gated like the vision lane (`tokenGated`), on dispatch and on poll (`JobView.Gated`).
-The legacy `stt` task joined the bearer rule **when the node had a `fleet_auth_token`** (0.164.0, D17): a tailnet peer can
+The legacy `stt` task joined the bearer rule **when the node had a `fleet_auth_token`** (0.165.0, D17): a tailnet peer can
 no longer make the node convert and transcribe any file it can read. It is now gated like every lane (the special case is
 gone: a node with no token that listens beyond loopback refuses it with `403`, a loopback node with no token takes it).
 Compatibility: the only external dispatcher known to send `stt` jobs sends no bearer token; no production use through it

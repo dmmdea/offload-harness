@@ -732,7 +732,7 @@ func (s *Scoper) commit(epoch uint64, mine seenRecord, cur []string, source stri
 			return err
 		}
 		path := s.seenPath(epoch)
-		tmp := path + ".tmp"
+		tmp := stagingPath(path)
 		if err := os.WriteFile(tmp, b, 0o666); err != nil {
 			return err
 		}
@@ -807,7 +807,7 @@ func LaunchMarkerReader(comfyDir string) func() (Marker, bool) {
 		if strings.TrimSpace(comfyDir) == "" {
 			return Marker{}, false
 		}
-		b, err := os.ReadFile(filepath.Join(comfyDir, ".offload-launch.json"))
+		b, err := readSharedFile(filepath.Join(comfyDir, ".offload-launch.json")) // restamped by Node through a staged .tmp file, like the keyed ones
 		if err != nil {
 			return Marker{}, false
 		}

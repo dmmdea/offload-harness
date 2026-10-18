@@ -28,8 +28,8 @@ other on a single shared card.
 | `internal/gpulease/term.go` | **terms (plan P9)**: `PlanTerm` (what a requested window comes to), the installed limits (`SetDefaultTerms`), and `AdvanceTerm`, the one place a term ends in a renewal or the expired label (see [Terms](#terms-a-window-is-a-term-and-a-term-ends-in-a-renewal-or-a-label-adr-0070)) |
 | `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
-| `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmits` (the ONE admission rule), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
-| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases (what the processes below the holder hold RESIDENT, the unit a declaration is in), `Manager.HostRAMPending`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
+| `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmitsLoad` (the ONE admission rule, over the working set a job touches and the commit it is charged, apart), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
+| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB` and `Options.HostRAMCommitGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases, per quantity (the working set less what the processes below the holder hold RESIDENT; the commit less what they hold PRIVATELY), `Manager.HostRAMPendingLoad`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card (for its own `--graph`, the files that graph's loaders name), else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
@@ -45,6 +45,7 @@ other on a single shared card.
 | `internal/gpulease/yield.go`, `gpu_yield*.go` | **the yield request (plan P11, ADR 0086)**: the policy (`ParseOnOverdue`, `SetDefaultOnOverdue`), the asker, the `yield.<epoch>` sidecar, the holder's ticker, the read-only `YieldViewOf` every surface words from; the root files hold the shell runner (`sh -c`, `cmd.exe /d /s /c`, hidden) and the `--detach` report |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
 | `gpu_progress.go`, `internal/gpulease/progressdir.go`, `render/lease-progress.mjs` | the progress contract of a wrapped render helper (F8): the helpers the wrapper declares one for, the minted file and its sweep, `GPU_LEASE_PROGRESS_FILE`, and the helper-side heartbeat |
+| `render/lease-read.mjs`, `render/gpu-lock.mjs` | **the Node readers of the lease**: `readSharedSync` / `readSharedJson` (a refused open waited out to a 100 ms deadline, and an absent name waited for to a 250 ms deadline while a fresh staged file stands beside it, on Windows only; a missing file with nothing beside it read once), behind `readLease`, `readEpochRecord`, `readCardClaim`, the fence `checkInheritedLease`, and the `render/lease-progress.mjs` record reader. Node never writes these files |
 | `gpu_reserve_devices.go`, `gpu_cards.go`, `gpu_doctor.go` | which cards a reserve holds (`--devices`, `--cards`, derivation, the queue), `gpu cards` and the status table, `gpu doctor` |
 | `internal/gpulease/owner.go` | **ownership (ADR 0070)**: who asked for a lease (`Owner`), the session registry, the first-observer orphan marker, the progress contract and `Standing`, the derived reading every status surface shares |
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
@@ -327,6 +328,26 @@ names — is in-process only and does not close the cross-process gap named abov
 - **Reclaim needs both halves:** *(holder provably gone)* OR *(heartbeat stale AND declared window
   expired)*. A bare heartbeat timeout would expire a descheduled benchmark under exactly the load
   it exists to protect.
+- **An unreadable heartbeat is unknown, and unknown is never stale.** `heartbeatAt` returns the
+  heartbeat and whether it could tell. The content of `hb.<epoch>` when it parses and is not earlier
+  than the stamp written at the acquisition (a torn write leaves a prefix of the digits, and a prefix of a
+  number is a number: it, zero and a negative number say nothing about the holder); the file's
+  modification time when the file is there but its content is no use or the read failed for any reason
+  but absence (a renewed heartbeat has the time of its write, an unrenewed one ages out like any); the
+  acquisition stamp only when the read found the name absent and the file is *settled* absent (no staged
+  file younger than 3 s beside the name, and the name still absent on a second look: a holder that never
+  renewed); unknown otherwise, which the reader passes to the rule as no stamp. A rename that is installing the heartbeat, or one that cannot
+  be examined, therefore never makes a live lease past its window reclaimable. What frees a holder whose
+  heartbeat stays unknown for good is the first half of the rule (wrapper gone, by pid and start time) or
+  `gpu release`.
+- **The same rule holds wherever absence would free a lease.** The keeper's look at a heartbeat (`keeperEvidence`: a record that
+  cannot be read is held while its keeper is alive) reads it the way `heartbeatAt` does, and a heartbeat that can be neither read nor
+  examined, or whose rename is installing it, is unknown and counts as alive (for a whole-node record, whose epoch is not known, a
+  staged heartbeat with no live name in the listing of the directory counts as well); it used to count as no sign of life, so the sweep
+  removed a live holder's record and claims. A ComfyUI launch marker that is being installed, which can tie a live instance to a
+  lease whose wrapper is gone, is unknown and holds that lease for the moment it lasts (`treeUnknown`, at most the 3 s a staged file
+  is fresh); it used to be skipped, and the lease was reclaimed with its instance still on the card. What each other consumer does
+  with a lease file it cannot read is listed under *Windows file semantics*.
 - **Release is epoch-guarded** — a fenced-out straggler cannot delete the current holder's lease.
 - **A reclaim removes only what is still stale (register C-59).** The reclaim rule decides from one read, and
   the claim used to be removed by path: two acquirers that both read the same dead holder's record could
@@ -402,10 +423,268 @@ concurrency test rather than by reading:
   `TestReserveRenewsTheLeaseWhileDraining` / `TestReserveRenewsTheLeaseWhileWarmingBack` (~1 run in
   24) and, in production, could leave the `draining` stamp on a held lease (cordoning the seat for
   the rest of its window) or drop a heartbeat renewal.
+- **A rename-over blocks a reader, too.** Windows checks sharing both ways. While the rename runs, the
+  system holds a handle on the old entry with `DELETE` access, so an open whose own share mode lacks
+  `FILE_SHARE_DELETE` fails with `ERROR_SHARING_VIOLATION`, and
+  `os.ReadFile` is such an open. A reader that took that failure for "no record" answered "no lease" for
+  a lease that was held: `reader.v2` skips a record it cannot read, so `Leases()` came back empty and
+  `EpochIsCurrent`, the fence a render child asks, said the lease was not its own. A media route's own
+  test saw `want one live lease while the render runs, got []` on a loaded box, 2 runs in 24 under
+  30 busy-loop processes. `readRecordFile` (`internal/gpulease/hostram.go`) now opens the lease records
+  (`meta.json`, `e/<epoch>.json`) with `OpenShared`, which shares read, write and delete: it does not fail
+  against the rename, and it reads the old record whole until the new one is in place, as a POSIX reader
+  does. Measured under a concurrent rewrite
+  (`TestAHeldLeaseNeverReadsAbsentWhileItsRecordIsRewritten`, `internal/gpulease/readrace_test.go`): with
+  `os.ReadFile`, `Leases()` missed 1 read in 30 to 60 and `EpochIsCurrent` about 1 in 15; through
+  `OpenShared`, none. A bounded retry of the failed plain read was tried first and dropped: under
+  saturating load the sharing violation lasted up to 1.4 s, so a bound short enough for a status call
+  left misses, and the open is the cause.
+  - **The heartbeat is read the same way, and it matters more.** `hb.<epoch>` is rewritten by `Renew`
+    with the same rename over the live name, and `heartbeatAt`, `lastHeartbeat` and `keeperSignOfLife`
+    read it through `readSharedFile`. Once a lease is past its declared window the heartbeat is the only
+    thing that keeps it: the reclaim rule needs a stale heartbeat AND an expired window. A heartbeat
+    read that failed fell back to the stamp written at acquisition (it no longer does: an unreadable heartbeat is
+    unknown, and unknown is never stale; see *How it stays correct*), so a live lease past its window (a
+    `gpu reserve` command that outran its `--for`, a detached hold past its window) read as reclaimable,
+    an acquirer's sweep removed it, and the card was granted to a second job while the first still ran
+    on it. A record that cannot be read is only skipped; a heartbeat that cannot be read is the
+    dangerous case. `TestALiveLeasePastItsWindowIsNotHandedToAnotherJobWhileItsHeartbeatIsBeingRenewed`
+    holds a `DELETE`-access handle on the heartbeat and asks for the card from a second process.
+  - **A shared open still meets one more refusal.** For the instant the rename has marked the old entry
+    for deletion and the new one has not taken its name, the file is delete-pending and every open of
+    the name fails with `ERROR_ACCESS_DENIED`, whoever shares what. `readSharedFile` waits that out: a
+    permission error is retried `removeAttempts` times at `removePause` (about 100 ms, the claim
+    removal's bound) and any other failure is returned at once (an absent name with a fresh staged file beside it is not a failure
+    yet; see the next bullet). Measured on a loaded host with a
+    heartbeat renewed in a loop: 5 failed reads in about 124,000 without the wait, none in about
+    108,000 with it. A file that stays unreadable is waited out once, not once per read (below).
+  - **A rename that was not refused can still leave the live name absent, and that is not an answer yet.**
+    For 11 to 75 ms as a reader sees it (one rename took 119 ms to return), about once in 74,000 renames
+    on the host that showed it, the live name is absent (`ENOENT`) while the staged file (`stagingPath`:
+    `<name>.tmp`, or `meta.json.restamp`, none for a card claim) still stands beside it. A reader that took
+    that for "not there" called a held lease gone: the fence failed it, `Leases()` dropped it, a release
+    took the whole-node branch. So on Windows an absence is an answer only once it is settled (`gate.go`,
+    `settled.go`). `readSharedFile` and `statSettled`, which `statRecord`, the keeper's look at a record,
+    `claimIsFresh` and the waiter and request-file stats go through, wait while a staged file younger than
+    3 s stands beside the absent name, pausing 5 ms, until 250 ms have passed since they first met one.
+    With none they look once at the name itself, taken after the look at the staged file (the rename can
+    end between the two), and answer absent only if that finds nothing too. When the 250 ms run out the
+    answer is `errRenameInFlight`, an I/O failure and never `ErrNotExist`: `Check` reads it as a record that
+    cannot be read (`RecordUnreadableError`, which `confirmFence` retries) and not as "the lease is gone",
+    and every stat caller already reads a non-absent error as "cannot be examined". The name whose wait
+    ran out is remembered for 5 s, so a staged file left by a writer that died a moment ago costs one wait
+    per file and not one per read (a grant reads each heartbeat about seven times under the epoch lock:
+    three such heartbeats cost a grant 1050 pauses before the memory and 150 after,
+    `TestAFreshLeftoverStagedHeartbeatCostsAGrantAtMostOneWaitPerFile`). A card claim has no staged
+    name and costs one open and no stat. The wait is on the same switch as the wait for a refused open
+    (`deniedOpenMayClear`): off Windows `readSharedFile` answers an absence at once (one open, no stat, no pause), and `statSettled`
+    takes its looks without a pause and answers `errRenameInFlight` beside a staged file younger than 3 s, so a crash leftover that
+    young makes a stat site read "cannot be examined" and not "absent" on every platform. The ComfyUI launch markers, which
+    Node restamps through a `.tmp` file, are read the same way (`ReadSharedFile`, used by
+    `internal/comfyinst`), as are the waiter records and the yield request. The Node readers keep the same
+    lists (`STAGING_SUFFIXES` in `render/lease-read.mjs`), and `staging_drift_test.go` fails when a Go
+    writer names a staged file without `stagingPath` or stages under a suffix Node does not look for.
+    Node returns `null` when its wait runs out (the fence aborts: fail-safe, and Node only reads), and
+    keeps no memory of a wait that ran out.
+  - **The staged files whose writers hold the epoch lock are swept under it, at any age.** `meta.json.restamp` (the restamp of the
+    whole-node record) and `e/<epoch>.json.tmp` (a card record) are staged, and renamed over the live name, only by code that holds
+    the epoch lock, from before the file is staged until after the rename returns, and the stall of a Windows rename over a name is
+    inside that call (a review's probe saw its exclusive creates succeed at the end of a stalled rename, which then completed over
+    them). So a staged file found by someone who holds the lock is a dead writer's leftover whatever its age, and a fresh one would
+    make every reader of the absent name wait a whole budget for a rename that will never end. `sweepStagedLeftoversLocked`
+    (`devices.go`) removes both: first in the debris sweep (every card grant, and the verification a whole-node grant makes), before any
+    record is read, and in the whole-node grant's own section (the restamp file only: one remove, no listing). One try and no retry: a
+    file a scanner holds is left for the next sweep, and the lock is not held longer for it. **`hb.<epoch>.tmp` is never swept**: `Renew`
+    replaces the heartbeat without the lock, so that file may be a rename landing at that instant.
+    `TestAWholeNodeGrantSweepsTheRestampFileAWriterLeft`, `TestACardGrantSweepsTheStagedRecordsAndTheRestampFileWritersLeft` and
+    `TestTheWholeNodeVerificationSweepsLeftoversBeforeItReadsAnything` pin the sweep, and
+    `TestTheSweepOfLeftoversLeavesTheHeartbeatsStagedFileAndTheLiveFiles` pins what it leaves. Limit: a lock broken as stale after 30 s
+    (`epochLockStale`) lets a second holder in beside a first that only stalled, and its sweep could remove the first's staged file,
+    which fails that rename with an error and corrupts nothing.
+  - **A whole-node grant holds the epoch lock across the epoch, the record and the claim.** The claim is an exclusive create of
+    `meta.json`, the name a holder's restamp replaces by a rename under the lock. The grant used to let the lock go as the epoch was
+    issued and then build the record and make the claim with nothing held, so a create could land inside a restamp's rename (a
+    review's probe on Windows: the create succeeded in 2 of 4 episodes, and the stalled rename then replaced it with the holder's
+    record), and "the lock is taken in `bumpEpoch`, so it cannot" was not true. Now `TryAcquire` takes the lock once around
+    `bumpEpochLocked`, `finishRecord` and the create and write of the claim, as a card grant does
+    (`TestAWholeNodeGrantCreatesItsClaimWhileHoldingTheEpochLock` reads the lock at the instant of the create through
+    `beforeClaimHook`; the exclusive create inside a real stalled rename is not reproduced by a test, which would need a production-only
+    hook). What the record needs from the process and the session registry (the holder's process start, the owner, the term plan) is read
+    BEFORE the lock (`draftRecord`) and finished inside it (`finishRecord`, the one place `RenewedAtMs` and the other instants are
+    written), so the section is the epoch's two file operations, the encoding and the create. The verification, the reclaim and the sweep
+    of sidecars take the lock themselves and run after it, as before. A grant that loses the create lets the lock go and leaves the
+    winner's claim alone (`TestAWholeNodeGrantThatMeetsAnotherClaimLetsTheEpochLockGoAndLeavesTheClaimAlone`).
+    **How long the lock is held**, measured on one Windows host with the real gate and the real clock (a scratch test, not in the tree):
+    - the grant's own section, 20 grants: 0.5 to 1.6 ms, median 1.1 ms. With a rename that takes 119 ms inside it (the epoch file held
+      open without delete sharing, so the rename is refused and retried), five grants: 121.8 to 124.5 ms, and a second acquirer that
+      arrived 30 ms in waited 92 to 98 ms and got the lock. That section reads no lease file, so the gate cannot add to it.
+    - the verification section, a separate hold, with N live card leases whose heartbeats each have a fresh leftover beside them and no
+      live name, and nothing remembered: N=1 253 ms, N=3 761 ms, N=8 2,030 ms, one 250 ms budget per file. With the leftovers already
+      waited for outside the lock, as the probe that every grant makes first does: 1.6, 2.7 and 5.9 ms, the probe having paid 256, 760
+      and 2,019 ms.
+    - a second acquirer's spin gave up after 2,186 ms against a lock that was never released (400 pauses of 5 ms and the file operations
+      between them; 2 s nominal).
+
+    So, before the cap, the worst hold was bounded and not removed: N x 250 ms, once per file per 5 s per process, which reaches the nominal
+    2 s at eight files and does not fit the measured 2.19 s at nine. What keeps it to milliseconds in practice is the order: the probe judges
+    every lease, not only the conflicting ones, before the lock, and a wait that ran out is remembered
+    (`TestTheProbeBeforeTheLockPaysTheGateWaitsSoTheLockIsHeldWithoutOne`, for a card grant and for a whole-node grant, counts the gate's
+    pauses with the lock held and wants none; `TestTheWholeNodeVerificationPaysAtMostOneWaitPerFile` counts one wait per file). Leftovers
+    that appear between the probe and the lock, fresh (younger than 3 s) and not read in the last 5 s, on nine or more leases, held the
+    lock past a second acquirer's spin, and it failed loudly (`the epoch lock ... did not clear`) and never granted.
+  - **A hold of the epoch lock spends at most one second of the gate** (`lockGateCap`, half of the 2 s a second acquirer spins). `withEpochLock`
+    registers the hold for its lease directory (`beginEpochHold`, `gate.go`), and once it has run that long on the gate's clock every
+    further read of a lease file in that directory (`readSharedFile`, `statSettled`) that would wait for a rename in flight answers
+    `errRenameInFlight` at once, with no wait and no memory. That is the answer a wait that ran out gives, and every decision under the lock
+    reads it as held (unknown is never stale), so nothing is decided differently: the wait would only have turned an unknown heartbeat into a
+    fresh one. It covers the reads of that directory by whoever makes them in this process, so a read in another thread during a spent hold
+    gets the I/O failure instead of a wait (held or unexaminable to every reader); it never applies to a read outside a hold; the launch
+    markers, in another directory, are not covered. `TestTheGateWaitsOfOneHoldOfTheEpochLockStayInsideTheSpinOfASecondAcquirer` (three, nine and
+    twelve leases) and `TestTheGateWaitsOfACardGrantThatMeetsLeftoversAfterItsProbeStayInsideTheSpin` pin the bound on the gate's clock, and
+    `TestTheCapOfAHoldOfTheEpochLockIsPerHoldAndEndsWithIt` its scope. The measurements above are from before the cap.
+  - **The wait is Windows only.** Off Windows nothing is delete-pending (`rename(2)` is atomic and an
+    open descriptor never holds one up), so a permission error on a record is a lasting refusal and
+    `readSharedFile` returns it at once. The choice is the constant `sharedOpenMeetsDeletePending`
+    beside `OpenShared`, and `TestOffWindowsAPermissionErrorIsReturnedAtOnce` pins that the open is
+    made once. With the wait on, a mode-000 record cost about 108 ms per read: `Leases()` 108 ms per
+    such record, and an acquirer, which reads the records under the epoch lock, 4.2 s with eight,
+    enough for a second acquirer to give up on the lock's 2 s. Those figures are from a scratch
+    measurement in a Linux environment, recorded in the change fragment, not from a test in the tree.
+    On Windows the same lasting refusal is waited out once per file (the bullet after next).
+  - **The Node readers wait the same refusal out** (`render/lease-read.mjs`). `readLease`, `readEpochRecord` and
+    `readCardClaim` (`render/gpu-lock.mjs`; the three behind `checkInheritedLease`, the fence a render runs before an
+    irreversible action) and the lease-progress reader read these files through `readSharedSync` / `readSharedJson`.
+    libuv opens with `FILE_SHARE_DELETE`, so Node never meets the sharing violation; it does meet the delete-pending
+    instant, as `EPERM` (a file held delete-pending reads exactly that), and it meets `ENOENT` twice: once the last handle on a delete-pending file closes, and for the tens
+    of milliseconds a rename that was not refused leaves the live name absent (the gate above). A
+    `null` record for a card lease falls through to `meta.json`, which a card lease never writes, so a refused open read
+    as "this lease is not current" and the render aborted. The helper retries `EPERM` and `EACCES` until a 100 ms deadline,
+    pausing 5 ms with `Atomics.wait`, waits for a rename while a fresh staged file stands beside an absent name (the
+    bullet above), and returns `null` at once for any other error or for a missing file with nothing beside it; the
+    waits are on only on Windows (`policy.waitsOutDenied`). The bound is a deadline and not a count of pauses because
+    `Atomics.wait(5)` sleeps a whole timer tick on Windows (15.4 ms measured), so 20 pauses were 308 ms. Plain
+    `readFileSync` missed nothing in about a million reads against 55,000 renames issued (half of those runs renamed a link of one
+    seed file, which replaces nothing after the first pass; the fragment says so), so the permission wait guards an instant that
+    measurement could not provoke. The absent-name window it also waits out was provoked, by a Go writer with the write pattern of
+    `renameReplacing` (the release lane's harness; and in a control of this round, one raw `ENOENT` in 295,200 reads with the name
+    absent 16 ms), not by a Node writer, and the waits are shown by the injection tests. `render/lease-read.test.mjs` (the helper and the five readers, with the refusal
+    injected) is the proof of the permission wait, `render/lease-read-gate.test.mjs` of the wait for an absent name, and
+    `heartbeat_unknown_test.go` of the reclaim rule. `render/lease-read-stress.test.mjs` pins none of them: with the permission wait
+    taken out it still passed 5 of 5 on Windows, because Node opens with `FILE_SHARE_DELETE` and the refusals it counts are the
+    writer's. What it pins is that no reader misses, at its size, under a rename-over. A writer in another process renames a
+    different inode over each of two lease files in turn (the record and `meta.json`, two seeds per file, alternated; it does not rename
+    over the card claim, which Go never does and no reader waits for) while the five readers loop. The writer
+    OBSERVES that each rename replaced something: after it, the live name has the inode it just installed, and the test wants that of
+    every rename. It also wants some of the writer's renames refused on Windows (the writer and the readers really met: 3 to 37 per
+    612 to 970 renames on one host, 14 to 30 a run in the release lane's runs) and none elsewhere, where `rename(2)` is atomic, so
+    it cannot pass without having raced. Its first form linked one seed, which on Linux died on `EEXIST` at the link of the third pass
+    (36 renames in, at six lease roots) and on Windows renamed a link onto itself: only the first rename of each file replaced
+    anything, 18 of 11,052 at the six committed roots. It ran six times on Windows (every rename a replacement, 612 to 738 renames a run) and seven times on
+    Linux under WSL (11,000 to 18,000 renames a run, 0 refused, 0 misses). CI runs it on Linux only (`node --test render/*.test.mjs` is a
+    step of the Ubuntu job), so its Windows assertions run on gated hosts only.
+  - **A file that is not there is not waited on unless a rename may be installing it, and no read of one under the epoch lock
+    multiplies a wait.** `readSharedFile` retries a permission error, and waits for a rename only while a fresh staged file
+    stands beside the name; a missing file with nothing beside it is one open, one look at the staged file and one at the name
+    (none for a claim), and the error, with no pause (`gatePauses` counts the gate's, `readRetries` the refused open's). After a release,
+    `Leases()` opens `meta.json` once, `EpochIsCurrent` opens `e/<epoch>.json` and `meta.json` once each, and the
+    heartbeat readers open `hb.<epoch>` once, with no pause
+    (`TestAReleasedLeaseReadsAbsentAtOnceAndNoReadWaitsForIt`); a grant whose sweep finds the three records it reads deleted
+    under the lock opens each once and pauses never (`TestAMissingOrDeletedRecordCostsOneOpenAndNoWaitUnderTheEpochLock`).
+    The reads that wait under the lock are of a file that exists and is refused, and of a name that is absent with a fresh
+    staged file beside it (the gate above). A record's writers hold the lock and the sweep removes their leftovers before it
+    reads anything (the bullet after the gate), so the second is in practice a heartbeat: for the instant `Renew` swaps a
+    live lease's heartbeat (`Renew` does not take the epoch lock) that is one wait that clears; what keeps the sweep from
+    judging a live lease stale is the reclaim rule (an unreadable heartbeat is unknown, and unknown is never stale), and the
+    wait only narrows the window in which it is unknown. `readRetries` counts the pauses of the refused open and `gatePauses` those of the
+    gate, as test seams.
+  - **A file refused for good is waited out once, not once per read.** A refusal still there when the wait ends is a
+    lasting fault (a deny-read ACL on a lease file, a foreign delete whose handle never closes), not a rename in flight.
+    A grant reads each record five times and each heartbeat seven inside one hold of the epoch lock (the sweep, the scan
+    for the unreadable and the verify each go over them), so the wait paid per read held the lock for about 500 ms per
+    refused record. `readSharedFile` therefore remembers a file that outlasted its wait for `refusedMemory` (5 s): a read
+    of it in that time opens it once, so a repair is read at once, and takes no pause if it is still refused; the first
+    open that succeeds forgets it. The memory is per file, and a refusal that clears inside the wait is never remembered,
+    so the heartbeat of a live lease keeps its whole wait. Pauses for a grant of a free card with three leases held,
+    the refusal injected at the open seam: one refused record 100 before and 20 after, one refused heartbeat 140 and 20,
+    six refused files 360 and 120 (654 ms). With real deny-read ACLs on a scratch root and two acquirers 30 ms apart: one
+    record 541 ms and 958 ms before, 113 ms and 111 ms after; six files 1.97 s and 3.57 s before, 648 ms and 624 ms
+    after. What remains is one wait (about 110 ms) for each refused file, so a second acquirer's 2 s spin is reached
+    at about eighteen files refused at once. `TestALastingRefusalOfOneRecordIsWaitedOutOnceByAGrant`,
+    `TestALastingRefusalOfOneHeartbeatIsWaitedOutOnceByAGrant`,
+    `TestEveryRecordAndHeartbeatThatIsLastingRefusedIsWaitedOutOnceByAGrant` and
+    `TestAFileRefusedForGoodIsWaitedOutOnceNotOnEveryRead` pin the counts; three more pin that a repair is seen at once,
+    that the memory is per file, and that it runs out.
+  - **Linux.** Nothing is delete-pending, so no read waits and none is missed.
+    `TestOnLinuxConcurrentRenameOverOfARecordAndItsHeartbeatIsNeverMissedAndNeverWaitedFor` rewrites a held lease's record
+    (`Restamp`) and heartbeat (`Renew`) in loops while `Leases()`, `EpochIsCurrent` and the heartbeat read poll: 50 runs
+    in a Linux environment, 0 misses in about 450,000 reads, 0 refused opens, 0 pauses. The Node readers on Linux are covered by
+    `render/lease-read-stress.test.mjs` (above), which wants no refused rename there.
+  - The epoch counter and the tokens are still read with `os.ReadFile`; no finding covers
+    them yet. The waiter records, the yield request and the ComfyUI launch markers are read through the shared open.
 
 Neither of the first two is defensive padding: with waiters polling once a second, both races are
 ordinary traffic. Measured under six concurrent acquire/release workers, 1 in 48 cycles failed
 before the retries were added.
+
+### What each consumer does with a lease file it cannot read, or finds mid-rename
+
+A read or a stat that gives up on a rename in flight answers `errRenameInFlight`: a `*fs.PathError`, so `isIOFailure` is true for it, and
+never `ErrNotExist`. The rule for every consumer of it, and of any other failure that is not an absence, is one: the lease is **held**, or
+the file **cannot be examined**; it is never free and never gone. Every call site that branches on `isIOFailure`, `RecordUnreadableError`
+or `fs.ErrNotExist` on a lease path was read against it, and so was every consumer of the gated reads (`readSharedFile`, `statSettled`,
+`statRecord`). By what each does:
+
+- **Held or refused (fail closed).**
+  - `Lease.Check` and `checkV2` answer `RecordUnreadableError`, not "gone". `confirmFence` retries it for a window; a wrapper that still
+    cannot read the record goes on, and never kills its command, releases its lease or queues again on it.
+  - `Restamp`, `restampLocked`, `restampV2Locked`, `restampWholeLocked`, `Lease.Release`, `ReleaseByEpoch`, `releaseByEpochV2`,
+    `ReleaseTarget`, `unreadableCardRecords` and `RecordState` answer a `RecordUnreadableError` or an error that names the record, and a
+    release that cannot tell leaves the lease releasable. `Restamp` and `restampLocked` send a look at `e/<epoch>.json` that fails for any
+    reason but absence to the card path, which reads the record itself. `gpu release` and the host-RAM wait read an unreadable record as still
+    held (`leaseStillHeld`, `stillHeldError`), and `stopInstancesOfLease` leaves the instances kept under a lease whose record cannot be read.
+  - Under the epoch lock: `claimIsFresh` (a claim that cannot be examined is a claim in progress, not debris), `keeperAlive` (an unreadable
+    record is held while its keeper is alive, and a heartbeat that cannot be told counts as alive), the claim loop of `TryAcquire`,
+    `removeStaleClaim` and `grantDevicesLocked` (each asks `keeperAlive` before it removes a claim that cannot be read),
+    `sweepDebrisLocked`, `keptUnreadable` and `verifyNoDeviceLeases` (a card record that cannot be read, whose keeper is alive, stays with
+    its claims and refuses a whole-node grant). The claims are the second arbiter: a card claim is created once, exclusively, and never
+    renamed over, so a grant over a card whose claim stands is refused whatever the reader could see.
+  - The reclaim rule: `heartbeatAt` (unknown is never stale) and `reader.judge` with `Reclaimable` (a launch marker being installed is
+    unknown, never "no instance").
+  - `EpochIsCurrent`, and the render-child fence and the recipe audit built on it, answer false for a lease they cannot read: the job
+    does not start. They read; they never grant. The Node readers answer `null` and the fence aborts: loud, and fail-safe.
+- **Left alone (nothing is done).**
+  - `Waiters` skips a waiter record it cannot read or stat for this read and never prunes it (`readWaiterFile`, `statWaiterFile`);
+    `readToken` leaves a token it cannot read.
+  - `ReadYield` reads a request file it cannot read as "not asked", so a holder does not yield on it; an asker whose look at the file
+    cannot tell goes on to the re-check under the epoch lock, which refuses to write over a request file that exists and cannot be read.
+  - `AdvanceTerm` (`recordOf`) and `Lease.HostRAMHold` return an error for a record they cannot read and write nothing: the holder's next
+    tick asks again, and the hold bound releases nothing on an error.
+  - `comfyinst.StopForLease`, `StopMarker` and the checks that read a marker again before a stop leave an instance running when its
+    marker cannot be read.
+- **Skipped by an unlocked reader.** `reader.v2` and `reader.legacy` (behind `Inspect`, `InspectFor`, `Leases`, `InspectDir`,
+  `InspectDirDetail` and `EpochIsCurrent`) skip a record they cannot read, and a directory listing taken in the instant of a rename does
+  not show the name. For that instant an unlocked caller sees the lease as not live. That is unchanged by this round. What a listing
+  no longer decides: a grant or a sweep lists under the epoch lock, where no record can be in flight (the writers of the records hold
+  that lock, and the sweep has removed their leftovers first) and the heartbeat is read by its name and not found by listing; the
+  keeper's scan of every heartbeat (the case of a whole-node record) counts a fresh staged heartbeat whose live name is not listed as
+  unknown; and a release that names no epoch (`gpu release`, `ReleaseTarget`) decides "what is held" from a listing without the lock, and
+  counts a fresh staged card record whose live name is not listed as a record that cannot be read (`unreadableCardRecords`), so it
+  refuses with the error that names it where it used to release the other card lease, or say that nothing was held. Advisory callers
+  (`gpu status`, the admission and routing checks, the vision gate, `gpuLeaseHeld` of the fleet baseline, which says so) can still see
+  a lease as free for it; the wait narrows that to the case where it ran out.
+- **Not reachable by the new error.** `readEpoch` reads the epoch counter with a plain `os.ReadFile` and reads an absence as the first
+  ever acquisition, but its callers hold the epoch lock and its only writer holds it too, so no rename of the counter is in flight at
+  that read. The session registry, the orphan marker, the progress file and the reader audit marker are advisory (nothing there kills or
+  releases anything): an unreadable one reads as not registered, not orphaned, progress unknown, and "unreadable".
+- **Known limits.**
+  - `PIDsOfOtherLeases` (the live ComfyUI instances of another lease that a wrapper which lost its lease spares when it stops its own
+    tree) skips a marker it cannot read, so that instance is not spared. Neither direction is safe: the other would leave the command
+    of a lease that was lost running on the card.
+  - `leaseDevicesOf` (the cards a detached hold drains and unloads for its lease) reads a lease whose record is absent as the whole
+    node's, and says so on stderr; the drain and the unload then act for the whole node. A lease it does not find in the listing whose
+    record cannot be read (a rename is installing it) is not that: it asks `RecordState`, lists again when the record is readable by
+    then, and otherwise fails the maintain step with the lease held (`detachedMaintainError` says so, and that `gpu release` frees it),
+    instead of widening the drain and the unload to seats on cards the lease does not hold.
 
 ## Card-scoped leases (record v2)
 
@@ -453,9 +732,11 @@ rule.) The consumers compare device sets since plan P4: a lease on card 0 no lon
 **Grant.** One critical section under the epoch lock, after a read-only probe so a one-second poller does not spin the
 lock: create `e/` and `cards/`; sweep debris; refuse while a live `meta.json` exists; refuse while a live device lease
 intersects; issue the epoch; write the record `granting`; create each card claim exclusively (all or nothing: any failure
-removes what was made); flip the record to `active`. A whole-node grant keeps its own atomic token (`O_EXCL meta.json`)
-and, once a device lease has ever existed on the host (or whenever `e/` cannot be proven absent), verifies under the same
-epoch lock that no device lease is live and withdraws its claim if one is. Before it judges, it **sweeps** every device
+removes what was made); flip the record to `active`. A whole-node grant keeps its own atomic token (`O_EXCL meta.json`),
+created in the same critical section as the epoch bump and the record (a holder's restamp replaces that name by a rename under
+the same lock, so a create cannot land inside it; the bullet on the whole-node grant below) and, once a device lease has ever
+existed on the host (or whenever `e/` cannot be proven absent), verifies under the epoch lock, in a second section, that no
+device lease is live and withdraws its claim if one is. Before it judges, it **sweeps** every device
 lease the shared rule calls reclaimable: a holder that is alive but stalled (a suspended or lid-closed session) has its
 record, claims and heartbeat removed, so when it resumes its per-epoch fence fails and it cannot renew over cards the
 whole-node holder now owns. A whole-node reclaim fenced the old holder by deleting `meta.json`; this is the same act. Because the device grant creates `e/` before it looks at `meta.json`, a whole-node claim
@@ -663,9 +944,11 @@ after a transient `nvidia-smi` failure carries no `display_attached` and marks i
 them until the next good reading), not claimed (a
 whole-node lease claims every card), not under a foreign compute process
 (`foreign-busy`, reported and skipped, never killed), its free VRAM fits `--vram` (GiB per card), and the **host** has the
-host's memory admits what `--ram` declares: the same rule the grant applies (`gpuprobe.HostRAMAdmits`: committed memory +
-the need + the not-yet-loaded part of granted leases must stay under physical RAM less `gpu_host_ram_headroom_gib`, default
-8; see "Host RAM" below), here as an advisory pre-filter. Among allocatable cards the order is: no resident
+host's memory admits what `--ram` and `--ram-commit` declare: the same rule the grant applies (`gpuprobe.HostRAMAdmitsLoad`: the
+available RAM less the touched need and the not-yet-touched part of granted leases must leave `gpu_host_ram_headroom_gib`, default
+8, and the commit charge + the commit need + the not-yet-touched part must stay under physical RAM less the headroom (a commit
+nobody stated), or, for a commit stated with `--ram-commit` where the OS enforces a limit, with the not-yet-charged part under that
+limit less the headroom; see "Host RAM" below), here as an advisory pre-filter. Among allocatable cards the order is: no resident
 seat first, then the cheapest eviction (the footprint of the configured layer seats loaded on it), then the lowest id. An
 unreadable host-memory reading refuses only when a RAM need was declared, and a need no state of the host admits ends the
 request at once. On Windows (WDDM) nvidia-smi lists no per-process
@@ -924,7 +1207,7 @@ names cards, and memoised for 2 s; an idle box and a whole-node lease never read
 | the delegation door, the `agent_run` door and the review lane's local loop | the fence pre-check reads the same narrowed lease the cordon does, so it still predicts what the cordon will do |
 | the delegator (`delegate`) | `LeaseForContract` narrows the local lease to the seats a contract could run on; the busy formula in the auto deal, the capacity wait, the retry fence and the spread deal read it per contract, and the local box is busy for a contract only when **every** local agent seat it could use sits on a held card (`TestLocalBusyFalseWhenAFreeCardServesTheSeat`). `LocalLeaseFor`, `LocalBusyFor`, `ReservedFor`, `FencedFor` and `ForeignFenceFor` are the same questions for a caller that knows its seat; `Reserved`, `Fenced` and `ForeignFence` keep their signatures and their whole-node reading |
 | the text and vision auto routes (`textremote`, `visionremote`) | the "local GPU is busy" trigger reads the cards of the workhorse and vision seats |
-| the stt auto route (`sttremote`, 0.164.0) | the "local whisper would be held" trigger is `modelaffinity.WouldBlockUpstream`, the upstream fence's own first inspection without its wait: a lease that fences the whisper model's cards (the same narrowing as above) AND the model not already resident; a resident whisper is served here at once (`TestWouldBlockUpstreamAgreesWithTheFence`, `TestDefaultLocalBusyIsTheWhisperFenceNotTheLease`) |
+| the stt auto route (`sttremote`, 0.165.0) | the "local whisper would be held" trigger is `modelaffinity.WouldBlockUpstream`, the upstream fence's own first inspection without its wait: a lease that fences the whisper model's cards (the same narrowing as above) AND the model not already resident; a resident whisper is served here at once (`TestWouldBlockUpstreamAgreesWithTheFence`, `TestDefaultLocalBusyIsTheWhisperFenceNotTheLease`) |
 | the pipeline's vision pre-check (`gpulock.WaitFreeScoped`) | waits, and defers `gpu_busy`, only for a lease on the vision seat's cards, the same reading the auto route made when it chose to run locally (`TestVisionGateIgnoresALeaseOnAnotherCard`, `TestVisionGateStillWaitsForALeaseOnItsOwnCard`); before this it waited `vision_gpu_wait_sec` on **any** live lease and deferred a call the delegator had just kept local |
 | the placement table | `Live.CardsHeld` (the local snapshot arms it from the same lease directory and card table) and agent row 5c, below |
 
@@ -1585,14 +1868,22 @@ takeover that stops a tree, the hardening of `gpu release --epoch N` over a live
 
 **The rule (AGENTS.md).** The cards do the inference; RAM is overflow only. Spill is allowed only while it is
 bounded, and it never makes the box unstable. **What the guard keeps of that rule** is narrower, and is stated here so it is
-not read as more: before a lease that declares host RAM is granted, the guard holds it back if its declared need, added to the
-committed memory the OS reports and to what granted leases have yet to load, would pass a line (physical RAM less a headroom).
-The line is the guard's own, chosen 2026-10-09 as a conservative way to keep spill bounded; it is a definition, not a
-measurement of any box's paging. The guard compares a *declaration*, which is an estimate: it does not bound what a lane then
-commits and it does not stop a process that holds no lease (the measured case in which an admitted lane reads OVER is under
-"Known limits", below). A card has a hard edge (the driver refuses the allocation); host RAM does not (the OS pages and every
-other process stalls), so the harness checks *before* the grant, on a number that includes what the granted jobs are about to
-load.
+not read as more: before a lease that declares host RAM is granted, the guard holds it back if either of two things its
+declaration adds would pass a line. The **working set it will touch** is held to the memory that is *available* (less a
+headroom): that is what pages when it runs out. The **commit it will be charged** is held to a line that depends on who said what
+the commit is. A job that **states its commit** (`--ram-commit`, or a caller that measured one) is held to the OS *commit limit*
+(less the same headroom), where the OS enforces one: past it other processes' allocations fail once the page file has reached its
+maximum (the limit moves with a system-managed page file: "The commit limit moves", below). A job that **states none** declares one
+figure, and its commit is that figure standing in for one: it is held to *physical RAM* (less the headroom), the line every such
+caller always had, because a job can commit more than it touches (a coder-model arm touched 27.8 GiB and was charged 58.1) and the
+commit limit lies 44 GiB further out than physical RAM on the reference box, so against it two such arms were admitted into commit
+exhaustion that the old line refuses ("Why two quantities", below). Committed memory is not memory in use, which is why a job that
+has measured its commit is not held to the physical line. The lines are the guard's own, chosen 2026-10-09 as a conservative way to
+keep spill bounded; they are a definition, not a measurement of any box's paging. The guard compares a *declaration*, which is an
+estimate: it does not bound what a lane then commits and it does not stop a process that holds no lease (the measured case in
+which an admitted lane leaves the box close to a line is under "Known limits", below). A card has a hard edge (the driver
+refuses the allocation); host RAM does not (the OS pages and every other process stalls), so the harness checks *before* the
+grant, on numbers that include what the granted jobs are about to load.
 
 **The incident.** On the reference 3-card Windows box (127.7 GiB physical), two ComfyUI media lanes that stream bf16
 weights the card cannot hold ran at once under two card-scoped media leases (`gpu reserve --devices <card> --class media --
@@ -1612,8 +1903,12 @@ that have been granted and have not loaded yet (both lanes were granted while RA
 
 ### What a lease declares
 
-A lease carries `Options.HostRAMGiB`, stamped on its record as `host_ram_gib` (additive and omitted when 0: an older
-binary ignores it, and a record without it declares nothing). Where the number comes from, in order
+A lease carries `Options.HostRAMGiB`, the working set it will touch, stamped on its record as `host_ram_gib` (additive and
+omitted when 0: an older binary ignores it, and a record without it declares nothing), and `Options.HostRAMCommitGiB`, the commit
+it STATES it will be charged, stamped as `host_ram_commit_gib` (additive; 0 or absent means no commit was stated and the commit is the
+same figure as `host_ram_gib`, which is what every caller that declares one number leaves, so such a caller is judged on commit
+against physical RAM as it always was; present, even equal to `host_ram_gib`, it is stated and judged against the commit limit).
+Where the touched figure comes from, in order
 (`internal/hostneed`; `TestAKrea2Bf16CallOn16GiBIsTheUnetPlusTheTextEncoder`, `TestAnExplicitRamBeatsTheEstimate`,
 `TestTextAndSeatLeasesDefaultToZero`):
 
@@ -1625,6 +1920,27 @@ binary ignores it, and a record without it declares nothing). Where the number c
 | a file whose size cannot be read | the documented per-family size (`hostneed.familySizes`: the files the reference box binds, rounded up; Qwen-Image 2512 bf16 is the incident's ~38 GiB stream). A family with neither has no estimate and takes the class default. |
 | the **media class default** | for a media lease with no `--ram` and no recognised call: the largest estimate over the render families **this box binds** (`imagegen_*`, `gen_edit_*`, `videogen_*`, named families; a binding on the sd.cpp engine is not counted, on whichever route it is, a video family included), so a 32 GiB node is not held to a 128 GiB node's numbers; 0 when nothing is bound. It is never clamped to fit the box: a default that cannot be admitted is refused with the reason and `--ram` as the way out. |
 | a text lease | 0: the harness cannot size an arbitrary wrapped command, so a text reservation declares nothing unless `--ram` says (the agent seat's own reload is sized where the harness does it, below). |
+
+**The commit, `gpu reserve --ram-commit <GiB>`.** Commit is memory the OS has promised the job, touched or not, and it can be much
+more than the job touches. Measured on the reference box (session readings, not recorded in this repository): one
+coder-model arm's process tree reached a 27.8 GiB working set and a 58.1 GiB private charge while the host's available memory
+fell from 91.5 to 61.1 GiB with no paging; a llama.cpp leg with every layer on the card held a 3.6 GiB working set and a 32.1
+GiB charge. So the arm states `--ram 28 --ram-commit 58`. **Stating the commit is what moves it to the commit limit.** Unset,
+`--ram-commit` is not stated: the commit is the `--ram` figure standing in for one, **including when `--ram` was estimated**, and
+it is held to physical RAM less the headroom, the line a job that declares one number has always been held to (or to an enforced commit limit
+less the headroom where that sits below physical RAM: strict-mode Linux with little swap, where the kernel refuses allocations at the limit). A commit stated
+equal to `--ram` is still stated (the lease record keeps it and the detached holder is passed it), so a job that measured its
+commit and found it equal to its working set is judged on the limit. A commit is declared beside the working set it goes with:
+`--ram-commit` needs a `--ram` (given or estimated) above 0, and is itself above 0 and finite (`NaN` and `Inf` are refused by
+name, as is a non-finite `--ram`: neither compares against anything; the rule itself and the hidden `gpu hold` verb refuse a figure that is not finite as well,
+`TestARuleCallerThatDeclaresAFigureThatIsNotFiniteIsRefused`, `TestHoldRefusesAHostRAMFigureThatIsNotFinite`). The converse is a known limit: a job whose commit is
+*smaller* than its working set (mapped files count in the working set and not in the commit) cannot say so by leaving the flag
+out, and is judged on the larger figure; `--ram-commit` states a smaller one. A caller that never heard of the flag declares one
+figure and states no commit, and keeps the protection it had: the media admission, the seat's warm-back, the read-only per-node
+check, and the card allocator unless it is handed a stated one. The footprint store records the private peak of a render's tree,
+and the media admission and the warm-back could pass it as a stated commit; that is not done here. A lease that unloads
+the seat (`--unload-seat`) carries both figures through the wait (`host_ram_wait_gib` and `host_ram_wait_commit_gib`), and
+admission moves both into the declared fields in one step, a stated commit staying stated.
 
 **When the figure is the class default, the verb says why** (F71, `classDefaultHint`;
 `TestReserveNamesTheUnrecognisedWrapperWhenItDeclaresTheClassDefault`, `TestReserveNamesTheGraphWhenARecognisedHelperRunsOne`,
@@ -1671,28 +1987,90 @@ as the way to a smaller one (`TestReserveOnAFlagOffHostDeclaresTheFilesInFullWit
 
 ### The admission rule
 
-Every grant path applies **one** rule (`gpuprobe.HostRAMAdmits`), with committed memory read from the OS
-(`GlobalMemoryStatusEx`: total minus available page file on Windows; `/proc/meminfo` `Committed_AS` on Linux):
+Every grant path applies **one** rule (`gpuprobe.HostRAMAdmitsLoad`). It reads two counters of the OS, the memory that is
+available (`GlobalMemoryStatusEx` `AvailPhys` on Windows, `MemAvailable` in `/proc/meminfo` on Linux) and the commit charge and
+limit (Windows: total minus available page file, and the total, which on that call is the commit limit, physical RAM plus the page
+file; Linux: `Committed_AS` and `CommitLimit`), and admits a lease iff BOTH conditions hold:
 
 ```
-commit term:    committed memory now + the lease's declared need + the not-yet-loaded part   <= physical RAM - headroom
-physical term:  available physical RAM now - the lease's declared need - the not-yet-loaded part   >= headroom
-admit iff BOTH hold       (headroom = gpu_host_ram_headroom_gib, default 8 GiB: chosen, not measured; see "How the numbers get measured")
+touched:  available RAM now - the lease's touched need - the not-yet-touched part                              >= headroom
+commit:   commit charge now + the lease's commit need + the not-yet-charged part        <=  commit limit - headroom     (a STATED commit, where the OS enforces a limit)
+          commit charge now + the lease's declared figure + the not-yet-touched part    <=  physical RAM - headroom      (a commit nobody stated, on every reading)
+          (headroom = gpu_host_ram_headroom_gib, default 8 GiB: chosen, not measured; see "How the numbers get measured")
 ```
 
-Two terms, because what the OS counts as committed is not the same quantity as what sits in RAM. Commit is the primary term:
-it counts memory the OS has promised, touched or not, which is what stops a second lane before it has loaded. On Windows a
-process's GPU allocations may be charged to its commit without ever occupying system RAM (see the finding below), and that cuts
-two ways. Where the commit counter already carries the VRAM in use it reads high, and a rule that read only commit would make a
-lane wait longer than it needs to. But a declaration is the size of the model files, or, once three measured runs of that
-family exist on the node, the *resident* memory those runs reached (a high percentile of the last twenty, clamped at twice the files' sum; it never lowers a declaration below the files), so a lane whose commit carries card
-allocations on top commits **more than it declared**, and the commit term learns that only after the lane has started. The
-physical term reads what can be handed out without paging, so it refuses a load that resident memory cannot take even when
-commit does not show it; but it measures the box against the *declared* loads at the moment of the decision, so it does not
-bound a lane that holds more than it declared, and neither term sees a process that holds no lease. Together the two terms
-refuse when either reading says the declared load would pass the line; they do not make an admitted load fit. A refusal says
-which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB physical is available`
-(`TestHostRAMAdmitsAlsoRequiresTheAvailableFloor`).
+A quantity a lease declares as 0 is not judged (it adds nothing to that counter), a lease that declares neither is admitted
+without reading anything, and a touched need above physical RAM less the headroom, or a commit above the line it is judged
+against less the headroom, is refused at once (waiting cannot help). A refusal says which condition refused and with whose numbers,
+and says both when both did: `needs 28.0 GiB, only 30.0 GiB of 127.7 GiB physical is available, 8.0 GiB headroom`, `needs 58.1 GiB of
+commit, committed 150.0 of 171.7 GiB commit limit, 8.0 GiB headroom` for a stated commit, and `needs 46.8 GiB, committed 84.6 of
+127.7 GiB physical, 8.0 GiB headroom` for a commit nobody stated, which on a host whose commit limit lies beyond physical RAM adds
+that a stated commit is held to that limit instead (`TestEachConditionRefusesAlone`,
+`TestAGrantIsRefusedOnItsCommitAlthoughItsTouchedSetFits`, `TestAGrantThatStatesNoCommitIsJudgedAgainstPhysicalRAMLessTheHeadroom`).
+A reading from a platform whose limit is always enforced that carries none (a Windows total page file of 0) is not a reading: the
+rule waits on it as unreadable and the verdict is `unknown` (`TestAHardReadingWithoutACommitLimitIsUnreadable`), where it used to
+skip the commit condition without a word.
+
+**Why two quantities, why those lines, and why a commit nobody stated keeps the old one.** The first version compared the commit
+charge plus the need against *physical RAM* less the headroom, for every caller. Committed memory is not memory in use: on the
+reference box (127.7 GiB RAM, 171.7 GiB commit limit) it read 70.5 GiB committed while 75.6 GiB were physically free (2026-10-17),
+and a coder-model arm that touches 27.8 GiB and is charged 58.1 GiB was refused (70.5 + 58.1 = 128.6 against 119.7). A job that
+**states** its commit is judged against the commit limit: the same arm needs 128.6 of 163.7, and against the available memory 27.8
+of 67.6: admitted (`TestMeasuredCoderArmIsAdmittedAgainstTheCommitLimit`). The commit charge cannot simply be dropped: on Windows it,
+not the physical availability, is what can run out, because a job that commits about twice what it touches can push the charge
+past the limit (physical RAM plus the page file) and, once the page file has reached its maximum, other processes' allocations fail
+with plenty of RAM free (before that Windows grows a system-managed file: "The commit limit moves", below). And what a
+job touches cannot be judged against the commit limit, because the available memory is what pages when it runs out. Each quantity
+is held to the line that is real for it.
+
+**That holds for a commit somebody measured. A caller that declares one figure measured nothing:** its commit is its touched figure
+standing in, and a job can commit twice what it touches. Against the commit limit the two coder arms declared as 27.8 / 27.8 each
+were both admitted: the touched line leaves 20.0 GiB of the available memory and the limit leaves 126.1 projected of 163.7, while
+the old line refuses (126.1 > 119.7), with arm 1 still loading and once it had loaded (128.6 committed, 156.4 projected). After
+both load the real charge is 70.5 + 2 x 58.1 = 186.7 GiB against the 171.7 GiB limit, 15.0 GiB past it, with the touched set at
+55.6 of 75.6 available: commit exhaustion, not paging. A single figure of 49.2 to 67.6 GiB at that reading was newly admitted for
+the same reason. So an unstated commit keeps the line it always had, and those arms are refused as one figure
+(`TestTwoCoderArmsDeclaredAsOneFigureAreRefusedOnTheCommitCharge`,
+`TestTheBandThatTheCommitLimitOpenedForASingleFigureIsRefusedAgain`) and admitted only on commits stated and fitting the limit
+(`TestTwoCoderArmsAreAdmittedOnlyOnStatedCommitsThatFitTheLimit`: arm 1 at its measured 58.1; a second arm up to 35.1 GiB of stated
+commit once arm 1 has loaded; the measured 58.1 twice is 186.7 against 163.7 and is refused). A job that commits less than it
+touches is the safe direction for the default (it over-declares); one under the display driver model can commit 2x to 9x what it
+touches (the coder arm 58.1 on 27.8, a llama.cpp leg 32.1 on 3.6), which is why the default cannot be the limit. The incident of 2026-10-09 is refused whatever the
+available memory is: with a 56 GiB desktop baseline the first 32.75 GiB lane is admitted and the second is refused while the first
+has not loaded, on the commit charge (56 + 65.5 = 121.5 against 120) at any available figure and on the available memory too at 72
+GiB (`TestTheTwoLaneIncidentIsRefusedWhateverIsAvailable`, `TestTheTwoLaneIncidentIsStillRefused`).
+
+**The commit limit moves.** The limit read is the *current* commit limit (`ullTotalPageFile`, physical RAM plus the page file as it
+is sized now). On a host whose page file is system managed Windows grows the file as the commit charge nears the limit, and the
+next reading carries a larger one: the reference box read 187.7 GiB on 2026-10-09 and 10 with the file at 60 to 68 GiB, and 171.7
+GiB on 2026-10-17 (read-only, 2026-10-17: the page file is `pagefile.sys` with initial and maximum size 0, the system-managed
+form, 45,056 MiB allocated, 6 MiB in use). So for a stated commit the bound is a moving one: it caps the commit at the page file's
+current size and does not stop the file growing, and growth was the incident's symptom. **"Other processes' allocations fail past
+the limit" is therefore conditional on the page file having reached its maximum**; before that, a charge near the limit makes
+Windows grow the file. The rule reads the current limit, the conservative choice: with a system-managed file the configured
+maximum is the number 0, there is no figure to read, and a rule that assumed a large maximum would admit what the file has not yet
+grown to take. The available figure is not stale: it is read on every attempt and every poll, at most 2 s before the comparison.
+
+**Where a stated commit is judged, and what Linux loses.** Always on Windows. On Linux in strict overcommit mode
+(`vm.overcommit_memory` = 2, or a mode that cannot be read, below); in the default heuristic mode (0) and in mode 1 the kernel grants allocations past `CommitLimit`, and
+`Committed_AS` counts mappings a process reserved and never touched (CUDA and large `mmap`s do), so refusing a stated commit on it
+would turn work away for a limit nothing enforces. The reading says so (`HostMemory.CommitLimitSoft`, read from
+`/proc/sys/vm/overcommit_memory` through a seam, `TestTheLinuxReaderMarksTheCommitLimitSoftOnlyInAKnownLaxMode`). **A mode that
+cannot be read or parsed is assumed strict**: the limit stays a hard one, failing closed. A `/proc/meminfo` that hides the commit
+counters has no limit to enforce and reads soft. So on Linux in modes 0 and 1 a **stated** commit is judged by neither line: it
+loses both the commit limit and the physical line, and only the touched condition applies to it
+(`TestTheCommitConditionIsAppliedOnlyWhereTheLimitIsHard`). A commit nobody stated is still held to physical RAM less the headroom on every reading,
+as it was before the two conditions existed, and to an enforced commit limit less the headroom when that limit sits below physical RAM (strict-mode Linux
+with little swap: the limit is about half the RAM plus the swap, and the kernel refuses allocations at it; `TestACommitNobodyStatedIsHeldToAnEnforcedLimitThatSitsBelowPhysicalRAM`) (`TestAnUnstatedCommitIsJudgedWhereTheLimitIsNotEnforced`). Two Linux nodes of the fleet
+were read on 2026-10-17: both in mode 0, with `Committed_AS` of 19.5 GiB on a 31.2 GiB `MemTotal` and 3.8 GiB on 30.2 GiB, so there
+a stated commit is moot, and one figure declared once is held to `Committed_AS` against physical RAM less the headroom as it was.
+
+**The not-yet-loaded part, per quantity.** What running leases have yet to touch is their declared working set less what the
+processes below their holders hold *resident*; what they have yet to be charged is their declared commit less what those
+processes hold *privately* (private bytes are the currency of the commit charge: `PrivateUsage` on Windows and, on Linux, the private
+writable mappings, `VmData`, which is what `Committed_AS` charges when a mapping is made). Each is never below zero and pooled per holder
+(see the bullet below). A declaration is an estimate, so this rule is a brake on declared loads: it does not bound what a lane then
+commits, and neither condition sees a process that holds no lease.
 
 * **Everywhere the cards are granted.** A card-scoped grant (`--devices`, `--cards`, the media admission) checks inside
   `grantDevicesLocked`, under the epoch lock, after the cards are shown free and before the epoch is issued; the record that
@@ -1736,17 +2114,24 @@ which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB phys
   to unblock a lane was still refused (found by the post-implementation review, 2026-10-10;
   `TestLoadInstallsTheHostRAMHeadroomForEveryGrant`, `TestAGrantKeepsTheInstalledHeadroomNotTheBuiltInOne`,
   `TestReserveGrantsAgainstTheConfiguredHeadroom`, `TestTheMediaAdmissionKeepsTheConfiguredHeadroom`).
-* **The not-yet-loaded part.** A granted lease's declared need minus what the processes below its holder hold RESIDENT
-  right now (`WorkingSetSize` through `K32GetProcessMemoryInfo` on Windows, `VmRSS` on Linux), never below zero. Resident and
-  not private, because a declaration is in RAM units and committed-but-unoccupied memory (a card allocation charged to the
+* **The not-yet-loaded part.** A granted lease's declared working set minus what the processes below its holder hold RESIDENT
+  right now (`WorkingSetSize` through `K32GetProcessMemoryInfo` on Windows, `VmRSS` on Linux), and its declared commit minus what
+  those processes hold PRIVATELY (`PrivateUsage` on Windows, `VmData` on Linux: the private writable mappings, touched or not), each never below zero. Each against
+  its own declaration, because a declaration is in RAM units and committed-but-unoccupied memory (a card allocation charged to the
   process's commit, an untouched reservation) is not RAM that has loaded: a real child that was committed 256 MiB it never
   touched read private 305 MiB and resident 13 MiB on the reference box, 2026-10-10
-  (`TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted`).
+  (`TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted`, which runs on Linux too). On Linux the touched part of the mappings
+  (`RssAnon` plus `VmSwap`) read 2.1 MiB for such a child while `Committed_AS` moved 333 MiB, so on a strict host the rest would have
+  been counted twice, once inside the charge and once as still to be charged; the reader returns `VmData`
+  (`TestLinuxHeldCommitCarriesWhatTheKernelAlreadyCharges`). `VmData` leaves out the main thread's stack and shared memory, which the kernel
+  charges and it does not, so it can read a little low, which leaves more pending: it can over-refuse and never over-admits. Subtracting the private bytes from the working-set declaration would call a
+  lane loaded while most of its RAM was still to come; subtracting the working set from the commit declaration would call a lane
+  uncharged while its process already held the charge (`TestWhatARunningLeaseHasYetToBeChargedCountsAgainstTheCommitLimit`).
   Leases that share a holder pid are pooled (the pipeline holds one lease per card in one server process, and all their
   runners are below it), the holder's own memory is not subtracted (a long-lived server's memory is not the job's), and a
   holder whose memory cannot be read counts as holding nothing, so its whole declared need is pending
   (`TestTheNotYetLoadedPartOfAGrantedLeaseCounts`, `TestPendingPoolsLeasesByHolder`). Without this term the second lane
-  reads 20 GiB committed, sees room, and both go: the incident, replayed.
+  sees room, and both go: the incident, replayed.
 * **A need of 0 is never read against the host.** The lease adds no memory, so a box that is already over is not made to
   wait for it, and the counters are not even read (`TestALeaseThatDeclaresNoNeedIsNeverReadAgainstTheHost`).
 * **A shortage waits in the same line.** The request stays a registered waiter, in the same FIFO, in the same place,
@@ -1765,24 +2150,27 @@ which term refused: `committed X of Y GiB physical` or `only A GiB of Y GiB phys
   (`TestThePassedWaiterIsServedRightAfterThePasserAndNothingElsePassesItMeanwhile`): at most the lease of whoever passed.
   **Named limits.** Nothing reserves the waiter's memory against a declaring request on *disjoint* cards (disjoint backfill
   was always allowed), and a place held for a caller who left (a token) still holds against everyone for its 30 s grace.
-  The line `waiting for host RAM: needs 33.4 GiB, committed 96.4 of 127.7 GiB physical
-  (+12.0 GiB still to load by leases already running), 8.0 GiB headroom` is printed once per request, never per poll.
-  `--wait 0` refuses with that text, the flag that waits, and `--ram` as the way out; the media admission answers the same
+  The line `waiting for host RAM: needs 33.4 GiB, only 31.0 GiB of 127.7 GiB physical is available
+  (+12.0 GiB still to load by leases already running), 8.0 GiB headroom` (or the commit sentence, above) is printed once per request,
+  never per poll. `--wait 0` refuses with that text, the flag that waits, and `--ram` as the way out (`--ram-commit` too when a stated
+  commit is what refused); the media admission answers the same
   words as a queued place in line (resumable doors) or a busy defer (the rest). That holds for a call with no time left
   (`gpu_wait_ms` 0, or a window spent) on every plan shape: a pinned card, an allocated card and the whole node all answer
   the guard's sentence, never the line's "promised to callers ahead of this one" (the cards are free and nobody is ahead;
   `TestWaitZeroKeepsTheGuardsSentenceOnAPinnedPlan` and its siblings, G2 of the P0 plan).
-* **A need no state of the box admits is refused at once.** If the need exceeds physical RAM less the headroom, waiting
-  cannot help: the request ends with the text (it names `--ram` and `gpu_host_ram_headroom_gib`), and the pipeline classes it
+* **A need no state of the box admits is refused at once.** If the touched need exceeds physical RAM less the headroom, or the
+  commit exceeds the commit limit less the headroom (where it is enforced), waiting cannot help: the request ends with the text (it
+  names `--ram` or `--ram-commit`, and `gpu_host_ram_headroom_gib`), and the pipeline classes it
   `gpu_lease_unavailable` (a configuration fault), not `gpu_busy`. `--ram 0` is the escape hatch the operator owns.
 * **Unreadable memory.** On a platform that has a reader (Windows, Linux) a lease that declares a need waits until the host
   can be read, the way the other guards fail closed. On a platform with no reader the rule cannot judge and admits.
 
-**Known limits, stated so they are not discovered.** **An admitted lane can still read OVER.** The rule applied to a commit
-reading of 81.6 GiB (the reference box between jobs, 2026-10-10 about 04:12 UTC; 83 GiB available, 127.7 GiB physical,
-headroom 8) admits a 32.8 GiB declaration, the Krea 2 bf16 files: projected 114.4 GiB against a limit of 119.7, 50.2 GiB left
-available, so both terms pass (`gpuprobe.HostRAMAdmits` on those numbers, pinned by
-`TestTheQuotedCounterexampleIsAdmittedOnBothTerms`). **Provenance:** the readings in this paragraph (81.6 GiB committed with
+**Known limits, stated so they are not discovered.** **An admitted lane can still leave the box close to a line.** The rule applied
+to a commit reading of 81.6 GiB (the reference box between jobs, 2026-10-10 about 04:12 UTC; 83 GiB available, 127.7 GiB physical,
+commit limit 187.7 GiB, headroom 8) admits a 32.8 GiB declaration, the Krea 2 bf16 files: 114.4 GiB of projected commit against a
+bound of 119.7 (physical RAM less the headroom, for the one figure; 179.7 against the commit limit for a stated commit), 50.2 GiB
+left available, so both conditions pass (`gpuprobe.HostRAMAdmitsLoad` on those numbers, pinned by
+`TestTheQuotedCounterexampleIsAdmittedOnBothConditions`). **Provenance:** the readings in this paragraph (81.6 GiB committed with
 83 GiB available; 57.7 GiB private bytes with a 40.7 GiB working set; 129.3 GiB committed with 49.1 GiB available and 2,298 MiB of
 page file in use) were measured on the reference box on 2026-10-10, from session readings that are not recorded in this
 repository; they were not re-measured for this document. At 06:01 UTC the box read 129.5 GiB committed with
@@ -1791,18 +2179,22 @@ a second process, launched fresh seven minutes earlier, held the same 57.7 GiB, 
 available with the page file unchanged (2,298 MiB in use): 1.6 GiB above physical RAM and 9.6 GiB past the guard's own line. The
 family those lanes ran is not recorded in the readings, and the 81.6 and 129.3 GiB readings are separate observations two hours
 apart, so the 47.7 GiB between them is the lane and whatever else changed, not the lane alone. What they establish is narrower: a
-lane that holds 57.7 GiB private (24.9 GiB more than a 32.8 GiB declaration), added to a baseline the rule admits, passes
-physical RAM. Whether a Krea 2 lane runs at that footprint is the S1 acceptance data. The exposure is (a) the first three runs of every family/quant/task key on a node, which
+lane that holds 57.7 GiB private (24.9 GiB more than a 32.8 GiB declaration), added to a baseline the rule admits, reads 129.3 GiB
+committed: 58 GiB under the commit limit and with 49.1 GiB available, so a STATED commit's lines are not reached (that reading is above
+physical RAM, which is the line a commit nobody stated is held to, and `OVER` says so). Whether a Krea 2 lane runs at that footprint is the S1 acceptance data. The exposure is (a) the first three runs of every family/quant/task key on a node, which
 declare the file sizes, (b) any lane whose private bytes exceed its declared resident need, and (c) any process that holds no
 lease (the watcher below saw commit swing 95.3 to 132.1 GiB, more than four times the 8 GiB headroom). What the guard does about it: a
-lane already running is counted whole in the commit reading, so the next lease waits (a declaration equal to that lane's working
-set, 40.7 GiB, is refused on the same baseline: 122.3 GiB projected against 119.7), and `OVER` reaches `gpu status` and
-`offload_status`. What it does not do: stop the lane that took the box over. The lasting fix is to declare the larger of
-resident and private for the commit term, or to add the card memory a lane's commit carries to the projection; both need the
-S1 acceptance runs' sampled data first (see "How the numbers get measured"). Linux's `Committed_AS` counts mappings a process reserved and never
-touched (CUDA and large `mmap`s do), so it reads high there: the safe direction for a guard whose failure is paging. A
-`/proc/meminfo` that omits the commit counters (a sandbox that virtualises it) falls back to what the box visibly uses
-(`MemTotal - MemAvailable`, limit `MemTotal`), which under-counts reserved memory but keeps the rule working: no reading
+lane already running is counted in the commit reading and gone from the available figure, so the next lease waits when its
+declaration would pass its line (at the 129.3 GiB reading with 49.1 GiB available, any figure declared once is refused on the commit
+charge, which is already above physical RAM; a 41.2 GiB commit STATED is refused on the available memory: 49.1 - 41.2 = 7.9 against
+a headroom of 8, and a stated 41.0 is not, `TestTheDocumentedReadingsAgreeWithTheRule`), and `NEAR` and `OVER` reach `gpu status`
+and `offload_status`. What it does not do: stop the lane that took the box over. The lasting fix is to declare the commit from
+measurement: the footprint store already records the private peak of a lane's process tree beside its resident peak
+(`TreeMemory`), so a declaration could state its commit from three measured runs instead of defaulting to the touched figure; that
+is not done here, and until it is the commit defaults to the touched figure, held to physical RAM, unless the caller states one (see
+"How the numbers get measured"). On Linux a stated commit is not judged unless the kernel is in strict overcommit mode (see "The
+admission rule"). A `/proc/meminfo` that omits the commit counters (a sandbox that virtualises it) falls back to what the box visibly uses
+(`MemTotal - MemAvailable`, limit `MemTotal`), marked soft, which keeps the rule working on the available memory alone: no reading
 would make every declaring lease wait forever. A
 detached lease (`--detach`) has no command of its own below its holder, so its whole declared need counts as still to
 load for as long as it is held (a budget reservation). A kept ComfyUI whose runner has exited is reparented away from the
@@ -1869,13 +2261,15 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   runs. The stock ComfyUI loader (dynamic VRAM off) maps every safetensors file copy-on-write and Windows charges the whole
   file to commit at map time (14.73 GiB on one Wan expert); a read-only loader adds nothing. This replaces the earlier
   one-process observation (2026-10-10), which was consistent with it and could not settle it.
-  *What it means for the brake.* The brake's commit term counts card-resident weights as host memory: system commit sits
-  tens of GiB above what the host really uses, so commit says nothing about paging by itself. **The brake is unchanged**: it
-  still reads committed memory plus the declared need against physical RAM less the headroom, and available RAM is the paging
-  signal beside it (decided 2026-10-11, F70). What keeps card-only work moving is the declaration: a recipe
-  whose weights all sit on the cards (card-only placement, the read-only loader) declares **`--ram 0`**, which is the brake's own
-  unit (host memory the lane adds to commit), and a need of 0 is always admitted. A recipe that streams weights from RAM declares
-  them in full and waits behind the brake as before.
+  *What it means for the brake.* System commit sits tens of GiB above what the host really uses, because card-resident weights
+  are charged to it, so commit says nothing about paging by itself. The brake compares a commit nobody stated to physical RAM (kept
+  on 2026-10-11 while this was measured, and the line every caller that declares one figure keeps); it judges what a lane touches
+  against the available RAM, which is the paging signal, and a commit a caller states against the OS commit limit, which is what
+  other processes' allocations fail once the page file has reached its maximum. What keeps
+  card-only work moving is the declaration: a recipe whose weights all sit on the cards (card-only placement, the read-only
+  loader) declares **`--ram 0`**, and a need of 0 is always admitted. A recipe that streams weights from RAM declares them in
+  full; a recipe whose commit exceeds what it touches (the card allocations above are charged 1:1) states both,
+  `--ram <touched> --ram-commit <charged>`.
   *Limits.* **One driver on one box:** the 1:1 charge was measured on the reference box's Windows driver and not on any other node
   or driver version, so another host's commit says nothing until it is measured there. **Commit counters are system-wide:** other
   tenants move them by tens of GiB (133 GiB before one run), so only a process tree's own private bytes are attributable to a
@@ -1910,9 +2304,11 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   and whether the page-cache part is memory the OS can drop is not verified here. So with the key unset the warm-back is
   admitted against a figure below the incident's, and a node that runs a seat sets `agent_seat_host_ram_gib` from its own
   measurement before it relies on the check.
-* **The warm passes the grant's admission.** Committed memory now, plus the seat's footprint, plus what the *other* live
-  leases have yet to load, must stay under physical RAM less the headroom (`Manager.HostRAMCheckWithout`: the same function
-  as the grant, with the lease being released left out, because its command has exited and it loads nothing more). A host
+* **The warm passes the grant's admission.** The seat's footprint, taken for both quantities and with no commit stated, plus
+  what the *other* live leases have yet to load, must leave the headroom of the available RAM and keep the commit charge under
+  physical RAM less the headroom: the warm-back states no commit, so it is held to physical RAM and not to the commit limit
+  (`TestAWarmBackIsHeldToPhysicalRAMAndNotToTheCommitLimit`). It is `Manager.HostRAMCheckWithout`, the same function
+  as the grant, with the lease being released left out, because its command has exited and it loads nothing more. A host
   that reads NEAR or OVER therefore never warms (`TestAWarmBackIsRefusedWhenTheHostCannotTakeTheSeatAndStaysOwed`,
   `TestAWarmBackDoesNotCountTheLeaseItIsReleasing`).
 * **Never while a lane streams.** Any other live lease that declared host RAM refuses the warm outright, whatever the
@@ -1949,7 +2345,7 @@ can be read (`gpu_hostram_await.go`):
    the same reason until its deadline with the seat cycled, so that lease keeps the grant's comparison too
    (`TestAnUnreadableHostKeepsTheGrantsComparisonForALeaseThatUnloadsTheSeat`).
 1. **A need no state of the box could ever admit is refused at once**, before anything is taken or unloaded (`screenDeferredHostRAM`,
-   `Manager.HostRAMCheck`): waiting cannot help, and a seat cycle for a lease that can never run is bought for nothing.
+   `Manager.HostRAMCheckLoad`, with both figures): waiting cannot help, and a seat cycle for a lease that can never run is bought for nothing.
 2. **The grant takes the place in line and the cards and compares nothing.** `Options.HostRAMGiB` is 0 for it and the figure
    travels as `Options.HostRAMWaitGiB`, stamped on the record as `host_ram_wait_gib` (additive and omitted when 0: an older reader
    ignores it and reads a lease that declares nothing yet). The card allocator's host term is off for the same reason
@@ -1966,7 +2362,7 @@ can be read (`gpu_hostram_await.go`):
 5. **The command starts.**
 
 **It is a reorder, not a looser check.** `AwaitHostRAM` puts the figure to the same function the grant does
-(`gpuprobe.HostRAMAdmits` through `hostRAMRefusalWith`): the same host reading, the same headroom, the not-yet-loaded part of every
+(`gpuprobe.HostRAMAdmitsLoad` through `hostRAMCheckWith`): the same host reading, the same headroom, the not-yet-loaded part of every
 lease that has been admitted, the same sentence. Over a table of hosts, needs and running leases it admits and refuses exactly
 where the grant does (`TestTheAwaitAdmitsExactlyWhereTheGrantDoes`). If the unload frees too little the lease keeps its cards,
 keeps waiting inside `--wait` and the hold bound, and ends with the host-RAM refusal (when `--wait` ends it) or the hold bound's
@@ -1993,7 +2389,7 @@ the drain starts over under the new lease, as for a lease lost during the drain.
 **What happened.** On the reference box a `gpu reserve --wait 8h --drain --unload-seat --class media --for 40m -- <a command that is
 not a recognised render helper>` with no `--ram` declared the media class default (46.8 GiB, the largest render family). The order
 above took the cards (exclusive), drained, unloaded the seat and only then asked the host, still holding the cards, for the whole
-`--wait`. The seat was not even loaded (the unload freed nothing), committed RAM was 84.6 of 127.7 GiB with 8 GiB of headroom, so the
+`--wait`. The seat was not even loaded (the unload freed nothing), committed RAM was 84.6 of 127.7 GiB with 8 GiB of headroom (the rule of that day compared it to physical RAM, as it does for a commit nobody stated), so the
 figure could not be met, and the lease held all three cards idle for about 50 minutes while a production lease queued behind it,
 renewing its window with no work running. The order is not the defect (it breaks a real deadlock and stays); the defect is that
 nothing bounded the time the cards could be held after it.
@@ -2022,8 +2418,8 @@ host's admission:
 2. **Nothing runs and nothing re-queues.** The command never starts; the bound's failure is not a lost lease, so the requeue branch
    of the drain loop is never taken.
 3. **The reserve exits non-zero with one line** (`errHostRAMHoldBound`): the hold bound that passed; how long the cards were held
-   and how much of it was the wait after the unload; the host's own refusal, which carries the need and the committed, physical and
-   headroom figures (`waiting for host RAM: needs 46.8 GiB, committed 84.6 of 127.7 GiB physical, 8.0 GiB headroom`); that nothing ran
+   and how much of it was the wait after the unload; the host's own refusal, which carries the need, the figures of the condition that refused and the
+   headroom (for a commit nobody stated the wording is still `waiting for host RAM: needs 46.8 GiB, committed 84.6 of 127.7 GiB physical, 8.0 GiB headroom`; the sentence names the condition that refused); that nothing ran
    under it and the lease **is being released** (the text is built before the release runs and claims no more; see "Releasing on its
    own" below for the outcome); what to do (a figure that is only the media class default: pass `--ram <GiB>` with the real figure, `--ram 0` when
    the weights sit on the cards; any other figure: a smaller `--ram`, or wait for the host to free memory); and the lever that
@@ -2140,9 +2536,15 @@ skipped, while the wrapper in its retry window kept running its command and wrot
 25 s of overlap. Now (a) the acquirer side leaves such a record, and its claims, alone while its keeper shows a sign of life within the
 heartbeat TTL (`DefaultHeartbeatTTL`, 120 s, the threshold the reader judges every record's heartbeat by): the epoch's `hb.<epoch>` file
 (its content is the moment of the last renewal; every `hb.*` counts for a `meta.json`, whose epoch is not known) or the record's own
-modification time. The whole-node grant, the card grant over a whole-node record and `verifyNoDeviceLeases` (a whole-node grant over a
-card lease whose record cannot be read) refuse with "the lease record cannot be read, and its holder is alive"; the sweep takes the
-record only once that liveness is gone. (b) The keepers above fail closed once their window passes, and every keeper's longest silence
+modification time. A heartbeat is read as the reclaim rule reads it (`keeperEvidence`): its content when it is a time of renewal (a number
+not below `minHeartbeatMs`, the earliest instant 13 digits of milliseconds can name; a torn write leaves a prefix of the digits, which parses
+and is not one), else the file's modification time; a file settled absent is no sign; one that can be neither read nor examined, or whose
+rename is installing it, is unknown, and unknown is alive. For a `meta.json`, whose epoch is not known, the heartbeats are found by listing the
+lease directory, and a listing does not show a name a rename is installing: a staged `hb.<epoch>.tmp` that is fresh and whose live name is not
+listed counts as an unknown heartbeat (as a launch marker's does), and so does a listing that fails. The whole-node grant, the card grant over a whole-node record and `verifyNoDeviceLeases` (a whole-node grant over a
+card lease whose record cannot be read) refuse with "the lease record cannot be read, and its holder is alive" when a heartbeat or a write within the TTL was seen, and with "... its heartbeat cannot be told ... so its holder
+is not shown to be gone" when none was and the heartbeat is unknown (that one ends when the heartbeat can be told, when a staged one ages past `stagingFresh`, or at `gpu release`;
+`TestTheRefusalForAnUnreadableRecordSaysWhatItRestsOn`); the sweep takes the record only once that liveness is gone. (b) The keepers above fail closed once their window passes, and every keeper's longest silence
 (its tick or renewal interval plus its window plus the confirming looks, and for the holder its release attempts) is shorter than that
 TTL, so a keeper has always stopped before an acquirer can be handed its cards: wrapper 15 s + 10 s, the drain heartbeat 15 s + two
 10 s windows, the hidden holder 15 s + 30 s + 4 s (`TestEveryKeepersSilenceIsShorterThanTheHeartbeatStaleThreshold`).
@@ -2312,8 +2714,8 @@ Once admitted the row shows `host_ram_gib` alone.
   this reorder exists for on a node that states no figure, and any prediction made when the reserve starts is stale when the grant
   comes, hours later, so one that sent the lease back to the grant would bring the deadlock back whenever the cause changed in
   between. The comparison after the unload is the decision. The only screens before the grant are the ones that do not depend
-  on the host's state: a need above physical RAM less the headroom, an unload that reaches nothing on the lease's cards, a host that
-  cannot be read. The levers are the hold bound (`--ram-hold-max`, `gpu_hostram_hold_max_sec`), `--wait`, and `--ram` when the
+  on the host's state: a need above physical RAM less the headroom, a commit above the commit limit less the headroom (where the OS
+  enforces one), an unload that reaches nothing on the lease's cards, a host that cannot be read. The levers are the hold bound (`--ram-hold-max`, `gpu_hostram_hold_max_sec`), `--wait`, and `--ram` when the
   figure is a guess (and Ctrl-C, which ends the wait and releases the wrapper's lease).
 
 **Not covered.** The media admission in `internal/pipeline` takes its lease with the declared figure compared in the grant, and the
@@ -2323,20 +2725,28 @@ reorder does not apply to it.
 ### What `gpu status` and `offload_status` show
 
 `gpu status` (text and `--json`) and `offload_status`'s `gpu_lease` block carry `host_memory`: `physical_gib`,
-`available_gib`, `commit_used_gib`, `commit_limit_gib`, `headroom_gib`, `declared_live_gib` (the sum of the host RAM the
-live leases declared), `pending_gib` (the part of it still to load), `admits_up_to_gib` and one **verdict**, built by
-`gpucards.HostView` for all three surfaces so they cannot disagree:
+`available_gib`, `commit_used_gib`, `commit_limit_gib`, `commit_limit_enforced` (whether a commit a lease states is
+judged against the commit limit on this host: always on Windows, on Linux in strict overcommit mode or when the mode cannot be read; a commit nobody stated is
+held to physical RAM less the headroom on every host, or to an enforced commit limit less the headroom when that sits below physical RAM), `headroom_gib`, `declared_live_gib` and `declared_live_commit_gib` (the sums of the working set and the commit the live
+leases declared), `pending_gib` and `pending_commit_gib` (the part of each still to load), `admits_up_to_gib` (the most a touched
+set could ever be admitted at), `touch_room_gib`, `commit_room_gib` and `unstated_commit_room_gib` (what a new lease could touch now,
+what a lease that STATES a commit could be charged now, and what a lease that states none could declare now: physical RAM (or an enforced commit limit that sits below it) less the
+commit charge, what running leases have yet to touch and the headroom; each less the headroom and never below 0),
+`verdict_why` (which line a NEAR or OVER verdict rests on, with its numbers), `stated_commit_note` (on an OVER that rests on the commit charge above physical RAM alone: what a lease that states its commit is judged on instead) and one **verdict**, built by `gpucards.HostView` for
+all three surfaces so they cannot disagree. The verdict judges the lines the grant applies:
 
 | host verdict | meaning |
 |---|---|
-| `OK` | committed memory is more than the headroom below physical RAM |
-| `NEAR` | committed memory is within the headroom of physical RAM: the next declaring lease waits |
-| `OVER` | committed memory is **above** physical RAM. The reading cannot say whether the box is paging now (that takes page-file growth or the pages-out rate, which no surface here reads), so none of them claims it. New leases that declare host RAM wait until commit is back under physical less the headroom; end a lease or stop a kept ComfyUI instance to free it |
-| `unknown` | the reading could not be taken |
+| `OK` | the available RAM, the room under physical RAM for the commit charge and, where the OS enforces a commit limit, the room under it all exceed the headroom |
+| `NEAR` | one of them is inside the headroom: a lease judged on that line waits (any lease that touches host RAM when the available RAM is; one that states no commit when the room under physical RAM is; one that states its commit when the room under the commit limit is). A lease that states its commit is not held to the physical-RAM line, so a host that reads `NEAR` on that line alone still admits it (`TestAHostThatReadsNearOnThePhysicalCommitLineStillAdmitsALeaseThatStatesItsCommit`) |
+| `OVER` | one of them is gone: nothing is available, the commit charge is above physical RAM (the line a commit nobody stated is held to: the paging incident's own reading, 162.9 GiB committed on 127.7 GiB with 3.2 GiB available, reads `OVER` and leads the brief line, as it did before the two conditions), or it has reached an enforced commit limit. The reading cannot say whether the box is paging now (that takes page-file growth or the pages-out rate, which no surface here reads), so none of them claims it. New leases that declare host RAM and state no commit wait until there is room again, and one that states a commit is judged on the limit; end a lease or stop a kept ComfyUI instance to free it. An admitted stated commit can itself take the box above physical RAM (the coder arm's measured 58.1 GiB does: 128.6 on 127.7), and the verdict then reads `OVER` by design |
+| `unknown` | the reading could not be taken, or came from a platform whose commit limit is always enforced and carried none |
 
-The brief verdict line of `offload_status` leads with `HOST RAM OVER (committed memory 162.9 GiB exceeds the 127.7 GiB of
-physical RAM)` in capitals, ahead of the lease verdict word, because `free` at the head of that line reads as "the box has room";
-NEAR trails it. The lease rows show what each lease declared, and the queue rows what a waiter waits for
+The brief verdict line of `offload_status` leads with `HOST RAM OVER (3.2 of 127.7 GiB physical RAM is available; committed 187.9 of
+the 187.7 GiB commit limit, 8.0 GiB headroom)` in capitals, ahead of the lease verdict word, because `free` at the head of that line reads as "the box has room";
+NEAR trails it. When the verdict rests on the commit charge above physical RAM alone, the lead goes on to say what a lease that states its commit is judged on
+(the commit limit, or nothing where the OS enforces none), because the rule admits such a lease while the host reads OVER; the block carries the same words as
+`stated_commit_note` (`TestTheBriefLeadSaysWhatALeaseThatStatesItsCommitIsJudgedOn`, `TestTheOverLeadSaysWhatALeaseThatStatesItsCommitIsJudgedOn`). The lease rows show what each lease declared (`host RAM 10.0 GiB touched, 60.0 GiB commit`), and the queue rows what a waiter waits for
 (`TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict`, `TestStatusNamesOverLoudlyOnTheBriefLine`).
 
 ### The driver's own fault events for the leased cards (C-83-B)
@@ -2436,7 +2846,12 @@ live (invariant I3, expiry never frees a card). Nothing here kills a process.
    process is alive and did not begin after the marker was written (a recycled pid), keeps the claim. A marker that names no
    lease (the default instance) ties only to a lease that recorded no tree, when it began at or after that lease and no other
    lease record exists in the directory (it cannot be told apart from another lease's otherwise); one that began before the
-   lease is a leftover and proves nothing.
+   lease is a leftover and proves nothing. Node restamps a marker through a staged `.tmp` file and a rename over the live name, and a
+   marker that is being installed cannot be told: its name is listed and the read ends as a rename in flight, or finds it gone with
+   a fresh staged file beside it, or its name is not listed and a fresh staged file stands where it was. That is **unknown**, and
+   the reader marks its copy of the record (`treeUnknown`); `Reclaimable` does not free a lease whose wrapper is gone while it is
+   set. It lasts as long as the staged file is fresh (3 s at most), and a marker that is unreadable for another reason is skipped
+   as before (`TestALaunchMarkerBeingInstalledHoldsTheLeaseOfADeadWrapper`).
 3. **The process table, for a lease that recorded no tree** (a wrapper that predates this change). Windows keeps a child's
    parent link when the parent dies, so the children of the dead wrapper's pid that began at or after the lease are found; Linux
    reparents them, so the walk finds none. A wrapper pid that is alive but recycled is never walked: its children are another

@@ -2,6 +2,8 @@
 // Claude Code hooks write (~/.claude/state/dispatch-log.jsonl), tagged harness:"opencode",
 // so the weekly adherence read covers both harnesses with one arithmetic. Fail-open like
 // its Claude Code twin: a broken log channel writes one stderr line and never throws.
+// The file is a cross-harness contract (events, fields, the rows the adherence read divides by, the one
+// rotation owner): docs/systems/dispatch-log.md. Read it before changing an event or a field name.
 import { appendFileSync, mkdirSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";

@@ -3,6 +3,8 @@ package compeval
 import (
 	"strings"
 	"testing"
+
+	"github.com/dmmdea/offload-harness/internal/piishape"
 )
 
 // The exported redactor must be the harvest's own, not a lookalike: whatever the vet refuses,
@@ -17,6 +19,11 @@ func TestExportedRedactorRedactsEveryVetClass(t *testing.T) {
 		"aws-access-key":     "id " + "AKIA" + strings.Repeat("A", 16),
 		"github-token":       "tok " + "ghp_" + strings.Repeat("c", 24),
 		"private-key-block":  "-----BEGIN " + "RSA PRIVATE KEY-----\nMIIB\n-----END " + "RSA PRIVATE KEY-----",
+		"provider-key":       "key s" + "k-proj-" + strings.Repeat("Ab9", 10),
+		"jwt":                "tok ey" + "J" + strings.Repeat("h", 12) + ".ey" + "J" + strings.Repeat("p", 12) + "." + strings.Repeat("s", 20),
+		"basic-auth":         "Authorization: Ba" + "sic " + strings.Repeat("Q", 20) + "==",
+		"auth-field":         `{"au` + `th":"` + strings.Repeat("Q", 20) + `"}`,
+		"cookie-header":      "Coo" + "kie: session=" + strings.Repeat("d", 24),
 	}
 	for _, p := range piiPatterns {
 		if _, ok := samples[p.name]; !ok {
@@ -70,4 +77,17 @@ func contains(xs []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// TestPIIPatternsAreTheSharedTable: the vet's table is internal/piishape's, not a
+// second copy, so the agent's credential check and the corpus vet cannot drift.
+func TestPIIPatternsAreTheSharedTable(t *testing.T) {
+	if len(piiPatterns) != len(piishape.Classes) {
+		t.Fatalf("piiPatterns has %d classes, piishape.Classes has %d", len(piiPatterns), len(piishape.Classes))
+	}
+	for i, c := range piishape.Classes {
+		if piiPatterns[i].name != c.Name || piiPatterns[i].re.String() != c.Re.String() {
+			t.Errorf("class %d: compeval has %q /%s/, piishape has %q /%s/", i, piiPatterns[i].name, piiPatterns[i].re, c.Name, c.Re)
+		}
+	}
 }

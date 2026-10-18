@@ -246,7 +246,7 @@ func (m *Manager) registerWaiter(class Class, opts Options) (Waiter, func()) {
 		since, resumed = tok.Since(), tok.ID
 	}
 	w := Waiter{PID: pid, Class: class, Reason: clipCommand(opts.Reason), SinceMs: since.UnixMilli(), Devices: opts.Devices, Token: resumed,
-		HostRAMGiB: max(opts.HostRAMGiB, 0)}
+		HostRAMGiB: max(opts.hostLoad().TouchGiB, opts.hostLoad().CommitGiB)}
 	if opts.Wait > 0 {
 		// The wait is the record's own: the debris cap is derived from it, not from the longest
 		// wait anyone is expected to pass (waiterOutlived).
@@ -410,7 +410,7 @@ func (m *Manager) refreshWaiter(self Waiter) {
 	if err != nil {
 		return
 	}
-	tmp := self.path + ".tmp"
+	tmp := stagingPath(self.path)
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return
 	}
@@ -436,12 +436,17 @@ const (
 // immediately (unretried) — the file is genuinely gone, not racing a rename,
 // and the caller must not treat retry-exhaustion the same as confirmed
 // absence: one is "try again next read", the other is "safe to prune".
+//
+// The read is through the shared open (readSharedFile): refreshWaiter replaces the record by a rename over the live name, and an open
+// that shares delete does not hold that rename up, where a plain os.ReadFile does. An absence there is only an answer once it is settled
+// (gate.go): a record whose rename never ended is errRenameInFlight, which is not a confirmed absence and is not retried here, since it
+// has just had its whole wait.
 func readWaiterFile(path string) ([]byte, error) {
 	var b []byte
 	var err error
 	for attempt := 0; attempt < waiterIOAttempts; attempt++ {
-		b, err = os.ReadFile(path)
-		if err == nil || os.IsNotExist(err) {
+		b, err = readSharedFile(path)
+		if err == nil || os.IsNotExist(err) || errors.Is(err, errRenameInFlight) {
 			return b, err
 		}
 		time.Sleep(waiterIOPause)
@@ -454,8 +459,8 @@ func statWaiterFile(path string) (os.FileInfo, error) {
 	var fi os.FileInfo
 	var err error
 	for attempt := 0; attempt < waiterIOAttempts; attempt++ {
-		fi, err = os.Stat(path)
-		if err == nil || os.IsNotExist(err) {
+		fi, err = statSettled(path)
+		if err == nil || os.IsNotExist(err) || errors.Is(err, errRenameInFlight) {
 			return fi, err
 		}
 		time.Sleep(waiterIOPause)

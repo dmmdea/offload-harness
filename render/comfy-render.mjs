@@ -57,7 +57,7 @@ import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import { assertNodeClasses } from "./comfy-nodes.mjs";
 import { planImageMulticard, lifecycleOptions, verifyImagePlacement, imagePlacementMode, beginPlacedWatch, settlePlacedRun } from "./multicard-image.mjs";
-import { findRecipe, RecipeRefusal } from "./multicard-recipes.mjs";
+import { findRecipe, canvasRefusal, RecipeRefusal } from "./multicard-recipes.mjs";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
@@ -131,11 +131,12 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
   let placement;
   try { placement = imagePlacementMode(flags); } catch (e) { throw new UsageError("error: " + e.message); }
   let residentGb;
+  let recipe;
   if (placement === "multicard") {
     if (flags.graph) throw new UsageError("error: --placement multicard places the graphs this runner builds; --graph posts your own workflow, which it does not touch");
     if (!multicard) throw new UsageError("error: --placement multicard needs the plan the runner makes before it builds a graph (the two cards and their launch); a direct call of buildRenderGraph has none");
     try {
-      findRecipe({ route: "image", family: flags.family, unet: flags.ckpt || env.COMFY_CKPT, clip: flags.clip });
+      recipe = findRecipe({ route: "image", family: flags.family, unet: flags.ckpt || env.COMFY_CKPT, clip: flags.clip });
     } catch (e) {
       if (e instanceof RecipeRefusal) throw new UsageError("error: " + e.message);
       throw e;
@@ -340,6 +341,12 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
       "9":  { class_type: "SaveImage", inputs: { filename_prefix: "render", images: ["8", 0] } },
     };
     if (!builtinVAE) graph["10"] = { class_type: "VAELoader", inputs: { vae_name: vae } };
+  }
+  // The card-only recipe's canvas cap (multicard-recipes.json maxPixels), judged on the size that will actually render, a family default included: every
+  // path to a card-only render passes here, one job of a --batch as well as a single call.
+  if (recipe) {
+    const tooBig = canvasRefusal(recipe, width, height);
+    if (tooBig) throw new UsageError("error: " + tooBig);
   }
   return { graph, seed, width, height };
 }

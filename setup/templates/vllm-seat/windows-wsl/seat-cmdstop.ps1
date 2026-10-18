@@ -1,6 +1,10 @@
 # seat-cmdstop.ps1 <seat> — llama-swap `cmdStop` for a vLLM seat whose engine runs in WSL.
 # RENDERED; do not hand-edit.
 #
+# Like seat-cmd.ps1, ONE file serves every Windows seat of the tier: the table below maps the seat argument to the port the
+# seat answers on (the same table, rendered from the same seats). A seat argument it does not hold logs the refusal and
+# exits 5 before the marker is written or any task is started.
+#
 # A real stop, so an unload through llama-swap (ttl expiry, `gpu reserve --drain --unload-seat`,
 # /api/models/unload, a llama-swap restart) truly frees the cards. It triggers the stop task in the
 # operator's session — which runs seat_stop.sh with this seat's env file — and then WAITS until the
@@ -11,6 +15,15 @@
 # crash, and the marker is how it knows this stop already ran and needs no crash cleanup of its own.
 param([Parameter(Mandatory)][string]$Seat)
 $ErrorActionPreference = 'Continue'
+$seats = @{
+__SEAT_MAP__
+}
+$want = $seats[$Seat]
+if ($null -eq $want) {
+  "[$(Get-Date -Format s)] stop requested for unknown seat '$Seat': this stub serves $((@($seats.Keys) | Sort-Object) -join ', ') - nothing stopped" | Out-File -Append (Join-Path '__SEAT_DIR__' 'seat-cmd.log')
+  exit 5
+}
+$base = "http://__PROXY_HOST__:$($want.Port)"
 $log = Join-Path '__SEAT_DIR__' "seat-cmd-$Seat.log"
 "[$(Get-Date -Format s)] stop requested" | Out-File -Append $log
 # A marker that cannot be written costs the stub one redundant stop after this unload, never this stop.
@@ -25,7 +38,7 @@ $deadline = (Get-Date).AddSeconds(55)
 while ((Get-Date) -lt $deadline) {
   Start-Sleep 2
   $busy = $false
-  try { $null = Invoke-RestMethod -Uri 'http://__PROXY_HOST__:__PORT__/health' -TimeoutSec 2; $busy = $true } catch {}
+  try { $null = Invoke-RestMethod -Uri "$base/health" -TimeoutSec 2; $busy = $true } catch {}
   if (-not $busy) { "[$(Get-Date -Format s)] seat stopped" | Out-File -Append $log; exit 0 }
 }
 "[$(Get-Date -Format s)] WARN: seat still answering after 55 s" | Out-File -Append $log

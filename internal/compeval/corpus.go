@@ -24,6 +24,7 @@ import (
 	"regexp"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/piishape"
 )
 
 // Entry is one corpus instance: a transcript slice to replay through the
@@ -152,18 +153,26 @@ func Load(path string) ([]Entry, string, error) {
 // piiPatterns are the DETERMINISTIC refusal classes for corpus vetting: a
 // corpus is a committed/replayed artifact, so credential- or identity-shaped
 // content refuses the whole corpus rather than being silently scrubbed
-// (scrubbing would change the bytes the hash pins).
-var piiPatterns = []struct {
+// (scrubbing would change the bytes the hash pins). The table itself lives in
+// internal/piishape, which internal/agent can import (this package imports the
+// agent, so it could not be asked from there); this is that table, same classes,
+// same order, same expressions.
+var piiPatterns = func() []struct {
 	name string
 	re   *regexp.Regexp
-}{
-	{"email", regexp.MustCompile(`[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}`)},
-	{"private-key-block", regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----`)},
-	{"bearer-token", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9_\-\.=]{16,}`)},
-	{"api-key-assignment", regexp.MustCompile(`(?i)\b(api[_-]?key|secret|token|passwd|password)\s*[=:]\s*['"]?[A-Za-z0-9_\-]{12,}`)},
-	{"aws-access-key", regexp.MustCompile(`\bAKIA[0-9A-Z]{16}\b`)},
-	{"github-token", regexp.MustCompile(`\bgh[pousr]_[A-Za-z0-9]{20,}\b`)},
-}
+} {
+	out := make([]struct {
+		name string
+		re   *regexp.Regexp
+	}, 0, len(piishape.Classes))
+	for _, c := range piishape.Classes {
+		out = append(out, struct {
+			name string
+			re   *regexp.Regexp
+		}{c.Name, c.Re})
+	}
+	return out
+}()
 
 // PIIFinding names one refusal hit (entry + class only — the matched text is
 // deliberately NOT echoed back).

@@ -128,7 +128,7 @@ func StopForLease(ctx context.Context, comfyDir string, epoch uint64, d Deps) []
 			continue
 		}
 		path := filepath.Join(comfyDir, name)
-		b, err := os.ReadFile(path)
+		b, err := gpulease.ReadSharedFile(path)
 		if err != nil {
 			continue
 		}
@@ -248,7 +248,7 @@ func stillThisLeases(path string, pid int, epoch uint64) string {
 	if epoch == 0 {
 		return stillTheSameInstance(path, pid)
 	}
-	b, err := os.ReadFile(path)
+	b, err := gpulease.ReadSharedFile(path)
 	if err != nil {
 		return "its launch marker vanished while the instance was being checked, so it is not shown to still be this lease's; left running"
 	}
@@ -331,7 +331,7 @@ func postFree(ctx context.Context, c *http.Client, base string) {
 // longer shown to be the one that was proved ("" = it still is): the marker is gone or unreadable,
 // or names another process.
 func stillTheSameInstance(path string, pid int) string {
-	b, err := os.ReadFile(path)
+	b, err := gpulease.ReadSharedFile(path)
 	if err != nil {
 		return "its launch marker vanished while the instance was being checked, so it is not shown to be the same instance; left running"
 	}
@@ -364,7 +364,7 @@ func StopMarker(ctx context.Context, comfyDir, key string, port int, d Deps) Out
 		file = markerPrefix + key + markerSuffix
 	}
 	path := filepath.Join(comfyDir, file)
-	b, err := os.ReadFile(path)
+	b, err := gpulease.ReadSharedFile(path)
 	if err != nil {
 		o.Why = fmt.Sprintf("no launch marker %s (%v)", file, err)
 		return o
@@ -399,7 +399,7 @@ func PIDsOfOtherLeases(comfyDir string, epoch uint64, alive func(int) bool, star
 		if e.IsDir() || !strings.HasPrefix(name, markerPrefix) || !strings.HasSuffix(name, markerSuffix) {
 			continue
 		}
-		b, rerr := os.ReadFile(filepath.Join(comfyDir, name))
+		b, rerr := gpulease.ReadSharedFile(filepath.Join(comfyDir, name))
 		if rerr != nil {
 			continue
 		}

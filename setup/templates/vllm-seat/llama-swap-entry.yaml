@@ -1,7 +1,9 @@
   # ===== <seat id> — a vLLM seat backed by LMCache MP (reference llama-swap entry) ======================
   # Rendered form: `Spec.Entry` (internal/vllmseat) writes this same block for a windows-wsl seat, and
   # TestVLLMSeatReferenceEntryDeclaresWhatEntryRenders keeps the two in step on every key and on the values below.
-  # `cmd` runs seat-cmd.ps1, the PowerShell stub `local-offload install vllm-seat` writes beside the seat's env: llama-swap
+  # `cmd` runs seat-cmd.ps1, the PowerShell stub `local-offload install vllm-seat` writes beside the seat's env (ONE file for every
+  # Windows seat of the tier: it maps the seat id passed here to the seat's served id, port and load budget, and refuses a seat id
+  # it was not rendered for, exit 5): llama-swap
   # runs as SYSTEM and a WSL distro belongs to the interactive user, so the stub triggers the scheduled task that runs
   # seat_fg.sh in the distro and stays alive while the seat answers; ending it is the swap-out. `cmdStop` (seat-cmdstop.ps1)
   # triggers the stop task: seat_stop.sh stops the engine by port and the LMCache MP server. (A llama-swap that runs AS the

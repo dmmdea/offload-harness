@@ -244,7 +244,7 @@ func registerOwner(leaseDir, session string, pid int, procStart func(int) (int64
 		return func() {}, err
 	}
 	path := filepath.Join(dir, ownerFileStem(session)+"."+strconv.Itoa(pid)+".json")
-	tmp := path + ".tmp"
+	tmp := stagingPath(path)
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return func() {}, fmt.Errorf("gpulease: session registry: %w", err)
 	}
@@ -516,7 +516,7 @@ func (m *Manager) stampOrphanMark(info Info, now *time.Time) error {
 			return nil
 		}
 		b, _ := json.Marshal(orphanMark{SinceMs: now.UnixMilli(), ByPID: m.pid})
-		tmp := m.orphanMarkPath(info.Epoch) + ".tmp"
+		tmp := stagingPath(m.orphanMarkPath(info.Epoch))
 		if err := os.WriteFile(tmp, b, 0o666); err != nil {
 			werr = err
 			return nil

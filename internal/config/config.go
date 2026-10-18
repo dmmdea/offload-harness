@@ -416,6 +416,15 @@ type Config struct {
 	// writes today's rows unchanged. Applies wherever a trail is attached (see
 	// audit_all_doors); the local-agent CLI honours it for its own trail too.
 	AuditChain bool `json:"audit_chain,omitempty"`
+	// AgentEvidenceReducer turns on the evidence-preserving reducer for the agent's
+	// build and test results (internal/agent/rung_reducer.go). false (the default)
+	// leaves every tool result exactly as the tool printed it. true: a `run` or
+	// `run_shell` build or test result of 4 KiB or more is replaced by a receipt, a
+	// few claims each over a quote the delegator found in the output, written by the
+	// cascade seat the agent's offload tools already use; any quote it cannot find, a
+	// credential-shaped output, a seat failure or a receipt that is not smaller keeps
+	// the raw output. The key stays off until a seat A/B passes.
+	AgentEvidenceReducer bool `json:"agent_evidence_reducer,omitempty"`
 	// PairWorkloadsEnabled (0.126.0) reports every job this box runs or
 	// delegates to NVIDIA Personal AI Router's Jobs list, through the loopback
 	// workload ingress of PAIR's workload manager (fork
@@ -1381,13 +1390,15 @@ type Config struct {
 	// is set (or the box has one card). Unset, such a lease stays whole-node and says
 	// why; nothing is ever guessed. Measure it with a CUDA_VISIBLE_DEVICES=<uuid> probe.
 	GPUComfyOrder string `json:"gpu_comfy_order,omitempty"`
-	// GPUHostRAMHeadroomGiB is the host memory every GPU lease grant keeps UNCOMMITTED beyond what
-	// the lease declares (`gpu reserve --ram`, the estimate from its model files, the class default;
-	// internal/hostneed): a grant is admitted only while committed memory now, plus its declared
-	// need, plus what the leases already granted have yet to load, stays at or under physical RAM
-	// less this. It is also the margin of the NEAR verdict `gpu status` reports. The card allocator
-	// applies the same rule before it picks cards. A load that pushes the host into paging stalls
-	// every seat on the box, so a DECLARED load is held back while it would pass physical RAM less this. That
+	// GPUHostRAMHeadroomGiB is the host memory every GPU lease grant keeps free beyond what
+	// the lease declares (`gpu reserve --ram` and --ram-commit, the estimate from its model files, the class
+	// default; internal/hostneed): a grant is admitted only while the available RAM, less the working set it
+	// touches and what the leases already granted have yet to touch, stays at or above this, and the commit charge now, plus the
+	// commit it declares, stays at or under physical RAM less this (a commit nobody stated, which is the --ram figure), or, for a
+	// commit stated with --ram-commit where the OS enforces a commit limit, under the commit limit less this with what the leases
+	// already granted have yet to be charged. It is also the margin of the NEAR verdict
+	// `gpu status` reports. The card allocator applies the same rule before it picks cards. A load that pushes the host
+	// into paging stalls every seat on the box, so a DECLARED load is held back while it would pass either line. That
 	// bounds declarations, not what a lane then commits (gpu-lease.md, "Known limits").
 	// 0 = DefaultGPUHostRAMHeadroomGiB (8).
 	GPUHostRAMHeadroomGiB float64 `json:"gpu_host_ram_headroom_gib,omitempty"`

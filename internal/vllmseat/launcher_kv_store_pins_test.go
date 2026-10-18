@@ -98,6 +98,15 @@ func TestLauncherStoreAddressChoiceIsBoundedAndScoped(t *testing.T) {
 		`[ -n "$SRCADDR" ]`,                      // and only when a source address is pinned
 		`${L2_ON:+ addr=$L2_ON}`,                 // the status file records the address the share is on (chosen, or read from the mount)
 		`findmnt -n -o SOURCE,OPTIONS -M "$SEAT_L2_MOUNT_DIR"`, // a share that is already mounted is described, not re-chosen
+		// The tie-break among several answers inside the network (the lowest minimum round-trip time): the ping line as the
+		// whole command (from the pinned source address, 5 probes 0.2 s apart, quiet, 1 s wait for each) under the same hard
+		// bound as the lookup, and the same bound around the test seam that stands in for it.
+		`LC_ALL=C timeout -s KILL 3 ping -I "$1" -c 5 -i 0.2 -q -W 1 "$2"`,
+		`timeout -s KILL 3 "$SEAT_FG_TEST_PING_CMD"`,
+		`SEAT_FG_TEST_PING_CMD`,                // the ping stand-in, a test seam
+		`[ "${#inside[@]}" -eq 1 ]`,            // one answer inside the network: no ping, the choice made before the tie-break
+		`[ "$us" -lt "$best_us" ]`,             // strictly lower: on equal times the earlier answer stays
+		`min/avg/max[^=]*=[[:space:]]*([0-9]+`, // the MINIMUM of the summary line (the first number after =), not the average
 	} {
 		if !strings.Contains(s, must) {
 			t.Errorf("seat_fg.sh lost %q", must)
@@ -113,7 +122,7 @@ func TestLauncherStoreAddressChoiceIsBoundedAndScoped(t *testing.T) {
 		t.Error("l2_report_mounted is not the else branch of the mountpoint check (for a cifs mount with a pinned source address)")
 	}
 	// The seams are for tests: the script says so where it reads them.
-	for _, seam := range []string{"SEAT_FG_TEST_MDNS_CMD", "SEAT_FG_TEST_MDNS_DEST"} {
+	for _, seam := range []string{"SEAT_FG_TEST_MDNS_CMD", "SEAT_FG_TEST_MDNS_DEST", "SEAT_FG_TEST_PING_CMD"} {
 		i := strings.Index(s, seam)
 		if i < 0 || !strings.Contains(s[max(0, i-400):i+len(seam)], "test") {
 			t.Errorf("%s is not documented as a test-only seam where the launcher reads it", seam)
@@ -132,6 +141,23 @@ func TestLauncherStoreAddressChoiceIsBoundedAndScoped(t *testing.T) {
 	fn = fn[:end]
 	if strings.Count(fn, `"$py" -`) != 1 || !strings.Contains(fn, `timeout -s KILL 3 "$py" -`) {
 		t.Error("the embedded helper must be started in exactly one place, under timeout -s KILL 3")
+	}
+	// Nothing runs ping unbounded: every line of code that starts ping (a comment line or prose may name it) goes through the
+	// timeout, and only l2_min_rtt starts it.
+	pingRun := regexp.MustCompile(`\bping( -| ")`)
+	pingStarts := 0
+	for _, l := range strings.Split(s, "\n") {
+		code := strings.TrimSpace(l)
+		if strings.HasPrefix(code, "#") || !pingRun.MatchString(code) {
+			continue
+		}
+		pingStarts++
+		if !strings.Contains(code, "timeout -s KILL 3 ping ") {
+			t.Errorf("a line starts ping outside the timeout: %q", code)
+		}
+	}
+	if pingStarts != 1 {
+		t.Errorf("ping must be started in exactly one place (l2_min_rtt), found %d", pingStarts)
 	}
 	// A chosen address is said where the reader of a degrade needs it, and the messages keep the text the other test pins.
 	for _, must := range []string{

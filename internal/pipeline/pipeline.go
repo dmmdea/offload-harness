@@ -3772,8 +3772,8 @@ func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wai
 }
 
 // acquireWholeNodeWith is acquireWholeNode for a call that declares hostRAMGiB of host RAM: the grant
-// admits it against committed memory (gpulease/hostram.go) and keeps the call in the queue while the
-// host is short.
+// admits it against the available memory and the commit charge against physical RAM (the one figure, no commit stated;
+// gpulease/hostram.go) and keeps the call in the queue while the host is short.
 func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl, wait time.Duration, resume string, hostRAMGiB float64) ([]string, func(), error) {
 	noop := func() {}
 	start := time.Now()

@@ -195,7 +195,8 @@ const build = (argv, extra = {}) => buildRenderGraph({ pos: POS, flags: flagsOf(
 const QI21_ARGV = ["--family", "qwen-image-2.1", "--ckpt", BF16, "--clip", QI21.clip, "--vae", QI21.vae];
 
 test("comfy-render: --placement multicard builds the multicard graph of the family, handed the plan the runner made", () => {
-  const g2 = build(["--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf", "--placement", "multicard"], { multicard: { residentGb: 3 } }).graph;
+  // a canvas under the row's pixel cap: the family default (1328x1328) is above it and is refused (render/multicard-canvas.test.mjs)
+  const g2 = build(["--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf", "--placement", "multicard", "--width", "1024", "--height", "1024"], { multicard: { residentGb: 3 } }).graph;
   assert.equal(g2["1"].class_type, "UnetLoaderGGUFDisTorch2MultiGPU");
   assert.equal(g2["1"].inputs.expert_mode_allocations, allocationString(3));
   // the 2.1 bf16 binding is held back: even handed a plan, the runner's graph entry refuses it by name instead of building the split

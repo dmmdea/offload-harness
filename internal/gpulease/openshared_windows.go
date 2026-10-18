@@ -8,6 +8,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+// sharedOpenMeetsDeletePending: an open made through OpenShared can still be refused with a permission error (ERROR_ACCESS_DENIED)
+// for a few milliseconds that pass, so a reader of a file its writer replaces by a rename waits that refusal out (readSharedFile).
+// The file is delete-pending: a rename has marked the old entry for deletion and the new one has not taken its name. No share mode
+// avoids it. The other builds say why they do not wait (openshared_other.go).
+const sharedOpenMeetsDeletePending = true
+
 // OpenShared opens a file for reading in a way that does not stand in the way of a rename or a delete of that file by
 // someone else. Use it wherever a harness image (the installed executable, a backup beside it) is read while a rename-swap
 // deploy may replace it.

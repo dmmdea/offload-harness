@@ -394,14 +394,15 @@ implications.
     binds loopback only, so a delegator cannot reach it directly; the caller's half is
     `llamaclient.FleetLaneGates` (see
     [offload-pipeline.md](offload-pipeline.md#security-and-privacy-notes)).
-12. The stt upload door (`POST /fleet/stt`, task `stt-upload`, 0.164.0) carries audio BYTES (base64 in JSON) so a box
+12. The stt upload door (`POST /fleet/stt`, task `stt-upload`, 0.165.0) carries audio BYTES (base64 in JSON) so a box
     whose own whisper is held can have this node transcribe. It is advertised — `stt-upload` in
     `supported_task_types`, `stt_hq` and `stt_upload_max_mb` in health — exactly when `STTUploadAdmissible` holds (a
     bound `stt_model` and the vision lane's reachability rule); an asker keys on those, never on the legacy `stt`. It is
     bearer-gated, and the bearer is checked BEFORE the body is read; the body is capped by `fleet_stt_upload_max_mb`
     (decoded MiB, default 48), the bytes live in a private file under `<media_dir>/.stt-upload/` removed when the job
     ends (and swept at startup), and the done job's data is the node's FULL `core.Result`. The legacy path-taking `stt`
-    joins the bearer rule when the node has a `fleet_auth_token` (a node with none is unchanged), and both stt lanes,
+    follows the rule every lane does (the bearer on a node that has a `fleet_auth_token`; a node with none answers it only on
+    loopback, `403` beyond it), and both stt lanes,
     pushed and pulled, share one FIFO cap, `fleet_stt_max_concurrent` (default 1): a job over it waits and never fails,
     and neither lane counts against `fleet_max_concurrent_jobs`. At most two uploads are in flight (a third waits up to
     30 s, then a re-placeable `503`). A request that DECLARES a `Content-Length` over the body cap is refused `400 request body too
@@ -1826,13 +1827,13 @@ set includes the `structured re-pack unreachable` shape, whose `output` is popul
 lost is the schema-checked deliverable, not the bytes — unless the delegator's rescue (`schema_miss`,
 above) re-packed it, in which case it is a success and is not counted.
 
-### Auth (v1 scope: the agent lane — joined by the vision lane in 0.116.0)
+### Auth (every lane needs the fleet bearer)
 
-`fleet_auth_token`, when set, bearer-gates exactly two lanes: agent dispatches (and the vision
-and text lanes' `POST /fleet/vision` and `POST /fleet/text`, the stt upload door's `POST /fleet/stt` and, since 0.164.0,
-the legacy path-taking `stt` task, which ride the same rule through `tokenGated`), and
-`/fleet/jobs/{id}` polls of jobs those dispatches created (the job record carries an agent
-marker — or, for a vision job, the `Gated` marker — written atomically at creation and evicted
+`fleet_auth_token`, when set, bearer-gates every lane: a dispatch of any task type (the vision and text
+lanes' `POST /fleet/vision` and `POST /fleet/text`, the stt upload door's `POST /fleet/stt`, the legacy path-taking `stt`
+task and the media tasks all ride the same rule as an agent dispatch, through `tokenGated`, which is true for every task
+type), and the `/fleet/jobs/{id}` poll and withdraw of any job (the job record carries an agent
+marker — or, for every other task type, the `Gated` marker — written atomically at creation and evicted
 with the record). The comparison hashes both
 sides with SHA-256 before a constant-time compare, making it length-independent. Wrong or
 missing credential → `401` with the standard error envelope (`"error": "unauthorized"`),
@@ -2235,8 +2236,8 @@ died is still on the node under its job id; the next identical call from that ma
 - [`internal/fleetnode/media_gate.go`](../../internal/fleetnode/media_gate.go) — which media names belong to gated lanes
   (`gatedMediaName`), the stt transcript retention (`SweepSTTTranscripts`, eviction hook, mtime refresh)
 - [`internal/fleetnode/pair_relay.go`](../../internal/fleetnode/pair_relay.go) — the PAIR card relay door
-- [`internal/fleetnode/vision_task.go`](../../internal/fleetnode/vision_task.go) — `tokenGated` / `gatedJob` (which
-  task types ride the bearer rule, the legacy `stt` when the node has a token), the vision lane
+- [`internal/fleetnode/vision_task.go`](../../internal/fleetnode/vision_task.go) — `tokenGated` / `gatedJob` (the bearer
+  rule every task type rides, and which jobs are masked from a poller without it), the vision lane
 - [`internal/sttremote/sttremote.go`](../../internal/sttremote/sttremote.go) — the asker of the upload door: routes,
   Opus conversion, placement, wait, validation and the asker's own output files
 - [`internal/fleetnode/media_job.go`](../../internal/fleetnode/media_job.go) — the media-job door: the body, the

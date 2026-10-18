@@ -3094,6 +3094,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		AuditAdvisory:   audit.Advisory,
 		ReadFloor:       cfg.AgentReadFloor,
 		AuditChain:      cfg.AuditChain,
+		EvidenceReducer: cfg.AgentEvidenceReducer,
 
 		// SF-02: a denial the enforcing trail causes names audit_all_doors.
 		AuditEnforcedByKey: audit.Enforced,

@@ -106,23 +106,37 @@ L2_DEGRADED=0
 # floor degraded L2), on an unreachable bridge address, or on the VPN address, which refuses the pinned source address: every
 # start for three days ran without L2. So, for a cifs mount whose source is //<name>.local/<share> with a pinned source
 # address (SEAT_L2_MOUNT_SRCADDR), l2_pick_address asks mDNS itself for ALL the A answers (a raw query to 224.0.0.251:5353 with
-# the QU bit, three times in about a second, sent out of the pinned source address) and mounts //<address>/<share> at the FIRST
+# the QU bit, three times in about a second, sent out of the pinned source address) and mounts //<address>/<share> at an
 # answer inside the pinned source address's IPv4 network (the prefix is read from `ip -4 -o addr`). Anything else keeps the
 # mount by name exactly as before, and the line printed says why: no python, a helper that fails or finds nothing, no answer on
 # that network, a prefix that cannot be read. Names that are not .local, nfs mounts and an unset source pin never get here. The
-# lookup is bounded: `timeout -s KILL 3` around the helper, so it can never hold a seat start. If the store's wired and Wi-Fi
-# addresses sit on ONE network, "first inside the network" cannot tell them apart: name the wired address in SEAT_L2_MOUNT_SRC,
-# either as a RESERVED or static address of the store (an IPv4 literal is mounted as given; a DHCP lease is the 2026-09-04
-# outage above) or as a name that is not .local and that this box resolves to it (such a name is not looked up; a .local name
-# pinned in /etc/hosts is NOT honoured here, because the lookup asks mDNS directly).
+# lookup is bounded: `timeout -s KILL 3` around the helper, so it can never hold a seat start.
+# ONE answer inside the network is mounted as it is. SEVERAL inside it (the store's wired and Wi-Fi addresses on one network)
+# cannot be told apart by arrival order, and the Wi-Fi path writes about ten times slower, so l2_min_rtt pings each of them from
+# the pinned source address (`ping -I <source address> -c 5 -i 0.2 -q -W 1 <address>`, the minimum of the min/avg/max line) and
+# the lowest minimum wins; equal minimums go to the earlier answer. On the reference workstation the wired address measured a
+# minimum RTT of 0.425-0.477 ms and the Wi-Fi one 0.983-2.288 ms (three runs each, so more than 2x apart on every run), while the
+# averages (0.57-0.62 ms and 1.5-26 ms) are much noisier, which is why the minimum is what is compared. A candidate whose ping
+# fails is shown as "no reply" and is never chosen over one that replied. When ping is missing, no candidate replies or no
+# round-trip time can be read, the choice is what it was before this tie-break, the first answer inside the network by arrival
+# order, and the line printed says which rule chose and lists each candidate's result. The pings run one after the other, each
+# under `timeout -s KILL 3`: at most 3 s per candidate inside the network, so they can never hold a seat start either.
+# The limit: the round-trip time is a heuristic for the better path, not a throughput measurement. A store whose fast path has a
+# higher latency than its slow path would be picked wrong, and a store whose fast path drops ICMP loses to a slow path that
+# answers it. SEAT_L2_MOUNT_SRC overrides all of it: name the wired address there, either as a RESERVED or static address of
+# the store (an IPv4 literal is mounted as given; a DHCP lease is the 2026-09-04 outage above) or as a name that is not .local
+# and that this box resolves to it (such a name is not looked up, so nothing is pinged either; a .local name pinned in
+# /etc/hosts is NOT honoured here, because the lookup asks mDNS directly).
 # The address is chosen when the share is MOUNTED, which is once per WSL session. A start that finds the share already mounted
 # does not mount again, does not unmount (another seat may be using it, and a new pick at every start could trade a good mount
 # on one network for the Wi-Fi one) and asks no mDNS: l2_report_mounted says where the share is (the source and the server
 # address, read with findmnt) and how to choose again, and the status file records that address. A share that was mounted at
 # the wrong address stays there until it is unmounted (`umount <dir>` while no seat uses it) and the seat is started again.
-# Two seams exist for the test (seat_fg.kv-and-store.tests.sh) and nothing else sets them: SEAT_FG_TEST_MDNS_CMD names a command
-# that stands in for the lookup (it is called as `<cmd> <name> <source address>` and prints one IPv4 answer per line), and
-# SEAT_FG_TEST_MDNS_DEST (host:port) moves the helper's query off the mDNS group onto a test responder.
+# Three seams exist for the test (seat_fg.kv-and-store.tests.sh) and nothing else sets them: SEAT_FG_TEST_MDNS_CMD names a command
+# that stands in for the lookup (it is called as `<cmd> <name> <source address>` and prints one IPv4 answer per line),
+# SEAT_FG_TEST_MDNS_DEST (host:port) moves the helper's query off the mDNS group onto a test responder, and
+# SEAT_FG_TEST_PING_CMD names a command that stands in for ping (it is called as `<cmd> <source address> <address>`, under the
+# same `timeout -s KILL 3`, and prints the minimum round-trip time in ms, or exits non-zero for no reply).
 L2_ADDR=""          # the address the share was mounted at when the launcher chose one: status file and degrade messages
 L2_SEEN_ADDR=""     # the server address of a share that was ALREADY mounted when this start found it (read from the mount)
 L2_SEEN_NOTE=""     # and the sentence the degrade messages append for such a share
@@ -240,6 +254,26 @@ l2_is_ipv4() {
   for o in 1 2 3 4; do [ $(( 10#${BASH_REMATCH[$o]} )) -le 255 ] || return 1; done
 }
 l2_ip2int() { local a b c d; IFS=. read -r a b c d <<< "$1"; echo $(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d )); }
+l2_ms_to_us() {   # $1 = milliseconds written as 9 or 0.425 or 0.4256: prints whole microseconds, so two times compare as integers
+  local i f
+  i="${1%%.*}"; f="${1#"$i"}"; f="${f#.}000"
+  echo $(( 10#$i * 1000 + 10#${f:0:3} ))
+}
+l2_min_rtt() {   # $1 = the source address, $2 = an address: prints the minimum of five pings from the source, in ms
+  # Returns 0 with the time printed, 1 for no reply (ping failed or was cut off), 2 when ping ended well but no time can be read
+  # from its output, 127 when there is no ping command. Bounded by `timeout -s KILL 3`, so it can never hold a seat start.
+  local out rc=0 rtt="" re='min/avg/max[^=]*=[[:space:]]*([0-9]+(\.[0-9]+)?)/'
+  if [ -n "${SEAT_FG_TEST_PING_CMD:-}" ]; then
+    out="$(timeout -s KILL 3 "$SEAT_FG_TEST_PING_CMD" "$1" "$2" 2>/dev/null)" || rc=$?
+  else
+    out="$(LC_ALL=C timeout -s KILL 3 ping -I "$1" -c 5 -i 0.2 -q -W 1 "$2" 2>/dev/null)" || rc=$?
+  fi
+  case "$rc" in 0) ;; 127) return 127 ;; *) return 1 ;; esac
+  if [ -n "${SEAT_FG_TEST_PING_CMD:-}" ]; then rtt="${out//[[:space:]]/}"
+  elif [[ "$out" =~ $re ]]; then rtt="${BASH_REMATCH[1]}"; fi
+  [[ "$rtt" =~ ^[0-9]+(\.[0-9]+)?$ ]] || return 2
+  printf '%s' "$rtt"
+}
 l2_local_name() {   # $1 = a mount source: prints <name> when it is //<name>.local/<share>, returns 1 for anything else
   local rest host
   rest="${1#//}"; host="${rest%%/*}"
@@ -259,7 +293,7 @@ l2_report_mounted() {   # the share was already mounted: say where it is and lea
   echo "seat_fg: cache-server share $SEAT_L2_MOUNT_DIR is already mounted${src:+ from $src}${a:+ (server address $a)} — the store address is chosen only when the share is mounted, so it was not looked up again${hint}"
 }
 l2_pick_address() {   # sets MOUNT_SRC and L2_ADDR when it chooses; prints one seat_fg: line either way
-  local rest name share out rc=0 plen mask net ans chosen="" why="" got=() dup g
+  local rest name share out rc=0 plen mask net ans chosen="" why="" got=() dup g inside=() rule list m r us best="" best_us=0 nok=0 nmiss=0 nunread=0 fb
   name="$(l2_local_name "$SEAT_L2_MOUNT_SRC")" || return 0
   rest="${SEAT_L2_MOUNT_SRC#//}"; share="${rest#*/}"
   out="$(l2_mdns_answers "$name" "$SRCADDR" 2>/dev/null)" || rc=$?
@@ -290,13 +324,38 @@ l2_pick_address() {   # sets MOUNT_SRC and L2_ADDR when it chooses; prints one s
   fi
   mask=$(( (0xFFFFFFFF << (32 - 10#$plen)) & 0xFFFFFFFF )); net=$(( $(l2_ip2int "$SRCADDR") & mask ))
   for ans in "${got[@]}"; do
-    if [ $(( $(l2_ip2int "$ans") & mask )) -eq "$net" ]; then chosen="$ans"; break; fi
+    if [ $(( $(l2_ip2int "$ans") & mask )) -eq "$net" ]; then inside+=("$ans"); fi
   done
-  if [ -z "$chosen" ]; then
+  if [ "${#inside[@]}" -eq 0 ]; then
     echo "seat_fg: cache-server store ${name}: mDNS answers: ${got[*]}, none inside ${SRCADDR}/${plen} — mounting by name as before"
     return 0
   fi
-  echo "seat_fg: cache-server store ${name}: mDNS answers: ${got[*]} — chose ${chosen}, the first inside ${SRCADDR}/${plen} (the pinned source address's network); mounting //${chosen}/${share} instead of //${name}/${share}"
+  chosen="${inside[0]}"
+  if [ "${#inside[@]}" -eq 1 ]; then
+    echo "seat_fg: cache-server store ${name}: mDNS answers: ${got[*]} — chose ${chosen}, the first inside ${SRCADDR}/${plen} (the pinned source address's network); mounting //${chosen}/${share} instead of //${name}/${share}"
+  else
+    # Several answers on the pinned network: the one with the lowest minimum round-trip time from the pinned source address.
+    # A candidate that did not reply has no time and is never compared; the strict < keeps the earlier answer on a tie.
+    for ans in "${inside[@]}"; do
+      m="$(l2_min_rtt "$SRCADDR" "$ans")"; r=$?
+      case "$r" in
+        0) list="${list:+$list }${ans} (min RTT ${m} ms)"; nok=$(( nok + 1 )); us="$(l2_ms_to_us "$m")"
+           if [ -z "$best" ] || [ "$us" -lt "$best_us" ]; then best="$ans"; best_us="$us"; fi ;;
+        2) list="${list:+$list }${ans} (RTT unreadable)"; nunread=$(( nunread + 1 )) ;;
+        127) list="${list:+$list }${ans} (not measured)"; nmiss=$(( nmiss + 1 )) ;;
+        *) list="${list:+$list }${ans} (no reply)" ;;
+      esac
+    done
+    if [ "$nok" -gt 1 ]; then rule="the lowest round-trip time"; chosen="$best"
+    elif [ "$nok" -eq 1 ]; then rule="the only candidate that replied to ping"; chosen="$best"
+    else
+      if [ "$nmiss" -eq "${#inside[@]}" ]; then fb="ping is not available on this box"
+      elif [ "$nunread" -gt 0 ]; then fb="no round-trip time could be read from ping's output"
+      else fb="no candidate replied to ping"; fi
+      rule="the first inside the network in arrival order (round-trip times could not be compared: ${fb})"
+    fi
+    echo "seat_fg: cache-server store ${name}: mDNS answers: ${got[*]}, inside ${SRCADDR}/${plen}: ${list}; chose ${chosen}, ${rule}; mounting //${chosen}/${share} instead of //${name}/${share}"
+  fi
   MOUNT_SRC="//${chosen}/${share}"; L2_ADDR="$chosen"
 }
 if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
