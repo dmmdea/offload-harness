@@ -19,13 +19,13 @@ import (
 //
 // Template-only, deliberately. A composition is trusted code: HyperFrames' Chrome
 // runs with --no-sandbox and site isolation off. Dispatch needs the fleet bearer
-// like every lane, but a holder of it is trusted to render, not to run code of its
-// own: a free-form `html` or a node-local `project_dir` sent here would be arbitrary
-// code in an unsandboxed browser on this node, so both are refused at ack time (a
-// whole project goes through the opt-in project door, ADR 0071); the node's own vetted
-// templates (render/compose-templates) with typed, escaped variables are the fleet
-// surface. png-sequence is refused too: it writes a DIRECTORY, which /fleet/media
-// (bare file names only) cannot serve back.
+// like every lane, and this door renders only the node's own vetted templates
+// (render/compose-templates) with typed, escaped variables: a free-form `html` or a
+// node-local `project_dir` sent here would be arbitrary code in an unsandboxed browser
+// on this node, so both are refused at ack time. A whole project goes through the
+// project door (ADR 0071) instead, which a node opts in to (fleet_compose_projects) and
+// which takes it from a holder of the fleet bearer. png-sequence is refused too: it
+// writes a DIRECTORY, which /fleet/media (bare file names only) cannot serve back.
 //
 // A caller's `out` is dropped for the same trust-boundary reason (see the media-builder
 // comment in tasks.go): the node writes to <media_dir>/compose-<hash8>.<ext>, with the
@@ -54,7 +54,7 @@ func buildComposeVideo(payload json.RawMessage) (core.Request, func(), error) {
 		return core.Request{}, noop, fmt.Errorf("compose-video payload: %w", err)
 	}
 	if len(in.HTML) > 0 || len(in.ProjectDir) > 0 {
-		return core.Request{}, noop, fmt.Errorf("compose-video payload: html and project_dir are not accepted over the fleet — compositions are trusted code (HyperFrames' Chrome runs without a sandbox), and the fleet bearer lets a caller render a vetted template, not run code of its own; send a vetted template name plus variables")
+		return core.Request{}, noop, fmt.Errorf("compose-video payload: html and project_dir are not accepted on this door — compositions are trusted code (HyperFrames' Chrome runs without a sandbox), so the fleet bearer lets a caller render the node's vetted templates here; send a vetted template name plus variables, or send a whole project to a node that has opted in to the project door (POST /fleet/compose-project)")
 	}
 	if in.Template == "" {
 		return core.Request{}, noop, fmt.Errorf("compose-video payload: template required")
