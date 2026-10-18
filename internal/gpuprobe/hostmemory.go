@@ -73,8 +73,10 @@ import (
 // the thing to change when a node's own measurement says so.
 const DefaultHostRAMHeadroomGiB = 8.0
 
-// HostMemory is one reading of the host's memory, in GiB. A reading that leaves CommitLimitGiB at 0 has no commit accounting,
-// and the commit condition is not applied to it (a fixture that omits the limit tests the available condition alone).
+// HostMemory is one reading of the host's memory, in GiB. A reading whose commit limit is enforced (CommitLimitSoft false: Windows
+// always, Linux in strict mode) must carry that limit: one that leaves CommitLimitGiB at 0 is not a reading, the rule waits on it as
+// unreadable and its verdict is unknown, because a counter that came back zero must not turn the commit brake off. A SOFT reading
+// carries a limit nobody enforces, and may leave it 0.
 type HostMemory struct {
 	// PhysicalGiB is the installed RAM the OS can use.
 	PhysicalGiB float64
@@ -91,6 +93,10 @@ type HostMemory struct {
 	// or a sandbox that hides the accounting). The zero value is a hard limit: Windows always, Linux in strict mode.
 	CommitLimitSoft bool
 }
+
+// commitLimitMissing says the reading is of a platform whose commit limit is enforced and carries none: a reading the rule cannot
+// trust, failed closed (see HostMemory).
+func (m HostMemory) commitLimitMissing() bool { return !m.CommitLimitSoft && m.CommitLimitGiB <= 0 }
 
 // HostLoad is what a job takes of the host's memory, in the two quantities the admission rule keeps apart.
 type HostLoad struct {
@@ -132,7 +138,7 @@ const (
 // little room", not a reading of paging. (Until the two-condition rule it compared the commit charge to physical RAM, a line
 // the grant no longer applies.)
 func (m HostMemory) Verdict(headroomGiB float64) HostVerdict {
-	if m.PhysicalGiB <= 0 {
+	if m.PhysicalGiB <= 0 || m.commitLimitMissing() {
 		return HostUnknown
 	}
 	if headroomGiB < 0 {
@@ -246,7 +252,7 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 		c.OK = true
 		return c
 	}
-	if !readable || mem.PhysicalGiB <= 0 {
+	if !readable || mem.PhysicalGiB <= 0 || mem.commitLimitMissing() {
 		if !supported {
 			c.OK = true // no reader on this platform: the rule cannot judge, and a refusal here would be permanent
 			return c
@@ -425,8 +431,8 @@ func readHostMemoryLinux(read func(path string) ([]byte, error)) (HostMemory, bo
 // available, so the commit charge is their difference: the figure Task Manager shows as "Committed". The Windows limit is
 // always enforced, so the reading's is hard.
 func hostMemoryFromStatus(totalPhys, availPhys, totalPageFile, availPageFile uint64) (HostMemory, bool) {
-	if totalPhys == 0 {
-		return HostMemory{}, false
+	if totalPhys == 0 || totalPageFile == 0 {
+		return HostMemory{}, false // a total page file of 0 is the commit limit missing, and Windows always enforces one
 	}
 	const gib = 1 << 30
 	used := uint64(0)
