@@ -40,7 +40,7 @@ func round3Shapes() []cookieShape {
 	}
 	al := func(seed, n int) string { return valueFixture(seed, n, alnum) }
 	A, B := al(841, 16), al(842, 16)
-	return append(out, cookieShape{"bare with a capital N and R in a path", "d=" + A + `\Name\Rick` + B, []string{A, B}, true})
+	return append(out, cookieShape{"bare with a capital N and R in a path", "d=" + A + `\Name\Reports` + B, []string{A, B}, true})
 }
 
 // round3Wrappers are the wrappers of those axes.

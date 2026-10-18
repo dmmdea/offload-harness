@@ -133,7 +133,7 @@ func TestRedactorTakesABareValueWithAnEscapeInItsFirstCharacters(t *testing.T) {
 			}
 		}
 	}
-	for _, path := range []string{`C:\Name`, `C:\Data\Rick`, `C:\Rick`} {
+	for _, path := range []string{`C:\Name`, `C:\Data\Reports`, `C:\Reports`} {
 		text := spanCk + ": dir=" + path + "; sid=" + v
 		round3Redact(t, "capital path "+path, text, false, v)
 		round3Redact(t, "capital path "+path+", in Args", reviewJSON(t, map[string]string{"cmd": text}), true, v)

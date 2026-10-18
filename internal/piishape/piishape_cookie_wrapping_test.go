@@ -65,7 +65,7 @@ func cookieShapes() []cookieShape {
 		{"literal HTML escapes in a quoted body", quoted(bsu + "0026" + bsu + "003c" + bsu + "003e"), []string{A, B}, true},
 		{"django saved", `m="Saved ok"`, []string{"Saved ok"}, false},
 		{"django apostrophe", `m="Can't save"`, []string{"Can't save"}, false},
-		{"django ampersand", `m="Tom&Jerry"`, []string{"Tom&Jerry"}, false},
+		{"django ampersand", `m="Rock&Roll"`, []string{"Rock&Roll"}, false},
 		{"literal HTML escape, bare", "a=x" + bsu + "0026y", nil, false},
 		{"ampersand, bare", `a=x&y`, nil, false},
 		{"refresh key word", "refresh_" + kwToken + "=" + V, []string{V}, true},

@@ -77,7 +77,7 @@ func TestCookieSpanTakesAQuotedValueThatHoldsAnyCharacter(t *testing.T) {
 // cookie behind it, so the session value was written out. With a session value on the line the whole line goes.
 func TestCookieSpanTakesDjangosShortMessages(t *testing.T) {
 	v, _, _, _ := spanValues()
-	for _, msg := range []string{"Saved ok", "Can't save", "Tom&Jerry"} {
+	for _, msg := range []string{"Saved ok", "Can't save", "Rock&Roll"} {
 		for _, body := range []string{
 			`messages="` + msg + `"; sessionid=` + v,
 			`sessionid=` + v + `; messages="` + msg + `"`,
@@ -248,7 +248,7 @@ func TestCookieSpanStaysQuietWithoutALongValue(t *testing.T) {
 	for _, text := range []string{
 		ckName + `: messages="Saved ok"; theme=dark`,
 		ckName + `: m="Can't save"; lang=en`,
-		ckName + `: m="Tom&Jerry"`,
+		ckName + `: m="Rock&Roll"`,
 		ckName + ": session=\" + fixtureJWT() + \"; path=/",
 		ckName + `: m="Your changes were saved successfully"`,
 		ckName + ": a=x" + bsu + "0026y; b=z",

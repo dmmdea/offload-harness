@@ -91,7 +91,7 @@ func reviewCookies(w string) []string {
 		spanCk + ": sid=" + w + "; theme=dark",
 		spanCk + ": sid=" + w + "; lang=en; a=b",
 		spanCk + `: m="Saved ok"; sid=` + w,
-		spanCk + ": sid=" + w + `; messages="Tom&Jerry"`,
+		spanCk + ": sid=" + w + `; messages="Rock&Roll"`,
 	}
 }
 

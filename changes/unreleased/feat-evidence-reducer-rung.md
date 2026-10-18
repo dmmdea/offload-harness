@@ -170,7 +170,7 @@
   Django's short messages and the HTTP reference's example header stay quiet. The fine-grained value grammar now lives only in the harvest
   redactor, which remembers every value in the span for the value-tail gate (a quoted body whole, with its spaces, quotes, escapes, line
   breaks and the characters above, the closing quote found by the number of backslashes in front of it). The apostrophe gap stays and
-  applies to an unquoted value only (`name=O'Brien` cannot be told from the quote that closes a header written in single quotes); quotes
+  applies to an unquoted value only (`note=don't` cannot be told from the quote that closes a header written in single quotes); quotes
   that are no level of escaping, a header folded again after its first cookie and a cookie passed apart from its header (`curl -b`) are
   named gaps. Measured on the first version of this class: a generated check of 17,057 lines (48 cookie shapes, 18 wrappings) broke the
   contract in all 18 wrappings with the old class and in none with the new one. The next bullet is the review of that version.

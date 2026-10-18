@@ -335,7 +335,7 @@ func cookieBody(n int) string {
 // white space among them, from the opening quote (the rule a bare value follows, so a Go string concatenation
 // that happens to follow an equals sign, `"Cookie: sid=" + f(x) + "..."`, is not a value). It is the units of
 // the span, except that an escape counts as one character, so Go's backslash-u0026 for an ampersand is one and
-// "Tom&Jerry" is nine characters in JSON text as it is in a header. A backslash-u that is not followed by four
+// "Rock&Roll" is nine characters in JSON text as it is in a header. A backslash-u that is not followed by four
 // hex digits counts for nothing; the span takes it all the same.
 func cookieCountUnit(n int) string {
 	k := strconv.Itoa(2*n + 1)
@@ -421,7 +421,7 @@ const cookieBareEscape = `\\{1,` + cookieRunMax + `}(?-i:[^"'\\\r\nnr])`
 // cookieStep is one step over the span of a header line: a quoted pair, or any character that is not a quote, a
 // backslash or a line break, or an escape that is not a quote or a line break. The quoted pair comes first, so the
 // quote that opens it is not where the step stops. A single quote ends the span: an apostrophe in an unquoted
-// value (name=O'Brien) cannot be told from the quote that closes a header written in single quotes.
+// value (note=don't) cannot be told from the quote that closes a header written in single quotes.
 var cookieStep = `(?:` + cookiePair + `|[^'"\\\r\n]|` + cookieBareEscape + `)`
 
 // cookieFirstStep is the first step of a line's span when a long value does not come first: not an opening bracket,
@@ -627,7 +627,7 @@ type Class struct {
 //     last cookie in front of the closing quote does not make it an opener; an empty value is still a value),
 //     and a quoted value that is open at a line break goes on to its closing quote when that is within three more
 //     line breaks, and ends at its line when it is not (a truncated line takes the rest of its line and no
-//     more). An apostrophe in an unquoted value ends the span (name=O'Brien cannot be told from the quote that
+//     more). An apostrophe in an unquoted value ends the span (note=don't cannot be told from the quote that
 //     closes a header written in single quotes), so a cookie behind one is not covered, and neither is one
 //     behind a bare double quote inside a value (a raw JSON value). The fine-grained grammar of a cookie value
 //     lives only in the harvest redactor, which remembers the values of a span for its value-tail gate.

@@ -97,7 +97,7 @@ func spanProbes() []spanProbe {
 	}
 	add("django saved", []string{"Saved ok", v}, `messages="Saved ok"`, "sessionid="+v)
 	add("django apostrophe", []string{"Can't save", v}, `messages="Can't save"`, "sessionid="+v)
-	add("django ampersand", []string{"Tom&Jerry", v}, `messages="Tom&Jerry"`, "sessionid="+v)
+	add("django ampersand", []string{"Rock&Roll", v}, `messages="Rock&Roll"`, "sessionid="+v)
 	add("list, short first element", []string{v}, "theme=dark", "session="+v+"; Path=/")
 	add("list, two long elements", []string{v, w}, "session="+v, "other="+w)
 	add("list, long short long", []string{v, w}, "session="+v+"; HttpOnly", "theme=dark", "other="+w)

@@ -704,7 +704,7 @@ because Go source assigns to token-named variables all day), a value passed apar
 (`fmt.Sprintf("password=%s", v)`), a terminal control sequence other than escape, bracket, parameters and a letter (a charset
 switch, an operating-system command, the one-byte form of the bracket), a Basic header whose name and scheme (or a cookie header
 whose name and cookies) are more than eight punctuation characters apart or have a word between them, a cookie behind a single
-quote or an apostrophe (`name=O'Brien` cannot be told from the quote that closes a header written in single quotes, so the match
+quote or an apostrophe (`note=don't` cannot be told from the quote that closes a header written in single quotes, so the match
 ends there), a quoted cookie whose quotes carry a number of backslashes that is not a level of escaping (0, 1, 3, 7 or 15), or a cookie passed apart from its header name (`curl -b`, a cookie jar); because the table is shared, widening it widens the
 corpus vet too. Run over the tracked tree, the assignment class matched 67 places before the quoted-value rule and 82 after (a scan of the
 tracked text files, counted before this text was written); the 15 added are prose in quotes after a key name
@@ -756,7 +756,7 @@ other cookie and attribute on the line. Over-redacting a cookie line is the acce
 are finer. A match starts only when some value in the span has 12 characters with no white space from its start (a bare value, or a quoted one from
 its opening quote; an escape counts as one character, in a bare value too: a JSON unicode escape, or a backslash run and the character it escapes),
 which leaves `http.Cookie{...}` literals, `Header.Get("Cookie")`, a Go string concatenation such as `"Cookie: sid=" + f(x)`, Django's short messages
-(`Saved ok`, `Can't save`, `Tom&Jerry`) and the HTTP reference's example header quiet. A quote after an equals sign opens a quoted value only when a
+(`Saved ok`, `Can't save`, `Rock&Roll`) and the HTTP reference's example header quiet. A quote after an equals sign opens a quoted value only when a
 value can start behind it: not white space, not a separator or a closer (a comma, a semicolon, a colon, an ampersand, a pipe, a paren, a brace, a
 bracket, an angle bracket, the escape of a tab or of an ampersand or angle bracket), so base64 padding or an empty last cookie in front of the quote
 that closes the string does not turn that quote into an opener, and the next field of Args, the next key of a document and the next argument of a
