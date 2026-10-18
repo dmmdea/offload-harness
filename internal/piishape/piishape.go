@@ -211,6 +211,13 @@ const cookieGapPiece = `(?:[^\w\r\n]|` + jsonEscape + `)`
 // cookieGap is up to eight of those pieces, as few as possible.
 const cookieGap = cookieGapPiece + `{0,8}?`
 
+// cookieLineGap is the same for the opener of a header line, which takes no opening bracket except one right behind the name
+// (a subscript): a header that a bracket after its punctuation opens is a list (below), and a line that could also read the bracket as part of its own gap would match twice, a
+// long list-shaped span at a higher priority and a short line behind it. Every match then waits for the list to end
+// or the text to run out, and a text that repeats a header over and over, each one opening a list that never closes,
+// is scanned to its end once per match.
+const cookieLineGap = `(?:[^\w\r\n\[]|` + jsonEscape + `){0,8}?`
+
 // cookieOpener is what stands between a cookie header's name and the cookies: the punctuation the Basic header
 // takes (up to eight non-word characters, then a colon, an equals sign, a greater-than sign or an opening bracket,
 // then up to eight more; a hash rocket is an equals sign and a greater-than sign, the second of which the gap takes,
@@ -219,7 +226,7 @@ const cookieGap = cookieGapPiece + `{0,8}?`
 // cookies, the form of a call that takes the name and the value as two arguments (Header.Set("Cookie", "...")).
 // A bare comma stays quiet: "the cookie, path=/some/long/path" is prose. A header fold may stand before the
 // punctuation and after it.
-const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieGap + `[:=>\[]|` + cookieGap + `,\s*\\*['"])` + cookieGap + `(?:` + cookieFold + cookieGap + `)?`
+const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieLineGap + `[:=>]|\[|` + cookieLineGap + `,\s*\\*['"])` + cookieLineGap + `(?:` + cookieFold + cookieLineGap + `)?`
 
 // cookieListOpener is the opener of a list: the punctuation, which a line break may precede or follow, then an
 // opening bracket. The white space behind the bracket, a pretty-printed list's line breaks and indentation
@@ -415,8 +422,12 @@ const cookieBareEscape = `\\{1,` + cookieRunMax + `}(?-i:[^"'\\\r\nnr])`
 // value (name=O'Brien) cannot be told from the quote that closes a header written in single quotes.
 var cookieStep = `(?:` + cookiePair + `|[^'"\\\r\n]|` + cookieBareEscape + `)`
 
+// cookieFirstStep is the first step of a line's span when a long value does not come first: not an opening bracket,
+// which opens a list.
+var cookieFirstStep = `(?:` + cookiePair + `|[^'"\\\r\n\[]|` + cookieBareEscape + `)`
+
 // cookieLineBody is the span of a header on a line: steps, a long value, then steps to the end.
-var cookieLineBody = cookieStep + `*?` + cookieLong + cookieStep + `*`
+var cookieLineBody = `(?:` + cookieLong + `|` + cookieFirstStep + cookieStep + `*?` + cookieLong + `)` + cookieStep + `*`
 
 // cookieClosedString is a string of a list at a level, with both its quotes. Inside it a quote of the next level is a
 // quote of a cookie value. A string that is open at a line break goes on to its closing quote when that is within
