@@ -3278,10 +3278,12 @@ one line per delegating machine, a CLI ticket dies with the CLI, a late-binding 
 carries: the `comfyui-workflow-templates` package that ComfyUI itself pins, a checkout of the upstream
 repository, or a `pip download` extract of a candidate version. It lists and classifies. It never runs a
 template, downloads a model, installs a package, changes a config or touches the network, and the only
-file it writes is the one named by `--out`. There is no MCP tool, config key, fleet task or route for it
-yet. A template is a UI-format graph and `run-graph` takes API-format graphs only (the tool description
-says so, and `preflight-graph-file.mjs` reads each node's `class_type`), so running one needs a converter
-that this phase does not contain.
+file it writes is the one named by `--out`. The `offload_run_template` tool reads the same catalog (see
+[the tool's section](mcp-server.md#workflow-templates-offload_run_template) for what it lists, gates and
+runs); there is still no config key, fleet task or route for the catalog itself. A template is a UI-format
+graph and `run-graph` takes API-format graphs only (the tool description says so, and
+`preflight-graph-file.mjs` reads each node's `class_type`), so running one needs the converter
+([below](#template-to-api-converter-rendertemplate-to-graphmjs)), which this phase does not contain.
 
 **Class: none.** No GPU slot, no lease, no ComfyUI process. It is one dependency-free file (`node:`
 builtins only), so the whole file can be piped to `node --input-type=module - snapshot --comfy-dir <tree>`
@@ -3296,7 +3298,7 @@ is not a figure.
 | field | rule |
 |---|---|
 | active nodes | subgraph instances are expanded; a node is active only if its mode is not 2 (muted) or 4 (bypassed) and every instance around it is active; a self-instantiating or dangling subgraph is flagged, never hidden |
-| model files | `properties.models` of active nodes (class, URL, hash), plus loader widget files nobody annotated; files that only bypassed nodes reference are reported apart and not required |
+| model files | `properties.models` of active nodes (class, URL, hash), plus widget files nobody annotated (a node's `widgets_values` as a list or as an object keyed by input name, and an active subgraph instance's own `widgets_values`, listed with no class); files that only bypassed nodes reference are reported apart and not required |
 | `kind` | `api` (paid partner nodes) beats `custom_nodes` (a node pack core does not carry) beats `local` (core nodes only) |
 | API flag | three signals, each reported: a node type in the node's own `comfy_api_nodes` ids (read from `node_id="X"`, a `NODE_ID = "X"` class attribute and the first argument of `_cloud_schema`), the `api_` name prefix, the index's `openSource: false`; any one is enough, and the summary counts the templates where they disagree |
 | parameter surface | the `proxyWidgets` of its subgraph instances, the widgets a caller could override |
@@ -3311,7 +3313,7 @@ or date, and the summary's evidence range ignores it. A template takes the worst
 conditional > unknown > permissive), so an unlisted repo never hides a known restriction, and a file with no
 Hugging Face source counts as unknown. The boolean `commercial_use` of
 [ADR 0058](../architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)
-(status Proposed) cannot say `conditional`, which is why the map has a third class. The map's 50 entries
+(Accepted 2026-10-14, together with the third state) cannot say `conditional`, which is why the map has a third class. The map's 50 entries
 were seeded from repo-level licence tags digested on 2026-09-30 and none was re-fetched when it was written;
 a tag is not a per-file licence, and the conditions text comes from digests of licence texts that were not
 read in full. The gate: a paid API template is `blocked` (it spends money,
@@ -3324,7 +3326,10 @@ instead, while any other class from that repo, a file with no class and the make
 Non-commercial, conditional and unknown licences are `ack_required` (an explicit acknowledgement that names the
 class); permissive or weightless is `open`. A FLUX-named weights file from another repo is only a warning. `list`
 hides blocked templates unless `--include-hidden`; naming `--kind api` lists the paid API ones without it, and
-the FLUX-family ones stay hidden.
+the FLUX-family ones stay hidden. The catalog reports this gate and runs nothing; the run-template tool applies a
+stricter one in its first release ([its section](mcp-server.md#workflow-templates-offload_run_template)): a template runs only
+when its class is permissive (or it has no weights), an `ack_required` template is refused under its own class, and nothing
+acknowledges it. The catalog row also names the input files the template's active loaders read (`input_files`).
 
 **Readiness is directory-aware.** A file is usable by a template only if ComfyUI would offer it to the
 loader that reads it, and that is a question about directories, not names: a VAE loader lists the `vae`
@@ -3338,7 +3343,14 @@ and the models directory); and a class listing that is recursive, follows links,
 the extensions its core loaders accept, by path relative to the directory (so `sub/name` is not `name`, and a
 `.gguf` is not offered by a core loader). A requirement is `present` (or `present_class_unknown`: a loader
 file nobody annotated, met by its exact name in any class) or says why not: `missing`, `wrong_class` (and
-where the file is), `in_subfolder`, `case_mismatch`, `extension_not_listed`, `class_unregistered`.
+where the file is), `in_subfolder`, `case_mismatch`, `extension_not_listed`, `class_unregistered`, and, for an embedding a prompt names, `embedding_unverified`. That lookup fails closed and is narrower than
+ComfyUI's (ComfyUI warns and skips a missing embedding, and finds the others in the roots and every subfolder through a set, so which
+directory answers varies from run to run): the harness accepts a name only when exactly one physical file answers it, case-exactly, anywhere in the roots and
+their subfolders (a `.git` directory too: the class listing skips it, ComfyUI's embedding search does not), a
+file reached by several paths (a link, a hard link, a root inside a root) counting once, and the status carries the reason: a case variant
+answers it, more than one file could answer it, or a file answers another name ComfyUI may try for the template's prompts, listed as
+`embedding_probes`. A loader widget's embeddings file (an annotation that records no prompt name) is met by its exact path like any
+other class.
 `--mode basename-only` is the older shortcut (any file with that name, anywhere), kept so its numbers can be
 reproduced and compared. Only `local` templates are evaluated. A snapshot records the node's ComfyUI version
 and the hashes of `folder_paths.py` and `utils/extra_config.py`; `readiness` compares the hashes with the
@@ -3494,8 +3506,13 @@ changed: the builder keeps its recipe in this change. Resolve it by setting the 
 A workflow template is a UI-format graph (`nodes[]`, `links[]`, `definitions.subgraphs`, `widgets_values`).
 `POST /prompt`, the `run-graph` door and the render builders take API-format graphs only:
 `{"<id>": {"class_type", "inputs"}}`. `render/template-to-graph.mjs` converts the first into the second. It is the
-converter the templates catalog (phase A, above) did not contain. Nothing calls it yet: no MCP tool, config key, fleet
-task or route, and the ComfyUI lifecycle module is untouched.
+converter the templates catalog (phase A, above) did not contain. The run-graph runner calls it for a template run
+(`comfy-run-graph.mjs --template NAME`, behind `offload_run_template`): once ComfyUI is up, with the running ComfyUI's own
+`/object_info` and version, before preflight, so a refusal is the defer `TEMPLATE_CONVERT_REFUSED` (and a model file the converted graph loads that the run's manifest does not name is the defer `TEMPLATE_MODEL_UNLISTED`, `unlistedModels` in `template-run.mjs`; an embedding the prompt text names counts as one) and the graph that is
+checked and posted is the converted one. `render/template-run.mjs` finds the template by name in the node's own package
+(a name the node's index does not list is an unknown template, never a file read), passes the index's `minComfyUIVersion`
+and applies the caller's overrides to the converted graph. The converter itself is still a pure function, there is no
+config key or fleet task for it, and the ComfyUI lifecycle module is untouched.
 
 **Class: none.** No GPU slot, no lease, no ComfyUI process. It is a pure function of three inputs: the template, an
 `/object_info` listing and options. The listing is never fetched here: the caller passes the one a running ComfyUI served

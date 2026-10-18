@@ -84,24 +84,34 @@ func ForGraph(graph []byte, f Facts) (Need, bool) {
 // maxGraphBytes or unreadable is not sized: ok is false, as for a graph ForGraph cannot size. Only a regular file is opened, so a
 // `--graph` that names a pipe or a device cannot block the verb that resolved it.
 func ForGraphFile(path string, f Facts) (Need, bool) {
+	raw, ok := readBoundedFile(path)
+	if !ok {
+		return Need{}, false
+	}
+	return ForGraph(raw, f)
+}
+
+// readBoundedFile reads the regular file at path, at most maxGraphBytes of it: the read ForGraphFile and ForManifestFile share. A path
+// that is empty, not a regular file, larger than the bound or unreadable is ok=false.
+func readBoundedFile(path string) ([]byte, bool) {
 	path = strings.TrimSpace(path)
 	if path == "" {
-		return Need{}, false
+		return nil, false
 	}
 	fi, err := os.Stat(path)
 	if err != nil || !fi.Mode().IsRegular() || fi.Size() > maxGraphBytes {
-		return Need{}, false
+		return nil, false
 	}
 	fh, err := os.Open(path)
 	if err != nil {
-		return Need{}, false
+		return nil, false
 	}
 	defer fh.Close()
 	raw, err := io.ReadAll(io.LimitReader(fh, maxGraphBytes+1)) // the file may have grown since the stat
 	if err != nil || len(raw) > maxGraphBytes {
-		return Need{}, false
+		return nil, false
 	}
-	return ForGraph(raw, f)
+	return raw, true
 }
 
 // otherWeightExts are weight-like extensions beyond the scan's six that a loader of some custom node opens. The list is a floor, not

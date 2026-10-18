@@ -106,9 +106,19 @@ export const nodeIo = {
   stat: (p) => {
     try { const st = statSync(p); return { size: st.size, isDir: st.isDirectory(), isFile: st.isFile() }; } catch { return null; }
   },
-  realpath: (p) => { try { return slash(realpathSync(p)); } catch { return slash(p); } },
+  // realpath: the native one, which resolves links; on a local volume that keeps one spelling on disk it also gives that spelling, where the JS
+  // one returns the case it was given. It is a fallback key and no promise of one spelling: a virtual or cloud drive may return the case it was
+  // given, and then one folder registered under two spellings reads as two files and is refused (embedding_unverified), never accepted wrongly.
+  realpath: (p) => { try { return slash(realpathSync.native(p)); } catch { return slash(p); } },
+  // identity: what the file system calls this file (`id:<device>:<index>`), or null when it cannot say. Two names of one file, a hard link,
+  // share it, and no path tells them apart. Like the real path, it is the file system's own word: a drive whose index is derived from the path
+  // gives two spellings two ids, and that reads as two files as well.
+  identity: (p) => { try { return fileIdentity(statSync(p, { bigint: true })); } catch { return null; } },
   writeText: (p, s) => { writeFileSync(p, s); },
 };
+
+// fileIdentity: the id of a file from its stat (bigint), or null when the file system gives none (an index of 0 is no index).
+export const fileIdentity = (st) => (st && st.ino !== 0n ? `id:${st.dev}:${st.ino}` : null);
 
 // walkFiles: every file under `root`, with its path relative to it. It follows symlinks and
 // junctions (ComfyUI's listing does) and refuses only a loop back into an ancestor.
@@ -142,7 +152,12 @@ export function walkFiles(root, io, { follow = true, excludeDirs = [] } = {}) {
 export const MODE_MUTED = 2;
 export const MODE_BYPASSED = 4;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const MAX_SUBGRAPH_DEPTH = 8;
+// The levels of subgraph instances this walk expands. The converter expands more (template-to-graph.mjs LIMITS.maxSubgraphDepth, 64),
+// and the two are deliberately not one constant: the converter bounds a nest that branches by counting nodes (LIMITS.maxNodes), and this
+// walk has no such count, so its depth is what keeps it small. What it does not expand it flags (`unexpanded`), and the verdict refuses
+// a template with one (template-manifest.mjs, subgraph_unexpanded): the models, licence and API signals of a template are read from
+// this walk, and a walk that stopped short must not stand in for the graph the converter would build.
+export const MAX_SUBGRAPH_DEPTH = 8;
 
 // walkGraph: a UI-format workflow is a graph whose nodes may be instances of subgraphs defined in
 // `definitions.subgraphs`. A node is ACTIVE only when its mode is not muted (2) or bypassed (4)
@@ -196,6 +211,11 @@ export function flattenActiveNodes(workflow, opts) {
 const MODEL_EXT = [".safetensors", ".gguf", ".pth", ".pt", ".ckpt", ".bin", ".sft", ".onnx"];
 const NOTE_TYPES = new Set(["MarkdownNote", "Note"]);
 
+// The node classes that read a file from the input (or output) directory: the loader list the graph door's file check reads
+// (internal/mediacap/graphfiles.go), so a template and the graph it becomes agree on what "reads input files" means. Input files do not
+// travel with a graph, which is why a graph that reads one stays on the machine whose directory holds it.
+export const INPUT_LOADER_TYPES = Object.freeze(["LoadImage", "LoadImageMask", "LoadImageOutput", "LoadVideo", "LoadAudio"]);
+
 // The model class a core loader node reads its file from. Only used for a file that appears as a
 // loader widget value and carries no `properties.models` annotation; an annotated file names its
 // own class.
@@ -210,8 +230,238 @@ const LOADER_CLASS = {
   HypernetworkLoader: "hypernetworks", PhotoMakerLoader: "photomaker",
 };
 
-const hasModelExt = (s) => { const l = s.toLowerCase(); return MODEL_EXT.some((e) => l.endsWith(e)); };
+// The node classes that read a model file, and the test for a model file name: the override step (template-run.mjs) refuses to retarget
+// either, and refuses a text that names an embedding (mentionsEmbedding, below), because the licence gate, the FLUX bar and the
+// trust-on-first-use check read the models the template names.
+export const MODEL_LOADER_TYPES = Object.freeze(Object.keys(LOADER_CLASS));
+export const hasModelExt = (s) => { const l = s.toLowerCase(); return MODEL_EXT.some((e) => l.endsWith(e)); };
 const textOrNull = (v) => (typeof v === "string" && v !== "" ? v : null);
+
+// modelCovered: does a set of lower-cased model names cover the file a widget (or a converted graph's input) carries? The whole name does,
+// and so does its base name: an annotation names `x.safetensors` where a loader's widget holds `sub/x.safetensors`. One rule for both
+// readers of a template: the catalog (an unannotated widget file is a requirement only when no annotation covers it) and the runner (a
+// file the converted graph loads must be one the manifest names), so neither is stricter or looser than the other.
+export function modelCovered(names, file) {
+  const name = slash(file).toLowerCase();
+  return names.has(name) || names.has(baseName(name));
+}
+
+// Embeddings. ComfyUI's CLIP tokenizer loads a file named in the PROMPT TEXT: a word that starts with `embedding:` names a file of the
+// embeddings class, tried as written and then with .safetensors, .pt and .bin appended (comfy/sd1_clip.py load_embed, read in 0.38.0). No
+// loader node and no file extension is involved, so neither the loader classes nor the suffix test (hasModelExt) see it.
+//
+// WHERE it looks is the narrow part, and it fails CLOSED. ComfyUI warns and skips an embedding it cannot find (sd1_clip.py, "does not
+// exist, ignoring") and runs the prompt without it; the harness refuses instead, because a missing or different embedding silently changes
+// the output of a vetted template, and the licence gate, the hash and the trust record attach to the file the manifest names. So a name a
+// prompt gives is accepted only when EXACTLY ONE physical file answers it, case-exactly (embeddingAnswers): the name as written, then with
+// .safetensors, .pt and .bin appended, on whole path segments, across every embeddings root and its subfolders, one file reached by
+// several paths (a link, a hard link, a root registered inside another) counted once by the file system's own identity. Anything else is
+// refused as `embedding_unverified`, with one of three reasons:
+//   - a case variant answers it: the only file that answers differs in letter case. Whether ComfyUI finds it depends on what the volume
+//     does with a name in another case, and the harness does not ask the volume;
+//   - more than one file could answer it: two directories, two extensions in one directory, a file with no extension beside a listed one,
+//     an exact file beside a case variant. ComfyUI puts every embeddings root and every subdirectory below it (os.walk, links followed)
+//     into one Python set() and load_embed takes the first directory of list(set) that holds the name, so which directory answers varies
+//     from one process to the next, and a manifest can name only one file;
+//   - a probe name (below) is answered by a file of the node.
+// No file answering at all is `missing`, as for any other class. Deliberately not replicated: ComfyUI's set-order choice between the
+// directories that hold a name, its preference of one extension over another within a directory, and the case rule of the volume. The full
+// replica is a later row, to be taken when the first real template needs it; no template of the installed package names an embedding in an
+// active prompt.
+//
+// A file a loader widget names (ConditioningLoader) is a different lookup, and it is unchanged: the node lists the directories by relative
+// path and opens its value with get_full_path, the exact path under the first root that holds it. checkRequirement gives it the rule of
+// every other class.
+//
+// WHAT it reads from a prompt is the tokenizer's, and embeddingRefs ports that path. Names ComfyUI may try beyond the ones it returns
+// (embeddingProbes: the name as written before its commas come off, and what the encoders that read a prompt without weights take) are
+// not requirements; readiness refuses a template when a file of the node answers one, as `embedding_unverified`. The override step
+// (template-run.mjs) does not use it: it refuses on mentionsEmbedding, a deliberately wider matcher, so that what it lets through is never
+// something the reader finds a file in. The runner's comparison with the manifest (unlistedModels) and the catalog (requiredModels) use
+// embeddingRefs and embeddingCovered, which is the one reading of the reference.
+export const EMBEDDING_EXTS = Object.freeze([".safetensors", ".pt", ".bin"]);
+export const mentionsEmbedding = (s) => typeof s === "string" && /embedding:/i.test(s);
+
+const EMBEDDING_ID = "embedding:";
+// Python's str.isspace set: what re's \s and str.split() match on a str. JavaScript's \s is another set (it holds U+FEFF and lacks U+001C
+// to U+001F and U+0085), so the tokenizer's whitespace is spelled out.
+const PY_SPACE = "\\t\\n\\v\\f\\r\\x1c-\\x1f \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const AFTER_SPACE_ID = new RegExp(`(?<=[${PY_SPACE}])${EMBEDDING_ID}`);
+const SPACE_RUN = new RegExp(`[${PY_SPACE}]+`);
+// What Python's float() accepts, which is what decides whether the tail of a group is its weight: a sign, digits with single underscores
+// between them, a point, an exponent, inf, infinity and nan in any case, spaces around, and any Unicode decimal digit. Its spaces are the
+// ASCII ones and the Unicode ones above U+007F, not U+001C to U+001F, which str.split() also counts (found by comparing with ComfyUI's code).
+const PY_FLOAT_SPACE = "\\t\\n\\v\\f\\r \\x85\\xa0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000";
+const PY_DIGITS = "\\p{Nd}(?:_?\\p{Nd})*";
+const PY_FLOAT = new RegExp(`^[${PY_FLOAT_SPACE}]*[+-]?(?:(?:${PY_DIGITS}(?:\\.(?:${PY_DIGITS})?)?|\\.${PY_DIGITS})(?:e[+-]?${PY_DIGITS})?|inf(?:inity)?|nan)[${PY_FLOAT_SPACE}]*$`, "iu");
+
+// A text nested deeper than this is not read (embeddingRefs gives the empty name). token_weights recurses once per nested group and
+// Python stops at its recursion limit (measured: about nine hundred groups deep inside ComfyUI), so no real prompt comes near it; the bound
+// keeps the quadratic cost of a hostile text small.
+const MAX_GROUP_DEPTH = 500;
+class UnreadableText extends Error {}
+
+const escapeImportant = (t) => t.replaceAll("\\)", "\u0000\u0001").replaceAll("\\(", "\u0000\u0002");
+const unescapeImportant = (t) => t.replaceAll("\u0000\u0001", ")").replaceAll("\u0000\u0002", "(");
+
+// parse_parentheses of sd1_clip.py, as written: the text cut into the pieces outside parentheses and the closed groups (nested ones kept
+// whole). A stray `)` pushes the level below zero and nothing closes a group after it; an unclosed `(` ends the last piece unclosed.
+function parseParentheses(string) {
+  const result = [];
+  let current = "";
+  let level = 0;
+  for (const ch of string) {
+    if (ch === "(") {
+      if (level === 0) {
+        if (current) result.push(current);
+        current = "(";
+      } else {
+        current += ch;
+      }
+      level++;
+    } else if (ch === ")") {
+      level--;
+      if (level === 0) {
+        result.push(current + ")");
+        current = "";
+      } else {
+        current += ch;
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current) result.push(current);
+  return result;
+}
+
+// token_weights of sd1_clip.py without the weights (only the text of each piece matters here): a closed group is opened, its tail after
+// the last colon is taken off when float() reads it (a colon at index 0 does not count), and the inside is cut again.
+function tokenSegments(string, depth = 0) {
+  if (depth > MAX_GROUP_DEPTH) throw new UnreadableText("nested too deep");
+  const out = [];
+  for (let x of parseParentheses(string)) {
+    if (x.length >= 2 && x[x.length - 1] === ")" && x[0] === "(") {
+      x = x.slice(1, -1);
+      const colon = x.lastIndexOf(":");
+      if (colon > 0 && PY_FLOAT.test(x.slice(colon + 1))) x = x.slice(0, colon);
+      for (const inner of tokenSegments(x, depth + 1)) out.push(inner); // not a spread: a group of many thousand groups would overflow the call stack
+    } else {
+      out.push(x);
+    }
+  }
+  return out;
+}
+
+// The deepest run of unclosed `(` in a text: an upper bound of the depth token_weights recurses to, found in one pass so that a hostile
+// text is refused before it is cut.
+function maxNesting(string) {
+  let level = 0;
+  let max = 0;
+  for (let i = 0; i < string.length; i++) {
+    const ch = string[i];
+    if (ch === "(") { level++; if (level > max) max = level; } else if (ch === ")" && level > 0) level--;
+  }
+  return max;
+}
+
+// _try_get_embedding of sd1_clip.py: what follows the identifier is split on whitespace, the first word is the name, it is cut at the first
+// `<` or `[`, and a retry strips commas from both ends. `written` is the name load_embed is asked for first, `name` the one after the comma
+// retry. An empty rest or word is the empty name.
+function embeddingWordIn(rest) {
+  const first = rest.split(SPACE_RUN).find((w) => w !== "");
+  if (first === undefined) return { written: "", name: "" };
+  const cut = first.search(/[<[]/);
+  const written = cut >= 0 ? first.slice(0, cut) : first;
+  return { written, name: written.replace(/^,+|,+$/g, "") };
+}
+
+// The words a reading of a text takes as references, {written, name} each, in order of appearance.
+function referenceWords(segments) {
+  const out = [];
+  for (const segment of segments) {
+    const pieces = unescapeImportant(segment).split(AFTER_SPACE_ID);
+    if (pieces[0].startsWith(EMBEDDING_ID)) out.push(embeddingWordIn(pieces[0].slice(EMBEDDING_ID.length)));
+    for (let i = 1; i < pieces.length; i++) out.push(embeddingWordIn(pieces[i]));
+  }
+  return out;
+}
+
+// The CLIP tokenizer's reading of a text (cut at parentheses, a closed group loses a numeric tail), or null when the text is nested too deep.
+function clipWords(text) {
+  const escaped = escapeImportant(text);
+  try {
+    if (maxNesting(escaped) > MAX_GROUP_DEPTH) throw new UnreadableText("nested too deep");
+    return referenceWords(tokenSegments(escaped));
+  } catch (e) {
+    if (e instanceof UnreadableText) return null;
+    throw e;
+  }
+}
+
+// embeddingRefs: the file names a text asks ComfyUI to load, each once, in order of appearance. This is ComfyUI's reading, ported from
+// tokenize_with_weights and the functions it calls (comfy/sd1_clip.py, 0.38.0): the text is cut at parentheses and a closed group loses a
+// numeric tail (a bare `:1.2` stays in the name); each piece is split where whitespace precedes `embedding:`, which must also be the
+// start of a piece or follow whitespace; the identifier is lower case only; `\(` and `\)` are literal characters of the name. The names were
+// checked against the extracted functions of that file on a corpus of generated texts.
+//
+// Where it differs from ComfyUI, and why:
+//  - The name returned is the one after the comma retry (commas off both ends). ComfyUI asks for the name as it stands first, so a file
+//    whose own name ends in a comma is opened before the stripped one: that name is not a requirement (a node holds no such file, nearly
+//    always) and is returned by embeddingProbes, which readiness refuses when a file answers it.
+//  - `embedding:` with nothing readable after it, and a text nested more than MAX_GROUP_DEPTH groups deep, are the empty name. ComfyUI
+//    raises on the first (and asks for a file named after the directory on a name cut to nothing) and reads the second up to about nine
+//    hundred groups. The empty name is refused by every caller, which is the side that fails closed.
+//  - Tokenizers built with disable_weights (the LLM-based text encoders) do not cut the text at parentheses, so `embedding:foo(bar)` is the
+//    name `foo(bar)` there and `(embedding:foo)` is no reference. This reads the CLIP tokenizer's way, the one embeddings are made for;
+//    the names the other reading gives are not requirements either, and embeddingProbes returns them.
+//  - A tokenizer without an embeddings directory loads nothing; the file is still listed (the side that lists more).
+// A value that is not a string names nothing.
+export function embeddingRefs(text) {
+  if (typeof text !== "string" || !text.includes(EMBEDDING_ID)) return [];
+  const words = clipWords(text);
+  if (words === null) return [""];
+  const out = [];
+  for (const { name } of words) if (!out.includes(name)) out.push(name);
+  return out;
+}
+
+// embeddingProbes: the names ComfyUI may try for a text beyond the ones embeddingRefs gives, each once. They are not requirements: a
+// template does not need a file called `foo,`. But a node that holds one may have ComfyUI open it, in place of the file the template
+// needs, and no manifest names it, so readiness refuses a template when a file of the node answers one (readiness, `probes`). The empty
+// name is not probed (embeddingRefs gives it, and every caller refuses it).
+//  - The name as written. `embedding:foo, a cat` asks load_embed for `foo,` first and strips the comma only when no file answers.
+//  - The names of the reading without weights. The LLM-based text encoders (Z-Image, Flux.2, ERNIE and others) pass the embeddings
+//    directory on and call tokenize_with_weights with disable_weights: the text is not cut at parentheses and no group weight is read, so
+//    `embedding:foo(bar)` is `foo(bar)` there and `a cat ( embedding:1.2 )` names `1.2`. A template does not say which encoder runs, so
+//    the CLIP reading stays the requirement and the other reading's names are probes.
+export function embeddingProbes(text) {
+  if (typeof text !== "string" || !text.includes(EMBEDDING_ID)) return [];
+  const refs = embeddingRefs(text);
+  const out = [];
+  for (const { written, name } of [...(clipWords(text) ?? []), ...referenceWords([escapeImportant(text)])]) {
+    if (name === "") continue;
+    for (const n of [written, name]) if (n !== "" && !refs.includes(n) && !out.includes(n)) out.push(n);
+  }
+  return out;
+}
+
+// embeddingCoveringNames: of a set of lower-cased names under the embeddings class (annotations, or a manifest's paths), those that cover the
+// file a reference loads. The name as written does, and so does the name with any of the three extensions ComfyUI appends; a file in a
+// subfolder does too, because ComfyUI searches every subfolder, so a name covers a reference when it ends in `/` and the candidate (whole
+// path segments, not a base name that merely ends alike). A name that would leave the directory is never covered: a drive letter, or an
+// empty, `.` or `..` segment (an empty name, a leading slash, a doubled slash and a trailing slash each leave an empty segment).
+export function embeddingCoveringNames(names, ref) {
+  const name = slash(ref).toLowerCase();
+  if (/^[a-z]:/.test(name) || name.split("/").some((seg) => seg === "" || seg === "." || seg === "..")) return [];
+  const candidates = [name, ...EMBEDDING_EXTS.map((e) => name + e)];
+  return [...names].filter((n) => candidates.some((c) => n === c || n.endsWith("/" + c)));
+}
+
+// embeddingCovered: does any name of the set cover the reference (embeddingCoveringNames)? That says a file of the right name is listed, not
+// that it is the one file that answers the reference on a node: readiness checks that (checkEmbedding), and for an annotation it checks the
+// reference requiredModels records on it.
+export const embeddingCovered = (names, ref) => embeddingCoveringNames(names, ref).length > 0;
 
 // requiredModels: the files a template needs. `active` are the files of active nodes: the
 // annotated ones (`properties.models`, which name a class, a download URL and sometimes a hash) and
@@ -219,7 +469,7 @@ const textOrNull = (v) => (typeof v === "string" && v !== "" ? v : null);
 // bypassed or muted nodes reference: optional in practice (a Lightning LoRA on a bypassed loader),
 // so not required, and reported so nobody has to wonder where they went.
 export function requiredModels(workflow) {
-  const { leaves } = walkGraph(workflow);
+  const { leaves, instances } = walkGraph(workflow);
   const active = new Map();
   const inactive = new Map();
   const add = (map, req) => {
@@ -241,18 +491,62 @@ export function requiredModels(workflow) {
   }
   for (const key of active.keys()) inactive.delete(key);
   const annotated = new Set([...active.values()].map((m) => m.name.toLowerCase()));
-  for (const { node, active: on } of leaves) {
-    if (!on || !Array.isArray(node.widgets_values)) continue;
+  // The annotations of the embeddings class, by lower-cased name. A prompt reference one of them covers is recorded on it (embedding_refs),
+  // so that readiness can check that the annotated file is the one file that answers that reference on the node.
+  const annotatedEmbeddings = new Map();
+  // The other names ComfyUI may try for the prompts of active nodes (embeddingProbes): not requirements, checked against a node's files.
+  const probes = new Set();
+  for (const m of active.values()) {
+    if (mapLegacyClass(m.directory ?? "") !== "embeddings") continue;
+    const key = slash(m.name).toLowerCase();
+    if (annotatedEmbeddings.has(key)) annotatedEmbeddings.get(key).push(m);
+    else annotatedEmbeddings.set(key, [m]);
+  }
+  // An unannotated file a node names in its widget values. The converter reads widgets_values in either of its two forms, a list or an
+  // object keyed by input name, so both are read here; and it routes the widgets_values of a subgraph instance into an inner loader (the
+  // widgets a proxyWidgets entry names, or the literal a subgraph input takes), so an ACTIVE instance's own values are read as well. The
+  // class a proxied file is filed under is the inner loader's, which is not followed here: it is listed with no class (readiness finds the
+  // directory it sits in). Which of the two files the converter loads (the instance's value replaces the inner loader's own) is not modelled
+  // either: when they differ both are required, which can ask for one file more than the graph loads and never one fewer.
+  const addWidgetFiles = (node) => {
+    const raw = node.widgets_values;
+    const values = Array.isArray(raw) ? raw : raw !== null && typeof raw === "object" ? Object.values(raw) : [];
     const type = typeof node.type === "string" ? node.type : "";
-    if (NOTE_TYPES.has(type)) continue;
-    for (const v of node.widgets_values) {
-      if (typeof v !== "string" || !hasModelExt(v)) continue;
+    if (NOTE_TYPES.has(type)) return;
+    for (const v of values) {
+      if (typeof v !== "string") continue;
+      // A prompt that names an embedding the way ComfyUI reads it needs that file, which no loader widget carries and no extension ends in:
+      // it is listed under the embeddings class by the name the text gives, unless an annotation of that class already covers it, and then
+      // the annotation records the name (embedding_refs). The extension and the directory are resolved against a node's files by the
+      // readiness check, which is the one place that knows them. A text that only looks like a reference to a wider matcher (another letter
+      // case, glued to a word) names nothing here, and a value with no reference goes on to the file-name test below.
+      for (const probe of embeddingProbes(v)) probes.add(probe);
+      const refs = embeddingRefs(v);
+      if (refs.length > 0) {
+        for (const ref of refs) {
+          const covering = embeddingCoveringNames(annotatedEmbeddings.keys(), ref);
+          if (covering.length === 0) {
+            add(active, { name: ref, directory: "embeddings", url: null, hash: null, hash_type: null, annotated: false, node_types: [type] });
+            continue;
+          }
+          for (const key of covering) {
+            for (const entry of annotatedEmbeddings.get(key)) {
+              if (!entry.embedding_refs) entry.embedding_refs = [];
+              if (!entry.embedding_refs.includes(ref)) entry.embedding_refs.push(ref);
+            }
+          }
+        }
+        continue;
+      }
+      if (!hasModelExt(v)) continue;
       const name = slash(v);
-      if (annotated.has(name.toLowerCase()) || annotated.has(baseName(name).toLowerCase())) continue;
+      if (modelCovered(annotated, name)) continue;
       add(active, { name, directory: Object.hasOwn(LOADER_CLASS, type) ? LOADER_CLASS[type] : null, url: null, hash: null, hash_type: null, annotated: false, node_types: [type] });
     }
-  }
-  return { active: [...active.values()], inactive: [...inactive.values()] };
+  };
+  for (const { node, active: on } of leaves) if (on) addWidgetFiles(node);
+  for (const { node, active: on } of instances) if (on) addWidgetFiles(node);
+  return { active: [...active.values()], inactive: [...inactive.values()], embedding_probes: [...probes] };
 }
 
 // parseNoteSizes: newer templates list each file's size in the model note as
@@ -687,6 +981,15 @@ function emptyGraph() {
   };
 }
 
+// inputFiles: the files the ACTIVE input loaders of a template name, in walk order. A loader keeps its file as the first widget value
+// ("ref.png", or "ref.png [output]" for a file in the output directory); a loader that names none is listed with a null name, so a
+// template that reads an unnamed file still counts as one that reads input.
+function inputFiles(leaves) {
+  return leaves
+    .filter((l) => l.active && INPUT_LOADER_TYPES.includes(l.node.type))
+    .map((l) => ({ node_type: l.node.type, name: textOrNull(Array.isArray(l.node.widgets_values) ? l.node.widgets_values[0] : null) }));
+}
+
 function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
   const name = String(entry.name ?? "");
   const requires = Array.isArray(entry.requiresCustomNodes) ? entry.requiresCustomNodes : [];
@@ -694,10 +997,12 @@ function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
   let graph = emptyGraph();
   let models = [];
   let inactive = [];
+  let probes = [];
   let surface = [];
   let noteSizes = {};
   let customPacks = [];
   let nodeTypes = [];
+  let inputs = [];
   if (workflow && typeof workflow === "object") {
     const walked = walkGraph(workflow);
     const leaves = walked.leaves;
@@ -714,12 +1019,14 @@ function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
       if (active && typeof cnr === "string" && cnr !== "" && cnr !== "comfy-core") packs.add(cnr);
     }
     customPacks = [...packs].sort();
+    inputs = inputFiles(leaves);
     nodeTypes = leaves.map((l) => (typeof l.node.type === "string" ? l.node.type : ""));
     const req = requiredModels(workflow);
     noteSizes = parseNoteSizes(workflow);
     const withSize = (m) => ({ ...m, note_size_bytes: Object.hasOwn(noteSizes, m.name) ? noteSizes[m.name] : null });
     models = req.active.map(withSize);
     inactive = req.inactive.map(withSize);
+    probes = req.embedding_probes;
     surface = paramSurface(workflow);
     graph = {
       ui_version: workflow.version ?? null,
@@ -760,9 +1067,11 @@ function buildRow(entry, { templatesDir, apiSet, licenseMap, io }) {
     kind,
     api,
     custom_packs: customPacks,
+    input_files: inputs,
     graph,
     models,
     models_inactive: inactive,
+    ...(probes.length > 0 ? { embedding_probes: probes } : {}),
     note_sizes: noteSizes,
     param_surface: surface,
     license,
@@ -894,7 +1203,8 @@ function summarizeLicenses(catalog, rows, local) {
 // - once the yaml files are read, main.py's apply_custom_paths appends the output directory's
 //   checkpoints, clip, vae, diffusion_models and loras (--output-directory moves the output
 //   directory; --base-directory moves it and the models directory);
-// - a class lists the files under its directories recursively (links followed, .git skipped) whose
+// - a class lists the files under its directories recursively (links followed, .git skipped; the prompt lookup of the embeddings class
+//   does enter .git, below) whose
 //   extension its core loaders accept, by their path relative to the directory. A loader offers
 //   exactly those strings, so a file in a subfolder or under another case is not the file a
 //   template names.
@@ -1084,27 +1394,53 @@ function extOf(rel) {
   return i <= 0 ? "" : base.slice(i).toLowerCase();
 }
 const extListed = (rel, exts) => exts === null || exts.length === 0 || exts.includes(extOf(rel));
+// underGit: a file below a `.git` directory, at any depth (a file called `.git` is no directory).
+const underGit = (rel) => rel.split("/").slice(0, -1).includes(".git");
 const byRel = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
 
 // scanModelInventory: what each class would list. A file reachable through several directories is
 // one entry that names them all (a junction to a model drive makes the same file appear twice).
 // Files with an extension the class's core loaders do not accept are only counted in `unlisted`.
+// The embeddings class also records, for each file and each directory that shows it, where the file really is (`reals`, parallel to `dirs`) and,
+// when the io can say, what the file system calls it (`ids`, the same shape: two names of one hard-linked file share one): a link makes one
+// file appear under several names, and the prompt lookup counts a physical file once (embeddingAnswers). And it records
+// the files it does not list (`unlisted_files`, the same shape without a size): load_embed asks for the name as written first, with no
+// extension filter, so a file whose whole name is the reference answers it whatever it ends in. Files below a `.git` directory are there too, in
+// every extension: the class listing skips `.git` as ComfyUI's does, but its embedding search walks it. It records no case rule of the volume and asks
+// the io about no name that is not a file it lists: a name in another case is a case variant and is refused, not looked up.
 export function scanModelInventory(roots, io = nodeIo) {
   const classes = {};
   const missing_dirs = [];
   for (const [cls, spec] of Object.entries(roots.classes)) {
     const listed = new Map();
+    const notListed = new Map();
     let unlisted = 0;
+    const real = cls === "embeddings";
+    const named = real && typeof io.identity === "function"; // an io that can tell two names of one file apart
+    const record = (map, f, d, size) => {
+      const seen = map.get(f.rel);
+      if (seen) {
+        if (!seen.dirs.includes(d.path)) { seen.dirs.push(d.path); if (real) seen.reals.push(io.realpath(f.abs)); if (named) seen.ids.push(io.identity(f.abs)); }
+        return;
+      }
+      map.set(f.rel, { rel: f.rel, dirs: [d.path], ...(real ? { reals: [io.realpath(f.abs)] } : {}), ...(named ? { ids: [io.identity(f.abs)] } : {}), ...(size ? { size: io.stat(f.abs)?.size ?? null } : {}) });
+    };
     for (const d of spec.dirs) {
       if (!io.list(d.path)) { missing_dirs.push({ class: cls, path: d.path }); continue; }
-      for (const f of walkFiles(d.path, io, { follow: true, excludeDirs: [".git"] })) {
-        if (!extListed(f.rel, spec.exts)) { unlisted++; continue; }
-        const seen = listed.get(f.rel);
-        if (seen) { if (!seen.dirs.includes(d.path)) seen.dirs.push(d.path); continue; }
-        listed.set(f.rel, { rel: f.rel, dirs: [d.path], size: io.stat(f.abs)?.size ?? null });
+      // The listing of every class skips .git (recursive_search does). The prompt lookup of the embeddings class does not: ComfyUI's embedding
+      // search enters it, so a file of the name under it is an answer ComfyUI may open. Those files are walked and kept apart, with the files the
+      // class does not list, for that lookup alone; `unlisted` counts only what an extension keeps out.
+      const walked = walkFiles(d.path, io, { follow: true, excludeDirs: real ? [] : [".git"] });
+      for (const f of walked) {
+        if (real && underGit(f.rel)) { record(notListed, f, d, false); continue; }
+        if (!extListed(f.rel, spec.exts)) { unlisted++; if (real) record(notListed, f, d, false); continue; }
+        record(listed, f, d, true);
       }
     }
-    classes[cls] = { dirs: spec.dirs.map((d) => d.path), exts: spec.exts, files: [...listed.values()].sort(byRel), unlisted };
+    classes[cls] = {
+      dirs: spec.dirs.map((d) => d.path), exts: spec.exts, files: [...listed.values()].sort(byRel), unlisted,
+      ...(real ? { unlisted_files: [...notListed.values()].sort(byRel) } : {}),
+    };
   }
   return { classes, missing_dirs };
 }
@@ -1131,7 +1467,8 @@ function indexInventory(inv) {
       pushTo(base, baseName(f.rel).toLowerCase(), f);
       pushTo(allBase, baseName(f.rel).toLowerCase(), { class: cls, rel: f.rel });
     }
-    byClass.set(cls, { exact, lower, base, exts: c.exts ?? null });
+    // `candidates`: the files a name can be answered by. An embeddings file the class does not list can answer the bare name (scanModelInventory).
+    byClass.set(cls, { exact, lower, base, files: c.files ?? [], exts: c.exts ?? null, dirs: c.dirs ?? [], candidates: [...(c.files ?? []), ...(c.unlisted_files ?? [])] });
   }
   const index = { byClass, allBase };
   indexCache.set(inv, index);
@@ -1146,8 +1483,11 @@ function indexInventory(inv) {
 //   case_mismatch       the right class, another spelling of the name
 //   extension_not_listed  the class's core loaders do not accept this file type (a .gguf in a core loader)
 //   class_unregistered  no directory is registered for the class
+//   embedding_unverified  (embeddings, a name a prompt gives) the lookup is not verified by the harness, with a `reason`: a case variant
+//                       answers it, more than one file could answer it, or a file answers a probe name (readiness, `probes`), another
+//                       name ComfyUI may try for the template's prompts. `found` lists the files. Only exactly one case-exact file is `present`.
 // A file with no class (an unannotated widget file) is met by its exact name in any class.
-function checkRequirement(req, inv, mode) {
+function checkRequirement(req, inv, mode, asFile = false) {
   const name = String(req.name);
   const directory = req.directory ?? null;
   const result = { name, directory, status: "missing" };
@@ -1164,6 +1504,11 @@ function checkRequirement(req, inv, mode) {
   const cls = mapLegacyClass(directory);
   const c = idx.byClass.get(cls);
   if (!c) { result.status = "class_unregistered"; return result; }
+  // The prompt tokenizer's lookup is for a name a prompt gives: an unannotated requirement, or an annotation that records the names it covers.
+  // An annotation with none is a file a loader widget names (ConditioningLoader): the node lists the directories by relative path and opens
+  // the value with get_full_path, the exact path under the first root that holds it, which is the rule of every other class and the code below.
+  const refs = Array.isArray(req.embedding_refs) ? req.embedding_refs : [];
+  if (cls === "embeddings" && !asFile && (req.annotated !== true || refs.length > 0)) return checkEmbedding(name, directory, c, inv, mode, result, refs);
   if (!extListed(name, c.exts)) { result.status = "extension_not_listed"; return result; }
   if (c.exact.has(name)) { result.status = "present"; return result; }
   const cased = c.lower.get(name.toLowerCase());
@@ -1182,42 +1527,153 @@ function checkRequirement(req, inv, mode) {
 
 const MET = new Set(["present", "present_class_unknown"]);
 
+// The reasons a prompt embedding is `embedding_unverified` (the `reason` of a requirement, and of an entry of the run gate's refusal).
+const WHY_CASE_VARIANT = "a case variant answers it";
+const WHY_SEVERAL_FILES = "more than one file could answer it";
+const WHY_PROBE = "a probe name (embedding_probes) is answered by a file of the node";
+
+// embeddingAnswers: the physical files of the class that answer `name`, each once. A candidate is the name as written, then the name with
+// .safetensors, .pt and .bin appended; a file answers when its path under a root equals a candidate or ends in `/` and a candidate (whole
+// path segments, never a base name that only ends alike), compared case-exactly (`asWritten`) or, for the diagnosis of a case variant,
+// without regard to case. The lookup does not rank candidates or directories: every file that answers counts, and what ComfyUI would
+// choose between them is not replicated (see the top of this section). A file reached by several paths is one answer: the inventory records
+// where a file really is (`ids` when the io names the file, else `reals`: one per directory that shows it), so a root that is a link to
+// another root, a link inside a root, a root registered inside another and a file linked into two directories (symbolic or hard) answer
+// once, while two copies answer twice; an inventory that carries neither is read by the path (root and relative path). One answer that is
+// reached under several names is `asWritten` when any of them is, and is reported by the first of them in path order.
+function embeddingAnswers(files, name) {
+  const written = [name, ...EMBEDDING_EXTS.map((e) => name + e)];
+  const lowered = written.map((s) => s.toLowerCase());
+  const answers = (rel, candidates) => candidates.some((c) => rel === c || rel.endsWith("/" + c));
+  const order = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const byFile = new Map();
+  for (const f of files) {
+    const asWritten = answers(f.rel, written);
+    if (!asWritten && !answers(f.rel.toLowerCase(), lowered)) continue;
+    f.dirs.forEach((root, i) => {
+      const key = f.ids?.[i] ?? f.reals?.[i] ?? `${root}/${f.rel}`;
+      const names = byFile.get(key);
+      const one = { key, rel: f.rel, path: `${root}/${f.rel}`, asWritten };
+      if (names) names.push(one); else byFile.set(key, [one]);
+    });
+  }
+  return [...byFile.values()].map((names) => {
+    const exact = names.filter((n) => n.asWritten);
+    const [first] = (exact.length > 0 ? exact : names).sort(order);
+    return { ...first, asWritten: exact.length > 0 };
+  }).sort(order);
+}
+
+// lookupEmbedding: what the harness verifies for one name on this node. `present` (exactly one physical file answers it, case-exactly:
+// `resolved` is that file's path under the class directory, the name a manifest must carry, and `file` its key, the file system's id for it
+// or its real path, so that two answers are about the same file when their keys are equal), `embedding_unverified` (a case variant is the only
+// answer, or more than one file could answer; `reason` says which and `found` lists the files, `found_in` the directory of each) or `missing`
+// (nothing answers it).
+function lookupEmbedding(c, name) {
+  const answers = embeddingAnswers(c.candidates, name);
+  if (answers.length === 0) return { result: { status: "missing" }, file: null };
+  const found = [...new Set(answers.map((a) => a.rel))].sort();
+  if (answers.length > 1) {
+    return { result: { status: "embedding_unverified", reason: WHY_SEVERAL_FILES, found, found_in: answers.map((a) => ({ class: "embeddings", rel: a.rel, dir: a.path.slice(0, a.path.lastIndexOf("/")) })) }, file: null };
+  }
+  if (!answers[0].asWritten) return { result: { status: "embedding_unverified", reason: WHY_CASE_VARIANT, found }, file: null };
+  return { result: { status: "present", resolved: answers[0].rel }, file: answers[0].key };
+}
+
+// checkEmbedding: an embedding is named by the text that loads it, not by a file, and the harness accepts a name only when exactly one
+// physical file answers it, case-exactly (embeddingAnswers, lookupEmbedding). The file found is `resolved`, the name a manifest must carry.
+// An annotation whose file answers a name that a prompt gives (`embedding_refs`, recorded by requiredModels) must also be the one file that
+// answers that name here: a second file for it, a case variant, are `embedding_unverified`, because the licence, the hash and the trust
+// record attach to the annotated file and not to a file the harness cannot tell from it. A name no file answers is reported as for any
+// other class when a file of another class does.
+function checkEmbedding(name, directory, c, inv, mode, result, refs = []) {
+  const looked = lookupEmbedding(c, name);
+  let found = looked.result;
+  if (found.status === "present") {
+    for (const ref of refs) {
+      const { result: r, file } = lookupEmbedding(c, ref);
+      if (r.status === "present" && file === looked.file) continue; // the same file: by its key
+      found = r.status === "present" ? { status: "embedding_unverified", reason: WHY_SEVERAL_FILES, found: [found.resolved, r.resolved].sort() } : r;
+      break;
+    }
+  }
+  if (found.status !== "missing") return { ...result, ...found };
+  for (const cand of [name, ...EMBEDDING_EXTS.map((e) => name + e)]) {
+    if (!extListed(cand, c.exts)) continue;
+    const r = checkRequirement({ name: cand, directory }, inv, mode, true);
+    if (r.status === "wrong_class") return { ...result, status: r.status, found_in: r.found_in };
+  }
+  return result;
+}
+
 // readiness: whether every file a template needs is usable. `directory-aware` (the default) is the
 // method above. `basename-only` is the older shortcut, kept so its numbers can be reproduced and
 // compared: any file with that name, in any class, any folder, any case.
-export function readiness(models, inv, { mode = "directory-aware" } = {}) {
+// `probes` are the other names ComfyUI may try for a template's prompts (embeddingProbes, recorded on the catalog row). They are not
+// requirements, so a name no file answers adds nothing; one a file answers adds an entry after the requirements (`probe: true`, status
+// `embedding_unverified`, `found` the files), because ComfyUI may open that file in place of the one the template needs and no manifest
+// names it. Any file that answers counts, in the case written or not, one or several: the harness does not verify which one ComfyUI opens.
+export function readiness(models, inv, { mode = "directory-aware", probes = [] } = {}) {
   const requirements = (Array.isArray(models) ? models : []).map((m) => checkRequirement(m, inv, mode));
+  if (mode === "directory-aware") requirements.push(...probeFindings(inv, probes));
   const not_ready_count = requirements.filter((r) => !MET.has(r.status)).length;
   return { mode, ready: not_ready_count === 0, requirements, not_ready_count };
+}
+
+// probeFindings: the probe names that a file of the node answers, as requirement entries that are not met. Every probe is asked.
+function probeFindings(inv, probes) {
+  const c = Array.isArray(probes) && probes.length > 0 ? indexInventory(inv).byClass.get("embeddings") : undefined;
+  if (!c) return [];
+  const out = [];
+  for (const name of probes) {
+    const { result: r } = lookupEmbedding(c, name);
+    if (r.status === "missing") continue;
+    out.push({ name, directory: "embeddings", status: "embedding_unverified", reason: WHY_PROBE, found: r.status === "present" ? [r.resolved] : r.found, probe: true });
+  }
+  return out;
 }
 
 // catalogReadiness: readiness of every LOCAL template (core nodes only; paid and custom-node
 // templates are not runnable by this route), keyed by template name.
 export function catalogReadiness(catalog, inv, { mode = "directory-aware" } = {}) {
   const out = {};
-  for (const row of catalog.templates) if (row.kind === "local") out[row.name] = readiness(row.models, inv, { mode });
+  for (const row of catalog.templates) if (row.kind === "local") out[row.name] = readiness(row.models, inv, { mode, probes: row.embedding_probes ?? [] });
   return out;
 }
 
 const bucketOf = (n) => (n === 0 ? "0" : n === 1 ? "1" : n === 2 ? "2" : n <= 5 ? "3-5" : "6+");
 
+// shortfall: the requirements a result does not meet, split by what is wrong. An `embedding_unverified` entry (a prompt embedding with a case
+// variant, a second copy, or a probe-named file) is not a file the node lacks: it holds too many files, or the name in another case, so it is
+// no part of "files short". A result with no `requirements` (a bare count) is all files short.
+const shortfall = (res) => {
+  const unverified = (res.requirements ?? []).filter((q) => q.status === "embedding_unverified").length;
+  return { short: res.not_ready_count - unverified, unverified };
+};
+// A template for which the node holds every file but the harness cannot verify an embedding: counted on its own line, in no files-short bucket.
+const unverifiedOnly = (res) => { const { short, unverified } = shortfall(res); return unverified > 0 && short === 0; };
+
 // summarizeReadiness: how many local templates a node could run, how many of those the gate leaves
-// open, and how far the rest are (the number of files short, bucketed).
+// open, and how far the rest are (the number of files short, bucketed; a template held back only by an embedding the harness cannot verify is
+// in no bucket and is counted in `embedding_unverified`, over every local template, one that needs no weights included).
 export function summarizeReadiness(catalog, results) {
   const rows = catalog.templates.filter((r) => r.kind === "local" && results[r.name]);
   const needing = rows.filter((r) => r.models.length > 0);
   const zero = rows.filter((r) => r.models.length === 0);
   const ready = needing.filter((r) => results[r.name].ready);
+  // a template with no model rows is ready unless the node blocks it some other way (a file that answers a probe name)
+  const zeroReady = zero.filter((r) => results[r.name].ready);
   const by_gate = { open: 0, ack_required: 0, blocked: 0 };
   for (const r of ready) by_gate[r.gate.state]++;
   const histogram = { "0": 0, "1": 0, "2": 0, "3-5": 0, "6+": 0 };
-  for (const r of needing) histogram[bucketOf(results[r.name].not_ready_count)]++;
+  for (const r of needing) if (!unverifiedOnly(results[r.name])) histogram[bucketOf(shortfall(results[r.name]).short)]++;
   return {
     local: rows.length,
     zero_model: zero.length,
     needing_weights: needing.length,
-    ready: { total: ready.length + zero.length, zero_model: zero.length, with_weights: ready.length, names: ready.map((r) => r.name).sort(), by_gate },
+    ready: { total: ready.length + zeroReady.length, zero_model: zeroReady.length, with_weights: ready.length, names: ready.map((r) => r.name).sort(), by_gate },
     histogram,
+    embedding_unverified: rows.filter((r) => unverifiedOnly(results[r.name])).length,
   };
 }
 
@@ -1255,8 +1711,13 @@ export function nodeReadiness({ catalog, snapshot, mode = "directory-aware", can
   return { mode, candidate, stamp_check, rules_check, counts: summarizeReadiness(catalog, results), results };
 }
 
-// readinessTable: every node's readiness, the templates ready on at least one node, and the
-// distance of the nearest node for the rest.
+// A node that holds every file of a template but not a verified embedding is nearer than one file short and is no file count, so readinessTable
+// ranks it between ready (0) and one file short (1).
+const ONLY_UNVERIFIED = 0.5;
+
+// readinessTable: every node's readiness, the templates ready on at least one node, and the distance of the nearest node for the rest: the
+// files it is short of, bucketed. A template whose nearest node is held back only by an unverified embedding is counted in
+// `nearest_embedding_unverified`, in no bucket.
 export function readinessTable({ catalog, snapshots, mode = "directory-aware", candidate = false }) {
   const rowByName = new Map(catalog.templates.map((t) => [t.name, t]));
   const nodes = {};
@@ -1269,14 +1730,15 @@ export function readinessTable({ catalog, snapshots, mode = "directory-aware", c
     for (const name of n.counts.ready.names) ready.add(name);
     for (const [name, r] of Object.entries(n.results)) {
       if (!rowByName.get(name)?.models.length) continue;
-      nearest.set(name, Math.min(nearest.get(name) ?? Infinity, r.not_ready_count));
+      nearest.set(name, Math.min(nearest.get(name) ?? Infinity, unverifiedOnly(r) ? ONLY_UNVERIFIED : shortfall(r).short));
     }
   }
   const by_gate = { open: 0, ack_required: 0, blocked: 0 };
   for (const name of ready) by_gate[rowByName.get(name).gate.state]++;
   const histogram = { "0": 0, "1": 0, "2": 0, "3-5": 0, "6+": 0 };
-  for (const n of nearest.values()) histogram[bucketOf(n)]++;
-  return { mode, nodes, any_node: { with_weights: ready.size, names: [...ready].sort(), by_gate, nearest_histogram: histogram } };
+  let nearest_embedding_unverified = 0;
+  for (const n of nearest.values()) if (n === ONLY_UNVERIFIED) nearest_embedding_unverified++; else histogram[bucketOf(n)]++;
+  return { mode, nodes, any_node: { with_weights: ready.size, names: [...ready].sort(), by_gate, nearest_histogram: histogram, nearest_embedding_unverified } };
 }
 
 // diffCatalogs: what moving from catalog `a` to catalog `b` (a candidate package) changes: templates
@@ -1451,7 +1913,7 @@ list filters: --kind local|api|custom_nodes  --group TITLE  --type TYPE  --tag T
 readiness: --candidate (answer for a node whose package differs from the catalog's, labelled) --detail (per-template results in --json)
 `;
 
-function resolveSource(flags, io) {
+export function resolveSource(flags, io) {
   const comfyDir = typeof flags["comfy-dir"] === "string" ? flags["comfy-dir"] : null;
   let templatesDir = typeof flags["templates-dir"] === "string" ? flags["templates-dir"] : null;
   if (!templatesDir && comfyDir) {
@@ -1474,7 +1936,7 @@ function resolveSource(flags, io) {
   return { templatesDir, basis, apiIds: new Set(scan.ids), apiScan: scan, apiDir, licenseMap };
 }
 
-function loadCatalog(flags, io) {
+export function loadCatalog(flags, io) {
   const src = resolveSource(flags, io);
   if (src.error) return src;
   const stamp = stampFor({ templatesDir: src.templatesDir, basis: src.basis, io });
@@ -1647,6 +2109,7 @@ function formatReadinessTable(table) {
     t += `${"".padEnd(14)} gates on the ready ones: open ${c.ready.by_gate.open} | ack required ${c.ready.by_gate.ack_required} | blocked ${c.ready.by_gate.blocked}\n`;
     const h = c.histogram;
     t += `${"".padEnd(14)} files short (needing weights): 0: ${h["0"]}  1: ${h["1"]}  2: ${h["2"]}  3-5: ${h["3-5"]}  6+: ${h["6+"]}\n`;
+    if (c.embedding_unverified > 0) t += `${"".padEnd(14)} embedding not verified (local): ${c.embedding_unverified}\n`;
     if (c.ready.names.length > 0) t += `${"".padEnd(14)} ready: ${c.ready.names.join(", ")}\n`;
   }
   t += `any node: ${table.any_node.with_weights} ready with weights (open ${table.any_node.by_gate.open} | ack required ${table.any_node.by_gate.ack_required} | blocked ${table.any_node.by_gate.blocked})\n`;

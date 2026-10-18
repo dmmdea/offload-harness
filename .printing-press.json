@@ -23,6 +23,7 @@
       "offload_ocr",
       "offload_generate_image",
       "offload_run_graph",
+      "offload_run_template",
       "offload_generate_svg",
       "offload_generate_video",
       "offload_animate_character",

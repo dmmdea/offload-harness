@@ -1402,10 +1402,17 @@ func containsString(list []string, s string) bool {
 
 // graphRAM is for a run_graph call: the weight files the graph's own loaders name (hostneed.ForGraphFile, by the family estimate's
 // fit rule), and the media class default when the graph cannot be read or one of its files cannot be sized, as routeRAM falls back.
-// The graph is read at each call of the closure (the grant, the allocator's pre-filter and the lane probe each ask), and it is a
-// few KiB.
+// A TEMPLATE run (params template, with the runtime manifest at manifest_path) carries no graph file: its files are the model paths
+// that manifest names (hostneed.ForManifestFile, the same rule and source), and a manifest that is not given, cannot be read or names
+// a file the box cannot size keeps the class default exactly as a graph does. The file is read at each call of the closure (the
+// grant, the allocator's pre-filter and the lane probe each ask), and it is a few KiB.
 func graphRAM(cfg config.Config, params map[string]any) func(float64) hostneed.Need {
 	graphPath := paramStr(params, "graph_path")
+	manifestPath := ""
+	if paramStr(params, "template") != "" {
+		manifestPath = paramStr(params, "manifest_path")
+		graphPath = "" // the run names a template or a graph and never both (buildRunGraphParams); the template's files are the manifest's
+	}
 	// reserve_vram goes to the runner as --reserve-vram, the margin it holds back on the card, so the graph is fitted with it; a value the
 	// runner would not take (not a number, 0 or less) leaves the config's, else the default.
 	var reserve float64
@@ -1414,7 +1421,11 @@ func graphRAM(cfg config.Config, params map[string]any) func(float64) hostneed.N
 	}
 	return func(vram float64) hostneed.Need {
 		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vram, ReserveVRAMGiB: reserve}
-		if n, ok := hostneed.ForGraphFile(graphPath, f); ok {
+		if manifestPath != "" {
+			if n, ok := hostneed.ForManifestFile(manifestPath, f); ok {
+				return n
+			}
+		} else if n, ok := hostneed.ForGraphFile(graphPath, f); ok {
 			return n
 		}
 		return hostneed.ClassDefault(f)
