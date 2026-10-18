@@ -348,30 +348,35 @@ const cookieRunMax = `16`
 const cookieBareLong = `(?:[^\s'",;&\\\]]|\\{1,` + cookieRunMax + `}u[0-9a-fA-F]{4}){12,}`
 
 // cookieQuotedLong is a quoted cookie value at a level whose first 12 characters are counted, taken whole: the rest
-// of the body, then the closing quote when it is there. With cross, a body that is open at a line break goes on
-// to its closing quote when that is within cookieBreakLimit line breaks, and ends at its line when it is not. Without
-// it (the value quoted inside a string of a list, which is itself one string of the list) the body ends at its line.
-func cookieQuotedLong(n int, cross bool) string {
+// of the body, then the closing quote. With cross, a body that is open at a line break goes on to its closing quote
+// when that is within cookieBreakLimit line breaks; when it is not (and open is set) the value ends at its line, a
+// truncated line, and when open is not set the value has to be closed. Without cross (the value quoted inside a string
+// of a list, which is itself one string of the list) the body ends at its line and its closing quote is optional.
+func cookieQuotedLong(n int, cross, open bool) string {
 	q := cookieQuote(n)
 	head := q + `(?:` + cookieCountUnit(n) + `){12}`
 	units := `(?:` + cookieSpanUnit(n) + `)*`
-	if !cross {
+	switch {
+	case !cross:
 		return head + units + `(?:` + q + `)?`
+	case !open:
+		return head + cookieBody(n) + q
 	}
 	return head + `(?:` + cookieBody(n) + q + `|` + units + `)`
 }
 
-// cookieLongOf is the equals sign and a cookie value of 12 or more characters, quoted at any level or bare as given.
-func cookieLongOf(bare string) string {
+// cookieLongOf is the equals sign and a cookie value of 12 or more characters, quoted at any level or bare as given. A
+// quoted value that is never closed is taken to the end of its line only when open is set.
+func cookieLongOf(bare string, open bool) string {
 	var alts []string
 	for _, n := range cookieQuoteLevels {
-		alts = append(alts, cookieQuotedLong(n, true))
+		alts = append(alts, cookieQuotedLong(n, true, open))
 	}
 	return `=(?:` + strings.Join(alts, `|`) + `|` + bare + `)`
 }
 
 // cookieLong is a long cookie value on a line.
-var cookieLong = cookieLongOf(cookieBareLong)
+var cookieLong = cookieLongOf(cookieBareLong, true)
 
 // cookiePairAt is a cookie whose value is a double-quoted string at a level n, from the equals sign to the closing
 // quote: an empty value; a value that starts with a unit that can start one and runs to its closing quote, over up
@@ -408,53 +413,83 @@ var cookieStep = `(?:` + cookiePair + `|[^'"\\\r\n]|` + cookieBareEscape + `)`
 // cookieLineBody is the span of a header on a line: steps, a long value, then steps to the end.
 var cookieLineBody = cookieStep + `*?` + cookieLong + cookieStep + `*`
 
-// cookieString is a string of a list at a level, with its quotes: the body, then the closing quote when it is
-// there. Inside it a quote of the next level is a quote of a cookie value. A string that is open at a line break
-// goes on to its closing quote when that is within cookieBreakLimit line breaks (a printed header holds the quoted
-// value of a cookie as a string of the list, and that value may hold a line break).
-func cookieString(n int) string {
+// cookieClosedString is a string of a list at a level, with both its quotes. Inside it a quote of the next level is a
+// quote of a cookie value. A string that is open at a line break goes on to its closing quote when that is within
+// cookieBreakLimit line breaks (a printed header holds the quoted value of a cookie as a string of the list, and that
+// value may hold a line break).
+func cookieClosedString(n int) string {
 	q := cookieQuote(n)
-	return q + `(?:` + cookieBody(n) + q + `|(?:` + cookieSpanUnit(n) + `)*)`
+	return q + cookieBody(n) + q
 }
 
-// cookieSingleString is a single-quoted string of a list (Python's repr of a header list).
-const cookieSingleString = `'(?:[^'\\\r\n]|\\[^\r\n])*'?`
+// cookieOpenString is a string of a list at a level that is never closed: the rest of its line.
+func cookieOpenString(n int) string { return cookieQuote(n) + `(?:` + cookieSpanUnit(n) + `)*` }
+
+// cookieSingleUnit is one piece of the body of a single-quoted string of a list (Python's repr of a header list).
+const cookieSingleUnit = `(?:[^'\\\r\n]|\\[^\r\n])`
+
+// A string of a list is closed in the middle of the list and may be open only as the last thing in it, a list that
+// the text was cut in. A string that could stay open in the middle would let the pairing of quotes shift by one,
+// every quote that closes a string opening a phantom string that hides a bracket, a brace and the keys between
+// two headers: the match would run from the first key of a printed header, whose value is short, over the closing
+// brace of its list to the long value of the key after it, and on to the end of the text.
 
 // cookieListStepClosing is one step over a list that ends at the closer (the class of the characters a bracket or a
-// brace is): a string at any level, a single-quoted string, or anything else that is not the closer, a quote or a
-// backslash, and the JSON escapes. A closer inside a string is part of the string (Django's messages cookie holds
-// two closing brackets).
+// brace is): a closed string at any level, a closed single-quoted string, or anything else that is not the closer,
+// a quote or a backslash, and the JSON escapes. A closer inside a string is part of the string (Django's messages
+// cookie holds two closing brackets).
 func cookieListStepClosing(closer string) string {
 	var alts []string
 	for _, n := range cookieQuoteLevels {
-		alts = append(alts, cookieString(n))
+		alts = append(alts, cookieClosedString(n))
 	}
-	return `(?:` + strings.Join(alts, `|`) + `|` + cookieSingleString + `|[^` + closer + `"'\\]|\\{1,` + cookieRunMax + `}[^"'\\\r\n])`
+	return `(?:` + strings.Join(alts, `|`) + `|'` + cookieSingleUnit + `*'|[^` + closer + `"'\\]|\\{1,` + cookieRunMax + `}[^"'\\\r\n])`
+}
+
+// cookieListTail is the string that a list ends in when the text is cut in it: open, to the end of its line.
+func cookieListTail() string {
+	var alts []string
+	for _, n := range cookieQuoteLevels {
+		alts = append(alts, cookieOpenString(n))
+	}
+	return `(?:` + strings.Join(alts, `|`) + `|'` + cookieSingleUnit + `*)`
 }
 
 // cookieListLong is where a list holds its long value: after an equals sign outside a string (a printed Go
 // header), inside a string at a level (the value bare, or quoted at the next level), or inside a single-quoted
-// string.
-var cookieListLong = func() string {
-	alts := []string{cookieLong}
+// string (the value bare, or quoted at any level, since the text may have been escaped). The string is closed, except
+// when open is set, which is the last element of a list that the text was cut in.
+func cookieListLong(open bool) string {
+	end := func(q string) string {
+		if open {
+			return `(?:` + q + `)?`
+		}
+		return q
+	}
+	alts := []string{cookieLongOf(cookieBareLong, open)}
 	deepest := cookieQuoteLevels[len(cookieQuoteLevels)-1]
 	for _, n := range cookieQuoteLevels {
 		// A quote of a cookie value inside a string at level n carries 2n+1 backslashes.
 		inner := cookieBareLong
 		if 2*n+1 <= deepest {
-			inner = cookieQuotedLong(2*n+1, false) + `|` + cookieBareLong
+			inner = cookieQuotedLong(2*n+1, false, false) + `|` + cookieBareLong
 		}
 		span := `(?:` + cookieSpanUnit(n) + `)`
-		alts = append(alts, cookieQuote(n)+span+`*?=(?:`+inner+`)`+span+`*(?:`+cookieQuote(n)+`)?`)
+		alts = append(alts, cookieQuote(n)+span+`*?=(?:`+inner+`)`+span+`*`+end(cookieQuote(n)))
 	}
-	alts = append(alts, `'(?:[^'\\\r\n]|\\[^\r\n])*?=(?:`+cookieQuotedLong(0, false)+`|`+cookieBareLong+`)(?:[^'\\\r\n]|\\[^\r\n])*'?`)
+	inner := cookieBareLong
+	for _, n := range cookieQuoteLevels {
+		inner = cookieQuotedLong(n, false, false) + `|` + inner
+	}
+	alts = append(alts, `'`+cookieSingleUnit+`*?=(?:`+inner+`)`+cookieSingleUnit+`*`+end(`'`))
 	return `(?:` + strings.Join(alts, `|`) + `)`
-}()
+}
 
-// cookieListBodyClosing is the span of a list that ends at the closer: steps, a long value, then steps to the closer.
+// cookieListBodyClosing is the span of a list that ends at the closer: steps, a long value, then steps to the closer,
+// and a string that is open when the text is cut in it; or steps and the long value in a last element that is open.
 func cookieListBodyClosing(closer string) string {
 	step := cookieListStepClosing(closer)
-	return step + `*?` + cookieListLong + step + `*`
+	return step + `*?(?:` + cookieListLong(false) + step + `*` + cookieListTail() + `?|` + cookieListLong(true) + `)`
 }
 
 // cookieHeader is the cookie-header class: a bracketed list, a Go slice literal, or a line.
