@@ -10,7 +10,7 @@ every failure a non-2xx.
 
 | Endpoint | What it returns |
 |---|---|
-| `GET /fleet/health` | node id, live global VRAM (total/free GiB), supported task types + model families **derived from this box's actual config**, measured per-family VRAM footprints, queue depth. Never blocks on a render. `503` when the VRAM snapshot is unavailable **or older than 30s** (nvidia-smi failing, e.g. a driver reset) — a stale 200 would mislead routing. |
+| `GET /fleet/health` | node id, live global VRAM (total/free GiB), supported task types + model families **derived from this box's actual config**, measured per-family VRAM footprints, queue depth, whether the boot-time GPU power profile took ([`power_profile`](#boot-time-gpu-power-profile-power_profile)). Never blocks on a render. `503` when the VRAM snapshot is unavailable **or older than 30s** (nvidia-smi failing, e.g. a driver reset) — a stale 200 would mislead routing. |
 | `POST /fleet/dispatch` | immediate `202 {"job_id": <exact echo>, "status": "accepted"}`; the render runs async through the pipeline. Duplicate `job_id` → 202 re-ack (accepted/running/**done** — poll `/fleet/jobs/{id}` for the state), never a second render; a job that previously **failed** here answers `409` (an explicit refusal, so the dispatcher may try another node). |
 | `GET /fleet/jobs/{id}` | `{"state": "accepted\|running\|done\|error", ...}` with `data` on done / `error` on error, plus `err_class` (the class the failed run's lane filed its deferral under, only when it filed one) beside `error`; terminal results retained ~1h; 404 for unknown/evicted ids. |
 | `DELETE /fleet/jobs/{id}` | Takes back an **agent** job that has not started ([ADR 0064](architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)): `200 {"state":"withdrawn","withdrawn":true}` when it had not (it never will; a job the node itself already took back answers the same), `409 {"state":"running"\|"done"\|"error","withdrawn":false}` when it had (the node does not touch it), `404` unknown id, `401` without the agent bearer, `405` for a non-agent job. See [Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease). |
@@ -365,6 +365,30 @@ a typo'd UUID forever. No effect on a single-GPU node beyond confirming what's a
 one `gpu_devices[]` entry is already the headline); no effect at all on the windows-generic
 source, which has no `gpu_devices[]` to match against. Implementation:
 `fleetnode.SelectHeadlineDevice` in `internal/fleetnode/vram.go`.
+
+## Boot-time GPU power profile: `power_profile`
+
+A box can apply a GPU power limit and a clock lock at boot with a separate tool. When that step is skipped, refused or blocked the card runs at stock limits and nothing else says so, so `/fleet/health` publishes whether it took, in the same words the `power:` row of `doctor` uses (see the [operator guide](OPERATOR-GUIDE.md), "A power profile applied this boot"). Both read one judgement of one file: the state record the boot-apply tool writes on every run, found only by the environment variable `LOCAL_OFFLOAD_POWER_PROFILE_STATE` (the harness knows no tool's install folder, so there is no platform default and no config key).
+
+```json
+"power_profile": {"state": "ok", "limit_w": [250, 150], "clock_lock": true, "applied_at": "2026-01-02T14:00:00Z"}
+"power_profile": {"state": "skipped", "reason": "cookie_blocked", "applied_at": "2026-01-02T14:00:00Z"}
+"power_profile": {"state": "unknown", "reason": "no_state"}
+```
+
+| field | means |
+|---|---|
+| `state` | `ok`: a profile was applied since this boot began, whole (the `power:` row reads OK). `skipped`: the boot apply did not take, or took in part (the row reads WARN: no apply this boot, a dry run, a refusal, a failure, an empty plan, the tool's crash guard, a step short of the plan, a lever skipped other than by design, a driver that differs from the profile's stamp). `unknown`: the node cannot say (the row reads SKIP or UNKNOWN). |
+| `reason` | absent when `ok`. Otherwise one token, never free text and never a path: `no_state` (no setting, or no file there), `unreadable`, `bad_state` (not JSON, no usable time, a time in the future), `bad_schema`, `not_due` (the box booted under ten minutes ago and the boot apply has not run yet), `boot_unknown` (applied whole, but the platform cannot say when the box booted, so "at boot" cannot be confirmed; the doctor row reads OK there), `stale_boot` (the newest record is older than this boot), `partial`, `dry_run`, `unrecognised`, or the tool's own outcome word for a run that ended without applying (`failed`, `refused`, `cookie_blocked`, `plan_empty`). |
+| `limit_w` | the driver's power limit of each card in watts, in the record's card order, as the record read it at the end of the run. Published only when `state` is `ok`, so a skipped run never advertises a limit it did not set. Absent when the record lists no card. |
+| `clock_lock` | `true` when a step that locked the clocks returned success. The record has no field for it, so it is read from the step's description and only that fact leaves the node. Absent means none was recorded, not "unlocked". Published only when `state` is `ok`. |
+| `applied_at` | the record's own time (RFC 3339, UTC) of the most recent run, whatever its outcome. Absent when the record could not be read. |
+
+A node that applies no profile (a Linux node with no boot-apply tool, any box with the variable unset) publishes `{"state": "unknown", "reason": "no_state"}`: a published answer, not an error, and not a finding. A node one release behind publishes no `power_profile` key, which a reader takes as unknown. The block carries no path, host name or card id, so a caller without the bearer reads it too.
+
+**It reads the record, not the card.** The record says what the tool did, so a limit changed after the apply still reads `ok` until the harness has a reader of the live limit and clock lock. The node reads the file at most once every 30 seconds.
+
+`offload_status` shows one short token per node in the `fleet` block, and the `brief` form carries it because it carries the whole block: `power_profile` is `ok`, `skipped` or `unknown`, and `power_profile_reason` follows when it is news (not for an `ok` node and not for `no_state`). The key is absent for a node one release behind. The local node's own state is the `power:` row of `doctor`.
 
 ## Config keys
 

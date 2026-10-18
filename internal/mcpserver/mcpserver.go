@@ -1370,6 +1370,15 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 		inFlight, verdict := nodeVerdict(r.view)
 		n["in_flight"] = inFlight
 		n["verdict"] = verdict
+		// Register A-103: did the node's boot-time GPU power profile take. One short token per node ("ok", "skipped"
+		// or "unknown"), so the brief form carries it too; the reason follows only when it is news (a node that
+		// applies no profile reads a bare "unknown"). Absent on a node too old to publish it, which is unknown.
+		if state, reason, ok := powerProfileTokens(r.view.PowerProfile); ok {
+			n["power_profile"] = state
+			if reason != "" {
+				n["power_profile_reason"] = reason
+			}
+		}
 		if r.view.AgentEnabled {
 			capable++
 			if r.view.QueueDepth == 0 {
@@ -1385,6 +1394,32 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 	out["agent_capable_nodes"] = capable
 	out["idle_agent_nodes"] = idle
 	return out
+}
+
+// powerProfileTokens is a node's published power_profile as the fleet block shows it: the state ("ok", "skipped" or
+// "unknown"; anything else a node sends reads "unknown") and, when it is news, the reason token. The reason is left out
+// for a node that is ok and for "no_state" (a node that applies no profile), and is dropped unless it is a lower-case
+// token of letters, digits and underscores, so a node cannot put free text into the answer. ok is false for a node
+// that publishes no power_profile (one release behind), which the block leaves absent.
+func powerProfileTokens(pp *delegate.PowerProfileView) (state, reason string, ok bool) {
+	if pp == nil || pp.State == "" {
+		return "", "", false
+	}
+	switch pp.State {
+	case "ok", "skipped", "unknown":
+		state = pp.State
+	default:
+		state = "unknown"
+	}
+	if state == "ok" || pp.Reason == "" || pp.Reason == "no_state" || len(pp.Reason) > 32 {
+		return state, "", true
+	}
+	for _, c := range pp.Reason {
+		if (c < 'a' || c > 'z') && (c < '0' || c > '9') && c != '_' {
+			return state, "", true
+		}
+	}
+	return state, pp.Reason, true
 }
 
 // pinsView is the fleet block's pin accounting (ADR 0078): this server's counts of the subtasks callers pinned to

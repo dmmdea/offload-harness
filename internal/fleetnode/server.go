@@ -181,6 +181,12 @@ type Options struct {
 	// the serving templates, which are embedded in the COMMAND (install_render.go)
 	// -- this package serves health, it does not own the seeds.
 	ServingConfig func() (specSHA256, state string)
+	// PowerProfile reports whether the GPU power profile this node applies at boot took (the state file the boot-apply
+	// tool writes, found by LOCAL_OFFLOAD_POWER_PROFILE_STATE). Like ServingConfig it is a func: the reader and its
+	// judgement live in the command, which also owns the doctor row that prints the same reading. nil omits the
+	// power_profile health field; a func that returns nil does too. It must answer from memory or one small local
+	// file read, because health never blocks.
+	PowerProfile func() *PowerProfileHealth
 }
 
 // Server is the fleet-node HTTP server: three handlers over a Runner + Jobs
@@ -1397,6 +1403,11 @@ type healthPayload struct {
 	// report", which must stay distinguishable from "this node reports MATCH".
 	ServingConfigSpecSHA256 string `json:"serving_config_spec_sha256,omitempty"`
 	ServingConfigState      string `json:"serving_config_state,omitempty"`
+	// PowerProfile says whether the GPU power profile this node applies at boot took (register A-103): the answer
+	// the doctor's power row gives, published so the delegator and offload_status can show it for every node. It
+	// carries no path, host or card id, so a caller without the bearer reads it too. Additive and omitempty: a
+	// node one release behind omits the key, which a reader takes as unknown, never as "no profile".
+	PowerProfile *PowerProfileHealth `json:"power_profile,omitempty"`
 	// Lease is this node's machine-wide GPU lease as gpulease reads it
 	// (0.113.16). Published only when a lease is HELD; absent = the card is
 	// unreserved (or the node predates the field — a delegator treats both as
@@ -1735,6 +1746,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		if sha, state := s.opts.ServingConfig(); state != "" {
 			payload.ServingConfigSpecSHA256, payload.ServingConfigState = sha, state
 		}
+	}
+	if s.opts.PowerProfile != nil {
+		payload.PowerProfile = s.opts.PowerProfile()
 	}
 	// Which engine answers for each lane and seat: a cached read, one background refresh per TTL.
 	payload.LaneBackends, payload.SeatBackends = s.activeBackends()

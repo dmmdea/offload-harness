@@ -1219,6 +1219,16 @@ on their own idle timer like any other load. `/fleet/health` never runs it.
   them. A seat's address and command line (the serving config's, and the live one `/running` reports) are read and never
   emitted.
 
+## Boot-time GPU power profile (`power_profile`)
+
+A box can apply a GPU power limit and a clock lock at boot with a separate tool, and when that step is skipped the card runs at stock limits with every other row green. The tool writes a state record on every run, found only by `LOCAL_OFFLOAD_POWER_PROFILE_STATE`. Two surfaces read it through one judgement, `readPowerProfile` (`doctor_powerprofile.go`): the `power:` row of `doctor`, which prints it, and `/fleet/health`, which publishes it as `power_profile` so a delegator and `offload_status` can show it for every node (register A-103). The field table, the `reason` tokens and the `offload_status` keys are in [FLEET-NODE.md](../FLEET-NODE.md), "Boot-time GPU power profile".
+
+- **Where it lives.** `internal/fleetnode` cannot import the command, and the reader needs the platform's boot time, so the command hands `fleetnode.Options.PowerProfile` a func (`powerProfileHealthReporter`, `power_profile_health.go`), the way `ServingConfig` is handed one. The func memoises the reading for 30 seconds and returns a copy. A nil func, or one that returns nil, omits the key.
+- **The mapping is one to one.** OK is `ok`, WARN is `skipped`, SKIP and UNKNOWN are `unknown`, so the row and the field cannot disagree. The one stricter case: a whole apply on a platform that cannot say when it booted is `unknown` (`boot_unknown`), because the field claims "applied at boot" and the row can only say "applied".
+- **Always published, never an error.** A node with no setting, no file or a file it cannot trust publishes `{"state": "unknown", "reason": "no_state"}` (or the reason that fits), so a current node says it does not know, and only a node one release behind omits the key. The delegator decodes it as a pointer (`delegate.NodeView.PowerProfile`) to keep those two apart, and `offload_status` leaves the key out for the second.
+- **What leaves the node.** A state, a token, the cards' power limits, whether a clock-lock step succeeded and the record's time. Never the record's host, path, detail or step text: the clock lock is matched in the step's description and only the fact is published, and the limits are the record's `boards[].power_limit_w`, published only when the state is `ok`. A shape of `boards` or `steps` this reader does not know costs those two fields, never the verdict.
+- **Not read by placement.** The fleet block shows it; no gate, ranking or deal consults it.
+
 ## The acceptance gate (`local-offload acceptance`)
 
 A node must pass this before it is handed work. It is deliberately NOT `doctor`: doctor
@@ -2224,6 +2234,7 @@ died is still on the node under its job id; the next identical call from that ma
 
 - [`internal/fleetnode/server.go`](../../internal/fleetnode/server.go) — routes, payloads, duplicate
   semantics, agent-lane auth gates, agent health advertisement
+- [`internal/fleetnode/powerprofile.go`](../../internal/fleetnode/powerprofile.go) and [`power_profile_health.go`](../../power_profile_health.go) — the `power_profile` health block, and the command's reporter that maps the doctor's reading of the boot-apply state record onto it
 - [`internal/fleetnode/leases.go`](../../internal/fleetnode/leases.go) — `leases[]`, the folded singular block, the
   node-level closed reading and the per-contract text-reservation gate (GPU routing P7)
 - [`internal/placement/leasecontract.go`](../../internal/placement/leasecontract.go) — which leases stand between a

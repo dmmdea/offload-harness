@@ -43,6 +43,11 @@ type powerProfileState struct {
 	StepsPlanned       int      `json:"steps_planned"`
 	StepsOK            int      `json:"steps_ok"`
 	NamedSkips         skipList `json:"named_skips"`
+	// Boards and Steps stay raw and are read leniently (powerProfileLimits, powerProfileClockLocked): they feed only
+	// the limit_w and clock_lock fields of /fleet/health, so a value in a shape this reader does not know must cost
+	// those two fields and never the verdict of a record that decoded before they were read.
+	Boards json.RawMessage `json:"boards"`
+	Steps  json.RawMessage `json:"steps"`
 }
 
 // skipList is the record's named skips. The applier writes an array: it keeps the list in an ordered hashtable,
@@ -97,111 +102,175 @@ func (s *skipList) UnmarshalJSON(b []byte) error {
 // The row prints no path, no host name and no card id, and not the applier's free-form detail (which can carry a
 // path): doctor output is pasted into issues and chats, and the operator finds the file by the setting. It is
 // informational, like the capacity and token rows: it never changes doctor's exit code.
+//
+// The judgement is readPowerProfile's, and /fleet/health publishes the same reading as its power_profile block
+// (powerProfileHealthOf, power_profile_health.go): OK is "ok", WARN is "skipped", SKIP and UNKNOWN are "unknown".
 func writePowerProfileSection(w io.Writer, path string, now, bootedAt time.Time) {
 	row := func(status, format string, args ...any) {
 		fmt.Fprintf(w, "power:      %-5s %s\n", status, fmt.Sprintf(format, args...))
 	}
-	if path == "" {
+	r := readPowerProfile(path, now, bootedAt)
+	ago := powerProfileAge(r.age)
+	switch r.kind {
+	case powerAbsent:
 		row("SKIP", "%s", powerProfileAbsent)
-		return
+	case powerUnreadable:
+		row("UNKNOWN", "the power profile state file cannot be read (%s), so whether a profile was applied is unknown", r.failure)
+	case powerNotJSON:
+		row("UNKNOWN", "the power profile state file is not valid JSON, so whether a profile was applied is unknown")
+	case powerNoSchema:
+		row("UNKNOWN", "the power profile state file carries no schema_version, so it is not a record this doctor reads")
+	case powerOtherSchema:
+		row("UNKNOWN", "the power profile state file is schema_version %d and this doctor reads %d, so it cannot say whether a profile was applied", r.schema, powerProfileSchema)
+	case powerBadTime:
+		row("UNKNOWN", "the power profile state file has no usable timestamp, so the age of the last run is unknown")
+	case powerFuture:
+		row("UNKNOWN", "the power profile state file's timestamp is in the future (the clock changed?), so the age of the last run is unknown")
+	case powerNotDue:
+		row("SKIP", "the box booted %s ago and has recorded no power profile run since; the boot apply runs a few minutes after boot, so this is not yet a finding (the last recorded run was %s ago)", powerProfileAge(r.up), ago)
+	case powerStaleBoot:
+		row("WARN", "no power profile was applied this boot (the box has been up %s): the last recorded run was %s ago (%s), so the card may be running at stock limits", powerProfileAge(r.up), ago, r.outcome)
+	case powerDryRun:
+		shown := r.outcome
+		if r.st.Outcome != "dry_run" {
+			shown += " as a dry run"
+		}
+		row("WARN", "the last power profile run, %s ago, ended %s: %s", ago, shown, powerProfileOutcomeMeaning("dry_run"))
+	case powerNotWhole:
+		row("WARN", "the last power profile run, %s ago, ended %s: %s", ago, r.outcome, powerProfileOutcomeMeaning(r.st.Outcome))
+	case powerPartial, powerApplied:
+		when := ago + " ago"
+		boot := ""
+		if r.bootKnown {
+			when = "this boot, " + when
+		} else {
+			boot = "; this box's boot time is unreadable, so whether it ran this boot is unknown"
+		}
+		if r.kind == powerPartial {
+			row("WARN", "power profile applied %s, but only part is in force: %s%s", when, strings.Join(r.gaps, "; "), boot)
+			return
+		}
+		detail := r.steps
+		if r.byDesign > 0 {
+			detail += fmt.Sprintf(", %d %s skipped by design", r.byDesign, powerProfilePlural(r.byDesign, "lever", "levers"))
+		}
+		row("OK", "power profile applied %s (%s)%s; recorded state only, the live power limit and clock lock are not compared", when, detail, boot)
+	}
+}
+
+// powerProfileKind is what the state record says about the boot apply, one value per row the doctor can print.
+type powerProfileKind int
+
+const (
+	powerAbsent      powerProfileKind = iota // no path set, or no file there: a box that applies no profile records nothing
+	powerUnreadable                          // the file is there and cannot be read
+	powerNotJSON                             // the file is not a JSON record
+	powerNoSchema                            // the record carries no schema_version
+	powerOtherSchema                         // the record is another schema than this reader's
+	powerBadTime                             // the record's timestamp does not parse
+	powerFuture                              // the record's timestamp is past the clock slack
+	powerNotDue                              // no record since the boot, and the boot apply is not yet due
+	powerStaleBoot                           // no record since the boot, and the boot apply is overdue
+	powerDryRun                              // the last run was a dry run
+	powerNotWhole                            // the last run ended in any outcome but applied_in_full
+	powerPartial                             // applied, but a step, a lever or the driver stamp leaves part out
+	powerApplied                             // applied whole
+)
+
+// powerProfileReading is the state record judged against the clock and the boot time: the one reading the doctor's
+// power row prints and /fleet/health's power_profile publishes, so the two cannot disagree. Which fields are set
+// depends on kind; age is the record's age with a small clock skew read as zero.
+type powerProfileReading struct {
+	kind      powerProfileKind
+	failure   string // powerUnreadable: why, in words that carry no path
+	schema    int    // powerOtherSchema: the record's schema_version
+	st        powerProfileState
+	ts        time.Time
+	age       time.Duration
+	up        time.Duration // powerNotDue, powerStaleBoot: how long the box has been up
+	bootKnown bool
+	outcome   string   // the outcome as printed (powerProfileOutcomeWord)
+	steps     string   // "9 of 9 steps ok"
+	gaps      []string // powerPartial: what is short
+	byDesign  int      // named skips the applier marks "by design"
+}
+
+// readPowerProfile reads the state file at path and judges it. An absent file is not an error; a file that cannot be
+// trusted is one of the unknown kinds, never absent and never fine (the rules are on writePowerProfileSection).
+func readPowerProfile(path string, now, bootedAt time.Time) powerProfileReading {
+	if path == "" {
+		return powerProfileReading{kind: powerAbsent}
 	}
 	raw, err := os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) {
-		row("SKIP", "%s", powerProfileAbsent)
-		return
+		return powerProfileReading{kind: powerAbsent}
 	}
 	if err != nil {
-		row("UNKNOWN", "the power profile state file cannot be read (%s), so whether a profile was applied is unknown", powerProfileReadFailure(err))
-		return
+		return powerProfileReading{kind: powerUnreadable, failure: powerProfileReadFailure(err)}
 	}
 	var st powerProfileState
 	if err := json.Unmarshal(raw, &st); err != nil {
-		row("UNKNOWN", "the power profile state file is not valid JSON, so whether a profile was applied is unknown")
-		return
+		return powerProfileReading{kind: powerNotJSON}
 	}
 	if st.SchemaVersion != powerProfileSchema {
 		if st.SchemaVersion == 0 {
-			row("UNKNOWN", "the power profile state file carries no schema_version, so it is not a record this doctor reads")
-		} else {
-			row("UNKNOWN", "the power profile state file is schema_version %d and this doctor reads %d, so it cannot say whether a profile was applied", st.SchemaVersion, powerProfileSchema)
+			return powerProfileReading{kind: powerNoSchema}
 		}
-		return
+		return powerProfileReading{kind: powerOtherSchema, schema: st.SchemaVersion}
 	}
 	ts, err := time.Parse(time.RFC3339, strings.TrimSpace(st.TS))
 	if err != nil {
-		row("UNKNOWN", "the power profile state file has no usable timestamp, so the age of the last run is unknown")
-		return
+		return powerProfileReading{kind: powerBadTime}
 	}
 	age := now.Sub(ts)
 	if age < -powerProfileClockSlack {
-		row("UNKNOWN", "the power profile state file's timestamp is in the future (the clock changed?), so the age of the last run is unknown")
-		return
+		return powerProfileReading{kind: powerFuture}
 	}
 	if age < 0 {
 		age = 0
 	}
-	ago := powerProfileAge(age)
-	outcome := powerProfileOutcomeWord(st.Outcome)
+	r := powerProfileReading{st: st, ts: ts, age: age, outcome: powerProfileOutcomeWord(st.Outcome), bootKnown: !bootedAt.IsZero()}
 
-	bootKnown := !bootedAt.IsZero()
-	if bootKnown && ts.Before(bootedAt) {
-		up := now.Sub(bootedAt)
-		if up < powerProfileBootApplyGrace {
-			row("SKIP", "the box booted %s ago and has recorded no power profile run since; the boot apply runs a few minutes after boot, so this is not yet a finding (the last recorded run was %s ago)", powerProfileAge(up), ago)
-			return
+	if r.bootKnown && ts.Before(bootedAt) {
+		r.up = now.Sub(bootedAt)
+		r.kind = powerStaleBoot
+		if r.up < powerProfileBootApplyGrace {
+			r.kind = powerNotDue
 		}
-		row("WARN", "no power profile was applied this boot (the box has been up %s): the last recorded run was %s ago (%s), so the card may be running at stock limits", powerProfileAge(up), ago, outcome)
-		return
+		return r
 	}
-
 	if st.DryRun || st.Outcome == "dry_run" {
-		shown := outcome
-		if st.Outcome != "dry_run" {
-			shown += " as a dry run"
-		}
-		row("WARN", "the last power profile run, %s ago, ended %s: %s", ago, shown, powerProfileOutcomeMeaning("dry_run"))
-		return
+		r.kind = powerDryRun
+		return r
 	}
 	if st.Outcome != "applied_in_full" {
-		row("WARN", "the last power profile run, %s ago, ended %s: %s", ago, outcome, powerProfileOutcomeMeaning(st.Outcome))
-		return
+		r.kind = powerNotWhole
+		return r
 	}
 
-	when := ago + " ago"
-	boot := ""
-	if bootKnown {
-		when = "this boot, " + when
-	} else {
-		boot = "; this box's boot time is unreadable, so whether it ran this boot is unknown"
-	}
-	steps := fmt.Sprintf("%d of %d steps ok", st.StepsOK, st.StepsPlanned)
-	var gaps []string
+	r.steps = fmt.Sprintf("%d of %d steps ok", st.StepsOK, st.StepsPlanned)
 	if st.StepsOK < st.StepsPlanned {
-		gaps = append(gaps, steps)
+		r.gaps = append(r.gaps, r.steps)
 	}
-	byDesign, other := 0, 0
+	other := 0
 	for _, s := range st.NamedSkips {
 		if strings.Contains(s, "by design") {
-			byDesign++
+			r.byDesign++
 		} else {
 			other++
 		}
 	}
 	if other > 0 {
-		gaps = append(gaps, fmt.Sprintf("%d lever %s", other, powerProfilePlural(other, "skip", "skips")))
+		r.gaps = append(r.gaps, fmt.Sprintf("%d lever %s", other, powerProfilePlural(other, "skip", "skips")))
 	}
 	if st.DriverMatchesStamp != nil && !*st.DriverMatchesStamp {
-		gaps = append(gaps, "the driver differs from the profile's stamp, so the tuned levers wait for a re-evaluation")
+		r.gaps = append(r.gaps, "the driver differs from the profile's stamp, so the tuned levers wait for a re-evaluation")
 	}
-	if len(gaps) > 0 {
-		row("WARN", "power profile applied %s, but only part is in force: %s%s", when, strings.Join(gaps, "; "), boot)
-		return
+	r.kind = powerApplied
+	if len(r.gaps) > 0 {
+		r.kind = powerPartial
 	}
-	detail := steps
-	if byDesign > 0 {
-		detail += fmt.Sprintf(", %d %s skipped by design", byDesign, powerProfilePlural(byDesign, "lever", "levers"))
-	}
-	row("OK", "power profile applied %s (%s)%s; recorded state only, the live power limit and clock lock are not compared", when, detail, boot)
+	return r
 }
 
 // powerProfileReadFailure is why the state file could not be read, in words that carry no path: the error text of a
