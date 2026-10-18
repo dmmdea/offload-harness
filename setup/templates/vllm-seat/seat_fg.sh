@@ -412,6 +412,15 @@ EXTRA=()
 # must STAY free for the co-residents' growth), floored at SEAT_KV_FLOOR_GIB (a smaller pool is still a seat) and capped
 # at SEAT_KV_CAP_GIB (never more than a profiled start could have taken), passed as --kv-cache-memory-bytes (per worker;
 # vLLM then ignores gpu-memory-utilization). The banner line names every input so a stall can be read back to its cause.
+# A pool the floor raised can still be too small for SEAT_MAX_LEN (register B-54): a card holding ~2.2 GB of desktop graphics
+# memory gave 1.95 GiB, floored to 2.0, and vLLM 0.28 refused every start ("To serve at least one request with the model's max
+# seq len (163840), (2.66 GiB KV cache is needed, which is larger than the available KV cache memory (2.0 GiB)") while
+# llama-swap restarted the seat on each request. SEAT_KV_NEED_GIB (optional) is that "N GiB KV cache is needed" figure for
+# SEAT_MAX_LEN; with it set and the pinned pool below it, --max-model-len -1 is passed instead of SEAT_MAX_LEN, and vLLM 0.28
+# (vllm/v1/core/kv_cache_utils.py _auto_fit_max_model_len, fed the --kv-cache-memory-bytes value) picks the largest length that
+# fits the PINNED pool, never more than the model's own maximum. Unset, SEAT_MAX_LEN is always passed (an auto-fit could exceed the operator's length) and a
+# floored pool is only warned about.
+MAXLEN="${SEAT_MAX_LEN:-131072}"
 KVPIN=()
 # nvidia-smi is resolved HERE, not trusted from PATH: the launcher exports a minimal PATH above, and under WSL the binary lives
 # in /usr/lib/wsl/lib — the first pinned start skipped this whole block in silence because `command -v` came back empty.
@@ -431,10 +440,25 @@ if [ -n "${SEAT_KV_HEADROOM_GIB:-}" ] && [ -n "$NVSMI" ]; then
     fi
   done
   if [ -n "$minfree" ]; then
-    pool_gib="$(awk -v f="$minfree" -v n="$nonkv" -v h="$SEAT_KV_HEADROOM_GIB" -v fl="$kvfloor" -v c="$kvcap" 'BEGIN{p=f/1024-n-h; if(p<fl)p=fl; if(p>c)p=c; printf "%.3f", p}')"
+    # "pool floored raw": the pool as passed, 1 when the computed value was under the floor, and that computed value.
+    pool_calc="$(awk -v f="$minfree" -v n="$nonkv" -v h="$SEAT_KV_HEADROOM_GIB" -v fl="$kvfloor" -v c="$kvcap" 'BEGIN{p=f/1024-n-h; r=p; fd=0; if(p<fl){p=fl; fd=1}; if(p>c)p=c; printf "%.3f %d %.3f", p, fd, r}')"
+    read -r pool_gib pool_floored pool_raw <<< "$pool_calc"
     pool_bytes="$(awk -v p="$pool_gib" 'BEGIN{printf "%d", p*1073741824}')"
     KVPIN=(--kv-cache-memory-bytes "$pool_bytes")
     echo "seat_fg: KV pool PINNED at ${pool_gib} GiB/worker = min free ${minfree} MiB on devices ${DEVS} − non-KV ${nonkv} GiB − headroom ${SEAT_KV_HEADROOM_GIB} GiB (floor ${kvfloor}, cap ${kvcap}) → --kv-cache-memory-bytes ${pool_bytes}; --gpu-memory-utilization ${SEAT_UTIL:-0.88} is ignored by vLLM while the pin is set"
+    # SEAT_KV_NEED_GIB: a decimal number of GiB (digits with at most one point, none at either end); anything else is said and
+    # means unset.
+    kvneed="${SEAT_KV_NEED_GIB:-}"
+    case "$kvneed" in
+      "") ;;
+      *[!0-9.]*|.*|*.|*.*.*) echo "seat_fg: WARNING — SEAT_KV_NEED_GIB='${kvneed}' is not a number of GiB (digits with one optional decimal point); ignored"; kvneed="" ;;
+    esac
+    if [ -n "$kvneed" ] && awk -v p="$pool_gib" -v n="$kvneed" 'BEGIN{exit !(p+0 < n+0)}'; then
+      MAXLEN=-1
+      echo "seat_fg: KV pool ${pool_gib} GiB/worker is below SEAT_KV_NEED_GIB=${kvneed} GiB (what SEAT_MAX_LEN=${SEAT_MAX_LEN:-131072} tokens need) — passing --max-model-len -1 instead: vLLM auto-fits the context to the pinned pool, so this seat serves LESS than SEAT_MAX_LEN (vLLM logs the length it chose: \"Auto-fit max_model_len\")"
+    elif [ -z "$kvneed" ] && [ "${pool_floored:-0}" = 1 ]; then
+      echo "seat_fg: WARNING — the KV pool was FLOORED: free memory allows ${pool_raw} GiB/worker, raised to SEAT_KV_FLOOR_GIB=${kvfloor} GiB. vLLM refuses to start when that is below what SEAT_MAX_LEN=${SEAT_MAX_LEN:-131072} needs (it prints \"N GiB KV cache is needed, which is larger than the available KV cache memory\"). Set SEAT_KV_NEED_GIB=N (that figure) and the launcher passes --max-model-len -1 whenever the pool is below it; unset, SEAT_MAX_LEN is kept"
+    fi
   else
     echo "seat_fg: WARNING — SEAT_KV_HEADROOM_GIB set but $NVSMI answered nothing for devices ${DEVS}; falling back to --gpu-memory-utilization ${SEAT_UTIL:-0.88} — the pool is NOT pinned"
   fi
@@ -443,7 +467,7 @@ KV_POLICY_JSON=""; [ -n "$KV_POLICY" ] && KV_POLICY_JSON=",\"kv_load_failure_pol
 [ -n "$KV_POLICY" ] && echo "seat_fg: kv_load_failure_policy=$KV_POLICY (SEAT_KV_LOAD_FAILURE_POLICY)"
 exec "$VENV/bin/vllm" serve "$MODEL" \
   --host 127.0.0.1 --port "$PORT" --served-model-name "$NAME" "${SEAT_ALIAS:-agent-pool}" \
-  --max-model-len "${SEAT_MAX_LEN:-131072}" "${PAR[@]}" --gpu-memory-utilization "${SEAT_UTIL:-0.88}" \
+  --max-model-len "$MAXLEN" "${PAR[@]}" --gpu-memory-utilization "${SEAT_UTIL:-0.88}" \
   --max-num-seqs "${SEAT_SEQS:-32}" \
   --mamba-cache-mode align --enable-prefix-caching --max-num-batched-tokens "${SEAT_BATCHED:-1567}" "${KVPIN[@]}" \
   --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"$KV_POLICY_JSON,\"kv_connector_extra_config\":{\"lmcache.mp.server_urls\":\"127.0.0.1:$MP_PORT\"}}" \
