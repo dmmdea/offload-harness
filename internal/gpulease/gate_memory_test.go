@@ -2,6 +2,7 @@ package gpulease
 
 import (
 	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"testing"
@@ -130,5 +131,41 @@ func TestAFreshLeftoverStagedHeartbeatCostsAGrantAtMostOneWaitPerFile(t *testing
 	}
 	if got := gatePauses.Load(); got > files*budgetPauses {
 		t.Errorf("the grant paused %d times for %d files, want at most %d (one budget of %d for each file, not one for each read of it)", got, files, files*budgetPauses, budgetPauses)
+	}
+}
+
+// The memory of a wait that ran out ends when the staged file is gone: a name that is simply absent is then absent, at once, and a
+// leftover that appears later is a new thing to wait for. Neither end was pinned: only the time and a successful read were.
+func TestTheMemoryOfAWaitThatRanOutEndsWhenTheStagedFileIsGone(t *testing.T) {
+	c := onGateClock(t)
+	path := filepath.Join(t.TempDir(), "hb.7")
+	stuckBeside(t, c, path)
+	if _, err := readSharedFile(path); !errors.Is(err, errRenameInFlight) {
+		t.Fatalf("read of a stuck leftover = %v, want an I/O-class errRenameInFlight", err)
+	}
+	budget := int64(absentBudget / absentPause)
+	if got := gatePauses.Load(); got != budget {
+		t.Fatalf("the first read paused %d times, want one budget (%d)", got, budget)
+	}
+
+	// The leftover is cleared away: the name is absent and nothing stands beside it.
+	if err := os.Remove(stagingPath(path)); err != nil {
+		t.Fatal(err)
+	}
+	_, err := readSharedFile(path)
+	if !errors.Is(err, fs.ErrNotExist) || errors.Is(err, errRenameInFlight) {
+		t.Errorf("read of an absent name with its leftover gone = %v, want a plain not-exist error: the memory of the wait must end with the file it was for", err)
+	}
+	if got := gatePauses.Load(); got != budget {
+		t.Errorf("the read of the absent name paused %d more times, want none", got-budget)
+	}
+
+	// A leftover that appears afterwards is waited for in full.
+	stuckBeside(t, c, path)
+	if _, err := readSharedFile(path); !errors.Is(err, errRenameInFlight) {
+		t.Fatalf("read of a new stuck leftover = %v, want an I/O-class errRenameInFlight", err)
+	}
+	if got := gatePauses.Load(); got != 2*budget {
+		t.Errorf("a new leftover after the old one was cleared away paused %d times in all, want %d: the new one is a new wait, and it was answered from the memory of the old", got, 2*budget)
 	}
 }
