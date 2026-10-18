@@ -411,8 +411,38 @@ func (r *redactor) apply(name string, re *regexp.Regexp, s string) string {
 		m = m[len(lead):]
 		r.Hits[name]++
 		r.remember(name, m)
+		if name == redactFirstClass {
+			head, tail := cookieKeyParts(m)
+			return lead + head + r.placeholder(name, m) + tail
+		}
 		return lead + r.placeholder(name, m)
 	})
+}
+
+// cookieKeyRe is the start of a cookie match whose header name is a key, or an argument: the name is followed by its
+// closing quote ("Cookie": ..., 'Set-Cookie': ..., Header.Set("Cookie", ...)), and the punctuation up to the first
+// character of the first cookie.
+var cookieKeyRe = regexp.MustCompile(`(?i)\A(?:_|-[A-Za-z])?(?:set-)?cookie\\*["'](?:\\+(?:[nrtbf]|u[0-9a-fA-F]{4})|[^\w])*`)
+
+// cookieTailQuoteRe is the closing quote of the last string of a list that a cookie match ends in, and the line break
+// and indentation (raw, or the JSON escape of them) of a pretty-printed list behind it.
+var cookieTailQuoteRe = regexp.MustCompile(`(?:\\*["'])+(?:\\+[nrt]|\s)*\z`)
+
+// cookieKeyParts splits a cookie match whose name is a key of a JSON object, a Python dict or an argument into what is
+// kept and what is replaced: the name, its closing quote and the punctuation up to the first cookie stay, the cookies
+// are replaced, and the closing quote of the last string of a list, which the match took, is put back. A document
+// keyed by the header name is then still a document (the match began inside the key's quotes and ran to the end of the
+// value, and the key lost its closing quote and the document its value). Any other match is replaced whole: head and
+// tail are empty.
+func cookieKeyParts(m string) (head, tail string) {
+	head = cookieKeyRe.FindString(m)
+	if head == "" {
+		return "", ""
+	}
+	if t := cookieTailQuoteRe.FindString(m[len(head):]); t != "" {
+		tail = t
+	}
+	return head, tail
 }
 
 // ClassifyKind buckets an entry by what its TOOL payloads are made of — the
