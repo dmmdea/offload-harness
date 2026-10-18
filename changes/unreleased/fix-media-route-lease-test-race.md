@@ -403,7 +403,7 @@
     ones before the cap, and the cap is shown on the gate's clock.
   - **Known limits.** A lock broken as stale after 30 s (`epochLockStale`) lets a second holder in beside a first that only stalled; its sweep could remove the first's staged file, which fails that rename with an error
     and corrupts nothing. The 5 s memory is the gate's choice and is not a measured figure. The measurements are one host's.
-- **A further review of this round found six more places, and five are fixed red first** (the sixth, the cap on the gate time of one hold of the epoch lock, is the passage on the worst hold above).
+- **A further review of this round found seven more places, and all are fixed red first** (six are below; the seventh, the cap on the gate time of one hold of the epoch lock, is the passage on the worst hold above).
   - **The keeper's scan of every heartbeat was blind to a heartbeat mid-rename (a second grant).** With the record of a whole-node holder old and unreadable, the keeper cannot name the epoch and lists the
     heartbeats of the lease directory (`keeperEvidence`, epoch 0). A listing does not show a name a rename is installing, and the scan skipped staged names, so a live holder whose heartbeat was mid-rename read
     as having no sign of life and its `meta.json` was removed by the claim loop. Red (`keeper_unknown_test.go`, at the unchanged code): `a second whole-node lease (epoch 3) was granted over a live whole-node
