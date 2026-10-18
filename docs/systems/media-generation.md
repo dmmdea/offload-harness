@@ -990,7 +990,9 @@ seat keeps `compute cuda:0`). **Fallback source once upstream goes read-only:** 
 plus this pinned commit). `render/comfy-nodes.mjs` (`NODE_PACKS`) and
 `internal/mediacap/routeneeds.go` (`nodePacks`/`packHint`) both carry the pin+mirror note in the
 operator-facing `MISSING_NODE` hint, so a box missing the pack is told where to get the frozen,
-patched code, not just the (soon read-only) upstream URL. All four fleet Windows/Linux ComfyUI
+patched code, not just the (soon read-only) upstream URL. The same pin (upstream and mirror) is a row of
+`render/node-packs.json`, the table a run-graph manifest's `node_packs` is checked against (a pack is taken only at a
+pinned repository and commit; see the [manifest flow](../flows/run-graph-manifest-satisfaction.md)). All four fleet Windows/Linux ComfyUI
 installs (<node-b>, <node-e>, <node-a>, <node-c>) are aligned to this commit (2026-09-24) — see the
 per-node rev table and the A/B seat-switch decision in
 `Ecosystem/Benchmarks and Optimizations/2026-09-22-qwen-image-21-hyperframes/infra/multigpu-archival-actions-2026-09-24.md`
@@ -2429,8 +2431,9 @@ an editor; the overlay itself is silent.
 
 - **Compositions are trusted code.** HyperFrames' Chrome launches with `--no-sandbox` and site
   isolation disabled. `html` and `project_dir` are accepted only from the local MCP and CLI doors, the
-  same trusted-caller posture as `run-graph`. The fleet door is not token-gated
-  ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)), so it refuses
+  same trusted-caller posture as `run-graph`. The fleet door needs the fleet bearer like every lane
+  ([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)), but a holder of
+  it is trusted to render, not to run code of its own, so it refuses
   both at ack time and renders only the node's vetted templates. It also ignores a caller's `out`:
   the node writes `<media_dir>/compose-<hash8>.<ext>`, the same rule every fleet media task follows
   ([fleet-node.md](fleet-node.md)). Template variables reach the page
@@ -2522,7 +2525,7 @@ with `Retry-After`. The client reads that as a `capacity` defer but does not rea
 picked, so the call returns the defer and a later call places the job again.
 The node also names a media-job's render itself (`mediajob-<16 hex>.<ext>`) and serves it only to a holder of the fleet token,
 because it is rendered from the caller's private files: the client sends the bearer on every output fetch, a tokenless read of
-that name is refused, and the outputs of a job with no input file (the tokenless dispatch) are still read by bare name.
+that name is refused, as it is for every name the node serves (the outputs of a plain dispatch need the bearer too).
 
 **What comes back.** The client polls `/fleet/jobs/{id}` every 2 seconds inside a budget when the caller gave no deadline
 (image 2 h, video and animate 6 h, audio 1 h, run-graph 2 h), then fetches every output the result names by bare name from

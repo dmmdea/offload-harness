@@ -51,7 +51,7 @@ stack that actually runs the work.
    improve with use.
 
 7. **A delegator that gives up can take an unstarted job back (ADR 0064).**
-   `DELETE /fleet/jobs/{id}` (agent bearer) withdraws a job that is still `accepted`: `200
+   `DELETE /fleet/jobs/{id}` (fleet bearer) withdraws a job that is still `accepted`: `200
    {"state":"withdrawn"}` when it had not started (it never will; the same answer for a job the node
    itself already took back), `409` with the job's own state when it had (the node does not touch it),
    `404` for an unknown id, `405` for a non-agent job. The delegator
@@ -80,10 +80,10 @@ This is the part with fleet-wide consequences, and the asymmetry is deliberate.
 
 A duplicate never starts a second run — acceptance is guarded so exactly one render happens per id.
 
-For an agent or vision job on a node with a `fleet_auth_token`, every row above is answered only to a
-caller that carries the bearer: the job's own record decides, not the `task_type` the duplicate declares,
-so a media-typed re-dispatch of an agent job's id is a `401` and neither restarts its poll lease nor reads
-its error.
+On a node with a `fleet_auth_token`, every row above is answered only to a caller that carries the
+bearer, for a job of any task type: the job's own record decides, not the `task_type` the duplicate
+declares, so a re-dispatch of a job's id under another task type is a `401` and neither restarts its
+poll lease nor reads its error.
 
 The reasoning behind `done` → `202`: the dispatcher treats any non-`202` as a refusal and may
 re-dispatch elsewhere. If a completed job answered non-`202`, the dispatcher would buy a duplicate
@@ -162,7 +162,13 @@ dispatcher and node.
 
 ## Security and privacy notes
 
-The contract is unauthenticated and assumes a trusted network. Binding beyond loopback requires
+Every dispatch, poll, withdraw and artifact read needs the fleet bearer (`Authorization: Bearer
+<fleet_auth_token>`) on a node that has a token, and a network the operator trusts still bounds who can
+reach the listener. A node with no token answers only on loopback and refuses everything else with `403`
+(`fleet-serve` will not start beyond loopback without one). `GET /fleet/health` and the jobs feed stay
+readable without the bearer, with their private fields withheld, and a refused request leaves a throttled
+line in the node's journal (see [FLEET-NODE.md](../FLEET-NODE.md#auth-every-lane-needs-the-fleet-bearer)).
+Binding beyond loopback requires
 `--listen-trusted-network`, and `:18811` with an empty host is refused as non-loopback
 ([ADR 0005](../architecture/decisions/0005-loopback-only-serve.md)). Node identity defaults to the
 hostname — worth knowing before exposing a node on a shared network.

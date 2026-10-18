@@ -27,8 +27,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
 // Plan is every input to one node-swap run. It is plain data (no live
@@ -131,6 +135,18 @@ type Plan struct {
 	// NoRollback is for tests exercising the failure path itself; production
 	// callers never set it.
 	NoRollback bool
+
+	// FleetKey is what the caller read of the config the node's fleet-serve reads; nil = not checked.
+	FleetKey *FleetKeyCheck
+}
+
+// FleetKeyCheck is whether the node's config holds a fleet_auth_token, and which config that was. The value itself is
+// never read out into the plan.
+type FleetKeyCheck struct {
+	// Config is the path of the config the caller read.
+	Config string
+	// Present is true when that config holds a non-empty fleet_auth_token.
+	Present bool
 }
 
 // Outcome is the full, JSON-serializable record of one run — written to the
@@ -339,6 +355,14 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 		return fail("validate", err.Error())
 	}
 
+	// 0. A node that listens beyond loopback needs fleet_auth_token in the config its fleet-serve reads: every lane of
+	// the binary this swap installs requires the fleet bearer, and fleet-serve will not start without the key. A swap
+	// that replaced the binary and restarted the node would take it down, so this refuses first, before anything is
+	// hashed, waited on, stopped or renamed, on a dry run as on a real one. Only whether the key is there was recorded.
+	if c := plan.FleetKey; c != nil && !c.Present && healthBeyondLoopback(plan.HealthURL) {
+		return fail("fleet-key", fmt.Sprintf("this node's health URL (%s) is beyond loopback and its config (%s) holds no fleet_auth_token: every lane of the new binary requires the fleet bearer, and fleet-serve will not start on a non-loopback address without the key. Put fleet_auth_token in that config (the value is never read here) and run the swap again, or pass --skip-fleet-key-check when this box's config is not the node's", plan.HealthURL, c.Config))
+	}
+
 	// 1. Verify the staged binary's hash before anything else is touched.
 	if !plan.SkipHashCheck {
 		got, err := deps.Hash(plan.Staged)
@@ -481,6 +505,20 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 
 	out.OK = true
 	return finish()
+}
+
+// healthBeyondLoopback reports whether a node's health URL names an address beyond loopback, which is a node whose
+// fleet-serve listens there. An empty URL is a standalone node with no fleet-serve; an address that cannot be read
+// is treated as exposed.
+func healthBeyondLoopback(healthURL string) bool {
+	if healthURL == "" {
+		return false
+	}
+	u, err := url.Parse(healthURL)
+	if err != nil || u.Hostname() == "" {
+		return true
+	}
+	return !netguard.LoopbackAddr(net.JoinHostPort(u.Hostname(), "1"))
 }
 
 func validatePlan(p Plan) error {

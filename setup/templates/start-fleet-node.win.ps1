@@ -5,6 +5,11 @@
 # measured gotchas this file encodes. Save AS UTF-8 WITH BOM; keep paths FORWARD-slashed
 # (PS 5.1 reads a BOM-less file as ANSI, and backslash escapes get eaten by generators).
 #
+# The node requires the fleet bearer on every lane, and fleet-serve refuses to start on the Tailscale address when
+# the config it reads has no fleet_auth_token. Put the key in that config BEFORE registering the task (the same
+# value on every delegator that calls this node). A node started without it exits at once, and the refusal it
+# prints names the key and the config file it read: this launcher's "exited immediately" line below carries it.
+#
 # Proven live on the ampere-8 reference box 2026-08-25. Three measured facts baked in:
 #  1. Under S4U (session 0) `tailscale ip -4` returns NOTHING - read the address from the
 #     INTERFACE (Get-NetIPAddress -InterfaceAlias Tailscale) instead.

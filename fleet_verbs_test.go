@@ -58,7 +58,7 @@ func TestFleetServeParams(t *testing.T) {
 	hostNodeA := func() (string, error) { return "node-a", nil }
 
 	t.Run("defaults resolve from config + hostname", func(t *testing.T) {
-		listen, nodeID, err := fleetServeParams("", "", false, config.Default(), hostNodeA)
+		listen, nodeID, err := fleetServeParams("", "", false, config.Default(), config.Source{}, hostNodeA)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -71,7 +71,7 @@ func TestFleetServeParams(t *testing.T) {
 	})
 
 	t.Run("non-loopback refused without the trusted flag", func(t *testing.T) {
-		_, _, err := fleetServeParams("100.64.0.10:18811", "", false, config.Default(), hostNodeA)
+		_, _, err := fleetServeParams("192.0.2.7:18811", "", false, config.Default(), config.Source{}, hostNodeA)
 		if err == nil || !strings.Contains(err.Error(), "refusing to bind") {
 			t.Fatalf("err = %v, want the netguard refusal", err)
 		}
@@ -84,27 +84,88 @@ func TestFleetServeParams(t *testing.T) {
 	// service manager retries once the tailnet address exists.
 	t.Run("an empty host is refused even with the trusted flag", func(t *testing.T) {
 		for _, listen := range []string{":18811", "0.0.0.0:18811", "[::]:18811"} {
-			_, _, err := fleetServeParams(listen, "node-a", true, config.Default(), hostNodeA)
+			_, _, err := fleetServeParams(listen, "node-a", true, config.Default(), config.Source{}, hostNodeA)
 			if err == nil || !strings.Contains(err.Error(), "EVERY interface") {
 				t.Fatalf("listen %q: err = %v, want the all-interfaces refusal", listen, err)
 			}
 		}
 	})
 
-	t.Run("trusted flag allows the Tailscale bind; explicit flags win", func(t *testing.T) {
-		listen, nodeID, err := fleetServeParams("100.64.0.10:18811", "node-a", true, config.Default(), hostNodeA)
+	t.Run("trusted flag allows the Tailscale bind with a token; explicit flags win", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.FleetAuthToken = "a-token"
+		listen, nodeID, err := fleetServeParams("192.0.2.7:18811", "node-a", true, cfg, config.Source{}, hostNodeA)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if listen != "100.64.0.10:18811" || nodeID != "node-a" {
+		if listen != "192.0.2.7:18811" || nodeID != "node-a" {
 			t.Fatalf("got (%q, %q), want the explicit flag values", listen, nodeID)
+		}
+	})
+
+	// Every lane of a node requires the fleet bearer, so a node that listens beyond loopback with none
+	// configured has no credential that could authorize any caller: it must not start, and it must say why.
+	t.Run("a listener beyond loopback with no fleet_auth_token refuses to start", func(t *testing.T) {
+		for _, listen := range []string{"192.0.2.7:18811", "192.0.2.7:18811", "[2001:db8::7]:18811"} {
+			_, _, err := fleetServeParams(listen, "node-a", true, config.Default(), config.Source{}, hostNodeA)
+			if err == nil || !strings.Contains(err.Error(), "fleet_auth_token") {
+				t.Fatalf("listen %q: err = %v, want a refusal that names fleet_auth_token", listen, err)
+			}
+		}
+	})
+
+	// A node that will not start must say which file to fix: the config key and the config the node read, so a
+	// box with two config files (LOCAL_OFFLOAD_CONFIG against the default) is not a guess.
+	t.Run("the refusal names the config key and the config file the node read", func(t *testing.T) {
+		src := config.Source{Path: "/srv/offload/etc/config.json"}
+		_, _, err := fleetServeParams("192.0.2.7:18811", "node-a", true, config.Default(), src, hostNodeA)
+		if err == nil {
+			t.Fatal("a listener beyond loopback with no token started")
+		}
+		for _, want := range []string{"fleet_auth_token", "/srv/offload/etc/config.json", "192.0.2.7:18811"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("the refusal does not name %q: %v", want, err)
+			}
+		}
+	})
+
+	t.Run("the refusal names a config that was named and is missing, and says so when no file was found", func(t *testing.T) {
+		missing := config.Source{Path: "/srv/offload/etc/absent.json", NotFound: true}
+		_, _, err := fleetServeParams("192.0.2.7:18811", "node-a", true, config.Default(), missing, hostNodeA)
+		if err == nil || !strings.Contains(err.Error(), "/srv/offload/etc/absent.json") || !strings.Contains(err.Error(), "does not exist") {
+			t.Errorf("err = %v, want it to name the missing config file and say it does not exist", err)
+		}
+		_, _, err = fleetServeParams("192.0.2.7:18811", "node-a", true, config.Default(), config.Source{}, hostNodeA)
+		if err == nil || !strings.Contains(err.Error(), "no config file") {
+			t.Errorf("err = %v, want it to say no config file was found", err)
+		}
+	})
+
+	t.Run("a loopback listener needs no token", func(t *testing.T) {
+		for _, listen := range []string{"127.0.0.1:18811", "localhost:18811", "[::1]:18811"} {
+			if _, _, err := fleetServeParams(listen, "node-a", false, config.Default(), config.Source{}, hostNodeA); err != nil {
+				t.Fatalf("listen %q: %v", listen, err)
+			}
+		}
+	})
+
+	t.Run("a token on a node whose fleet_listen is beyond loopback is enough", func(t *testing.T) {
+		cfg := config.Default()
+		cfg.FleetListen = "192.0.2.7:18811"
+		cfg.FleetAuthToken = "a-token"
+		if _, _, err := fleetServeParams("", "node-a", true, cfg, config.Source{}, hostNodeA); err != nil {
+			t.Fatal(err)
+		}
+		cfg.FleetAuthToken = ""
+		if _, _, err := fleetServeParams("", "node-a", true, cfg, config.Source{}, hostNodeA); err == nil {
+			t.Fatal("a non-loopback fleet_listen with no token started")
 		}
 	})
 
 	t.Run("config fleet_node_id beats the hostname", func(t *testing.T) {
 		cfg := config.Default()
 		cfg.FleetNodeID = "cfg-node"
-		_, nodeID, err := fleetServeParams("", "", false, cfg, hostNodeA)
+		_, nodeID, err := fleetServeParams("", "", false, cfg, config.Source{}, hostNodeA)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -114,7 +175,7 @@ func TestFleetServeParams(t *testing.T) {
 	})
 
 	t.Run("hostname failure falls back to a stable literal", func(t *testing.T) {
-		_, nodeID, err := fleetServeParams("", "", false, config.Default(),
+		_, nodeID, err := fleetServeParams("", "", false, config.Default(), config.Source{},
 			func() (string, error) { return "", errors.New("no hostname") })
 		if err != nil {
 			t.Fatal(err)
@@ -127,7 +188,7 @@ func TestFleetServeParams(t *testing.T) {
 	t.Run("config fleet_listen beats the built-in fallback", func(t *testing.T) {
 		cfg := config.Default()
 		cfg.FleetListen = "127.0.0.1:18899"
-		listen, _, err := fleetServeParams("", "", false, cfg, hostNodeA)
+		listen, _, err := fleetServeParams("", "", false, cfg, config.Source{}, hostNodeA)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -155,7 +216,7 @@ func TestFleetServeStampsItsResolvedNodeIDOnTheConfigThePipelineReads(t *testing
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Default()
 			cfg.FleetNodeID = tc.cfgID
-			_, nodeID, err := fleetServeParams("", tc.flag, false, cfg, tc.hostname)
+			_, nodeID, err := fleetServeParams("", tc.flag, false, cfg, config.Source{}, tc.hostname)
 			if err != nil {
 				t.Fatal(err)
 			}

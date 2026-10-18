@@ -168,7 +168,7 @@ func TestFinishedMediaJobDataCarriesArtifacts(t *testing.T) {
 	}}
 	s, jobs := newTestServer(t, cfg, runner, nil)
 
-	rec := do(t, s, "POST", "/fleet/dispatch", `{"job_id":"art-1","task_type":"video-gen","payload":{"prompt":"p"}}`, nil)
+	rec := do(t, s, "POST", "/fleet/dispatch", `{"job_id":"art-1","task_type":"video-gen","payload":{"prompt":"p"}}`, asHolder(cfg))
 	if rec.Code != 202 {
 		t.Fatalf("dispatch status %d: %s", rec.Code, rec.Body.String())
 	}

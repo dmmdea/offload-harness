@@ -10,13 +10,13 @@ import (
 	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
-// A wrong or missing fleet_auth_token is invisible to every read of a node: /fleet/health ignores the
-// Authorization header, so a token mismatch reads healthy until the first dispatch comes back 401, which
-// the delegator does not re-place. CheckToken asks the node the one question health cannot: does it accept
-// THIS bearer. It is how `doctor` shows the answer before a call is spent on it (membership review F11).
+// A wrong or missing fleet_auth_token is invisible to every read of a node: /fleet/health answers 200 to any
+// Authorization header and only withholds its private fields from a wrong one, so a token mismatch reads healthy
+// until the first dispatch comes back 401, which the delegator does not re-place. CheckToken asks the node the one
+// question health does not answer with a status: does it accept THIS bearer. It is how `doctor` shows the answer before a call is spent on it (membership review F11).
 //
 // The question is an agent dispatch with no job_id. The node's dispatch handler runs the bearer check
-// first (the agent lane is token-gated) and validates the envelope after, so:
+// first (every lane needs the bearer) and validates the envelope after, so:
 //
 //	401  the node has a token and this one is not it
 //	403  the node has none and listens beyond loopback, so it refuses the agent lane for every caller

@@ -17,7 +17,8 @@ func leasedOpts(info gpulease.Info) *Options {
 		NodeID: "leased-node", Snapshot: goodSnapshot,
 		Footprints: func() []FootprintEntry { return nil },
 		GpuVendor:  "nvidia", GpuArch: "ampere",
-		Lease: func() gpulease.Info { return info },
+		LoopbackListener: true,
+		Lease:            func() gpulease.Info { return info },
 	}
 }
 

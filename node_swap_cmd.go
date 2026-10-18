@@ -40,6 +40,8 @@ type nodeSwapOutput struct {
 	resultPath string
 	logPath    string
 	asJSON     bool
+	// skipFleetKeyCheck is --skip-fleet-key-check: the swap goes on without checking the node's config for a fleet_auth_token.
+	skipFleetKeyCheck bool
 }
 
 // parseNodeSwapFlags is the testable seam: pure flag parsing into a
@@ -78,6 +80,7 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 	resultPath := fs.String("result", "", "write the full JSON Outcome here (poll this after a detached launch)")
 	logPath := fs.String("log", "", "append a timestamped text log here as the swap progresses")
 	asJSON := fs.Bool("json", false, "print the Outcome as JSON on stdout too")
+	skipFleetKeyCheck := fs.Bool("skip-fleet-key-check", false, "do not check that the config this command resolves holds a fleet_auth_token before swapping a node whose health URL is beyond loopback (use it when this box's config is not the node's)")
 
 	if err := fs.Parse(args); err != nil {
 		return nodeswap.Plan{}, nodeSwapOutput{}, err
@@ -103,7 +106,7 @@ func parseNodeSwapFlags(args []string) (nodeswap.Plan, nodeSwapOutput, error) {
 		DryRun:          *dryRun,
 		NoRollback:      *noRollback,
 	}
-	out := nodeSwapOutput{resultPath: *resultPath, logPath: *logPath, asJSON: *asJSON}
+	out := nodeSwapOutput{resultPath: *resultPath, logPath: *logPath, asJSON: *asJSON, skipFleetKeyCheck: *skipFleetKeyCheck}
 	return plan, out, nil
 }
 
@@ -211,6 +214,20 @@ func resolveNodeSwapDefaults(plan nodeswap.Plan, cfg config.Config, log func(str
 	return plan
 }
 
+// resolveNodeSwapFleetKey records, for a node whose swap is about to start, whether the config it read holds a fleet_auth_token.
+// Only whether the key is there is recorded, never its value. skip (--skip-fleet-key-check) records nothing.
+func resolveNodeSwapFleetKey(plan nodeswap.Plan, cfg config.Config, src config.Source, skip bool) nodeswap.Plan {
+	if skip {
+		return plan
+	}
+	where := src.Path
+	if where == "" {
+		where = "no config file was found, so built-in defaults"
+	}
+	plan.FleetKey = &nodeswap.FleetKeyCheck{Config: where, Present: cfg.FleetAuthToken != ""}
+	return plan
+}
+
 // scanConfigFlag is scanEarlyOutputFlags' pattern applied to --config: a
 // tolerant, best-effort pre-scan (space or = form) done OUTSIDE
 // parseNodeSwapFlags on purpose — parseNodeSwapFlags stays pure/I-O-free (its
@@ -268,6 +285,9 @@ func runNodeSwap(args []string) error {
 		logger.Printf("config auto-resolve: %s failed to load (%v) — --health-url and the GPU-lease paths stay exactly as passed", cfgSrc.Path, cfgSrc.LoadErr)
 	} else {
 		plan = resolveNodeSwapDefaults(plan, cfg, func(s string) { logger.Printf("%s", s) })
+		// After the defaults (they may fill the health URL), before the swap: a node beyond loopback whose config holds no
+		// fleet_auth_token is refused by the engine before it touches anything.
+		plan = resolveNodeSwapFleetKey(plan, cfg, cfgSrc, out.skipFleetKeyCheck)
 	}
 
 	// The cards the operator named must place on cards this box has: an entry that does not

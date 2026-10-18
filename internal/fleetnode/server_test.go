@@ -61,13 +61,17 @@ func newTestServer(t *testing.T, cfg config.Config, r Runner, opts *Options) (*S
 	t.Helper()
 	jobs := NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
+	// A loopback node: every lane needs the bearer, and a node with no token on a listener beyond loopback
+	// refuses every dispatch (it is a configuration fleet-serve will not start in), so a test that is not about
+	// the listener models a node that can take work. A test of the listener says so with authOpts(false).
 	o := Options{
-		NodeID:     "testnode",
-		Snapshot:   goodSnapshot,
-		Footprints: func() []FootprintEntry { return nil },
-		GpuVendor:  "nvidia",
-		GpuArch:    "ampere",
-		Cfg:        cfg,
+		NodeID:           "testnode",
+		Snapshot:         goodSnapshot,
+		Footprints:       func() []FootprintEntry { return nil },
+		GpuVendor:        "nvidia",
+		GpuArch:          "ampere",
+		LoopbackListener: true,
+		Cfg:              cfg,
 	}
 	if opts != nil {
 		o = *opts
@@ -1249,13 +1253,13 @@ func (b *syncBuffer) String() string {
 // config with no agent keys at all — the advertisement keys off the operator
 // opt-in, never off the mere presence of a seat (every tier binds one).
 func TestHealthAgentFieldsAbsentWhenDisabled(t *testing.T) {
-	plain, _ := newTestServer(t, imageCfg(), &fakeRunner{}, nil)
+	plain, _ := newTestServer(t, imageCfg(), &fakeRunner{}, authOpts(false))
 
 	seeded := imageCfg()
 	seeded.AgentModel = "offload-e4b"
 	seeded.AgentCtxTokens = 16384
 	seeded.Endpoint = "http://127.0.0.1:1" // must never be dialed while disabled
-	withSeat, _ := newTestServer(t, seeded, &fakeRunner{}, nil)
+	withSeat, _ := newTestServer(t, seeded, &fakeRunner{}, authOpts(false))
 
 	recPlain := do(t, plain, http.MethodGet, "/fleet/health", "", nil)
 	recSeeded := do(t, withSeat, http.MethodGet, "/fleet/health", "", nil)
@@ -1481,7 +1485,7 @@ func TestDispatchQueueFullRetryAfterFromRecentWall(t *testing.T) {
 	cfg.FleetMaxConcurrentJobs = 1
 	cfg.FleetMaxQueueDepth = 3 // already AT the limit: the next dispatch is refused
 	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
-		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", LoopbackListener: true, Cfg: cfg})
 
 	rec := dispatchImage(t, s, "rf-1")
 	wantErrorShape(t, rec, http.StatusServiceUnavailable, "queue full")
@@ -1513,7 +1517,7 @@ func TestDispatchQueueFullRetryAfterDefaultsWithoutRecentWall(t *testing.T) {
 	cfg.FleetMaxConcurrentJobs = 1
 	cfg.FleetMaxQueueDepth = 2
 	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
-		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", LoopbackListener: true, Cfg: cfg})
 
 	rec := dispatchImage(t, s, "rf-2")
 	wantErrorShape(t, rec, http.StatusServiceUnavailable, "queue full")
@@ -1556,7 +1560,7 @@ func TestDispatchQueueFullRetryAfterClampedHighSaysSo(t *testing.T) {
 	cfg.FleetMaxConcurrentJobs = 1
 	cfg.FleetMaxQueueDepth = 11 // already AT the limit (1 running + 10 queued)
 	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
-		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", LoopbackListener: true, Cfg: cfg})
 
 	rec := dispatchImage(t, s, "rf-4")
 	wantErrorShape(t, rec, http.StatusServiceUnavailable, "queue full")
@@ -1592,7 +1596,7 @@ func TestDispatchQueueFullRetryAfterIgnoresUncappedJobs(t *testing.T) {
 	cfg.FleetMaxConcurrentJobs = 4
 	cfg.FleetMaxQueueDepth = 10 // already AT the total-backlog limit
 	s := New(&fakeRunner{}, jobs, Options{NodeID: "testnode", Snapshot: goodSnapshot,
-		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", Cfg: cfg})
+		Footprints: func() []FootprintEntry { return nil }, GpuVendor: "nvidia", GpuArch: "ampere", LoopbackListener: true, Cfg: cfg})
 
 	rec := dispatchImage(t, s, "rf-3")
 	wantErrorShape(t, rec, http.StatusServiceUnavailable, "queue full")
@@ -1866,7 +1870,7 @@ func TestDispatchTaskModelMetadataThroughJobsFeed(t *testing.T) {
 	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
 
 	rec := do(t, s, http.MethodPost, "/fleet/dispatch",
-		`{"job_id":"media-1","task_type":"image-gen","model_family":"sdxl","payload":{"prompt":"hi"}}`, nil)
+		`{"job_id":"media-1","task_type":"image-gen","model_family":"sdxl","payload":{"prompt":"hi"}}`, map[string]string{"Authorization": "Bearer tok"})
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("media dispatch status = %d, body %s", rec.Code, rec.Body.String())
 	}

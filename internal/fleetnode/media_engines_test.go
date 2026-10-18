@@ -141,7 +141,7 @@ func TestEngineOnlyBoxRefusesALaneWhoseBoundFileIsMissing(t *testing.T) {
 				t.Fatalf("want the route-not-ready refusal naming %s, got %v", tc.route, err)
 			}
 			body := `{"job_id":"e-1","task_type":"` + tc.task + `","payload":` + tc.payload + `}`
-			if rec := do(t, s, "POST", "/fleet/dispatch", body, nil); rec.Code != 503 {
+			if rec := do(t, s, "POST", "/fleet/dispatch", body, asHolder(box.cfg)); rec.Code != 503 {
 				t.Fatalf("dispatch status %d, want 503: %s", rec.Code, rec.Body.String())
 			}
 			touchFile(t, box.files[tc.file])

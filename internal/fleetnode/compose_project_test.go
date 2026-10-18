@@ -268,8 +268,8 @@ func TestComposeProjectJobsAreMaskedWithoutTheBearer(t *testing.T) {
 			t.Errorf("a pulled %s job must be gated", task)
 		}
 	}
-	if s.claimSpec(ComposeTask, func() {}).Gated {
-		t.Error("the template door stays tokenless: its jobs are not gated")
+	if !s.claimSpec(ComposeTask, func() {}).Gated {
+		t.Error("the template door's jobs are gated like every lane's")
 	}
 }
 

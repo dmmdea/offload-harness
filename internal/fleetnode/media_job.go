@@ -5,8 +5,8 @@ package fleetnode
 // machine with no render lane of its own can have a still animated, a character retargeted onto a
 // driver video or a voice cloned from a sample, with the files a node cannot otherwise get.
 //
-// The tokenless media tasks (/fleet/dispatch) read NODE-LOCAL paths only; they stay exactly as they
-// were. This door is the one that writes caller-supplied bytes to the node's disk, so it is closed unless
+// The media tasks sent over /fleet/dispatch read NODE-LOCAL paths only; they stay exactly as they
+// were (and need the bearer like every lane). This door is the one that writes caller-supplied bytes to the node's disk, so it is closed unless
 // the node opted in (fleet_media_inputs), holds a fleet token and has a media task bound
 // (config.MediaInputsAdmissible), and the bearer is checked before a byte of the body is read. The bundle
 // is a gzip-tar the node checks against its declared sha256, extracts (regular files only, confined
@@ -125,7 +125,7 @@ func (s *Server) handleMediaJob(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+		s.refuseBearer(w, r, MediaJobTask)
 		return
 	}
 	// A body whose declared length is over the cap is refused here, before the slot and without reading it
@@ -452,7 +452,7 @@ func buildMediaJob(ctx context.Context, v *mediaView, loopbackListener bool, pay
 		return core.Request{}, noop, err
 	}
 	// The render is written under a stem of the door's own choosing, never the pipeline's <task>-<hash8>
-	// (which the tokenless /fleet/dispatch lane shares): GET /fleet/media then tells a media-job render by
+	// (which the /fleet/dispatch lane shares): GET /fleet/media then tells a media-job render by
 	// its name alone and serves it only to a bearer holder (media_gate.go). The renders are made from the
 	// caller's private input files, so they must not be readable by whoever learns a name.
 	if out, oerr := mediaJobOutputPath(cfg, task, req.Params); oerr != nil {

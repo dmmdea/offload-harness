@@ -51,10 +51,10 @@ func originOf(r *http.Request, trustClass bool) (session, class string) {
 }
 
 // trustsWire reports whether the request is one this node can authenticate, so the run class it carries may be
-// believed. A token-gated lane has already passed authorizeGated (a bearer when a token is configured, else a
-// loopback listener, the trust boundary of the local MCP surface); any other lane (the media task types and the
-// legacy path-taking stt lane are open on purpose, so deployed tokenless clients keep working) is trusted only
-// when a token is configured and the request presented it.
+// believed. Every lane has passed authorizeGated by the time a class is read (a bearer when a token is
+// configured, else a loopback listener, the trust boundary of the local MCP surface); the fallback below is for a
+// task type that is ever exempted from tokenGated, and trusts it only when a token is configured and the request
+// presented it.
 func (s *Server) trustsWire(r *http.Request, taskType string) bool {
 	if tokenGated(s.opts.Cfg, taskType) {
 		return true

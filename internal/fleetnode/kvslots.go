@@ -101,13 +101,7 @@ func (s *Server) handleKVSlotRestore(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleKVSlot(w http.ResponseWriter, r *http.Request, action string) {
 	// Same bearer rule as the chat lane: the endpoint reaches into llama-swap.
-	if s.opts.Cfg.FleetAuthToken == "" {
-		if !AgentLaneSafelyReachable(s.opts.Cfg, s.opts.LoopbackListener) {
-			writeError(w, http.StatusForbidden, "kvslot lane requires fleet_auth_token on a non-loopback listener")
-			return
-		}
-	} else if !bearerOK(r, s.opts.Cfg.FleetAuthToken) {
-		writeError(w, http.StatusUnauthorized, "unauthorized")
+	if !s.authorizeLane(w, r, kvslotRefusalLabel, "kvslot lane requires fleet_auth_token on a non-loopback listener") {
 		return
 	}
 	if !s.kvSlotEnabled() {

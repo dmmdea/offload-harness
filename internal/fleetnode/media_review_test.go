@@ -313,7 +313,7 @@ func TestABoundTaskWithANotReadyRouteIs503NamingTheRouteAnUnboundOneStays400(t *
 	cfg := mediaJobCfg(t)
 	s, _ := newTestServer(t, cfg, &fakeRunner{}, nil)
 
-	rec := do(t, s, "POST", "/fleet/dispatch", `{"job_id":"v-1","task_type":"video-gen","payload":{"prompt":"p"}}`, nil)
+	rec := do(t, s, "POST", "/fleet/dispatch", `{"job_id":"v-1","task_type":"video-gen","payload":{"prompt":"p"}}`, asHolder(cfg))
 	if rec.Code != 503 {
 		t.Fatalf("bound-but-missing video-gen: status %d, want 503 (re-placeable): %s", rec.Code, rec.Body.String())
 	}
@@ -337,12 +337,12 @@ func TestABoundTaskWithANotReadyRouteIs503NamingTheRouteAnUnboundOneStays400(t *
 	unbound := mediaJobCfg(t)
 	unbound.VideoGenScript = ""
 	s2, _ := newTestServer(t, unbound, &fakeRunner{}, nil)
-	rec = do(t, s2, "POST", "/fleet/dispatch", `{"job_id":"v-2","task_type":"video-gen","payload":{"prompt":"p"}}`, nil)
+	rec = do(t, s2, "POST", "/fleet/dispatch", `{"job_id":"v-2","task_type":"video-gen","payload":{"prompt":"p"}}`, asHolder(unbound))
 	if rec.Code != 400 || !strings.Contains(rec.Body.String(), "unsupported task_type") {
 		t.Fatalf("an unbound task: status %d %s, want the 400 unsupported task_type", rec.Code, rec.Body.String())
 	}
 	// A ready route is unaffected, and a bad payload on it is still a 400.
-	if rec := do(t, s, "POST", "/fleet/dispatch", `{"job_id":"a-1","task_type":"animate","payload":{"prompt":"p"}}`, nil); rec.Code != 400 {
+	if rec := do(t, s, "POST", "/fleet/dispatch", `{"job_id":"a-1","task_type":"animate","payload":{"prompt":"p"}}`, asHolder(cfg)); rec.Code != 400 {
 		t.Fatalf("animate is ready here; a payload with no ref is a 400, got %d: %s", rec.Code, rec.Body.String())
 	}
 

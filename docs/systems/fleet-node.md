@@ -203,7 +203,7 @@ distinction below trustworthy: a job still `accepted` when shutdown begins prova
 
 **Duplicate dispatch is idempotent, with one deliberate exception.** Re-dispatching a job id that is
 `accepted`, `running`, or `done` re-acks `202` and does **not** start a second run. A job in `error`
-returns `409`. For an agent or vision job on a node with a `fleet_auth_token`, all of it is answered only to
+returns `409`. For a job of any task type on a node with a `fleet_auth_token`, all of it is answered only to
 a caller carrying the bearer, whatever `task_type` the duplicate declares (`401` otherwise): the job's own
 record decides.
 
@@ -410,10 +410,10 @@ implications.
     length and then stalls still holds its slot until its bytes arrive or the 10-minute window ends. The transcript outputs (`stt-<digits>-<8 hex>.srt|txt|segments.json`) are removed when
     the job record is evicted or after `fleet_stt_transcript_ttl_min` (default 30, a negative value keeps them; swept at
     startup and on the janitor tick), and on a node with a token `GET /fleet/media` serves them only to a bearer holder
-    (so do a project render, `composeproj-<16 hex>.*`, a media-job render, `mediajob-<16 hex>.*`, and the legacy path-taking
-    `stt` lane's transcripts, `<basename>-<8 hex>.srt|txt|segments.json`; the outputs of the tokenless lanes, `render-*`, `compose-*`
-    and a plain `/fleet/dispatch` job's files, stay readable by bare name; the match folds case and trailing
-    dots and spaces and treats a non-ASCII, `~` or `:` name as gated, because NTFS opens one file under those spellings).
+    (so does every other artifact now, whatever task made it: a project render, `composeproj-<16 hex>.*`, a media-job render,
+    `mediajob-<16 hex>.*`, the legacy path-taking `stt` lane's transcripts, `<basename>-<8 hex>.srt|txt|segments.json`, and the
+    `render-*`, `compose-*` and plain `/fleet/dispatch` files; the check runs before the file lookup, so no spelling of a name that
+    NTFS would open as the same file gets a bearer-free read).
     `GET /fleet/media` refuses a
     dot name. Details: [FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt),
     [ADR 0072](../architecture/decisions/0072-a-fleet-node-transcribes-audio-its-caller-uploads-so-a-held-card-is-a-place-in-line.md).
@@ -483,16 +483,16 @@ Before setting `enforce`, know four edges:
   it is a tailnet zone, and a `seat_endpoints` URL under it would pass the endpoint rule too.
 
 This guard is not authentication. It stops a browser page and a DNS-rebinding name from reaching the node; a tailnet
-peer that is not a browser (no `Origin`, a JSON POST, a `Host` that names the node's address) is admitted as before,
-so the media lane stays unauthenticated on a non-loopback bind. Per-node tokens and tailnet grants are separate work.
+peer that is not a browser (no `Origin`, a JSON POST, a `Host` that names the node's address) is admitted by it as before.
+What keeps such a peer out is the fleet bearer, which every lane requires.
 
-The **media** contract is unauthenticated and assumes a trusted network — in practice a tailnet.
-That assumption is acknowledged by the explicit `--listen-trusted-network` flag. Since 0.65.0
-the **agent lane** is the deliberate exception: bearer-gated when `fleet_auth_token` is set,
-refused outright beyond loopback without one, because it executes caller-supplied agent
-contracts rather than renders (see [The agent task](#the-agent-task-task_type-agent) and
-[ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)). Node
-identity defaults to the hostname, so operator documentation uses placeholders rather than real
+Every lane of a node requires the fleet bearer: with a `fleet_auth_token` a request without it is refused `401`, a node
+that listens beyond loopback with none refuses every lane `403` and will not start, and only a loopback node with no token
+is open (the same trust boundary as the local MCP surface). The network is still assumed to be a tailnet, acknowledged by
+the explicit `--listen-trusted-network` flag. The agent lane was the first to be gated (0.65.0), because it executes
+caller-supplied agent contracts rather than renders (see [The agent task](#the-agent-task-task_type-agent) and
+[ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md), whose amendment carries the
+every-lane rule). Node identity defaults to the hostname, so operator documentation uses placeholders rather than real
 names.
 
 ## Observability and debugging
@@ -515,8 +515,7 @@ workers are busy, a burst whose peak overlap never exceeds the limit (with an un
 the server admitting while busy and refusing only when full, and drain telling never-started from
 interrupted. `healthwire_compat_test.go` is an EXTERNAL test package so it can run the delegator's
 real `FetchNodeView` decoder against the real health handler: the additive capacity fields must not
-break a reader that has never heard of them. `auth_test.go` pins the agent-lane auth matrix and the media lane's tokenless
-bypass; `tasks_agent_test.go` the advertisement gate and contract materialization;
+break a reader that has never heard of them. `auth_test.go` pins the agent-lane auth matrix and `bearer_every_lane_test.go` the rule for every other task type; `tasks_agent_test.go` the advertisement gate and contract materialization;
 `internal/pipeline/agenttask_test.go` the defer shapes over a fake chat client.
 `fleet_verbs_test.go` covers parameter resolution and the bind guard. `stt_upload_test.go` covers the upload door
 (advertisement == admission over the listener/token matrix, the bearer before the body, the body and upload caps, payload
@@ -743,8 +742,8 @@ not before. Two more headers carry the asker's session and run class (`X-Offload
 `admit` (and the claim loop, from `fleetqueue.Job.Origin` / `RunClass`) cleans them with the ledger's own rules
 (`ledger.CleanOrigin`, `CleanClass`; a session over 96 bytes is refused whole, where the tenant is truncated) and stamps them
 on the node's ledger row as `origin_session` and `run_class`, with the node process's own pids. The class is believed only
-for a request the node can authenticate (`trustsWire`: a token-gated lane that passed its gate, or a presented bearer), so
-a tokenless media dispatch keeps the session and loses the class. A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
+for a request the node can authenticate (`trustsWire`: every lane passes its gate before a class is read, so a bearer holder, or any caller of a loopback node with no
+token, is believed, and a caller without the bearer never gets as far as a class). A claim of a job the node already holds (a lease-expiry re-claim) opens no card, and a claim a
 draining node refuses closes its card failed; a pushed dispatch gets the same guarantee against a racing
 duplicate (the id lookup, the queued frame and `Admit` run under one lock). Details and the rollout reasoning: [pair-workloads](pair-workloads.md).
 
@@ -1208,9 +1207,9 @@ on their own idle timer like any other load. `/fleet/health` never runs it.
   is refreshed behind the next request and published while it is. One older than two minutes is no longer published (the
   keys are absent until the refresh lands), so a refresh that is slow or stuck cannot leave a stale answer up for as long as
   the process lives. A node with no llama-swap endpoint publishes nothing.
-- Who can read the new keys, and what they expose. `GET /fleet/health` is unauthenticated on every node: `fleet_auth_token`
-  gates dispatches to the agent, vision, text and speech-to-text lanes and the polls of the jobs they create, not the health
-  route, and the ingress guard is not authentication. Under its default `warn` mode the guard serves even the requests it
+- Who can read the new keys, and what they expose. `GET /fleet/health` answers without the bearer on every node (with the
+  lease reason, the store status and the weight-file rows withheld from a caller that lacks it): `fleet_auth_token`
+  gates every dispatch and the polls of the jobs they create, not the health route, and the ingress guard is not authentication. Under its default `warn` mode the guard serves even the requests it
   would refuse, so a stock node answers any peer that can reach its port, and under `enforce` it still admits a non-browser
   peer that names the node. The new keys reach exactly those readers. Against `backends` (hardware tags and nothing else) they
   add no host name, path, URL or IP, but they do add the status key of each lane, engine kinds and probe levels (a fixed
@@ -1837,27 +1836,40 @@ marker — or, for a vision job, the `Gated` marker — written atomically at cr
 with the record). The comparison hashes both
 sides with SHA-256 before a constant-time compare, making it length-independent. Wrong or
 missing credential → `401` with the standard error envelope (`"error": "unauthorized"`),
-checked immediately after the body decode and **before** the job_id validation and the re-ack
-lookup, so an unauthorized caller can neither probe the field validators nor learn job
-existence.
+checked **before** the request body is read (on the dispatch, vision and text routes: nothing of it is
+buffered or decoded, and a malformed body, a wrong content type or an oversized one is `401`, not `400`) and so
+before the job_id validation and the re-ack lookup. A caller without the credential gets the auth verdict and nothing
+else: no validation answer, no job existence.
 
-With **no token configured**, a non-loopback listener refuses agent dispatches outright —
-`403 agent lane requires fleet_auth_token on a non-loopback listener` — and
+With **no token configured**, a non-loopback listener refuses every dispatch, of any task type, outright —
+`403 fleet lanes require fleet_auth_token on a non-loopback listener` — and `fleet-serve` does not start in that
+state (`fleetServeParams`, which names `fleet_auth_token` and the listen address).
 `AgentLaneAdmissible` withholds `agent` from the advertised `supported_task_types` **and** from
 the four `agent_*` health fields below, so neither a task-list-driven dispatcher nor a delegator
 learns the capability just to eat a 403. Loopback with no token is the
-local-MCP trust boundary and stays open. Every media path — media dispatch, media job polls, `/fleet/media/*`, health — ignores
-the token, so already-deployed tokenless media clients keep working byte-identically
-(pinned by test), with ONE exception since the stt transcript change: on a node that HAS a token, `GET /fleet/media/{name}`
-needs the bearer for the outputs of the token-gated lanes (an stt upload's transcripts, the legacy `stt` lane's
-`<basename>-<8 hex>` transcripts, a project render's `composeproj-<16 hex>` files, a media-job render's `mediajob-<16 hex>` files;
-`gatedMediaName`, which folds case and trailing dots and spaces and fails closed on a non-ASCII, `~` or `:` name, since a Windows
-node opens one file under those spellings), while the outputs of the tokenless lanes (`render-*`, `compose-*`, a plain
-`/fleet/dispatch` job's files) stay readable by bare name;
-whole-fleet enforcement is a recorded follow-up
-([ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
+local-MCP trust boundary and stays open.
 
-**Because media dispatch is tokenless, a remote media task never picks the node's output path.**
+**Every lane is behind the bearer** since the amendment of 2026-10-15 to
+[ADR 0023](../architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md): `tokenGated` returns true for every task
+type, so a media dispatch, a run-graph, the legacy `stt` lane, the poll and withdraw of any job and the read of any artifact in
+`GET /fleet/media/{name}` need the bearer on a node that has a token (pinned by `bearer_every_lane_test.go`; every refusal of a
+credential, at every door that checks one, writes one journal line through `refuseBearer`, `refuseNoToken` or `queueAuthOK`
+(pinned by `refusal_every_door_test.go`), throttled per caller address and reason, never per door, task type or any header the caller sends, pinned by
+`refusal_throttle_key_test.go`; the whole line is the door, the caller's host and one of three constant reasons, pinned by
+`refusal_line_shape_test.go`; and every door that takes a body checks the bearer before it reads any of it, pinned by
+`auth_before_body_doors_test.go`). `/fleet/health` and the jobs feed answer without it, with
+their private fields withheld (`healthPayload.withoutPrivateFields`: the lease's free-text `reason`, the store steward's status,
+the weight-file rows of the image, video, animation and audio recipes; the jobs feed's `error` text); a request to either
+that presents a bearer which is not the node's is answered the same way and writes the usual journal line (`holdsBearer`,
+door `health` or `jobs-feed`, pinned by `refusal_public_routes_test.go`), while one with no bearer writes nothing. A run-graph manifest may
+name a node pack only at a pinned repository and commit (`render/node-packs.json`, its copy `internal/mediacap/nodepacks.go`
+and `mediacap.CheckManifestNodePacks`, called by `buildRunGraph` before anything is written; the runner's satisfier refuses on
+the same table before its first git command). The rollout order is delegators first, then nodes: every client already sends the
+bearer when it has a token, and a per-package test plus a source test (`TestEveryFleetClientRequestSetsTheBearer`) keep it so.
+What a node that gains the rule refuses, the release floors of each client and the advice on the token's strength are in
+[FLEET-NODE.md](../FLEET-NODE.md#auth-every-lane-needs-the-fleet-bearer).
+
+**A remote media task never picks the node's output path, whatever the bearer says.**
 The builders in `internal/fleetnode/tasks.go` and `compose_task.go` drop a caller's `out`, and
 run-graph's `out_dir`. The pipeline then writes `<media_dir>/<task>-<hash8>.<ext>` (run-graph:
 `<media_dir>`). Results come back by bare name through `GET /fleet/media/{name}`, which serves only
@@ -1934,10 +1946,11 @@ sampler's last cached value, the same pattern the VRAM snapshot already uses.
 **unauthenticated for id/task/model/state/`agent`/timestamps/`wall_ms`** — metadata only, never the
 job's `payload` or its result, so there is nothing there the per-job bearer gate (`handleJob`,
 `GET /fleet/jobs/{id}`) exists to protect. Its `error` string (truncated to 200 runes) is the one
-exception: an `agent: true` row's error text can echo contract content (the goal, a tool-result
-fragment) the way a media row's never does, so when `fleet_auth_token` is configured and the request
-carries no valid bearer, `handleJobs` omits `error` on every agent row while leaving it — and every
-other field on every row, media rows included — unchanged. It exists for
+exception: a row's error text can echo contract content (the goal, a tool-result
+fragment) or a path on the node's disk, so when `fleet_auth_token` is configured and the request
+carries no valid bearer, `handleJobs` omits `error` on every row (every job is gated, agent or not) while leaving
+every other field unchanged. A bearer that is presented and is not the node's also writes the usual throttled
+journal line (door `jobs-feed`); a request with no bearer writes nothing. It exists for
 [fleet-overview](fleet-overview.md)'s cross-node JOBS feed and `fleet-ui`'s per-node job lists; a
 node that predates 0.113.0 answers this route with a permanent 404, which the poller distinguishes
 from a transient failure only by effect (it keeps the node's last-known job list either way) — see
@@ -2090,7 +2103,7 @@ in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`
   audio.cpp engine, so an engine-only node with every script key blank opens it; health lists `media-job` only while one inner
   task is also runnable). Closed, it answers
   403; without the bearer, 401; both before a byte of the body is read. `media-job` is token-gated, so the same task over
-  `/fleet/dispatch` needs the bearer too, and its jobs are masked from tokenless polls and feeds.
+  `/fleet/dispatch` needs the bearer too, as every task type does, and its jobs are masked from polls and feeds that lack it.
 - The body is capped at `fleet_media_inputs_max_mb` (default 256, compressed) in base64 plus 64 KiB (413 over it). A request that
   DECLARES a longer `Content-Length` is answered `413` at once with `Connection: close`, right after the door and bearer checks:
   before the in-flight slot below is taken and without reading the body, so a client that declares 8 GiB and sends 20 bytes
@@ -2119,9 +2132,9 @@ in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`
   its output is not served by bare name to anyone who learns it. After the inner builder, the door sets the render's `out` to
   `<media_dir>/mediajob-<16 hex>.<ext>` (`png`, `mp4`, `wav`, or `flac` for music; run-graph, which takes no file through this
   door and whose outputs the graph names, is left alone), and `GET /fleet/media/{name}` answers `401` to a tokenless read of
-  that stem on a node with a token (`gatedMediaName`, the rule the project and stt upload renders already ride). The client
-  sends the fleet bearer on every output fetch. The outputs of the tokenless `/fleet/dispatch` door keep the pipeline's own
-  names and stay readable by bare name.
+  that stem on a node with a token (as it does for every name now). The client
+  sends the fleet bearer on every output fetch. The outputs of the plain `/fleet/dispatch` door keep the pipeline's own
+  names; they need the bearer too.
 - The bundle's sha256 must match; it is extracted into `<media_dir>/fleet-inputs/in-*` (regular files only, confined names,
   byte caps; a symlink or a traversal name is refused); each `inputs` value must be a regular file directly in that
   directory; and its first bytes must match the field's kind: image PNG, JPEG or WebP; video MP4/MOV or WebM/MKV; audio WAV,

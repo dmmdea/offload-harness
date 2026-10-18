@@ -357,18 +357,18 @@ test("satisfyModels tells its beat which model it is on, before ComfyUI exists t
     download: async () => {}, sha256: async () => "H",
   };
   const r = await satisfyModels([
-    { path: "models/have.safetensors", sha256: "H" },
-    { path: "models/need.safetensors", source_url: "u", sha256: "H" },
+    { path: "models/checkpoints/have.safetensors", sha256: "H" },
+    { path: "models/checkpoints/need.safetensors", source_url: "https://huggingface.co/x/y", sha256: "H" },
   ], deps);
   assert.equal(r.ok, true);
   assert.deepEqual(told, [
-    "manifest: checking models/have.safetensors",
-    "manifest: checking models/need.safetensors",
-    "manifest: downloading models/need.safetensors",
-    "manifest: downloaded models/need.safetensors",
+    "manifest: checking models/checkpoints/have.safetensors",
+    "manifest: checking models/checkpoints/need.safetensors",
+    "manifest: downloading models/checkpoints/need.safetensors",
+    "manifest: downloaded models/checkpoints/need.safetensors",
   ]);
   // No beat given: unchanged behaviour.
-  const bare = await satisfyModels([{ path: "models/need.safetensors", source_url: "u", sha256: "H" }], { ...deps, beat: undefined, exists: () => false, sentinelOk: () => false });
+  const bare = await satisfyModels([{ path: "models/checkpoints/need.safetensors", source_url: "https://huggingface.co/x/y", sha256: "H" }], { ...deps, beat: undefined, exists: () => false, sentinelOk: () => false });
   assert.equal(bare.ok, true);
 });
 

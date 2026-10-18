@@ -106,3 +106,10 @@ eligible node the work still runs local
 - [systems/fleet-node.md](../../systems/fleet-node.md)
 - [ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md) — the agent lane's auth and locality
 - [ADR 0038](0038-accelerator-work-travels-to-the-box-that-has-the-device.md) — bytes travel with the job
+
+## Amendment (2026-10-17): every lane needs the fleet bearer
+
+Where this record calls media lanes tokenless, it describes the node when the decision was taken. Since the amendment of 2026-10-15 to
+[ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token
+(dispatch of any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on
+loopback. The decision recorded here is otherwise unchanged.

@@ -53,8 +53,8 @@ func (b *bodyRunner) ran() (graphs, manifests []string) {
 }
 
 const (
-	bodyManifestA = `{"models":[{"name":"x"}]}`
-	bodyManifestB = `{"models":[{"name":"y"}]}`
+	bodyManifestA = `{"models":[{"path":"models/checkpoints/x.safetensors"}]}`
+	bodyManifestB = `{"models":[{"path":"models/checkpoints/y.safetensors"}]}`
 )
 
 // A caller that reuses one graph file writes shot 1, is told "queued", and writes shot 2 over it. The ticket of shot 1 renders shot 1

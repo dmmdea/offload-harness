@@ -142,3 +142,10 @@ What this left open, measured against the delegator's own ledger:
 - [pair-workloads](../../systems/pair-workloads.md) (the attribution headers)
 - [fleet-node](../../systems/fleet-node.md), [FLEET-NODE](../../FLEET-NODE.md#the-delegation-ledger-row)
 - [OPERATOR-GUIDE](../../OPERATOR-GUIDE.md) (reading the ledger)
+
+## Amendment (2026-10-17): every lane needs the fleet bearer
+
+Where this record calls the media task types and the legacy path-taking stt lane open on purpose, for the tokenless clients then deployed, it describes the node when the decision was taken. Since the amendment of 2026-10-15 to
+[ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token
+(dispatch of any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on
+loopback. Every lane has passed its gate by the time the class is read, and the rule that a class from a caller the node cannot authenticate is dropped is unchanged.

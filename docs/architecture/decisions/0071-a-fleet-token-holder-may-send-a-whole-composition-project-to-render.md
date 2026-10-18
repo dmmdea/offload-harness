@@ -98,3 +98,10 @@ sweeps orphaned project trees at startup.
 Accepted with decision 3's residual: the check is static and reads markup as text, so a difference between how it and
 the compiler's parser read a document could still let a reference through. The fleet token is the boundary; the check
 narrows what a mistake, or a leaked token, could read.
+
+## Amendment (2026-10-17): every lane needs the fleet bearer
+
+Where this record calls the template door (`compose-video` over `/fleet/dispatch`) and media dispatch tokenless, it describes the node when the decision was taken. Since the amendment of 2026-10-15 to
+[ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token
+(dispatch of any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on
+loopback. The decision recorded here is otherwise unchanged.

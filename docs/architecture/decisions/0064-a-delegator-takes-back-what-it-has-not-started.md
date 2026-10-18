@@ -171,3 +171,10 @@ carried no timestamp or process id.
   would make every dispatched request miss.
 - **Write the started marker to its own file, or under its own task name.** Rejected: the join to the finished
   row is the point, and one file with one schema keeps every existing reader's dedup rule in one place.
+
+## Amendment (2026-10-17): every lane needs the fleet bearer
+
+Where this record limits the bearer rule for a known job id to an agent or vision job, it describes the node when the decision was taken. Since the amendment of 2026-10-15 to
+[ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token
+(dispatch of any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on
+loopback. A re-dispatch of any known job id answers `401` without the bearer, whatever its task type. The decision recorded here is otherwise unchanged.
