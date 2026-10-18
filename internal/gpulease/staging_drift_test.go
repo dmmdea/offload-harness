@@ -1,6 +1,9 @@
 package gpulease
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -104,5 +107,97 @@ func TestTheNodeReaderLooksForEverySuffixAGoWriterStagesUnder(t *testing.T) {
 	}
 	if got := stagingPath(filepath.Join(dir, "cards", "gpu-0.claim")); got != "" {
 		t.Errorf("stagingPath of a card claim = %q, want none", got)
+	}
+}
+
+// The line test above sees a staging name spelled ".tmp" or ".restamp" and nothing else: a writer that stages under `path + ".stg"`, a
+// Sprintf, a backtick literal or a temp-file call goes by it, and a file staged under a name no reader looks for is a rename in flight
+// nobody can see (the original defect). What a writer passes to renameReplacing as the file it stages is the thing to check, so it is
+// parsed: the first argument of every call must be a call of stagingPath, or a name whose every assignment in the function is one.
+func TestEveryGoWriterRenamesAFileItStagedUnderStagingPath(t *testing.T) {
+	fset := token.NewFileSet()
+	sites := 0
+	isStagingPath := func(e ast.Expr) bool {
+		call, ok := e.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		return ok && id.Name == "stagingPath"
+	}
+	for name, src := range goSources(t) {
+		file, err := parser.ParseFile(fset, name, src, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil || fn.Name.Name == "renameReplacing" {
+				continue
+			}
+			// every right-hand side a name is given in this function (closures included)
+			assigned := map[string][]ast.Expr{}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch s := n.(type) {
+				case *ast.AssignStmt:
+					if len(s.Lhs) == len(s.Rhs) {
+						for i, l := range s.Lhs {
+							if id, ok := l.(*ast.Ident); ok {
+								assigned[id.Name] = append(assigned[id.Name], s.Rhs[i])
+							}
+						}
+					} else {
+						for _, l := range s.Lhs {
+							if id, ok := l.(*ast.Ident); ok {
+								assigned[id.Name] = append(assigned[id.Name], nil) // a multi-value call: not a staging name
+							}
+						}
+					}
+				case *ast.ValueSpec:
+					for i, id := range s.Names {
+						if i < len(s.Values) {
+							assigned[id.Name] = append(assigned[id.Name], s.Values[i])
+						} else {
+							assigned[id.Name] = append(assigned[id.Name], nil)
+						}
+					}
+				}
+				return true
+			})
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				if id, ok := call.Fun.(*ast.Ident); !ok || id.Name != "renameReplacing" || len(call.Args) != 2 {
+					return true
+				}
+				sites++
+				at := fset.Position(call.Pos())
+				arg := call.Args[0]
+				if isStagingPath(arg) {
+					return true
+				}
+				id, ok := arg.(*ast.Ident)
+				if !ok {
+					t.Errorf("%s:%d renames %T, want a name that stagingPath gave or a call of it", at.Filename, at.Line, arg)
+					return true
+				}
+				rhs := assigned[id.Name]
+				if len(rhs) == 0 {
+					t.Errorf("%s:%d renames %s, which is not assigned in %s: want stagingPath(<the live name>)", at.Filename, at.Line, id.Name, fn.Name.Name)
+				}
+				for _, e := range rhs {
+					if e == nil || !isStagingPath(e) {
+						t.Errorf("%s:%d renames %s, which %s gives a name that is not stagingPath(<the live name>): a reader that asks whether a rename is in flight would not look for it", at.Filename, at.Line, id.Name, fn.Name.Name)
+						break
+					}
+				}
+				return true
+			})
+		}
+	}
+	if sites < 12 {
+		t.Fatalf("found %d calls of renameReplacing in the package's sources, want at least 12 (the writers of the lease files): the test no longer reads them", sites)
 	}
 }
