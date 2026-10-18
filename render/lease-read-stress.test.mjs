@@ -106,7 +106,7 @@ for (let r = 1; r <= Number(rootsArg); r++) {
 const SEEDS = [".seed", ".seed2"];
 const ino = (p) => statSync(p, { bigint: true }).ino;
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const stats = { renames: 0, replaced: 0, absentAfter: 0, staleStaged: 0, retries: 0, linkRetries: 0, fails: 0, capped: false, crashed: null };
+const stats = { renames: 0, replaced: 0, absentAfter: 0, staleStaged: 0, claimRenames: 0, retries: 0, linkRetries: 0, fails: 0, capped: false, crashed: null };
 const STAGED_FRESH_MS = Number(freshArg);
 // The inode of the live name, looked at right after the writer's own rename. The name can be absent for tens of milliseconds after
 // a rename that was not refused (the episode the read gate waits for), so an ENOENT is looked at again, counted once, and only a name
@@ -161,6 +161,7 @@ try {
         continue;
       }
       stats.renames++;
+      if (path.endsWith(".claim")) stats.claimRenames++;
       const seen = observe(path);
       if (seen === seedIno.get(path)[i] && seen !== inPlace.get(path)) stats.replaced++;
       inPlace.set(path, seen);
@@ -231,10 +232,11 @@ test("the readers never answer null for a lease file that is there while a write
   await closed;
   assert.ok(out.trim(), "the writer printed nothing: it never ran (its own stderr is above)");
   const w = JSON.parse(out.trim());
-  t.diagnostic(`${loops} loops of the five readers (about ${loops * READS_PER_LOOP} file reads) against ${w.renames} renames (${w.replaced} observed to replace a different inode than the one in place, ${w.retries} refused and retried, ${w.linkRetries} link refusals, ${w.absentAfter} met the live name absent right after the writer's own rename, ${w.staleStaged} staged files older than the reader's freshness when renamed, ${w.fails} given up): ${JSON.stringify(miss)}`);
+  t.diagnostic(`${loops} loops of the five readers (about ${loops * READS_PER_LOOP} file reads) against ${w.renames} renames (${w.replaced} observed to replace a different inode than the one in place, ${w.retries} refused and retried, ${w.linkRetries} link refusals, ${w.absentAfter} met the live name absent right after the writer's own rename, ${w.staleStaged} staged files older than the reader's freshness when renamed, ${w.claimRenames} renames over a card claim, ${w.fails} given up): ${JSON.stringify(miss)}`);
 
   assert.equal(w.crashed, null, `the writer stopped on an error after ${w.renames} renames: ${w.crashed}`);
   assert.equal(w.staleStaged, 0, `${w.staleStaged} of ${w.renames} renames installed a staged file that was already older than ${STAGED_FRESH_MS} ms: a reader counts a staged file that old beside an absent name as a dead writer's leftover and answers "not there", so a run past 3 s would read its own writer's rename in flight as a lease that is gone`);
+  assert.equal(w.claimRenames, 0, `${w.claimRenames} of ${w.renames} renames replaced a card claim: Go never renames over a claim (it creates one once and deletes it), and a reader does not wait for an absent claim because nothing is staged beside one, so the absent-name episode of a rename over it reads as a lease that is gone: a false red on a correct reader, seen in long mode`);
   assert.equal(w.replaced, w.renames, `only ${w.replaced} of ${w.renames} renames were observed to put a different inode than the one in place under the live name: a rename of a link over its own inode replaces nothing and no reader can be refused by it`);
   if (WINDOWS) {
     assert.ok(w.retries > 0, `no rename was refused in ${w.renames} renames against ${loops} reader loops (capped: ${w.capped}): the writer and the readers never met, so this run proves nothing`);
