@@ -37,6 +37,16 @@ func runQueued(ctx context.Context, cfg config.Config, subtasks []core.AgentCont
 			return nil, Summary{}, fmt.Errorf("delegate: subtask %d has no output_schema — queue placement, like remote, requires one", i)
 		}
 	}
+	// SF-40: the holder is the one node this box submits to, so it is checked here, where the route bypasses
+	// the placement gate. Which node later CLAIMS a queued job is the claimants' own configuration and is not
+	// something this box can see or fence.
+	if cfg.RemoteIsPublic(holder) {
+		for i, c := range subtasks {
+			if private, what := privateWork(c); private {
+				return nil, Summary{}, fmt.Errorf("delegate: route \"queue\": the holder (fleet_queue_holder) is declared public in delegate_remote_classes and takes public-data work only, and subtask %d is not (%s); route it local, or point fleet_queue_holder at a private-ok node", i, what)
+			}
+		}
+	}
 
 	results := make([]PlacedResult, len(subtasks))
 	// Submit ALL before polling ANY: the queue's value is nodes pulling

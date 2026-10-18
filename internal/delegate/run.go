@@ -5551,8 +5551,17 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 	var remoteBases []string
 	eligible := 0
 	var heldBack, atCap []string
+	// SF-40: public nodes this private contract is kept off, named on the slot's reason (the rest of the
+	// ineligible nodes are not narrated by the spread deal, but this one is a policy, not a capability).
+	var classHeld []string
 	for j, v := range r.spreadViews {
 		if !remoteEligible(st, v) {
+			if v.AgentEnabled && v.PublicOnly {
+				if private, _ := privateWork(st.Contract); private {
+					_, detail := publicVerdict(st.Contract)
+					classHeld = append(classHeld, laneID(v)+": private ("+detail+")")
+				}
+			}
 			continue
 		}
 		eligible++
@@ -5711,6 +5720,9 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 		// they were passed over for, with their arithmetic, so an operator can see why
 		// a node got nothing.
 		reason += "; held back: " + strings.Join(held, "; ")
+	}
+	if len(classHeld) > 0 {
+		reason += "; excluded by data class: " + strings.Join(classHeld, "; ")
 	}
 	return spreadSlot{placement: placement{view: nodes[k], base: bases[k], reason: reason}}
 }
@@ -7594,6 +7606,8 @@ func (r *runner) probeRemotes(ctx context.Context) ([]NodeView, []string, []stri
 				r.noteDeadProbe(ctx, base, err)
 				return
 			}
+			// SF-40: the class is the operator's declaration about this base, never the node's own claim.
+			v.PublicOnly = r.cfg.RemoteIsPublic(base)
 			out[i].view, out[i].ok = v, true
 		}(i, base)
 	}
@@ -7671,6 +7685,26 @@ func (r *runner) noEligibleRemote(st Subtask, views []NodeView, probeErrs []stri
 	if len(r.remotes) == 0 {
 		return "no remote fleet nodes are configured (pass --remote / the remotes argument)", core.DeferClassConfig
 	}
+	// SF-40: nodes the data-class rule keeps this contract off are named first, by the rule. They are taken out
+	// of the roster the sentences below are written about: left in, a public node would count as a lane that
+	// "fits", and a fleet whose only answering node is public would fall through to the "placement and gate
+	// disagree" line, which blames this package for the operator's own declaration.
+	if held, rest := publicHeld(st, views); len(held) > 0 {
+		ruled := publicHeldSentence(st, held)
+		if len(rest) == 0 && len(probeErrs) == 0 {
+			// Nothing else answered and nothing failed: the rule is the whole story. The class is the caller's
+			// contract (it cannot be placed on any node this box may send it to, however healthy the fleet), not a
+			// broken stack: the fix is a local route or a private-ok node, not a box.
+			return ruled, core.DeferClassContract
+		}
+		restWhy, restClass := r.noEligibleRemoteAmong(st, rest, probeErrs)
+		return ruled + "; the other remote(s) could not take it either: " + restWhy, restClass
+	}
+	return r.noEligibleRemoteAmong(st, views, probeErrs)
+}
+
+// noEligibleRemoteAmong is noEligibleRemote's body: the cause of "nothing eligible" over the roster it is given.
+func (r *runner) noEligibleRemoteAmong(st Subtask, views []NodeView, probeErrs []string) (reason, class string) {
 	lanes, advertisedTooSmall, roomiest, unadvertised := laneStats(st, views)
 	contractWhy := contractIneligible(st, lanes, advertisedTooSmall, roomiest, len(unadvertised))
 	nodeWhy, nodeClass := nodeSideVerdict(lanes, unadvertised, views, probeErrs)

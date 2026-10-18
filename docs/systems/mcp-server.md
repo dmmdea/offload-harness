@@ -303,7 +303,7 @@ whether one tool step and a minimal answer fit the contract's own wall, then an 
 seeded near-tie draw so parallel callers do not herd onto one seat), and demote — rather than exclude — a remote whose only obstacle
 is a declared-but-idle lease. `results[].placement` (the published `placement_reason`) names which
 node ran each subtask and, for `auto`/`remote`, a one-word verdict for every OTHER reachable remote
-too (`chosen | queue | cap | slow | lease | cold | probe | unfit(ctx) | noschema`) — read it before
+too (`chosen | queue | cap | slow | lease | cold | probe | private | unfit(ctx) | noschema`; `private` is the data-class rule: a node declared public in `delegate_remote_classes` takes public-data work only) — read it before
 assuming the fleet was even consulted.
 
 Since 0.130.2 (register C-46) `route` is accepted on **`agent_run` and `offload_ask`** too. Both

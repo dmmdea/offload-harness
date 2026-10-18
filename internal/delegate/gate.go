@@ -395,6 +395,9 @@ func freeWorkerProven(v NodeView) bool {
 // one fails toward local:
 //
 //   - AgentEnabled: the node's operator opted it into the agent lane.
+//   - Data class (SF-40): a node declared public in delegate_remote_classes is
+//     eligible for public-data work only (dataclass.go publicWork). A private
+//     contract is never eligible there, however idle the node is.
 //   - AgentResident: the seat is roster-VERIFIED on the node (advertised from
 //     its cached probe), not merely configured.
 //   - seatServed: the node's served_models roster, when published, names the
@@ -445,12 +448,22 @@ func remoteEligible(st Subtask, r NodeView) bool {
 //
 // Order, exactly as remoteEligible has always checked it:
 //
-//	AgentEnabled → lease fence (W-14) → output_schema present → origin hop
+//	AgentEnabled → data class (SF-40: a public node takes public-data work
+//	only) → lease fence (W-14) → output_schema present → origin hop
 //	(Depth == 0) → feasibility (W-05) → the layer table (composite) OR
 //	residency/served/adequate (plain node).
 func eligibilityVerdict(st Subtask, r NodeView) (eligible bool, word, detail string) {
 	if !r.AgentEnabled {
 		return false, "probe", "agent lane not advertised"
+	}
+	// SF-40: a node the operator declared public is not a candidate for work that is not public-data, whatever
+	// its capacity - checked before the lease fence and every capacity reading, so a private contract is never
+	// even a place in line there (dataclass.go).
+	if r.PublicOnly {
+		if private, _ := privateWork(st.Contract); private {
+			word, detail := publicVerdict(st.Contract)
+			return false, word, detail
+		}
 	}
 	// A node advertising a held TEXT lease is not a target at all (0.113.16):
 	// its card is reserved for a measurement, exactly as Reserved() makes the

@@ -203,6 +203,12 @@ type NodeView struct {
 	// single-lane gate (AgentCtxTokens) exactly.
 	Layers []placetable.LayerRow
 	Local  bool
+	// PublicOnly is true when the operator declared this node "public" in delegate_remote_classes (register SF-40):
+	// its admin is not this box's operator, so the placement gate takes it public-data work only (dataclass.go).
+	// It is not read from health: a node cannot declare its own trustworthiness. probeRemotes stamps it from the
+	// config, beside the base URL that keys it; every other view (the local seat, a fresh single-node read) is
+	// false, and none of those is a placement candidate.
+	PublicOnly bool
 	// JobsAdmitting is the SUBSET of JobsRunning still in admission (cordon,
 	// swap pre-flight, warm, coherence probe) — health `jobs_admitting`
 	// (0.127). Those jobs hold a capped slot while the card is idle; placement
