@@ -8,7 +8,7 @@
     "non_commercial": "The repo declares a non-commercial licence. Needs an explicit acknowledgement that names it.",
     "unknown": "No entry, or the repo declares no licence. Handled like conditional until somebody reads the licence."
   },
-  "evidence": "Repo-level licence tags from the Hugging Face model API (cardData and tags), as digested on 2026-09-30 during a research pass; none of these entries was re-fetched when the map was written. An entry whose basis begins `inferred from` was copied from the sibling repo it names, not read, and carries no source_url or fetched_on. A tag is not a per-file licence: a repo can host files under another licence, and one repo (a shared encoder host) is tagged for a different model family than some of its files. Conditions text comes from digests of licence texts and was not read in full. Treat every conditional or non_commercial entry as a pointer to the licence, not a summary of it.",
+  "evidence": "Repo-level licence tags from the Hugging Face model API (cardData and tags), as digested on 2026-09-30 during a research pass; none of these entries was re-fetched when the map was written. An entry whose basis begins `inferred from` was copied from the sibling repo it names, not read, and carries no source_url or fetched_on. A tag is not a per-file licence: a repo can host files under another licence, and one repo (a shared encoder host) is tagged for a different model family than some of its files. Conditions text comes from digests of licence texts and was not read in full. Treat every conditional or non_commercial entry as a pointer to the licence, not a summary of it. The two ACE-Step repack entries were re-fetched from their source_url on 2026-10-18 and read against their base models' cards and the ACE-Step 1.5 LICENSE file (MIT); both repos still state apache-2.0.",
   "flux_bar": "flux_bar true marks a repo the FLUX-family bar (ADR 0011) applies to; false exempts a repo the name pattern would otherwise catch. Without the field, the catalog's name pattern decides. These entries exist so the gate can refuse those templates; they are not recommendations.",
   "repos": {
     "circlestone-labs/Anima": {
@@ -24,15 +24,17 @@
       "class": "permissive",
       "license_id": "apache-2.0",
       "source_url": "https://huggingface.co/api/models/Comfy-Org/ace_step_1.5_ComfyUI_files?expand%5B%5D=cardData&expand%5B%5D=tags",
-      "fetched_on": "2026-09-30",
-      "basis": "hf-card-tag"
+      "fetched_on": "2026-10-18",
+      "basis": "hf-card-tag",
+      "note": "The repo's card states apache-2.0 and names ACE-Step/Ace-Step1.5 as its base model, which states MIT (its Hugging Face card, and the LICENSE file of its GitHub project, read 2026-10-18). The tag is the repo's own statement, not the base model's; both licences allow commercial use."
     },
     "Comfy-Org/ACE-Step_ComfyUI_repackaged": {
       "class": "permissive",
       "license_id": "apache-2.0",
       "source_url": "https://huggingface.co/api/models/Comfy-Org/ACE-Step_ComfyUI_repackaged?expand%5B%5D=cardData&expand%5B%5D=tags",
-      "fetched_on": "2026-09-30",
-      "basis": "hf-card-tag"
+      "fetched_on": "2026-10-18",
+      "basis": "hf-card-tag",
+      "note": "The repo's card states apache-2.0, as does its base model ACE-Step/ACE-Step-v1-3.5B (card fetched 2026-10-18). This is the ACE-Step v1 checkpoint, not 1.5."
     },
     "Comfy-Org/Anima-LLLite": {
       "class": "non_commercial",
