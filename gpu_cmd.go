@@ -31,6 +31,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -450,8 +451,14 @@ func runGPUReserve(args []string) (retErr error) {
 			holdMaxGiven = true
 		}
 	})
+	if math.IsNaN(*ramFlag) || math.IsInf(*ramFlag, 0) {
+		return errors.New("--ram must be a finite number of GiB (0 = needs no host RAM): NaN and Inf compare against nothing, so a lease declaring one would never be refused or admitted by the numbers")
+	}
 	if *ramFlag < 0 {
 		return errors.New("--ram must be 0 (needs no host RAM) or a number of GiB")
+	}
+	if ramCommitGiven && (math.IsNaN(*ramCommitFlag) || math.IsInf(*ramCommitFlag, 0)) {
+		return errors.New("--ram-commit must be a finite number of GiB above 0: NaN and Inf compare against nothing, so a lease declaring one would never be refused or admitted by the numbers")
 	}
 	if ramCommitGiven && *ramCommitFlag <= 0 {
 		return errors.New("--ram-commit must be a number of GiB above 0 (unset = the --ram figure); a job that is charged no commit declares no host RAM at all, which is --ram 0")
