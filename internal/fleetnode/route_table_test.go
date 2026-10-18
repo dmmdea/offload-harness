@@ -457,11 +457,13 @@ func TestRoutesAreRegisteredOnlyThroughRegisterRoutes(t *testing.T) {
 
 // What each problem of the source test says, which the cases below look for.
 const (
-	wantMuxFlow      = "the mux Handler builds goes only to registerRoutes and netguard.IngressGuard"
-	wantRegistrar    = "registerRoutes hands its registrar only to fleetqueue.Mount"
-	wantQueueOutside = "fleetqueue registers a route only in Mount"
-	wantMountRouter  = "Mount uses its router only as the receiver of HandleFunc"
-	wantCount        = "route registrations"
+	wantMuxFlow       = "the mux Handler builds goes only to registerRoutes and netguard.IngressGuard"
+	wantHandlerReturn = "Handler returns the netguard.IngressGuard call around its mux and nothing else"
+	wantServerHandler = "the node's http.Server serves s.Handler() and nothing wrapped around it"
+	wantRegistrar     = "registerRoutes hands its registrar only to fleetqueue.Mount"
+	wantQueueOutside  = "fleetqueue registers a route only in Mount"
+	wantMountRouter   = "Mount uses its router only as the receiver of HandleFunc"
+	wantCount         = "route registrations"
 )
 
 // A node and a queue in the shape of the real ones: Handler builds one mux, hands it to registerRoutes and to the ingress guard;
@@ -474,6 +476,13 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	return netguard.IngressGuard(opts, mux)
+}
+
+func (s *Server) httpServer() *http.Server {
+	return &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 }
 
 func (s *Server) registerRoutes(mux routeRegistrar) {
@@ -534,6 +543,24 @@ func TestTheRouteSourceCheckNamesWhatEscapesTheRouteTable(t *testing.T) {
 			node: [][2]string{{"return netguard.IngressGuard(opts, mux)", "return mux"}}},
 		{name: "Handler does not hand the mux to registerRoutes", want: wantMuxFlow,
 			node: [][2]string{{"\ts.registerRoutes(mux)\n", ""}}},
+		// What the node serves is what Handler returns and what httpServer puts on the socket: a handler wrapped around either answers
+		// for a path before the mux, the bearer rules and the route table, and registers nothing.
+		{name: "a handler wrapped around the ingress guard in Handler", want: wantHandlerReturn,
+			node: [][2]string{{"return netguard.IngressGuard(opts, mux)", "return zzWrap(netguard.IngressGuard(opts, mux))"}}},
+		{name: "the guard assigned in Handler and a wrapper returned", want: wantHandlerReturn,
+			node: [][2]string{{"return netguard.IngressGuard(opts, mux)", "guarded := netguard.IngressGuard(opts, mux)\n\treturn zzWrap(guarded)"}}},
+		{name: "a second return in Handler", want: wantHandlerReturn,
+			node: [][2]string{{"\treturn netguard.IngressGuard(opts, mux)", "\tif s.opts.Debug {\n\t\treturn zzDebug()\n\t}\n\treturn netguard.IngressGuard(opts, mux)"}}},
+		{name: "a handler wrapped around s.Handler() in httpServer", want: wantServerHandler,
+			node: [][2]string{{"Handler:           s.Handler(),", "Handler:           zzWrap(s.Handler()),"}}},
+		{name: "httpServer serves a handler of its own", want: wantServerHandler,
+			node: [][2]string{{"Handler:           s.Handler(),", "Handler:           http.NotFoundHandler(),"}}},
+		{name: "an http.Server with no Handler", want: wantServerHandler,
+			node: [][2]string{{"\t\tHandler:           s.Handler(),\n", ""}}},
+		{name: "a second http.Server built outside httpServer", want: wantServerHandler,
+			node: [][2]string{{"func (s *Server) registerRoutes(", "func (s *Server) elsewhere(h http.Handler) *http.Server {\n\treturn &http.Server{Handler: h}\n}\n\nfunc (s *Server) registerRoutes("}}},
+		{name: "http.ListenAndServe with a handler of its own", want: wantServerHandler,
+			node: [][2]string{{"func (s *Server) registerRoutes(", "func (s *Server) elsewhere() error {\n\treturn http.ListenAndServe(\":0\", nil)\n}\n\nfunc (s *Server) registerRoutes("}}},
 		{name: "a route registered under a condition in registerRoutes", want: wantCount,
 			node: [][2]string{{"\tif s.queue != nil {", "\tif s.opts.LoopbackListener {\n\t\tmux.HandleFunc(\"POST /fleet/zz-local\", s.handleZZ)\n\t}\n\tif s.queue != nil {"}}},
 		{name: "routes registered in a loop in registerRoutes", want: wantCount, recorded: routeFixtureRecorded + 2,
@@ -584,14 +611,22 @@ func TestTheRouteSourceCheckNamesTheseAdditionsToTheRealSources(t *testing.T) {
 	if p := routeSourceProblems(routeSources{node: readGoSources(t, "."), queue: queue, recorded: recorded}); len(p) != 0 {
 		t.Fatalf("setup: the real sources already have problems: %q", p)
 	}
-	for _, tc := range []struct{ name, old, new, want string }{
-		{"a cross-package mount handed the mux in Handler", "s.registerRoutes(mux)", "s.registerRoutes(mux)\n\tfleetqueue.MountExtra(mux)", wantMuxFlow},
+	for _, tc := range []struct{ name, old, new, old2, new2, want string }{
+		{"a cross-package mount handed the mux in Handler", "s.registerRoutes(mux)", "s.registerRoutes(mux)\n\tfleetqueue.MountExtra(mux)", "", "", wantMuxFlow},
 		{"a route registered under a condition in registerRoutes", `mux.HandleFunc("GET /fleet/health", s.handleHealth)`,
-			"mux.HandleFunc(\"GET /fleet/health\", s.handleHealth)\n\tif s.opts.LoopbackListener {\n\t\tmux.HandleFunc(\"POST /fleet/zz-local\", s.handleHealth)\n\t}", wantCount},
+			"mux.HandleFunc(\"GET /fleet/health\", s.handleHealth)\n\tif s.opts.LoopbackListener {\n\t\tmux.HandleFunc(\"POST /fleet/zz-local\", s.handleHealth)\n\t}", "", "", wantCount},
+		// A path-answering wrapper around the guarded handler, in Handler and in httpServer: neither touches the mux, registerRoutes
+		// or a HandleFunc call.
+		{"a handler wrapped around the ingress guard in Handler", "return netguard.IngressGuard(netguard.IngressOptions{", "return zzWrap(netguard.IngressGuard(netguard.IngressOptions{",
+			"}, mux)", "}, mux))", wantHandlerReturn},
+		{"a handler wrapped around s.Handler() in httpServer", "Handler:           s.Handler(),", "Handler:           zzWrap(s.Handler()),", "", "", wantServerHandler},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := readGoSources(t, ".")
 			node["server.go"] = replaceOnce(t, node["server.go"], tc.old, tc.new)
+			if tc.old2 != "" {
+				node["server.go"] = replaceOnce(t, node["server.go"], tc.old2, tc.new2)
+			}
 			problems := routeSourceProblems(routeSources{node: node, queue: queue, recorded: recorded})
 			for _, p := range problems {
 				if strings.Contains(p, tc.want) {
