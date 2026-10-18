@@ -4018,6 +4018,27 @@ test("readiness: a link inside an embeddings root is one directory with its targ
   assert.equal(linkedGot([EMB("sd15/e.pt"), EMB("alias/e.pt")], { [EMB("alias")]: EMB("sd15") }, "e", [])[0], "present", "alias is sd15 again");
 });
 
+// ComfyUI's embedding search walks with links followed, so a file behind a link inside the root is an answer: a different file of the same name
+// behind it is a second one, and a name held only behind it is found. The in-memory io lists every entry as a plain one, so this io lists the entry
+// `link` as a symbolic link (the walker follows one only when the class says to) and puts what is behind it outside the roots.
+const symIo = (files, linkAt, linkTo) => {
+  const io = linkedIo(files, { [linkAt]: linkTo });
+  const list = io.list;
+  io.list = (p) => list(p)?.map((e) => (`${String(p).replace(/\\/g, "/").replace(/\/+$/, "")}/${e.name}` === linkAt ? { ...e, isSymlink: true } : e));
+  return io;
+};
+const symGot = (files, name) => {
+  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: [] }), symIo({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) }, EMB("link"), "D:/x/store"));
+  const r = C.readiness([req("embeddings", name, { annotated: false })], inv).requirements[0];
+  return [r.status, r.resolved ?? null, r.reason ?? null, r.found ?? null];
+};
+
+test("readiness: a link inside the embeddings root is followed, so a different file of the name behind it is a second answer, and a name held only behind it is found", () => {
+  assert.deepEqual(symGot([EMB("foo.pt"), EMB("link/foo.pt")], "foo"), ["embedding_unverified", null, WHY_MANY, ["foo.pt", "link/foo.pt"]], "foo.pt of the root and another foo.pt behind the link");
+  assert.deepEqual(symGot([EMB("link/bar.pt")], "bar"), ["present", "link/bar.pt", null, null], "a name only behind the link");
+  assert.deepEqual(symGot([EMB("foo.pt")], "foo"), ["present", "foo.pt", null, null], "control: with nothing behind the link the one file is present");
+});
+
 // An annotation must be the file ComfyUI opens for the name a prompt gives. When one file has two paths under the roots (a root registered
 // inside another, a link inside a root), the annotation can name it by either, and the name a prompt gives resolves to one of them: it is the
 // same file, so the annotation is not shadowed.
@@ -4625,4 +4646,23 @@ test("readiness (real files): a second file of the name under a .git directory o
   assert.deepEqual(realStatus(root, "Foo"), ["present", "Foo.pt", null, null], "one file");
   nfs.writeFileSync(`${emb}/.git/refs/Foo.pt`, "g");
   assert.deepEqual(realStatus(root, "Foo"), ["embedding_unverified", null, WHY_MANY, [".git/refs/Foo.pt", "Foo.pt"]], "and a second one under .git");
+});
+
+// The same on the real file system: a junction (or a symbolic link) inside the embeddings root to a folder outside it. The test skips where no
+// link can be made, because a pass there would prove nothing.
+test("readiness (real files): a link inside the embeddings root is followed, so a different file of the name behind it is a second answer, and a name held only behind it is found", (t) => {
+  const root = scratchDir(t, "tc-emb-sublink-").replace(/\\/g, "/");
+  const emb = `${root}/comfy/models/embeddings`;
+  nfs.mkdirSync(emb, { recursive: true });
+  nfs.mkdirSync(`${root}/store`, { recursive: true });
+  nfs.writeFileSync(`${emb}/foo.pt`, "one");
+  nfs.writeFileSync(`${root}/store/foo.pt`, "other bytes");
+  nfs.writeFileSync(`${root}/store/bar.pt`, "bar");
+  try {
+    nfs.symlinkSync(`${root}/store`, `${emb}/link`, "junction");
+  } catch (e) {
+    return t.skip("no permission to create links here");
+  }
+  assert.deepEqual(realStatus(root, "foo"), ["embedding_unverified", null, WHY_MANY, ["foo.pt", "link/foo.pt"]], "two files: the root's and the one behind the link");
+  assert.deepEqual(realStatus(root, "bar"), ["present", "link/bar.pt", null, null], "a name only behind the link");
 });
