@@ -68,7 +68,7 @@ func TestCookieOpensBehindABytesPrefix(t *testing.T) {
 		"dict":           {"{b'" + ckName + "': b'sid=" + a + "'}", ckName + "': b'sid=" + a},
 		"double quotes":  {`[(b"cookie", b"sid=` + a + `")]`, `cookie", b"sid=` + a},
 		"dict, double":   {`{b"` + ckName + `": b"sid=` + a + `"}`, ckName + `": b"sid=` + a},
-		"two cookies":    {"(b'cookie', b'sessionid=" + a + "; csrftoken=" + b + "')", "cookie', b'sessionid=" + a + "; csrftoken=" + b},
+		"two cookies":    {"(b'cookie', b'sessionid=" + a + "; csrf=" + b + "')", "cookie', b'sessionid=" + a + "; csrf=" + b},
 		"set-cookie":     {"[(b'" + sckName + "', b'sid=" + a + "; Path=/')]", sckName + "', b'sid=" + a + "; Path=/"},
 		"raw string":     {"headers.append((r'" + ckName + "', u'sid=" + a + "'))", ckName + "', u'sid=" + a},
 		"escaped quotes": {`(b\"cookie\", b\"sid=` + a + `\")`, `cookie\", b\"sid=` + a},
@@ -85,7 +85,7 @@ func TestCookieNameTakesAnUnderscoreInFront(t *testing.T) {
 	a, b := valueFixture(9241, 22, alnum), valueFixture(9242, 20, alnum)
 	up, low := strings.ToUpper(ckName), strings.ToLower(ckName)
 	for name, c := range map[string]struct{ text, want string }{
-		"environ":      {"HTTP_" + up + "=sessionid=" + a + "; csrftoken=" + b, "_" + up + "=sessionid=" + a + "; csrftoken=" + b},
+		"environ":      {"HTTP_" + up + "=sessionid=" + a + "; csrf=" + b, "_" + up + "=sessionid=" + a + "; csrf=" + b},
 		"lower":        {"http_" + low + `="sessionid=` + a + `"`, "_" + low + `="sessionid=` + a},
 		"dict":         {"{'HTTP_" + up + "': 'sessionid=" + a + "'}", "_" + up + "': 'sessionid=" + a},
 		"set variant":  {"HTTP_SET_" + up + "=sid=" + a + "; Path=/", "_" + up + "=sid=" + a + "; Path=/"},

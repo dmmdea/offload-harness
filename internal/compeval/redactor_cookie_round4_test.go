@@ -124,7 +124,7 @@ func TestRedactorTakesPythonBytesLiterals(t *testing.T) {
 	r4Run(t, []r4Case{
 		{label: "tuple list", text: "[(b'cookie', b'sid=" + a + "')]", values: []string{a}},
 		{label: "dict", text: "{b'" + spanCk + "': b'sid=" + a + "'}", values: []string{a}},
-		{label: "asgi scope", text: "{'type': 'http', 'headers': [(b'host', b'x.example'), (b'cookie', b'sessionid=" + a + "; csrftoken=" + b + "')]}", values: []string{a, b}},
+		{label: "asgi scope", text: "{'type': 'http', 'headers': [(b'host', b'x.example'), (b'cookie', b'sessionid=" + a + "; csrf=" + b + "')]}", values: []string{a, b}},
 		{label: "set-cookie tuple", text: "[(b'" + spanSetCk + "', b'sid=" + a + "; Path=/')]", values: []string{a}},
 		{label: "double quotes, tuple", text: `[(b"cookie", b"sid=` + a + `")]`, values: []string{a}},
 		{label: "double quotes, dict", text: `{b"` + spanCk + `": b"sid=` + a + `"}`, values: []string{a}},
@@ -139,8 +139,8 @@ func TestRedactorTakesAnUnderscoreBeforeTheCookieName(t *testing.T) {
 	a, b := tailFake(7141, 22, tailAlnum), tailFake(7142, 20, tailAlnum)
 	up, low := strings.ToUpper(spanCk), strings.ToLower(spanCk)
 	r4Run(t, []r4Case{
-		{label: "environ line", text: "HTTP_" + up + "=sessionid=" + a + "; csrftoken=" + b, values: []string{a, b}},
-		{label: "wsgi dict", text: "{'HTTP_HOST': 'x.example', 'HTTP_" + up + "': 'sessionid=" + a + "; csrftoken=" + b + "'}", values: []string{a, b}},
+		{label: "environ line", text: "HTTP_" + up + "=sessionid=" + a + "; csrf=" + b, values: []string{a, b}},
+		{label: "wsgi dict", text: "{'HTTP_HOST': 'x.example', 'HTTP_" + up + "': 'sessionid=" + a + "; csrf=" + b + "'}", values: []string{a, b}},
 		{label: "nginx variable, quoted", text: "http_" + low + `="sessionid=` + a + `"`, values: []string{a}},
 		{label: "export", text: "export HTTP_" + up + "=sessionid=" + a, values: []string{a}},
 		{label: "set-cookie variable", text: "HTTP_SET_" + up + "=sid=" + a + "; Path=/", values: []string{a}},
