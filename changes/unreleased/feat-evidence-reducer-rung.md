@@ -180,8 +180,7 @@
   key word of a quoted credential on the same line into its span (an unquoted header, then a credential whose value is quoted) and stopped
   in front of the quote, leaving the value with no key word for any class and no memory in the value-tail gate. A matrix of 8 cookie forms,
   12 credential forms and 12 layouts, as text and as Args, left 1,584 of 2,304 values in the text with the old order and none with the
-  table's order; the redactor now runs the cookie class in the table's order again (email still last), and a key-word cookie is found by both
-  classes with its value gone either way (the two tests that counted which class took it now assert the values and the residual gate). (2) A
+  table's order; the redactor ran the cookie class in the table's order for a time (the next bullet says where it runs now). (2) A
   last cookie that ends in an equals sign (base64 padding, or no value) in front of the closing quote of the string made that quote the
   opener of a value: the span ran through the next field, key or argument, broke the Args JSON, and when the next key was a second header's
   name its value was left outside every match. A quote now opens a quoted value only when a value can start behind it (not white space, a
@@ -192,7 +191,7 @@
   closing quote when that is within three more line breaks and ends at its line when it is not. (6) A shell escape (an escaped dollar sign,
   backtick, space or semicolon) or a backslash path in an unquoted value ended the span or stopped any match, and a quoted value cut by the end
   of the text behind a long bare one was left; both are inside the span now. (7) A table of single-guard mutants showed guards no test
-  reached; tests pin them and the dead alternatives (the hash rocket's greater-than sign in two openers, a lower bound that could not be
+  reached; tests pin them and the dead alternatives (the hash rocket's greater-than sign in the openers of a list and of a slice literal (the one in the line opener was live and came back, see the next bullet), a lower bound that could not be
   reached, a SameSite entry that could not hold 12 characters) are deleted.
   Red first: 13 failing tests and a generator axis were committed before any fix and run against the previous class, then the guard tests (some red,
   some green by design and red against the mutant that removes the guard, each said so in its commit), then the fix. The generator grew from
@@ -201,14 +200,53 @@
   four layers of JSON and shell escaping); against the previous class 34 of the 46 wrappings break the contract (29,271 lines with the wrong
   span, 28,024 leaking a value, 67 breaking the Args JSON) and none does with the new one. Measured with the new class: it matches nowhere in
   `internal/` and `docs/` (2,276 files, 27 MB), and in Go's `net/http` source (158 files, 2.8 MB) the same four places as before, each with a
-  real cookie value in it; it scans 1 MiB of Go source in about 0.1 s, as before; 1 MiB built to be slow for it takes 0.1 to 1.1 s (0.1 to
-  0.5 s before); the pattern is five times the size (54,500 program instructions, 11 ms to compile, once, against 9,800 and 2.5 ms), the cost of
-  five levels of escaping. A mutation pass after the fixes (47 mutants of the class, 29 of the harvest scanner: each level, break limit,
+  real cookie value in it; it scans 1 MiB of Go source in about 0.1 s, as before (the next bullet has the cost of text built to be slow for it and the size of the pattern). A mutation pass after the fixes (47 mutants of the class, 29 of the harvest scanner: each level, break limit,
   opening rule, escape bound, closer, list opener, count and stop character) killed all but one, which is equivalent (the index at which the
   scanner resumes after a closing quote, which is only re-read as a quote that is not followed by an equals sign). Named gaps after the review: a raw JSON value (a bare double quote inside an unquoted value) ends the span at the
-  quote, and so does an apostrophe; a backslash and an n or an r in an unquoted value is the JSON escape of a line break and ends the span (a
-  raw path such as `dir=C:\new\x` ends it there); a quoted value that starts with white space or a separator is not a pair; quotes with two, four to six or
+  quote, and so does an apostrophe; a backslash and a lowercase n or r in an unquoted value is the JSON escape of a line break and ends the span (a raw path such as `dir=C:\new\x` ends it there); a quoted value that starts with white space or a separator is not a pair; quotes with two, four to six or
   eight to fourteen backslashes are no level; a Go slice literal with its type left out is read as a line.
+- **The whole-span cookie class after its third review, red first.** A third review (every finding reproduced three times, each against the
+  commit before the second review's fixes as well) found that those fixes had traded some defects for others, and some older ones. Most let
+  a value of 12 or more characters through with the residual gate clean. (1) Order: with the credential classes run before the cookie class,
+  a cookie named like a credential with a double-quoted value was taken by the assignment class, which leaves the closing quote behind its
+  placeholder, and the span stopped at that stray quote, so every cookie behind it was written out; a JWT, a Bearer value or a key-word
+  cookie inside an unquoted printed list (a header printed with the plain verb, a Java map) left a placeholder that holds the bracket that
+  closes the list, and the span ended in it; and redacted Args lost their closing quote when an empty quoted cookie came ahead of a key-word
+  cookie in such a list. The cookie class runs first again, so the span sees the text as written, and the reason it had moved is answered
+  another way: when the cookie class has substituted anything, the credential classes also run over the text as it was written, and every
+  credential value of 12 or more characters they find is substituted wherever it still stands (longest first, with its own placeholder,
+  remembered for the value-tail gate); the 2,304-case matrix of an unquoted header followed by a quoted credential stays green. (2) A header
+  printed with the Go-syntax verb holds its keys in sorted order, so a Cookie with short values stands in front of a Set-Cookie with long
+  ones, and a string of a list that could stay open let the pairing of quotes shift by one: the match ran from the first key over the
+  closing brace of its list to the long value of the second and on past the quote that closes an Args string. A JSON object of two lists, a
+  Python dict and a Python list with a quoted value inside Args (the single-quoted string looked for the quote of the value at one level
+  only) did the same. A string of a list is now closed in the middle of it and open only as its last element, and a single-quoted string
+  looks for a quoted value at every level. (3) The count that starts a match took a JSON unicode escape as one character and nothing else,
+  so a shell escape, an escaped slash or a backslash path inside the first 12 characters of the only long value left it whole; a capital N
+  or R after a backslash (a Windows path) ended the span as if it were the escape of a line break. A bare value counts the escapes the span
+  takes now, and only a lowercase n or r is the escape of a line break. (4) The greater-than sign right behind the header name (an XML
+  element, an arrow) was live, and the second review had deleted it as dead; it is back. (5) Cost: a text that repeats a header over and
+  over, each one opening a list that never closes, was scanned to its end once per match and took the square of its length (16 KiB, 0.6 s; 1
+  MiB, hours), because a match cannot be reported while a thread of higher priority is alive. A header line now takes no opening bracket (a
+  list opens behind the punctuation, a space or the name), the line alternative goes first, and a quoted value starts a match by the rule of
+  a pair (a quote followed by a closer or a separator closes what came before). (6) Three guards that a mutant table found unreached are
+  pinned: the bound on the backslash run in the value scanner (a text cut in a backslash run made the redactor read past its end and panic),
+  the quoted value that starts with a backslash-u escape of U+0100 to U+0FFF (Python's json.dumps writes one for every non-ASCII letter;
+  without its alternative the long cookie behind it was written out), and the resume of the value walk after a closing quote.
+  Red first: the redactor tests of each defect and the generator axes (the bare escape inside the 12 characters; a two-key header in four
+  wrappings, a JSON object of two lists in three, a Python dict in two and a Python list in Args; in the redactor generator the cookies
+  behind a key-word cookie, a JWT and a Bearer value in three more wrappings that keep an earlier placeholder inside an unquoted list) were
+  committed before any fix and run against the class as it stood, and so were the scan-time tests (4 KiB 41 ms, 16 KiB 594 ms, a factor of
+  15 for 4 times the text); the guard tests are green by design and red against the mutant that removes the guard, each run as `go test
+  -overlay` of the one test. The generator grew from 77,417 to 148,934 cases (74 cookie shapes, 56 wrappings). Measured: the pattern is
+  132,494 program instructions (54,527 before this review) and compiles in 26 ms; the class alone scans 1 MiB of Go source in 0.1 s, and 1
+  MiB of each text that reviews found to be slow takes 0.5 to 1.1 s and grows in step with its length; a full redaction of 256 KiB of the
+  single-quote unit takes 1.9 s per MiB against 1.2 s for source text. A random search over 4,900 units of up to a dozen pieces (header
+  names, quotes at two levels of escaping, backslash runs, brackets, equals signs) and a hill climb on the slowest eight, run on a gate
+  runner against the class after the first cost fix, still found four families whose time grew with the square of the length (16 KiB, 0.3 to
+  1.2 s); the line-first order and the pair rule for a long value remove them, and two searches with new seeds against the final class
+  (9,800 units and 16 hill climbs) found none: the units that looked slow at 32 KiB scale linearly at 0.7 to 1.3 s per MiB from 8 KiB to 512
+  KiB. A new named gap: a bare value with a shell escape inside four layers of escaping (more than sixteen backslashes) is left whole.
 - **A Go module version is not an email address.** The email pattern read `toolchain@v0.0.1-go1.27.2.linux-amd64`, which every Go stack
   trace and module-cache path carries, as an address. Measured on 9.4 MB of real Go build and test logs cut into 4, 16 and 64 KiB pieces,
   it matched 67.6 % of the 4 KiB pieces (55.7 % of the 64 KiB ones), so the reducer would have kept most Go logs raw; a domain may no
@@ -271,5 +309,4 @@
   The opening rule (a quote followed by white space or a separator opens no value) and the three-line-break bound are design choices
   pinned by tests, not measured against real traffic; the timings are one series on a noisy shared machine. The widened value class and the tail gate were tested on fixtures only; no real harvested trace was re-run through the redactor here.
   The same holds for the control-sequence, quoted-literal and header shapes: the fixtures are built from pieces, and no real colored
-  build log or real harvested trace was run through them. The scan cost (about 1.5 s per MiB; 1.51, 1.54 and 1.54 s) is one series of three
-  runs on a noisy shared machine, and the 67-to-82 count of assignment matches is one scan of this repository's tracked text.
+  build log or real harvested trace was run through them. The scan cost (about 1.5 s per MiB; 1.51, 1.54 and 1.54 s) is one series of three runs on a noisy shared machine, and so are the timings of the third review's slow texts (a desk machine at two threads, and a gate runner for the random searches), and the 67-to-82 count of assignment matches is one scan of this repository's tracked text.
