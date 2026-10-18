@@ -72,7 +72,7 @@ func TestNoSentenceHoldsTheWarmBackToTheCommitLimit(t *testing.T) {
 // Windows grows a system-managed file. gpu-lease.md "The commit limit moves" says so, and the flat sentences beside it must not.
 func TestNoSentenceSaysAllocationsFailPastTheCommitLimitWithoutTheCondition(t *testing.T) {
 	problems := retiredHostRAMWordings(".", map[string][]string{
-		"docs/systems/gpu-lease.md": {"and then other processes' allocations fail"},
+		"docs/systems/gpu-lease.md": {"and then other processes' allocations fail", "allocations fail at once the page file"},
 		"internal/gpuprobe/hostmemory.go": {
 			"allocations fail while physical RAM may sit free",
 			"(allocations by other processes can fail)",
@@ -80,6 +80,37 @@ func TestNoSentenceSaysAllocationsFailPastTheCommitLimitWithoutTheCondition(t *t
 		},
 		"internal/gpulease/hostram.go": {"what the OS refuses allocations at"},
 	}, "other processes' allocations fail past the commit limit only once the page file has reached its maximum; before that a system-managed file grows")
+	for _, p := range problems {
+		t.Error(p)
+	}
+}
+
+// A stated commit is judged where the OS enforces a commit limit: always on Windows, on Linux in strict mode, and on Linux when the
+// mode cannot be read (assumed strict: a limit assumed away on an input nobody read is a brake switched off). Not "only with
+// vm.overcommit_memory = 2", which leaves out the unreadable mode (internal/gpuprobe
+// TestTheLinuxReaderMarksTheCommitLimitSoftOnlyInAKnownLaxMode).
+func TestNoSentenceSaysAStatedCommitIsJudgedOnLinuxOnlyInStrictMode(t *testing.T) {
+	problems := retiredHostRAMWordings(".", map[string][]string{
+		"gpu_cmd.go":                {"on Linux only with vm.overcommit_memory=2"},
+		"docs/OPERATOR-GUIDE.md":    {"on Linux only with `vm.overcommit_memory` = 2"},
+		"docs/systems/gpu-lease.md": {"on Linux only in strict overcommit mode"},
+	}, "a stated commit is judged on Linux in strict mode and when the mode cannot be read (assumed strict), not only with vm.overcommit_memory = 2")
+	for _, p := range problems {
+		t.Error(p)
+	}
+}
+
+// A commit nobody stated is held to physical RAM less the headroom, or to an enforced commit limit less the headroom when that sits
+// below physical RAM (strict-mode Linux with little swap): the nearer of the two (internal/gpuprobe
+// TestACommitNobodyStatedIsHeldToAnEnforcedLimitThatSitsBelowPhysicalRAM).
+func TestNoSentenceHoldsAnUnstatedCommitToPhysicalRAMAlone(t *testing.T) {
+	problems := retiredHostRAMWordings(".", map[string][]string{
+		"docs/systems/gpu-lease.md": {
+			"held to physical RAM less the headroom on every host)",
+			"A commit nobody stated is still held to physical RAM on every reading,",
+		},
+		"docs/OPERATOR-GUIDE.md": {"under physical RAM less the headroom, on every OS."},
+	}, "a commit nobody stated is held to physical RAM less the headroom, or to an enforced commit limit less the headroom when that sits below physical RAM")
 	for _, p := range problems {
 		t.Error(p)
 	}

@@ -582,7 +582,7 @@ func (m *Manager) grantDevicesLocked(class Class, opts Options, devs []string, h
 			// Present but unreadable: a record that cannot be READ while its holder is alive is held (keeper.go); else a claim caught
 			// mid-write, or debris.
 			if _, rerr := m.readMeta(); isIOFailure(rerr) && m.keeperAlive(0, m.metaPath()) {
-				return nil, unreadableHeld(0), nil
+				return nil, m.unreadableHeld(0, m.metaPath()), nil
 			}
 			if m.claimIsFresh() {
 				return nil, &ErrHeld{Info: Info{Held: true, Reason: "claim in progress"}}, nil
@@ -705,7 +705,7 @@ func (m *Manager) verifyNoDeviceLeases(epoch uint64) error {
 		if conflict == nil {
 			// A card lease whose record cannot be read is invisible to the reader and still held while its keeper is alive.
 			if kept := m.keptUnreadable(); len(kept) > 0 {
-				info := unreadableHeld(kept[0]).Info
+				info := m.unreadableHeld(kept[0], epochRecordPath(m.leaseDir(), kept[0])).Info
 				conflict = &info
 			}
 		}

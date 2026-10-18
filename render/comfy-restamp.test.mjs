@@ -18,10 +18,11 @@
 // markers are real files under a scratch directory.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, readdirSync, statSync, utimesSync } from "node:fs";
+import { mkdirSync, readFileSync, readdirSync, statSync, utimesSync } from "node:fs";
 import { join } from "node:path";
 import * as L from "./comfy-lifecycle.mjs";
 import * as O from "./comfy-ownership.mjs";
+import { stagingFor } from "./lease-read.mjs";
 import { scratchDir } from "./test-scratch.mjs";
 
 const BASE_FLAGS = ["--disable-smart-memory", "--cache-none", "--reserve-vram", "1.0"];
@@ -131,6 +132,31 @@ test("restampLaunchOwner leaves an epochless, absent or foreign marker alone", (
   assert.deepEqual(O.restampLaunchOwner(k.dir, "other", 9), { changed: false, why: "no marker" });
   assert.deepEqual(O.restampLaunchOwner(k.dir, "side", 5), { changed: false, why: "already this lease's" });
 });
+
+// ---- the staged file of a marker is one the readers look for ---------------------------------
+
+// A marker is replaced by a write beside it and a rename over it. A reader that finds the marker's name absent asks whether a rename
+// is in flight by looking for the staged file (internal/gpulease reads `.tmp` through stagingPath, and lease-read.mjs looks under
+// stagingFor), so the writer must stage under one of those names. Every name the readers look for is occupied by a directory here:
+// a writer that stages under one of them cannot write and says which, and one that stages under another name writes and is caught.
+for (const [name, write] of [
+  ["restampLaunchOwner", (dir) => O.restampLaunchOwner(dir, "side", 9)],
+  ["stampLaunchFamily", (dir) => O.stampLaunchFamily(dir, "side", "family-b")],
+]) {
+  test(`${name} stages the marker under a name the readers look for`, (t) => {
+    const k = keptInstance(t, { leaseEpoch: 5 });
+    const live = markerFile(k.dir, "side");
+    const looked = stagingFor(live);
+    assert.ok(looked.length > 0, "the readers look for a staged file beside a marker");
+    for (const staged of looked) mkdirSync(staged);
+    const before = readFileSync(live, "utf8");
+    let thrown = null;
+    try { write(k.dir); } catch (e) { thrown = e; }
+    assert.ok(thrown, `${name} wrote its staged file under a name no reader looks for (not one of ${looked.join(", ")})`);
+    assert.ok(looked.includes(thrown.path), `${name} failed on ${thrown.path}, which is not a name the readers look for (${looked.join(", ")})`);
+    assert.equal(readFileSync(live, "utf8"), before, "the marker is untouched");
+  });
+}
 
 // ---- a kept launch whose marker cannot be written is said ----------------------------------
 

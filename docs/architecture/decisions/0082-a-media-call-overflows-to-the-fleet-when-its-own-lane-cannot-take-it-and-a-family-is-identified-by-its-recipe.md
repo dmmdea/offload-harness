@@ -466,3 +466,12 @@ and is a choice: a caller that reads `defer_class` alone will treat them as retr
 `data.refusal` is what tells it that waiting does not help. (e) Nothing here was run against a live fleet. The tests use fake nodes
 and the real node server with its health rewritten; the live acceptance (read `media_recipes` on every node, name a node that lacks a
 weight and see the refusal with no job on it, name a node by id for a music render and verify the file) is the release's.
+
+## Amendment 4 (2026-10-18): every lane needs the fleet bearer
+
+Where this record says the run-graph door is open to any peer, or that a node answers a graph from any caller, it describes the node
+when the decision was taken. Since the amendment of 2026-10-15 to
+[ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token (dispatch of
+any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on loopback. The
+bound on the files a graph names (up to six of each kind shown, and no count past six) is unchanged and holds for the same reason as
+before: a graph can name thousands of files, whoever sends it. The decision recorded here is otherwise unchanged.

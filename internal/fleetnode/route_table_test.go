@@ -19,6 +19,8 @@ package fleetnode
 //
 //   - a route is registered by a call to HandleFunc or Handle only inside registerRoutes (and, for the queue's, inside Mount);
 //   - the one mux Handler builds goes only to registerRoutes and the ingress guard, whatever a call that takes it might mount;
+//   - what Handler returns is that ingress guard call and nothing around it, and the node's http.Server serves s.Handler() exactly, so
+//     no handler wrapped around the guarded one answers for a path before the mux, the bearer rules and these tables;
 //   - registerRoutes hands its registrar only to fleetqueue.Mount, and Mount uses its router only to register on it;
 //   - the registrations that stand in those two functions are as many as the node registered, so a route under a condition the
 //     test node does not meet, or in a loop, fails by count.
@@ -306,6 +308,115 @@ func handlerMuxProblems(fset *token.FileSet, fd *ast.FuncDecl) []string {
 	if handed != 1 {
 		problems = append(problems, fmt.Sprintf("%s: %s, and Handler hands it to registerRoutes %d times, not once", fset.Position(fd.Pos()), wantMuxFlow, handed))
 	}
+	return append(problems, handlerReturnProblems(fset, fd, def.Name)...)
+}
+
+// handlerReturnProblems holds the other end of the mux's way out. Handler hands the mux to the ingress guard, and what it returns is
+// what the node serves: a handler wrapped around the guard (or a guard that is not the last thing the request meets) answers for a
+// path before the mux, the bearer rules and the route table ever see it, and no registration shows it. So Handler has one return, and
+// it is the netguard.IngressGuard call whose last argument is the mux.
+func handlerReturnProblems(fset *token.FileSet, fd *ast.FuncDecl, mux string) []string {
+	var returns []*ast.ReturnStmt
+	ast.Inspect(fd.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.FuncLit:
+			return false // a closure's return is not Handler's
+		case *ast.ReturnStmt:
+			returns = append(returns, n)
+		}
+		return true
+	})
+	if len(returns) != 1 || len(returns[0].Results) != 1 {
+		return []string{fmt.Sprintf("%s: %s, and Handler has %d return statements", fset.Position(fd.Pos()), wantHandlerReturn, len(returns))}
+	}
+	call, ok := returns[0].Results[0].(*ast.CallExpr)
+	if ok && calleeIs(call, "netguard", "IngressGuard") && len(call.Args) > 0 {
+		if last, isIdent := call.Args[len(call.Args)-1].(*ast.Ident); isIdent && last.Name == mux {
+			return nil
+		}
+	}
+	return []string{fmt.Sprintf("%s: %s, and here Handler returns something else: a handler around the guard serves paths no route table row and no bearer rule covers", fset.Position(returns[0].Pos()), wantHandlerReturn)}
+}
+
+// isHandlerCallOn reports whether e is the call recv.Handler() with no argument: the handler the node builds, nothing wrapped around it.
+func isHandlerCallOn(e ast.Expr, recv string) bool {
+	call, ok := e.(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return false
+	}
+	sel, ok := call.Fun.(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != "Handler" {
+		return false
+	}
+	x, ok := sel.X.(*ast.Ident)
+	return ok && x.Name == recv
+}
+
+// serverHandlerProblems holds the node's way onto a socket: the one http.Server is built by httpServer and serves s.Handler(), exactly.
+// An http.Server built anywhere else, one with no Handler (it would serve the default mux), a Handler that is something around
+// s.Handler(), and the package-level helpers that take a handler (http.ListenAndServe and the like) are each a way to serve a path
+// the route table does not hold.
+func serverHandlerProblems(fset *token.FileSet, files []*ast.File) []string {
+	var problems []string
+	found := false
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			inside, recv := "", ""
+			if fd, ok := decl.(*ast.FuncDecl); ok {
+				inside = fd.Name.Name
+				if fd.Recv != nil && len(fd.Recv.List) > 0 && len(fd.Recv.List[0].Names) > 0 {
+					recv = fd.Recv.List[0].Names[0].Name
+				}
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				switch n := n.(type) {
+				case *ast.CompositeLit:
+					sel, ok := n.Type.(*ast.SelectorExpr)
+					if !ok || sel.Sel.Name != "Server" {
+						return true
+					}
+					if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "http" {
+						return true
+					}
+					at := fset.Position(n.Pos())
+					if inside != "httpServer" {
+						problems = append(problems, fmt.Sprintf("%s: %s, and %q builds an http.Server of its own", at, wantServerHandler, inside))
+						return true
+					}
+					found = true
+					served := false
+					for _, elt := range n.Elts {
+						kv, ok := elt.(*ast.KeyValueExpr)
+						if !ok {
+							continue
+						}
+						if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "Handler" {
+							served = true
+							if !isHandlerCallOn(kv.Value, recv) {
+								problems = append(problems, fmt.Sprintf("%s: %s, and its Handler is something else: a handler around s.Handler() answers for paths before the guard, the bearer rules and the route table", fset.Position(kv.Pos()), wantServerHandler))
+							}
+						}
+					}
+					if !served {
+						problems = append(problems, fmt.Sprintf("%s: %s, and this http.Server has no Handler", at, wantServerHandler))
+					}
+				case *ast.CallExpr:
+					if sel, ok := n.Fun.(*ast.SelectorExpr); ok {
+						if x, ok := sel.X.(*ast.Ident); ok && x.Name == "http" {
+							switch sel.Sel.Name {
+							case "ListenAndServe", "ListenAndServeTLS", "Serve", "ServeTLS":
+								problems = append(problems, fmt.Sprintf("%s: %s, and %q serves a handler of its own with http.%s", fset.Position(n.Pos()), wantServerHandler, inside, sel.Sel.Name))
+							}
+						}
+					}
+				}
+				return true
+			})
+		}
+	}
+	if !found {
+		problems = append(problems, "no http.Server literal was found in httpServer: the source test no longer sees what the node serves")
+	}
 	return problems
 }
 
@@ -433,6 +544,7 @@ func routeSourceProblems(src routeSources) []string {
 	if registerCalls == 0 {
 		problems = append(problems, "no route registration was found in registerRoutes: the source test no longer sees what it guards")
 	}
+	problems = append(problems, serverHandlerProblems(fset, nodeFiles)...)
 	queueFiles, parseProblems := parseSources(fset, src.queue)
 	queueRoutes, queueProblems := queueRouteProblems(fset, queueFiles)
 	problems = append(append(problems, parseProblems...), queueProblems...)
@@ -447,7 +559,8 @@ func routeSourceProblems(src routeSources) []string {
 }
 
 // The routes the node serves are the ones registerRoutes registers and no others: no function of the package registers a route
-// on a mux of its own, and the only mux built is Handler's, which it hands to registerRoutes and wraps in the ingress guard.
+// on a mux of its own, and the only mux built is Handler's, which it hands to registerRoutes and wraps in the ingress guard; what
+// Handler returns is that guard and what the server serves is Handler's result, with no handler of the node's own around either.
 func TestRoutesAreRegisteredOnlyThroughRegisterRoutes(t *testing.T) {
 	src := routeSources{node: readGoSources(t, "."), queue: readGoSources(t, "../fleetqueue"), recorded: len(servedRoutes(t))}
 	for _, problem := range routeSourceProblems(src) {
@@ -457,11 +570,13 @@ func TestRoutesAreRegisteredOnlyThroughRegisterRoutes(t *testing.T) {
 
 // What each problem of the source test says, which the cases below look for.
 const (
-	wantMuxFlow      = "the mux Handler builds goes only to registerRoutes and netguard.IngressGuard"
-	wantRegistrar    = "registerRoutes hands its registrar only to fleetqueue.Mount"
-	wantQueueOutside = "fleetqueue registers a route only in Mount"
-	wantMountRouter  = "Mount uses its router only as the receiver of HandleFunc"
-	wantCount        = "route registrations"
+	wantMuxFlow       = "the mux Handler builds goes only to registerRoutes and netguard.IngressGuard"
+	wantHandlerReturn = "Handler returns the netguard.IngressGuard call around its mux and nothing else"
+	wantServerHandler = "the node's http.Server serves s.Handler() and nothing wrapped around it"
+	wantRegistrar     = "registerRoutes hands its registrar only to fleetqueue.Mount"
+	wantQueueOutside  = "fleetqueue registers a route only in Mount"
+	wantMountRouter   = "Mount uses its router only as the receiver of HandleFunc"
+	wantCount         = "route registrations"
 )
 
 // A node and a queue in the shape of the real ones: Handler builds one mux, hands it to registerRoutes and to the ingress guard;
@@ -474,6 +589,13 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	s.registerRoutes(mux)
 	return netguard.IngressGuard(opts, mux)
+}
+
+func (s *Server) httpServer() *http.Server {
+	return &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 5 * time.Second,
+	}
 }
 
 func (s *Server) registerRoutes(mux routeRegistrar) {
@@ -534,6 +656,24 @@ func TestTheRouteSourceCheckNamesWhatEscapesTheRouteTable(t *testing.T) {
 			node: [][2]string{{"return netguard.IngressGuard(opts, mux)", "return mux"}}},
 		{name: "Handler does not hand the mux to registerRoutes", want: wantMuxFlow,
 			node: [][2]string{{"\ts.registerRoutes(mux)\n", ""}}},
+		// What the node serves is what Handler returns and what httpServer puts on the socket: a handler wrapped around either answers
+		// for a path before the mux, the bearer rules and the route table, and registers nothing.
+		{name: "a handler wrapped around the ingress guard in Handler", want: wantHandlerReturn,
+			node: [][2]string{{"return netguard.IngressGuard(opts, mux)", "return zzWrap(netguard.IngressGuard(opts, mux))"}}},
+		{name: "the guard assigned in Handler and a wrapper returned", want: wantHandlerReturn,
+			node: [][2]string{{"return netguard.IngressGuard(opts, mux)", "guarded := netguard.IngressGuard(opts, mux)\n\treturn zzWrap(guarded)"}}},
+		{name: "a second return in Handler", want: wantHandlerReturn,
+			node: [][2]string{{"\treturn netguard.IngressGuard(opts, mux)", "\tif s.opts.Debug {\n\t\treturn zzDebug()\n\t}\n\treturn netguard.IngressGuard(opts, mux)"}}},
+		{name: "a handler wrapped around s.Handler() in httpServer", want: wantServerHandler,
+			node: [][2]string{{"Handler:           s.Handler(),", "Handler:           zzWrap(s.Handler()),"}}},
+		{name: "httpServer serves a handler of its own", want: wantServerHandler,
+			node: [][2]string{{"Handler:           s.Handler(),", "Handler:           http.NotFoundHandler(),"}}},
+		{name: "an http.Server with no Handler", want: wantServerHandler,
+			node: [][2]string{{"\t\tHandler:           s.Handler(),\n", ""}}},
+		{name: "a second http.Server built outside httpServer", want: wantServerHandler,
+			node: [][2]string{{"func (s *Server) registerRoutes(", "func (s *Server) elsewhere(h http.Handler) *http.Server {\n\treturn &http.Server{Handler: h}\n}\n\nfunc (s *Server) registerRoutes("}}},
+		{name: "http.ListenAndServe with a handler of its own", want: wantServerHandler,
+			node: [][2]string{{"func (s *Server) registerRoutes(", "func (s *Server) elsewhere() error {\n\treturn http.ListenAndServe(\":0\", nil)\n}\n\nfunc (s *Server) registerRoutes("}}},
 		{name: "a route registered under a condition in registerRoutes", want: wantCount,
 			node: [][2]string{{"\tif s.queue != nil {", "\tif s.opts.LoopbackListener {\n\t\tmux.HandleFunc(\"POST /fleet/zz-local\", s.handleZZ)\n\t}\n\tif s.queue != nil {"}}},
 		{name: "routes registered in a loop in registerRoutes", want: wantCount, recorded: routeFixtureRecorded + 2,
@@ -584,14 +724,22 @@ func TestTheRouteSourceCheckNamesTheseAdditionsToTheRealSources(t *testing.T) {
 	if p := routeSourceProblems(routeSources{node: readGoSources(t, "."), queue: queue, recorded: recorded}); len(p) != 0 {
 		t.Fatalf("setup: the real sources already have problems: %q", p)
 	}
-	for _, tc := range []struct{ name, old, new, want string }{
-		{"a cross-package mount handed the mux in Handler", "s.registerRoutes(mux)", "s.registerRoutes(mux)\n\tfleetqueue.MountExtra(mux)", wantMuxFlow},
+	for _, tc := range []struct{ name, old, new, old2, new2, want string }{
+		{"a cross-package mount handed the mux in Handler", "s.registerRoutes(mux)", "s.registerRoutes(mux)\n\tfleetqueue.MountExtra(mux)", "", "", wantMuxFlow},
 		{"a route registered under a condition in registerRoutes", `mux.HandleFunc("GET /fleet/health", s.handleHealth)`,
-			"mux.HandleFunc(\"GET /fleet/health\", s.handleHealth)\n\tif s.opts.LoopbackListener {\n\t\tmux.HandleFunc(\"POST /fleet/zz-local\", s.handleHealth)\n\t}", wantCount},
+			"mux.HandleFunc(\"GET /fleet/health\", s.handleHealth)\n\tif s.opts.LoopbackListener {\n\t\tmux.HandleFunc(\"POST /fleet/zz-local\", s.handleHealth)\n\t}", "", "", wantCount},
+		// A path-answering wrapper around the guarded handler, in Handler and in httpServer: neither touches the mux, registerRoutes
+		// or a HandleFunc call.
+		{"a handler wrapped around the ingress guard in Handler", "return netguard.IngressGuard(netguard.IngressOptions{", "return zzWrap(netguard.IngressGuard(netguard.IngressOptions{",
+			"}, mux)", "}, mux))", wantHandlerReturn},
+		{"a handler wrapped around s.Handler() in httpServer", "Handler:           s.Handler(),", "Handler:           zzWrap(s.Handler()),", "", "", wantServerHandler},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			node := readGoSources(t, ".")
 			node["server.go"] = replaceOnce(t, node["server.go"], tc.old, tc.new)
+			if tc.old2 != "" {
+				node["server.go"] = replaceOnce(t, node["server.go"], tc.old2, tc.new2)
+			}
 			problems := routeSourceProblems(routeSources{node: node, queue: queue, recorded: recorded})
 			for _, p := range problems {
 				if strings.Contains(p, tc.want) {
