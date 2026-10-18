@@ -4,18 +4,17 @@ Thanks for your interest in improving offload-harness — a local-first harness 
 short-context, low-judgment work to a free local Gemma-family cascade. Contributions of all
 sizes are welcome.
 
-## Build & test
+## Build & check
 
 This is a single-module Go project. From the repository root:
 
 ```bash
 go build ./...   # build everything (CLI + MCP server are the same binary)
 go vet ./...     # static analysis — keep this clean
-go test ./...    # run the full test suite
 ```
 
-All three must pass before you open a pull request. The tests do not require a running
-llama.cpp server.
+Both must pass before you open a pull request. CI runs the test suite and is the gate: do not run the full
+suite by hand, and see "Testing rule" below for what a change carries instead of tests.
 
 `go.mod` names the compiler the harness ships with (`toolchain go1.27.2`; the `go` line is only the
 oldest one allowed). With `GOTOOLCHAIN` at its default, a Go older than that downloads the release
@@ -34,7 +33,7 @@ system). A finding fails the job; the fix is a newer toolchain pin in `go.mod` (
 - **Keep changes scoped.** One focused change per PR. Avoid drive-by refactors, renames, or
   reformatting unrelated code — they make review harder and bury the actual change.
 - **Match the existing style.** Run `gofmt` (or `go fmt ./...`) before committing.
-- **Add or update tests** for any behavior you change.
+- **No new tests.** A change carries none; see "Testing rule" below.
 - **Conventional-ish commit messages.** Prefix with the kind of change — `feat:`, `fix:`,
   `docs:`, `test:`, `refactor:`, `chore:` — followed by a short imperative summary.
 - **No cloud calls in the cascade.** The cascade never calls a cloud model and holds no cloud
@@ -46,115 +45,29 @@ system). A finding fails the job; the fix is a newer toolchain pin in `go.mod` (
   [ADR 0001](docs/architecture/decisions/0001-defer-never-cloud-fallback.md) and
   [ADR 0060](docs/architecture/decisions/0060-opt-in-browse-lane-drives-the-operators-browser.md).)
 
-## Proving a test can fail
+## Testing rule
 
-A test that has only ever passed proves nothing, so a fix or a new gate is shown to work by making it fail on purpose:
-apply one single-line mutation that removes the control and watch the test go red. Do that with
-[`scripts/mutation-check.sh`](scripts/mutation-check.sh) (PowerShell twin: [`scripts/mutation-check.ps1`](scripts/mutation-check.ps1)),
-not with an ad hoc `sed` plus `go test` that counts any failure as a kill. From the module root it takes the file, the
-mutation (`--old`/`--new`, or `--marker` to pick the line) and either a Go package (`--pkg ./internal/x --run TestX`) or your
-own `--test` and `--compile` commands, and it runs the unmutated control arm, which must pass; applies the mutation and asserts
-it landed, comparing with line endings normalised so a CRLF file cannot fake a pass; compiles the test binary before
-running the tests, so a mutant that does not build is reported `BAD-MUTANT` and never counted as a kill; reports `RED` (the
-tests caught it) or `SURVIVED` (they did not); and restores the file byte for byte, even when interrupted. Quote the final
-`MUTATION-VERDICT:` line, with the mutation it printed, in the pull request. `bash scripts/mutation-check-selftest.sh` (or
-`pwsh -File scripts/mutation-check-selftest.ps1`) shows every verdict on a fixture under `scripts/testdata/`.
+Canonical text: [`AGENTS.md`](AGENTS.md#testing-rule). It replaces the earlier red-first, mutation-check, seam-test and
+review-round practice (superseded 2026-10-18). In short:
 
-## Tests that certify a seam
+- **A change carries no new tests** (unit, regression, golden, fixture, lint, self-test, mutant or test plan). The one
+  exception is a change that cannot be seen working any other way: it gets the single smallest check that shows it works.
+- **CI as it stands is the gate.** Do not run mutation checks, red-first proofs, coverage hunts, repeat-until-clean
+  cycles, or full-suite, multi-host or remote-gate runs beyond what CI already runs.
+- **The check is one real run of the change** (the real command, the deployed binary, the live seat, the rendered file),
+  run once and read back. Say in the pull request what you ran and what you saw.
+- **Review is at most one pass, and only for credentials/security or data loss.** Fix only what a real input reaches;
+  drop low-severity findings and findings that need an input no real system produces.
+- **A test your change turns red** is fixed in the code if real behaviour broke; otherwise edit or delete the test.
+  Never replace it with a new one.
+- Existing tests, scripts (`scripts/mutation-check.sh` and its self-test, `scripts/test-temp-tripwire.sh`) and CI config
+  are left as they are until the maintainer prunes them in a separate change.
 
-A seam is the place where one part of the harness hands work to another: a function variable or an interface that production
-code fills in, a config key that picks an engine, a door that calls a lane. A test that certifies a seam says the two sides
-are wired together and behave across it, and it proves nothing if it injects the very thing it certifies. A test that assigns
-a stand-in to the seam, runs the code, and asserts on the value it just put there passes with the production wiring deleted;
-a mutation of exactly that kind once survived a green seam test here. It matters most in red-first work: the behaviour-free
-stub that lets the first test compile is what the test must go red against, not what it certifies.
-
-- **Fake the far side of the seam, never the seam.** Stand in for what lies beyond it (a node, an engine, a clock source) and
-  let the production code on the near side run, so the path under test is the path production takes.
-- **Assert on something the production path produces,** not on a value the test supplied, and not on a count of calls to a
-  stand-in that only the test drives. You must be able to name the production line whose removal turns the test red.
-- **Show that it goes red.** Remove or neutralise that line with `scripts/mutation-check.sh` (see "Proving a test can fail")
-  and quote the `RED` verdict in the pull request; a seam test whose mutation `SURVIVED` is certifying its stand-in.
-  `TestRunNoEligibleRemoteNamesTheRealCause` in `internal/delegate/run_test.go` is a worked example: it drives `Run` against
-  fake nodes (or none) and asserts the reason and the `Unplaced` flag that the production path reports.
-- **Reviewer's check:** for each test that claims to cover a wiring, ask which production line it goes red without. If the
-  answer is none, or only a line inside the test, it does not certify the seam.
-
-## Keeping tests out of the OS temp dir
-
-A test takes its scratch space from `t.TempDir()`, which `testing` removes when the test ends. A test that makes a folder
-or file in the OS temp dir (C: on Windows) and does not remove it on every path adds one more every run; a stand-in test
-binary once left 22,434 folders and about 70 GB in under two hours. Two things guard this, and neither replaces the other.
-
-- **The lint, `tempdir_lint_test.go` in the root package.** It reads every `*_test.go` file of the module and fails on a
-  direct use of the OS temp dir that `tempdir_lint_allowlist_test.go` does not list with its count and the reason its folder
-  is gone on every path: `os.MkdirTemp` / `os.CreateTemp` / `ioutil.TempDir` / `ioutil.TempFile` with an empty directory,
-  any `os.TempDir`, `TMP`, `TEMP` or `TMPDIR` read from the environment, and `os.MkdirTemp` passed as a value. It also
-  requires every package whose tests start a copy of their own test binary to hold
-  `TestARelaunchedTestBinaryLeavesNothingInTheTempDir` (see `internal/mediaremote/relaunch_leak_test.go`) or to be listed in
-  `relaunchExempt` with the reason a started copy leaves nothing. Prefer `t.TempDir()` to a new entry. To regenerate the
-  keys, run `TEMPDIR_LINT_PRINT=1 go test . -run 'TestTestsReachForTheOSTempDirOnlyWhereItsRemovalIsOnEveryPath|TestEveryRelaunchingPackageProvesItLeavesNothing' -v`
-  and write the reasons after reading the code.
-
-  Six suites make a throwaway state root in their `TestMain` (the root package, `internal/delegate`, `internal/mcpserver`,
-  `internal/mediaremote`, `internal/pairworkloads` and `internal/pipeline`), and the same two rules hold for all six. A
-  removal that fails is tried once more after 250 ms; a root that is still there is named on stderr with the error, and a
-  suite that passed then exits 1, because `go test ./...` shows the stderr of a package that passed only with `-v` (a
-  suite that failed keeps its own exit code). In the root package, a copy of the test binary that a test starts with
-  `LOCAL_OFFLOAD_STATE_DIR` taken out of its environment (the `gpu reserve` tests) keeps its own state root inside the
-  suite's root, which the suite removes, and says on stderr when it has to fall back to the OS temp dir.
-- **The tripwire, `scripts/test-temp-tripwire.sh`** (PowerShell twin `scripts/test-temp-tripwire.ps1`). A lint cannot see a
-  temp file made by production code that a test calls, or a copy of the test binary that exits before its cleanup. The
-  tripwire points `TMP`, `TEMP`, `TMPDIR` and `GOTMPDIR` at a fresh folder, runs `go test -count=1`, and ends with a
-  `TRIPWIRE-VERDICT` line: `CLEAN`, `LEAK` (what is left, by name prefix with a count), `PROCESSES` (an image still running
-  from the folder) or `TESTS-FAILED`. `--dir` is required and must not be on the system drive (it refuses with `REFUSED`
-  unless `--allow-system-drive` is given). A leaver that is legitimate (there is none today, so the list is empty) is named in
-  `scripts/test-temp-tripwire.ignore`, one `NAME-PREFIX`, a tab and a reason per line: the tripwire prints it with its reason and
-  does not count it, so an ignore is never silent. A whole-module run loads the machine, so run it on a spare host with
-  `nice -n 19 bash scripts/test-temp-tripwire.sh --dir <data drive folder> --go-args "-p 1 -timeout 45m"`, or pass `--pkgs` a subset. The timeout matters: `internal/pipeline` takes
-  about ten minutes, which is go test's default timeout, and a test binary that times out is killed before it cleans up, so its temp
-  state would read as a leak.
-  `bash scripts/test-temp-tripwire-selftest.sh` (or `pwsh -File scripts/test-temp-tripwire-selftest.ps1`) shows every verdict on
-  the fixture module `scripts/testdata/tripwirefixture`. When go test fails, the failing tests and their messages are printed
-  ahead of the tail of the output, because go test prints one `ok` line per later package; an interrupted run (Ctrl-C, `kill`)
-  stops go test and every test binary it started, and exits 130. The tripwire sees only what a child writes under `TMP`, `TEMP`
-  and `TMPDIR`: a child started with a scrubbed environment, or a test that names a fixed directory such as `/dev/shm`, writes
-  elsewhere and a `CLEAN` says nothing about it (the lint's relaunch-proof test is what covers the scrubbed copy).
-
-## Keeping tests from failing on a slow machine
-
-A test must not fail because the machine it ran on was slow. A suite that goes red once on a loaded host and green again
-alone is nearly always a test that put a number on the clock: an upper bound on a measured time ("it returned within
-200 ms"), a window shorter than the work it starts, or a fixed sleep followed by an assertion. A slow runner stretches every
-one of those, and the product was right each time. Prefer to wait on the event the product signals (a channel, a barrier a
-fake holds until the test releases it, a count of calls), and bound the wait with a generous hang guard, not a short window.
-
-- **The lint, `clock_lint_test.go` in the root package.** It judges every `*_test.go` file of the module (and reads the
-  constants a test refers to from the package's other files too) and fails on an upper bound on a measured elapsed time
-  under one second that `clock_lint_allowlist_test.go` does not list with its count and its reason: what the bound rules
-  out, and how wide the margin to it is. The measured time is `time.Since`, a difference with a `time.Now()` stamp, a name
-  that holds one, that value read as a number, rounded, made absolute, converted or multiplied or divided by a constant, or
-  the result of a helper of the package that returns one (`measure(f) > C`, `results, sum, elapsed := runWithin(...)`; a
-  method counts only when it is called on a local name that holds a value of the type that declares it); the bound is `>`
-  or `>=` against a constant it can evaluate (a package const is trusted only when every declaration of the name agrees). A bound of a second or more is not reviewed by the lint. That is where a
-  bound starts to be a hang guard, but the line is a ratchet and not a proof of safety (a 2.5 s ceiling failed under
-  starvation too), so such a bound is still yours to judge. Fixing a listed site (waiting on an event instead) means
-  lowering its count, or deleting the entry when it was the last, and the lint fails until you do. A test file that imports
-  `time` with a dot fails the lint by name. To regenerate the keys, run
-  `CLOCK_LINT_PRINT=1 go test . -run TestTestsPutNoSubSecondCeilingOnMeasuredTime -v` and write the reasons after reading
-  the code.
-- **What it does not see** (the header of the file has the full list). It reads Go only: the JavaScript tests under
-  `render/` and the shell scripts have the same fault and no lint here. It does not see a bound against a value it cannot
-  evaluate (a field, a parameter, a poll interval, a constant of another package, a const written with `iota` or by
-  repetition of the line above); a measured time it cannot follow (a sum with another duration, `max` or `min` of it, a
-  helper kept in a closure variable or in another package, a method called through a package-level variable, a field or
-  an interface, a value stored in a field or sent on a channel, and an instant held as an integer: an atomic `UnixNano`
-  stored from `time.Now()` and subtracted later, of which `internal/delegate/callwait_test.go` holds a live 400 ms
-  ceiling); `elapsed < C` when it is not a lower bound, namely a fixture schedule (a fake that answers one way until `C` has
-  passed and another way after) and a poll deadline written as a loop condition (`for time.Since(start) < C { ... }`
-  followed by a failure); or the lower edge of a sampling window. It does not see the other shapes of the same fault
-  either: a fixed sleep before an assertion, a short call or context window handed to the code under test, a poll deadline
-  taken from `time.Now().Add(C)`. Those stay a review duty.
+Two lints in the root package run in CI and still bind any test that is edited; nothing here asks for a new test.
+`tempdir_lint_test.go` fails on a test that reaches for the OS temp dir (`os.MkdirTemp` or `os.CreateTemp` with an empty
+directory, `os.TempDir`, `TMP`, `TEMP` or `TMPDIR` read from the environment) unless `tempdir_lint_allowlist_test.go` lists
+it; use `t.TempDir()`. `clock_lint_test.go` fails on an upper bound under one second on a measured elapsed time unless
+`clock_lint_allowlist_test.go` lists it; wait on the event the product signals, not on a short clock window.
 
 ## Documentation
 
@@ -173,7 +86,7 @@ Documentation lives in [`docs/`](docs/README.md) and is part of the change, not 
   review.
 - **Verify what you write.** Check each factual claim against the source at the time of writing. Mark
   genuine uncertainty with `> **Unverified:**` rather than guessing.
-- **Structural gate:** `go test -run TestDocsLint .` checks that scaffold files exist, relative links
+- **Structural gate:** CI's `TestDocsLint` checks that scaffold files exist, relative links
   resolve, ADR frontmatter is schema-valid, and system/flow docs keep their required sections. It
   checks structure only — meaning is a review duty.
 - Conventions, the ADR schema, and the privacy rules for published files are in
@@ -294,14 +207,15 @@ finds the script. When the only bash on the machine is that launcher, the test s
 ## Opening a pull request
 
 1. Fork the repo and create a branch off `main`.
-2. Make your change, with `go build ./...`, `go vet ./...`, and `go test ./...` all green.
+2. Make your change, with `go build ./...` and `go vet ./...` clean. CI runs the tests and is the gate; do not add
+   tests (see "Testing rule").
 3. If you changed anything under `openspec/` (see [docs/systems/openspec.md](docs/systems/openspec.md)), run the OpenSpec
    validator too: install the pinned CLI with `scripts/openspec-install.sh <prefix>` (a directory on a data drive), then
    `OPENSPEC_BIN=<prefix>/node_modules/.bin/openspec scripts/openspec-validate.sh`. `go test ./...` runs the real validator
    only where `OPENSPEC_BIN` is set, and CI does not set it, so this step is yours.
 4. If you changed published behavior, add a changelog fragment under `changes/unreleased/` (see "The
    changelog is one file per change" above); do not edit `CHANGELOG.md`.
-5. Open a PR describing what changed and why. Link any related issue.
+5. Open a PR describing what changed and why, and the one real run you made and what you saw. Link any related issue.
 6. If it removes any tracked file, say so with a `Deletes:` line (see above) — CI refuses an
    undeclared deletion.
 

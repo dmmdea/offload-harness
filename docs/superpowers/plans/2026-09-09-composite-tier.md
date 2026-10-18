@@ -1,6 +1,8 @@
 # Composite Tier (0.116.0) Implementation Plan — v2 (after the council)
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Superseded 2026-10-18 by the no-more-testing rule (AGENTS.md, Testing rule):** skip every step below that writes a test, proves red-first, runs a mutation check, runs a review round or runs a gate beyond CI. The check is one real run of the change.
 
 **Goal:** Make `<node-b>` one installed tier (`blackwell-3x16`) that *composes* `blackwell-16` and `blackwell-2x16` as device layers, decide per task which layer and seat serve it, record that decision truthfully on every result, advertise the layers to the fleet, and ship it as 0.116.0 with live gates on `<node-b>` that can fail.
 

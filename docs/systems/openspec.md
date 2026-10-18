@@ -14,7 +14,7 @@ request body and the goal list it has today.
 
 | OpenSpec owns | Stays as it is |
 |---|---|
-| the `openspec/` tree: `config.yaml`, `schemas/`, `specs/`, `changes/` | plan execution (superpowers-style: red-first tests, small steps) |
+| the `openspec/` tree: `config.yaml`, `schemas/`, `specs/`, `changes/` | plan execution (superpowers-style: small steps, no new tests) |
 | the artifacts of a change: `proposal.md`, `specs/**/spec.md`, `design.md`, `tasks.md`, and an optional `adr.md` | the ship flow: one gate pass, then a pull request; the changelog fragment; the docs update |
 | `openspec validate` over those artifacts | ADRs under `docs/architecture/decisions/`, accepted by a human |
 
@@ -25,7 +25,7 @@ and the docs travel the same way.
 
 | path | what it is |
 |---|---|
-| `openspec/config.yaml` | `schema: harness-change`, a `context` that carries the standing invariants (quality outranks speed with no wall-time term in a pass rule, no CPU inference, idle models unload at 300 s, no daemon or scheduler, public-repo privacy with node letters only, one changelog fragment per change, ADR for a decision, red-first tests, the leak gate) and `rules` per artifact |
+| `openspec/config.yaml` | `schema: harness-change`, a `context` that carries the standing invariants (quality outranks speed with no wall-time term in a pass rule, no CPU inference, idle models unload at 300 s, no daemon or scheduler, public-repo privacy with node letters only, one changelog fragment per change, ADR for a decision, no new tests and one real run as the check, the leak gate) and `rules` per artifact |
 | `openspec/schemas/harness-change/` | the project-local workflow, forked from the built-in `spec-driven` with `openspec schema fork spec-driven harness-change` |
 | `openspec/specs/` | the capability specs (empty until the first change is archived) |
 | `openspec/changes/` | in-flight changes; `archive/` holds finished ones |

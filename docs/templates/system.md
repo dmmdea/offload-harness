@@ -70,7 +70,7 @@ commands, or common symptoms when applicable.
 
 ## Testing notes
 
-Describe important tests and how to validate changes.
+Describe the existing guards and the one real run that shows a change works. Do not add tests (AGENTS.md, Testing rule).
 
 ## Common pitfalls
 

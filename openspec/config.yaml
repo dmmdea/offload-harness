@@ -17,8 +17,9 @@ context: |
   - One changelog fragment per change under changes/unreleased/ (named for the branch); never edit CHANGELOG.md.
   - A decision that shapes the system beyond one implementation detail needs an ADR in docs/architecture/decisions/.
     Agents draft it as Proposed; a human accepts it.
-  - Red-first tests: the failing test lands before the fix, and a new gate is proved by a mutation that turns it red.
-  - Docs change in the same PR; system pages keep their Purpose and Source map sections (go test -run TestDocsLint .).
+  - No new tests: a change carries none, CI as it stands is the gate and the check is one real run of the change
+    (red-first tests and mutation proofs are superseded 2026-10-18; AGENTS.md, Testing rule).
+  - Docs change in the same PR; system pages keep their Purpose and Source map sections (CI runs TestDocsLint).
   - Third-party software enters only through the admission checks in docs/systems/security.md (pinned version and
     sha256, telemetry off, data off the system drive).
 
@@ -32,7 +33,7 @@ rules:
     - "Name each ADR the change needs by title; the optional adr artifact drafts it. No decision, no ADR."
     - "Say how the leak gate, TestDocsLint and the changelog fragment apply. Machines by node letter or role phrase only; a tier id only as 'the <tier> reference box'."
   tasks:
-    - "In each group the first task writes the failing test; the task that makes it pass follows it."
+    - "No task adds a test; a group is checked by one real run of its change."
     - "Every task names the command that verifies it, with a pass condition that has no wall-time term."
     - "The changelog fragment and the docs update sit in the group that changes behavior, not in a final group."
   adr:

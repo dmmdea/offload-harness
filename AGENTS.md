@@ -54,7 +54,7 @@ Detailed documentation lives in `docs/`. This file only routes you there.
 3. Make the change.
 4. Update the affected docs **in the same pull request** when behavior, responsibilities, flows,
    invariants, interfaces, or glossary concepts change.
-5. Make sure docs and code agree before you finish. `go test -run TestDocsLint .` checks structure;
+5. Make sure docs and code agree before you finish. CI's docs lint (`TestDocsLint`) checks structure;
    you check meaning. If they disagree and you cannot resolve it, say so explicitly in the PR.
 
 Do not put detailed system behavior in this file — it belongs in `docs/`.
@@ -96,6 +96,31 @@ them; `cd` into the module.
 
 ## Working in the code
 
-- Build: `go build ./...`  ·  Test: `go test ./...`  ·  Vet: `go vet ./...` — all must stay green.
-- Go 1.26+. TDD for Go changes (failing test first). Keep changes scoped and minimal.
+- Build: `go build ./...`  ·  Vet: `go vet ./...` — both must stay green. CI runs the test suite and is the
+  gate (see "Testing rule" below).
+- Go 1.26+. Keep changes scoped and minimal.
 - Do not break the serving invariants or the agent safety defaults — see `CLAUDE.md` → "Invariants".
+
+## Testing rule
+
+The maintainer's rule for every change, by a person or an agent. It replaces the earlier red-first,
+mutation-check, seam-test and review-round practice (superseded 2026-10-18).
+
+- **New changes carry no new tests.** Do not write, add or extend a test of any kind (unit, regression,
+  golden, fixture, lint, self-test, dry-run assertion harness, mutant, test plan), directly or through a
+  subagent or workflow. The one exception: a change that cannot be seen working any other way gets the
+  single smallest check that shows it works.
+- **CI as it stands is the gate.** Do not run mutation checks, red-first proofs, coverage hunts,
+  repeat-until-clean cycles, refute or skeptic panels, fresh-context reviews of a fix, or full-suite,
+  multi-host or remote-gate runs beyond what CI already runs.
+- **The check is one real run of the change** (the real command, the deployed binary, the live seat, the
+  rendered file), run once and read back. Say in the pull request what you ran and what you saw.
+- **Review is at most one pass, and only for credentials/security or data loss.** Fix only what a real
+  input reaches; drop low-severity findings and findings that need an input no real system produces.
+- **A test a change turns red** is fixed in the code if real behaviour broke; otherwise the test is edited or
+  deleted. It is never replaced with a new one.
+- Model evals, benchmarks, smokes and soaks run only when the maintainer orders that measurement, and then
+  at the bare minimum.
+- Existing tests, scripts and CI config stay as they are until the maintainer prunes them in a separate
+  change. The security guards (the leak gate, the identity scrub, credential scans) are guards, not tests,
+  and stay.

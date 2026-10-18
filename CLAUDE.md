@@ -43,8 +43,8 @@ same aliases via the templates in `setup/templates/`.
 
 ```bash
 go build ./...                         # build everything — must stay green
-go test ./...                          # test suite
 go vet ./...                           # vet gate
+# The test suite (`go test ./...`) is run by CI, which is the gate: do not run it by hand (AGENTS.md, Testing rule).
 ```
 
 ```powershell

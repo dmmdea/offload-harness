@@ -170,7 +170,7 @@ apart.
 
 ## The lint gate
 
-`go test -run TestDocsLint .` checks structure: scaffold files exist, relative links resolve, ADR
+CI's `TestDocsLint` checks structure: scaffold files exist, relative links resolve, ADR
 frontmatter is schema-valid, and system/flow docs keep their `## Purpose` and `## Source map`
 sections.
 

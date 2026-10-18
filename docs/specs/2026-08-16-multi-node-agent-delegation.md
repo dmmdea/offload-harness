@@ -1,6 +1,8 @@
 # Multi-Node Sub-Agent Delegation Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+>
+> **Superseded 2026-10-18 by the no-more-testing rule (AGENTS.md, Testing rule):** skip every step below that writes a test, proves red-first, runs a mutation check, runs a review round or runs a gate beyond CI. The check is one real run of the change.
 
 **Goal:** The delegation cascade can hand agent-loop subtasks optimally to <node-b> alone, <node-b>+<node-c>, or <node-c> alone — over the tailnet, authenticated, quality-first — so a weak-but-real second local agent (node-c-ampere6, RTX 3050 6GB) does meaningful work without ever costing delivered quality.
 

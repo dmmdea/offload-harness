@@ -2182,8 +2182,8 @@ Requirements and limits, all of them refusals rather than surprises:
   self-contained, and an absolute path from your box would name nothing there.
 - 8 files, 64 KiB written, 192 KiB of diff. Past any of them nothing is published and the subtask
   defers `write` — split the leg instead.
-- No delete, no shell, no `run`, no network. This lane edits files; it does not verify them. Running the
-  tests is still yours.
+- No delete, no shell, no `run`, no network. This lane edits files; it does not verify them. Checking the
+  result with one real run is still yours.
 
 **Gate it before you rely on it.** `scripts/write-door-gate.ps1` (fixtures under
 [`contracts/write-door/`](../contracts/README.md), section "write-door/")
