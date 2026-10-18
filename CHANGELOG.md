@@ -6,6 +6,953 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.190.0] - 2026-10-18 - offload_run_template runs ComfyUI workflow templates behind a licence gate, an optional evidence-preserving reducer for build and test results, the vLLM seat picks the faster store path and one rendered stub serves every Windows seat, and changes carry no new tests
+
+### Added - two contract pages (the `delegate --contract` file, the dispatch log), stale vLLM debt reasons corrected, a labelled-agent-seat gate (A-20), and an `install render` refusal of a llama.cpp 9B agent seat on ampere-16 (A-40)
+
+- **`docs/systems/delegate-contract-file.md` (register D-70).** The file `local-offload delegate --contract` reads is a bare subtask
+  object or an array of at most 8, never the `{"subtasks": [...]}` wrapper the MCP tool takes. A wrapper file does not fail to parse:
+  unknown fields are ignored, so it becomes one subtask with a blank goal and intake refuses it with `goal is required`. The page also
+  maps the tool's call-level arguments to the flags that carry them, and records the seat id rule behind three failed launches:
+  `agent_model` must equal an id the endpoint's `/v1/models` publishes, or every subtask comes back deferred as `infrastructure`
+  (counted in `lost_to_stack`) while the contract itself is fine. Held by `TestDelegateContractFilePageNamesWhatTheCLIReads` (the page
+  names every field of the `--contract` help's own `(fields: ...)` list) and `TestContractFileWrapperIsNotUnwrapped` (the wrapper trap,
+  against the real parser and intake).
+- **`docs/systems/dispatch-log.md` (register D-74).** `state/dispatch-log.jsonl` is written by two harnesses (the Claude Code hooks, which
+  also rotate it at 1 MiB, and the opencode plugin, append-only, tagged `"harness":"opencode"`) and read by one scoreboard that divides by
+  `readonly_spawn` and checks a `session` heartbeat. The page lists every event with its writer, fields and reader, and names the rows a
+  rewrite of either writer must keep emitting. `TestDispatchLogContractPageNamesEveryEventTheWritersEmit` reads the `DispatchEvent`
+  type in `integrations/opencode/src/instrument.ts` and fails when the page leaves out an event the plugin may write;
+  `TestDispatchLogContractIsLinkedFromItsWriters` holds the links from `instrument.ts`, `opencode-integration.md` and `docs/README.md`.
+- **vLLM coverage debt reasons (register A-07, coverage).** Four `vllmSeatDebt` reasons were stale: ampere-8 said "9B w4a16 arm never
+  run" and blackwell-8 "vLLM arm never measured" although both profiles record that vLLM is not a path for the 9B on 8 GB (the W4A16
+  weights alone are 7.51 to 9.35 GiB), and amd-gcn and cpu said nothing of the 2026-09-20 vLLM-CPU run (Qwen3.5-4B bf16 only, 3.1 tok/s
+  against 9.27 for llama.cpp CPU, not seated). `TestVLLMDebtReasonsAreCurrent` ties each debt reason to its own profile's recorded
+  measurement, so the next one cannot go stale unnoticed.
+- **Agent seats are measured or labelled (register A-20).** `TestEveryTierIsMeasuredOrLabelledProjectedForItsAgentSeat` makes every tier
+  either MEASURED or carry a PROJECTED label naming the seat it seeds; a projected seed that ends up with a seat a measurement failed
+  (the 26B that scored 1/8 on the A2, offload-e4b that failed on amd-gcn) must record the failure. It does not decide whether the A2
+  finding generalises to other card sizes; it makes the open question countable. No profile changed.
+- **`install render` refuses a llama.cpp 9B agent seat on ampere-16 (register A-40).** The prohibition was measured (the 9B under llama.cpp
+  fails on the A2, under vLLM it only ties the 4B) and recorded, never gated. `renderGate` now reads the rendered models and refuses a
+  `mimo-9b-agent` or `qwen3.5-9b-agent` entry for that tier, naming the tier and the register row. The 8 GB tiers, which ship those entries, are
+  untouched (`TestRenderGateLeavesTheNineBSeatsOfTheEightGBTiersAlone`).
+- **Red-first.** Every test above was committed before its page or fix and failed on the unmodified tree: the two page tests on the missing
+  pages, `TestVLLMDebtReasonsAreCurrent` on the four stale reasons, `TestAgentSeatLabelCheckRefusesEachDefect` on the empty gate, and
+  `TestRenderGateRefusesALlamaCppNineBAgentSeatOnAmpere16` on "the write gate passed it".
+- **Not done here.** A-86 (an `audit-yaml` check that residents and singles sit on the intended cards) needs a machine-readable layout
+  declaration and the layout it would protect moved when the display card changed, so it waits for that declaration.
+
+### Changed - docs: new changes carry no new tests, CI as it stands is the gate and one real run is the check
+
+- **The rule.** `AGENTS.md` now carries a "Testing rule" (the maintainer's order of 2026-10-18): a change adds no new tests; CI is the gate and no full-suite, multi-host or remote-gate run is made beyond it; the check is one real run of the change, read back; review is at most one pass and only for credentials/security or data loss; a test a change turns red is fixed or deleted, never replaced.
+- **What was rewritten to match.** `CONTRIBUTING.md` (build and check, the testing rule, the pull request list), `CLAUDE.md`, `README.md`, `docs/README.md`, `docs/STYLE.md`, the system and flow doc templates, `changes/README.md`, the invariant I5 row of `docs/systems/security.md`, the OpenSpec config, schema and page, and one line of the operator guide. The five older implementation plans carry a one-line pointer saying their test, red-first, mutation and review steps are superseded.
+- **What did not change.** No test, script or CI file is edited or deleted here; the maintainer prunes them in a separate change. The leak gate, the identity scrub and the other security guards stay.
+
+### Added - an optional evidence-preserving reducer for the agent's build and test results, default off
+
+- **What it does.** With the config key `agent_evidence_reducer` set, a `run` or `run_shell` result that is a build or test
+  invocation and is 4 KiB to 64 KiB is no longer carried into the transcript whole. The cascade seat the agent's own offload
+  tools already use (`Build`'s `Offload`: the recordless offload, one named tier, the `extract` task, no new client and no ledger
+  row) is asked for at most five claims, each with a `claim` and a one-line `quote`. Every quote is looked up in the output with
+  `quotecheck.Locate`, the lookup behind the research digest's quote check (the output's bytes first, then case, spacing, quote
+  marks and punctuation set aside, publishing the output's own span), and the transcript keeps a receipt in place of the log: an opening
+  line `[evidence-receipt: original N chars, M lines; ...]`, the tool's `exit=` line copied by code and never written by the
+  seat, each claim over its verified quote, and a closing line saying the rest is not kept and the command can be run again.
+  Unset, the key is off and the loop is byte-identical to before.
+- **When the raw output is kept, unchanged.** Output under 4 KiB or over 64 KiB; output with no `exit=` first line; any tool that
+  is not `run` or `run_shell`; a command the producer gate (the log-collapse rung's `logsCallIsBuild`) does not read as a build or
+  test invocation, which is what bypasses reads and searches (`read_file`, `search_files`, `list_dir`, `grep`, `cat`, `sed -n`,
+  `git grep`, a chained command, a fetch, an unknown tool: the agent needs their exact text); a call that did not run or
+  errored; a seat error, timeout (60 s), deferral or panic; an answer that is not the requested JSON, has no claims or more than
+  eight; a claim with no text or a quote that is not one line of 8 to 200 characters; any quote that is not in the output as one contiguous span, an elided `first ... last` quote
+  included (all or nothing); output the corpus vet's table says looks like a credential or an email address, checked before the seat is shown
+  anything, and the receipt checked again; a receipt that is not strictly shorter than the output. A claim is collapsed to one line,
+  so a seat cannot forge a receipt line (an exit status, a disclosure line) from inside a claim.
+- **The credential check reuses an existing detector and moves it.** The only credential-shape detector in the tree was the
+  compaction-eval corpus vet's class table (`piiPatterns`, `PIIClasses` in `internal/compeval`), and `internal/compeval` imports
+  `internal/agent`, so the agent could not call it. The table and the question "which classes match this text" move, unchanged
+  (same six classes, order and expressions), to the new `internal/piishape` (`Classes`, `Matching`). `compeval` derives its
+  `piiPatterns` from it, `PIIClasses` delegates to `Matching`, and `VetPII`, the redactor and the residual gate behave as before
+  (a test pins that the two tables are one). The reducer calls `piishape.Matching`. It flags an email address, so a log that prints
+  one stays raw. The table was widened in the same change (next bullet).
+- **The credential table is widened for both users.** `api-key-assignment` now also matches a key word that follows an underscore
+  or other non-word character and may be followed by `access`/`key`/`secret`/`token` parts (`GITHUB_TOKEN=`, `OPENAI_API_KEY=`,
+  `DB_PASSWORD=`, `AWS_SECRET_ACCESS_KEY=`), with the 12-character value floor kept; two classes are appended after the existing six,
+  `provider-key` (bare `sk-` followed by 20 or more letters and digits, or `sk-proj-`, `sk-ant-`, `sk-svcacct-`, `sk-admin-` followed by 20
+  or more key characters) and `jwt` (three base64url segments of 8 or more characters, the first starting `eyJ`). The corpus vet and the
+  harvest redactor, which derive from the table, refuse and redact the same shapes. Settings and prose stay clean (`MAX_TOKENS=4096`,
+  `token_count: 12`, "the password field is required", a git sha, a UUID, a base64 blob, `sk-learn`, `/tmp/secret_dir`), pinned by
+  tests. Still not covered (stated, not detected): a camel-case name (`githubToken=`), a key name the table does not hold
+  (`dbpassword=`, `sid=`), a command-line flag with a space (`--token value`, `curl -u user:pass`),
+  URL userinfo (`scheme://user:pass@host`), an authorization scheme other than Bearer and Basic, a provider prefix the table does not list
+  (`sk_live_`, `xoxb-`), an unsigned JWT, a high-entropy string with no key name or known prefix, a value that starts with `/`,
+  `.`, `[` or `]`, the part of a value after a backslash inside it, an unquoted value after `:=`, `==` or `=>`, a value passed apart
+  from its name (`fmt.Sprintf("password=%s", v)`), and a terminal control sequence other than escape, bracket, parameters and a letter.
+- **A credential value is matched and redacted whole.** The first widening stopped a value at the first `.`, `/`, `+`, `=`, `@`, `~`
+  or `:`, so the compaction-eval harvest redactor, which derives from the table, wrote `access_token=<jwt>` out as the key name, a
+  placeholder and the JWT's payload and signature, `AWS_SECRET_ACCESS_KEY=<key>` with everything after its first slash, and a
+  bearer value with a `/` or `+` the same way, and the residual gate saw nothing because a tail matches no class. The value of
+  `api-key-assignment` and `bearer-token` now runs to the next whitespace, quote, comma, semicolon, ampersand or backslash (12 or more
+  characters, 16 for a bearer token; a bearer value starts with a letter, digit, underscore or hyphen, an assignment value with any
+  character except those and `/`, `.`, `[`, `]`, after an optional quote), so a value such as `ab/cdef...` or `!cdef...` after a secret name is recognised too, and
+  the redactor replaces the value as a whole (the key name stays, as for every class). A value that starts with `/` or `.` (a path
+  after `token_store=`) is not read as a secret; a relative path that starts with a letter is, the safe direction. Across the 3,959
+  tracked files (3,736 read as text) the two classes matched 16 times before and 44 now (assignment 9 to 37, bearer 7 to 7); every new match is source
+  code or a test that assigns something to a name containing `token` (a local variable or struct field whose name contains `token`) or a redaction
+  test's own fixture, none in a corpus or testdata file.
+- **The redactor substitutes the email class last.** An address-shaped piece inside an assignment's value used to be
+  replaced first, leaving a placeholder where the credential class needs the value to start. The vet table keeps its order.
+- **The residual gate is stronger than the vet.** `Redactor.Residual` (the trace harvest's and the trace corpus verb's exit gate)
+  reports the vet classes that still match and `value-tail` when 12 or more consecutive bytes of any credential value the redactor
+  replaced (assignment, bearer, bare provider keys, JWT; not email or the PEM header, whose pieces are ordinary text elsewhere)
+  are still in the text. With whole-value replacement a tail cannot occur, which a 400-value property test pins, so the check is a
+  second wall against the next widening that stops short; a mention of a replaced secret elsewhere in the same corpus, or ordinary code
+  that reuses a piece of a value taken from `token = f(x)`, leaves that one trace out of the harvest with a note (the others are
+  kept), the safe direction. In the trace corpus verb the same gate refuses the harvest.
+- **A value stops at a backslash.** Tool-call arguments are JSON text. A value class that ran through a backslash took the closing
+  quote or the next escaped command with it, so a redacted `Args` was no longer valid JSON and replay code that parses it lost the
+  call (`export TOKEN=<value>\nls` became `export <placeholder> -la`). The value now ends at a backslash and may start with a
+  quote or a JSON-escaped quote (with any number of backslashes in front of it, see below), and tests pin that the redacted `Args`
+  stay valid JSON with the text after the value intact. A
+  secret that itself holds a backslash leaves the part after it, which the limits above name.
+- **A value may start with a symbol.** `DB_PASSWORD=!...`, `password: $...`, `secret=#...` and `token=(...` were neither
+  redacted nor seen by the vet, because the value had to start with a letter, digit, underscore or hyphen. A value that starts with
+  `/`, `.`, `[` or `]` is still not read as a secret (a path after a key name, an earlier placeholder).
+- **A key word right after a JSON escape is recognised.** Tool-call arguments and JSON tool output are JSON text, so the newline
+  before a line that starts with `PASSWORD=` is a backslash and an `n`, and a word boundary does not see one between them. Every
+  class that starts with a word (assignment, bearer, AWS, GitHub, provider key, JWT) therefore missed a secret at the start of a
+  line in an escaped write_file body or a heredoc: the redactor returned the Args unchanged, the residual gate and the corpus vet
+  reported nothing, and the harvest wrote the password to the corpus. The classes now also accept a JSON escape (backslash and
+  `n`, `r`, `t`, `b` or `f`, or backslash-`u` and four hex digits) in front of the first word, and the email class may start with one,
+  so `\nbob@example.com` no longer loses the `n`. The match then carries the escape, so the redactor keeps the escape and puts the
+  placeholder after it: redacted Args stay valid JSON and the lines around the secret are intact (pinned by a test that decodes
+  the redacted Args and compares the lines, and by a harvest test through `HarvestTraces` and `WriteCorpus`). The reducer, which
+  sees real newlines in tool output, was not affected on that path, but tool output that is itself JSON (a `go test -json` line)
+  was.
+- **More credential names.** The assignment class also reads `PGPASSWORD`, `passphrase`, `credential(s)`, `private_key`,
+  `access_key`, `auth_key`, a plural `passwords`, a trailing digit (`password1=`) and a trailing `_value` or `_id` part
+  (`client_secret_value=`, `secret_id=`), and `_PASS=` and `_PWD=` (`DB_PASS=`, `MYSQL_PWD=`). The short words need the
+  underscore and an equals sign: bare `pass` would read the test runner's `PASS: TestName` line and bare `pwd` the shell's
+  `PWD=`, and a test pins that those stay quiet along with `private_key_path=/etc/...` and `token_count:`.
+- **Basic authorization, registry auth and cookies.** Three classes are appended after the existing eight: `basic-auth` (an
+  `Authorization` or `Proxy-Authorization` header, or a quoted JSON key, with the Basic scheme and a value of 12 or more
+  characters), `auth-field` (a quoted `auth` key with an encoded quoted value, the shape of a container registry's config) and
+  `cookie-header` (a `Cookie` or `Set-Cookie` header holding a value of 12 or more characters, replaced as one whole span: see
+  the cookie bullet below). Each match ends before
+  the closing quote or backslash, so redacted text keeps its quoting and Args stay valid JSON, and the residual gate remembers the
+  credential part of each (the encoded value, or every cookie value in the span, a quoted one whole, but not its attributes, not the header name). The words alone ("Basic
+  authentication", `Authorization: Basic` with no value, `{"auth":"none"}`, `Cookie: theme=dark`) stay quiet. The corpus vet and
+  the harvest redactor derive from the table, so both refuse and redact the new shapes.
+- **A terminal control sequence before a key word is recognised.** The `m` that ends a color code is a word character, so a
+  word boundary never saw the key word after it: `ESC[32mpassword=<value>`, `ESC[1;34mpassword: <value>`, a colored
+  `Bearer`, `ghp_`, `sk-`, `Authorization: Basic` or `Cookie` line passed the table, the redactor, the residual gate and the
+  reducer's seat check, and colored build and test output (`FORCE_COLOR`, `--color=always`, CI) is what the reducer targets. Every
+  class that accepted a JSON escape before its first word now also accepts a control sequence (the escape byte, a bracket,
+  parameters and a letter, as the raw byte or as its JSON escape `\u001b`); the assignment class also accepts one between the name
+  and the colon (`DB_PASSWORD ESC[0m: <value>`) and after the operator, and a flag letter in front of a key word (`-Dpassword=`,
+  `-DTOKEN=`). A value ends at the escape byte, so the color reset behind it is not eaten, and the redactor keeps the sequence
+  that opens a match, like a JSON escape (`piishape.Lead` names it; the redactor no longer carries its own copy of the escape
+  pattern). The cookie class does not stop at the escape byte: a color reset inside a cookie line goes with the rest of the line, as
+  that class already takes the whole line. Quiet cases are pinned: `PASS: TestName`, `token_count=1234`, `MAX_TOKENS=4096` and the word `password` in colored prose.
+- **A quote may carry any number of backslashes.** The assignment, Basic and registry auth classes took one optional
+  backslash before a quote. JSON text inside a double-quoted shell string doubles them again, so `bash -c "export API_KEY=\"<value>\""`
+  as Args has three backslashes in front of the value's quote and the value was neither redacted nor seen by the residual gate. The
+  prefix is now any number of backslashes; the redacted Args stay valid JSON with the text after the value intact. The cookie class
+  has no back-references to count with either, so it writes out the levels it reads (none, one, three, seven and fifteen), as its bullets below say.
+- **More assignment shapes, quoted literals only.** The assignment class put nothing but `=` or `:` between the key word and a
+  value, so Go's `password := "<value>"`, `const token: string = "<value>"`, `var token string = "<value>"`, `password: str = "<value>"`,
+  `if password == "<value>"`, `password = b"<value>"` and `r'<value>'`, `os.environ["API_TOKEN"] = "<value>"`, `{'password' => '<value>'}` and a quoted
+  JSON key `"token": "<value>"` matched nothing, and a type annotation such as `token: Record<string, string> = "<value>"` was
+  matched in place of the value, which left the value in the text. A second alternative (tried first) takes `:=`, `==`, `!=`, `=>`
+  (also as Go's encoder writes it, `=>`), a type annotation, a closing quote or bracket after the name and a `b`, `r`, `u` or `f` string
+  prefix, and requires a QUOTED literal of 12 or more characters: an unquoted value after `:=` or `==` is an identifier or a call
+  (`token := strings.TrimSpace(line)`), which would flood. A third takes a call that passes the name and the literal as two arguments
+  right behind an opening paren (`t.Setenv("API_TOKEN", "<value>")`, `setProperty("password", "<value>")`); the match starts at the paren, and a
+  list of strings (`["token", "client_identifier"]`) stays quiet. The harvest now remembers the literal itself and not the type
+  annotation or call in front of it, so ordinary code that shares a long type name with a redacted line is not read as a leftover.
+  Measured on the tracked tree: the assignment class matched 37 places before and 64 after (counted before this fragment was written); the
+  27 added are quoted fake values in test files and one config example, none an identifier. A type annotation counts only when an `=`
+  follows it, so prose such as `password required: "..."` stays quiet. Not covered and now named: `fmt.Sprintf("password=%s", v)`, where the value is a
+  separate argument, and an unquoted value after the wider operators. The table costs time: about 1.5 s per MiB for all classes
+  (three runs, 1.51, 1.54 and 1.54 s over 1 MiB that matches no class; the figure the first version of this note gave, about 1 s,
+  understated it).
+- **A Basic credential in a printed header or a call is recognised.** The class took a colon or an equals sign straight after the
+  header name, so a Go `http.Header` dump (`map[Authorization:[Basic <value>]]`), `req.setHeader('Authorization', 'Basic <value>')`,
+  `req.Header.Set("Authorization", "Basic <value>")`, `con.setRequestProperty(...)`, `headers["Authorization"] = "Basic <value>"`, a
+  hash rocket, `http.Header{"Authorization": []string{"Basic <value>"}}` and `[Authorization] => Basic <value>` were not matched (the
+  Bearer form of the same dump was). Between the name and the scheme the class now takes a run of up to eight punctuation characters
+  that holds at least one of `: = , > [` (a JSON escape and Go's `[]string{` opener count as punctuation); a word in between, or the bare
+  words with no separator, stay quiet. The value ends before a closing bracket, paren or brace, which base64 never holds, so
+  the redactor does not eat the closers of a dump or a call.
+- **A quoted credential literal runs to its closing quote.** A quoted value ended at the first space, comma, semicolon or
+  ampersand inside it, so a quoted literal holding an ampersand, a comma or a space after the name (an assignment, a JSON field, a single-quoted shell value, an `export`)
+  were total misses whenever each side was shorter than 12 characters, in the plain assignment, in the wider-operator forms and in the
+  call form. A literal that starts with a quote now has its own body: it runs to the closing quote of the same kind, takes in the other
+  kind of quote and Go's JSON escape for `&`, `<` and `>` (so an ampersand in Args does not end it), and never passes a backslash (an
+  escaped quote in JSON text), a line break or the escape byte of a control sequence. The closing quote stays out of the match, and the
+  first-character rule (no whitespace, none of `/ . [ ]`) holds inside the quote, so a quoted path after a key name stays quiet. An
+  unterminated quote runs to the end of the line. The harvest redactor remembers the value the class took (`piishape.AssignmentValue`
+  names it from the same pieces) and no longer cuts the match at its last space, comma, semicolon or ampersand, so the value-tail gate
+  covers the whole quoted value. The cost is precision, measured on the tracked tree: the assignment class matched 67 places before and
+  82 after (a scan of the tracked text files, counted before this fragment was updated). The 15 added are prose in quotes after a key
+  name (a status map entry for `credentials`, a test string that starts with `secret = "the goal named`), placeholders with spaces in doc
+  examples, and a Go string literal's closing quote read as an opening one (`... token: ", tailJWT(), ...`); none is a credential, and the
+  cookie class matched nowhere in the tree. Quiet cases are pinned (a literal under 12 characters, a name that only contains the key word,
+  a leading `/`, blank padding, a bare word run with no quote, a literal that continues on the next line).
+- **The cookie header takes a whole span, not a cookie at a time.** The release lane's reading found seven defects of one design, three of
+  them high: the class walked the line cookie by cookie, with a fine-grained rule for what a cookie value may hold, and every value
+  outside that alphabet ended the match with the credentials behind it going to the seat and the corpus verbatim. A quoted value with a
+  space, an apostrophe, an ampersand, a comma, a semicolon, a tab, a shell escape (an escaped dollar sign or backtick at the third level)
+  or one of Go's HTML escapes for `&`, `<` and `>`; a Set-Cookie list whose first element was short or whose later elements held the
+  credential; a header folded after the colon; and a cookie named like a credential (`refresh_token=`, `password=`) that the assignment
+  class half-took first were each a way out. The design changes instead of a seventh patch. Once the header name and an opener fire (the
+  Basic header's punctuation, a comma followed by a quote as in `req.Header.Set("Cookie", "...")`, a header fold on either side) and the
+  span holds a cookie value of 12 or more characters, the match runs from the header name to the first of the end of the line (a line
+  break, its JSON escape or the end of the text), the closing quote of the string the header sits in (a quote that opens no quoted
+  cookie value: bare, or with 1, 3, 7 or 15 backslashes, the levels of escaping after none to four layers; a single quote ends it too, so
+  a curl command's header ends before the shell's closing quote) and the closing bracket of a list or the closing brace of a Go slice
+  literal (`"Set-Cookie": [ ... ]`, a printed Go header, the Go-syntax print of one, a Python list: one span however many elements and
+  lines it has, a bracket inside a string element not ending it). The closing quote and the bracket stay out of the match, so the
+  redacted Args stay valid JSON (a JSON document that held the header as a key does not, since the match starts at the key's name).
+  Nothing inside the span is read for an alphabet. Over-redacting a cookie line is accepted by design: it is evidence of a header, not of
+  the build. What starts a match stays precise: some value in the span has 12 characters with no white space from its start (an escape
+  counts as one), so `http.Cookie{...}` literals, `Header.Get("Cookie")`, a Go string concatenation such as `"Cookie: sid=" + f(x)`,
+  Django's short messages and the HTTP reference's example header stay quiet. The fine-grained value grammar now lives only in the harvest
+  redactor, which remembers every value in the span for the value-tail gate (a quoted body whole, with its spaces, quotes, escapes, line
+  breaks and the characters above, the closing quote found by the number of backslashes in front of it). The apostrophe gap stays and
+  applies to an unquoted value only (`note=don't` cannot be told from the quote that closes a header written in single quotes); quotes
+  that are no level of escaping, a header folded again after its first cookie and a cookie passed apart from its header (`curl -b`) are
+  named gaps. Measured on the first version of this class: a generated check of 17,057 lines (48 cookie shapes, 18 wrappings) broke the
+  contract in all 18 wrappings with the old class and in none with the new one. The next bullet is the review of that version.
+- **The whole-span cookie class after its review: seven findings fixed, red first.** A review of the whole-span class (verified one by
+  one, each reproduced) found one high and six medium defects, every one a way a value of 12 or more characters reached the corpus with
+  the residual gate clean, or the span ran into the next field. (1) The high one was the class order: run first, the cookie class took the
+  key word of a quoted credential on the same line into its span (an unquoted header, then a credential whose value is quoted) and stopped
+  in front of the quote, leaving the value with no key word for any class and no memory in the value-tail gate. A matrix of 8 cookie forms,
+  12 credential forms and 12 layouts, as text and as Args, left 1,584 of 2,304 values in the text with the old order and none with the
+  table's order; the redactor ran the cookie class in the table's order for a time (the next bullet says where it runs now). (2) A
+  last cookie that ends in an equals sign (base64 padding, or no value) in front of the closing quote of the string made that quote the
+  opener of a value: the span ran through the next field, key or argument, broke the Args JSON, and when the next key was a second header's
+  name its value was left outside every match. A quote now opens a quoted value only when a value can start behind it (not white space, a
+  separator, a closer or the escape of a tab, an ampersand or an angle bracket). (3) A header printed with the Go-syntax verb is a slice
+  literal; the span stopped at its first element, or matched nothing when that was short: it is now a list that ends at the closing brace.
+  (4) The quotes of JSON in a shell string in JSON carry seven backslashes (fifteen with a fourth layer); the class knew none, one and three:
+  the levels are now 0, 1, 3, 7 and 15. (5) A line break inside a quote that is still open ended the span; the value now goes on to its
+  closing quote when that is within three more line breaks and ends at its line when it is not. (6) A shell escape (an escaped dollar sign,
+  backtick, space or semicolon) or a backslash path in an unquoted value ended the span or stopped any match, and a quoted value cut by the end
+  of the text behind a long bare one was left; both are inside the span now. (7) A table of single-guard mutants showed guards no test
+  reached; tests pin them and the dead alternatives (the hash rocket's greater-than sign in the openers of a list and of a slice literal (the one in the line opener was live and came back, see the next bullet), a lower bound that could not be
+  reached, a SameSite entry that could not hold 12 characters) are deleted.
+  Red first: 13 failing tests and a generator axis were committed before any fix and run against the previous class, then the guard tests (some red,
+  some green by design and red against the mutant that removes the guard, each said so in its commit), then the fix. The generator grew from
+  17,057 to 74,119 cases (60 cookie shapes, 46 wrappings: header last in its string, a document, a command followed by data, lists opened by
+  an equals sign or a hash rocket, lists cut in their last element, the Go-syntax print of a header in four places, and 16 chains of two to
+  four layers of JSON and shell escaping); against the previous class 34 of the 46 wrappings break the contract (29,271 lines with the wrong
+  span, 28,024 leaking a value, 67 breaking the Args JSON) and none does with the new one. Measured with the new class: it matches nowhere in
+  `internal/` and `docs/` (2,276 files, 27 MB), and in Go's `net/http` source (158 files, 2.8 MB) the same four places as before, each with a
+  real cookie value in it; it scans 1 MiB of Go source in about 0.1 s, as before (the next bullet has the cost of text built to be slow for it and the size of the pattern). A mutation pass after the fixes (47 mutants of the class, 29 of the harvest scanner: each level, break limit,
+  opening rule, escape bound, closer, list opener, count and stop character) killed all but one, which is equivalent (the index at which the
+  scanner resumes after a closing quote, which is only re-read as a quote that is not followed by an equals sign). Named gaps after the review: a raw JSON value (a bare double quote inside an unquoted value) ends the span at the
+  quote, and so does an apostrophe; a backslash and a lowercase n or r in an unquoted value is the JSON escape of a line break and ends the span (a raw path such as `dir=C:\new\x` ends it there); a quoted value that starts with white space or a separator is not a pair; quotes with two, four to six or
+  eight to fourteen backslashes are no level; a Go slice literal with its type left out is read as a line.
+- **The whole-span cookie class after its third review, red first.** A third review (every finding reproduced three times, most of them
+  compared with the commit before the second review's fixes) found that those fixes had traded some defects for others, and some older ones. Most let
+  a value of 12 or more characters through with the residual gate clean. (1) Order: with the credential classes run before the cookie class,
+  a cookie named like a credential with a double-quoted value was taken by the assignment class, which leaves the closing quote behind its
+  placeholder, and the span stopped at that stray quote, so every cookie behind it was written out; a JWT, a Bearer value or a key-word
+  cookie inside an unquoted printed list (a header printed with the plain verb, a Java map) left a placeholder that holds the bracket that
+  closes the list, and the span ended in it; and redacted Args lost their closing quote when an empty quoted cookie came ahead of a key-word
+  cookie in such a list. The cookie class runs first again, so the span sees the text as written, and the reason it had moved is answered
+  another way: when the cookie class has substituted anything, the credential classes also run over the text as it was written, and every
+  credential value of 12 or more characters they find is substituted wherever it still stands (longest first, with its own placeholder,
+  remembered for the value-tail gate); the 2,304-case matrix of an unquoted header followed by a quoted credential stays green. (2) A header
+  printed with the Go-syntax verb holds its keys in sorted order, so a Cookie with short values stands in front of a Set-Cookie with long
+  ones, and a string of a list that could stay open let the pairing of quotes shift by one: the match ran from the first key over the
+  closing brace of its list to the long value of the second and on past the quote that closes an Args string. A JSON object of two lists, a
+  Python dict and a Python list with a quoted value inside Args (the single-quoted string looked for the quote of the value at one level
+  only) did the same. A string of a list is now closed in the middle of it and open only as its last element, and a single-quoted string
+  looks for a quoted value at every level. (3) The count that starts a match took a JSON unicode escape as one character and nothing else,
+  so a shell escape, an escaped slash or a backslash path inside the first 12 characters of the only long value left it whole; a capital N
+  or R after a backslash (a Windows path) ended the span as if it were the escape of a line break. A bare value counts the escapes the span
+  takes now, and only a lowercase n or r is the escape of a line break. (4) The greater-than sign right behind the header name (an XML
+  element, an arrow) was live, and the second review had deleted it as dead; it is back. (5) Cost: a text that repeats a header over and
+  over, each one opening a list that never closes, was scanned to its end once per match and took the square of its length (16 KiB, 0.6 s; 1
+  MiB, hours), because a match cannot be reported while a thread of higher priority is alive. A header line now takes no opening bracket (a
+  list opens behind the punctuation, a space or the name), the line alternative goes first, and a quoted value starts a match by the rule of
+  a pair (a quote followed by a closer or a separator closes what came before). (6) Three guards that a mutant table found unreached are
+  pinned: the bound on the backslash run in the value scanner (a text cut in a backslash run made the redactor read past its end and panic),
+  the quoted value that starts with a backslash-u escape of U+0100 to U+0FFF (Python's json.dumps writes one for every non-ASCII letter;
+  without its alternative the long cookie behind it was written out), and the resume of the value walk after a closing quote.
+  Red first: the redactor tests of each defect and the generator axes (the bare escape inside the 12 characters; a two-key header in four
+  wrappings, a JSON object of two lists in three, a Python dict in two and a Python list in Args; in the redactor generator the cookies
+  behind a key-word cookie, a JWT and a Bearer value in three more wrappings that keep an earlier placeholder inside an unquoted list) were
+  committed before any fix and run against the class as it stood, and so were the scan-time tests (4 KiB 41 ms, 16 KiB 594 ms, a factor of
+  15 for 4 times the text); the guard tests are green by design and red against the mutant that removes the guard, each run as `go test -overlay` of the one test. The sweep of credential values is pinned by the 2,304-case matrix of an unquoted header followed by a quoted credential, which leaves 1,589 failing lines (values still in the text) when the sweep is removed. The generator grew from 77,417 to 145,862 cases (74 cookie shapes, 56 wrappings). Measured: the pattern is
+  132,494 program instructions (54,527 before this review) and compiles in 26 ms; the class alone scans 1 MiB of Go source in 0.1 s, and 1 MiB of each text that reviews found to be slow takes 0.4 to 1.0 s and grows in step with its length; a full redaction (every class) of 1 MiB of those texts takes 1.4 to 2.1 s against 1.2 s for source text. A random search over 4,900 units of up to a dozen pieces (header
+  names, quotes at two levels of escaping, backslash runs, brackets, equals signs) and a hill climb on the slowest eight, run on a gate
+  runner against the class after the first cost fix, still found four families whose time grew with the square of the length (16 KiB, 0.3 to
+  1.2 s); the line-first order and the pair rule for a long value remove them, and two searches with new seeds against the final class
+  (9,800 units and 16 hill climbs) found none: the units that looked slow at 32 KiB scale linearly at 0.7 to 1.3 s per MiB from 8 KiB to 512
+  KiB. A new named gap: a bare value with a shell escape inside four layers of escaping (more than sixteen backslashes) is left whole.
+- **A fourth review of the cookie class: what it takes, and a gate that fails closed.** Each defect below was a value of 12 or more
+  characters left in the text with the residual gate clean, or a document the redaction broke; each has a test that was red before its
+  fix (the failure lines are in the commits). (1) In an unquoted printed list (`map[Cookie:[a=b c=d]]`) a closing bracket is a character
+  of the cookie when a character of a value follows it and the one in front of it is no opening bracket (`sid=ab]cd`, the PHP-style name
+  `user[id]=v`); it used to end the span, and the tail of the value, or the whole cookie, stayed. The empty list of a typed slice literal
+  (`[]string{...}`) still closes, and the slice literal is tried before the bracketed list. (2) The open single-quoted string a cut list
+  ends in stops at a closing bracket, so an apostrophe in a value (`note=don't`) no longer runs through the closers of the Args around it
+  and the redacted Args stay valid JSON. (3) The Go-syntax print of decoded JSON (`[]interface {}{...}`, `[]interface{}{...}`, `[]any{...}`)
+  opens a list like `[]string{...}`. (4) A bytes or raw prefix in front of a quote (`b'cookie'`, `r"..."`) is part of the gap (ASGI scope
+  headers, aiohttp raw headers, dicts of bytes). (5) An underscore in front of the name is no obstacle (`HTTP_COOKIE`, `http_cookie`; the
+  test of the opener limits that pinned `my_Cookie` as a non-match changes with it). (6) A value that starts with an ampersand or a closing
+  bracket is counted, in a cookie, and an ampersand (or Go's escape for one) in the assignment class; the case-sensitive island that keeps a
+  capital N, R or U after a backslash a single character in the count is pinned. (7) The assignment class takes a credential header
+  (`X-Api-Key`, `Api-Key`, `X-Auth-Token`, `X-Amz-Security-Token`) printed with a list of values (`map[X-Api-Key:[...]]`, a JSON or Python
+  list), and a placeholder behind the name is not read as the list's value. (8) The Basic header's gap takes a line break, indentation, a
+  YAML dash and a placeholder left by an earlier class (`json.MarshalIndent`, jq, a YAML list, a header with two values). (9) A cookie match
+  whose header name is a key (`{"Cookie": ...}`, `{'Set-Cookie': [...]}`, `Header.Set("Cookie", "...")`) keeps the name, its closing quote
+  and the punctuation, replaces the cookies and puts back the closing quote of a list's last string, so redacted JSON is still JSON (the
+  other classes still start a match at their key word). (10) The credential sweep reads the text once: the distinct values are collected into
+  a set, grouped by their first 12 bytes and tried longest first at each position of one pass over the output, and the credential classes
+  read the lines of the cookie matches only. It used to search the whole text for each value (one `Cookie` line among many lines with a
+  credential each: 12 s for 1 MiB, 44 s for 2 MiB on one gate runner, 4 times the time for twice the text); one `Cookie` line now costs nothing
+  measurable (1.56 s against 1.55 s without it for 1 MiB, 3.1 s for 2 MiB, on the same runner). The longest-first order, the memory of every swept value
+  for the value-tail gate and the count of the places replaced are pinned by tests that go red against a mutant of each.
+  (11) The residual gate fails closed (`piishape.KeywordRun`, named `credential-keyword-run` by `Redactor.Residual`): a credential header
+  keyword (cookie, authorization, api key, auth token, security token; any case, inside any longer word or name) with a run of 12 or more
+  characters with no white space, quote, comma, semicolon or backslash starting within 32 characters behind it. The harvest leaves such a
+  trace out with a note that does not echo the text, and the evidence reducer keeps the output raw and does not call the seat. A YAML block
+  list item, a backtick-quoted value, a HAR name/value pair, an XML attribute and a scheme other than Bearer and Basic are covered by it
+  and not by new openers: the text is skipped, not redacted. A placeholder is not read and ends the reach of the keyword in front of it; a
+  line break ends the reach once a word has been read, and goes on only behind a colon, an equals sign, an opening bracket or brace, a comma
+  or a dash; another keyword is no part of a run; the placeholder of a cookie header followed by a YAML dash and a long run (the items
+  behind the first of a block list) fires it too. **The trade:** the check is wide on purpose. A test or an identifier whose name starts
+  with a keyword (`TestCookieJarKeepsTheValues`, `authorizationHeaderValue`) is a long run right behind it. Over the Go sources, tests and
+  Markdown of this repository it fires on 5.4 % of the files (125 of 2,311: 34 of 595 Go sources, 76 of 1,544 Go tests, 15 of 172
+  Markdown files), nearly all with a long identifier or word behind a keyword, so a trace that holds such text is skipped and a build
+  output that prints it stays raw; it costs 0.08 s per MiB of redacted text. Still open: a value in doubled apostrophes after a password
+  name, and a credential behind a keyword that is not in the list.
+- **A Go module version is not an email address.** The email pattern read `toolchain@v0.0.1-go1.27.2.linux-amd64`, which every Go stack
+  trace and module-cache path carries, as an address. Measured on 9.4 MB of real Go build and test logs cut into 4, 16 and 64 KiB pieces,
+  it matched 67.6 % of the 4 KiB pieces (55.7 % of the 64 KiB ones), so the reducer would have kept most Go logs raw; a domain may no
+  longer start with a lowercase `v` and a digit, and the same logs now match 0.3 % (all real addresses). No credential class matched
+  any piece, before or after the widening. The coding-agent page now says what the check is for: defense in depth on the seat path, the
+  only automatic credential layer on the corpus path, and a best-effort shape list in both.
+- **The quote lookup moves as well.** `internal/agent` could not import `internal/research` to call `research.VerifyQuotes`:
+  research imports `internal/delegate`, and delegate's own tests import the agent, so the import is a cycle in delegate's
+  test build. The lookup (`locateQuote` with the fold code under it) moves, verbatim apart from exported names, to the new
+  `internal/quotecheck` (`Locate`, `NewFolds`, `How`). `research.VerifyQuotes` keeps its signature, its report and its
+  behaviour and calls it; research's tests, which exercise it through `VerifyQuotes` and `AnnotateWire`, are unchanged and
+  green, and `quotecheck` has tests of its own. The reducer calls `quotecheck.Locate` directly, so the agent's dependency
+  closure does not grow by research, delegate, config or the ledger.
+- **Where it sits.** At the tool-result boundary in the loop, after the per-result cap and the environment rules and before the
+  read budget, the effect record and the pager, so each sees the bytes the transcript really carries, and only for a call that ran.
+  It is not a rung of the compaction ladder, which rewrites older bodies under budget pressure and is model-free by design: this
+  runs once, when a result is first produced, and costs one seat call on the loop's critical path (seconds per qualifying result).
+  The ladder, its options and its default bytes are untouched.
+- **A repeat is honoured.** A receipt is not the output. With the reducer on, an exact repeat of a reduced call is re-run once
+  (the receipt counts as a destroyed result for the repeat breaker, the same recovery path the compaction rungs use) and that
+  result is pinned and not reduced; any further repeat is refused as before. With the reducer off the breaker is unchanged, even
+  for a body that merely opens like a receipt. `IsEvidenceReceipt` recognises a receipt by its opening line and nothing that only
+  mentions it; the trace harvest asks it, so a transcript that holds a receipt is refused like any other already-shortened body.
+- **Config and doors.** `agent_evidence_reducer` (bool, `false`), documented in the operator guide and in `config.example.json`
+  (regenerated). `BuildConfig.EvidenceReducer` installs `Loop.WithEvidenceReducer(Offload)`; with the key on and no seam, `Build`
+  says so in its notes and installs nothing. The local agent CLI (its three `Build` calls), the MCP front door and the fleet-node
+  agent task read it from the node's config; a source-level test requires every `BuildConfig` literal that takes the node's agent
+  policy to hand over the key. The prompt-replay builder takes no node policy and is left alone, so a prompt A/B is not perturbed.
+- **Tests.** Red first, in four red commits each followed by its green one: the shared credential table and the shared quote
+  lookup against stubs, the reducer's
+  properties against a no-op stub (the tests that need a receipt fail), then the key's wiring (a missing key in the example and
+  five doors without it failed first). The properties are tested through the loop with a scripted planner and a scripted seat: the 4 KiB edge (4095
+  stays, 4096 is reduced), the 64 KiB ceiling, the receipt's claims, quotes and verbatim exit line (including `exit=137 (killed by
+  signal 9)` against a seat that claims success), reads and searches bypassed with the seat never asked, a missing exit line,
+  an unverifiable quote, a credential shape (the seat not even called), a receipt that is not smaller, twelve ways the seat can
+  fail, forged lines, a refused call, the repeat path with the reducer on and off, and the harvest refusal. A run of 22 mutations
+  (each guard, threshold, the producer gate, the pinned bypass, the repeat recovery, the exit check, the credential checks, the
+  quote shape, the claim cap, the panic guard) killed all 22; two initial survivors (a quote-shape check made redundant by the
+  span check, and the exit-status post-condition) led to removing the redundancy and to a direct test of the check. The four
+  fixes that followed the release lane's delta read (quoted values, cookie quoted pairs, cookie openers, cookie escapes) are red first as
+  well, a red commit before each fix commit; the value-tail test for every cookie value landed with the harvest code of the first fix, and
+  was run red against the older harvest file. The value-tail test for the session value behind a quoted cookie with escapes was already
+  green at its red commit (the harvest finds that value once it is inside a match); the red one is the redactor test for the
+  session cookie behind a quoted cookie with escapes. The whole-span change of the cookie class is red first as well, one red commit
+  with the generator and the probes, run against the old class: all 18 wrappings broke the contract, with 10,130 of the generator's
+  17,057 lines matched to the wrong span, 8,642 leaking a value and 326 matching with no long value in them; then the change. The
+  redactor probe for a key-word cookie was red on its class-order assertion only; that assertion was given up in the review below, whose
+  order finding showed it protected the accounting and not the values.
+- **Not verified here.** Nothing in this change ran against a live seat. The acceptance measurement is a seat A/B on the 9B and
+  27B agent seats through the gate's non-inferiority mode (tool-call reliability and pass rate), with forwarded prefill tokens as
+  the efficiency metric and never seconds; until it passes the key stays off. Also open: how often real seats return a usable
+  answer (the `extract` task's fixed 512-token completion budget holds about five claims with short quotes, and an answer cut by
+  it falls back to the raw output, which would make the step nearly inert); whether a seat quotes single verbatim lines as asked;
+  the receipt's effect on the agent's later steps (the thing the A/B exists to find out); the seat-call latency on the critical
+  path; and the planner-seat render of the cascade call (the offload closure renders on the planner seat without thinking when
+  the planner is not the workhorse). Fall-back reasons are logged per attempt (`agent evidence reducer: kept the raw output of ...`)
+  and not yet counted on the run result.
+  The whole-span cookie class was tested on fixtures built from pieces, on this repository's tracked text and on the Go standard
+  library's `net/http` source; no real harvested trace went through it, and the review's fixes were not run against a live seat either.
+  The opening rule (a quote followed by white space or a separator opens no value) and the three-line-break bound are design choices
+  pinned by tests, not measured against real traffic; the timings are one series on a noisy shared machine. The widened value class and the tail gate were tested on fixtures only; no real harvested trace was re-run through the redactor here.
+  The same holds for the control-sequence, quoted-literal and header shapes: the fixtures are built from pieces, and no real colored
+  build log or real harvested trace was run through them. The scan cost (about 1.5 s per MiB; 1.51, 1.54 and 1.54 s) is one series of three runs on a noisy shared machine, and so are the timings of the third review's slow texts (a desk machine at two threads, and a gate runner for the random searches), and the 67-to-82 count of assignment matches is one scan of this repository's tracked text.
+  The fourth review's fixes and the keyword check were tested on fixtures built from pieces, on this repository's text (the 5.4 %
+  figure) and on a census of 825 planted cases of the review's leak families (705 left a value in the text with the gate quiet before,
+  30 after, and 120 are named by the gate; the 30 are a value in doubled apostrophes after a password name, which no class and no keyword covers); no real harvested
+  trace or build log went through the keyword check, so how often it skips a real trace is unmeasured beyond the repository's own files.
+  The sweep's cost was measured on two gate runners, one series each.
+
+### Added - offload_run_template: list, inspect and run the ComfyUI workflow templates a node carries, behind a licence gate, with trust on first use for model files
+
+- **What it does.** One MCP tool, `offload_run_template`, with an `action`: `list` (filterable, paged, sorted, the same bytes for the
+  same tree), `get` (one template's manifest and licence class), `readiness` (each model present or missing, directory-aware; each
+  input file; node packs; ComfyUI's version against the template's minimum; the licence verdict) and `run`. `run` asks
+  `render/run-template.mjs resolve` for the gate, and only for a template it passes sends a `run_graph` task through the same call
+  `offload_run_graph` makes (route `local`: the same lease, ComfyUI lifecycle, satisfier and envelope), with the template **name**, a
+  runtime manifest and optional `overrides` and `seed`. The runner (`comfy-run-graph.mjs --template NAME`) converts the template with the
+  converter once ComfyUI is up, with that ComfyUI's own `/object_info` and version, and before preflight; a refusal is the typed defer
+  `TEMPLATE_CONVERT_REFUSED`, and a model file the converted graph loads that the manifest does not name is `TEMPLATE_MODEL_UNLISTED`. An
+  override sets values and never retargets a file or names an embedding: one that targets a model or input loader node, an input
+  that holds a model file name, a value that is a model file name, or a string value with `embedding:` in it is refused as `override_is_file`,
+  because the licence gate, the FLUX bar and the trust-on-first-use check read only the models the template names (one limit is stated with the embeddings, below: text that string nodes assemble while the graph runs is not seen). The manifest generator is `render/template-manifest.mjs` (templates to manifest entries: models as
+  `models/<class>/<name>` with the source and the hash a template declares, node packs, licence class, API or not, input files read or not).
+- **The gate.** This release runs a template only if it is not a paid-API one, not FLUX-family, needs no custom node pack, is readable and
+  has a permissive licence class (or no weights). A paid-API template is a Defer (`deferred:true`, class `api_paid`, never cloud). Every
+  other case is refused with a typed class: `flux_barred`, `custom_nodes`, `license_unknown` (a repository the map does not list, a weights
+  file with no Hugging Face source, or a map entry that was inferred from a sibling and not read: unknown is not permissive),
+  `license_conditional`, `license_non_commercial`, `template_unreadable`, `subgraph_unexpanded`, `bad_model_path`, and what the node lacks with the exact list:
+  `models_missing`, `embedding_unverified` (a prompt embedding the harness does not verify, below), `inputs_missing`, `comfyui_too_old`. Nothing
+  is leased, started or sent for a refused template. A run never downloads a
+  model: the runtime manifest names each model by the path it was found at and carries no source.
+- **Where it runs.** On this machine's lane only. The fleet door takes an API-format graph and a template is converted on the node that
+  runs it, so a call that names a route beyond local, remotes or a node is refused as `fleet_not_offered`. A template that reads input files
+  (an active `LoadImage`, `LoadImageMask`, `LoadImageOutput`, `LoadVideo` or `LoadAudio`) is a local-only ticket for its own reason, and the
+  answer says so (`local_only`, `fleet_note`): a node can match an input file only by name.
+- **Host RAM.** A template run carries `template` and `manifest_path` and no graph file, so the run-graph lane read nothing and declared
+  the media class default: the largest family the box binds (33.1 GiB on a box that binds a Wan 2.2 pair) for a template whose files
+  are 23.1 GiB, held by the host-RAM brake though the box could run it, and on a box that binds no ComfyUI render family, 0 (source
+  `none`), so a big template got no host-RAM check at all. The lane now declares the model files the runtime manifest names
+  (`models/<class>/<name>`, sized under the ComfyUI model roots; `hostneed.ForManifestModels` and `ForManifestFile`), by the rule
+  a graph's loader files get: the sum, each file once, in full when together they do not fit the card (less the call's
+  `reserve_vram`), 0 when they fit, source `graph loaders`. Any doubt keeps the class default exactly as before: no manifest, one that
+  cannot be read, one that names nothing, an entry that is not `models/<class>/<name>`, or one file the box cannot find or size (no
+  partial sum). The lane probe reads the same figure through the same function, so it agrees with the admission. A name is looked up
+  under every class directory, as a graph's is, so a name held under two classes is sized as the larger. An estimate from the files'
+  sizes, not a measurement.
+- **Subgraph depth.** The catalog expands eight levels of subgraph instances and the converter up to sixty-four, and a template's models, licence
+  class, FLUX bar and host-RAM figure are read from the catalog's walk. A template with one loader within eight levels and another at a deeper
+  level got a manifest naming only the shallow file while the converted graph loaded both (reproduced at nine nested instances), and the host-RAM
+  figure summed the short list. A template with an instance the walk left unexpanded (nested past eight levels, or a subgraph that contains
+  itself) is now refused as `subgraph_unexpanded`, ahead of the checks that read the graph, in `list`, `get`, `readiness` and `run`. The two depth
+  limits are kept apart on purpose: the converter bounds a branching nest by counting nodes, and the catalog walk has no such count, so its depth is
+  what keeps it small; a template nested deeper than eight is refused rather than run, though the converter could convert it. No template of a
+  602-template copy of a newer package (`json 0.1.108`, 203 with subgraphs) has an unexpanded instance; that is evidence for the counts below, not a
+  re-scan of the package they were measured on. The runtime
+  manifest carries no completeness mark and the Go side has no backstop for one; the refusal stops a short list from the case above, and the
+  runner's comparison (next bullet) stops it whatever its cause (`hostneed/manifest.go` says so).
+- **Model files only the converter reads.** The manifest is the catalog's static reading of a template and the graph is the converter's, two
+  readers of one file, and the licence gate, the FLUX bar, trust on first use and the host-RAM figure read only the manifest. Three ways they
+  differed: an active subgraph instance's own `widgets_values` (the converter routes them into an inner loader, through `proxyWidgets` or as
+  the literal a subgraph input takes), a loader whose `widgets_values` is an object keyed by input name (the converter reads both forms, the
+  list was read only in its list form), and a loader that stores fewer values than it has widgets and takes the listing's default. A template
+  with the first or the second resolved to `run` with the licence class of its other files (or none), and loaded the file the list lacked.
+  Two changes close them. The catalog now reads both forms of `widgets_values` and the values of an active instance, so such a file reaches
+  the licence class, the FLUX bar and readiness before a run (an unmapped one refuses the template as `license_unknown`; a value of a muted
+  or bypassed instance is not read, and one an annotation covers is not listed twice). And the runner compares the converted graph with the
+  manifest before preflight (`unlistedModels`, `template-run.mjs`): a model file the graph loads that the manifest does not name defers
+  `TEMPLATE_MODEL_UNLISTED` (the first such file is the `ref`) and nothing is posted. The comparison reads the graph that will run, so it
+  covers the third way, which the catalog cannot see, and any other. A file matches an entry as the catalog matches an annotation to a widget
+  (by the name under the class directory or by its base name, ignoring case and slash direction, `modelCovered`); a graph run is not compared.
+  The proxied value is listed with no class, and its precedence over the inner loader's own annotation is not modelled: when both name
+  a file, both are required, which can ask for one file more than the graph loads and never one fewer. Measured on the installed package
+  (`json 0.1.96`, 578 templates, read only): the catalog lists the same 897 model entries, with the same licence class, FLUX flag and verdict
+  per template, before and after this change.
+- **Embeddings named by the prompt text.** ComfyUI's CLIP tokenizer loads `models/embeddings/<name>`, then `<name>.safetensors`, `.pt` and
+  `.bin`, from a word of the prompt that starts with `embedding:` (`comfy/sd1_clip.py`, `load_embed`, read in ComfyUI 0.38.0). No loader node
+  and no file extension is involved, so a text override such as `embedding:evil_ti, a cat`, `embedding:evil_ti.pt, a cat` or
+  `(embedding:evil_ti:1.2) cat` was accepted (only a value ending in `.safetensors` was refused), the runner's comparison saw no file, and the
+  licence gate and trust on first use never read it, which contradicted "an override never retargets a file". One reading of the reference
+  (`embeddingRefs` and `embeddingCovered` in `templates-catalog.mjs`) serves the catalog and the runner's comparison; the override check keeps
+  its own, wider matcher (`mentionsEmbedding`), so that what it lets through is never a text the reader finds a file in.
+  - Where ComfyUI looks, and what the harness does about it. Not in the directories of the class one after the other: `expand_directory_list`
+    puts every embeddings root and every subfolder below it (links followed) into a Python `set`, and `load_embed` opens the file of the first
+    directory of that set that holds the name, so the directory that answers is chosen by hash order and differs from one process to the next.
+    Two things follow. A file that sits only in a subfolder (`sd15/foo.safetensors`, a common layout) is the file `embedding:foo` loads. And a
+    name that more than one directory holds (the root and a subfolder, two subfolders, two registered roots) is not one file: the trust record,
+    the hash and the licence approval would attach to a file ComfyUI may not open. The harness does not replicate
+    that choice (see the fail-closed bullet below).
+  - Override: any string value that contains `embedding:`, in any letter case, is refused as `override_is_file`. ComfyUI matches a lower-case
+    word that starts with the identifier; matching it anywhere and in any case is the fail-closed side.
+  - Runner: a string input of the converted graph that names an embedding the way ComfyUI reads it is read as text and no longer as a file
+    name. Each name it asks for is reported as `models/embeddings/<name>` (the first is the `ref` of `TEMPLATE_MODEL_UNLISTED`) unless the
+    manifest names, under `models/embeddings/`, a file for it: the name as written or with `.safetensors`, `.pt` or `.bin` appended, at the top
+    of the directory or in any subfolder (whole path segments, never a base name that only ends alike; case and slash direction ignored), and a
+    name that is empty, absolute or has a `..` segment is never covered. A manifest entry under another class does not cover it.
+  - Catalog: a prompt widget of an active node (or an active subgraph instance's own values; not a note, not a muted or bypassed node) that
+    names an embedding is a requirement under the `embeddings` class with no source, unless an annotation of that class covers it by the
+    name or with one of the three extensions, in the root or a subfolder; the annotation then records the name it covers (`embedding_refs`). A
+    template whose own prompt names an unannotated embedding is therefore `license_unknown` and refused; an annotated one is read by the
+    licence gate like any weights file. Text that only looks like a reference to the override's wider matcher (`Embedding: a primer`,
+    `wordembedding:vec`) names nothing here.
+  - Fail closed, deliberately narrower than ComfyUI. ComfyUI warns and skips an embedding it cannot find (`comfy/sd1_clip.py` logs
+    `embedding:<name> does not exist, ignoring`, drops the word and runs the prompt without it). The harness refuses instead: a missing or
+    different embedding silently changes the output of a vetted template, and the licence class, the hash and the trust record attach to the
+    file the manifest names. Readiness therefore accepts a name a prompt gives only when exactly one physical file answers it, case-exactly:
+    the name as written, then with `.safetensors`, `.pt` and `.bin` appended, on whole path segments, in the roots and every subfolder,
+    `.git` directories included: ComfyUI's embedding search walks them, so a file under one is an answer, while the listing a loader widget
+    reads skips them (the scan walks the `.git` of an embeddings root that is a git work tree, as ComfyUI's search does). A file
+    the class does not list answers the name as written too (no extension, or a whole name that is the reference), because `load_embed` asks
+    `isfile` for it first with no extension filter; the inventory records those files (`unlisted_files`) for this class, with the files below a
+    `.git` directory, and `unlisted` counts only what an extension keeps out. One such file is
+    `present`, and the runtime manifest names it (`models/embeddings/<sub>/<name>.<ext>` for one in a subfolder, which the host-RAM figure can
+    size and the satisfier and the trust check can find). A file reached by several paths is one file, by the file system's own word: the
+    inventory records where each embeddings file really is (`reals`) and what the file system calls it (`ids`, so two hard links of one file
+    are one file), and answers that open the same file are one answer. A root that is a link to another registered root (a model drive reached
+    through the default directory), a link inside a root, a root registered inside another and one file linked into two directories (symbolic
+    or hard) are each one file; two copies are two files. A file system that gives no file identity falls back to the real path, so there a
+    hard link reads as two files; a drive that keeps the case it is given, or derives its file index from the path, can show one folder
+    registered under two spellings as two files, and that is refused too. Everything else with a file in it is refused as the new status
+    `embedding_unverified`, with a `reason` and the files in `found`:
+    - a case variant answers it: the only file that answers differs in letter case. Whether ComfyUI finds it depends on what the volume does
+      with a name in another case, and the harness does not ask the volume;
+    - more than one file could answer it: the root and a subfolder, two subfolders, two registered roots, two extensions in one directory, a
+      file with no extension beside a listed one, an exact file beside a case variant of it, and an annotated file (`embedding_refs`) beside
+      another file that answers the same name. ComfyUI would pick one by set order or by extension, and a manifest can name only one file;
+    - a probe name is answered by a file of the node (below).
+    A node with no file for the name is `missing`, listed by the name the text gives (`models_missing` at the gate). The gate answers
+    `models_missing` first when both apply, then `embedding_unverified` (the class, the code `TEMPLATE_EMBEDDING_UNVERIFIED`, the detail
+    `embedding lookup not verified by the harness: <name>: <reason> (<files>)`, and the list in `embedding_unverified`); `readiness` blocks on
+    both, in that order, and the readiness table, `nodeReadiness` and `summarizeReadiness` do not count such a template as ready.
+    They do not count it as files short either: a template held back only by an embedding the harness cannot verify is in no bucket of the files-short histogram (nor of the
+    table's nearest-node histogram), and is counted in `embedding_unverified` (`nearest_embedding_unverified`), which the text table prints as
+    `embedding not verified (local)`. Deliberately
+    not replicated: ComfyUI's choice between the directories that hold a name, its preference of one extension over another within a
+    directory, and the case rule of the volume. The full replica is a later row, to be taken when the first real template needs it; no template
+    of the installed package names an embedding in an active prompt.
+  - A loader widget's embeddings file is not a prompt name. An annotated entry of the embeddings class that records no prompt name is the
+    file a `ConditioningLoader` widget carries (three templates of the installed package, the Marigold depth, albedo and surface-normal
+    ones). That node lists the directories by relative path (a subfolder file is `sd15/x`) and opens its value with the exact path under the
+    first root that holds it, so it is met like a file of any other class: a subfolder-only file is `in_subfolder`, and a root file with a copy in a
+    subfolder is `present`. The prompt lookup applies to an unannotated requirement and to an annotation that records the prompt names it
+    covers (`embedding_refs`); `readinessFor` forwards `annotated` so the run gate makes the same split.
+  - Other names ComfyUI may try (`embedding_probes`). Two readings of a prompt open files the requirement does not name. `_try_get_embedding`
+    asks `load_embed` for the name as written first (`embedding:foo, a cat` asks for `foo,`) and strips the commas only when nothing
+    answers; and the LLM-based text encoders (Z-Image, Flux.2, ERNIE and others) hand the same directory on with `disable_weights`, so the
+    text is not cut at parentheses and no group weight is read (`embedding:foo(bar)` names `foo(bar)`, `a cat ( embedding:1.2 )` names
+    `1.2`). A template does not say which encoder runs, and the two readings differ in both directions, so the CLIP reading stays the
+    requirement. `embeddingProbes` returns the other names; they are not requirements (listing them would refuse every prompt with a comma
+    after the name), the catalog row carries them as `embedding_probes` only when there are some, and readiness adds an entry
+    (`embedding_unverified`, `probe: true`, the reason, the files in `found`) after the requirements when a file of the node answers one, in
+    any letter case and however many files answer. Every probe of a prompt is asked, the second as well as the first. The template is then
+    not ready and the run gate refuses it as `embedding_unverified` (nothing is missing), naming the probe name, because ComfyUI may open a
+    file that no manifest names.
+  - Grammar: the reader is a port of the tokenizer path of `comfy/sd1_clip.py` (`token_weights`, `tokenize_with_weights`,
+    `_try_get_embedding`), compared with the extracted functions of that file on 150,000 generated texts with no difference. The text is cut
+    at parentheses and a closed group loses a numeric tail, so `(embedding:name:1.2)` is `name` and a bare `embedding:name:1.2` is the name
+    `name:1.2`, which ComfyUI fails to find; the identifier is lower case and starts the text or follows whitespace or a parenthesis, so
+    `Embedding:`, `wordembedding:` and `a,embedding:x` are not references, while `an embedding: soft light` is (ComfyUI looks for a file named
+    `soft`); whitespace after the identifier is skipped; the name ends at whitespace, `(`, `<` or `[` (an unescaped `)` with no group to
+    close stays in it); commas come off both ends; `\(` and `\)` are characters of the name. Deviations from ComfyUI, each named: the name
+    returned is the one after the comma retry and the reading is the CLIP tokenizer's, the one embeddings are made for, and the names the
+    other tries (the name as written, the reading without weights) are probes, not requirements (above); `embedding:` with no readable
+    name, and a text nested more than 500 groups deep (ComfyUI reads about 900), are the empty name, which every caller refuses; the
+    class listing skips `.git` directories, as ComfyUI's listing does, and the prompt lookup walks them, as its embedding search does (above).
+  - Limit: the override check and the runner's comparison both read the string values of the graph, so an embedding assembled while the graph
+    runs by string nodes (a concatenation of two overrides, for example) is neither refused nor compared with the manifest, and the licence
+    gate, the hash and the trust record never see the file it loads. "An override never retargets a file or names an embedding" is true of the
+    values an override sets, not of text built from them.
+  - Measured read only on the installed package (`json 0.1.96`: 594 `.json` files, which are the 578 templates of the index, `fuse_options.json` and 15 index-family files, `index.json`,
+    twelve localized or mcp indexes, the schema and the logo): the package holds
+    897 model entries, 3 of them annotations of the embeddings class (the loader-widget conditioning files that the prompt lookup does not
+    touch), and no row carries `embedding_probes` or an annotation `embedding_refs`, so the prompt lookup has nothing to read in it. The
+    per-template verdicts and the readiness per template on a snapshot of the measuring machine (`readiness --snapshot <file> --json --detail`,
+    run before the simplification and at its head) are the same: 649 requirements missing, 214 present; the snapshot itself differs only by the
+    dropped `case_insensitive_dirs` field. The only `embedding:` text in the package is in the
+    markdown notes of four `video_minimax_h3_*` templates, which are not read (they are refused as `license_conditional`). That snapshot
+    holds no embedding file, so the lookup was tested on fixture trees and on real files, links and hard links in a scratch directory (see
+    the tests below).
+- **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
+  profile and 672 compact, so one more tool is about +3.2% of the 31-tool full list. The registered design accepts that cost, and the
+  `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 3,092 bytes of `tools/list` in
+  the full profile and 2,930 compact, against means of 4,110 and 2,639 over the 32 tools of the default box (bytes, not tokens; the
+  `tools/list` dump of `toolsprofile_dump_test.go`). It has a reviewed compact keep-list entry (four sentences: what a run is allowed for and
+  refused with, that it never downloads a model, that an embedding the harness cannot verify is refused as `embedding_unverified`, where it
+  runs).
+- **Trust on first use for model files.** Most template annotations carry no hash (10 of 1,135 do). The first run that meets a model with no
+  declared hash records its sha256, size and modification time in `<file>.tofu` beside it; a later run with the same size and time trusts the
+  record without hashing, a changed file is hashed again, and a hash that is not the recorded one defers `MODEL_SHA_MISMATCH`, naming both. The
+  check (`verifyTofuModels`) runs on every run, a cached one included, before ComfyUI starts. It is a different record from the `.sha-ok`
+  sentinel, which means "matched a pinned hash". A record that cannot be read or written defers `MODEL_TOFU_RECORD`. The first sighting of a
+  large file pays the hash once (minutes for 20 GB); bytes replaced under an unchanged size and time are not seen.
+- **Also changed.** The manifest parser carries an optional `trust` per model. The satisfier now looks for a `diffusion_models` file under
+  `models/unet` and a `text_encoders` file under `models/clip` too, as ComfyUI does (a run-graph manifest that names the modern class was
+  reported missing for a file in the legacy directory). The catalog row names the input files its active loaders read (`input_files`).
+  ADR 0058 is Accepted, dated 2026-10-14, with the third licence state `conditional`; its index row says so.
+- **Measured catalog at this head** (installed package `comfyui-workflow-templates 0.11.70`, `json 0.1.96`; the research's 246 was a heuristic):
+  578 templates in the index; 337 are paid-API (all three API signals agree); 80 are runnable by this release (5 with no weights; 75 with 247
+  model entries, 237 of them trusted on first use and 10 with a declared hash; 55 of the 80 read input files); the others are refused as
+  25 `flux_barred`, 63 `license_conditional`, 10 `license_non_commercial` and 63 `license_unknown` by first class (39, 64, 30 and 71 templates carry
+  those reasons, counted over every kind, paid-API included; among the 236 local templates that need weights the catalog's tally is 75
+  permissive, 63 conditional, 29 non-commercial and 69 unknown). `custom_nodes` is 0 for this package. 85 of 135 repositories of the local templates that need weights are not in the licence
+  map (83 of 133 in the research). On one node (<node-a>, ComfyUI 0.38.0), 4 of the 80 were ready to run that day (73 lacked a model file, 52
+  lacked an input file they read).
+- **Tests.** Written red first: the red commit failed 39 + 12 + 16 tests of the three new Node files, 11 of the satisfier's and 6 of the
+  run-graph flow's, 5 of `internal/rungraph`, 2 of the pipeline, 19 of the MCP door (a stub answered a bare deferral) and the ADR test.
+  `node --test render/template-manifest.test.mjs render/run-template.test.mjs render/template-run.test.mjs` (a paid-API template is a Defer with
+  a typed class; an unlisted licence is refused; a template that reads input files is local-only; `list`, `get` and `readiness` are
+  deterministic on a fixture catalog), the satisfier tests (a hash mismatch is refused; the check runs on a cached run; a real-file round trip),
+  `internal/mcpserver/runtemplate_test.go` and `toolsprofile_runtemplate_test.go` (the compact keep-list test covers the tool), and a Go test
+  that runs the real script on a tree built from the catalog fixtures. Docs: `docs/systems/mcp-server.md` ("Workflow templates"),
+  `docs/flows/run-graph-manifest-satisfaction.md` ("Template runs"), `docs/systems/media-generation.md`, `render/README.md`.
+- **Subgraph depth tests.** Written red first: 4 of 5 new tests of `render/template-manifest.test.mjs` failed (a template nested nine deep, and one whose
+  subgraph contains itself, were run instead of refused; resolve and list agreed); the fifth, a template nested exactly eight deep, passed before the
+  change and pins the boundary.
+- **Model-file tests.** Written red first: the runner test (a converted graph that loads a file the manifest does not name was posted, not
+  deferred) and the three `unlistedModels` tests of `render/comfy-run-graph.test.mjs` and `render/template-run.test.mjs`; then two tests of
+  `render/templates-catalog.test.mjs` and two of `render/template-manifest.test.mjs` (the list lacked the instance's file and the object-form
+  file, and both templates were `run`). The guards that passed before the change pin what must not move: a graph run is not compared, a file
+  is matched by path, base name and case, a muted or bypassed instance is not read, and on the two hand-written templates the converter's graph
+  loads only files the catalog names.
+- **Embedding tests.** Written red first: 18 tests failed on the code before the change (the three override shapes and the letter-case one,
+  six of `unlistedModels`, `embeddingRefs`, the catalog requirement, annotation coverage and the subgraph instance, three readiness ones,
+  and the verdict of a template with a baked-in embedding). The guards that already passed pin what must not move: a prompt that only
+  talks about embeddings goes through, a muted node and a note add nothing, and an annotated embedding runs. The reading and the
+  resolution those tests first pinned were corrected afterwards; their tests and mutation checks are in the next bullet.
+- **Embedding lookup and grammar tests.** Written red first, one per behaviour: 13 tests of `render/templates-catalog.test.mjs` (seven of the
+  grammar, two of the catalog, three of readiness and one of `embeddingCovered`), 4 of `render/template-manifest.test.mjs` (an embedding held
+  only in a subfolder, an annotated one in a subfolder, a name held in the root and in a subfolder, an annotated file another file shadows), 2 of
+  `render/template-run.test.mjs`, and the root prose test `run_template_docs_test.go` (the docs say how ComfyUI finds an embedding and name the
+  string-node limit; it refuses the first wording of the lookup, a walk through the class directories in order that matched a whole path
+  only). The test that pinned "a nested listed name is not matched by its base name alone" became its opposite. Guards written with them pass
+  on the new code and bite under mutation: the override check is at least as wide as the reader (a corpus), Python's whitespace set and
+  float() rules, a text of 150,000 groups, a text nested 600 deep, a model file name that holds an identifier-like word, and a file under
+  another class. The reader was compared with the extracted functions of `comfy/sd1_clip.py` on 150,000 generated texts (27,440 with a
+  reference), no difference (it found one: float() does not strip U+001C, which `str.split()` does); that comparison ran in a scratch
+  directory and is not committed. Mutations of the reader, one per scratch copy of `render/`, each fail at least one test: a case-insensitive
+  identifier (twice), a bare weight stripped, no cut at parentheses, no skip of whitespace, any group tail as a weight, float() without `inf`,
+  `nan` or digit underscores or with the wrong whitespace, JavaScript's whitespace, escapes not honoured, no depth bound, a spread of a
+  group's pieces, and a gate on the wide matcher in the catalog and in the runner.
+- **Earlier review rounds of the embedding lookup (what still stands).** Each fix had a commit of failing tests before it. A loader widget's
+  embeddings file (a `ConditioningLoader`) is met by its exact path under the first root that holds it, and the prompt lookup does not apply
+  to it (`readinessFor` forwards `annotated` so the run gate makes the same split). A physical file is one file however it is reached: the
+  inventory records the file system's id and real path of each embeddings file, so a junction to another registered root, a link inside a
+  root, a root registered inside another and a hard link are one file, and two copies stay two. A file the class does not list answers the
+  name as written (`unlisted_files`). The probe names are asked against the node, and a template with no model rows that a probe blocks is
+  not counted as ready by `summarizeReadiness`. The real file system tests make their folders with `scratchDir` (they had turned
+  `test-scratch.test.mjs` red).
+- **Embedding lookup simplified (round six).** Four review rounds had made the prompt lookup a replica of ComfyUI's set-order choice on every
+  file system, and every finding was on synthetic input: in the installed package (`json 0.1.96`) the catalog holds no embedding
+  requirement and no probe. The lookup is now the narrow, fail-closed one above. Gone: the case-folding probe and the inventory's
+  `case_insensitive_dirs`, every rule that depended on whether a volume folds case, the choice within one directory between extensions, and the
+  statuses `ambiguous` and `shadowed` (and `case_mismatch` for a prompt embedding); the loader-widget rule is unchanged. Written red first (a
+  commit of tests only): 8 tests of `render/templates-catalog.test.mjs` and 7 of `render/template-manifest.test.mjs` failed on the code before
+  the change: a case variant, an exact file beside a case variant, two files in one or several directories, a file beside an annotated one
+  that ComfyUI tries first, a probe hit (refused as `models_missing` before), a file that answers only the SECOND probe of a prompt (the
+  earlier tests lacked it: a mutant that asked only the first probe passed all three test files), the inventory's case rule and probe, and
+  the order of `models_missing` before the new class. The class list of the Go door passed at once. The two real-NTFS layouts (a
+  case-sensitive root holding `Foo.pt` with a junction first in the walk to a folder that folds case; a root holding `EasyNeg.safetensors`
+  beside a case-sensitive subfolder holding `Zed.pt`) are tests that skip where the per-directory case flag or the link cannot be made; their
+  synthetic twins run everywhere. Removed, because they pinned the dropped behaviour: thirteen tests that asked a volume or a root to fold case
+  (the inventory's case rule, the probe against a real volume, a case variant answered on a folding volume, two variants in two directories, a
+  root with no letter in its top-level names, the swap of each letter, the folder that holds both spellings, the per-root case rule, the
+  earlier candidate winning on a folding volume, a name with capitals), the one that pinned the extension order within a directory, two
+  superseded by the new tests (a name held in several directories; an annotation met only when it is the file ComfyUI opens), and in the
+  manifest tests the folding io and three superseded tests of the old statuses; the rest that named the old statuses were converted. Twenty
+  mutations of the new code, one per scratch copy of `render/`, each fail at least one test: the exact-case compare lowered, no identity
+  dedup, a case variant read as present, more than one file read as present, a probe hit ignored, only the first probe asked, probe findings
+  not added, the whole-segment match loosened to a suffix, the case flag of a file under two names taken from the first, annotation names
+  not checked, the two reasons swapped, `.bin` not tried, unlisted files not candidates, the class missing from `blocking`, the gate not
+  refusing the class, the gate checking it before `models_missing`, unverified entries also listed as `models_missing`, probe hits missing
+  from the list, the reason missing from the entries, and the class constant misspelled; one of them (the case flag of a file under two
+  names) survived the first set of tests and has a test of its own.
+- **Proof gaps found by the next read of the simplified lookup.** A one-token change of each of these left every test file green and gave a
+  wrong `ready` or a wrong label, and each has tests now, shown red against the change in a scratch copy of `render/`: a probe loop capped at
+  the first two or three probes (a prompt with four probes and a file that answers only the last, in the catalog and the manifest test
+  files, with each position walked); the annotated file compared with the file that answers a name it covers, by identity (an annotation
+  `foo.pt` that covers `foo`, with `foo.pt.safetensors` and `foo.bin` on the node: ComfyUI loads `foo.bin`); a walk that stopped following
+  links for the embeddings class (a link inside the root: a different file of the name behind it is a second answer, and a name held only
+  behind it is found; on an in-memory io that lists one entry as a link and on real files, the latter skipping where no link can be made);
+  and
+  the name reported for a file reached under several names (the first in path order, not the last). The readiness summary no longer counts an
+  unverified embedding as a file short (see above).
+- **Manifest-side normalisation tests.** `unlistedModels` lower-cases the manifest path, turns its backslashes into slashes and drops the
+  `models/<class>/` prefix, and every test manifest was lower case with forward slashes, so no test could fail on that step. Both fixtures
+  (`LISTED_MODELS` in `template-run.test.mjs`, `LISTED` in `comfy-run-graph.test.mjs`) now hold a mixed-case entry
+  (`Qwen-Image-Lightning-8steps-V1.0.safetensors`) and a backslash entry under a mixed-case folder, with a graph that names each exactly,
+  as four separate tests. Production was already right, so they pass; each was shown to bite by mutating the step in a scratch copy of
+  `render/`: without the lower-casing 5 fail, without the slash normalisation 2 fail (both backslash ones), and no pre-existing test fails
+  under either.
+- **Not verified here.** The package the counts below were measured on, re-scanned for unexpanded subgraph instances (only the newer copy was).
+  The runner's comparison against the converter's output for the real templates under a live ComfyUI: it is tested on injected graphs, on the
+  two hand-written templates with their saved listing, and by unit, and the real package was only read by the catalog (a template the
+  converter loads a file for that the catalog did not name would show as a `TEMPLATE_MODEL_UNLISTED` defer on a live run).
+  An embedding loaded by a live ComfyUI: the directory set and the tokenizer path are read from ComfyUI's source (0.38.0) and compared with
+  its extracted functions in Python, not run in a live ComfyUI, and no template of the installed package names one in an active prompt, so the
+  catalog path has no real template to be measured on. The lookup on the real model tree of a node: the measuring machine's snapshot holds
+  no embedding file. The junction layout of a model drive was reproduced with a real junction in a scratch tree, not on a node. The two
+  real-NTFS tests (a root with the per-directory case flag) skip where the flag cannot be set; on the machine they were written on, setting it
+  was refused (access denied), so they have not run on a real volume, and their synthetic twins did. A folder registered under two spellings
+  on a virtual or cloud drive (one that keeps the case it is given, or derives its file index from the path) was read as two files by the
+  earlier code of this branch on a drive of that kind; at this head it is refused for the same reason by reading the code, not by a run
+  on such a drive. The probe names (the name as written, the reading without weights) were not run through a live
+  encoder: ComfyUI's extracted functions give the names, and which text encoder a template uses is not asked.
+  One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
+  change. The production wiring of the conversion against a live ComfyUI (the `/object_info` and `/system_stats` reads in
+  `comfy-run-graph.mjs`; the flow and the converter are tested with injected values, and the converter on saved listings). The time of a
+  first sighting hash on a 20 GB file. The Go door's production path on a box's real tree (tested on a fixture tree and a canned script). The template run's host-RAM
+  declaration against a real template under a lease on a node (tested on stat tables and sparse files through the real admission).
+- **Not built.** Fleet placement of a template; model downloads (a missing model is a refusal that lists it); an acknowledgement path for a
+  conditional or non-commercial template; staging a template's sample input files; custom node packs; a CLI verb and a fleet task for the tool. Later, with its trigger: the full replica of ComfyUI's embedding
+  lookup (its choice between the directories that hold a name, its extension preference and the case rule of the volume), taken when the first
+  real template needs it.
+
+### Fixed - the host-RAM rule holds a commit nobody stated to an enforced commit limit below physical RAM and refuses figures that are not numbers; the staged-file, route and decision-record checks pin what they say
+
+- **A commit nobody stated, and a strict Linux limit.** A lease that declares one figure (the media admission, the seat warm-back, a bare `gpu reserve --ram N`)
+  states no commit, so its commit is the touched figure standing in for one and was judged against physical RAM less the headroom on every reading. On a reading
+  whose commit limit is enforced and sits below physical RAM (Linux with `vm.overcommit_memory=2` and little swap: the limit is about half the RAM plus the swap)
+  that line lies further out than the one the kernel enforces, so such a lease was admitted past it while the verdict of the same reading was OVER. The bound of a
+  commit nobody stated is now the nearer of the two, `min(physical RAM, commit limit)` less the headroom, when the limit is enforced. Windows (the limit is physical
+  RAM plus the page file, so above it) and a limit the OS does not enforce keep the physical line. A commit above that bound is impossible and says which line.
+- **The surfaces follow the line.** The refusal and the impossible sentence name the commit limit when it is the line that refused. `unstated_commit_room_gib`
+  in the `host_memory` block is the room under the same line. The loud OVER lead (`gpu status`, the brief line of `offload_status`) said less than the note under it:
+  when the verdict rests on the commit charge above physical RAM alone, it now adds that a lease that states its commit is judged on the commit limit instead (or
+  not at all where the OS enforces none), which the rule admits; the block carries the same words as `stated_commit_note`. A reading at or near an enforced limit,
+  or OVER on the available memory, adds nothing.
+- **Figures that are not numbers.** `NaN` compares false against everything and Go's `max(NaN, 0)` is `NaN`, so a declaration of it fell through every test of the
+  rule and was admitted (and `-Inf` was read as "declares nothing"). The rule now refuses a declared figure that is not finite as impossible, makes a lease wait
+  when a figure it compares against (the reading, the headroom, what running leases have yet to load) is not finite, reads such a reading as `unknown`, and counts a
+  `NaN` load as declaring host RAM so that it reaches the rule. The hidden `gpu hold` verb checks `--ram`, `--ram-commit`, `--ram-wait` and `--ram-wait-commit`
+  itself, as `gpu reserve` does; a `-Inf` commit used to be held.
+- **Wording.** The `--ram-commit` help and the operator guide said a stated commit is judged on Linux only with `vm.overcommit_memory=2`; a mode that cannot be read
+  counts as strict, so it is judged there too, and both now say so. The lease guide read "fail at once the page file has reached its maximum" and reads "fail once".
+  The scan that refuses retired wordings gained these.
+- **The refusal for an unreadable lease record says what it rests on.** When the heartbeat of the holder cannot be told (a rename is installing it, or it can be
+  neither read nor examined) no sign of life was seen: the holder is only not shown to be gone. The refusal claimed a heartbeat or a write within the heartbeat TTL
+  and said the lease is held until the heartbeat goes stale. It now says the heartbeat cannot be told and that the hold ends when it can, when a staged one ages out,
+  when the holder lets go, or at `gpu release`. A sign of life within the TTL keeps its sentence.
+- **Pins on the staged-file handling, no behaviour change.**
+  - A staged heartbeat with no live name beside an unreadable whole-node record counts as a heartbeat that cannot be told only while the staged file is younger than
+    `stagingFresh`: just under the bound the record is held, just over it and at ten minutes it is debris and the node is free. The card-record twin does the same
+    for `gpu release` with no epoch and for the listing of records that cannot be read. A staged heartbeat beside a live one that reads is not unknown.
+  - Every rename of a lease file goes through `renameReplacing`; a direct `os.Rename` anywhere else in the package is named (the drift test read the
+    `renameReplacing` call sites only, so a new writer with a direct rename went unseen).
+  - The Node launch-marker writer stages under the name `stagingPath` gives a marker, checked from the Go side against its source and from the Node side against the
+    names the readers look for, so a marker mid-rename cannot read as no marker and a dead wrapper's lease be reclaimed with its instance running.
+- **The fleet node's route check covers a handler wrapped around the ingress guard.** The tables of the credential tests are complete by construction only if no
+  handler answers for a path without registering it. The source test now also holds what `Handler` returns (the one return, the `netguard.IngressGuard` call
+  around the mux) and what the node's `http.Server` serves (`s.Handler()` exactly, built by `httpServer`); a second `http.Server`, one with no handler, a handler
+  around either, and `http.ListenAndServe` and its siblings are named.
+- **A decision record.** The record for the overflow of a media call said the graph door is open to any peer. It carries the dated amendment, pointing at the
+  decision for the fleet bearer, that every record calling a lane open carries, and the lint that requires the amendment now matches that wording too.
+- **How it was proved.** Red first, with the failure lines in the commit messages: the admission rule at a limit below physical RAM (refusal, boundary,
+  pending, impossible, and the Windows and unenforced controls), the room key and the OVER lead (`internal/gpucards`, `internal/mcpserver`), the non-finite figures
+  (rule, verdict, hidden holder), the help and guide wording, the refusal sentence, the route check rows on the fixtures and on the node's real sources, and the
+  amendment lint. The pins that pass on the code before this change (the staged-file bound, the card record, the staged heartbeat beside a live one, the direct
+  rename, the marker writer, the stated-commit flag in the deferred-reserve split and in the card allocator) were each shown to survive a one-line edit that removes
+  what they pin and to go red once they exist.
+- **Not verified here.**
+  - No lease was taken and no seat was loaded: every test runs against a stand-in host reading.
+  - The strict Linux path has no live host: both Linux nodes read are in mode 0, so the new bound is exercised through the rule's inputs and the reader seam only.
+  - The Windows-only staged-file behaviour (the rename gate on a real clock) ran on the local Windows host through targeted tests, not on a loaded runner.
+
+### Fixed - the amd-gcn seed records the ACE-Step 1.5 licence as the MIT its source states instead of "not verified", and the licence map says what each ACE-Step repack states (register ACE-LICENCE)
+
+The amd-gcn profile's notes said "ACE-STEP LICENCE IS NOT VERIFIED" and left the music lane's licence unset, a plan page assumed Apache-2.0, and the licence map tagged both Comfy-Org ACE-Step repacks `apache-2.0`
+without saying how that relates to the model they repackage. Read at the sources on 2026-10-18:
+
+- **The ACE-Step 1.5 project.** The `LICENSE` file of its GitHub repository is the MIT text ("Copyright (c) 2026 ACEStep"), and its README says the project is licensed under MIT.
+- **The model repository `ACE-Step/Ace-Step1.5`.** The Hugging Face API returns `cardData.license` `mit` (tag `license:mit`), the card's own line reads "License: [MIT]", and the card says the generated music may be used commercially.
+  The model repository holds no `LICENSE` file (the raw URL answers 404), so the card and the GitHub file are the sources.
+- **The package the seed binds.** `audio-cpp/audio.cpp-gguf` is tagged `license:other` at the repository level, and its README table lists the original-model licence of `ACE-Step1.5-GGUF` (family `ace_step`) as MIT;
+  audio.cpp's model licence reference lists `ace_step` as MIT with commercial use allowed.
+- **The repacks the map names.** `Comfy-Org/ace_step_1.5_ComfyUI_files` states `apache-2.0` and names `ACE-Step/Ace-Step1.5` as its base model, so it states a different licence from the model it repackages.
+  `Comfy-Org/ACE-Step_ComfyUI_repackaged` states `apache-2.0` and repackages the ACE-Step v1 checkpoint (`ACE-Step/ACE-Step-v1-3.5B`), whose card states `apache-2.0` too.
+
+What changed:
+
+- **`setup/templates/profiles.json` (amd-gcn notes) and the generated `docs/tiers/amd-gcn.md`.** The unverified clause is now the verified record: MIT, with the three sources above. The page is generated from the notes
+  (`TestTierDocsAreCurrent`); the same text was written to both.
+- **`render/templates-license-map.json`.** Each repack is tagged exactly as it states itself (`apache-2.0`, class `permissive`, unchanged), `fetched_on` moves to the re-fetch (2026-10-18), and a `note` on each says what its
+  base model states; the 1.5 repack's note says the tag is the repo's statement and not the base model's. The top-level `evidence` text says the two entries were re-fetched.
+- **`setup/install.ps1`.** The comment above the amd-gcn media pins no longer says the licence is unverified.
+- **`internal/tierseed/amdgcn_media_seed_test.go`.** The assertion that the notes call the licence unverified now asserts the verified MIT record (and that the old clause is gone); it fails on the unmodified profile.
+
+What did not change, and why: **no `commercial_use` key is seeded for the music lane.** The audio lanes (`audiocpp_*`, `musicgen_engine`, `voicegen_engine`) have no `license` or `commercial_use` key in the config schema, and the
+seed test forbids a licence key on them, so the record lives in the notes. Adding a key would be a schema change with its own design (ADR 0058 tags image, edit and video families only); it is not part of this change.
+The two repack tags stay `apache-2.0` because that is what each states. Not verified: the Hugging Face API and the raw files were read once, on one day; a later change of any of them is not seen until the entries are fetched again.
+
+### Fixed - a structured re-pack that counts upward is read as a loop, and the retry is told not to repeat
+
+- **What was wrong.** A seat writing a grammar-constrained re-pack can run out of real items and count: `"349", "350",
+  "351", ...`. Every item differs from the one before, so neither the byte-level repeat test nor the line-block test in
+  `degenerateTail` had a block to find, and the cut was filed as "the budget was too small". On a delegated run of
+  2026-10-15 (a 9B seat, a 4,729-character answer) that sent the second request to the 8,192-token cap with the same
+  sampling; the seat counted on to 1483 and that request spent 145 s of a 197 s re-pack, after which the attempt told
+  not to repeat finished the object in 14 s.
+- **What it does now.** `degenerateTail` reads one more shape, last, so every output the earlier tests named keeps its
+  words: a run of numbers that rise by exactly one, with the same text between every pair, that spans at least
+  128 bytes, has at least 12 numbers, and reaches the end of the output (only the start of the next item follows the
+  last number). It is filed as `degenerate (counting up one at a time, N numbers from A to B)`, so the retry is the
+  conditioned one (frequency penalty and the do-not-repeat sentence) at the budget the first request had, not an
+  escalation to the cap. The 12 and the 128 are chosen, not measured. The limit is stated in the code: it counts by one,
+  so a loop that counts by two, counts down, or carries other digits in each item is read as before.
+- **Tests, red first.** `TestDegenerateTailReadsAMonotoneCountingLoop` (seven loop shapes: quoted numbers on one line cut
+  inside an item, inside the separator and exactly after a number, across a power of ten, a label and a number on each
+  line, bare numbers on each line, unquoted numbers; and eight spared shapes: three years closing a list, nine
+  consecutive numbers, twenty-five years that close the list, a count followed by prose, a numbered list of distinct
+  items, a count that restarts, numbers that jump, ordinary prose with digits) and
+  `TestRunAgentTaskRepackAfterACountingLoopIsNotEscalatedToTheCap`
+  (end to end against a fake seat, with a fixture that is first shown to be escalated when the loop is not recognised).
+  On the unmodified code both failed: the seven loop shapes read `degenerateTail = ""`, and the second attempt was a
+  plain request to the cap (`the attempt after a counting loop is not conditioned against repeating`). Six mutations of
+  the detector were then run against the table (no end-of-output check, no same-text rule, no span floor, a count floor
+  of 5 for 12, the cut item not dropped, a step other than one); two survived the first table (the same-text rule and the
+  count floor) and three cases were added that fail under each (eleven numbered lines are spared and twelve are read, and
+  a numbered list of distinct items that ends on three identical ones is spared), after which all six are caught.
+
+### Changed - every tier that binds an agent model states its agent completion budget (D-24)
+
+- **What changed.** `TestAReasoningSeatSeedsItsCompletionBudget` walked only the tiers whose vLLM seat declares a
+  `reasoning_parser`; four more tiers that bind an agent model (`blackwell-32`, `blackwell-48`, `blackwell-72`,
+  `ampere-6`) seeded no `agent_max_tokens` and inherited the loop's 1,024 without saying so. The new
+  `TestEveryAgentSeatingTierStatesItsCompletionBudget` walks every tier that binds an agent model, in its seed or in a
+  RAM overlay, and requires one of three statements: a seeded `agent_max_tokens`, `agent_thinking: "off"` (the
+  exemption), or the new tier-level marker `agent_budget_policy: "loop-default-chosen"`. A tier whose vLLM seat declares
+  a `reasoning_parser` may use neither the marker nor the exemption; the marker is refused beside a number, beside the
+  exemption, on a tier with no agent model, and with any other value. `TestBudgetGuardRules` pins each rule on a
+  synthetic tier.
+- **The marker is chosen, not measured** (operator decision D8). The four tiers above carry it, their pages in
+  `docs/tiers/` say so in a "Completion budget" paragraph (rendered by `internal/tierdocs`), and the field is
+  documented in `profiles.json` `_fields` and in `docs/systems/setup-installer.md`. It is not a `config_seed` key and
+  never reaches a node's `config.json`. A seat window that measures a budget replaces it with a seeded
+  `agent_max_tokens`.
+- **Rollout note.** The marker changes the four tiers' `profiles.json` entries, so a serving config rendered from the old
+  entry reads `STALE(profiles_entry_sha256)` in `audit-yaml --against-render` until it is re-rendered.
+- **Tests, red first.** On the unmodified code the widened guard named exactly the four tiers
+  (`tier "blackwell-32" binds an agent model and states no completion budget`, and `-48`, `-72`, `ampere-6`), and
+  `TestAMarkedTierPageSaysItsBudgetIsChosenNotMeasured` failed for each marked tier before the page rendered the note.
+
+### Changed - `ledger` says a total that reaches back before 0.117.7 undercounts (D-96)
+
+- Before 0.117.7 the ledger priced the tokens a local seat generated at zero (the estimated Opus value was the input
+  rate only), so a dollar figure summed over older rows is an undercount. The history is not restated, by design, which
+  makes the line under the figure the place to say it. `local-offload ledger` now prints, under `tokens kept local
+  (est.)`, `note: rows written before 0.117.7 (2026-09-14) priced generated tokens at zero, so a total that reaches back
+  before then undercounts; those rows are not restated` whenever the window can reach back before the fix: a lifetime
+  read, or a `--since` long enough to cross 2026-09-16 (the cut-off is one UTC day after the release, chosen, because a
+  ledger row does not record the build that wrote it). A `--since 1` read prints nothing extra.
+- **Test, red first.** `TestLedgerSaysLifetimeTotalsUndercountRowsBeforeOutputWasPriced` failed on the unmodified code
+  (`a lifetime ledger read does not carry the pricing caveat`).
+
+### Changed - the docs say which instrument answers which question (D-73)
+
+- `docs/systems/opencode-integration.md` (the instrument row) now says that the dispatch-log scoreboard measures the
+  lead's effort and has the lead's own turns as its denominator, and that the share gate and every savings figure read
+  the ledger (`origin_session`, `cards_tokens`) with tokens as the denominator, so the two are never compared as one
+  number.
+
+### Fixed - the card-only render runners refuse two calls up front and say why: an unkeyed runner under a two-card lease with no `--placement multicard` (PF-4), and a canvas above the 2512 Q5_1 recipe's pixel cap (PF-3)
+
+Two misleading or missing refusals of the render runners, found in the media session of 2026-10-15 (registers PF-3 and PF-4). Both are in `render/`; no Go code changes.
+
+- **PF-4, the defect.** A still run under `gpu reserve --devices <a>,<b>` without `--placement multicard`, aimed at a non-default ComfyUI endpoint (`--api` or `COMFY_API`) that nothing answered on, failed as
+  `COMFY-ENDPOINT-DOWN`. That line tells the operator to start ComfyUI on the port or to key the instance (`COMFY_INSTANCE`, `COMFY_CARD_UUID`), and a card key pins ONE card, so it does not say what is missing:
+  only `--placement multicard` keys the pair's own instance and launches it on its own port.
+- **PF-4, the fix.** `ensureComfy` (`render/comfy-lifecycle.mjs`) answers `COMFY-PLACEMENT-MISSING`, which names the two leased cards (`GPU_LEASE_DEVICES`) and `--placement multicard`, when the lease holds exactly two cards, the
+  call carries no multicard launch and the endpoint it was aimed at does not answer. Nothing else moves: an endpoint that answers is reused as before, one or three leased cards and a keyed instance keep their lines, the
+  default endpoint launches as before, and nothing is launched in the refused case (it never was). The refusal still comes after the single probe of the endpoint, not before it, so a ComfyUI someone started there is reused.
+  A caller that matched the old text on this case matches `COMFY-PLACEMENT-MISSING` now (nothing in the harness matches either).
+- **PF-3, the defect.** The `qwen-image/gguf-q5_1` row of `render/multicard-recipes.json` (the 2512 Q5_1 GGUF across two cards, basis `predicted`) ran out of memory in the sampler on its first live run, at 928x1664
+  (1.54 MP, on the storage card, 56 s in). The row held any canvas, so a call at that canvas, or at no size at all (the qwen-image default is 1328x1328, 1.76 MP), took both cards and failed late.
+- **PF-3, the fix.** The row carries `maxPixels: 1472700` (1.47 MP) and `maxPixelsNote`; a new `canvasRefusal` (`render/multicard-recipes.mjs`) turns a canvas above it into a refusal that names the row, both sizes, the
+  cap, that it is chosen, and the flags to change (`--width` and `--height`, or the single placement). It is enforced where the size is known: `buildRenderGraph` (`render/comfy-render.mjs`, which every path to a
+  card-only render passes, one job of a `--batch` included, with the family default resolved) and, for a single `comfy-generate` call that names its canvas, `planImageMulticard` (`render/multicard-image.mjs`),
+  before the lease's cards are read and before ComfyUI starts. The single placement is not held to the cap, the edit rows keep their `maxMegapixels`, and the row stays `predicted`.
+- **The cap is chosen, not measured.** No canvas of this row has been measured on two cards. 1.47 MP is the largest canvas the row's evidence shows a same-size Q5_1 GGUF running on two cards (the 2511 edit, every weight on
+  the storage card, 0.3 GiB free: "too thin for production"), and it sits below the canvas that failed. The OOM was on the storage card, which argues that the row's storage figure, not its activations, is what is wrong
+  at that canvas. A measured arm at a larger canvas, or a re-split that fits 928x1664, replaces the cap; the existing default-size multicard call is refused until then (`--width`/`--height` below the cap).
+- **Not done.** There is no refusal at the typed door (`internal/pipeline`, `internal/hostneed`): a request that names its size reaches the runner, which refuses it after the pair was leased. `render/README.md` and
+  `docs/systems/media-generation.md` do not describe either refusal yet.
+- **Tests (red first).** `render/comfy-unkeyed-api.test.mjs` (4 tests: the refusal names the placement and both cards; an endpoint that answers is reused; one or three cards, a keyed instance and a multicard launch are
+  unchanged) and the new `render/multicard-canvas.test.mjs` (13 tests, 7 of the first 10 red on the unmodified code; the others are guards). Mutants of the fix that the tests catch: the launch exemption dropped, "exactly two" turned
+  into "two or more", no pair at all, the cap check dropped from `buildRenderGraph`, from the planner and from `comfy-generate`, `<=` turned into `<`, the no-cap guard dropped, the batch given the shared canvas, and the
+  non-number guard dropped. `render/multicard-builders.test.mjs` names a 1024x1024 canvas in the one test that built the multicard graph at the default size.
+
+### Fixed - the vLLM seat launcher mounts the cache-server share at the store address with the lowest ping round-trip time when several of its addresses lie on the pinned network
+
+Residual of register B-55, in `setup/templates/vllm-seat/seat_fg.sh` (shell rendered verbatim into the seat, so one file; no renderer and no installer changes). The previous B-55 fix mounted
+the FIRST mDNS answer inside the pinned source address's IPv4 network. When the store host has two answers on the SAME network, a wired address and a Wi-Fi address, "first inside the network" is
+arrival order, and the Wi-Fi path is about ten times slower for writes, so the cache tier degraded.
+
+- **The fix.** With more than one distinct answer inside the pinned network, `l2_pick_address` measures each candidate's minimum round-trip time with
+  `ping -I <source address> -c 5 -i 0.2 -q -W 1 <address>` (the first number after `=` on the `min/avg/max` line, so it reads iputils and busybox summaries) and mounts the lowest. Each ping runs under
+  `timeout -s KILL 3`, one after the other, so the measurement takes at most 3 s per candidate and a start can never hang on it. Equal minimums go to the earlier answer. With exactly one answer inside the
+  network nothing changes and no ping runs; an answer outside the network is never pinged, whatever its time would be.
+- **Why the minimum.** Measured on the reference workstation with `ping -c 5 -i 0.2 -q`, three runs each: the wired address had a minimum RTT of 0.425-0.477 ms (average 0.57-0.62 ms), the Wi-Fi address a
+  minimum of 0.983-2.288 ms (average 1.5-26 ms). The minimum separates them by more than 2x on every run; the average is noisy on the Wi-Fi path.
+- **Fallback.** A candidate whose ping fails (no reply, cut off by the timeout) shows `no reply` and is never chosen over one that replied. When ping is missing (`not measured`), every ping fails, or no time
+  can be read from its output (`RTT unreadable`), the choice is the first answer inside the network by arrival order, the rule before this change. The `seat_fg:` line says which rule chose and lists
+  each candidate, for example `mDNS answers: A B C, inside N/P: A (min RTT 0.43 ms) B (min RTT 1.10 ms); chose A, the lowest round-trip time`; the fallback reads
+  `chose A, the first inside the network in arrival order (round-trip times could not be compared: <why>)`, with three reasons (ping is not available on this box; no candidate replied to ping; no round-trip time
+  could be read from ping's output), and a single replier reads `chose B, the only candidate that replied to ping`. A one-answer line is byte-identical to before.
+- **Limit, stated.** The round-trip time is a heuristic for the better path, not a throughput measurement: a store whose fast path has a higher latency than its slow path would be picked wrong, and a store whose
+  fast path drops ICMP loses to a slow path that answers it. `SEAT_L2_MOUNT_SRC` naming a reserved or static address (an IPv4 literal) or a name that is not `.local` still overrides everything: nothing is looked up
+  and nothing is pinged. A share that is already mounted is still left alone (the address is chosen only when the share is mounted), so a start after this change does not remount a share an earlier start put on
+  the Wi-Fi address; unmount it while no seat uses it and start the seat again.
+- **Test seam.** `SEAT_FG_TEST_PING_CMD` names a command that stands in for ping (called as `<cmd> <source address> <address>`; it prints a minimum RTT in ms, or exits non-zero for no reply). It is documented in the
+  script with the other two seams, is read nowhere else, and nothing in a rendered seat sets it.
+- **Tests (red first).** `seat_fg.kv-and-store.tests.sh` gains 24 cases against two ping stand-ins (the seam, and a `ping` found on `PATH` that prints what iputils or busybox print; the real `ping` is never reached, and the
+  case without ping runs on a `PATH` that has none): the second or the first or the last or the middle candidate lowest, times compared as numbers (12.5 above 9), a tie, a no-reply first, second or one of three, every
+  ping failing, a ping command that does not exist, no ping on `PATH`, unreadable output, a hanging ping cut off at 3 s (both shapes), the exact ping command line and the minimum taken instead of the average
+  (a candidate with minimum 0.45 and average 26.0 beats 1.00 and 1.20), a busybox summary, one answer inside the network (no ping, both shapes), answers outside the network never pinged, and `SEAT_L2_MOUNT_SRC` as an
+  address literal or a non-`.local` name (no lookup, no ping). On `origin/main`'s launcher 20 of the 24 fail; the other 4 are guards that pass on both sides (the one-answer and the `SEAT_L2_MOUNT_SRC` cases), and all
+  49 earlier cases pass on both. The existing case "the FIRST answer inside the network wins" keeps its assertions and is renamed to say what it now proves: with no round-trip time to compare, the first one wins.
+  Mutants of the launcher, each caught: the highest time taken, a tie going to the later answer, no source address on ping, 3 probes instead of 5, the average read instead of the minimum, no timeout on ping, no timeout on
+  the seam, every answer pinged and not only those inside the network, a failed ping counted as 0, the fallback taking the last answer, unreadable output and a missing ping both reported as no reply, a single in-network answer pinged too, the single-replier wording
+  dropped. The Go wrappers (`launcher_kv_store_run_test.go`, `launcher_kv_store_pins_test.go`) name all 73 cases and pin the ping line as one whole command, its timeout, the strict comparison, the one-answer branch, the
+  minimum read and that ping is started in exactly one place.
+- **Docs.** `docs/OPERATOR-GUIDE.md` and `docs/systems/cache-server.md` describe the tie-break, the fallback and the limit in place of the old "cannot tell them apart" paragraph.
+- **Not verified here.** No live store and no real network: every ping in the tests is a stand-in, and the figures above are the reference workstation's own measurement. The real `ping` output shape was read on a
+  loopback address only.
+
+### Fixed - the rendered Windows seat stubs serve every Windows seat of the tier, so a box with two Windows seats no longer needs a hand-made stub (register B-57)
+
+`seat-cmd.ps1` and `seat-cmdstop.ps1` (`setup/templates/vllm-seat/windows-wsl/`) are one pair of files for every Windows seat on a box: each seat's llama-swap entry
+runs the same file from the same seat directory and passes its own seat id. The render baked ONE seat's values into them, so the stub could not serve a second seat.
+
+- **The defect.** `seat-cmd.ps1` waited for `__SEAT_ID__` (the model id the seat serves) in `/v1/models` on `__PORT__`, both filled in for the seat the render was run for.
+  A second seat's `cmd` passes its own seat id to the same file, so its stub waited for the first seat's id for its whole load budget, then exited 4. A box with two Windows
+  seats on one port therefore ran a hand-made copy of the stub, keyed by a map from the seat argument to the served id and exiting 5 on an unknown seat. That copy has none of
+  the template's later fixes: the crash cleanup, the stop marker and the stop-result read.
+- **The change.** Both stubs carry a table, one row per Windows seat: seat id (the argument the entry passes) to the id served, the port and the load budget (the seat's
+  health-check timeout). `Spec.ArtifactsWith(templatesDir, runtime, seats)` renders it from the rendered seat plus the other Windows seats given; `Spec.Artifacts` is unchanged
+  and renders a table of one. `install vllm-seat` passes the tier's `extra_vllm_seats` that start through WSL. The rows are sorted by seat id and do not depend on which seat the
+  render was run for, so rendering the seats one after another writes byte-identical stubs and the last render drops nobody. The file's other behaviour is untouched: crash
+  cleanup, stop marker, bounds, exit codes 2, 3 and 4.
+- **A seat the table does not hold is refused.** The stub writes `unknown seat '<arg>': this stub serves <ids> - nothing started` to `seat-cmd.log` (a fixed name, because the
+  argument is not trusted into a file name) and exits 5, before it starts the task or asks a port. `seat-cmdstop.ps1` does the same before it writes the stop marker or starts the
+  stop task, so a misnamed entry cannot leave a marker that makes a later crash look like an unload. The render refuses, before reading anything from disk, another seat that
+  starts through systemd, an id that is not a seat argument, a port out of range, an id given twice with different values, and any other seats for a seat that has no stub.
+- **Deploying it.** Re-render and deploy BOTH stubs (they agree on the table and on the marker name). The seat argument must be the seat id the entry passes, as the rendered
+  entries do; a hand-made entry that passes a short name now exits 5 instead of waiting for an id it was never given. `install vllm-seat` still writes the env file and the
+  registration script of the lane seat only: an extra Windows seat's own are not rendered by it, and the note it prints for such a seat now says so instead of asking for a systemd unit,
+  wrapper scripts and polkit rule that a Windows seat does not have (an extra seat that starts through systemd keeps its note).
+- **Limit, stated.** The table holds the seats the tier declares. A tier cannot declare a seat on other cards than its lane seat (`extra_vllm_seats` are alternatives of the lane
+  seat), so a seat of that kind on a box still needs its row added by hand until the tier can declare it. Not verified: the stubs under llama-swap as SYSTEM on a real Windows box.
+  The PowerShell-driven tests run under whichever PowerShell the test host has and skip without one; the Linux gate runners used had none, so those tests skipped there and only
+  the Go-only tests ran. The rendered stubs were instead run by hand, under Windows PowerShell 5.1 and PowerShell 7, with the same drivers.
+- **Tests (red first).** `internal/vllmseat/seat_stub_seat_table_test.go` renders two seats on two ports with different load budgets and runs the RENDERED stubs under a PowerShell
+  driver with a simulated clock: each seat argument probes its own port, waits for its own id (another seat's id on its port is not it) and keeps its own load budget; an unknown
+  seat exits 5 with nothing started, nothing asked and no file named after it; the stop stub watches its own seat's port and writes only its own marker. A Go-only test pins the table
+  rows in both files, byte-identical output whichever seat the render is for, the sort order, and the refusals. `install_vllmseat_wsl_siblings_test.go` runs the command over a tier with a
+  second Windows seat and a systemd seat: the stubs hold the first two and not the third, and a one-seat tier's stubs hold one row. The existing crash-cleanup driver now renders the seat it
+  runs the stub for (`pp3`) instead of passing a seat argument the stub was not rendered for. On `origin/main` the new Go-only tests fail (the root-package ones as they stand; the vllmseat ones against a shim that gives the new
+  entry point main's behaviour). By hand, the stubs rendered from `origin/main` for one seat: a second seat probed the first seat's port and either came up on the first seat's id or waited
+  out its load budget and exited 4, an unknown seat started a task and exited 0, and the stop stub wrote a marker for it; the new stubs do what the tests above assert. The 12 scenarios
+  of the existing crash-cleanup driver (crash, unload marker, task ended early, a live launcher, every stop-task bound and failure, the three marker failures) give call logs identical to
+  `origin/main`'s stubs, under both PowerShells and with the template's line endings either LF or CRLF.
+
 ## [0.189.1] - 2026-10-18 - A fleet node requires the fleet bearer on every lane, the GPU lease judges a stated commit on the commit limit, a lease record being rewritten is read rather than judged absent, and the vLLM seat launcher fits its context to the KV pool and mounts the store on the pinned network
 
 ### Fixed - the tests that hold a fleet node's bearer rules cover every route, and the texts that describe the rules say what holds
