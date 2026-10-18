@@ -2305,7 +2305,9 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   cache, from the project notes of 2026-09-10, not re-measured here) stands in, a **chosen** fail-closed figure, never 0
   (`TestSeatNeedIsTheConfiguredFigureElseTheFailClosedDefault`). It is **not** the largest figure on record: the 2026-09-10
   incident recorded 44 GB of host RAM for a seat, the note that carries it attributes that to LMCache staging plus page cache,
-  and whether the page-cache part is memory the OS can drop is not verified here. So with the key unset the warm-back is
+  and the page-cache part is droppable (measured 2026-10-18 on a WSL2 pair seat: loading the INT4 27B left 23 GiB of guest page
+  cache, which on WSL2 is host commit; one drop took the VM 68.7 -> 46.8 GiB and host commit 149.7 -> 128.0 GiB with the seat
+  serving). On WSL2 the launcher now drops it itself (`SEAT_CACHE_CAP_GIB`, below). So with the key unset the warm-back is
   admitted against a figure below the incident's, and a node that runs a seat sets `agent_seat_host_ram_gib` from its own
   measurement before it relies on the check. Two readers help the node do that (register B-56 / H-08). The vLLM seat launcher
   (`seat_fg.sh`) logs `host rss N GiB (L1 N GiB)` to the seat log at every start: the resident set of the LMCache MP server unit
