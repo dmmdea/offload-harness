@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
+	"strings"
 	"testing"
 )
 
@@ -111,4 +113,75 @@ func sortedKeys[V any](m map[string]V) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// vllmMeasuredNote matches the sentences a profile's own notes use to record a vLLM RESULT on that tier's
+// silicon: "vLLM-CPU MEASURED <date>" (a run that seated or failed to seat a model) and "vLLM is NOT a path"
+// (weights that cannot fit the card). A tier whose notes carry one has been measured, so a debt reason that
+// still reads "never run" / "never measured" / "not established" is stale (register A-07, coverage).
+var vllmMeasuredNote = regexp.MustCompile(`vLLM-CPU MEASURED|vLLM is NOT a path`)
+
+// vllmReasonSaysMeasured is what a debt reason must carry once the tier's notes record a measurement: the
+// house spelling of a result, upper case ("never measured" is the stale reason and must not satisfy it).
+var vllmReasonSaysMeasured = regexp.MustCompile(`MEASURED`)
+
+// checkVLLMDebtReasonsAreCurrent returns one finding per vllmSeatDebt entry whose profile text records a vLLM
+// measurement that the entry's reason does not mention. It takes the profile text per tier so a fixture can hand
+// it a tier that must be refused (the W0.1 pattern: a gate only ever shown clean data has not been seen to fail).
+func checkVLLMDebtReasonsAreCurrent(profileText map[string]string, debt map[string]string) []string {
+	var out []string
+	for _, tier := range sortedKeys(debt) {
+		if !vllmMeasuredNote.MatchString(profileText[tier]) {
+			continue
+		}
+		if !vllmReasonSaysMeasured.MatchString(debt[tier]) {
+			out = append(out, tier+": its profile notes record a vLLM measurement but its vllmSeatDebt reason ("+debt[tier]+") does not say it was measured")
+		}
+	}
+	return out
+}
+
+func TestVLLMDebtReasonsAreCurrent(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("setup", "templates", "profiles.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var doc struct {
+		Profiles map[string]json.RawMessage `json:"profiles"`
+	}
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("profiles.json is not valid JSON: %v", err)
+	}
+	text := map[string]string{}
+	measured := 0
+	for tier, body := range doc.Profiles {
+		text[tier] = string(body)
+		if _, owes := vllmSeatDebt[tier]; owes && vllmMeasuredNote.MatchString(text[tier]) {
+			measured++
+		}
+	}
+	if measured == 0 {
+		t.Fatal("no vllmSeatDebt tier's notes record a vLLM measurement any more; the matcher went blind or the notes moved")
+	}
+	for _, f := range checkVLLMDebtReasonsAreCurrent(text, vllmSeatDebt) {
+		t.Error(f)
+	}
+}
+
+// A debt reason that predates a measurement is refused; one that records it, and a tier with no measurement
+// to record, are not.
+func TestVLLMDebtReasonCheckRefusesAStaleReason(t *testing.T) {
+	profiles := map[string]string{
+		"measured-tier": `{"notes":"... vLLM is NOT a path for this 9B on 8GB ..."}`,
+		"quiet-tier":    `{"notes":"no vLLM result recorded here"}`,
+	}
+	stale := map[string]string{"measured-tier": "vLLM arm never measured", "quiet-tier": "no box online"}
+	got := checkVLLMDebtReasonsAreCurrent(profiles, stale)
+	if len(got) != 1 || !strings.HasPrefix(got[0], "measured-tier:") {
+		t.Fatalf("want exactly one finding, for measured-tier, got %q", got)
+	}
+	current := map[string]string{"measured-tier": "MEASURED, not a path: weights exceed the card", "quiet-tier": "no box online"}
+	if got := checkVLLMDebtReasonsAreCurrent(profiles, current); len(got) != 0 {
+		t.Fatalf("a reason that records the measurement must pass, got %q", got)
+	}
 }
