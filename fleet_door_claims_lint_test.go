@@ -23,6 +23,7 @@ var staleFleetDoorClaims = []struct{ file, phrase string }{
 	{"internal/fleetnode/compose_task.go", "not token-gated"},
 	{"internal/fleetnode/tasks.go", "not token-gated"},
 	{"internal/fleetnode/remote_out_test.go", "not token-gated"},
+	{"internal/fleetnode/server.go", "an agent (or vision) job"},
 	{"internal/rosterprobe/token.go", "ignores the Authorization header"},
 	{"internal/rosterprobe/token.go", "the agent lane is token-gated"},
 	{"docs/systems/media-generation.md", "not token-gated"},
