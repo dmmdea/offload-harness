@@ -360,9 +360,16 @@ type swept struct{ class, match, value string }
 // sweepCredentials substitutes, in out, the credential values the tail classes find in orig that the substitution left
 // standing, longest first so that a value inside another is not cut. Each is replaced by the placeholder its whole
 // match has (or would have had) in apply, and remembered like any other, so the value-tail gate sees it.
+//
+// The cost is that of two passes over the text and one map lookup per byte of it, however many values there are: the
+// distinct values are collected into a set first (a value found twice keeps the class and match it was found with
+// first), grouped by their first tailWindow bytes, longest first within a group, and out is read once, from the left.
+// At each position the values that start with the tailWindow bytes standing there are tried, longest first, and the
+// first that is there is taken whole. Searching the text for each value in turn, which this replaced, cost the number
+// of values times the length of the text.
 func (r *redactor) sweepCredentials(orig, out string) string {
-	var found []swept
-	seen := map[swept]bool{}
+	var order []swept
+	seen := map[string]bool{}
 	for _, p := range redactPatterns {
 		if p.name == redactFirstClass || !tailClasses[p.name] {
 			continue
@@ -370,23 +377,58 @@ func (r *redactor) sweepCredentials(orig, out string) string {
 		for _, m := range p.re.FindAllString(orig, -1) {
 			m = m[len(piishape.Lead(m)):]
 			for _, v := range credentialValues(p.name, m) {
-				f := swept{p.name, m, v}
-				if len(v) >= tailWindow && !seen[f] && strings.Contains(out, v) {
-					seen[f] = true
-					found = append(found, f)
+				if len(v) >= tailWindow && !seen[v] {
+					seen[v] = true
+					order = append(order, swept{p.name, m, v})
 				}
 			}
 		}
 	}
-	sort.SliceStable(found, func(i, j int) bool { return len(found[i].value) > len(found[j].value) })
-	for _, f := range found {
-		if n := strings.Count(out, f.value); n > 0 {
-			r.Hits[f.class] += n
+	if len(order) == 0 {
+		return out
+	}
+	sort.SliceStable(order, func(i, j int) bool { return len(order[i].value) > len(order[j].value) })
+	byHead := make(map[string][]int, len(order))
+	for i, f := range order {
+		byHead[f.value[:tailWindow]] = append(byHead[f.value[:tailWindow]], i)
+	}
+	type place struct{ at, end, value int }
+	var places []place
+	counts := make([]int, len(order))
+	for i := 0; i+tailWindow <= len(out); {
+		for _, k := range byHead[out[i:i+tailWindow]] {
+			if v := order[k].value; strings.HasPrefix(out[i:], v) {
+				places = append(places, place{i, i + len(v), k})
+				counts[k]++
+				i += len(v) - 1
+				break
+			}
+		}
+		i++
+	}
+	if len(places) == 0 {
+		return out
+	}
+	// The placeholders are numbered in the order of the values, longest first, as they were when each value was searched
+	// for in turn.
+	holder := make([]string, len(order))
+	for k, f := range order {
+		if counts[k] > 0 {
+			r.Hits[f.class] += counts[k]
 			r.remember(f.class, f.match)
-			out = strings.ReplaceAll(out, f.value, r.placeholder(f.class, f.match))
+			holder[k] = r.placeholder(f.class, f.match)
 		}
 	}
-	return out
+	var b strings.Builder
+	b.Grow(len(out))
+	last := 0
+	for _, pl := range places {
+		b.WriteString(out[last:pl.at])
+		b.WriteString(holder[pl.value])
+		last = pl.end
+	}
+	b.WriteString(out[last:])
+	return b.String()
 }
 
 // placeholder is the stable placeholder of a matched text in a class, numbered by first appearance.
