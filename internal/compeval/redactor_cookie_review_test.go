@@ -140,9 +140,10 @@ var reviewLayouts = []struct {
 }
 
 // TestRedactorTakesAQuotedCredentialAfterACookie: the cookie span ends in front of a quote, and with the cookie class
-// run first it had swallowed the key word of a quoted credential on the same line, so the quoted value was left
-// with no key word in front of it, for the other classes and for the value-tail gate alike, and went out with the
-// residual gate clean. Every credential with a quoted value, after an unquoted cookie on the same line, in every
+// run first it swallows the key word of a quoted credential on the same line, so the quoted value is left
+// with no key word in front of it, for the other classes and for the value-tail gate alike, and goes out with the
+// residual gate clean unless the credential values the classes find in the text as it was written are swept
+// (sweepCredentials). Every credential with a quoted value, after an unquoted cookie on the same line, in every
 // layout, as text and as the string of a tool call's Args, loses its value.
 func TestRedactorTakesAQuotedCredentialAfterACookie(t *testing.T) {
 	w, v := tailFake(5001, 32, tailAlnum), tailFake(5002, 28, tailAlnum)
@@ -188,8 +189,8 @@ func TestHarvestKeepsNoCredentialAfterACookie(t *testing.T) {
 
 // TestRedactorTakesACookieWhoseNameHoldsAKeyWord: a cookie named like a credential (refresh_token, auth_token,
 // password, secret) is taken, both values are gone, the residual gate is clean and a cookie-header placeholder
-// stands where the line was. Which class counts the substitution is not the point: the assignment class runs
-// before the cookie class, so that a quoted credential after the header is found by its own key word.
+// stands where the line was. Which class counts the substitution is not the point: the cookie class runs first and
+// takes the line whole, and the credential values found in the text as it was written are swept after it.
 func TestRedactorTakesACookieWhoseNameHoldsAKeyWordWhicheverClassCountsIt(t *testing.T) {
 	v, w := tailFake(911, 32, tailAlnum), tailFake(912, 32, tailAlnum)
 	for _, names := range [][2]string{

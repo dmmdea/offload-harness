@@ -307,29 +307,98 @@ func (r *redactor) survivingTail(s string) bool {
 	return false
 }
 
+// redactFirstClass is applied before every other class. The cookie span ends in front of a quote that opens no
+// quoted cookie value, and it crosses everything else on its way, so it has to see the text as it was written: a
+// placeholder left by an earlier class holds a closing bracket that ends an unquoted printed list, and the closing quote
+// that a quoted assignment match leaves behind its placeholder is not the quote that closes the string the header sits
+// in. Run later, the cookie class lost every cookie that stood behind a key-word cookie with a quoted value, and
+// behind a JWT or a Bearer value inside a printed list. A cookie whose name holds a key word (refresh_token=,
+// password=, secret=) is taken whole by the cookie class, as one substitution.
+const redactFirstClass = "cookie-header"
+
 // redactLastClass is applied after every other class. An address-shaped piece can sit inside a
 // credential value (GITHUB_TOKEN: a@b.c:rest); replacing it first would split the value, leave a
 // placeholder where the value must start, and so hide the rest of it from the credential classes.
 // The vet table keeps its order; only the order of substitution differs.
-//
-// The cookie class is deliberately not first. A cookie span ends in front of a quote that opens no quoted
-// cookie value, and an unquoted header followed on the same line by a credential with a quoted value (a key
-// word, a colon or an equals sign, a quote) would, run first, take the credential's key word into its span
-// and stop in front of the quote: the value is then left with no key word for any class and no memory in the
-// value-tail gate, and the residual gate stays clean. Run in the table's order, the credential classes take
-// their quoted values by their own key words first, and the cookie class takes what is left of the header
-// (a cookie whose name holds a key word is then found by both, and which class counts it does not matter).
 const redactLastClass = "email"
 
+// redactStage orders the substitution: the first class, then the others in the table's order, then the last.
+func redactStage(name string) int {
+	switch name {
+	case redactFirstClass:
+		return 0
+	case redactLastClass:
+		return 2
+	}
+	return 1
+}
+
+// redact substitutes every class in s. The cookie span can swallow the key word of a credential that follows it on the
+// same line, because it ends in front of a quote that opens no cookie value: in `Cookie: a=<value>; key: "<value>"`
+// the span takes the key word and stops at the quote, and the value behind it is left with no key word for any class.
+// So when the cookie class has substituted anything, the credential classes are also run over the text as it was
+// written, and every credential value of 12 or more characters they find is substituted wherever it still stands
+// (sweepCredentials).
 func (r *redactor) redact(s string) string {
-	for _, last := range [2]bool{false, true} {
+	orig, cookies := s, r.Hits[redactFirstClass]
+	for stage := 0; stage <= 2; stage++ {
 		for _, p := range redactPatterns {
-			if (p.name == redactLastClass) == last {
+			if redactStage(p.name) == stage {
 				s = r.apply(p.name, p.re, s)
 			}
 		}
 	}
+	if r.Hits[redactFirstClass] != cookies {
+		s = r.sweepCredentials(orig, s)
+	}
 	return s
+}
+
+// swept is a credential value a credential class found in the text as it was written.
+type swept struct{ class, match, value string }
+
+// sweepCredentials substitutes, in out, the credential values the tail classes find in orig that the substitution left
+// standing, longest first so that a value inside another is not cut. Each is replaced by the placeholder its whole
+// match has (or would have had) in apply, and remembered like any other, so the value-tail gate sees it.
+func (r *redactor) sweepCredentials(orig, out string) string {
+	var found []swept
+	seen := map[swept]bool{}
+	for _, p := range redactPatterns {
+		if p.name == redactFirstClass || !tailClasses[p.name] {
+			continue
+		}
+		for _, m := range p.re.FindAllString(orig, -1) {
+			m = m[len(piishape.Lead(m)):]
+			for _, v := range credentialValues(p.name, m) {
+				f := swept{p.name, m, v}
+				if len(v) >= tailWindow && !seen[f] && strings.Contains(out, v) {
+					seen[f] = true
+					found = append(found, f)
+				}
+			}
+		}
+	}
+	sort.SliceStable(found, func(i, j int) bool { return len(found[i].value) > len(found[j].value) })
+	for _, f := range found {
+		if n := strings.Count(out, f.value); n > 0 {
+			r.Hits[f.class] += n
+			r.remember(f.class, f.match)
+			out = strings.ReplaceAll(out, f.value, r.placeholder(f.class, f.match))
+		}
+	}
+	return out
+}
+
+// placeholder is the stable placeholder of a matched text in a class, numbered by first appearance.
+func (r *redactor) placeholder(name, m string) string {
+	key := name + "\x00" + m
+	if ph, ok := r.assigned[key]; ok {
+		return ph
+	}
+	r.counts[name]++
+	ph := fmt.Sprintf("[redacted-%s-%d]", name, r.counts[name])
+	r.assigned[key] = ph
+	return ph
 }
 
 // apply replaces every match of one class in s by its placeholder. A class may start right after a JSON
@@ -342,14 +411,7 @@ func (r *redactor) apply(name string, re *regexp.Regexp, s string) string {
 		m = m[len(lead):]
 		r.Hits[name]++
 		r.remember(name, m)
-		key := name + "\x00" + m
-		if ph, ok := r.assigned[key]; ok {
-			return lead + ph
-		}
-		r.counts[name]++
-		ph := fmt.Sprintf("[redacted-%s-%d]", name, r.counts[name])
-		r.assigned[key] = ph
-		return lead + ph
+		return lead + r.placeholder(name, m)
 	})
 }
 
