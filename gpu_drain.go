@@ -704,14 +704,30 @@ func unloadModelsEnv(models []string, known bool) string { return gpualloc.Unloa
 
 // leaseDevicesOf is the cards the live lease with this epoch holds (lease ids), nil when the epoch
 // is not live or holds the whole node.
-func leaseDevicesOf(m *gpulease.Manager, epoch uint64) []string {
-	for _, l := range m.Leases() {
-		if l.Epoch == epoch {
-			return l.Devices
+//
+// A lease whose record cannot be read right now is HELD and not gone: the leases are found by listing, and a listing does not show a
+// record that a rename is installing (or one that cannot be opened while it is replaced). Reading that as "not live" widened the drain and
+// the unload to the whole node, and took down seats on cards the lease does not hold. So the record itself is asked: when it is readable
+// by then the listing is repeated, and when it still cannot be read the answer is an error, which fails the maintain step and leaves the
+// lease held (detachedMaintainError says so and that `gpu release` frees it).
+func leaseDevicesOf(m *gpulease.Manager, epoch uint64) ([]string, error) {
+	for attempt := 0; attempt < 2; attempt++ {
+		for _, l := range m.Leases() {
+			if l.Epoch == epoch {
+				return l.Devices, nil
+			}
 		}
+		st, cause := m.RecordState(epoch)
+		if st == gpulease.RecordUnreadable {
+			return nil, fmt.Errorf("the record of lease epoch %d cannot be read, so the cards it holds cannot be told (the lease is still held): %w", epoch, cause)
+		}
+		if st != gpulease.RecordHeld {
+			break
+		}
+		// Readable now, though the listing did not show it: the rename ended in between. List again.
 	}
 	fmt.Fprintf(os.Stderr, "gpu hold: lease epoch %d is not live in this lease directory, so its cards cannot be read: the drain and unload act as for the whole node\n", epoch)
-	return nil
+	return nil, nil
 }
 
 // detachMaintain is the detached holder's maintain step (`gpu reserve --detach --drain
@@ -723,8 +739,12 @@ func detachMaintain(m *gpulease.Manager, epoch uint64, cfg config.Config, drain 
 
 // detachMaintainReport is detachMaintain that also tells the caller what the unload took down (out, when non-nil).
 func detachMaintainReport(m *gpulease.Manager, epoch uint64, cfg config.Config, drain bool, deadline time.Time, unload, exclusive bool, out *unloadOutcome) error {
+	devices, err := leaseDevicesOf(m, epoch)
+	if err != nil {
+		return err
+	}
 	return maintainSeatReport(context.Background(), cfg, func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) },
-		drain, deadline, unload, exclusive, markWarmOwed(m), leaseDevicesOf(m, epoch), out)
+		drain, deadline, unload, exclusive, markWarmOwed(m), devices, out)
 }
 
 // rosterIDsFn reads the llama-swap roster ids; a variable so a test needs no llama-swap.

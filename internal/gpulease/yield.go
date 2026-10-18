@@ -176,9 +176,11 @@ func YieldFilePath(leaseDir string, epoch uint64) string {
 	return filepath.Join(leaseDir, yieldPrefix+strconv.FormatUint(epoch, 10))
 }
 
-// ReadYield reads the sidecar of one epoch; false when the holder was never asked. It writes nothing.
+// ReadYield reads the sidecar of one epoch; false when the holder was never asked. It writes nothing. The sidecar is replaced by a rename
+// over the live name (an action recorded on a request already made), so it is read through the shared open and an absence is only an
+// answer once it is settled (gate.go).
 func ReadYield(leaseDir string, epoch uint64) (YieldRequest, bool) {
-	b, err := os.ReadFile(YieldFilePath(leaseDir, epoch))
+	b, err := readSharedFile(YieldFilePath(leaseDir, epoch))
 	if err != nil {
 		return YieldRequest{}, false
 	}
@@ -260,8 +262,9 @@ func (a *YieldAsker) Tick() (YieldRequest, bool, error) {
 	if a.overdueSince.IsZero() {
 		a.overdueSince = now
 	}
-	// (d) already asked (by an earlier ask of this epoch from another asker).
-	if _, serr := os.Stat(YieldFilePath(m.leaseDir(), a.epoch)); serr == nil {
+	// (d) already asked (by an earlier ask of this epoch from another asker). The request file may be mid-rename (an action recorded on
+	// it), so the look waits for the rename; a look that cannot tell goes on, and the re-check under the epoch lock decides.
+	if _, serr := statSettled(YieldFilePath(m.leaseDir(), a.epoch)); serr == nil {
 		a.asked = true
 		return YieldRequest{}, false, nil
 	}
@@ -363,6 +366,8 @@ func (a *YieldAsker) write(req YieldRequest) (bool, error) {
 	created, exists := false, false
 	var werr error
 	lerr := m.withEpochLock(func() error {
+		// A plain stat, on purpose: the only writer of this file (writeYieldFile) runs under this same lock, so no rename of it is in flight
+		// here, and an absence is exact. A staged file left by a writer that died is not one, and waiting for it would hold the lock.
 		if _, serr := os.Stat(path); serr == nil {
 			exists = true
 			return nil
@@ -392,7 +397,7 @@ func (a *YieldAsker) write(req YieldRequest) (bool, error) {
 
 // writeYieldFile is tmp and rename, the way every sidecar of this package is written.
 func writeYieldFile(path string, b []byte) error {
-	tmp := path + ".tmp"
+	tmp := stagingPath(path)
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return err
 	}
@@ -425,7 +430,8 @@ func (m *Manager) recordYieldActionAt(epoch uint64, action string, exit int, act
 		}
 		req, ok := ReadYield(m.leaseDir(), epoch)
 		if !ok {
-			// Never asked: nothing to update. A file that is there and cannot be read is not that.
+			// Never asked: nothing to update. A file that is there and cannot be read is not that. A plain stat, as in the ask: the
+			// writer holds this lock.
 			if _, serr := os.Stat(path); serr == nil {
 				werr = fmt.Errorf("the request file %s exists but cannot be read", filepath.Base(path))
 			}

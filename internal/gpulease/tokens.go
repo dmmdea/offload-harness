@@ -114,7 +114,7 @@ func (m *Manager) LeaveToken(class Class, opts Options, since time.Time) (Token,
 		return Token{}, fmt.Errorf("gpulease: cannot keep a place in line: %w", err)
 	}
 	path := tokenPath(dir, id)
-	tmp := path + ".tmp"
+	tmp := stagingPath(path)
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return Token{}, fmt.Errorf("gpulease: cannot keep a place in line: %w", err)
 	}
@@ -248,7 +248,7 @@ func (m *Manager) TouchToken(id string) bool {
 	if err != nil {
 		return false
 	}
-	tmp := path + ".tmp"
+	tmp := stagingPath(path)
 	if err := os.WriteFile(tmp, b, 0o666); err != nil {
 		return false
 	}
