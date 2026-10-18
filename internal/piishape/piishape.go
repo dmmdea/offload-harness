@@ -211,26 +211,28 @@ const cookieGapPiece = `(?:[^\w\r\n]|` + jsonEscape + `)`
 // cookieGap is up to eight of those pieces, as few as possible.
 const cookieGap = cookieGapPiece + `{0,8}?`
 
-// cookieLineGap is the same for the opener of a header line, which takes no opening bracket: a header that a bracket
-// opens, behind its punctuation or right behind its name (a subscript, a printed slice), is a list (below), and a line that could also read the bracket as part of its own gap would match twice, a
-// long list-shaped span at a higher priority and a short line behind it. Every match then waits for the list to end
-// or the text to run out, and a text that repeats a header over and over, each one opening a list that never closes,
-// is scanned to its end once per match.
+// cookieLineGap is the same for the opener of a header line, which takes no opening bracket. A header that a bracket
+// opens, behind its punctuation, behind a space or right behind its name (a subscript, a printed slice), is a list
+// (below), and a line that could also read that bracket as part of its own gap would match twice: as a list, at a
+// higher priority, and as a short line behind it. A match cannot be reported while a higher-priority thread is alive,
+// so a text that repeats a header over and over, each one opening a list that never closes, was scanned to its end
+// once per match and took the square of its length.
 const cookieLineGap = `(?:[^\w\r\n\[]|` + jsonEscape + `){0,8}?`
 
 // cookieOpener is what stands between a cookie header's name and the cookies: the punctuation the Basic header
-// takes (up to eight non-word characters, then a colon, an equals sign, a greater-than sign or an opening bracket,
-// then up to eight more; a hash rocket is an equals sign and a greater-than sign, the second of which the gap takes,
-// and a greater-than sign right behind the name is the end of an XML tag or the head of an arrow), so a header
-// line, a subscript, a hash, an element and an arrow are covered; or else a comma behind which a quote opens the string that holds the
-// cookies, the form of a call that takes the name and the value as two arguments (Header.Set("Cookie", "...")).
-// A bare comma stays quiet: "the cookie, path=/some/long/path" is prose. A header fold may stand before the
-// punctuation and after it.
+// takes (up to eight non-word characters, none of them an opening bracket, then a colon, an equals sign or a
+// greater-than sign, then up to eight more; a hash rocket is an equals sign and a greater-than sign, the second of
+// which the gap takes, and a greater-than sign right behind the name is the end of an XML tag or the head of an
+// arrow), so a header line, a hash, an element and an arrow are covered; or else a comma behind which a quote opens
+// the string that holds the cookies, the form of a call that takes the name and the value as two arguments
+// (Header.Set("Cookie", "...")). A bare comma stays quiet: "the cookie, path=/some/long/path" is prose. A header
+// fold may stand before the punctuation and after it.
 const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieLineGap + `[:=>]|` + cookieLineGap + `,\s*\\*['"])` + cookieLineGap + `(?:` + cookieFold + cookieLineGap + `)?`
 
-// cookieListOpener is the opener of a list: the punctuation, which a line break may precede or follow, then an
-// opening bracket. The white space behind the bracket, a pretty-printed list's line breaks and indentation
-// included, is taken by the steps of the list.
+// cookieListOpener is the opener of a list: an opening bracket, which the punctuation (a colon or an equals sign, and
+// up to eight more characters) may precede, so a printed Go header, a JSON list, a slice printed behind a space and a
+// subscript are lists, and a line break may precede the punctuation or follow it. The white space behind the bracket, a
+// pretty-printed list's line breaks and indentation included, is taken by the steps of the list.
 const cookieListOpener = `(?:` + cookieFold + `)?` + cookieGap + `(?:[:=](?:` + cookieGapPiece + `|[\r\n]){0,8}?)?\[`
 
 // cookieGoListOpener is the opener of a Go slice literal, the way the Go-syntax print of a header writes it
@@ -365,7 +367,7 @@ const cookieBareLong = `(?:[^\s'",;&\\\]]|\\{1,` + cookieRunMax + `}u[0-9a-fA-F]
 // of a list, which is itself one string of the list) the body ends at its line and its closing quote is optional.
 func cookieQuotedLong(n int, cross, open bool) string {
 	q := cookieQuote(n)
-	head := q + `(?:` + cookieCountUnit(n) + `){12}`
+	head := q + `(?:` + cookieOpeningUnit(n) + `)(?:` + cookieCountUnit(n) + `){11}`
 	units := `(?:` + cookieSpanUnit(n) + `)*`
 	switch {
 	case !cross:
@@ -508,11 +510,15 @@ func cookieListBodyClosing(closer string) string {
 	return step + `*?(?:` + cookieListLong(false) + step + `*` + cookieListTail() + `?|` + cookieListLong(true) + `)`
 }
 
-// cookieHeader is the cookie-header class: a bracketed list, a Go slice literal, or a line.
+// cookieHeader is the cookie-header class: a line, a bracketed list, or a Go slice literal. A header line takes no
+// bracket, so on a header that a bracket opens the line cannot match and the list does, and the alternatives never
+// compete; where they do (a gap that skips quotes and an equals sign to reach a long value inside what would be a list),
+// the line goes first: a match is reported only when no thread of higher priority is alive, and a list that never
+// closes, in front of a line that matches, held every match back until the end of the text.
 var cookieHeader = `(?i)` + lead + `(?:set-)?cookie(?:` +
+	cookieOpener + cookieLineBody + `|` +
 	cookieListOpener + cookieListBodyClosing(`\]`) + `|` +
-	cookieGoListOpener + cookieListBodyClosing(`}`) + `|` +
-	cookieOpener + cookieLineBody + `)`
+	cookieGoListOpener + cookieListBodyClosing(`}`) + `)`
 
 // Class is one refusal class: a name and the pattern that recognizes it.
 type Class struct {
@@ -597,16 +603,19 @@ type Class struct {
 //     name and an opener fire (the punctuation the Basic header takes may stand between them, so a JSON list, a
 //     subscript, a hash and a printed Go header match; a comma counts only when a quote follows it, as in
 //     Header.Set("Cookie", "..."), so prose stays quiet; a header fold, a line break, may stand before the
-//     punctuation and after it) and the span holds a cookie value of 12 or more characters: 12 characters with no
-//     white space from the start of a bare value or from the opening quote of a quoted one, a JSON unicode escape
-//     counting as one. The match then runs from the header name to the first of the end of the line (a line break,
+//     punctuation and after it; a greater-than sign right behind the name, an XML tag or an arrow, opens a line;
+//     a bracket behind the punctuation, a space or the name opens a list, and a header line takes none) and the
+//     span holds a cookie value of 12 or more characters: 12 characters with no white space from the start of a
+//     bare value or from the opening quote of a quoted one, an escape counting as one (a JSON unicode escape, or
+//     a backslash run and the character it escapes). The match then runs from the header name to the first of the end of the line (a line break,
 //     its JSON escape or the end of the text), the closing quote of the string the header sits in (a quote that
 //     opens no quoted cookie value: a bare quote, or a backslash run of 1, 3, 7 or 15 and a quote, which are the
 //     levels of escaping of a header line or a shell command, of JSON text, and of each further layer; a single
 //     quote ends it too, so a curl command's header ends before the shell's closing quote) and the closing bracket
 //     of a list or the closing brace of a Go slice literal (a JSON list, a printed Go header, the Go-syntax print
 //     of one, a Python list: one span however many elements and lines it has, a bracket inside a string element
-//     not ending it). The closing quote and the bracket are not part of the match, so redacted text keeps its
+//     not ending it, a string of the list closed in the middle of it and open only as its last element). The
+//     closing quote and the bracket are not part of the match, so redacted text keeps its
 //     quoting and Args stay valid JSON. Nothing inside the span is read for an alphabet: a quoted value with a
 //     space, an apostrophe, an ampersand, a comma, a semicolon, a tab, an escaped quote, a doubled backslash, an
 //     octal escape, a shell escape (an escaped dollar sign or backtick) or one of Go's HTML escapes
@@ -647,9 +656,10 @@ type Class struct {
 // header whose name and scheme (or a cookie header whose name and cookies) are more than
 // eight punctuation characters apart or have a word between them, a cookie behind a
 // single quote or an apostrophe in an unquoted value, a cookie behind a bare double quote inside an unquoted value,
-// a cookie behind a backslash and an n or an r in an unquoted value (the JSON escape of a line break ends the line,
-// so a raw path such as C:\new\x ends the span there), a quoted cookie whose quotes carry a number of backslashes
-// that is no level of escaping (not 0, 1, 3, 7 or 15),
+// a cookie behind a backslash and a lowercase n or r in an unquoted value (the JSON escape of a line break ends the line,
+// so a raw path such as C:\new\x ends the span there; a capital, as in C:\Name, is an ordinary escape), a bare value
+// that holds a shell escape inside four layers of escaping (more than sixteen backslashes), a quoted cookie whose quotes
+// carry a number of backslashes that is no level of escaping (not 0, 1, 3, 7 or 15),
 // a quoted value that starts with white space or a separator, a Go slice literal whose type is left out, a header
 // folded again after its first cookie, and a cookie passed apart from its header name (curl -b, a jar).
 var Classes = []Class{
