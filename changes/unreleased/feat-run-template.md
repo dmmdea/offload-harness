@@ -93,9 +93,12 @@
     `embedding:<name> does not exist, ignoring`, drops the word and runs the prompt without it). The harness refuses instead: a missing or
     different embedding silently changes the output of a vetted template, and the licence class, the hash and the trust record attach to the
     file the manifest names. Readiness therefore accepts a name a prompt gives only when exactly one physical file answers it, case-exactly:
-    the name as written, then with `.safetensors`, `.pt` and `.bin` appended, on whole path segments, in the roots and every subfolder. A file
+    the name as written, then with `.safetensors`, `.pt` and `.bin` appended, on whole path segments, in the roots and every subfolder,
+    `.git` directories included: ComfyUI's embedding search walks them, so a file under one is an answer, while the listing a loader widget
+    reads skips them (the scan walks the `.git` of an embeddings root that is a git work tree, as ComfyUI's search does). A file
     the class does not list answers the name as written too (no extension, or a whole name that is the reference), because `load_embed` asks
-    `isfile` for it first with no extension filter; the inventory records those files (`unlisted_files`) for this class. One such file is
+    `isfile` for it first with no extension filter; the inventory records those files (`unlisted_files`) for this class, with the files below a
+    `.git` directory, and `unlisted` counts only what an extension keeps out. One such file is
     `present`, and the runtime manifest names it (`models/embeddings/<sub>/<name>.<ext>` for one in a subfolder, which the host-RAM figure can
     size and the satisfier and the trust check can find). A file reached by several paths is one file, by the file system's own word: the
     inventory records where each embeddings file really is (`reals`) and what the file system calls it (`ids`, so two hard links of one file
@@ -145,7 +148,7 @@
     returned is the one after the comma retry and the reading is the CLIP tokenizer's, the one embeddings are made for, and the names the
     other tries (the name as written, the reading without weights) are probes, not requirements (above); `embedding:` with no readable
     name, and a text nested more than 500 groups deep (ComfyUI reads about 900), are the empty name, which every caller refuses; the
-    inventory skips `.git` directories (ComfyUI's walk enters them).
+    class listing skips `.git` directories, as ComfyUI's listing does, and the prompt lookup walks them, as its embedding search does (above).
   - Limit: the override check and the runner's comparison both read the string values of the graph, so an embedding assembled while the graph
     runs by string nodes (a concatenation of two overrides, for example) is neither refused nor compared with the manifest, and the licence
     gate, the hash and the trust record never see the file it loads. "An override never retargets a file or names an embedding" is true of the

@@ -4578,10 +4578,10 @@ test("readiness: a file of the name under a .git directory of the embeddings roo
 });
 
 test("inventory: the embeddings class lists no .git entry, keeps those files apart for the prompt lookup, and no other class reads them", () => {
-  const inv = invFrom({ ...TREE, [EMB("Foo.pt")]: { size: 1 }, [EMB(".git/refs/Foo.pt")]: { size: 1 }, [EMB("sd15/.git/x.safetensors")]: { size: 1 }, "D:/x/comfy/models/vae/.git/v.safetensors": { size: 1 } });
+  const inv = invFrom({ ...TREE, [EMB("Foo.pt")]: { size: 1 }, [EMB(".git/refs/Foo.pt")]: { size: 1 }, [EMB("sd15/.git/x.safetensors")]: { size: 1 }, [EMB("link/.git")]: { size: 1 }, "D:/x/comfy/models/vae/.git/v.safetensors": { size: 1 } });
   assert.deepEqual(relsOf(inv, "embeddings"), ["Foo.pt"]);
-  assert.deepEqual(inv.classes.embeddings.unlisted_files.map((f) => f.rel), [".git/refs/Foo.pt", "sd15/.git/x.safetensors"]);
-  assert.equal(inv.classes.embeddings.unlisted, 0, "`unlisted` still counts only the files an extension keeps out");
+  assert.deepEqual(inv.classes.embeddings.unlisted_files.map((f) => f.rel), [".git/refs/Foo.pt", "link/.git", "sd15/.git/x.safetensors"], "a file called .git (a work tree's pointer file) is no directory: it is kept out by its extension like any other");
+  assert.equal(inv.classes.embeddings.unlisted, 1, "`unlisted` counts only the files an extension keeps out: the file called .git, not the files below a .git directory");
   assert.deepEqual(relsOf(inv, "vae"), ["ae.safetensors"], "another class still skips .git");
   assert.equal(inv.classes.vae.unlisted_files, undefined);
 });

@@ -1203,7 +1203,8 @@ function summarizeLicenses(catalog, rows, local) {
 // - once the yaml files are read, main.py's apply_custom_paths appends the output directory's
 //   checkpoints, clip, vae, diffusion_models and loras (--output-directory moves the output
 //   directory; --base-directory moves it and the models directory);
-// - a class lists the files under its directories recursively (links followed, .git skipped) whose
+// - a class lists the files under its directories recursively (links followed, .git skipped; the prompt lookup of the embeddings class
+//   does enter .git, below) whose
 //   extension its core loaders accept, by their path relative to the directory. A loader offers
 //   exactly those strings, so a file in a subfolder or under another case is not the file a
 //   template names.
@@ -1393,6 +1394,8 @@ function extOf(rel) {
   return i <= 0 ? "" : base.slice(i).toLowerCase();
 }
 const extListed = (rel, exts) => exts === null || exts.length === 0 || exts.includes(extOf(rel));
+// underGit: a file below a `.git` directory, at any depth (a file called `.git` is no directory).
+const underGit = (rel) => rel.split("/").slice(0, -1).includes(".git");
 const byRel = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
 
 // scanModelInventory: what each class would list. A file reachable through several directories is
@@ -1402,7 +1405,8 @@ const byRel = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
 // when the io can say, what the file system calls it (`ids`, the same shape: two names of one hard-linked file share one): a link makes one
 // file appear under several names, and the prompt lookup counts a physical file once (embeddingAnswers). And it records
 // the files it does not list (`unlisted_files`, the same shape without a size): load_embed asks for the name as written first, with no
-// extension filter, so a file whose whole name is the reference answers it whatever it ends in. It records no case rule of the volume and asks
+// extension filter, so a file whose whole name is the reference answers it whatever it ends in. Files below a `.git` directory are there too, in
+// every extension: the class listing skips `.git` as ComfyUI's does, but its embedding search walks it. It records no case rule of the volume and asks
 // the io about no name that is not a file it lists: a name in another case is a case variant and is refused, not looked up.
 export function scanModelInventory(roots, io = nodeIo) {
   const classes = {};
@@ -1423,8 +1427,12 @@ export function scanModelInventory(roots, io = nodeIo) {
     };
     for (const d of spec.dirs) {
       if (!io.list(d.path)) { missing_dirs.push({ class: cls, path: d.path }); continue; }
-      const walked = walkFiles(d.path, io, { follow: true, excludeDirs: [".git"] });
+      // The listing of every class skips .git (recursive_search does). The prompt lookup of the embeddings class does not: ComfyUI's embedding
+      // search enters it, so a file of the name under it is an answer ComfyUI may open. Those files are walked and kept apart, with the files the
+      // class does not list, for that lookup alone; `unlisted` counts only what an extension keeps out.
+      const walked = walkFiles(d.path, io, { follow: true, excludeDirs: real ? [] : [".git"] });
       for (const f of walked) {
+        if (real && underGit(f.rel)) { record(notListed, f, d, false); continue; }
         if (!extListed(f.rel, spec.exts)) { unlisted++; if (real) record(notListed, f, d, false); continue; }
         record(listed, f, d, true);
       }

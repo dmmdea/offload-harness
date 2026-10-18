@@ -3340,7 +3340,8 @@ the extensions its core loaders accept, by path relative to the directory (so `s
 file nobody annotated, met by its exact name in any class) or says why not: `missing`, `wrong_class` (and
 where the file is), `in_subfolder`, `case_mismatch`, `extension_not_listed`, `class_unregistered`, and, for an embedding a prompt names, `embedding_unverified`. That lookup fails closed and is narrower than
 ComfyUI's (ComfyUI warns and skips a missing embedding, and finds the others in the roots and every subfolder through a set, so which
-directory answers varies from run to run): the harness accepts a name only when exactly one physical file answers it, case-exactly, a
+directory answers varies from run to run): the harness accepts a name only when exactly one physical file answers it, case-exactly, anywhere in the roots and
+their subfolders (a `.git` directory too: the class listing skips it, ComfyUI's embedding search does not), a
 file reached by several paths (a link, a hard link, a root inside a root) counting once, and the status carries the reason: a case variant
 answers it, more than one file could answer it, or a file answers another name ComfyUI may try for the template's prompts, listed as
 `embedding_probes`. A loader widget's embeddings file (an annotation that records no prompt name) is met by its exact path like any

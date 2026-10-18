@@ -1167,7 +1167,8 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    missing or different embedding silently changes the output of a vetted template, and the licence class, the hash and the trust record
    attach to the file the manifest names. So the lookup is deliberately narrower than ComfyUI's: a name is accepted only when exactly one
    physical file answers it, case-exactly (the name as written, or with `.safetensors`, `.pt` or `.bin` appended, on whole path segments, in
-   the roots and every subfolder; a file the class does not list, with no extension, answers the name as written, as `isfile` does), and
+   the roots and every subfolder, `.git` directories included because ComfyUI's embedding search walks them while the listing a loader widget
+   reads skips them; a file the class does not list, with no extension, answers the name as written, as `isfile` does), and
    then it is `present` and the runtime manifest names that file, subfolder and extension included. A file reached by several paths is one
    file, by the file system's own word (the inventory records where each embeddings file really is and what the file system calls it): a
    root that links to another registered root, a link inside a root, a root registered inside another and a file linked into two
