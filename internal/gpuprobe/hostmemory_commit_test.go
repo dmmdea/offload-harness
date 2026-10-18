@@ -208,10 +208,10 @@ func TestParseOvercommit(t *testing.T) {
 	}
 }
 
-// The Linux reader through its seam: the commit limit is hard only in strict mode (vm.overcommit_memory 2). In the
-// heuristic and always modes the kernel grants allocations past CommitLimit, so the number is no limit; a mode that cannot be
-// read, or a meminfo that hides the accounting, is not trusted as one either.
-func TestTheLinuxReaderMarksTheCommitLimitHardOnlyInStrictMode(t *testing.T) {
+// The Linux reader through its seam: the commit limit is soft only in a mode known to be lax (vm.overcommit_memory 0 or 1), where
+// the kernel grants allocations past CommitLimit and the number is no limit. A mode that cannot be read is not assumed to be lax,
+// so the limit stays hard (fail closed); a meminfo that hides the accounting has no limit to enforce, and reads soft.
+func TestTheLinuxReaderMarksTheCommitLimitSoftOnlyInAKnownLaxMode(t *testing.T) {
 	reader := func(meminfo string, overcommit string, overcommitErr error) func(string) ([]byte, error) {
 		return func(path string) ([]byte, error) {
 			switch path {
@@ -236,8 +236,9 @@ func TestTheLinuxReaderMarksTheCommitLimitHardOnlyInStrictMode(t *testing.T) {
 		{"strict", sampleMeminfo, "2\n", nil, false},
 		{"heuristic", sampleMeminfo, "0\n", nil, true},
 		{"always", sampleMeminfo, "1\n", nil, true},
-		{"mode unreadable", sampleMeminfo, "", errors.New("permission denied"), true},
-		{"mode garbled", sampleMeminfo, "x\n", nil, true},
+		// A mode that cannot be told is not assumed to be lax: the commit limit stays a hard one (fail closed).
+		{"mode unreadable", sampleMeminfo, "", errors.New("permission denied"), false},
+		{"mode garbled", sampleMeminfo, "x\n", nil, false},
 		{"strict but the accounting is hidden", strings.ReplaceAll(sampleMeminfo, "CommitLimit:", "Other:"), "2\n", nil, true},
 	}
 	for _, c := range cases {
