@@ -153,7 +153,8 @@
     runs by string nodes (a concatenation of two overrides, for example) is neither refused nor compared with the manifest, and the licence
     gate, the hash and the trust record never see the file it loads. "An override never retargets a file or names an embedding" is true of the
     values an override sets, not of text built from them.
-  - Measured read only on the installed package (`json 0.1.96`, 578 templates in the index, 593 template files): the catalog is
+  - Measured read only on the installed package (`json 0.1.96`: 594 `.json` files, which are the 578 templates of the index, `fuse_options.json` and 15 index-family files, `index.json`,
+    twelve localized or mcp indexes, the schema and the logo): the catalog is
     byte-identical before and after the simplification (897 model entries, 3 of them annotations of the embeddings class, the loader-widget
     conditioning files that the prompt lookup does not touch; no row carries `embedding_probes` or an annotation `embedding_refs`), and so are
     the per-template verdicts and the readiness per template on a snapshot of the measuring machine (649 requirements missing, 214 present;
