@@ -237,11 +237,8 @@
   wrappings, a JSON object of two lists in three, a Python dict in two and a Python list in Args; in the redactor generator the cookies
   behind a key-word cookie, a JWT and a Bearer value in three more wrappings that keep an earlier placeholder inside an unquoted list) were
   committed before any fix and run against the class as it stood, and so were the scan-time tests (4 KiB 41 ms, 16 KiB 594 ms, a factor of
-  15 for 4 times the text); the guard tests are green by design and red against the mutant that removes the guard, each run as `go test
-  -overlay` of the one test. The generator grew from 77,417 to 148,934 cases (74 cookie shapes, 56 wrappings). Measured: the pattern is
-  132,494 program instructions (54,527 before this review) and compiles in 26 ms; the class alone scans 1 MiB of Go source in 0.1 s, and 1
-  MiB of each text that reviews found to be slow takes 0.5 to 1.1 s and grows in step with its length; a full redaction of 256 KiB of the
-  single-quote unit takes 1.9 s per MiB against 1.2 s for source text. A random search over 4,900 units of up to a dozen pieces (header
+  15 for 4 times the text); the guard tests are green by design and red against the mutant that removes the guard, each run as `go test -overlay` of the one test. The sweep of credential values is pinned by the 2,304-case matrix of an unquoted header followed by a quoted credential, which leaves 1,589 failing lines (values still in the text) when the sweep is removed. The generator grew from 77,417 to 145,862 cases (74 cookie shapes, 56 wrappings). Measured: the pattern is
+  132,494 program instructions (54,527 before this review) and compiles in 26 ms; the class alone scans 1 MiB of Go source in 0.1 s, and 1 MiB of each text that reviews found to be slow takes 0.4 to 1.0 s and grows in step with its length; a full redaction (every class) of 1 MiB of those texts takes 1.4 to 2.1 s against 1.2 s for source text. A random search over 4,900 units of up to a dozen pieces (header
   names, quotes at two levels of escaping, backslash runs, brackets, equals signs) and a hill climb on the slowest eight, run on a gate
   runner against the class after the first cost fix, still found four families whose time grew with the square of the length (16 KiB, 0.3 to
   1.2 s); the line-first order and the pair rule for a long value remove them, and two searches with new seeds against the final class

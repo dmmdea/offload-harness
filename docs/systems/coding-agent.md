@@ -718,10 +718,8 @@ quoted prose after a key name is read as a value, in the safe direction. The tab
 text that matches no class, all eleven classes took 1.51, 1.54 and 1.54 s (three runs), about 1.5 s per MiB, of which the assignment class
 is 0.6 s and each other class 0.1 to 0.2 s; the same input took 1.53, 1.53 and 1.55 s before the quoted-value and cookie changes, so those
 changes did not move it measurably. The whole-span cookie class alone scans 1 MiB of Go source in about 0.1 s, as the older class did. Text built to
-be slow for it costs 0.4 to 1.1 s per MiB for the class alone and grows in step with its length (four times the text, four times the time): 1 MiB of a
-header, a bracket, an apostrophe, an escaped equals sign and a quote repeated took 1.1 s, 1 MiB of single quotes, equals signs and seven-backslash
-quotes behind a header opener 0.8 s, and a 240-byte unit of quotes, backslashes and brackets 0.5 s; a full redaction of 256 KiB of the single-quote
-unit took 1.9 s per MiB against 1.2 s for source text (one machine, `GOMAXPROCS=2`, a noisy desk; unverified elsewhere). Until a header line stopped
+be slow for it costs 0.4 to 1.0 s per MiB for the class alone and grows in step with its length (four times the text, four times the time): 1 MiB of a
+header, a bracket, an apostrophe, an escaped equals sign and a quote repeated took 1.0 s, 1 MiB of single quotes, equals signs and seven-backslash quotes behind a header opener 0.7 s, and a 240-byte unit of quotes, backslashes and brackets 0.5 s; a full redaction (every class) of 1 MiB of those texts took 1.4 to 2.1 s against 1.2 s for source text, the other classes costing about 1.1 s of it (one machine, `GOMAXPROCS=2`, a noisy desk; unverified elsewhere). Until a header line stopped
 taking an opening bracket, a text that repeated a header over and over, each one opening a list that never closed, was scanned to its end once per
 match and took the square of its length (16 KiB, 0.6 s; 1 MiB, hours), because a match cannot be reported while a thread of higher priority is alive.
 A random search over units of up to a dozen pieces (header names, quotes at two levels of escaping, backslash runs, brackets, equals signs), run on
