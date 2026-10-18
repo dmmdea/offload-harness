@@ -16,8 +16,10 @@ import (
 //
 // The word judges the lines the grant applies (gpuprobe.HostMemory.Verdict): the available physical
 // memory, the commit charge against physical RAM (the line a commit nobody stated is held to), and the commit limit
-// where the OS enforces one. NEAR is inside the headroom of any of them, so a lease that declares any host RAM waits;
-// OVER is one of them gone (nothing available, the commit charge above physical RAM, or at the limit). It is a
+// where the OS enforces one. NEAR is inside the headroom of any of them, so a lease judged on that line waits: one that touches
+// host RAM when the available memory is, one that states no commit when the room under physical RAM is, one that states its commit
+// when the room under the commit limit is (a host that reads NEAR on the physical line alone still admits a lease that states its
+// commit); OVER is one of them gone (nothing available, the commit charge above physical RAM, or at the limit). It is a
 // statement about room, not about paging: whether the box is paging now needs the page-file
 // growth or the pages-out rate, which no surface here reads, so none of them says it. The grant's own rule
 // (gpuprobe.HostRAMAdmitsLoad) is stricter for the load it is asked to admit (it holds a new declaring lease while

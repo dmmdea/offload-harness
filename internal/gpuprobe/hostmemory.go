@@ -124,7 +124,10 @@ const (
 	// HostOK: the available memory, the room under physical RAM for the commit charge and (where the OS enforces one) the room
 	// under the commit limit all exceed the headroom, so a lease that declares host RAM can be admitted if it is small enough.
 	HostOK HostVerdict = "OK"
-	// HostNear: one of them is inside the headroom, so a lease that declares any host RAM waits.
+	// HostNear: one of them is inside the headroom, so a lease judged on that line waits: one that touches host RAM when the
+	// available memory is, one that states no commit when the room under physical RAM is, one that states its commit when the
+	// room under the commit limit is. A lease that states its commit is not held to the physical-RAM line, so it can be admitted
+	// while the host reads NEAR on that line alone.
 	HostNear HostVerdict = "NEAR"
 	// HostOver: one of them is gone: no memory is available, or the commit charge is above physical RAM (the line a commit nobody
 	// stated is held to), or it has reached a commit limit the OS enforces (allocations by other processes can fail once the page
