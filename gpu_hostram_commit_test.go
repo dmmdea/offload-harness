@@ -193,7 +193,7 @@ func TestTheHolderTakesTheLeaseWithBothDeclarations(t *testing.T) {
 
 // The split of a deferred reserve moves both quantities together.
 func TestHostRAMLoadSplitMovesBothQuantities(t *testing.T) {
-	load := gpuprobe.HostLoad{TouchGiB: 28, CommitGiB: 58}
+	load := gpuprobe.HostLoad{TouchGiB: 28, CommitGiB: 58, CommitStated: true} // the flag is part of the figure: a split that rebuilds the struct without it must not pass
 	gate, later := hostRAMLoadSplit(false, load)
 	if gate != load || later != (gpuprobe.HostLoad{}) {
 		t.Errorf("a lease that unloads nothing compares both in the grant: gate %+v later %+v", gate, later)
