@@ -108,3 +108,23 @@ func TestCookieLineOpenerTakesAGreaterThanSign(t *testing.T) {
 		}
 	}
 }
+
+// TestCookieListOpensBehindASpaceOrAName: a slice printed after the header name with the plain verb, fmt.Println("Cookie",
+// []string{...}), puts a space and a bracket behind the name, and a subscript a bracket right behind it. A bracket there is the
+// head of a list whether a colon stands in front of it or not; the match ends in front of the closing bracket.
+func TestCookieListOpensBehindASpaceOrAName(t *testing.T) {
+	v, w := valueFixture(871, 36, alnum), valueFixture(872, 36, alnum)
+	re := cookieClass().Re
+	for name, c := range map[string]struct{ text, want string }{
+		"space":                 {ckName + " [sid=" + v + "]", ckName + " [sid=" + v},
+		"space, two cookies":    {"x " + ckName + " [sid=" + v + " b=" + w + "]", ckName + " [sid=" + v + " b=" + w},
+		"println of a slice":    {fmt.Sprint("x ", ckName, " ", []string{"sid=" + v, "b=" + w}), ckName + " [sid=" + v + " b=" + w},
+		"subscript":             {ckName + "[sid=" + v + "]", ckName + "[sid=" + v},
+		"subscript, a receiver": {"h." + ckName + "[sid=" + v + "; b=x]", ckName + "[sid=" + v + "; b=x"},
+		"line break":            {ckName + "\n[sid=" + v + "]", ckName + "\n[sid=" + v},
+	} {
+		if got := re.FindString(c.text); got != c.want {
+			t.Errorf("%s: matched %q in %q, want %q", name, got, c.text, c.want)
+		}
+	}
+}
