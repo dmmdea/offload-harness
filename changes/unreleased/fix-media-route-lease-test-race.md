@@ -391,14 +391,15 @@
     (`TestTheProbeBeforeTheLockPaysTheGateWaitsSoTheLockIsHeldWithoutOne`: a card grant over live leases on other cards, and a whole-node grant over leases whose holders are gone, count the gate's pauses taken
     with the lock held and want none; `TestTheWholeNodeVerificationPaysAtMostOneWaitPerFile` counts one wait per file). A later review showed what the order does not cover: leftovers that appear between the probe
     and the lock, fresh (younger than 3 s) and unread for 5 s, on nine or more leases, held the lock past the spin, and the second acquirer failed with `the epoch lock ... did not clear` (a queued acquire left
-    the queue with that error). So the hold is capped: the gate takes at most one second (`lockGateCap`, half the spin) of one hold of the epoch lock (`beginEpochHold`, registered by lease directory in
+    the queue with that error). So the hold is capped: the gate takes at most one second (`lockGateCap`, half the spin) of one hold of the epoch lock (`beginEpochHold`, registered by the cleaned lease directory in
     `withEpochLock`), and once a hold has run that long every further read of a lease file in that directory that would wait for a rename in flight answers the I/O failure at once. That is the answer a wait that
     ran out gives, and every decision under the lock reads it as held (unknown is never stale), so nothing is decided differently: the wait would only have turned "unknown" into a heartbeat that is fresh. The cap
     applies to the reads of the lease directory the hold is of, by whoever makes them in this process (a read in another thread during a spent hold gets the I/O failure instead of a wait, which every reader of it
     treats as held or unexaminable), and never to a read outside a hold. The launch markers live in another directory and are not covered. Red, at the unchanged code
     (`epochlock_cap_test.go`): `9 leases: the verification waited 2.25s on the gate with the epoch lock held, the spin of a second acquirer is 2s (450 pauses)`, `12 leases ... 3s ... (600 pauses)`, and for a card
-    grant whose leftovers land after its probe `the grant waited 3s (600 pauses) on the gate with the epoch lock held`; after, green with three, nine and twelve leases, and the three tests of the cap's scope
-    (a read outside a hold waits its whole budget, another directory's hold does not shorten a wait, the hold is forgotten when the lock is let go). Not measured on a Windows host again: the figures above are the
+    grant whose leftovers land after its probe `the grant waited 3s (600 pauses) on the gate with the epoch lock held`; after, green with three, nine and twelve leases, and the four tests of the cap's scope
+    (a read outside a hold waits its whole budget, another directory's hold does not shorten a wait, the hold is forgotten when the lock is let go, and a lease directory spelled with forward slashes, a trailing separator or a
+    "." element still meets its hold: a first form registered the directory as it was given and never met the clean paths read inside it). Not measured on a Windows host again: the figures above are the
     ones before the cap, and the cap is shown on the gate's clock.
   - **Known limits.** A lock broken as stale after 30 s (`epochLockStale`) lets a second holder in beside a first that only stalled; its sweep could remove the first's staged file, which fails that rename with an error
     and corrupts nothing. The 5 s memory is the gate's choice and is not a measured figure. The measurements are one host's.
