@@ -153,3 +153,60 @@ test("ensureComfy: an orphan on another endpoint that needs replacing is refused
   assert.equal(killed, null, "nothing may be stopped when it cannot be relaunched where it was");
   assert.equal(spawned, 0);
 });
+
+// ---- a two-card lease without --placement multicard (register PF-4) ---------------------------
+//
+// A still run under `gpu reserve --devices <a>,<b>` (GPU_LEASE_DEVICES names the two cards) that did not pass `--placement multicard`
+// is an UNKEYED runner: only --placement multicard keys the pair's own instance and launches it on the pair's port. Aimed at that
+// port (COMFY_API) with nothing answering, it used to fail as COMFY-ENDPOINT-DOWN, whose advice (start ComfyUI yourself, or key the
+// instance with COMFY_INSTANCE / COMFY_CARD_UUID, which pins ONE card) does not say what is missing. It now names the placement.
+
+const PAIR = "GPU-00000000-0000-0000-0000-00000000000a,GPU-00000000-0000-0000-0000-00000000000b";
+
+test("ensureComfy: an unkeyed runner under a two-card lease with no placement is told to pass --placement multicard", async (t) => {
+  const { calls, opts } = harness(t, { up: false, env: { GPU_LEASE_DEVICES: PAIR } });
+  await assert.rejects(ensureComfy(opts), (e) => {
+    assert.match(e.message, /--placement multicard/, "the missing placement is named");
+    assert.match(e.message, /COMFY-PLACEMENT-MISSING/, "under its own name, not the endpoint-down one");
+    assert.doesNotMatch(e.message, /COMFY-ENDPOINT-DOWN/, "the generic line is not what a two-card lease gets");
+    for (const id of PAIR.split(",")) assert.ok(e.message.includes(id), `the two leased cards are named (${id})`);
+    assert.match(e.message, new RegExp(OTHER.replace(/\./g, "\.")), "and so is the endpoint nothing answered on");
+    return true;
+  });
+  assert.equal(calls.spawn.length, 0, "nothing is launched");
+  assert.equal(calls.marker.length, 0);
+});
+
+test("ensureComfy: a two-card lease whose endpoint answers still reuses it (the refusal is for the endpoint that is down)", async (t) => {
+  const { calls, opts } = harness(t, { up: true, env: { GPU_LEASE_DEVICES: PAIR } });
+  assert.equal(await ensureComfy(opts), null);
+  assert.equal(calls.spawn.length, 0);
+});
+
+test("ensureComfy: one leased card, or three, keeps the endpoint-down line (the placement is for exactly two cards)", async (t) => {
+  for (const devices of ["GPU-00000000-0000-0000-0000-00000000000a", `${PAIR},GPU-00000000-0000-0000-0000-00000000000c`, "", "-"]) {
+    const { opts } = harness(t, { up: false, env: devices ? { GPU_LEASE_DEVICES: devices } : {} });
+    await assert.rejects(ensureComfy(opts), (e) => {
+      assert.match(e.message, /COMFY-ENDPOINT-DOWN/, `devices ${JSON.stringify(devices)}`);
+      assert.doesNotMatch(e.message, /--placement multicard/);
+      return true;
+    });
+  }
+});
+
+test("ensureComfy: a keyed instance, or a multicard launch, under a two-card lease is not told about the placement", async (t) => {
+  // keyed: the operator named an instance, so the launch is the runner's own and the failure is another one
+  const keyed = harness(t, { up: false, env: { GPU_LEASE_DEVICES: PAIR, COMFY_INSTANCE: "side" } });
+  keyed.opts.portFree = async () => false; // the instance's port is held by something that is not ComfyUI
+  await assert.rejects(ensureComfy(keyed.opts), (e) => {
+    assert.doesNotMatch(e.message, /COMFY-PLACEMENT-MISSING/);
+    return true;
+  });
+  // multicard launch: the placement WAS asked for, and the extra launch it carries is not this refusal's business
+  const launched = harness(t, { up: false, env: { GPU_LEASE_DEVICES: PAIR } });
+  launched.opts.launch = { cards: ["GPU-00000000-0000-0000-0000-00000000000a", "GPU-00000000-0000-0000-0000-00000000000b"], cudaVisibleDevices: PAIR, key: "pair" };
+  await assert.rejects(ensureComfy(launched.opts), (e) => {
+    assert.doesNotMatch(e.message, /COMFY-PLACEMENT-MISSING/);
+    return true;
+  });
+});
