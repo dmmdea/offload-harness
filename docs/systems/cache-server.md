@@ -98,8 +98,14 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    starts on the Wi-Fi path at ~24 MB/s, on an unreachable bridge address and on a VPN address that refuses the pinned
    source, three days without L2). It collects all the A answers itself (an embedded python helper, a raw mDNS query with
    the QU bit sent out of the pinned source address three times in about a second, `timeout -s KILL 3` around it), takes the
-   FIRST answer inside the pinned source address's IPv4 network (prefix from `ip -4 -o addr`) and mounts `//<address>/<share>`
-   with the same options, printing one `seat_fg:` line with every answer and the choice; the status file then reads
+   answer inside the pinned source address's IPv4 network (prefix from `ip -4 -o addr`) and mounts `//<address>/<share>`
+   with the same options. With one answer inside the network that is the address; with several (the store's wired and Wi-Fi
+   addresses on one network) it pings each from the pinned source address (`ping -I <src> -c 5 -i 0.2 -q -W 1 <address>`, each
+   under `timeout -s KILL 3`, one after the other) and mounts the lowest MINIMUM round-trip time, equal minimums going to the
+   earlier answer (reference workstation: wired 0.425-0.477 ms, Wi-Fi 0.983-2.288 ms, three runs each; the averages were far
+   noisier). A candidate with no reply is never chosen over one that replied; with no ping, no reply from any candidate or no
+   readable time the choice is the first inside the network by arrival order. It prints one `seat_fg:` line with every answer,
+   each candidate's result (`min RTT <n> ms`, `no reply`) and the rule that chose; the status file then reads
    `ok <when> mbps=<n> addr=<address>`. No python, no answer, nothing on that network or a helper that fails or times out
    keeps the mount by name exactly as before (the line says why); a name that is not `.local`, an IPv4 literal, an `nfs` mount
    and an unset pin are untouched. The address is chosen when the share is mounted (once per WSL session): a start that finds
@@ -107,10 +113,12 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    could trade a good mount for the Wi-Fi one) and asks no mDNS; it prints one `seat_fg:` line with the share's source and
    server address (read with `findmnt`) and how to choose again, the status file then reads `addr=<that server address>`, and
    a write-floor degrade names it. A share an earlier start mounted at the wrong address stays there until it is unmounted
-   (`umount <SEAT_L2_MOUNT_DIR>` while no seat uses it) and the seat is started again. If the store's wired and Wi-Fi
-   addresses share one network the choice cannot tell them apart: name the wired address in `SEAT_L2_MOUNT_SRC`, as a reserved
-   or static address of the store (never a DHCP lease) or as a name that is not `.local` which this box resolves to it (such a
-   name is not looked up; a `.local` name pinned in `/etc/hosts` is not honoured, the lookup asks mDNS directly). Proven by
+   (`umount <SEAT_L2_MOUNT_DIR>` while no seat uses it) and the seat is started again. The round-trip time is a heuristic, not
+   a throughput measurement: a store whose fast path has a higher latency than its slow path would be picked wrong, and one
+   whose fast path drops ICMP loses to a slow path that answers it. To override the choice name the wired address in
+   `SEAT_L2_MOUNT_SRC`, as a reserved or static address of the store (never a DHCP lease) or as a name that is not `.local`
+   which this box resolves to it (such a name is not looked up and nothing is pinged; a `.local` name pinned in `/etc/hosts`
+   is not honoured, the lookup asks mDNS directly). Proven by
    `setup/templates/vllm-seat/seat_fg.kv-and-store.tests.sh`,
    which runs the whole launcher against stand-ins for the mount, the network and mDNS, and drives the helper alone against a
    loopback responder. When the mount fails the
