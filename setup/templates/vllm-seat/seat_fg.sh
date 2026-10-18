@@ -753,6 +753,32 @@ if [ -n "$mp_pid" ] && [ "$mp_pid" -gt 1 ] 2>/dev/null; then
 else
   echo "seat_fg: host rss not read — the MP server unit $MP_UNIT has no main pid (L1 ${L1_GB} GiB)"
 fi
+# Page-cache bound on WSL2 (register B-56, operator rule 2026-10-18: no swapping, no out-of-memory). vLLM reads the checkpoint
+# through the guest page cache and keeps none of it mapped once the weights are on the cards, so the cache is a second copy in
+# host RAM, and on WSL2 guest page cache is VM memory the host cannot take back until the guest frees it. Measured on the
+# 3-card reference box 2026-10-18: loading the INT4 27B pair seat moved host commit 76.6 -> 150 of 171.7 GiB, 23 GiB of it guest
+# page cache; one drop took vmmem 66.1 -> 44.3 GiB and host commit 149 -> 127 GiB with the seat serving. The earlier 168 GiB
+# peak and a 42 GiB cache read on 10-15 are the same growth over hours. So a watcher (a subshell started before the exec, which
+# keeps this PID for the engine) drops clean page cache once the engine answers /health and again whenever the guest's cache
+# passes SEAT_CACHE_CAP_GIB, until the engine exits. drop_caches=1 frees clean cache only (no dirty data, no process memory) and
+# needs root, which a WSL seat has. Native Linux is left alone: there the cache is reclaimable kernel memory, not host commit.
+SEAT_PID=$$
+if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null && [ -w /proc/sys/vm/drop_caches ]; then
+  ( cap_kib=$(( ${SEAT_CACHE_CAP_GIB:-4} * 1048576 )); ready=0
+    while kill -0 "$SEAT_PID" 2>/dev/null; do
+      sleep 30
+      if [ "$ready" = 0 ]; then
+        "$VENV/bin/python" -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:$PORT/health', timeout=5)" 2>/dev/null || continue
+        ready=1; force=1
+      fi
+      c=$(awk '/^Cached:/{print $2}' /proc/meminfo)
+      if [ "${force:-0}" = 1 ] || [ "${c:-0}" -gt "$cap_kib" ]; then
+        sync; echo 1 > /proc/sys/vm/drop_caches
+        echo "seat_fg: page cache dropped ($(( ${c:-0} / 1048576 )) GiB -> $(awk '/^Cached:/{print int($2/1048576)}' /proc/meminfo) GiB; cap ${SEAT_CACHE_CAP_GIB:-4} GiB)"
+        force=0
+      fi
+    done ) &
+fi
 exec "$VENV/bin/vllm" serve "$MODEL" \
   --host 127.0.0.1 --port "$PORT" --served-model-name "$NAME" "${SEAT_ALIAS:-agent-pool}" \
   --max-model-len "$MAXLEN" "${PAR[@]}" --gpu-memory-utilization "${SEAT_UTIL:-0.88}" \
