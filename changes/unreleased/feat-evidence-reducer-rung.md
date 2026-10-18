@@ -205,8 +205,8 @@
   scanner resumes after a closing quote, which is only re-read as a quote that is not followed by an equals sign). Named gaps after the review: a raw JSON value (a bare double quote inside an unquoted value) ends the span at the
   quote, and so does an apostrophe; a backslash and a lowercase n or r in an unquoted value is the JSON escape of a line break and ends the span (a raw path such as `dir=C:\new\x` ends it there); a quoted value that starts with white space or a separator is not a pair; quotes with two, four to six or
   eight to fourteen backslashes are no level; a Go slice literal with its type left out is read as a line.
-- **The whole-span cookie class after its third review, red first.** A third review (every finding reproduced three times, each against the
-  commit before the second review's fixes as well) found that those fixes had traded some defects for others, and some older ones. Most let
+- **The whole-span cookie class after its third review, red first.** A third review (every finding reproduced three times, most of them
+  compared with the commit before the second review's fixes) found that those fixes had traded some defects for others, and some older ones. Most let
   a value of 12 or more characters through with the residual gate clean. (1) Order: with the credential classes run before the cookie class,
   a cookie named like a credential with a double-quoted value was taken by the assignment class, which leaves the closing quote behind its
   placeholder, and the span stopped at that stray quote, so every cookie behind it was written out; a JWT, a Bearer value or a key-word
