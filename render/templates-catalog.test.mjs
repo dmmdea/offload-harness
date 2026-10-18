@@ -4159,6 +4159,17 @@ test("readiness: two names that share a file id are one file, whatever their pat
   assert.equal(invFrom({ ...TREE, [EMB("e.pt")]: { size: 7 } }).classes.embeddings.files[0].ids, undefined, "an io that cannot name files records no ids");
 });
 
+test("readiness: one file under two names that share an id answers as written when any of its names is, and is reported by that name", () => {
+  const tree = { ...TREE, [EMB("FOO.pt")]: { size: 7 }, [EMB2("foo.pt")]: { size: 7 } };
+  const status = (ids) => {
+    const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: OVERFLOW }), idIo(tree, ids));
+    const r = C.readiness([req("embeddings", "foo", { annotated: false })], inv).requirements[0];
+    return [r.status, r.resolved ?? null, r.reason ?? null];
+  };
+  assert.deepEqual(status({ [EMB("FOO.pt")]: "id:1:7", [EMB2("foo.pt")]: "id:1:7" }), ["present", "foo.pt", null], "one file, one of its names is the spelling the prompt gives");
+  assert.deepEqual(status({ [EMB("FOO.pt")]: "id:1:7", [EMB2("foo.pt")]: "id:1:8" }), ["embedding_unverified", null, WHY_MANY], "two files: the exact one and a case variant");
+});
+
 test("fileIdentity: a device and an index name a file, an index of 0 names nothing, and nodeIo gives the same id to two names of one file", async (t) => {
   assert.equal(C.fileIdentity({ dev: 5n, ino: 9n }), "id:5:9");
   assert.equal(C.fileIdentity({ dev: 5n, ino: 0n }), null, "a file system that has no index reports 0 for every file: those would all be one file");
