@@ -1204,7 +1204,8 @@ func (s Spec) ExtraEntry(r Runtime) string { return s.entry(r, s.Unit) }
 // ExtraEntry writes them. The installer does not write them: the seat's launch line carries flags the
 // shared unit template cannot express (the ampere-16 35B's `--language-model-only`), so its unit, its
 // wrapper scripts and its polkit rule are the operator's step. nil for the WSL launch, whose entry runs
-// one shared PowerShell stub named by the seat id, so there is no per-seat script to install.
+// one shared PowerShell stub named by the seat id, so there is no per-seat script to install: the stub is
+// rendered once for every Windows seat of the tier, and a seat it was not rendered for is refused (ArtifactsWith).
 func (s Spec) ExtraWrapperPaths(r Runtime) []string {
 	if s.launch() == LaunchWindowsWSL {
 		return nil
@@ -1326,7 +1327,28 @@ func (s Spec) NeedsLMCacheOverlay() bool {
 // the polkit rule from the reference templates in templatesDir. It returns
 // installed-name -> content, and refuses to return a file that still holds a token:
 // a half-substituted unit starts and misbehaves rather than failing loudly.
+//
+// A windows-wsl seat rendered this way gets stubs that serve this one seat. A box that runs
+// more than one Windows seat from one seat directory renders them with ArtifactsWith.
 func (s Spec) Artifacts(templatesDir string, r Runtime) (map[string]string, error) {
+	return s.ArtifactsWith(templatesDir, r, nil)
+}
+
+// ArtifactsWith is Artifacts for a windows-wsl seat that shares its seat directory with other Windows
+// seats. Every Windows seat's llama-swap entry runs the SAME two stubs (seat-cmd.ps1, seat-cmdstop.ps1)
+// from that directory and passes its own seat id, so the stubs cannot bake one seat's id, port and load
+// budget: they carry a table from the seat argument to those three values, and the table must hold every
+// seat that runs them. A stub rendered for one seat alone makes a second seat wait for the first seat's
+// id for its whole load budget, then fail (register B-57).
+//
+// seats are the OTHER Windows seats of the tier, normally its extra windows-wsl seats; s itself is always
+// in the table and may be repeated in seats when the repeat agrees with it. The table is sorted by seat id
+// and holds nothing about which seat the call is for, so rendering the seats one after the other, each
+// with the others given, writes byte-identical stubs and the last render drops nobody. seats that start
+// through systemd, are not valid ids, or repeat an id with a different port or load budget are refused,
+// and so is any seats at all for an s that starts through systemd (no stub is rendered for it, so the
+// list would be read by nothing).
+func (s Spec) ArtifactsWith(templatesDir string, r Runtime, seats []Spec) (map[string]string, error) {
 	if err := s.Validate("(render)"); err != nil {
 		return nil, err
 	}
@@ -1346,11 +1368,26 @@ func (s Spec) Artifacts(templatesDir string, r Runtime) (map[string]string, erro
 		return nil, fmt.Errorf("vllm seat %s: launch %s needs Runtime.Distro — the wrappers must name the WSL "+
 			"distribution the engine runs in", s.ID, LaunchWindowsWSL)
 	}
+	// The seats the stubs serve are checked before anything is read from disk: a refusal about a seat list needs no snapshot.
+	table := ""
+	if s.launch() == LaunchWindowsWSL {
+		t, err := windowsSeatTable(s, seats)
+		if err != nil {
+			return nil, err
+		}
+		table = t
+	} else if len(seats) > 0 {
+		return nil, fmt.Errorf("vllm seat %s: starts through %s and renders no shared PowerShell stub, so the %d other seat(s) given "+
+			"would be read by nothing; only launch %s renders the seat table", s.ID, s.launch(), len(seats), LaunchWindowsWSL)
+	}
 	resolved, err := s.Resolve(r)
 	if err != nil {
 		return nil, err
 	}
 	tok := resolved.tokens(r)
+	if table != "" {
+		tok["__SEAT_MAP__"] = table
+	}
 	out := map[string]string{}
 	for src, dst := range s.artifactFiles() {
 		raw, err := os.ReadFile(filepath.Join(templatesDir, src))
@@ -1391,6 +1428,54 @@ func (s Spec) Artifacts(templatesDir string, r Runtime) (map[string]string, erro
 		out[installedChatTemplatesDir+"/"+s.ChatTemplate] = strings.ReplaceAll(string(raw), "\r\n", "\n")
 	}
 	return out, nil
+}
+
+// windowsSeatTable is the body of the hashtable the two PowerShell stubs look their seat argument up in: one line per
+// Windows seat, keyed by the seat id (the argument every entry passes), holding the model id the seat serves, the port
+// it answers on and its load budget in seconds. Sorted by id, so the text does not depend on the order the caller listed
+// the seats in or on which of them the render is for. The ids are safeID (letters, digits, dot, underscore, hyphen), so
+// they need no quoting inside the single quotes.
+func windowsSeatTable(self Spec, others []Spec) (string, error) {
+	type row struct{ id, port, budget string }
+	byID := map[string]row{}
+	add := func(x Spec, origin string) error {
+		if x.launch() != LaunchWindowsWSL {
+			return fmt.Errorf("vllm seat %s: the seat %s starts through %s, not %s, so it does not run these PowerShell stubs and "+
+				"cannot be in their table", self.ID, x.ID, x.launch(), LaunchWindowsWSL)
+		}
+		if !safeID.MatchString(x.ID) {
+			return fmt.Errorf("vllm seat %s: the %s seat id %q must match %s to be a seat argument", self.ID, origin, x.ID, safeID)
+		}
+		if x.Port <= 0 || x.Port >= 65536 {
+			return fmt.Errorf("vllm seat %s: the %s seat %s has port %d out of range", self.ID, origin, x.ID, x.Port)
+		}
+		got := row{x.ID, strconv.Itoa(x.Port), strconv.Itoa(x.healthTimeout())}
+		if prev, dup := byID[x.ID]; dup && prev != got {
+			return fmt.Errorf("vllm seat %s: the seat id %s is given twice with different values (port %s and %s, load budget %s s and %s s): "+
+				"a seat argument can map to one seat only", self.ID, x.ID, prev.port, got.port, prev.budget, got.budget)
+		}
+		byID[x.ID] = got
+		return nil
+	}
+	if err := add(self, "rendered"); err != nil {
+		return "", err
+	}
+	for _, o := range others {
+		if err := add(o, "other"); err != nil {
+			return "", err
+		}
+	}
+	ids := make([]string, 0, len(byID))
+	for id := range byID {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	lines := make([]string, 0, len(ids))
+	for _, id := range ids {
+		x := byID[id]
+		lines = append(lines, fmt.Sprintf("  '%s' = @{ Id = '%s'; Port = %s; HealthTimeout = %s }", x.id, x.id, x.port, x.budget))
+	}
+	return strings.Join(lines, "\n"), nil
 }
 
 // Executable reports whether an installed artifact needs the execute bit.
