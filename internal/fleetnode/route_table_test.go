@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
@@ -167,24 +168,63 @@ func withoutPattern(patterns []string, remove string, add ...string) []string {
 	return append(out, add...)
 }
 
-// The routes the node serves are the ones registerRoutes registers and no others: no function of the package registers a route
-// on a mux of its own, and the only mux built is Handler's, which it hands to registerRoutes and wraps in the ingress guard.
-func TestRoutesAreRegisteredOnlyThroughRegisterRoutes(t *testing.T) {
-	entries, err := os.ReadDir(".")
+// routeSources is what the source test reads: the node's non-test Go files and the durable queue's (whose Mount registers the
+// queue's routes on the registrar the node hands it), each by file name, and how many patterns the node registered when it was
+// built the way the table test builds it.
+type routeSources struct {
+	node, queue map[string]string
+	recorded    int
+}
+
+// readGoSources reads the non-test Go files of one package directory.
+func readGoSources(t *testing.T, dir string) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	fset := token.NewFileSet()
-	registerCalls := 0
+	out := map[string]string{}
 	for _, e := range entries {
 		name := e.Name()
 		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
 			continue
 		}
-		file, err := parser.ParseFile(fset, name, nil, 0)
+		b, err := os.ReadFile(filepath.Join(dir, name))
 		if err != nil {
-			t.Fatalf("%s: %v", name, err)
+			t.Fatal(err)
 		}
+		out[name] = string(b)
+	}
+	return out
+}
+
+// parseSources parses each file, in name order, and says which ones do not parse.
+func parseSources(fset *token.FileSet, srcs map[string]string) ([]*ast.File, []string) {
+	names := make([]string, 0, len(srcs))
+	for name := range srcs {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var files []*ast.File
+	var problems []string
+	for _, name := range names {
+		file, err := parser.ParseFile(fset, name, srcs[name], 0)
+		if err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		files = append(files, file)
+	}
+	return files, problems
+}
+
+// routeSourceProblems reads the sources and says, one line each, where a route could be registered that the route table
+// does not see.
+func routeSourceProblems(src routeSources) []string {
+	fset := token.NewFileSet()
+	nodeFiles, problems := parseSources(fset, src.node)
+	registerCalls := 0
+	for _, file := range nodeFiles {
 		for _, decl := range file.Decls {
 			inside := ""
 			if fd, ok := decl.(*ast.FuncDecl); ok {
@@ -206,13 +246,13 @@ func TestRoutesAreRegisteredOnlyThroughRegisterRoutes(t *testing.T) {
 						return true
 					}
 					if inside != "registerRoutes" {
-						t.Errorf("%s: a route is registered by %s in %q; register it in registerRoutes, which route_table_test.go holds to the credential tables", at, sel.Sel.Name, inside)
+						problems = append(problems, fmt.Sprintf("%s: a route is registered by %s in %q; register it in registerRoutes, which route_table_test.go holds to the credential tables", at, sel.Sel.Name, inside))
 					} else {
 						registerCalls++
 					}
 				case "NewServeMux":
 					if inside != "Handler" {
-						t.Errorf("%s: %q builds a mux of its own; the node serves the one Handler builds and hands to registerRoutes", at, inside)
+						problems = append(problems, fmt.Sprintf("%s: %q builds a mux of its own; the node serves the one Handler builds and hands to registerRoutes", at, inside))
 					}
 				}
 				return true
@@ -220,6 +260,165 @@ func TestRoutesAreRegisteredOnlyThroughRegisterRoutes(t *testing.T) {
 		}
 	}
 	if registerCalls == 0 {
-		t.Fatal("no route registration was found in registerRoutes: the source test no longer sees what it guards")
+		problems = append(problems, "no route registration was found in registerRoutes: the source test no longer sees what it guards")
+	}
+	sort.Strings(problems)
+	return problems
+}
+
+// The routes the node serves are the ones registerRoutes registers and no others: no function of the package registers a route
+// on a mux of its own, and the only mux built is Handler's, which it hands to registerRoutes and wraps in the ingress guard.
+func TestRoutesAreRegisteredOnlyThroughRegisterRoutes(t *testing.T) {
+	src := routeSources{node: readGoSources(t, "."), queue: readGoSources(t, "../fleetqueue"), recorded: len(servedRoutes(t))}
+	for _, problem := range routeSourceProblems(src) {
+		t.Error(problem)
+	}
+}
+
+// What each problem of the source test says, which the cases below look for.
+const (
+	wantMuxFlow      = "the mux Handler builds goes only to registerRoutes and netguard.IngressGuard"
+	wantRegistrar    = "registerRoutes hands its registrar only to fleetqueue.Mount"
+	wantQueueOutside = "fleetqueue registers a route only in Mount"
+	wantMountRouter  = "Mount uses its router only as the receiver of HandleFunc"
+	wantCount        = "route registrations"
+)
+
+// A node and a queue in the shape of the real ones: Handler builds one mux, hands it to registerRoutes and to the ingress guard;
+// registerRoutes registers two routes and, when the queue is on, hands the registrar to fleetqueue.Mount, which registers two.
+const routeFixtureNode = `package fleetnode
+
+import "net/http"
+
+func (s *Server) Handler() http.Handler {
+	mux := http.NewServeMux()
+	s.registerRoutes(mux)
+	return netguard.IngressGuard(opts, mux)
+}
+
+func (s *Server) registerRoutes(mux routeRegistrar) {
+	mux.HandleFunc("GET /fleet/health", s.handleHealth)
+	mux.HandleFunc("POST /fleet/dispatch", s.handleDispatch)
+	if s.queue != nil {
+		fleetqueue.Mount(mux, s.queue, s.queueAuthOK)
+	}
+}
+`
+
+const routeFixtureQueue = `package fleetqueue
+
+import "net/http"
+
+func Mount(mux Router, q *Queue, authOK func(*http.Request) bool) {
+	mux.HandleFunc("POST /fleet/queue/submit", nil)
+	mux.HandleFunc("GET /fleet/queue/jobs/{id}", nil)
+}
+`
+
+// routeFixtureRecorded is what a node built from the fixtures registers: its two routes and the two Mount registers.
+const routeFixtureRecorded = 4
+
+// replaceOnce is s with the one occurrence of old replaced by new.
+func replaceOnce(t *testing.T, s, old, new string) string {
+	t.Helper()
+	if n := strings.Count(s, old); n != 1 {
+		t.Fatalf("setup: %q occurs %d times, want 1", old, n)
+	}
+	return strings.Replace(s, old, new, 1)
+}
+
+// The check itself: a route that reaches the node's mux by a way the route table cannot record is named, wherever it is added.
+func TestTheRouteSourceCheckNamesWhatEscapesTheRouteTable(t *testing.T) {
+	control := routeSources{node: map[string]string{"server.go": routeFixtureNode}, queue: map[string]string{"http.go": routeFixtureQueue}, recorded: routeFixtureRecorded}
+	if p := routeSourceProblems(control); len(p) != 0 {
+		t.Fatalf("setup: the fixture already has problems: %q", p)
+	}
+	const queueRoute = "\tmux.HandleFunc(\"GET /fleet/queue/jobs/{id}\", nil)\n"
+	for _, tc := range []struct {
+		name       string
+		node       [][2]string // old, new pairs applied to routeFixtureNode
+		queue      [][2]string // old, new pairs applied to routeFixtureQueue
+		extraQueue string      // appended to routeFixtureQueue
+		recorded   int         // 0: the fixture's own
+		want       string
+	}{
+		{name: "a cross-package mount handed the mux in Handler", want: wantMuxFlow,
+			node: [][2]string{{"s.registerRoutes(mux)\n", "s.registerRoutes(mux)\n\tfleetqueue.MountExtra(mux)\n"}}},
+		{name: "the mux copied under another name in Handler", want: wantMuxFlow,
+			node: [][2]string{{"s.registerRoutes(mux)\n", "s.registerRoutes(mux)\n\textra := mux\n\tfleetqueue.MountExtra(extra)\n"}}},
+		{name: "the mux handed to a closure in Handler", want: wantMuxFlow,
+			node: [][2]string{{"s.registerRoutes(mux)\n", "s.registerRoutes(mux)\n\tfunc() { fleetqueue.MountExtra(mux) }()\n"}}},
+		{name: "a route registered on the mux in Handler", want: wantMuxFlow,
+			node: [][2]string{{"s.registerRoutes(mux)\n", "s.registerRoutes(mux)\n\tmux.Handle(\"/fleet/zz\", nil)\n"}}},
+		{name: "Handler serves the bare mux", want: wantMuxFlow,
+			node: [][2]string{{"return netguard.IngressGuard(opts, mux)", "return mux"}}},
+		{name: "Handler does not hand the mux to registerRoutes", want: wantMuxFlow,
+			node: [][2]string{{"\ts.registerRoutes(mux)\n", ""}}},
+		{name: "a route registered under a condition in registerRoutes", want: wantCount,
+			node: [][2]string{{"\tif s.queue != nil {", "\tif s.opts.LoopbackListener {\n\t\tmux.HandleFunc(\"POST /fleet/zz-local\", s.handleZZ)\n\t}\n\tif s.queue != nil {"}}},
+		{name: "routes registered in a loop in registerRoutes", want: wantCount, recorded: routeFixtureRecorded + 2,
+			node: [][2]string{{"\tif s.queue != nil {", "\tfor _, p := range []string{\"POST /fleet/zz-a\", \"POST /fleet/zz-b\"} {\n\t\tmux.HandleFunc(p, s.handleZZ)\n\t}\n\tif s.queue != nil {"}}},
+		{name: "a cross-package mount under a condition in registerRoutes", want: wantRegistrar,
+			node: [][2]string{{"\tif s.queue != nil {", "\tif s.opts.LoopbackListener {\n\t\tfleetqueue.MountExtra(mux)\n\t}\n\tif s.queue != nil {"}}},
+		{name: "the registrar copied under another name in registerRoutes", want: wantRegistrar,
+			node: [][2]string{{"\tif s.queue != nil {", "\textra := mux\n\textra.HandleFunc(\"POST /fleet/zz\", s.handleZZ)\n\tif s.queue != nil {"}}},
+		{name: "the queue registers a route outside Mount", want: wantQueueOutside,
+			extraQueue: "\nfunc MountExtra(mux Router) {\n\tmux.HandleFunc(\"POST /fleet/queue/zz\", nil)\n}\n"},
+		{name: "Mount registers a route under a condition", want: wantCount,
+			queue: [][2]string{{queueRoute, queueRoute + "\tif q.extra {\n\t\tmux.HandleFunc(\"POST /fleet/queue/zz\", nil)\n\t}\n"}}},
+		{name: "Mount hands its router on", want: wantMountRouter,
+			queue: [][2]string{{queueRoute, queueRoute + "\tmountMore(mux)\n"}}},
+		// The two rules that stood before.
+		{name: "a route registered outside registerRoutes", want: "a route is registered by HandleFunc in",
+			node: [][2]string{{"func (s *Server) registerRoutes(", "func (s *Server) elsewhere(mux routeRegistrar) {\n\tmux.HandleFunc(\"GET /fleet/zz\", s.handleZZ)\n}\n\nfunc (s *Server) registerRoutes("}}},
+		{name: "a second mux built outside Handler", want: "builds a mux of its own",
+			node: [][2]string{{"func (s *Server) registerRoutes(", "func (s *Server) elsewhere() http.Handler {\n\treturn http.NewServeMux()\n}\n\nfunc (s *Server) registerRoutes("}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node, queue := routeFixtureNode, routeFixtureQueue+tc.extraQueue
+			for _, r := range tc.node {
+				node = replaceOnce(t, node, r[0], r[1])
+			}
+			for _, r := range tc.queue {
+				queue = replaceOnce(t, queue, r[0], r[1])
+			}
+			recorded := tc.recorded
+			if recorded == 0 {
+				recorded = routeFixtureRecorded
+			}
+			problems := routeSourceProblems(routeSources{node: map[string]string{"server.go": node}, queue: map[string]string{"http.go": queue}, recorded: recorded})
+			for _, p := range problems {
+				if strings.Contains(p, tc.want) {
+					return
+				}
+			}
+			t.Errorf("no problem contains %q; problems = %q", tc.want, problems)
+		})
+	}
+}
+
+// Two additions made to the node's real sources, the shapes that put a route on the mux without a row in the tables: a mount made
+// from Handler by a call that takes the mux, and a route registered under a condition the test node does not meet.
+func TestTheRouteSourceCheckNamesTheseAdditionsToTheRealSources(t *testing.T) {
+	queue, recorded := readGoSources(t, "../fleetqueue"), len(servedRoutes(t))
+	if p := routeSourceProblems(routeSources{node: readGoSources(t, "."), queue: queue, recorded: recorded}); len(p) != 0 {
+		t.Fatalf("setup: the real sources already have problems: %q", p)
+	}
+	for _, tc := range []struct{ name, old, new, want string }{
+		{"a cross-package mount handed the mux in Handler", "s.registerRoutes(mux)", "s.registerRoutes(mux)\n\tfleetqueue.MountExtra(mux)", wantMuxFlow},
+		{"a route registered under a condition in registerRoutes", `mux.HandleFunc("GET /fleet/health", s.handleHealth)`,
+			"mux.HandleFunc(\"GET /fleet/health\", s.handleHealth)\n\tif s.opts.LoopbackListener {\n\t\tmux.HandleFunc(\"POST /fleet/zz-local\", s.handleHealth)\n\t}", wantCount},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			node := readGoSources(t, ".")
+			node["server.go"] = replaceOnce(t, node["server.go"], tc.old, tc.new)
+			problems := routeSourceProblems(routeSources{node: node, queue: queue, recorded: recorded})
+			for _, p := range problems {
+				if strings.Contains(p, tc.want) {
+					return
+				}
+			}
+			t.Errorf("no problem contains %q; problems = %q", tc.want, problems)
+		})
 	}
 }
