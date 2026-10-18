@@ -171,7 +171,7 @@ func TestEveryStaleClaimRowFindsTheSentenceItWasTakenFrom(t *testing.T) {
 func TestADecisionRecordThatCallsALaneTokenlessCarriesTheAmendmentForTheBearer(t *testing.T) {
 	const dir = "docs/architecture/decisions"
 	const amendedBy = "0023-agent-lane-tailnet-auth-and-locality.md"
-	oldClaim := regexp.MustCompile(`(?i)tokenless|not token-gated|ignores the bearer|agent or vision job`)
+	oldClaim := regexp.MustCompile(`(?i)tokenless|not token-gated|ignores the bearer|agent or vision job|open to any peer`)
 	heading := regexp.MustCompile(`(?m)^## Amendment[^\n]*every lane needs the fleet bearer[^\n]*$`)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
