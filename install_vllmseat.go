@@ -557,7 +557,16 @@ func wslNextSteps(s vllmseat.Spec, rt vllmseat.Runtime, dir string, names []stri
 // unit template cannot express, so those stay the operator's step. "" for a tier with none.
 func extraSeatsNote(p servingProfile) string {
 	var b strings.Builder
+	windowsLane := p.VLLMSeat != nil && p.VLLMSeat.Launch == vllmseat.LaunchWindowsWSL
 	for _, e := range p.ExtraVLLMSeats {
+		if windowsLane && e.Launch == vllmseat.LaunchWindowsWSL {
+			// A Windows seat has no unit, wrapper scripts or polkit rule: it shares the lane seat's two PowerShell stubs, whose
+			// table this run wrote (windowsSiblings). What it still needs is its own env file and scheduled tasks.
+			fmt.Fprintf(&b, "NOTE  the tier's extra vLLM seat %s starts through WSL: it is in the table of the two PowerShell stubs this command wrote, "+
+				"but its env file (%s.env) and its two scheduled tasks (register-seat-tasks.ps1) are NOT rendered by this command, which renders the lane seat's.\n",
+				e.ID, e.ID)
+			continue
+		}
 		fmt.Fprintf(&b, "NOTE  the tier's extra vLLM seat %s is NOT rendered by this command: its launch line carries flags the shared "+
 			"unit template cannot express.\n"+
 			"      Install its unit (%s.service, no [Install] section), its wrapper scripts (%s-run.sh, %s-cmd.sh, %s-cmdstop.sh) and its "+

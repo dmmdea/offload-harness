@@ -115,9 +115,17 @@ func TestInstallVLLMSeatStubsServeEveryWindowsSeatOfTheTier(t *testing.T) {
 	if !strings.Contains(r.stdout, "serve every Windows seat of the tier (beta-vllm, "+lane.ID+")") {
 		t.Errorf("the next steps must say the stubs serve both seats:\n%s", r.stdout)
 	}
-	// This command writes the lane seat's env and tasks script; the other seat's are not its output.
+	// This command writes the lane seat's env and tasks script; the other seat's are not its output, and the note says so
+	// without sending the operator to install a systemd unit a Windows seat does not have. The systemd seat keeps its note.
 	if got := renderedFiles(t, r.out); strings.Contains(strings.Join(got, ","), "beta-vllm") {
 		t.Errorf("the other Windows seat's own files are not rendered by this run, yet it wrote %v", got)
+	}
+	if !strings.Contains(r.stdout, "extra vLLM seat beta-vllm starts through WSL") || !strings.Contains(r.stdout, "beta-vllm.env") ||
+		strings.Contains(r.stdout, "vllm-beta-seat.service") {
+		t.Errorf("the note for the extra Windows seat must say it is in the stubs' table but has no env or tasks rendered, and ask for no unit:\n%s", r.stdout)
+	}
+	if !strings.Contains(r.stdout, "vllm-gamma-seat.service") {
+		t.Errorf("the extra seat that starts through systemd keeps its note:\n%s", r.stdout)
 	}
 }
 

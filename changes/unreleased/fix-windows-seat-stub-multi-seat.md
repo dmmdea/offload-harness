@@ -18,7 +18,8 @@ runs the same file from the same seat directory and passes its own seat id. The 
   starts through systemd, an id that is not a seat argument, a port out of range, an id given twice with different values, and any other seats for a seat that has no stub.
 - **Deploying it.** Re-render and deploy BOTH stubs (they agree on the table and on the marker name). The seat argument must be the seat id the entry passes, as the rendered
   entries do; a hand-made entry that passes a short name now exits 5 instead of waiting for an id it was never given. `install vllm-seat` still writes the env file and the
-  registration script of the lane seat only: an extra Windows seat's own are not rendered by it.
+  registration script of the lane seat only: an extra Windows seat's own are not rendered by it, and the note it prints for such a seat now says so instead of asking for a systemd unit,
+  wrapper scripts and polkit rule that a Windows seat does not have (an extra seat that starts through systemd keeps its note).
 - **Limit, stated.** The table holds the seats the tier declares. A tier cannot declare a seat on other cards than its lane seat (`extra_vllm_seats` are alternatives of the lane
   seat), so a seat of that kind on a box still needs its row added by hand until the tier can declare it. Not verified on a real Windows box: the stubs ran under PowerShell 7 in the
   tests (and under Windows PowerShell 5.1 where the test host has it), never under llama-swap as SYSTEM.
