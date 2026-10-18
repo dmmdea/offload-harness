@@ -131,9 +131,19 @@ func (m *Manager) keeperAlive(epoch uint64, record string) bool {
 	return unknown || (!sign.IsZero() && m.now().Sub(sign) < m.heartbeatTTL)
 }
 
-// unreadableHeld is the refusal for a lease whose record cannot be read and whose holder is alive.
-func unreadableHeld(epoch uint64) *ErrHeld {
+// unreadableHeld is the refusal for a lease whose record cannot be read and whose holder is taken to be alive. It says what that rests
+// on. A sign of life within the heartbeat TTL (a heartbeat or a write) is evidence, and the lease is held until the holder lets go or
+// the sign goes stale. A heartbeat that could not be told (keeperEvidence: mid-rename, or neither readable nor examinable) is no sign
+// of life at all: the holder is only not shown to be gone, and what ends that is not the heartbeat going stale but the heartbeat
+// being told (a staged one ages out after stagingFresh), the holder letting go, or an operator releasing the lease.
+func (m *Manager) unreadableHeld(epoch uint64, record string) *ErrHeld {
+	sign, unknown := m.keeperEvidence(epoch, record)
+	fresh := !sign.IsZero() && m.now().Sub(sign) < m.heartbeatTTL
 	reason := "the lease record cannot be read, and its holder is alive (a heartbeat or a write within the heartbeat TTL); it is held until the holder lets go or its heartbeat goes stale"
+	if unknown && !fresh {
+		reason = "the lease record cannot be read, and its heartbeat cannot be told (it is being installed, or can be neither read nor examined), so its holder is not shown to be gone and is taken to be alive; " +
+			"it is held until the holder lets go, its heartbeat can be told and has gone stale, or the lease is released (gpu release)"
+	}
 	if epoch != 0 {
 		reason = "lease epoch " + strconv.FormatUint(epoch, 10) + ": " + reason
 	}

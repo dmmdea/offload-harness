@@ -2542,8 +2542,9 @@ and is not one), else the file's modification time; a file settled absent is no 
 rename is installing it, is unknown, and unknown is alive. For a `meta.json`, whose epoch is not known, the heartbeats are found by listing the
 lease directory, and a listing does not show a name a rename is installing: a staged `hb.<epoch>.tmp` that is fresh and whose live name is not
 listed counts as an unknown heartbeat (as a launch marker's does), and so does a listing that fails. The whole-node grant, the card grant over a whole-node record and `verifyNoDeviceLeases` (a whole-node grant over a
-card lease whose record cannot be read) refuse with "the lease record cannot be read, and its holder is alive"; the sweep takes the
-record only once that liveness is gone. (b) The keepers above fail closed once their window passes, and every keeper's longest silence
+card lease whose record cannot be read) refuse with "the lease record cannot be read, and its holder is alive" when a heartbeat or a write within the TTL was seen, and with "... its heartbeat cannot be told ... so its holder
+is not shown to be gone" when none was and the heartbeat is unknown (that one ends when the heartbeat can be told, when a staged one ages past `stagingFresh`, or at `gpu release`;
+`TestTheRefusalForAnUnreadableRecordSaysWhatItRestsOn`); the sweep takes the record only once that liveness is gone. (b) The keepers above fail closed once their window passes, and every keeper's longest silence
 (its tick or renewal interval plus its window plus the confirming looks, and for the holder its release attempts) is shorter than that
 TTL, so a keeper has always stopped before an acquirer can be handed its cards: wrapper 15 s + 10 s, the drain heartbeat 15 s + two
 10 s windows, the hidden holder 15 s + 30 s + 4 s (`TestEveryKeepersSilenceIsShorterThanTheHeartbeatStaleThreshold`).
@@ -2743,7 +2744,9 @@ all three surfaces so they cannot disagree. The verdict judges the lines the gra
 
 The brief verdict line of `offload_status` leads with `HOST RAM OVER (3.2 of 127.7 GiB physical RAM is available; committed 187.9 of
 the 187.7 GiB commit limit, 8.0 GiB headroom)` in capitals, ahead of the lease verdict word, because `free` at the head of that line reads as "the box has room";
-NEAR trails it. The lease rows show what each lease declared (`host RAM 10.0 GiB touched, 60.0 GiB commit`), and the queue rows what a waiter waits for
+NEAR trails it. When the verdict rests on the commit charge above physical RAM alone, the lead goes on to say what a lease that states its commit is judged on
+(the commit limit, or nothing where the OS enforces none), because the rule admits such a lease while the host reads OVER; the block carries the same words as
+`stated_commit_note` (`TestTheBriefLeadSaysWhatALeaseThatStatesItsCommitIsJudgedOn`, `TestTheOverLeadSaysWhatALeaseThatStatesItsCommitIsJudgedOn`). The lease rows show what each lease declared (`host RAM 10.0 GiB touched, 60.0 GiB commit`), and the queue rows what a waiter waits for
 (`TestGPUStatusJSONCarriesTheHostBlockAndAnOverVerdict`, `TestStatusNamesOverLoudlyOnTheBriefLine`).
 
 ### The driver's own fault events for the leased cards (C-83-B)

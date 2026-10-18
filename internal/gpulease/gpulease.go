@@ -1617,7 +1617,7 @@ func (m *Manager) TryAcquire(class Class, opts Options) (*Lease, error) {
 		meta, rerr := m.readMeta()
 		if isIOFailure(rerr) && m.keeperAlive(0, m.metaPath()) {
 			// Present and not readable, and its holder is alive: held, whatever the age of the record (keeper.go).
-			return nil, unreadableHeld(0)
+			return nil, m.unreadableHeld(0, m.metaPath())
 		}
 		if rerr != nil && m.claimIsFresh() {
 			// Present but not yet parseable: a claim caught mid-write. Treat it as
