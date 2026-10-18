@@ -2696,6 +2696,36 @@ test("cli: the text readiness table prints each node's counts, gates, histogram 
   }
 });
 
+// An embedding the harness cannot verify is not a file short: the text table gives it a line of its own, only for a node that has one, and
+// leaves the files-short line to the files a node lacks.
+test("cli: the text readiness table prints the templates blocked only by an unverified embedding on their own line, apart from the files short", async () => {
+  const index = JSON.stringify([{ moduleName: "default", category: "Fixture", title: "Fixture", type: "image", templates: [{ name: "tt_emb", mediaType: "image", mediaSubtype: "webp", openSource: true, title: "tt_emb", tags: ["Image"], models: ["A"] }] }]);
+  const workflow = JSON.stringify({ version: 0.4, nodes: [{ id: 1, type: "CLIPTextEncode", mode: 0, widgets_values: ["embedding:foo, a cat"], properties: { cnr_id: "comfy-core" } }] });
+  const io = memIo({
+    "/srv/tpl/index.json": index,
+    "/srv/tpl/tt_emb.json": workflow,
+    "/srv/tpl/map.json": readFileSync(FIXTURE_MAP_PATH, "utf8"),
+    "/srv/snap/alpha.json": snapshotFile({ ...TREE, [EMB("foo.pt")]: { size: 1 }, [EMB("sd15/foo.pt")]: { size: 1 } }, {}),
+    "/srv/snap/beta.json": snapshotFile({ ...TREE, [EMB("foo.pt")]: { size: 1 } }, {}),
+    "/srv/snap/gamma.json": snapshotFile(TREE, {}),
+  });
+  const snaps = ["alpha", "beta", "gamma"].flatMap((id) => ["--snapshot", `/srv/snap/${id}.json`]);
+  const argv = ["readiness", "--templates-dir", "/srv/tpl", "--license-map", "/srv/tpl/map.json", "--basis", "templates-dir", "--candidate", ...snaps];
+  const json = JSON.parse((await run([...argv, "--json"], io)).stdout);
+  assert.deepEqual(["alpha", "beta", "gamma"].map((id) => [json.nodes[id].counts.ready.total, json.nodes[id].counts.embedding_unverified]), [[0, 1], [1, 0], [0, 0]], "two copies on alpha, one file on beta, none on gamma");
+  const lines = (await run(argv, io)).stdout.split("\n");
+  const section = (id) => {
+    const rest = lines.slice(lines.findIndex((l) => l.startsWith(id)) + 1);
+    const end = rest.findIndex((l) => /^\S/.test(l));
+    return (end < 0 ? rest : rest.slice(0, end)).join("\n");
+  };
+  assert.match(section("alpha"), /^\s+files short \(needing weights\): 0: 0  1: 0  2: 0  3-5: 0  6\+: 0$/m, "alpha lacks no file");
+  assert.match(section("alpha"), /^\s+embedding not verified \(local\): 1$/m);
+  assert.doesNotMatch(section("beta"), /embedding not verified/, "a node with none has no such line");
+  assert.match(section("gamma"), /^\s+files short \(needing weights\): 0: 0  1: 1  2: 0  3-5: 0  6\+: 0$/m, "gamma lacks the one file");
+  assert.doesNotMatch(section("gamma"), /embedding not verified/);
+});
+
 // ---- diff --------------------------------------------------------------------------------------
 
 // Kills: diff needing a --snapshot, --mode not validated or its value lost from the JSON, --candidate-basis ignored, the
@@ -4494,6 +4524,44 @@ test("catalog readiness: a template whose embedding is unverified is not counted
   assert.deepEqual({ total: s.ready.total, zero_model: s.ready.zero_model, with_weights: s.ready.with_weights, names: s.ready.names }, { total: 2, zero_model: 1, with_weights: 1, names: ["held_once"] });
   const n = C.nodeReadiness({ catalog: cat, snapshot: { package: null, inventory: inv }, candidate: true });
   assert.deepEqual([n.counts.ready.total, n.counts.ready.names], [2, ["held_once"]], "the node table says the same");
+});
+
+// "Files short" counts the files a node lacks. An embedding the harness cannot verify (a case variant, two copies, a probe-named file) is not a
+// file short: the node holds too many files or the wrong spelling, so it is not bucketed with them and has a count of its own.
+test("catalog readiness: an unverified embedding is not a file short, so the histogram counts files only and the embeddings have their own count", () => {
+  const gate = { state: "open" };
+  const emb = (name) => req("embeddings", name, { annotated: false });
+  const cat = { templates: [
+    { name: "held_twice", kind: "local", models: [emb("e")], gate },
+    { name: "held_once", kind: "local", models: [emb("f")], gate },
+    { name: "short_one", kind: "local", models: [req("vae", "nope.safetensors")], gate },
+    { name: "short_and_twice", kind: "local", models: [emb("e"), req("vae", "nope.safetensors")], gate },
+    { name: "probed", kind: "local", models: [], gate, embedding_probes: ["1.2"] },
+  ] };
+  const inv = invFrom({ ...TREE, [EMB("e.pt")]: { size: 1 }, [EMB("sd15/e.pt")]: { size: 1 }, [EMB("f.pt")]: { size: 1 }, [EMB("1.2.pt")]: { size: 1 } });
+  const results = C.catalogReadiness(cat, inv);
+  assert.deepEqual(Object.fromEntries(Object.entries(results).map(([n, r]) => [n, [r.ready, r.not_ready_count]])), { held_twice: [false, 1], held_once: [true, 0], short_one: [false, 1], short_and_twice: [false, 2], probed: [false, 1] }, "not_ready_count is still every requirement that is not met");
+  const s = C.summarizeReadiness(cat, results);
+  assert.deepEqual({ ...s.histogram }, { "0": 1, "1": 2, "2": 0, "3-5": 0, "6+": 0 }, "files short: none for held_once, one for short_one and for short_and_twice (its unverified embedding is not a second file short); held_twice is in no bucket");
+  assert.equal(s.embedding_unverified, 2, "the templates blocked only by an embedding the harness cannot verify: held_twice, and probed, which needs no weights");
+});
+
+test("readiness table: the nearest node counts files short, and a template whose nearest node holds only an unverified embedding is counted apart", () => {
+  const gate = { state: "open" };
+  const emb = (name) => req("embeddings", name, { annotated: false });
+  const cat = { templates: [
+    { name: "unverified_on_alpha", kind: "local", models: [emb("e")], gate },
+    { name: "short_everywhere", kind: "local", models: [req("vae", "nope.safetensors")], gate },
+    { name: "ready_on_alpha", kind: "local", models: [emb("f")], gate },
+    { name: "both", kind: "local", models: [emb("e"), req("vae", "nope.safetensors")], gate },
+  ] };
+  const snapshots = {
+    alpha: { package: null, inventory: invFrom({ ...TREE, [EMB("e.pt")]: { size: 1 }, [EMB("sd15/e.pt")]: { size: 1 }, [EMB("f.pt")]: { size: 1 } }) },
+    gamma: { package: null, inventory: invFrom(TREE) },
+  };
+  const table = C.readinessTable({ catalog: cat, snapshots, candidate: true });
+  assert.deepEqual({ ...table.any_node.nearest_histogram }, { "0": 1, "1": 2, "2": 0, "3-5": 0, "6+": 0 }, "ready_on_alpha is 0; short_everywhere and both are 1 short at their nearest node (the unverified embedding of both is not a file)");
+  assert.equal(table.any_node.nearest_embedding_unverified, 1, "unverified_on_alpha: alpha holds every file, but the harness cannot verify the embedding");
 });
 
 // The same on the real file system. Per-directory case sensitivity (the flag WSL sets on the folders it makes) is applied to an EMPTY folder,
