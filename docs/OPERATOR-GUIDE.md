@@ -1721,8 +1721,19 @@ SEAT_LMCACHE_PYTHONPATH=<seat-dir>/lmcache-overlay   # optional: load LMCache fr
   bridge address, or on the VPN address that refuses the pinned source, and every start for three days ran without L2. The
   launcher now asks mDNS itself for all the A answers (a raw query to `224.0.0.251:5353` with the QU bit, three times in about
   a second, sent out of the pinned source address; the embedded helper runs under `timeout -s KILL 3`, so a seat start never
-  hangs on it) and mounts `//<address>/<share>` at the FIRST answer inside the pinned source address's IPv4 network (the prefix
-  comes from `ip -4 -o addr`). One `seat_fg:` line names every answer and the choice, and the status file reads
+  hangs on it) and mounts `//<address>/<share>` at an answer inside the pinned source address's IPv4 network (the prefix
+  comes from `ip -4 -o addr`). With ONE answer inside the network that is the address. With SEVERAL (the store's wired and
+  Wi-Fi addresses on one network, where arrival order cannot tell them apart) the launcher pings each one from the pinned
+  source address (`ping -I <source address> -c 5 -i 0.2 -q -W 1 <address>`, each ping under `timeout -s KILL 3`, one after
+  the other, so at most 3 s per candidate) and mounts the one with the lowest MINIMUM round-trip time; equal minimums go to
+  the earlier answer. On the reference workstation the wired address measured a minimum RTT of 0.425-0.477 ms and the Wi-Fi
+  one 0.983-2.288 ms (three runs each, more than 2x apart on every run; the averages, 0.57-0.62 ms against 1.5-26 ms, were
+  much noisier, so the minimum is what is compared). A candidate whose ping fails shows `no reply` and is never chosen over
+  one that replied. If ping is missing, no candidate replies or no time can be read, the choice is the first answer inside
+  the network by arrival order, the rule in force before this tie-break. One `seat_fg:` line names every answer, the
+  candidates with their results and the rule that chose, for example `mDNS answers: A B C, inside N/P: A (min RTT 0.43 ms)
+  B (min RTT 1.10 ms); chose A, the lowest round-trip time` (the fallback reads `chose A, the first inside the network in
+  arrival order (round-trip times could not be compared: <why>)`), and the status file reads
   `ok <stamp> mbps=<n> addr=<address>`. Whatever else happens (no python, no answer, nothing on that network, a helper that
   fails or times out) leaves the mount by name exactly as before, and the line printed says why. A name that is not `.local`,
   an IPv4 literal, an `nfs` mount and an unset pin are never touched. **The address is chosen when the share is mounted** (once
@@ -1731,11 +1742,14 @@ SEAT_LMCACHE_PYTHONPATH=<seat-dir>/lmcache-overlay   # optional: load LMCache fr
   line saying where the share is (source and server address, read with `findmnt`) and how to choose again, the status file then
   reads `addr=<that server address>`, and a write-floor degrade names it. **A share an earlier start mounted at the wrong address
   (for example by name, before this change) stays there** until you unmount it while no seat uses it (`umount
-  <SEAT_L2_MOUNT_DIR>`) and start the seat again; restarting the WSL distro does the same. **Limit:** when the store's wired and
-  Wi-Fi addresses sit on ONE network, "first inside the network" cannot tell them apart; name the wired address in
-  `SEAT_L2_MOUNT_SRC` as a reserved or static address of the store (a literal is mounted as given; a DHCP lease is what the rule
-  above forbids) or as a name that is not `.local` which this box resolves to it (a static DNS entry or a hosts-file line: such
-  a name is not looked up, and a `.local` name pinned in `/etc/hosts` is NOT honoured, because the lookup asks mDNS directly).
+  <SEAT_L2_MOUNT_DIR>`) and start the seat again; restarting the WSL distro does the same. **Limit:** the round-trip time is a
+  heuristic for the better path, not a throughput measurement. When the store's wired and Wi-Fi addresses sit on ONE network
+  the minimum RTT separated them on the reference workstation, but a store whose fast path has a higher latency than its slow
+  path would be picked wrong, and a store whose fast path drops ICMP loses to a slow path that answers it (the line shows
+  `no reply` for it). Name the wired address in `SEAT_L2_MOUNT_SRC` to override all of it, as a reserved or static address of
+  the store (a literal is mounted as given; a DHCP lease is what the rule above forbids) or as a name that is not `.local`
+  which this box resolves to it (a static DNS entry or a hosts-file line: such a name is not looked up and nothing is pinged,
+  and a `.local` name pinned in `/etc/hosts` is NOT honoured, because the lookup asks mDNS directly).
   The degrade messages keep their text and name the address when the launcher chose it or found the share mounted at it.
 - `SEAT_LMCACHE_PYTHONPATH` (optional, 0.113.13): a directory prepended to `PYTHONPATH` for BOTH the LMCache
   MP server and the vLLM engine, so the seat imports LMCache from an overlay copy that carries a not-yet-released

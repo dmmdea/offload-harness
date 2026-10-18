@@ -81,14 +81,15 @@ func TestSeatLauncherAutoFitsTheContextToAPinnedPoolBelowTheKnob(t *testing.T) {
 // with that interface's own address (a Wi-Fi address on the same /24, container bridges, a VPN address). The name resolver
 // returns ONE of them, so the mount landed on the Wi-Fi path (writes ~24 MB/s, so the launcher degraded L2 under
 // SEAT_L2_MIN_MBPS), on an unreachable bridge address, or on the VPN address that refuses the pinned source: every start for
-// three days ran without L2. The launcher now collects all the answers, mounts the first one inside the pinned source
-// address's network, and mounts by name exactly as before whenever it cannot.
+// three days ran without L2. The launcher now collects all the answers, mounts the one inside the pinned source address's
+// network (the lowest minimum round-trip time when several are, see the next test), and mounts by name exactly as before
+// whenever it cannot.
 func TestSeatLauncherMountsTheCacheServerAtAnAddressOnThePinnedNetwork(t *testing.T) {
 	out := kvStoreShellRun(t)
 	requirePassLines(t, out, []string{
 		"an off-network answer first and an on-network one second: the mount uses the on-network address, one line names every answer and the choice, the status file records it",
 		"an explicit source address picks the address the same way",
-		"the FIRST answer inside the network wins",
+		"two answers inside the network and no round-trip time to compare (the stand-in ping gets no reply): the FIRST one wins",
 		"a share path below the share name is kept",
 		"the helper fails: the mount is by name exactly as before, the reason is printed, the status line is unchanged",
 		"the helper finds no answer: the mount is by name, the reason is printed",
@@ -112,6 +113,43 @@ func TestSeatLauncherMountsTheCacheServerAtAnAddressOnThePinnedNetwork(t *testin
 		"the helper's default destination is the mDNS group and port, it asks 2 or 3 times and listens for about 1 s",
 		"the first query is lost: the next one still brings the answer",
 		"an answer that takes 0.7 s is heard inside the window",
+	})
+}
+
+// TestSeatLauncherPicksTheLowestRoundTripAddressWhenSeveralAreOnThePinnedNetwork (register B-55, residual). The store host's wired
+// address and its Wi-Fi address can sit on the SAME network as the pinned source address, and "first inside the network" is then
+// arrival order. On the reference workstation the wired address measured a minimum ping RTT of 0.425-0.477 ms and the Wi-Fi one
+// 0.983-2.288 ms (the Wi-Fi path writes about ten times slower), so with several answers inside the network the launcher pings
+// each from the pinned source address and mounts the lowest minimum. It falls back to the first by arrival order when ping is
+// missing, nothing replies or no time can be read, and the printed line says which rule chose. With one answer inside the
+// network it does what it did before and calls no ping; answers outside the network are never pinged.
+func TestSeatLauncherPicksTheLowestRoundTripAddressWhenSeveralAreOnThePinnedNetwork(t *testing.T) {
+	out := kvStoreShellRun(t)
+	requirePassLines(t, out, []string{
+		"two answers inside the network, the second with the lower round-trip time: the second is mounted, each candidate is pinged once from the source address, one line lists every RTT and the rule",
+		"two answers inside the network, the first with the lower round-trip time: the first is mounted",
+		"three answers inside the network, the last the lowest: the last is mounted and all three were pinged",
+		"three answers inside the network, the middle one the lowest: the middle one is mounted",
+		"round-trip times are compared as numbers, not as text (12.5 ms is above 9 ms)",
+		"equal round-trip times: the first in arrival order is kept",
+		"the first candidate gets no reply: the one that replied is mounted although it came second, and the line says no reply",
+		"the second candidate gets no reply: the first, which replied, is mounted (a failed ping is not a round-trip time of 0)",
+		"three candidates, the first without a reply: the lower of the two that replied is mounted",
+		"every ping fails: the first inside the network by arrival order, the line says that rule and why, and lists each candidate as no reply",
+		"the ping command named by the seam does not exist: the first inside the network by arrival order, the line says ping is not available",
+		"no ping on the box's PATH (the production shape): the first inside the network by arrival order, the line says ping is not available",
+		"ping replies but no round-trip time can be read: the first inside the network by arrival order, the line says so",
+		"ONE answer inside the network: it is mounted as before and ping is not called",
+		"ONE answer, the production shape (ping on PATH): ping is not called",
+		"answers outside the pinned network are never pinged, even with a lower round-trip time, and are never chosen",
+		"the real ping command line (from the pinned source address, 5 probes 0.2 s apart, quiet, 1 s wait) and the MINIMUM of its min/avg/max line is compared, not the average (0.45 min but 26.0 avg beats 1.00/1.20)",
+		"the real ping reports 100% loss and exits 1 for the first candidate: the one that replied is mounted",
+		"a busybox-style summary line (round-trip min/avg/max = ...) is read too",
+		"the real ping prints no min/avg/max line: the first inside the network by arrival order, the line says so",
+		"a ping stand-in that hangs is cut off at 3 s per candidate and the first inside the network is mounted",
+		"a ping that hangs (the production shape) is cut off at 3 s per candidate and the first inside the network is mounted",
+		"SEAT_L2_MOUNT_SRC naming an address literal still overrides everything: no lookup, no ping",
+		"SEAT_L2_MOUNT_SRC naming a name that is not .local still overrides everything: no lookup, no ping",
 	})
 }
 
