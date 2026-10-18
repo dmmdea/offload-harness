@@ -66,6 +66,14 @@ func TestDegenerateTailReadsAMonotoneCountingLoop(t *testing.T) {
 		{"consecutive numbers that restart", facts + countedItems(1, 12, ", ") + `, ` + countedItems(1, 12, ", ") + `, "7`, ""},
 		{"numbers that jump", facts + `"101", "205", "309", "413", "517", "621", "725", "829", "933", "1037", "1141", "1245", "1349", "1453", "1557", "1661", "1765", "1869", "1973", "20`, ""},
 		{"ordinary prose with digits", proseNoise(400) + " 2026 10 15", ""},
+
+		// The floor and the same-text rule, pinned from both sides. The label is long enough that
+		// the 128-byte span is met by few numbers, so the count floor is what decides.
+		{"eleven numbered lines under a long label, just under the floor", proseNoise(100) + "\n" + countedLines("This is the entry for item number ", 1, 11), ""},
+		{"twelve numbered lines under a long label, at the floor", proseNoise(100) + "\n" + countedLines("This is the entry for item number ", 1, 12), "counting"},
+		// Distinct items numbered 1 to 17, then three that happen to read the same: the numbers
+		// rise by one all the way, but only the last three have the same text between them.
+		{"a numbered list of distinct items that ends on three identical ones", proseNoise(100) + "\n" + numberedDistinctList(17) + "18. same\n19. same\n20. same\n2", ""},
 	}
 	for _, tc := range cases {
 		got := degenerateTail(tc.content)
