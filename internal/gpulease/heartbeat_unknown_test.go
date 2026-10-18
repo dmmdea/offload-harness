@@ -457,3 +457,26 @@ func TestAHeartbeatThatParsesToLessThanTheStampIsAgedByItsFileTime(t *testing.T)
 		}
 	}
 }
+
+// The read of the heartbeat failed with something that is not an absence (an access error that outlasted its wait, an I/O error), and by
+// the time the file is looked at it is gone: the holder released, or never renewed. A read that failed says nothing about the file it
+// could not read, so the answer is unknown, and not "settled absent", which is the stamp from the acquisition, hours old for an overdue
+// lease. Only a read that found the name absent and a look that agrees is a holder that never renewed.
+func TestAHeartbeatWhoseReadFailedAndWhoseFileIsThenGoneIsUnknownAndNotStale(t *testing.T) {
+	for _, devs := range [][]string{{card0}, nil} {
+		kind := "whole-node lease"
+		if len(devs) > 0 {
+			kind = "card lease"
+		}
+		t.Run(kind, func(t *testing.T) {
+			m, now := scopedManager(t)
+			l := overdueLease(t, m, now, devs...)
+			defer l.Release()
+			if err := os.Remove(m.heartbeatPath(l.Epoch())); err != nil {
+				t.Fatal(err)
+			}
+			withHeartbeatFaults(t, errHBBoom, nil)
+			refusedAsHeld(t, m, "because the heartbeat read failed and the file was then absent", devs...)
+		})
+	}
+}

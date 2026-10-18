@@ -246,3 +246,23 @@ func TestAnUnreadableRecordWhoseHeartbeatIsATornNumberIsHeldWhileTheFileIsFresh(
 		}
 	}
 }
+
+// The keeper's twin of it: the heartbeat read failed with something that is not an absence and the file is then gone. The read failed, so
+// nothing is known about the holder, and the record of a live holder is not swept.
+func TestAnUnreadableRecordWhoseHeartbeatReadFailedAndIsThenGoneIsHeldAndNotSwept(t *testing.T) {
+	m, l, rec, hb := unreadableRecordFixture(t)
+	if err := os.Remove(hb); err != nil {
+		t.Fatal(err)
+	}
+	withHeartbeatFaults(t, errHBBoom, nil)
+	if other, err := m.TryAcquire(ClassMedia, Options{Reason: "second", TTL: time.Hour, Devices: []string{card0}}); err == nil {
+		_ = other.Release()
+		t.Errorf("a second lease (epoch %d) was granted on the card of a holder whose record cannot be read and whose heartbeat read failed", other.Epoch())
+	}
+	if _, serr := os.Stat(rec); serr != nil {
+		t.Errorf("the record of a holder whose heartbeat read failed was swept: %v", serr)
+	}
+	if len(m.ClaimsOf(l.Epoch())) == 0 {
+		t.Errorf("the claims of a holder whose heartbeat read failed were swept")
+	}
+}
