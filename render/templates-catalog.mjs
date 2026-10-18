@@ -1643,8 +1643,19 @@ export function catalogReadiness(catalog, inv, { mode = "directory-aware" } = {}
 
 const bucketOf = (n) => (n === 0 ? "0" : n === 1 ? "1" : n === 2 ? "2" : n <= 5 ? "3-5" : "6+");
 
+// shortfall: the requirements a result does not meet, split by what is wrong. An `embedding_unverified` entry (a prompt embedding with a case
+// variant, a second copy, or a probe-named file) is not a file the node lacks: it holds too many files, or the name in another case, so it is
+// no part of "files short". A result with no `requirements` (a bare count) is all files short.
+const shortfall = (res) => {
+  const unverified = (res.requirements ?? []).filter((q) => q.status === "embedding_unverified").length;
+  return { short: res.not_ready_count - unverified, unverified };
+};
+// A template for which the node holds every file but the harness cannot verify an embedding: counted on its own line, in no files-short bucket.
+const unverifiedOnly = (res) => { const { short, unverified } = shortfall(res); return unverified > 0 && short === 0; };
+
 // summarizeReadiness: how many local templates a node could run, how many of those the gate leaves
-// open, and how far the rest are (the number of files short, bucketed).
+// open, and how far the rest are (the number of files short, bucketed; a template held back only by an embedding the harness cannot verify is
+// in no bucket and is counted in `embedding_unverified`, over every local template, one that needs no weights included).
 export function summarizeReadiness(catalog, results) {
   const rows = catalog.templates.filter((r) => r.kind === "local" && results[r.name]);
   const needing = rows.filter((r) => r.models.length > 0);
@@ -1655,13 +1666,14 @@ export function summarizeReadiness(catalog, results) {
   const by_gate = { open: 0, ack_required: 0, blocked: 0 };
   for (const r of ready) by_gate[r.gate.state]++;
   const histogram = { "0": 0, "1": 0, "2": 0, "3-5": 0, "6+": 0 };
-  for (const r of needing) histogram[bucketOf(results[r.name].not_ready_count)]++;
+  for (const r of needing) if (!unverifiedOnly(results[r.name])) histogram[bucketOf(shortfall(results[r.name]).short)]++;
   return {
     local: rows.length,
     zero_model: zero.length,
     needing_weights: needing.length,
     ready: { total: ready.length + zeroReady.length, zero_model: zeroReady.length, with_weights: ready.length, names: ready.map((r) => r.name).sort(), by_gate },
     histogram,
+    embedding_unverified: rows.filter((r) => unverifiedOnly(results[r.name])).length,
   };
 }
 
@@ -1699,8 +1711,13 @@ export function nodeReadiness({ catalog, snapshot, mode = "directory-aware", can
   return { mode, candidate, stamp_check, rules_check, counts: summarizeReadiness(catalog, results), results };
 }
 
-// readinessTable: every node's readiness, the templates ready on at least one node, and the
-// distance of the nearest node for the rest.
+// A node that holds every file of a template but not a verified embedding is nearer than one file short and is no file count, so readinessTable
+// ranks it between ready (0) and one file short (1).
+const ONLY_UNVERIFIED = 0.5;
+
+// readinessTable: every node's readiness, the templates ready on at least one node, and the distance of the nearest node for the rest: the
+// files it is short of, bucketed. A template whose nearest node is held back only by an unverified embedding is counted in
+// `nearest_embedding_unverified`, in no bucket.
 export function readinessTable({ catalog, snapshots, mode = "directory-aware", candidate = false }) {
   const rowByName = new Map(catalog.templates.map((t) => [t.name, t]));
   const nodes = {};
@@ -1713,14 +1730,15 @@ export function readinessTable({ catalog, snapshots, mode = "directory-aware", c
     for (const name of n.counts.ready.names) ready.add(name);
     for (const [name, r] of Object.entries(n.results)) {
       if (!rowByName.get(name)?.models.length) continue;
-      nearest.set(name, Math.min(nearest.get(name) ?? Infinity, r.not_ready_count));
+      nearest.set(name, Math.min(nearest.get(name) ?? Infinity, unverifiedOnly(r) ? ONLY_UNVERIFIED : shortfall(r).short));
     }
   }
   const by_gate = { open: 0, ack_required: 0, blocked: 0 };
   for (const name of ready) by_gate[rowByName.get(name).gate.state]++;
   const histogram = { "0": 0, "1": 0, "2": 0, "3-5": 0, "6+": 0 };
-  for (const n of nearest.values()) histogram[bucketOf(n)]++;
-  return { mode, nodes, any_node: { with_weights: ready.size, names: [...ready].sort(), by_gate, nearest_histogram: histogram } };
+  let nearest_embedding_unverified = 0;
+  for (const n of nearest.values()) if (n === ONLY_UNVERIFIED) nearest_embedding_unverified++; else histogram[bucketOf(n)]++;
+  return { mode, nodes, any_node: { with_weights: ready.size, names: [...ready].sort(), by_gate, nearest_histogram: histogram, nearest_embedding_unverified } };
 }
 
 // diffCatalogs: what moving from catalog `a` to catalog `b` (a candidate package) changes: templates
@@ -2091,6 +2109,7 @@ function formatReadinessTable(table) {
     t += `${"".padEnd(14)} gates on the ready ones: open ${c.ready.by_gate.open} | ack required ${c.ready.by_gate.ack_required} | blocked ${c.ready.by_gate.blocked}\n`;
     const h = c.histogram;
     t += `${"".padEnd(14)} files short (needing weights): 0: ${h["0"]}  1: ${h["1"]}  2: ${h["2"]}  3-5: ${h["3-5"]}  6+: ${h["6+"]}\n`;
+    if (c.embedding_unverified > 0) t += `${"".padEnd(14)} embedding not verified (local): ${c.embedding_unverified}\n`;
     if (c.ready.names.length > 0) t += `${"".padEnd(14)} ready: ${c.ready.names.join(", ")}\n`;
   }
   t += `any node: ${table.any_node.with_weights} ready with weights (open ${table.any_node.by_gate.open} | ack required ${table.any_node.by_gate.ack_required} | blocked ${table.any_node.by_gate.blocked})\n`;
