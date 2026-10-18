@@ -38,7 +38,9 @@ func (m *Manager) keeperSignOfLife(epoch uint64, record string) time.Time {
 // heartbeat (a torn or unreadable one that nobody renews goes stale); a file SETTLED absent is no sign (a holder that never renewed);
 // and a heartbeat that can be neither read nor examined, or whose rename is installing it, is UNKNOWN. Unknown is no evidence that the
 // holder is gone, so keeperAlive reads it as alive. Reading it as "no sign of life" had the sweep remove the record and the claims of
-// a live holder whose record could not be read, and the next grant take its cards.
+// a live holder whose record could not be read, and the next grant take its cards. That holds for the scan of every heartbeat (epoch 0)
+// as well: it works from a listing, a listing does not show a name that a rename is installing, so a staged heartbeat whose live name is
+// not listed counts as unknown too.
 func (m *Manager) keeperEvidence(epoch uint64, record string) (newest time.Time, unknown bool) {
 	note := func(t time.Time) {
 		if t.After(newest) {
@@ -73,21 +75,45 @@ func (m *Manager) keeperEvidence(epoch uint64, record string) (newest time.Time,
 		noteHeartbeat(m.heartbeatPath(epoch))
 		return newest, unknown
 	}
+	// The epoch is not known, so the heartbeats are found by LISTING the directory, and a listing is blind to a rename in flight: the
+	// live name of a heartbeat that is being installed is not in it, and only its staged file is. A staged heartbeat whose live name is
+	// not listed and which is fresh (stagedInFlight) is a heartbeat that cannot be told, as a launch marker's is (tree.go). A listing
+	// that fails says nothing about any heartbeat: unknown as well.
 	entries, err := os.ReadDir(m.leaseDir())
 	if err != nil {
-		return newest, unknown
+		return newest, true
+	}
+	listed := make(map[string]bool, len(entries))
+	for _, e := range entries {
+		listed[e.Name()] = true
 	}
 	for _, e := range entries {
 		name := e.Name()
-		if e.IsDir() || !strings.HasPrefix(name, "hb.") || isStagedName(name) {
+		if e.IsDir() || !strings.HasPrefix(name, "hb.") {
 			continue
 		}
-		if _, perr := strconv.ParseUint(strings.TrimPrefix(name, "hb."), 10, 64); perr != nil {
+		if live := withoutStagedSuffix(name); live != name {
+			if isHeartbeatName(live) && !listed[live] && stagedInFlight(filepath.Join(m.leaseDir(), live)) {
+				unknown = true
+			}
+			continue
+		}
+		if !isHeartbeatName(name) {
 			continue
 		}
 		noteHeartbeat(filepath.Join(m.leaseDir(), name))
 	}
 	return newest, unknown
+}
+
+// isHeartbeatName says whether a directory entry is the live name of some lease's heartbeat: hb.<epoch>.
+func isHeartbeatName(name string) bool {
+	rest, ok := strings.CutPrefix(name, "hb.")
+	if !ok {
+		return false
+	}
+	_, err := strconv.ParseUint(rest, 10, 64)
+	return err == nil
 }
 
 // keeperAlive reports whether the holder of the lease with this record gave a sign of life within the heartbeat TTL (m.heartbeatTTL,

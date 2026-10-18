@@ -2,6 +2,7 @@ package gpulease
 
 import (
 	"os"
+	"path/filepath"
 	"strconv"
 	"testing"
 	"time"
@@ -187,5 +188,21 @@ func TestAnUnreadableWholeNodeRecordWhoseHeartbeatIsMidRenameIsHeldAndNotSwept(t
 				t.Errorf("a card lease (epoch %d) was granted over a live whole-node holder (epoch %d) whose record cannot be read, while %s", cl.Epoch(), l.Epoch(), c.name)
 			}
 		})
+	}
+}
+
+// A listing of the heartbeats that fails says nothing about any of them, so it cannot be read as "no sign of life": unknown.
+func TestAFailedListingOfTheHeartbeatsIsUnknown(t *testing.T) {
+	m := scopedRealClock(t)
+	dir := m.leaseDir()
+	if err := os.MkdirAll(filepath.Dir(dir), 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(dir, []byte("not a directory"), 0o666); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(dir) })
+	if _, unknown := m.keeperEvidence(0, m.metaPath()); !unknown {
+		t.Errorf("a listing of the heartbeats that failed was read as no sign of life, want unknown")
 	}
 }
