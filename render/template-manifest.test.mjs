@@ -699,6 +699,21 @@ test("resolve: a file that answers only the SECOND probe of a prompt refuses the
   assert.deepEqual(gone.embedding_unverified, [{ path: "models/embeddings/1.2", reason: WHY_PROBE, found: ["1.2.pt"] }]);
 });
 
+test("resolve: a file that answers only the LAST of four probes of a prompt refuses the run, and the readiness table agrees", () => {
+  const prompt = "embedding:evil_ti, a cat ( embedding:1.2 ) ( embedding:2.5 ) ( embedding:3.7 )";
+  const files = [A_FILE, "embeddings/evil_ti.safetensors"];
+  const ok = embeddingIo(EVIL, files, prompt);
+  assert.deepEqual(rowOf(catalogOf(ok), "tt_emb").embedding_probes, ["evil_ti,", "1.2", "2.5", "3.7"]);
+  assert.equal(gateOf(ok).ok, true, "no file answers any of the four");
+  const io = embeddingIo(EVIL, [...files, "embeddings/3.7.pt"], prompt);
+  const gone = gateOf(io);
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "embedding_unverified", undefined]);
+  assert.deepEqual(gone.embedding_unverified, [{ path: "models/embeddings/3.7", reason: WHY_PROBE, found: ["3.7.pt"] }]);
+  const r = readyOf(io);
+  assert.deepEqual([r.ready, r.embedding_probes.map((p) => [p.name, p.status, p.found])], [false, [["3.7", "embedding_unverified", ["3.7.pt"]]]]);
+  assert.equal(C.catalogReadiness(catalogOf(io), snapshotOf(io).inventory).tt_emb.ready, false, "and so does the table");
+});
+
 test("resolve: a node that lacks a model file and also holds an embedding twice is answered as models_missing first, and readiness blocks on both, in that order", () => {
   const io = embeddingIo(EVIL, ["embeddings/evil_ti.safetensors", "embeddings/sd15/evil_ti.safetensors"]);
   const gone = gateOf(io);

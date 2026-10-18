@@ -4433,6 +4433,21 @@ test("readiness: every probe is asked, so a file that answers only the SECOND on
   assert.deepEqual(run([EMB("foo.safetensors"), EMB("foo,.pt"), EMB("1.2.pt")]), [false, [["foo,", "embedding_unverified", ["foo,.pt"]], ["1.2", "embedding_unverified", ["1.2.pt"]]]], "both are reported");
 });
 
+// A cap on the probes asked (the first one, two or three) passes a test whose only hit is early, so the hit stands at the LAST of four, and at
+// each position in turn.
+test("readiness: a file that answers only the LAST of four probes still makes the template not ready, whichever position the one answered probe stands in", () => {
+  const text = "embedding:foo, a cat ( embedding:1.2 ) ( embedding:2.5 ) ( embedding:3.7 )";
+  const probes = C.requiredModels({ nodes: [promptNode(1, text)] }).embedding_probes;
+  assert.deepEqual(probes, ["foo,", "1.2", "2.5", "3.7"], "the name as written, then three names only the reading without weights takes");
+  const run = (files) => {
+    const r = C.readiness([req("embeddings", "foo", { annotated: false })], invFrom({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) }), { probes });
+    return [r.ready, r.requirements.slice(1).map((x) => [x.name, x.status, x.found])];
+  };
+  assert.deepEqual(run([EMB("foo.safetensors")]), [true, []], "no file answers any of the four");
+  assert.deepEqual(run([EMB("foo.safetensors"), EMB("3.7.pt")]), [false, [["3.7", "embedding_unverified", ["3.7.pt"]]]], "only the fourth is answered");
+  probes.forEach((p, i) => assert.deepEqual(run([EMB("foo.safetensors"), EMB(`${p}.pt`)]), [false, [[p, "embedding_unverified", [`${p}.pt`]]]], `only probe ${i + 1} (${p}) is answered`));
+});
+
 test("catalog readiness: a template whose embedding is unverified is not counted among the ready ones, with weights or without", () => {
   const gate = { state: "open" };
   const cat = { templates: [
