@@ -377,11 +377,11 @@ it back when that declaration would pass a line the harness chose. Two readings 
 `available RAM now - the lease's touched need - what running leases have yet to touch` at or above `gpu_host_ram_headroom_gib`
 (default 8, a floor the harness chose and has not yet measured), and the commit line. A commit you **state** with `--ram-commit` is
 held to the OS commit limit: `commit charge now + the lease's commit + what running leases have yet to be charged` at or under the
-limit less the same headroom (where the OS enforces one: always on Windows, on Linux only with `vm.overcommit_memory` = 2; the
+limit less the same headroom (where the OS enforces one: always on Windows, on Linux with `vm.overcommit_memory` = 2 and when that mode cannot be read, which counts as strict; the
 Windows limit moves with a system-managed page file, so "other processes' allocations fail past it" holds once the file has reached
 its maximum). A lease that states **no** commit (a bare `--ram`, the media admission, the seat warm-back) declares one figure,
 and that figure is held to the line it always had: `commit charge now + the figure + what running leases have yet to touch` at or
-under physical RAM less the headroom, on every OS. **This is a brake on declared loads, not a guarantee about
+under physical RAM less the headroom, on every OS (or under an enforced commit limit less the headroom, where that sits below physical RAM: strict-mode Linux with little swap). **This is a brake on declared loads, not a guarantee about
 the box.** A declaration is an estimate: the size of the model files, until three measured runs of that family on the node raise
 it to the resident memory they reached (the 90th percentile of the last twenty runs, so one inflated run does not stick, and never above twice the files). A lane's commit can carry its card allocations on top, so a lane can commit more
 than it declared: the rule applied to a commit reading of 81.6 GiB on the 127.7 GiB reference box admits a 32.8 GiB Krea 2 bf16

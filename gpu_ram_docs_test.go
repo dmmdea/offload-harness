@@ -106,7 +106,7 @@ func TestNoSentenceSaysAStatedCommitIsJudgedOnLinuxOnlyInStrictMode(t *testing.T
 func TestNoSentenceHoldsAnUnstatedCommitToPhysicalRAMAlone(t *testing.T) {
 	problems := retiredHostRAMWordings(".", map[string][]string{
 		"docs/systems/gpu-lease.md": {
-			"held to physical RAM less the headroom on every host",
+			"held to physical RAM less the headroom on every host)",
 			"A commit nobody stated is still held to physical RAM on every reading,",
 		},
 		"docs/OPERATOR-GUIDE.md": {"under physical RAM less the headroom, on every OS."},

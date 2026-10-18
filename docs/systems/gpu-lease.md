@@ -1927,11 +1927,13 @@ coder-model arm's process tree reached a 27.8 GiB working set and a 58.1 GiB pri
 fell from 91.5 to 61.1 GiB with no paging; a llama.cpp leg with every layer on the card held a 3.6 GiB working set and a 32.1
 GiB charge. So the arm states `--ram 28 --ram-commit 58`. **Stating the commit is what moves it to the commit limit.** Unset,
 `--ram-commit` is not stated: the commit is the `--ram` figure standing in for one, **including when `--ram` was estimated**, and
-it is held to physical RAM less the headroom, the line a job that declares one number has always been held to. A commit stated
+it is held to physical RAM less the headroom, the line a job that declares one number has always been held to (or to an enforced commit limit
+less the headroom where that sits below physical RAM: strict-mode Linux with little swap, where the kernel refuses allocations at the limit). A commit stated
 equal to `--ram` is still stated (the lease record keeps it and the detached holder is passed it), so a job that measured its
 commit and found it equal to its working set is judged on the limit. A commit is declared beside the working set it goes with:
 `--ram-commit` needs a `--ram` (given or estimated) above 0, and is itself above 0 and finite (`NaN` and `Inf` are refused by
-name, as is a non-finite `--ram`: neither compares against anything). The converse is a known limit: a job whose commit is
+name, as is a non-finite `--ram`: neither compares against anything; the rule itself and the hidden `gpu hold` verb refuse a figure that is not finite as well,
+`TestARuleCallerThatDeclaresAFigureThatIsNotFiniteIsRefused`, `TestHoldRefusesAHostRAMFigureThatIsNotFinite`). The converse is a known limit: a job whose commit is
 *smaller* than its working set (mapped files count in the working set and not in the commit) cannot say so by leaving the flag
 out, and is judged on the larger figure; `--ram-commit` states a smaller one. A caller that never heard of the flag declares one
 figure and states no commit, and keeps the protection it had: the media admission, the seat's warm-back, the read-only per-node
@@ -2049,16 +2051,17 @@ Windows grow the file. The rule reads the current limit, the conservative choice
 maximum is the number 0, there is no figure to read, and a rule that assumed a large maximum would admit what the file has not yet
 grown to take. The available figure is not stale: it is read on every attempt and every poll, at most 2 s before the comparison.
 
-**Where a stated commit is judged, and what Linux loses.** Always on Windows. On Linux only in strict overcommit mode
-(`vm.overcommit_memory` = 2); in the default heuristic mode (0) and in mode 1 the kernel grants allocations past `CommitLimit`, and
+**Where a stated commit is judged, and what Linux loses.** Always on Windows. On Linux in strict overcommit mode
+(`vm.overcommit_memory` = 2, or a mode that cannot be read, below); in the default heuristic mode (0) and in mode 1 the kernel grants allocations past `CommitLimit`, and
 `Committed_AS` counts mappings a process reserved and never touched (CUDA and large `mmap`s do), so refusing a stated commit on it
 would turn work away for a limit nothing enforces. The reading says so (`HostMemory.CommitLimitSoft`, read from
 `/proc/sys/vm/overcommit_memory` through a seam, `TestTheLinuxReaderMarksTheCommitLimitSoftOnlyInAKnownLaxMode`). **A mode that
 cannot be read or parsed is assumed strict**: the limit stays a hard one, failing closed. A `/proc/meminfo` that hides the commit
 counters has no limit to enforce and reads soft. So on Linux in modes 0 and 1 a **stated** commit is judged by neither line: it
 loses both the commit limit and the physical line, and only the touched condition applies to it
-(`TestTheCommitConditionIsAppliedOnlyWhereTheLimitIsHard`). A commit nobody stated is still held to physical RAM on every reading,
-as it was before the two conditions existed (`TestAnUnstatedCommitIsJudgedWhereTheLimitIsNotEnforced`). Two Linux nodes of the fleet
+(`TestTheCommitConditionIsAppliedOnlyWhereTheLimitIsHard`). A commit nobody stated is still held to physical RAM less the headroom on every reading,
+as it was before the two conditions existed, and to an enforced commit limit less the headroom when that limit sits below physical RAM (strict-mode Linux
+with little swap: the limit is about half the RAM plus the swap, and the kernel refuses allocations at it; `TestACommitNobodyStatedIsHeldToAnEnforcedLimitThatSitsBelowPhysicalRAM`) (`TestAnUnstatedCommitIsJudgedWhereTheLimitIsNotEnforced`). Two Linux nodes of the fleet
 were read on 2026-10-17: both in mode 0, with `Committed_AS` of 19.5 GiB on a 31.2 GiB `MemTotal` and 3.8 GiB on 30.2 GiB, so there
 a stated commit is moot, and one figure declared once is held to `Committed_AS` against physical RAM less the headroom as it was.
 
@@ -2262,7 +2265,7 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   are charged to it, so commit says nothing about paging by itself. The brake compares a commit nobody stated to physical RAM (kept
   on 2026-10-11 while this was measured, and the line every caller that declares one figure keeps); it judges what a lane touches
   against the available RAM, which is the paging signal, and a commit a caller states against the OS commit limit, which is what
-  other processes' allocations fail at once the page file has reached its maximum. What keeps
+  other processes' allocations fail once the page file has reached its maximum. What keeps
   card-only work moving is the declaration: a recipe whose weights all sit on the cards (card-only placement, the read-only
   loader) declares **`--ram 0`**, and a need of 0 is always admitted. A recipe that streams weights from RAM declares them in
   full; a recipe whose commit exceeds what it touches (the card allocations above are charged 1:1) states both,
@@ -2722,11 +2725,11 @@ reorder does not apply to it.
 
 `gpu status` (text and `--json`) and `offload_status`'s `gpu_lease` block carry `host_memory`: `physical_gib`,
 `available_gib`, `commit_used_gib`, `commit_limit_gib`, `commit_limit_enforced` (whether a commit a lease states is
-judged against the commit limit on this host: always on Windows, on Linux only in strict overcommit mode; a commit nobody stated is
-held to physical RAM less the headroom on every host), `headroom_gib`, `declared_live_gib` and `declared_live_commit_gib` (the sums of the working set and the commit the live
+judged against the commit limit on this host: always on Windows, on Linux in strict overcommit mode or when the mode cannot be read; a commit nobody stated is
+held to physical RAM less the headroom on every host, or to an enforced commit limit less the headroom when that sits below physical RAM), `headroom_gib`, `declared_live_gib` and `declared_live_commit_gib` (the sums of the working set and the commit the live
 leases declared), `pending_gib` and `pending_commit_gib` (the part of each still to load), `admits_up_to_gib` (the most a touched
 set could ever be admitted at), `touch_room_gib`, `commit_room_gib` and `unstated_commit_room_gib` (what a new lease could touch now,
-what a lease that STATES a commit could be charged now, and what a lease that states none could declare now: physical RAM less the
+what a lease that STATES a commit could be charged now, and what a lease that states none could declare now: physical RAM (or an enforced commit limit that sits below it) less the
 commit charge, what running leases have yet to touch and the headroom; each less the headroom and never below 0),
 `verdict_why` (which line a NEAR or OVER verdict rests on, with its numbers) and one **verdict**, built by `gpucards.HostView` for
 all three surfaces so they cannot disagree. The verdict judges the lines the grant applies:

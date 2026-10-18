@@ -399,7 +399,7 @@ const defaultReserveWait = 8 * time.Hour
 
 // ramCommitHelp is the usage text of `gpu reserve --ram-commit` (a constant so a test reads it: the flag set exits the
 // process on --help).
-const ramCommitHelp = "GiB of commit the job will be charged, STATED on the lease beside --ram and admitted against the OS commit limit less gpu_host_ram_headroom_gib (the limit is always enforced on Windows; on Linux only with vm.overcommit_memory=2, elsewhere a stated commit is not judged). Commit is memory the OS has promised the job, touched or not, so it can be much more than the working set --ram states (a process tree measured at 27.8 GiB touched was charged 58.1 GiB). State it from a measurement. Unset, no commit is stated: the --ram figure, estimated or given, stands in for it and is admitted against physical RAM less that headroom, as a job that declares one figure always was, because the commit limit lies further out than physical RAM and a job that commits more than it touches would be admitted past it. A commit stated equal to --ram is still stated. A job whose commit is smaller than its working set (mapped files count in the working set and not in the commit) cannot say so by leaving the flag out; --ram-commit below --ram is taken as stated. Needs a host-RAM declaration above 0"
+const ramCommitHelp = "GiB of commit the job will be charged, STATED on the lease beside --ram and admitted against the OS commit limit less gpu_host_ram_headroom_gib (the limit is always enforced on Windows; on Linux with vm.overcommit_memory=2, and also when that mode cannot be read, which counts as strict; in mode 0 or 1 a stated commit is not judged). Commit is memory the OS has promised the job, touched or not, so it can be much more than the working set --ram states (a process tree measured at 27.8 GiB touched was charged 58.1 GiB). State it from a measurement. Unset, no commit is stated: the --ram figure, estimated or given, stands in for it and is admitted against physical RAM less that headroom (or against an enforced commit limit less it, when that sits below physical RAM), as a job that declares one figure always was, because the commit limit usually lies further out than physical RAM and a job that commits more than it touches would be admitted past it. A commit stated equal to --ram is still stated. A job whose commit is smaller than its working set (mapped files count in the working set and not in the commit) cannot say so by leaving the flag out; --ram-commit below --ram is taken as stated. Needs a host-RAM declaration above 0"
 
 func runGPUReserve(args []string) (retErr error) {
 	fs := flag.NewFlagSet("gpu reserve", flag.ExitOnError)
@@ -1417,6 +1417,16 @@ func runGPUHold(args []string) (retErr error) {
 	owner := addOwnershipFlags(fs)
 	_ = fs.Parse(args)
 
+	// The parent validated these four; this verb is also run by hand, and max(NaN, 0) is NaN: a figure that is not finite compares
+	// against nothing, so a lease declaring one would be neither refused nor admitted by the numbers.
+	for _, f := range []struct {
+		name string
+		v    float64
+	}{{"--ram", *ramFlag}, {"--ram-commit", *ramCommitFlag}, {"--ram-wait", *ramWaitFlag}, {"--ram-wait-commit", *ramWaitCommitFlag}} {
+		if math.IsNaN(f.v) || math.IsInf(f.v, 0) {
+			return fmt.Errorf("gpu hold: %s must be a finite number of GiB: NaN and Inf compare against nothing, so a lease declaring one would never be refused or admitted by the numbers", f.name)
+		}
+	}
 	m, err := openLease(fs)
 	if err != nil {
 		return err

@@ -3,6 +3,7 @@ package gpuprobe
 import (
 	"bufio"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -118,8 +119,20 @@ type HostLoad struct {
 }
 
 // Declares says the job declares any host memory at all: the one test every "does this lease ask the host for something"
-// decision goes through, so a job that declares only a commit is not mistaken for one that declares nothing.
-func (l HostLoad) Declares() bool { return l.TouchGiB > 0 || l.CommitGiB > 0 }
+// decision goes through, so a job that declares only a commit is not mistaken for one that declares nothing. A figure that is not a
+// number (NaN) declares something: "nothing" is the answer that skips the rule, and the rule is where such a figure is refused.
+func (l HostLoad) Declares() bool { return !(l.TouchGiB <= 0 && l.CommitGiB <= 0) }
+
+// finiteGiB says every figure is a finite number of GiB. Every ordered comparison with NaN is false and Go's max(NaN, 0) is NaN, so
+// a NaN would fall through each "never" and "short" test of the rule and be admitted.
+func finiteGiB(xs ...float64) bool {
+	for _, x := range xs {
+		if math.IsNaN(x) || math.IsInf(x, 0) {
+			return false
+		}
+	}
+	return true
+}
 
 // HostVerdict is the one word for how the host's memory stands against the two lines the admission rule keeps.
 type HostVerdict string
@@ -148,9 +161,10 @@ const (
 // limit where the OS enforces one. OVER is the commit charge above physical RAM, or nothing available, or the limit reached; NEAR
 // is within the headroom of any of them. They are the guard's own conservative lines for the house rule (RAM is overflow only and
 // never makes the box unstable), chosen 2026-10-09 and not measured: a definition of "too little room", not a reading of paging.
-// A reading from a platform whose limit is enforced but carries none is unknown (fail closed).
+// A reading from a platform whose limit is enforced but carries none is unknown (fail closed), and so is one with a figure that is
+// not a finite number (nothing compares against NaN).
 func (m HostMemory) Verdict(headroomGiB float64) HostVerdict {
-	if m.PhysicalGiB <= 0 || m.commitLimitMissing() {
+	if m.PhysicalGiB <= 0 || m.commitLimitMissing() || !finiteGiB(m.PhysicalGiB, m.AvailableGiB, m.CommitUsedGiB, m.CommitLimitGiB, headroomGiB) {
 		return HostUnknown
 	}
 	if headroomGiB < 0 {
@@ -260,6 +274,13 @@ func hostRAMAdmits(mem HostMemory, readable, supported bool, needGiB, pendingGiB
 }
 
 func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending HostLoad, headroomGiB float64) HostRAMCheck {
+	// A declared figure that is not a finite number is refused whatever the box looks like (and on a platform with no reader too):
+	// no state of the box admits it, so waiting cannot help.
+	if !finiteGiB(need.TouchGiB, need.CommitGiB) {
+		return HostRAMCheck{Impossible: true, NeedGiB: need.TouchGiB, CommitNeedGiB: need.CommitGiB, CommitStated: need.CommitStated, HeadroomGiB: headroomGiB,
+			Why: fmt.Sprintf("host RAM can never admit this: a declared host-RAM figure is not a finite number of GiB (working set %v, commit %v); "+
+				"state the real need (gpu reserve --ram <GiB>, 0 = none)", need.TouchGiB, need.CommitGiB)}
+	}
 	need = HostLoad{TouchGiB: max(need.TouchGiB, 0), CommitGiB: max(need.CommitGiB, 0), CommitStated: need.CommitStated}
 	pending = HostLoad{TouchGiB: max(pending.TouchGiB, 0), CommitGiB: max(pending.CommitGiB, 0)}
 	headroomGiB = max(headroomGiB, 0)
@@ -275,6 +296,13 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 		}
 		c.Unreadable = true
 		c.Why = fmt.Sprintf("waiting for host RAM: the host's memory cannot be read, so a lease that needs %.1f GiB cannot be shown to fit", max(need.TouchGiB, need.CommitGiB))
+		return c
+	}
+	// A figure the comparisons rest on that is not a finite number (the reading, the headroom, what running leases have yet to load)
+	// is no figure: the lease waits as it does on a reading that cannot be taken.
+	if !finiteGiB(mem.PhysicalGiB, mem.AvailableGiB, mem.CommitUsedGiB, mem.CommitLimitGiB, headroomGiB, pending.TouchGiB, pending.CommitGiB) {
+		c.Unreadable = true
+		c.Why = fmt.Sprintf("waiting for host RAM: a figure the rule compares against (the host's memory reading, the headroom or what running leases have yet to load) is not a finite number of GiB, so a lease that needs %.1f GiB cannot be shown to fit", max(need.TouchGiB, need.CommitGiB))
 		return c
 	}
 	c.CommittedGiB, c.PhysicalGiB, c.AvailableGiB = mem.CommitUsedGiB, mem.PhysicalGiB, mem.AvailableGiB
