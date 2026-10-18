@@ -13,9 +13,15 @@ package fleetnode
 //
 // A row that names no route is as wrong as a route with no row: the table would be testing a door that is gone.
 //
-// The comparison sees what registerRoutes registers, so a second place that registers a route would escape it. The source test
-// at the end closes that: a route is registered by a call to HandleFunc or Handle only inside registerRoutes, and the one mux
-// Handler builds is handed to registerRoutes and to nothing else.
+// The comparison sees what registerRoutes registers when the node is built the one way the test builds it, so a route registered
+// anywhere else, or under a condition that node does not meet, would escape it. The source test at the end closes that, over the
+// node's package and the queue's:
+//
+//   - a route is registered by a call to HandleFunc or Handle only inside registerRoutes (and, for the queue's, inside Mount);
+//   - the one mux Handler builds goes only to registerRoutes and the ingress guard, whatever a call that takes it might mount;
+//   - registerRoutes hands its registrar only to fleetqueue.Mount, and Mount uses its router only to register on it;
+//   - the registrations that stand in those two functions are as many as the node registered, so a route under a condition the
+//     test node does not meet, or in a loop, fails by count.
 
 import (
 	"fmt"
@@ -303,12 +309,84 @@ func handlerMuxProblems(fset *token.FileSet, fd *ast.FuncDecl) []string {
 	return problems
 }
 
+// registrarUses follows the first parameter of fd, the registrar the function is handed. A use that is the receiver of a
+// HandleFunc or Handle call registers a route in the function's own body, where the count sees it; a use as the first argument of
+// fleetqueue.Mount (counted in mounts, when mountOK) registers the queue's, which the count adds by the routes of Mount; any other
+// use (the registrar copied, captured, or handed to a call that mounts routes on it) is named, with want as the start of the line.
+func registrarUses(fset *token.FileSet, fd *ast.FuncDecl, mountOK bool, want string) (mounts int, problems []string) {
+	if fd.Body == nil || fd.Type.Params == nil || len(fd.Type.Params.List) == 0 || len(fd.Type.Params.List[0].Names) == 0 {
+		return 0, []string{fmt.Sprintf("%s: %s, and %s has no named first parameter for the check to follow", fset.Position(fd.Pos()), want, fd.Name.Name)}
+	}
+	name := fd.Type.Params.List[0].Names[0].Name
+	inspectWithAncestors(fd.Body, func(n ast.Node, up []ast.Node) {
+		id, ok := n.(*ast.Ident)
+		if !ok || id.Name != name {
+			return
+		}
+		switch parent := up[len(up)-1].(type) {
+		case *ast.SelectorExpr:
+			if parent.Sel == id {
+				return // a field or method of that name, not the registrar
+			}
+			if len(up) >= 2 && (parent.Sel.Name == "HandleFunc" || parent.Sel.Name == "Handle") {
+				if call, ok := up[len(up)-2].(*ast.CallExpr); ok && call.Fun == ast.Expr(parent) {
+					return
+				}
+			}
+		case *ast.CallExpr:
+			if mountOK && len(parent.Args) > 0 && parent.Args[0] == ast.Expr(id) && calleeIs(parent, "fleetqueue", "Mount") {
+				mounts++
+				return
+			}
+		}
+		problems = append(problems, fmt.Sprintf("%s: %s, and here it is used some other way; a route registered through it is not one the route table records", fset.Position(id.Pos()), want))
+	})
+	return mounts, problems
+}
+
+// queueRouteProblems reads the queue's package: a route is registered by Mount and nowhere else, Mount only registers on the
+// router it is handed, and the routes it registers are counted.
+func queueRouteProblems(fset *token.FileSet, files []*ast.File) (routes int, problems []string) {
+	foundMount := false
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			fd, isFunc := decl.(*ast.FuncDecl)
+			isMount := isFunc && fd.Recv == nil && fd.Name.Name == "Mount"
+			inside := ""
+			if isFunc {
+				inside = fd.Name.Name
+			}
+			if isMount {
+				foundMount = true
+				_, ps := registrarUses(fset, fd, false, wantMountRouter)
+				problems = append(problems, ps...)
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok || len(call.Args) != 2 || !(calleeIs(call, "", "HandleFunc") || calleeIs(call, "", "Handle")) {
+					return true
+				}
+				if isMount {
+					routes++
+				} else {
+					problems = append(problems, fmt.Sprintf("%s: %s, which route_table_test.go counts, and %q registers one", fset.Position(call.Pos()), wantQueueOutside, inside))
+				}
+				return true
+			})
+		}
+	}
+	if !foundMount {
+		problems = append(problems, "no Mount was found in the queue's package: the source test no longer sees what registers the queue's routes")
+	}
+	return routes, problems
+}
+
 // routeSourceProblems reads the sources and says, one line each, where a route could be registered that the route table
 // does not see.
 func routeSourceProblems(src routeSources) []string {
 	fset := token.NewFileSet()
 	nodeFiles, problems := parseSources(fset, src.node)
-	registerCalls := 0
+	registerCalls, mounts := 0, 0
 	for _, file := range nodeFiles {
 		for _, decl := range file.Decls {
 			inside := ""
@@ -316,6 +394,11 @@ func routeSourceProblems(src routeSources) []string {
 				inside = fd.Name.Name
 				if inside == "Handler" && fd.Body != nil {
 					problems = append(problems, handlerMuxProblems(fset, fd)...)
+				}
+				if inside == "registerRoutes" {
+					m, ps := registrarUses(fset, fd, true, wantRegistrar)
+					mounts += m
+					problems = append(problems, ps...)
 				}
 			}
 			ast.Inspect(decl, func(n ast.Node) bool {
@@ -349,6 +432,15 @@ func routeSourceProblems(src routeSources) []string {
 	}
 	if registerCalls == 0 {
 		problems = append(problems, "no route registration was found in registerRoutes: the source test no longer sees what it guards")
+	}
+	queueFiles, parseProblems := parseSources(fset, src.queue)
+	queueRoutes, queueProblems := queueRouteProblems(fset, queueFiles)
+	problems = append(append(problems, parseProblems...), queueProblems...)
+	// The table test records the patterns a node registers when built one way. A registration that stands in registerRoutes (or in
+	// Mount) and was not recorded is one the tables never saw: it sits under a condition that node does not meet.
+	if static := registerCalls + mounts*queueRoutes; static != src.recorded {
+		problems = append(problems, fmt.Sprintf("registerRoutes holds %d route registrations (%d of its own, and %d in fleetqueue.Mount, called %d time(s)) and the node the table test builds registers %d: a route registered under a condition that node does not meet, or in a loop, is one the credential tables never saw; make the node meet the condition, or register the route without one",
+			static, registerCalls, queueRoutes, mounts, src.recorded))
 	}
 	sort.Strings(problems)
 	return problems
