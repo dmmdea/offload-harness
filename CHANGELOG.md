@@ -6,6 +6,406 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.189.0] - 2026-10-17 - result-cache keys are length-prefixed and typed so no request can be served another request's cached answer, a stale stall-timer callback files nothing against the next phase, a spent post-ready bound reads the engine before the probe, a lint keeps sub-second wall-clock ceilings out of the Go tests, and CONTRIBUTING's seam-test rule
+
+### Added - CONTRIBUTING says a seam test must not inject the seam it certifies
+
+A test that certifies a wiring (a function variable, an interface, a config key or a door that hands work from one part of the harness to
+another) proves nothing if it assigns a stand-in to that very seam and asserts on the value it just put there: it passes with the
+production wiring deleted. A mutation of that kind has survived a green seam test in this repository before, and the red-first practice of
+this series (a behaviour-free stub first, then the failing test) makes the rule more relevant, not less.
+
+- **What changed.** `CONTRIBUTING.md` gains a section, "Tests that certify a seam", between "Proving a test can fail" and "Keeping tests out
+  of the OS temp dir". It states the rule and three working habits: fake the far side of the seam and never the seam; assert on something the
+  production path produces; show that the test goes red with `scripts/mutation-check.sh` and quote the `RED` verdict in the pull request.
+  It names `TestRunNoEligibleRemoteNamesTheRealCause` in `internal/delegate/run_test.go` as the worked example. It ends with one line for a
+  reviewer: for each test that claims to cover a wiring, ask which production line it goes red without.
+- **What did not change.** No code, no test and no lint. There is no mechanical gate for this rule: a source lint for "a test assigns a
+  seam variable and asserts only on the value it injected" would have to decide what counts as a seam, which only the reader can, so the rule
+  lives where contributors and reviewers read it.
+- **Checked.** `go test -run 'TestDocsLint|Changelog|Fragment' .` and `go run ./cmd/changelog check` pass; the section was read back
+  against the example it cites.
+
+### Fixed - the result-cache key can no longer be forged from request text: every part is length-prefixed, callers pass each ingredient as its own part, the params part is typed, and every existing cache key changes once
+
+- **One-time effect on upgrade: every existing result-cache key changes, so the cache starts cold.** The first call of each kind after the upgrade misses and
+  runs the model, then stores its result under the new key. The cache itself needs nothing: it is a transparent accelerator, a miss does what the request would have
+  done with no cache at all, and there is nothing to configure or migrate. (Some output file names and exemplar `params_key` values change once too; the
+  `StableParamsKey` entry below says which.) Entries stored under the old keys are never looked up again, and the cache has no
+  eviction, so they stay in the cache file as dead weight until the file is removed. (The ask lane's own cache lives in memory for the life of one server process,
+  so it has nothing stored to orphan.)
+- **The defect (issue #4).** `cache.Key` joined its parts with a NUL byte and hashed the result, so `Key("a", "b")` and `Key("a\x00b")` were one key. One part of a
+  key is arbitrary request text, and text that carries a NUL can forge the boundary between two parts, so a request could be served a result that was stored for a
+  different request. The empty cases collided as well: `Key()` and `Key("")`, and `Key("", "")` and `Key("\x00")`, were each one key. `TestKeySeparatorCollision` had
+  pinned the collision as known behaviour, with a `t.Skip` that was to fire once the encoding was fixed.
+- **The encoding (`internal/cache`).** The preimage is a version tag, `offload/cache.Key/v2`, then for each part its byte length as 8 bytes big-endian and its
+  bytes; the key is the hex SHA-256 of that. A length prefix is self-delimiting, so no byte inside a part can be read as the boundary between two parts, and the
+  empty list, one empty part and two empty parts are three keys. The doc comment on `Key` states the encoding, why a separator cannot work for text that may hold
+  any byte, and the rule for callers: pass each ingredient as its own part and never glue fields into one part with a separator of your own. The same rule is in
+  `docs/systems/offload-pipeline.md`, under "How a result-cache entry is keyed". `Cache.Put` refuses an empty key (`ErrEmptyKey`): no real key is empty, and the
+  pipeline uses `""` for "this call has no key and must not be cached".
+- **The same defect one level up (`internal/pipeline`).** Length-prefixing cannot repair a part that a caller built by gluing fields, because the encoding cannot
+  see inside a part. Five key ingredients were built that way, and each is now separate parts or goes through `cache.Key`, so the whole key has one framing and not
+  a second one:
+  - `runVisionGen` keyed `req.Input + "|" + the media identity` as one part, and the identity is the only carrier of the source file's content, so `("a|b", "c")` and
+    `("a", "b|c")` named one entry and one file's cached description could be served for another. They are two parts now (`visionKeyFor` in `mediagate_test.go`, the
+    test mirror, follows).
+  - `cacheKeyForTierRender` folded the render into the model name (`model#render`); the render is a part of its own, so a model named `x#y` and the model `x` rendered
+    `y` no longer share an entry.
+  - `exemplarCacheTag` ended each exemplar field with a NUL, and an exemplar's input and output are past request and answer text that can hold one, so
+    `(Input "a\x00b", Output "c")` and `(Input "a", Output "b\x00c")` had one tag while the prompts they inject differ.
+  - `templateCacheTag` joined the system prompt, the grammar and the user template the same way. Both tags are now `partsHash`, which is `cache.Key` over the fields.
+  - The transcription key is a named function, `transcribeCacheKey`, taking the content digest, model, language and protocol as parts, with the model once (the old
+    key carried it twice). The joined `digest|model=...|lang=...|proto=...` string stays only as the input of the on-disk media stem, so no output file is renamed.
+    This seam was not reachable end to end: the old key also carried the model as a part of its own, and the digest is a hash of the file. It is hardening.
+  - `askcache.Key` keeps its own per-field length prefix as a second layer, so its keys do not rest on `cache.Key` alone. Its comments changed (and the comment in its
+    test that said `cache.Key` joins with a NUL), and its test gained one assertion: `Key("ab", "c")` against `Key("a", "bc")`.
+  - One glued part is left on purpose: the video media identity (`vid:<digest>|fps=...|n=...|w=...|frames=...`, and the per-window `vidw:` form) is built from the file
+    digest and numbers and passed as one part. None of it is caller text, so it cannot forge a boundary; the documentation names it as the exception to "every ingredient
+    is its own part".
+- **The params part is typed, and params that cannot be keyed skip the cache (`internal/tasks`, `internal/pipeline`).** The result-cache key carried the params as
+  `StableParamsKey` printed them, and that prints nested and non-string values with Go's `%v`, which is type-erased and space-separated. Two extract requests whose
+  schemas differ only where `%v` cannot see it, a `required` list naming `"a b"` instead of `"a"` and `"b"`, or a `minimum` that is the string `"1"` instead of the
+  number 1, had one key, so the second was served the first's cached answer before its own schema was ever checked (a cached reply is validated only on a miss). The
+  key now carries `tasks.CacheParamsKey`: the params as JSON with the keys of every map sorted at every depth, typed, so `"5"` and 5, `["a","b"]` and `["a b"]`, a string
+  and the bool it spells all differ, while an int 5 and the float64 5 the MCP door decodes, or a `[]string` and a `[]any` holding the same strings, still agree. It is used
+  for the result cache only: Run, RunTier, the vision path and the transcription key. **It fails closed.** Params with no faithful typed form (NaN or an infinity, a
+  function or channel, a struct, a byte slice, a type with its own JSON or text form by any of `MarshalJSON`, `MarshalJSONTo`, `MarshalText` or `AppendText` on the
+  value or the pointer receiver, a `json.Number` that is not a number, a string that is not valid UTF-8, a self-referencing value) make that call neither read nor
+  write the result cache: it runs the model every time, logs one line, and sets `cache_bypass` ("params: ...") on the result's meta, which `Run`, vision and transcribe
+  write to their ledger row (`RunTier` writes no ledger row, so there it is on the returned meta only). The reason names the params key and a kind, never a value. Such a
+  call is not harvested as an exemplar either: the exemplar row prints the params with `%v`, which has no cycle guard, so a self-referencing value would have crashed
+  the process after the model answered. There is no fallback to a `%v` rendering or to `StableParamsKey`, because that would hand the call a key a different request
+  can reach. Nesting is bounded at 128 JSON levels.
+- **The params string for file names (`internal/tasks`).** `StableParamsKey` renders `<key>=<value>;` per entry with nothing to tell a structural `=` or `;` from one
+  inside a key or a value, so `{"a": "1;b=2"}` and `{"a": "1", "b": "2"}` both rendered `a=1;b=2;`. It names the render-, video-, animate-, inpaint-, upscale-, edit- and
+  audio output files and is recorded as `params_key` on the persisted exemplar rows, so it stays, with the escaping. Each key and each rendered value now has `%`, `;`
+  and `=` written as `%25`, `%3B` and `%3D`, in one pass (`%` is the escape character, so it is escaped too; that is what keeps a value that spells `%3B` apart from the
+  value `;`). Backslashes are left alone. **Every top-level entry is now unambiguous; nested and non-string values keep Go's `%v` rendering**, so `{"seed": "5"}` and
+  `{"seed": 5}`, or a slice holding `"a b"` and a slice holding `"a"` and `"b"`, still render alike. That limit is documented and pinned by a test, because lifting it would
+  give every params map with such a value a new file name; it now matters only for file stems and exemplar rows, since the result cache no longer uses this string. The
+  escaping does not make output file names injective either: a stem is a hash of the prompt followed directly by this string, with no boundary between the two, so a prompt
+  and a params string can still run together. That predates this change; a stem collision only reuses or overwrites a file under a truncated 32-bit name.
+  **The output is byte-identical to the old format for every params map whose keys and rendered values contain none of `%`, `;` and `=`** (prompts, numbers, bools, paths
+  of either slash direction, nested maps and slices of those), so the output file names and recorded keys of ordinary params do not move, and neither do those of the
+  image, edit and upscale params that carry Windows paths. A key or value that does contain one of the three, such as a negative prompt with a semicolon or an equals sign,
+  a URL with a query string (`?a=b`), or a percent-encoded URL, renders differently from before: its default output file name changes once (an earlier file under the old
+  name is not reused), and its `params_key` on newly written exemplar rows differs. Nothing reads `params_key` back for matching today.
+- **Tests, red first.** A test that pins a defect was written before its fix and failed on the old code; a test that pins behaviour the code already has (the
+  ordinary-params table, the documented limit, the encoding values, the digit-part entries, the empty-key refusal) is shown red by a mutation instead, listed below.
+  - `internal/cache`: `TestKeySeparatorCollision` no longer skips. It asserts 28 named part lists give 28 distinct keys (the NUL cases, every empty-part case, a part that
+    spells out a length header, a part that spells out the frames of another list, and two pairs of lists that a decimal length with no delimiter would read as one:
+    two digit lists, and a pair whose only long part is ten characters with no digits after the first), names the
+    headline pairs as separate checks, and checks that its colliding pairs really did collide under the old `strings.Join(parts, "\x00")`, so the table cannot go stale.
+    `TestKeyIsInjectiveOverSmallLists` checks all 2,380 lists of up to three SHORT parts over `{a, NUL, \x01}` (what it cannot reach, a part of ten characters or more, is the named
+    decimal-length entries above). `TestKeyEncodingIsPinned` holds four keys to values computed outside the package, so a change to the tag or the length width is a visible edit.
+    `TestEmptyKeyNamesNoEntry` holds the empty-key refusal.
+  - `internal/pipeline`: `TestRunVisionGenKeepsInputAndIdentityApart` drives `runVisionGen` itself with inputs whose old glued strings are equal; the second call must
+    miss, the model must run twice, two entries must be stored, the answers must differ, and a genuine repeat of either must still hit.
+    `TestTierKeyKeepsModelAndRenderApart`, `TestExemplarCacheTagKeepsFieldsApart` (tag and key level) and `TestTemplateCacheTagKeepsFieldsApart` (tag level, and key level for the case where
+    the grammar agrees) cover the render and the two tags. `TestTranscribeCacheKeyKeepsFieldsApart` has three cases; two fail on the old key, and the third (model text imitating the digest
+    boundary) passes on it because the old key repeated the model, which is what the case now holds to the framing. `TestRunTranscribeStoresUnderTranscribeCacheKey` drives
+    `runTranscribe` on both protocol legs (whisper, and an HQ model on the OpenAI shape, which keys with no language) and ties the entry it stores to `transcribeCacheKey`; that is what makes the call site a pinned seam (the function's own test cannot see which key the call
+    site builds: with the glued key put back at the call site every other transcription test stayed green).
+  - Typed params, driven through `Run` (`internal/pipeline`): `TestRunKeepsTypeErasedParamsApart` stores one request and asks the other for both release-review pairs
+    (`required` and `minimum`); the asking request must miss and the model must run again. It fails on the old code with "A was served B's cached answer". The
+    fail-closed behaviour is pinned the same way for `Run` (NaN, an infinity, a function), `RunTier`, the vision path and the transcribe path: two identical calls both run the model,
+    no entry is stored, and `cache_bypass` says why; the same request with keyable params is cached and hit, so the tests are not vacuous. They fail on the old code, where the
+    second call is a cache hit. `TestRunDoesNotHarvestParamsThatCannotBeKeyed` sends a map and a list that hold themselves through `Run`: no crash and no exemplar row,
+    while the same call with keyable params is harvested. `TestRunCacheBypassNeverEchoesAParamsValue` sends an invalid `json.Number` and checks that its text is in
+    none of the log, the meta and the ledger.
+  - `internal/tasks`: `TestCacheParamsKeyKeepsTypesAndStructureApart` (eight pairs, each checked against the old `%v` rendering first),
+    `TestCacheParamsKeyIsStableAcrossRepresentations`, `TestCacheParamsKeyIsPinned` (exact strings) and `TestCacheParamsKeyFailsClosed` (twenty-four unkeyable values, each an error that
+    names a kind and never a value, by every route to an error: the walk, the `json.Number` check and the encoder; a 100-level object stays keyable), and
+    `TestCacheParamsKeyRejectsAV2OwnForm` (a type whose only own form is the v2 `MarshalJSONTo`, which `json.Marshal` honours on Go 1.27; it first checks that the
+    encoder really renders it its own way). For `StableParamsKey`: `TestStableParamsKeyKeepsEntriesApart` (three pairs, each checked against a copy of the old rendering),
+    `TestStableParamsKeyEscapesWhatItMustEscape` and `TestStableParamsKeyIsInjectiveOverASmallAlphabet` (all 93,051 params maps of up to two entries over `{a, %, =, ;}`, strings
+    up to two characters) fail on the old format. `TestStableParamsKeyIsInjectiveOverEscapeSpellings` covers what that alphabet cannot reach, a value that spells an escape: all
+    160,000 single-entry maps with keys and values of up to three characters over `{a, %, ;, =, 3, B, D}`. `TestStableParamsKeyOrdinaryParamsAreUnchanged` holds a table of
+    ordinary maps, Windows and UNC paths and values with backslashes among them, to hard-coded expected strings written from the format and not computed by the function; it
+    passes on the old format and the new, which is the promise that file names and recorded keys did not move. `TestStableParamsKeyNestedAndNonStringValuesKeepGoRendering`
+    pins the documented limit above (three pairs that still render equal); it goes red if the nested rendering changes, so that change has to be deliberate.
+  - `TestRunTier_NoCacheWrite` probed a hand-written five-part key while the key `Run` really uses has seven parts, so its "no entry under the default-model key" check could
+    not fail whatever `RunTier` did. The probe now calls `cacheKeyFor` and the test checks that `Run`'s own entry is found under it. With `RunTier` made to write under `Run`'s
+    key, the old probe stayed silent and the new one fails.
+- **Mutations run.** With each of these put back in turn, the named tests fail and the code is restored byte for byte afterwards. `cache.Key`: the old NUL join; no version tag
+  (only `TestKeyEncodingIsPinned`); an 8-byte length cut to 4 (only `TestKeyEncodingIsPinned`); the length missing on the last part; a decimal length with no delimiter
+  (`TestKeySeparatorCollision` and `TestKeyEncodingIsPinned`; before the digit entries only the pinned test failed). `Cache.Put` without the empty-key refusal. Call sites:
+  the glued vision key; the folded render; the NUL-terminated exemplar fields; the NUL-joined template tag; the glued transcription identity, inside `transcribeCacheKey` and
+  at the `runTranscribe` call site (the latter fails only `TestRunTranscribeStoresUnderTranscribeCacheKey`); the requested language passed on the OAI leg (only that
+  test's `oai` leg fails); the transcription key without the model; `StableParamsKey` back in
+  the key at the `Run`, vision, `RunTier` and transcribe call sites. Fail-closed handling: a fallback from an unkeyable value to `StableParamsKey`; the bypass not recorded;
+  the unkeyable flag ignored at the `Run`, `RunTier`, vision and transcribe call sites. `CacheParamsKey`: it returning `StableParamsKey`; no walk over the values; byte slices,
+  non-UTF-8 strings or types with their own JSON form allowed; the pointer-receiver half of that check, `MarshalJSONTo` or `AppendText` dropped from it; the
+  `json.Number` check off; the encoder's error text forwarded; the walk bound back at 64; the exemplar harvest without the keyability check (a stack overflow); a `fmt` fallback for an unkeyable value (it crashes on a self-referencing map, which is the danger of a
+  fallback). `StableParamsKey`: the keys not escaped, the values not escaped, `%` not escaped, `=` not escaped, `;` not escaped, the trailing `;` changed, the backslash
+  escaped as well, the escape applied twice, and the nested rendering changed to `%#v`. Removing `field()` from `askcache.Key` on its own no longer turns a test red, because
+  `cache.Key` keeps those fields apart; its test says so.
+- **Not fixed here (pre-existing, out of scope).** D-136: a cached result is not validated against the requesting call's schema on a hit (validation runs only on a miss), so
+  a key collision of any kind would still be served; the typed key closes the known ones. D-137: the result cache has no bound, TTL, compaction or operator lever. D-138:
+  output-file stems that glue fields (`composevideo.go:343` hashes a `fmt.Sprint` of its fields with no separator at all; the render, video and edit stems hash the prompt
+  and the params string with no boundary). Left alone on purpose, no row: `promptPrefixFingerprint` (`internal/pipeline/identity.go`) and the research retry-cap key
+  (`pageKeyFor`, `internal/delegate/processgate.go`) join their fields with a NUL, but they are telemetry and a retry cap, not result-cache keys.
+- **Proved.** Remote Linux runs at commit `dca2e015` (the typed-params round; `babdd239` before it passed the same): a gate over `./internal/cache`, `./internal/askcache`, `./internal/tasks`, `./internal/mcpserver`,
+  `./internal/changelog`, `./internal/pipeline` and the root package passed (7 of 7), and `./internal/pipeline` passed again on a second remote Linux runner. On Windows, for the
+  typed-params round, `go test -p 1 -count=1` passes on `./internal/cache/`, `./internal/askcache/`, `./internal/tasks/` and `./internal/mcpserver/` with `-run TestAsk`, and on
+  `./internal/pipeline/` with `-run` over the key, cache, vision, tier, exemplar, template, transcribe, gate, media, image-batch, render, video and legacy-file-name tests
+  (skipping one lease-timing test, see below); `go vet` is clean on the touched packages and `go run ./cmd/changelog check` passes. The other callers of `StableParamsKey` (the output-file stems in `internal/pipeline` and
+  the exemplar append) were read, and the tests that reach them pass, among them the legacy file-name test in `imagebatch_family_test.go`. That test computes its expectation with
+  `StableParamsKey` itself, so it cannot see a change in the output; the hard-coded table above is what holds the bytes.
+- **Not verified here.** No live cache file, seat or fleet node was used, so the cold start after an upgrade is read from the code (a key that is not in the store is a miss) and not
+  measured. The Windows pipeline run skips `TestEveryMediaRouteLeasesForItsOwnTimeoutAndIsKilledThere`: a lease-window timing test (it spawns real runner processes) that failed
+  intermittently under load on this machine, always as "want one live lease while the render runs" within about 50 ms and on a different subtest each time, and passed three runs in a
+  row on its own. That flake is the media-route lease-read race (a held lease record read as absent while it is rewritten) that PR #634 fixes, not this change: this diff touches no lease code, and the remote Linux runs of the whole package included the test. A Windows run of the full suite was not made, and the leak-gate tool (it needs the operator's name list) was not run.
+
+### Fixed - a spent post-ready bound makes the same decision on the seat probe's tick as on the stall timer
+
+- **A production race, not a test timing assumption.** A request held in the post-ready part of the cold-load hold (the
+  seat loaded for it and read ready, no byte yet) is judged at the bound by two callers: the stall timer, which asks the
+  engine, and the seat probe's tick, which polls `/running`. While a tick's read is in flight the timer sees the probe busy
+  and leaves the decision to the tick (`onStall`), and the tick used to file the stall without asking anyone. Two legs of
+  that one defect:
+  - **Engine leg.** The seat reads ready (or cannot be read) and the engine works for the request's siblings. The tick
+    stalled a request that was waiting its turn; the timer would have entered the busy hold.
+  - **Loading leg.** The straddling read says the seat is **loading** again (evicted after it read ready). The tick took
+    no engine read and no loading hold either: it stalled with the cold-load ceiling unspent and a reason that
+    contradicted itself, `no byte for 1s after the seat read ready ... the seat: starting`. The same read one poll
+    earlier enters the loading hold, and the timer path (the engine read reports `Loading`) enters it too.
+- **One decision for both callers.** `silenceVerdictLocked` now decides, for the timer and the tick alike, what a silent
+  request becomes; before, each caller carried its own copy of the conditions and they had drifted apart. At a spent
+  hold bound, by what the seat reads:
+  - **Post-ready bound spent, seat loading.** Timer: the engine read reports `Loading`, back to the loading hold. Tick
+    before: stalled, no engine read (the defect). Both now: back to the loading hold, with the cold-load ceiling still
+    counted from the first silence, so a load that never ends is still stalled at the ceiling, as a cold-load stall.
+  - **Post-ready bound spent, seat ready or unreadable.** Both read the engine: the busy hold while it works for
+    someone, the stall when it is flat. Unchanged (the unreadable seat says nothing about the engine, and the production
+    engine read answers for itself).
+  - **Cold-load ceiling spent, any seat state.** Both stall, without an engine read. Unchanged.
+  - **No engine probe installed** (`EngineFlat` 0; the real wiring always installs one beside the seat probe). The
+    timer stalls at a spent bound without reading the seat; the tick stalls on a ready or unreadable seat as before and
+    sends a loading one back to the loading hold. Left as it is.
+- **The stall reason can no longer contradict itself.** A post-ready stall cannot carry a loading seat state any more: a
+  loading read at a spent post-ready bound re-enters the loading part, and a load that outlasts the ceiling reads
+  `stalled: seat still loading after Ns in cold-load (... the seat read "starting", so no byte could arrive)`. Pinned: the
+  reason never says `seat read ready` when the last read said `stopping`.
+- **A stale timer callback.** The first form of this fix still stalled the loading leg a second in, about a quarter of
+  the time in loaded runs (8 of the first 34 loaded runs and 4 of the first 38 unloaded ones failed, with `stalled: seat still
+  loading after 1s in cold-load (allowed 30s ...)`): the timer callback that had fired at the bound was waiting for the
+  monitor's lock, ran after the tick had re-armed the timer for the longer ceiling, and stalled a request the tick had
+  just held. In the hold the timer is always armed for what is left of the current part, so a callback that finds time
+  left is not due: it re-arms for that time and returns.
+- **Found as a CI flake.** `TestPostReadyHoldReadsTheEngineBeforeStalling` failed once on a hosted Linux runner with
+  `a post-ready request whose engine works for its siblings was stalled: stalled: no byte for 0s after the seat read
+  ready, in cold-load (... post-ready bound = max(0s, 2 x 0s prefill allowance) ...)`. In that test the probe tick falls
+  on the bound's own instant (a 10 ms poll, a 40 ms prefill allowance and a 100 ms bound), so who decides is a coin toss.
+- **Evidence for the engine leg (race rigor).** Counts are runs of the test binary, 3 `-cpu` settings each.
+  - Red, original test on the parent: `go test -c -o agent.test ./internal/agent/`, then in `internal/agent`
+    `agent.test -test.run '^TestPostReadyHoldReadsTheEngineBeforeStalling$' -test.count=150 -test.cpu 1,2,4`:
+    3/450 failed, with the CI line above.
+  - Red, deterministic: `TestPostReadyBoundExpiringDuringASeatReadReadsTheEngine` (the first seat read made in the
+    post-ready part returns only after the bound is spent, so the tick always lands after it), committed before the
+    fix, with `-test.run '^TestPostReadyBoundExpiringDuringASeatReadReadsTheEngine$' -test.count=20 -test.cpu 1,2,4`:
+    60/60 failed with the same reason.
+  - Green with the first form of the fix: the deterministic test 0/60 (same command); the original test
+    `-test.count=400 -test.cpu 1,2,4`: 0/1200. Mutant (the engine-read branch of the tick disabled), both tests kept: the
+    deterministic test 60/60 failed and the original test failed 26/1200.
+  - The deterministic test must not depend on the scheduler (review finding). Its first form slowed the seat read only
+    when it began in cold-load, and gave the bound 100 ms against a 40 ms prefill allowance, a window of about 60 ms. On a
+    starved runner the stall timer and the first tick both ran after the bound, every seat read happened in prefill, the
+    slow read never started and the test failed with `the test never made the post-ready seat read slow; it proves
+    nothing` (a false red, never a false pass): 1/100 failed with 2 spinners on the test's core and 3/100 with 6 (binary
+    pinned to one core, `-test.cpu 1`). The test now gives the post-ready part a 1 s bound, so the first cold-load tick
+    starts far inside it; the slow read waits on the monitor's own state until the bound is spent, and the test polls
+    for the busy hold instead of sleeping.
+- **Evidence for the loading leg and the decision (race rigor).** The tests wait on the monitor's own state, never on a
+  wall-clock share: the loading-hold test, the stall-at-the-ceiling test, the reason-wording test, the unreadable-seat
+  pin and the cold-load-ceiling pin (all in `internal/agent/liveness_spentbound_test.go`, with the same straddling-read
+  hook as the engine test, the post-ready part 1 s), a table that calls the tick and the stall timer's callback by hand
+  for every seat state and part (so the two callers are compared like for like, with no timing at all), and a pin that a
+  timer callback finding time left in the hold is not due. Counts are runs of one test binary,
+  `-test.run '^(TestSpentPostReadyBound|TestSpentColdLoad|TestSpentHoldBound|TestLoadingAfterASpent|TestStallTimerCallback|TestPostReadyHoldReads|TestPostReadyBoundExpiring)'`,
+  built with `go test -c -o agent.test ./internal/agent/` and run in `internal/agent`.
+  - Red, on the code before the decision change, `-test.count=20 -test.cpu 1,2,4` (60 runs): the loading-hold test 60/60
+    failed (`a post-ready request whose straddling seat read said loading was stalled with 29s of the cold-load ceiling
+    unspent: stalled: no byte for 1s after the seat read ready ... the seat: starting`), the stall-at-the-ceiling test
+    60/60 (`stalled in phase cold-load (post-ready=true) at 1s`), the wording test 60/60 (`the last seat read said
+    stopping, but the reason says the seat read ready`), and the table's two loading rows 60/60 each (`tick: got
+    {stalled:true phase:cold-load postReady:true}, want {stalled:false phase:cold-load postReady:false}`). The unreadable-seat
+    and cold-load-ceiling pins passed on that code: they pin behaviour the fix keeps.
+  - Red for the stale callback, on the code before the guard, same command: 60/60 on each of its two rows (a callback
+    that found 50 minutes of loading ceiling left stalled the request; one that found post-ready time left read the
+    engine).
+  - Green, final code, unloaded, `-test.count=50 -test.cpu 1,2,4` (150 runs of each test): 0 of 150 failed, for each of the nine tests (the two engine-race tests included).
+  - Green, final code, under CPU load: the test binary and 6 busy-loop processes pinned to one core of a 36-thread host,
+    `-test.count=150 -test.cpu 1` (150 runs of each test): 0 of 150 failed, for each of the nine tests. (The unloaded and the loaded run went at the same time.)
+  - Mutants, each applied by an exact-snippet edit that fails unless it matches once, the sources compared byte for byte
+    with the committed ones afterwards:
+    - The new code reverted, the first fix kept (the parent's `liveness.go`): unloaded `-test.count=20 -test.cpu 1,2,4`
+      (60 runs) the loading-hold, stall-at-the-ceiling, wording, table and stale-callback tests failed 60/60 each, and
+      the two engine-race tests and the two pins passed 60/60; loaded `-test.count=40 -test.cpu 1` (40 runs) the same five
+      failed 40/40.
+    - Only the stale-callback guard removed: the stale-callback test failed 60/60 unloaded and 40/40 loaded, and the
+      loading-hold test 4/60 unloaded and 5/40 loaded, the stall-at-the-ceiling test 4/60 and 4/40 (the failure above).
+    - The tick made to stall on an unreadable seat read (`-test.count=10 -test.cpu 1,2,4`, 30 runs): the unreadable-seat
+      pin and the table's unreadable row failed 30/30, everything else passed.
+    - The decision's clause for a spent cold-load ceiling removed (same command): the table's `cold-load ceiling spent,
+      seat loading` row failed 30/30, everything else passed. Widening `engineCheckablePhaseLocked` to every cold-load
+      part alone failed 0/12 (`-test.count=4`): the decision's clause already shields it, so that mutant is
+      equivalent; with both applied the table's three cold-load-ceiling rows and the cold-load-ceiling pin failed 12/12.
+  - One false red seen once in the unloaded runs before the guard (`the test never made a cold-load seat read slow; it
+    proves nothing`, at 0.46 s) was not reproduced in the 300 runs after it; the message now names the phase and the
+    cause of a run that never reached the race.
+- **Not fixed here (cosmetic).** The stall note prints its bounds with `%.0f` of seconds, so a sub-second bound reads
+  `0s` (`allowed 0s`, `max(0s, 2 x 0s ...)`). Production bounds are minutes, not seconds: the post-ready bound is
+  `max(120 s, 2 x the waiting phase's allowance)` (the floor `postReadyFloor` is 120 s, and no allowance is under the
+  60 s liveness floor), so it is never under 120 s, and the cold-load ceiling is `max(600 s, 2 x the seat's measured cold
+  load)`, clamped to the run's ceiling. Only the compressed bounds of a test show the `0s`.
+- **Not verified here.** The race was exercised with scripted seat and engine probes only; no live seat or lease was
+  used, and the timer-before-tick interleaving is pinned by calling the callback by hand, not reproduced on real
+  hardware.
+
+### Fixed - a stall filed with no silence in it: a stale stall-timer callback no longer judges the run's next phase, and the wedged-seat fixtures give the run's setup and a slow progress write room
+
+- **Two observations, three causes; no single cause covers both.** `TestRunAgentTaskWedgedSeatFilesSeatDownPrefix` failed once in a full `./internal/pipeline` run
+  on a loaded box with `stalled: no progress for 0s in admission`, and an earlier fragment recorded a two-hold run that ended `stalled: no progress for 0s in tool
+  (allowed 120s; 1 tok so far)`. Both are a stall filed with no silence in it (the `0s` is `%.0f` of a silence under half a second, or of none). The hypothesis that a
+  stall timer armed for one phase fires after the monitor has moved on is true of the second and false of the first, and a third failure sat behind the first:
+  - **Production (the tool-phase note):** the stall timer's callback cannot say which arm of the timer launched it.
+  - **Fixture policy (the admission failure):** the admission phase of the seat-down fixtures was allowed 200 ms, the compressed liveness floor.
+  - **Fixture scale (found once the admission failures were gone):** a slow progress write at the prefill's announcement, against a window of 500 ms.
+- **The production defect (`internal/agent`).** The stall timer is a `time.AfterFunc`, and `Timer.Reset` cannot recall a callback that has already been
+  launched. A timer that expires while `Phase`, `ToolPhase` or `Progress` holds the monitor's lock launches `onStall`, which parks on the lock and takes it the
+  moment the method lets go, after the run has moved on and the timer has been re-armed. It then judged the new phase against the new last-progress time and
+  filed a stall with no silence in it: `no progress for 0s in tool (allowed 60s; 0 tok so far)`. In a prefill it went on to the seat probe and the busy hold
+  instead, so a request entered the hold a few milliseconds into its phase. The monitor has an `epoch` counter, but a callback launched by `AfterFunc` cannot
+  capture it, and `onStall` compared it only after its own seat read, so nothing checked it at the lock. Measured on the wedged-seat test pinned to two cores
+  with six busy loops: the callback ran 320 times in a prefill and 17 of them (5%) found less than the allowance gone since the last progress.
+- **The fix.** `onStall` returns at once when the phase counts its allowance from the last progress (admission, prefill, decoding, tool, re-pack) and less than
+  the allowance has passed since it (`stallCallbackStaleLocked`, new file `stallstale.go`). The arm that is current fires by itself, because `Timer.Reset` on an
+  `AfterFunc` timer either moves the pending call or schedules a new one, so no stall is lost. The re-looks the monitor makes after a due fire (the probe's poll,
+  the engine's poll) happen with the allowance already spent, so they are never taken for stale. The cold-load hold and the busy hold arm their timers by their
+  own arithmetic and are left to the code that owns them (the cold-load hold's own stale-callback check is the one in the post-ready fix). Touched in `internal/agent`:
+  the condition of `onStall`'s first guard in `liveness.go` (one line) and the new method in `stallstale.go`; `onProbeTick`, the probe-path switch, `fileStallLocked`
+  and `checkEngineLocked` are unchanged. A callback made by hand with no silence is now what a stale callback is: `TestParkedMonitorIgnoresATimerThatFiresAnyway`
+  called `onStall` right after `Phase` and expected its control arm to stall, so both of its arms now back-date the last progress (the control still stalls; a
+  mutant without the park clause still fails the parked arm).
+- **The admission defect (`internal/pipeline`, fixture policy).** The admission phase of the monitor is the run's own setup between its start and the loop's first
+  request. Its allowance is `max(admission budget, floor)`, and with the admission gate off (the seat-down tests use `agent_admission_wait_sec: -1`, budget 0) it is
+  the floor alone, which those tests compress to 200 ms so that a wedged seat is seen quickly. On a starved process the first request went out later than that (in
+  one instrumented run, more than 200 ms after the monitor started in 35 of 112 runs, the slowest 6 s later), and the run was stalled in admission before it had
+  asked the seat for anything: `stalled: no progress for 2s in admission (allowed 0s; 0 tok so far)`, or, when the busy hold ended it, `seat down: the seat's engine
+  did no work for 0s while this request waited in admission (allowed 0s; ...)` with no step in flight and so no recovery wait. A stall filed in the admission phase
+  cannot be a stale callback: nothing moves the last progress without leaving the phase, and all 75 admission firings in that run were due (silence at least the
+  allowance). `livenessAdmissionFloor` (60 s, the value the floor has in production) is now the least allowance of the admission phase, so a test that compresses
+  `livenessFloor` leaves it alone. Nothing changes at production values: gate off 60 s, a 5 s budget 60 s, the default 300 s budget 300 s
+  (`TestLivenessPolicyAdmissionAllowanceIsUnchangedInProduction`). Touched: `LivenessPolicyFor` and the new variable in `internal/pipeline/liveness.go`.
+- **The slow-write defect (fixture scale, no product change).** The loop announces the prefill to the run's observer (on a fleet node, the job record) after the
+  monitor has started the prefill's stall clock and before it registers the model call. A write longer than the clock plus the busy hold's flat bound (200 ms and
+  300 ms in these fixtures) lets the monitor file a seat-down verdict while no call is in flight, and a verdict with no call to cancel ends the run without the
+  recovery wait: `seat down: the seat's engine did no work for 0s while this request waited in prefill (allowed 0s; ...)`. On a loaded host the write measured 200 to
+  500 ms and, with the admission failures gone, the wedged-seat test failed 12 of 450 runs under load that way. `TestRunAgentTaskWedgedSeatSurvivesASlowProgressWrite` makes the write
+  700 ms with a progress sink (`core.WithProgressReport`), so the failure is deterministic. The wedged-seat fixtures take their scale from one helper,
+  `compressWedgedSeat` (floor 200 ms, cold-load ceiling 700 ms, busy-hold flat bound now 1.5 s instead of 300 ms), so the window is 1.7 s, and the wall bound of
+  the four runs, which only has to tell the 700 ms cold-load ceiling from no bound, goes from 8 s to 30 s (the runs take about 2.5 s unloaded). At the production
+  floors (60 s and 120 s) the window is minutes and a job-record write is nothing. The other seat-down tests keep their own, shorter scale.
+- **Tests, written first.** Red before the fixes, on `1604928b`:
+  - `liveness_stalecallback_test.go` queues the method that moves the run on ahead of an expired timer's callback on the monitor's lock (no hook in the product):
+    `a stall timer armed for decoding expired as the run moved into a tool and filed "stalled: no progress for 0s in tool (allowed 60s; 0 tok so far)"`,
+    `a stall timer expired as a token was being booked and filed "stalled: no progress for 0s in decoding (allowed 10s; 1 tok so far)"` and
+    `the stale callback filed "stalled: no progress for 0s in tool (allowed 1s; 0 tok so far)" before the tool's second had passed`; a control that real silence
+    still stalls, with a silence at least as long as its allowance, passes before and after.
+  - `agenttask_seatdown_admission_test.go`: `the admission phase may be silent for 200ms with the floor at 200ms, want at least 10 s`.
+  - `agenttask_seatdown_slowwrite_test.go`: `TestRunAgentTaskWedgedSeatSurvivesASlowProgressWrite` with the fixtures at the 300 ms flat bound they had: 3 of 3 runs failed with `seat down: the seat's engine did no work for 0s while this request waited in prefill (allowed 0s; ...)` and no `did not come back` wait.
+- **Proved.** Counts are runs of one compiled test binary (`go test -c -o <exe> ./internal/pipeline/`; an unfixed build uses `-overlay` to put the `1604928b` files back).
+  "Under load" is the binary with `-test.cpu 1` pinned to two cores together with four (or six) busy-loop processes pinned to the same two cores (started before the run,
+  killed by PID after it).
+  - **Cause B, deterministic** (`go test -count=20 -run 'TestStallTimerExpired|TestIgnoredStale|TestRealSilenceStill' ./internal/agent/`): with the stale clause removed from
+    `onStall`'s guard (the unfixed monitor) 60 of 60 failed (three tests of 20 runs) and the control passed 20 of 20; with the fix 80 of 80 passed, and
+    `-cpu 1,2,4 -count=10` with the parked-monitor test 150 of 150.
+  - **Cause A, deterministic** (`TestSeatDownPipelineAdmissionOutlastsTheCompressedFloor`): unfixed policy 5 of 5 failed; fixed 60 of 60 passed (`-cpu 1,2,4 -count=20`)
+    and 50 of 50 under load.
+  - **Cause C, deterministic** (`TestRunAgentTaskWedgedSeatSurvivesASlowProgressWrite`): with the helper's flat bound put back to 300 ms 30 of 30 failed (`-cpu 1,2,4
+    -count=10`); fixed 60 of 60 passed (`-cpu 1,2,4 -count=20`) and 50 of 50 under load.
+  - **The original test under load**, `-test.run '^TestRunAgentTaskWedgedSeatFilesSeatDownPrefix$' -test.count 150 -test.cpu 1`:
+    - Unfixed build: 1 of 150 failed with four busy loops and 2 of 150 with six, all in the admission phase, one of them the observation's own line
+      `stalled: no progress for 0s in admission (allowed 0s; 0 tok so far)`. An earlier series on a busier host failed 25 of 300 runs (3 of 40, 7 of 60, 8 of 100, 7 of 100), all in admission.
+    - With the admission and stale-callback fixes and the old fixture scale: 12 of 450 failed (5 of 300 in three series of 100, 7 of 150 in a later one), every one in the
+      prefill, the slow progress write above. This is what the third fix is for.
+    - Final code: 0 of 150 with four busy loops, 0 of 150 with six, and unloaded `-test.cpu 1,2,4 -test.count 50` 0 of 150.
+- **Not verified here.** No GPU lease, live seat or fleet node was used. How often the stale callback occurs at production allowances (60 s and longer) is not measured:
+  it needs a silence that ends within microseconds of its allowance, which is rare there and common at the tens of milliseconds the tests use. The other seat-down
+  tests (`TestRunAgentTaskStallsAWedgedEngine` and its siblings) share the shorter 200 ms and 300 ms scale and were not run under load for this change.
+
+### Added - a lint keeps a test from failing because a loaded runner stretched a measured time
+
+The starvation fixes of this series (the call-reserve start order, the queued-credit and cut-answer tests, the call-deadline windows,
+the lease-renewal helper, the busy-hold ceiling, the warm-watch poll) each found one test that put a number on the clock, after a green
+suite went red once, and fixed that one test. The next test to do it was not covered. This change adds the lint that covers the part of
+the fault a syntax tree can see. It adds two test files in the root package and one section of `CONTRIBUTING.md`; no product code and no
+existing test changes.
+
+- **What it checks.** `clock_lint_test.go` judges every `*_test.go` file of the module (the same walk as `tempdir_lint_test.go`) and fails
+  on an upper bound on a measured elapsed time under one second, compared with `>` or `>=` (or the same written the other way round)
+  against a constant it can evaluate. The measured time is `time.Since(x)`, a difference with a `time.Now()` stamp, a name that only ever
+  holds one of those, that value read as a number (`.Seconds()`, `.Milliseconds()`), rounded, made absolute (`.Abs`, `math.Abs`),
+  converted (`int`, `float64`, `time.Duration`, `math.Round`, `math.Floor`) or multiplied or divided by a constant, and the result of a
+  function or method of the same package that returns one (`measure(f) > C`, `d := measure(f)`, `measure[int](f)`,
+  `results, sum, elapsed := runWithin(...)`, named results, bare returns, helpers that return other helpers' results to any depth). A
+  function is found by its name unless the function defines that name itself; a method is found only through a local name that holds a
+  value of the type that declares it (a declared type, a composite literal, `new(T)`, the method's own receiver), so a method of another
+  type, or of a type from another package, with the same name is not the helper. The constant is a literal, a unit product such as
+  `250*time.Millisecond`, a const of the same package (read from its test files and from its other files, because a test refers to
+  `leasePollInterval` as often as to a neighbour's const), or a const or once-assigned local of the same function. A package name is
+  trusted only when every package-level declaration of it, a var, a function or a type included, is a const with the same value. Names
+  are settled to a fixed point, so a chain of any length resolves the same way on every run. The key is `file:elapsed>C`.
+  `clock_lint_allowlist_test.go` lists the 28 keys (33 sites) the tree holds, each with its count and a reason that names what the bound
+  rules out and how wide the margin is; a thin margin is written down as thin. The list is kept true in both directions, as the temp-dir
+  list is: a new bound, a larger count, a fixed site whose count or entry stays, and an entry without a reason each fail. A test file
+  that imports `time` with a dot cannot be read and fails by name.
+- **Why one second.** A bound of a second or more is not reviewed by the lint. That is where a bound starts to be a hang guard, and
+  where the list stops being something one person can review: the tree holds 28 keys under 1 s, 61 under 2 s, 84 under 3 s and 113 under
+  5 s. The floor is a ratchet, not a proof of safety: a 2.5 s ceiling failed under starvation too, so a bound just above it is still
+  yours to judge. Raising `clockBoundFloor` and listing what it then finds is the next step.
+- **What it cannot see** (the header of the file has the full list, and `CONTRIBUTING.md` repeats it). It reads Go only: the
+  JavaScript tests under `render/` and the shell scripts have the same fault and no lint here. Bounds against a value it cannot evaluate
+  (a field, a parameter, a poll interval, a constant of another package, a const written with `iota` or by repetition of the line
+  above). Measured times it cannot follow: a sum with another duration, `max` or `min` of one, a helper kept in a closure variable or in
+  another package, a method called through a package-level variable, a field or an interface, a value stored in a field or sent on a
+  channel, and an instant held as an integer. That last shape has a live site: `internal/delegate/callwait_test.go` stores
+  `time.Now().UnixNano()` in an atomic integer and bounds `time.Duration(lastDispatch.Load() - horizon.UnixNano())` at 400 ms, a
+  sub-second ceiling the lint does not see (it is not in the list and is not changed here). `elapsed < C`, which is overwhelmingly a
+  lower bound and is not read, in its two shapes that are not: a fixture schedule (a fake server that answers one way until `C` has
+  passed and another way after, so a starved runner moves the flip relative to the code under test) and a poll deadline written as a
+  loop condition (`for time.Since(start) < C { ... }` followed by a failure). The lower edge of a sampling window (`el > lo && el < hi`)
+  is not told from a ceiling; such a site is listed with that reason. And the other shapes of the same fault: a fixed sleep before an
+  assertion, a short call or context window handed to the code under test, a poll deadline taken from `time.Now().Add(C)`, a helper that
+  takes a short timeout. `case <-time.After(C): t.Fatal(...)` ceilings were counted when it was written: none is under a second.
+- **Red first, in four rounds.** (1) With an empty allowlist the lint failed on the real tree with 22 findings, the first being
+  `gpu_warm_watch_test.go fails when a measured time is above 500ms (3 time(s)) and is not in clockBoundAllowlist`; with the list written
+  it passed. A scratch test file holding `time.Since(start) > 250*time.Millisecond` turned it red and named that file and the form, and was
+  removed. (2) Reading package constants from the package's other files made six more keys (eight sites: five files in
+  `internal/modelaffinity`, one in `internal/pairworkloads`, each a bound of `leasePollInterval/2` or `nodeInfoTimeout/2`) fail the
+  real-tree test before they were listed. (3) Sixteen forms of a measured time that the lint did not read (arithmetic, conversions,
+  `Round`, `Truncate`, helper results of every shape) were pinned as cases that failed against the scanner as it stood, and pass now.
+  (4) Seventeen cases failed against that scanner and pass now: a chain of twelve dependent locals, of forty renamed constants and of
+  twelve renamed stamps and measured times (each scanned a hundred times in one test, because the order of a Go map changes between
+  iterations; the whole set also passes with `-count=20`), a package const that is also a var, a function or an unevaluable const in
+  another file, a method of an imported type, a closure, a parameter or a func field with a helper's name, a method called through a
+  field or a call result, a generic helper, `Duration.Abs` and `math.Abs`, `Round` and `Floor`. The tree's keys did not change.
+- **Mutations.** Single-line mutations of the scanner, each run with `scripts/mutation-check.sh` against the scanner's own tests, were all
+  `RED`: six on the first round (dropping `>=` or `<=` from the bound operators, treating a bound of zero as a bound, reading any `Sub` as
+  an elapsed time, no longer failing on a count below the listed one, a local no longer shadowing a package const), ten on the second
+  (reading test files only for constants, trusting a const declared with two values, a quotient read as a product, `Truncate` unread, a
+  multi-value definition unread, a bare return unread, a zero return read as not elapsed, two declarations of one helper trusted, a call
+  through an imported package read as a local helper, a dot import no longer named) and ten on the third (locals, helpers and package
+  consts back to a fixed number of passes, a const trusted with a declaration of another kind, a local that no longer hides a function,
+  `math` functions and `Duration.Abs` unread, a name with disagreeing definitions typed, a method found by its name alone or keyed by it).
+- **No new finding in the open changes.** The same scanner run on all the Go files of the four open pull requests found no site outside
+  the list.
+- **`CONTRIBUTING.md`** gets a section, "Keeping tests from failing on a slow machine", beside the temp-dir one: prefer waiting on the
+  event the product signals, with a generous guard against a hang; what the lint covers and what it does not see; the command that
+  regenerates the keys. Fixing a listed site means lowering its count, or deleting the entry when it was the last.
+
 ## [0.188.0] - 2026-10-15 - a graph job declares the weight files its own loaders name instead of the largest family the box binds, doctor says whether the boot-time GPU power profile was applied this boot, a recipe audit verb scores every stored recipe with the measurement gate, ADR 0094 (a lease names its cards, a card has one holder), compaction-eval switches for the two optional rungs, a self-improvement chapter, and four timing-flake fixes
 
 ### Added - ADR 0094, a lease names its cards and a card has one holder; dated pointers in ADRs 0018, 0026, 0039 and 0041; the lease guide's Known gaps located and corrected
