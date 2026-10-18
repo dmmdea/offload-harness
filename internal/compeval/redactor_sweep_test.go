@@ -65,6 +65,34 @@ func TestSweepCountsWhatItReplaces(t *testing.T) {
 	}
 }
 
+// TestSweepReadsTheLinesOfTheCookieMatchesOnly: a credential whose key word a cookie span swallowed is on the line of the
+// span, and the sweep reads that line. A cookie line among many other lines, and several of them, are all swept, whatever
+// stands between them.
+func TestSweepReadsTheLinesOfTheCookieMatchesOnly(t *testing.T) {
+	var lines []string
+	var values []string
+	for i := 0; i < 6; i++ {
+		w, v := tailFake(7340+i, 32, tailAlnum), tailFake(7350+i, 26, tailAlnum)
+		values = append(values, v)
+		lines = append(lines, "ordinary line "+tailFake(7360+i, 40, tailAlnum))
+		if i%2 == 0 {
+			lines = append(lines, spanCk+": sid="+w+" "+sweepKw+" = '"+v+"' trailing words")
+		}
+	}
+	r := NewRedactor()
+	out := r.Redact(strings.Join(lines, "\n"))
+	for i, v := range values {
+		if i%2 == 0 {
+			if run, ok := anyRun(v, out, 8); ok {
+				t.Errorf("%q of the swept value %d is still in %q", run, i, out)
+			}
+		}
+	}
+	if !strings.Contains(out, "trailing words") {
+		t.Errorf("the text behind a swept value is gone: %q", out)
+	}
+}
+
 // TestRedactorCountsACapitalEscapeAfterTheFirstCharacters: a capital N, R or U after a backslash is no escape of a line break or
 // a character code (a Windows path, \Name), and the count that starts a match must take it as one character of the value.
 // The class is case-insensitive, so the character class that excludes the lowercase escapes would exclude the capitals too
@@ -78,10 +106,13 @@ func TestRedactorCountsACapitalEscapeAfterTheFirstCharacters(t *testing.T) {
 	}
 }
 
-// sweepShape builds about n bytes of a text of one Cookie line and many lines that carry a distinct credential.
-func sweepShape(kind string, n int) string {
+// sweepShape builds about n bytes of a text of one Cookie line (when withCookie is set) and many lines that carry a
+// credential of their own.
+func sweepShape(kind string, n int, withCookie bool) string {
 	var b strings.Builder
-	b.WriteString(spanCk + ": sid=" + tailFake(1, 24, tailAlnum) + "\n")
+	if withCookie {
+		b.WriteString(spanCk + ": sid=" + tailFake(1, 24, tailAlnum) + "\n")
+	}
 	for i := 2; b.Len() < n; i++ {
 		switch kind {
 		case "assignment":
@@ -95,12 +126,21 @@ func sweepShape(kind string, n int) string {
 	return b.String()
 }
 
-// TestRedactorSweepCostGrowsInStepWithTheText: one Cookie line in a text of many lines that carry a credential of their own
-// made the sweep search the whole text once per value, so doubling the text took 4 times as long: 20 s for 1 MiB. The
-// sweep is a single pass now. A full redaction of the shape the review used (one Cookie line and many assignment lines)
-// stays under 2 s per MiB at 1 and 2 MiB, and doubling any of three shapes takes less than 3 times as long (linear is 2,
-// the square is 4). It runs for several seconds, so it is left out of short runs; it is a timing test and belongs on a
-// quiet runner.
+// sweepSeconds is the time of one full redaction of text by a fresh redactor.
+func sweepSeconds(text string) float64 {
+	r := NewRedactor()
+	t0 := time.Now()
+	r.Redact(text)
+	return time.Since(t0).Seconds()
+}
+
+// TestRedactorSweepCostGrowsInStepWithTheText: one Cookie line in a text of many lines that carry a credential of their
+// own made the sweep search the whole text once per value, so doubling the text took 4 times as long: 20 s for 1 MiB. The
+// sweep reads the lines of the cookie matches only, and once. A full redaction of the shape the review used (one Cookie
+// line and many assignment lines) takes what the same text takes without the Cookie line, within a quarter, at 1 and
+// 2 MiB, or stays under 2 s per MiB. Doubling any of three shapes takes less than 3 times as long (linear is 2, the
+// square is 4). It runs for several seconds, so it is left out of short runs; it is a timing test and belongs on a quiet
+// runner.
 func TestRedactorSweepCostGrowsInStepWithTheText(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing test")
@@ -109,15 +149,17 @@ func TestRedactorSweepCostGrowsInStepWithTheText(t *testing.T) {
 	for _, kind := range []string{"assignment", "bearer", "cookie and key word"} {
 		var secs [2]float64
 		for i, size := range []int{mib, 2 * mib} {
-			text := sweepShape(kind, size)
-			r := NewRedactor()
-			t0 := time.Now()
-			out := r.Redact(text)
-			secs[i] = time.Since(t0).Seconds()
+			text := sweepShape(kind, size, true)
+			secs[i] = sweepSeconds(text)
 			perMiB := secs[i] / (float64(len(text)) / mib)
-			t.Logf("%s, %d bytes: %.2f s, %.2f s per MiB (%d bytes out)", kind, len(text), secs[i], perMiB, len(out))
-			if kind == "assignment" && perMiB > 2.0 {
-				t.Errorf("%s, %d bytes: %.2f s per MiB, want under 2", kind, len(text), perMiB)
+			t.Logf("%s, %d bytes: %.2f s, %.2f s per MiB", kind, len(text), secs[i], perMiB)
+			if kind == "cookie and key word" {
+				continue
+			}
+			plain := sweepSeconds(sweepShape(kind, size, false))
+			t.Logf("%s, the same without the Cookie line: %.2f s", kind, plain)
+			if secs[i] > 1.25*plain && perMiB > 2.0 {
+				t.Errorf("%s, %d bytes: %.2f s (%.2f s per MiB) against %.2f s without the Cookie line, want within a quarter of it or under 2 s per MiB", kind, len(text), secs[i], perMiB, plain)
 			}
 		}
 		if ratio := secs[1] / secs[0]; ratio > 3.0 {

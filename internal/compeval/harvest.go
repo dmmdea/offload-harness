@@ -341,15 +341,21 @@ func redactStage(name string) int {
 // (sweepCredentials).
 func (r *redactor) redact(s string) string {
 	orig, cookies := s, r.Hits[redactFirstClass]
+	var spans [][2]int // where the cookie class matched in orig
 	for stage := 0; stage <= 2; stage++ {
 		for _, p := range redactPatterns {
-			if redactStage(p.name) == stage {
+			if redactStage(p.name) != stage {
+				continue
+			}
+			if p.name == redactFirstClass {
+				s, spans = r.applyFirst(p.name, p.re, s)
+			} else {
 				s = r.apply(p.name, p.re, s)
 			}
 		}
 	}
 	if r.Hits[redactFirstClass] != cookies {
-		s = r.sweepCredentials(orig, s)
+		s = r.sweepCredentials(orig, s, spans)
 	}
 	return s
 }
@@ -361,25 +367,32 @@ type swept struct{ class, match, value string }
 // standing, longest first so that a value inside another is not cut. Each is replaced by the placeholder its whole
 // match has (or would have had) in apply, and remembered like any other, so the value-tail gate sees it.
 //
-// The cost is that of two passes over the text and one map lookup per byte of it, however many values there are: the
-// distinct values are collected into a set first (a value found twice keeps the class and match it was found with
-// first), grouped by their first tailWindow bytes, longest first within a group, and out is read once, from the left.
-// At each position the values that start with the tailWindow bytes standing there are tried, longest first, and the
-// first that is there is taken whole. Searching the text for each value in turn, which this replaced, cost the number
-// of values times the length of the text.
-func (r *redactor) sweepCredentials(orig, out string) string {
+// A credential whose key word the cookie span swallowed lies in the line the span is in: the key word is inside the span,
+// and its value, which no class lets run past a line break, stands behind the span's end. So the credential classes
+// read only those lines of orig (sweepWindows), not the whole text, and a text of many lines that carry a credential of
+// their own, with one cookie line among them, costs what it cost without the cookie line.
+//
+// The cost of the sweep itself is that of two passes over the text and one map lookup per byte of it, however many
+// values there are: the distinct values are collected into a set first (a value found twice keeps the class and match
+// it was found with first), grouped by their first tailWindow bytes, longest first within a group, and out is read
+// once, from the left. At each position the values that start with the tailWindow bytes standing there are tried,
+// longest first, and the first that is there is taken whole. Searching the text for each value in turn, which this
+// replaced, cost the number of values times the length of the text.
+func (r *redactor) sweepCredentials(orig, out string, spans [][2]int) string {
 	var order []swept
 	seen := map[string]bool{}
-	for _, p := range redactPatterns {
-		if p.name == redactFirstClass || !tailClasses[p.name] {
-			continue
-		}
-		for _, m := range p.re.FindAllString(orig, -1) {
-			m = m[len(piishape.Lead(m)):]
-			for _, v := range credentialValues(p.name, m) {
-				if len(v) >= tailWindow && !seen[v] {
-					seen[v] = true
-					order = append(order, swept{p.name, m, v})
+	for _, w := range sweepWindows(orig, spans) {
+		for _, p := range redactPatterns {
+			if p.name == redactFirstClass || !tailClasses[p.name] {
+				continue
+			}
+			for _, m := range p.re.FindAllString(orig[w[0]:w[1]], -1) {
+				m = m[len(piishape.Lead(m)):]
+				for _, v := range credentialValues(p.name, m) {
+					if len(v) >= tailWindow && !seen[v] {
+						seen[v] = true
+						order = append(order, swept{p.name, m, v})
+					}
 				}
 			}
 		}
@@ -431,6 +444,29 @@ func (r *redactor) sweepCredentials(orig, out string) string {
 	return b.String()
 }
 
+// sweepWindows are the stretches of orig the sweep reads: from the start of each cookie match to the end of the line it
+// ends in (a raw line break, or the end of the text), overlapping stretches merged. The spans are in order, so the end
+// of the line is looked for once for each line and not once for each span.
+func sweepWindows(orig string, spans [][2]int) [][2]int {
+	var out [][2]int
+	lineEnd := -1
+	for _, sp := range spans {
+		if lineEnd < sp[1] {
+			if i := strings.IndexAny(orig[sp[1]:], "\r\n"); i >= 0 {
+				lineEnd = sp[1] + i
+			} else {
+				lineEnd = len(orig)
+			}
+		}
+		if n := len(out); n > 0 && sp[0] <= out[n-1][1] {
+			out[n-1][1] = lineEnd
+			continue
+		}
+		out = append(out, [2]int{sp[0], lineEnd})
+	}
+	return out
+}
+
 // placeholder is the stable placeholder of a matched text in a class, numbered by first appearance.
 func (r *redactor) placeholder(name, m string) string {
 	key := name + "\x00" + m
@@ -453,12 +489,35 @@ func (r *redactor) apply(name string, re *regexp.Regexp, s string) string {
 		m = m[len(lead):]
 		r.Hits[name]++
 		r.remember(name, m)
-		if name == redactFirstClass {
-			head, tail := cookieKeyParts(m)
-			return lead + head + r.placeholder(name, m) + tail
-		}
 		return lead + r.placeholder(name, m)
 	})
+}
+
+// applyFirst is apply for the class that goes first, which sees the text as it was written: it also keeps the key of a
+// match whose header name is a key (cookieKeyParts) and returns where in s the matches were.
+func (r *redactor) applyFirst(name string, re *regexp.Regexp, s string) (string, [][2]int) {
+	locs := re.FindAllStringIndex(s, -1)
+	if len(locs) == 0 {
+		return s, nil
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	spans := make([][2]int, 0, len(locs))
+	last := 0
+	for _, loc := range locs {
+		m := s[loc[0]:loc[1]]
+		lead := piishape.Lead(m)
+		m = m[len(lead):]
+		r.Hits[name]++
+		r.remember(name, m)
+		head, tail := cookieKeyParts(m)
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(lead + head + r.placeholder(name, m) + tail)
+		last = loc[1]
+		spans = append(spans, [2]int{loc[0], loc[1]})
+	}
+	b.WriteString(s[last:])
+	return b.String(), spans
 }
 
 // cookieKeyRe is the start of a cookie match whose header name is a key, or an argument: the name is followed by its
