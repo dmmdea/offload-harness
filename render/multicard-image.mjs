@@ -23,7 +23,7 @@ import {
   checkComfyDevices, createOomWatch, PACK_MULTIGPU, PACK_GGUF,
 } from "./wan-multicard.mjs";
 import {
-  findRecipe, recipeResident, recipePeaks, multicardLoaders, PLACEMENTS, PLACEMENT_DEFAULT, MULTICARD_STORAGE, MULTICARD_COMPUTE,
+  findRecipe, recipeResident, recipePeaks, multicardLoaders, canvasRefusal, PLACEMENTS, PLACEMENT_DEFAULT, MULTICARD_STORAGE, MULTICARD_COMPUTE,
 } from "./multicard-recipes.mjs";
 
 /** The image runners' flags: the Wan placement's --wan-placement, --wan-resident-gb and --wan-cards with the prefix dropped. */
@@ -109,11 +109,13 @@ function checkPeaks(recipe, residentGb, pair, flags) {
  * table and touches nothing), otherwise the whole plan of the card-only placement. It refuses, with the reason, every request it cannot honour:
  * the placement's own flags spelled with '=', a --graph file, a (route, family, DiT, text encoder) with no recipe, no cards named, not two
  * cards, a card the lease does not hold, a display card or one whose display state is unknown, a recipe that does not fit the cards, a resident
- * share the compute card cannot hold, a missing pack. route is "image" or "edit"; family/unet/clip are the call's own words for the binding;
+ * share the compute card cannot hold, a missing pack, a canvas above the recipe's pixel cap. route is "image" or "edit"; family/unet/clip are the call's own words for
+ * the binding; `canvas` ({ width, height }) is the size the call names, when it names one (a call that names none is judged where the runner knows its default,
+ * comfy-render.mjs buildRenderGraph; the edit route's canvas is held to `maxMegapixels` by comfy-edit.mjs, so it passes none);
  * `cards` reads the driver's card table (injectable); `listFn` lists the custom_nodes folders; `leaseDevicesFn` names the cards the lease holds.
  */
 export function planImageMulticard({
-  route, family, unet, clip, flags, env = process.env, comfyDir, isGraph = false,
+  route, family, unet, clip, flags, env = process.env, comfyDir, isGraph = false, canvas,
   spawnSync, cards = () => queryCardsRanked(spawnSync), launchFn, listFn, leaseDevicesFn = leaseDevices, say = () => {},
 }) {
   refuseEqualsSpelling(flags, IMAGE_FLAG_NAMES);
@@ -122,6 +124,8 @@ export function planImageMulticard({
     throw new Error("--placement multicard places the graphs this runner builds; this invocation posts a --graph file, which it does not touch");
   }
   const recipe = findRecipe({ route, family, unet, clip });
+  const tooBig = canvas ? canvasRefusal(recipe, canvas.width, canvas.height) : "";
+  if (tooBig) throw placementError(tooBig);
   const residentGb = recipeResident(recipe, imageResidentGb(flags));
   const pair = relabel(() => {
     const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn, cardsFlag: "cards" });

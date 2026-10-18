@@ -53,7 +53,9 @@ const out = pos[0], prompt = pos[1];
 // own instance, so the api and the lease slot read it; the render child gets the same flags and verifies the pair before it submits.
 let placement = null;
 try {
-  placement = planImageMulticard({ route: "image", family: flags.family, unet: flags.ckpt || process.env.COMFY_CKPT, clip: flags.clip, flags, comfyDir: COMFY_DIR, isGraph: !!flags.graph, say: (m) => console.error(m) });
+  // A single call that names its canvas is judged here, before the lease's cards are spent on a cold ComfyUI; a --batch is judged job by job (a job names its own
+  // size), and a call that names none where the render runner knows its default (comfy-render.mjs buildRenderGraph).
+  placement = planImageMulticard({ route: "image", family: flags.family, unet: flags.ckpt || process.env.COMFY_CKPT, clip: flags.clip, flags, comfyDir: COMFY_DIR, isGraph: !!flags.graph, canvas: flags.batch ? undefined : { width: flags.width, height: flags.height }, say: (m) => console.error(m) });
 } catch (e) { console.error("PLACEMENT REFUSED: " + e.message); process.exit(2); }
 const API = comfyApi(flags.api, placement ? placement.env : process.env);
 

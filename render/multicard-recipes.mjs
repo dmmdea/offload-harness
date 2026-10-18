@@ -12,6 +12,8 @@
 // own pool flags, SDXL and HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
 // the int8_convrot DiT is a different file and a recipe of its own, held back for now: its `blocked` sentence says why); a text
 // encoder other than the one the recipe was built for.
+// A row can carry a CANVAS CAP (`maxPixels`, refused by canvasRefusal): the launchable image row is held to 1.47 MP, a number chosen and not measured, because its first
+// live run ran out of memory at 928x1664 (1.54 MP). The edit rows have `maxMegapixels` instead, the edit canvas their peaks were scaled to (comfy-edit.mjs refuses above it).
 // A row can be HELD BACK: it stays in the table (its data is the proof arm's), carries a `blocked` sentence that says why, and
 // findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. Both qwen-image-2.1 rows are held back today:
 // int8_convrot (its DiT on cuda:1 never ran) and bf16 (under --gpu-only ComfyUI builds the whole 16.33 GiB text encoder on the 15.9 GiB
@@ -112,6 +114,22 @@ export function findRecipe({ route, family, unet, clip } = {}) {
     throw new RecipeRefusal(`the text encoder ${want} is not the one the ${row.id} recipe was built for (a ${row.clipMatch} file): the placement of any other was never measured`);
   }
   return row;
+}
+
+/**
+ * canvasRefusal: why a row refuses a canvas of width x height pixels, or "" when it takes it. Only a row with a `maxPixels` cap refuses, and only a pair of positive
+ * numbers is judged (a size not given is judged where the runner knows the default: comfy-render.mjs buildRenderGraph). The cap of the qwen-image/gguf-q5_1 row is
+ * chosen, not measured; its `maxPixelsNote` says so, and the sentence repeats it. The edit rows have no pixel cap: the edit runner holds a pinned canvas to their
+ * `maxMegapixels` itself (comfy-edit.mjs planEdit).
+ */
+export function canvasRefusal(row, width, height) {
+  const w = Number(width), h = Number(height);
+  if (!row || !(row.maxPixels > 0) || typeof width === "boolean" || typeof height === "boolean" || !Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) return "";
+  const asked = w * h;
+  if (asked <= row.maxPixels) return "";
+  const mp = (n) => (n / 1e6).toFixed(2);
+  const note = row.maxPixelsNote ? `${row.maxPixelsNote}. ` : "";
+  return `the card-only recipe ${row.id} cannot take a ${w}x${h} canvas (${mp(asked)} MP): it is held to at most ${mp(row.maxPixels)} MP (${row.maxPixels} pixels). ${note}Name a smaller --width and --height, or use the single placement`;
 }
 
 /**

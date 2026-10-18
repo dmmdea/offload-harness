@@ -5,10 +5,17 @@
 // runner can say so, instead of being held on two cards until the sampler runs out of memory. Pure: no card table, no ComfyUI.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as R from "./multicard-recipes.mjs";
 import * as W from "./wan-multicard.mjs";
 import * as I from "./multicard-image.mjs";
 import { buildRenderGraph, UsageError } from "./comfy-render.mjs";
+import { scratchDir } from "./test-scratch.mjs";
+
+const HERE = dirname(fileURLToPath(import.meta.url));
 
 const IMAGE_ROW = "qwen-image/gguf-q5_1";
 const OOM = { width: 928, height: 1664 }; // the canvas of the live two-card run that ran out of memory
@@ -57,9 +64,17 @@ test("canvasRefusal: a canvas at or under the cap passes, one pixel row over it 
   assert.notEqual(R.canvasRefusal(row(), 1328, 1328), "", "the qwen-image default canvas is above the cap");
 });
 
+test("canvasRefusal: the cap itself is taken and one pixel over it is not (a row with a round cap, so the boundary is exact)", () => {
+  const round = { ...row(), maxPixels: 1000000 };
+  assert.equal(R.canvasRefusal(round, 1000, 1000), "");
+  assert.notEqual(R.canvasRefusal(round, 1000, 1001), "");
+  assert.notEqual(R.canvasRefusal(round, 1000001, 1), "");
+  assert.match(R.canvasRefusal(round, 1000, 1001), /1.00 MP.*pixels/s, "a row with no maxPixelsNote still says what it can");
+});
+
 test("canvasRefusal: a row with no pixel cap, or a size that is not a pair of positive numbers, says nothing", () => {
   assert.equal(R.canvasRefusal(row("qwen-image-edit-2511/fp8mixed"), 6000, 4000), "", "the edit rows have their own megapixel cap, enforced by the edit runner");
-  for (const [w, h] of [[undefined, 1664], [928, undefined], [NaN, 1664], [928, 0], [-928, 1664], ["928", "1664x"]]) {
+  for (const [w, h] of [[undefined, 1664], [928, undefined], [NaN, 1664], [928, 0], [-928, 1664], [-2000, -2000], ["928", "1664x"]]) {
     assert.equal(R.canvasRefusal(row(), w, h), "", `${w} x ${h}`);
   }
 });
@@ -109,4 +124,51 @@ test("planImageMulticard: a canvas above the cap is refused before the card tabl
   assert.equal(plan({ canvas: { width: 1024, height: 1024 } }).recipe.id, IMAGE_ROW);
   assert.equal(plan().recipe.id, IMAGE_ROW, "a call that names no canvas is judged where the size is known (the graph builder)");
   assert.equal(plan({ canvas: {} }).recipe.id, IMAGE_ROW);
+});
+
+// ---- the runner, as a process: a single call is refused before the lease's cards are read, a batch is judged job by job ---------------------------------
+
+function scrubbedEnv(comfyDir) {
+  const env = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (/^(GPU_LEASE_|COMFY|LLAMA_SWAP|SDCPP|OFFLOAD_|CUDA_)/i.test(k) || /^path$/i.test(k)) continue;
+    env[k] = v;
+  }
+  env.PATH = dirname(process.execPath);
+  env.LLAMA_SWAP_API = "http://127.0.0.1:9";
+  env.COMFY_DIR = comfyDir;
+  env.COMFY_WAIT_SEC = "5";
+  return env;
+}
+const run = (script, args, env) => new Promise((resolve, reject) => {
+  const c = spawn(process.execPath, [join(HERE, script), ...args], { env, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+  let out = "", err = "";
+  c.stdout.on("data", (d) => { out += d; });
+  c.stderr.on("data", (d) => { err += d; });
+  c.on("error", reject);
+  c.on("close", (code) => resolve({ code, out, err }));
+});
+
+test("comfy-generate: a single multicard call that names the canvas that ran out of memory is refused with exit 2 before any card is read; one that names a small canvas gets as far as the cards", async (t) => {
+  const dir = scratchDir(t, "mc-canvas-");
+  const env = scrubbedEnv(dir);
+  const flags = ["--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf", "--placement", "multicard", "--no-lock"];
+  const big = await run("comfy-generate.mjs", [join(dir, "o.png"), "a bottle", ...flags, "--width", "928", "--height", "1664"], env);
+  assert.equal(big.code, 2, big.err);
+  assert.match(big.err, /PLACEMENT REFUSED:.*928x1664.*at most 1.47 MP/s);
+  assert.doesNotMatch(big.err, /needs the two cards/, "the canvas is judged before the cards");
+  const small = await run("comfy-generate.mjs", [join(dir, "o.png"), "a bottle", ...flags, "--width", "1024", "--height", "1024"], env);
+  assert.equal(small.code, 2, small.err);
+  assert.match(small.err, /PLACEMENT REFUSED:.*needs the two cards it runs on/s, "the small canvas passes the cap and meets the next refusal (this process names no lease)");
+});
+
+test("comfy-generate: a --batch is not refused for a shared canvas (a job names its own size; the render of each job judges it)", async (t) => {
+  const dir = scratchDir(t, "mc-canvas-");
+  const env = scrubbedEnv(dir);
+  const jobs = join(dir, "jobs.jsonl");
+  writeFileSync(jobs, JSON.stringify({ prompt: "p", out: join(dir, "a.png"), width: 1024, height: 1024 }) + "\n");
+  const b = await run("comfy-generate.mjs", ["--batch", jobs, "--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf", "--placement", "multicard", "--no-lock", "--width", "928", "--height", "1664"], env);
+  assert.equal(b.code, 2, b.err);
+  assert.doesNotMatch(b.err, /cannot take a/);
+  assert.match(b.err, /needs the two cards it runs on/);
 });
