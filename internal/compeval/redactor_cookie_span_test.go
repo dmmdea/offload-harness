@@ -58,12 +58,18 @@ func spanWrap(t *testing.T, how, name, body string, elems []string) (text string
 	case "pretty list in args":
 		b, _ := json.MarshalIndent(map[string][]string{spanSetCk: elems}, "", "  ")
 		return args(string(b)), true
+	case "printed list":
+		return "map[" + name + ":[" + strings.Join(elems, " ") + "]]", false
+	case "printed list in args":
+		return args("map[" + name + ":[" + strings.Join(elems, " ") + "]]"), true
+	case "java map":
+		return "{" + name + "=[" + strings.Join(elems, ", ") + "]}", false
 	}
 	t.Fatalf("no wrapping named %q", how)
 	return "", false
 }
 
-var spanWraps = []string{"plain", "args", "curl", "args of curl", "fold", "list", "pretty list in args"}
+var spanWraps = []string{"plain", "args", "curl", "args of curl", "fold", "list", "pretty list in args", "printed list", "printed list in args", "java map"}
 
 type spanProbe struct {
 	name   string
@@ -100,6 +106,17 @@ func spanProbes() []spanProbe {
 	add("flash with escapes before the credential", []string{h, v}, `messages="`+h+flash+`"`, "sessionid="+v)
 	add("key word names", []string{v, w}, "refresh_"+spanKwToken+"="+v, "sessionid="+w)
 	add("password and secret names", []string{v, w}, spanKwPass+"="+v, spanKwSecr+"="+w)
+	// The cookies behind a value that another class takes first: a key-word cookie with a quoted value (the assignment
+	// class leaves the closing quote behind its placeholder), and a cookie whose value is a JWT or a Bearer value (the
+	// placeholder holds a closing bracket).
+	jwt := tailJWT()
+	bearer := tailFake(906, 24, tailAlnum)
+	add("quoted key word cookie before a session", []string{a, v}, spanKwToken+`="`+a+`"`, "sessionid="+v)
+	add("quoted key word cookie between two", []string{a, v, w}, "sessionid="+v, "auth_"+spanKwToken+`="`+a+`"`, "csrf="+w)
+	add("quoted password cookie with a space", []string{a, b, v}, spanKwPass+`="`+a+" "+b+`"`, "sessionid="+v)
+	add("jwt cookie before a session", []string{jwt, v}, "session="+jwt, "sessionid="+v)
+	add("jwt cookie between two", []string{v, jwt, w}, "sessionid="+v, "session="+jwt+"; Path=/", "csrf="+w)
+	add("bearer cookie before a session", []string{bearer, v}, "auth=Bearer "+bearer, "sessionid="+v)
 	return out
 }
 
