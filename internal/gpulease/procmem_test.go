@@ -43,13 +43,16 @@ func holdHelper() int {
 }
 
 func TestParseStatusPrivate(t *testing.T) {
-	const status = "Name:\tpython\nVmRSS:\t  900000 kB\nRssAnon:\t  800000 kB\nRssFile:\t  100000 kB\nVmSwap:\t   50000 kB\n"
+	// The private figure is what the kernel's commit accounting charges: the process's private writable mappings (VmData), touched
+	// or not. RssAnon + VmSwap is only the part of them that has been touched, so a mapping committed and never touched is
+	// charged in Committed_AS and absent from it.
+	const status = "Name:\tpython\nVmRSS:\t  900000 kB\nVmData:\t 3000000 kB\nRssAnon:\t  800000 kB\nRssFile:\t  100000 kB\nVmSwap:\t   50000 kB\n"
 	got, ok := parseStatusPrivate(status)
-	if !ok || got != (800000+50000)*1024 {
-		t.Fatalf("anonymous resident + swapped = %d (ok=%v), want %d", got, ok, (800000+50000)*1024)
+	if !ok || got != 3000000*1024 {
+		t.Fatalf("private writable mappings = %d (ok=%v), want %d (VmData, not RssAnon + VmSwap = %d)", got, ok, 3000000*1024, (800000+50000)*1024)
 	}
-	if _, ok := parseStatusPrivate("Name:\told\nVmRSS:\t900000 kB\n"); ok {
-		t.Fatal("a kernel without RssAnon must read as unreadable, not as VmRSS (which counts shared file pages)")
+	if _, ok := parseStatusPrivate("Name:\told\nVmRSS:\t900000 kB\nRssAnon:\t800000 kB\nVmSwap:\t50000 kB\n"); ok {
+		t.Fatal("a status without VmData must read as unreadable, not as the touched part of the mappings or as VmRSS (which counts shared file pages)")
 	}
 	if _, ok := parseStatusPrivate(""); ok {
 		t.Fatal("an empty status is unreadable")
@@ -201,8 +204,8 @@ func TestTreeMemoryCountsTheRootAndTheChildren(t *testing.T) {
 // 256 MiB private and next to nothing resident, and the held figure the grant subtracts a lease's declared need
 // by must not count it: the RAM it was declared to load is still to come.
 func TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("untouched anonymous memory is not private on Linux (RssAnon), so there is no difference to show here")
+	if runtime.GOOS != "windows" && runtime.GOOS != "linux" {
+		t.Skip("no process-memory reader on this platform")
 	}
 	const mib = 256
 	cmd := winexec.Command(os.Args[0])
@@ -238,7 +241,8 @@ func TestHeldCountsWhatIsResidentNotWhatIsMerelyCommitted(t *testing.T) {
 	}
 	t.Logf("measured on this process model: committed %d MiB untouched -> private %.0f MiB, resident %.0f MiB", mib, priv*1024, res*1024)
 	if priv*1024 < mib*0.8 {
-		t.Skipf("this runtime did not commit the allocation (private %.0f MiB): the distinction cannot be shown here", priv*1024)
+		// Both readers carry a committed-and-untouched mapping in the private figure (PrivateUsage on Windows, VmData on Linux).
+		t.Fatalf("a child committed %d MiB it never touched, and the private figure reads %.0f MiB: the commit half of the held figure must carry what the OS charged", mib, priv*1024)
 	}
 	if res*1024 > mib*0.5 {
 		t.Fatalf("untouched committed memory must not read as resident: private %.0f MiB, resident %.0f MiB", priv*1024, res*1024)
