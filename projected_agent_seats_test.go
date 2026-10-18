@@ -100,9 +100,55 @@ var agentSeatsMeasuredToFail = map[string]string{
 // document, one finding per defect. It is a function of its document and its three tables so a fixture can hand
 // it a state that must be refused.
 func checkAgentSeatLabels(doc seedRulesDoc, measured map[string]string, projected map[string]agentSeatLabel, failed map[string]string) []string {
-	_ = fmt.Sprintf // STUB for the red run: the gate reports nothing yet
-	sort.Strings(nil)
-	return nil
+	var out []string
+	for _, name := range sortedTiers(doc) {
+		p := doc.Profiles[name]
+		_, isMeasured := measured[name]
+		label, isProjected := projected[name]
+		switch {
+		case isMeasured && isProjected:
+			out = append(out, fmt.Sprintf("%s is in both measuredAgentTiers and projectedAgentSeats: one tier, one state", name))
+			continue
+		case !isMeasured && !isProjected:
+			out = append(out, fmt.Sprintf("%s is in neither measuredAgentTiers nor projectedAgentSeats: say whether its agent seat was run on its own silicon, or label what it seeds", name))
+			continue
+		case isMeasured:
+			continue
+		}
+		seeded := ""
+		if raw, ok := p.ConfigSeed["agent_model"]; ok {
+			seeded = strings.Trim(string(raw), `"`)
+		}
+		if seeded != label.Seat {
+			out = append(out, fmt.Sprintf("%s: the projected agent seed changed from %q to %q; re-label it (and say what measured it, or that nothing did)", name, label.Seat, seeded))
+		}
+		if strings.TrimSpace(label.Why) == "" {
+			out = append(out, fmt.Sprintf("%s: its projected label carries no reason", name))
+		}
+		effective := seeded
+		if effective == "" {
+			effective = p.ResidentTier
+		}
+		why, known := failed[effective]
+		switch {
+		case known && label.FailedElsewhere != effective:
+			out = append(out, fmt.Sprintf("%s ends up with the agent seat %q, which a measurement failed (%s); the label must record it as FailedElsewhere", name, effective, why))
+		case !known && label.FailedElsewhere != "":
+			out = append(out, fmt.Sprintf("%s: the label records %q as failed elsewhere, but the seat it ends up with (%q) is not in agentSeatsMeasuredToFail", name, label.FailedElsewhere, effective))
+		}
+	}
+	for _, name := range sortedKeys(projected) {
+		if _, ok := doc.Profiles[name]; !ok {
+			out = append(out, fmt.Sprintf("projectedAgentSeats names %s, which profiles.json no longer has", name))
+		}
+	}
+	for _, name := range sortedKeys(measured) {
+		if _, ok := doc.Profiles[name]; !ok {
+			out = append(out, fmt.Sprintf("measuredAgentTiers names %s, which profiles.json no longer has", name))
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 func TestEveryTierIsMeasuredOrLabelledProjectedForItsAgentSeat(t *testing.T) {

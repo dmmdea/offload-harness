@@ -30,6 +30,9 @@ where the code lives.
 - [systems/delegation-client.md](systems/delegation-client.md) — `install client` / `install.sh --client`:
   a machine with no model or lane that places agent contracts, research and compositions on the fleet,
   and what stays out of its reach
+- [systems/delegate-contract-file.md](systems/delegate-contract-file.md) — the file `delegate --contract`
+  reads (a bare subtask object or an array of up to 8, never the MCP wrapper), the flags that carry the
+  call-level arguments, and the `agent_model` seat id rule behind an `infrastructure` defer
 - [systems/node-swap.md](systems/node-swap.md) — `node-swap`: the reusable Windows fleet-node
   binary swap (verify hash, wait idle, backup+rename, restart, verify, auto-rollback), and its
   detached launcher for an SSH-session-proof run
@@ -47,6 +50,9 @@ where the code lives.
 - [systems/opencode-integration.md](systems/opencode-integration.md) — full harness support inside
   opencode: MCP registration, rules parity, the `opencode-local-offload` plugin (plan-time
   protocol, read-only task reroute, nudges, instrument)
+- [systems/dispatch-log.md](systems/dispatch-log.md) — `state/dispatch-log.jsonl`, the cross-harness
+  instrument: the event vocabulary, the two writers (Claude Code hooks, the opencode plugin), the rows
+  the adherence read divides by, and the one rotation owner
 - [systems/browse-lane.md](systems/browse-lane.md) — the opt-in browse lane: the sidecar and its stdio
   protocol, the deny-list, attended vs agent doors, the loopback decision endpoint, and what leaves the machine
 - [systems/pair-workloads.md](systems/pair-workloads.md) — harness jobs in NVIDIA Personal AI
