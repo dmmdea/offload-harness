@@ -1253,10 +1253,12 @@ func inspectDirDetailAt(leaseDir string, now time.Time, hbTTL time.Duration) (In
 //     failed for any reason but the file being absent (a permission error that outlasted its wait, an I/O error). The file is aged like any
 //     heartbeat: Renew writes a staged file and renames it over the live name, so a heartbeat renewed a moment ago has the time of that
 //     write, and one nobody renews goes stale after the TTL, corrupt or not. The time is never earlier than the stamp either;
-//   - the stamp from the acquisition when the file is SETTLED absent (no fresh staged file beside the name, and the name still not
-//     there on a second look: statSettled), which is a holder that never renewed;
-//   - unknown otherwise: the name is absent with a fresh staged file beside it (a rename is installing it), the read said absent and
-//     the look at the file disagrees, or the read and the look at the file both failed.
+//   - the stamp from the acquisition when the read found the name absent and the file is SETTLED absent (no fresh staged file beside
+//     the name, and the name still not there on a second look: statSettled), which is a holder that never renewed;
+//   - unknown otherwise: the name is absent with a fresh staged file beside it (a rename is installing it), the read failed with
+//     something other than an absence (or read a body that says nothing) and the file is then gone, or the read and the look at the file
+//     both failed. A read that said absent and a look that then finds the file (the rename landed between the two) is the file's
+//     modification time, above, and is known.
 //
 // It reads through a handle that shares delete (readSharedFile). Renew replaces the file by a rename over the live name, WITHOUT the
 // epoch lock, so the sweep that reads it under that lock is not protected from it: an acquirer's probe and its locked sweep each meet

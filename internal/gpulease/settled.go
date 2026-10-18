@@ -38,7 +38,7 @@ func stagingPath(path string) string {
 	base := filepath.Base(path)
 	switch {
 	case base == metaFileName:
-		return path + ".restamp" // restampWholeLocked: ".tmp" is the epoch counter's and the other writers'
+		return path + ".restamp" // the whole-node record stages under a suffix of its own (restampWholeLocked has always done)
 	case strings.HasSuffix(base, ".claim") && filepath.Base(filepath.Dir(path)) == cardsDirName:
 		return ""
 	}

@@ -42,7 +42,8 @@ function metaPath(lockPath) {
 // READS it — the schema is owned on the Go side. Every read of a lease file here goes through
 // lease-read.mjs: Go replaces these files by rename-over, and on Windows an open that meets the
 // instant of the rename fails with EPERM although the file is there a moment later, which is
-// waited out (a missing file is not: it reads null at once).
+// waited out, as is an absent name with a fresh staged file beside it (a rename that left the live name
+// absent for a moment). A missing file with nothing staged beside it is not waited for: it reads null at once.
 export function readLease(lockPath) {
   return readSharedJson(metaPath(lockPath));
 }

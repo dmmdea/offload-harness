@@ -17,7 +17,7 @@ func TestStagingPathIsTheNameEachKindOfLeaseFileIsStagedUnder(t *testing.T) {
 	for _, c := range []struct{ name, path, want string }{
 		{"a heartbeat", filepath.Join(dir, "hb.7"), filepath.Join(dir, "hb.7.tmp")},
 		{"a card lease record", filepath.Join(dir, "e", "7.json"), filepath.Join(dir, "e", "7.json.tmp")},
-		{"the whole-node record, which the epoch counter's tmp must not be mistaken for", filepath.Join(dir, "meta.json"), filepath.Join(dir, "meta.json.restamp")},
+		{"the whole-node record, which stages under a suffix of its own", filepath.Join(dir, "meta.json"), filepath.Join(dir, "meta.json.restamp")},
 		{"a card claim, which is created once and never replaced", filepath.Join(dir, "cards", "gpu-0.claim"), ""},
 		{"anything else", filepath.Join(dir, "gpu", "epoch"), filepath.Join(dir, "gpu", "epoch.tmp")},
 	} {

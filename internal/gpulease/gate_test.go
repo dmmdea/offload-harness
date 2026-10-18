@@ -153,7 +153,7 @@ func TestTheWaitCoversTheWholeNodeRecordThroughItsRestampFileAndOnlyThat(t *test
 	if b, err := readSharedFile(path); err != nil || string(b) != "42" {
 		t.Fatalf("readSharedFile(meta.json) = %q, %v while meta.json.restamp stood beside it, want the new content 42", b, err)
 	}
-	// A .tmp beside meta.json is not its staged name (the epoch counter's is): nothing is in flight, so no wait.
+	// A .tmp beside meta.json is not its staged name (meta.json.restamp is): nothing is in flight, so no wait.
 	other := t.TempDir()
 	gatePauses.Store(0)
 	if err := os.WriteFile(filepath.Join(other, "meta.json.tmp"), []byte("x"), 0o666); err != nil {
