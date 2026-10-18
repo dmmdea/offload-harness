@@ -6,6 +6,13 @@
   puts it under the checks that a caller without the bearer costs the node no body byte and is refused with one journal line; any
   other route must be a row of that table or an entry of the two public routes (health and the jobs feed), which are read-only. A
   row that names no route fails too. The hand-kept door count that stood in for this is gone. Nothing a caller sees changes.
+- **A route cannot reach the node's mux where that table cannot see it.** A source test follows the mux `Handler` builds through
+  every use of its name: it goes only to `registerRoutes` (once) and to the ingress guard, so a call from another package that
+  takes the mux and mounts routes on it, the mux copied or captured, or a bare mux served fails. `registerRoutes` hands its
+  registrar only to the queue's `Mount`, `Mount` uses its router only to register on it, and the queue's package registers a route
+  nowhere else. The registrations that stand in `registerRoutes` and `Mount` are counted and compared with the patterns the table
+  test's node registered, so a route registered under a condition that node does not meet, or in a loop, fails whatever the
+  condition. Nothing a caller sees changes.
 - **"Answered the same way" is pinned.** For `/fleet/health` and the jobs feed, a request that presents a bearer the node does not
   hold (a wrong one of the key's length and of another, the scheme in lower case, `Basic`, a bare `Bearer` with and without a
   space, a 64 KiB bearer, a 64 KiB value with no scheme, and the right key under another scheme) must get the same status, the same
@@ -37,6 +44,8 @@
 - **Tests, red first.** The lint's own proof of its rows failed on the two rows that matched nothing, the extended list failed on
   eight stale sentences and then on three more, and the tightened composition refusal test failed on the old wording, each before
   the change; the route table and the same-answer matrix pass today by design and were shown to fail on a route added without a row,
-  on a challenge and a verdict header added for a presented bearer, and on the task list emptied for one.
+  on a challenge and a verdict header added for a presented bearer, and on the task list emptied for one. The cases of the source
+  test for a route mounted from `Handler` and for a route registered under a condition were committed failing before the rules
+  that make them pass, and each shape was also run against the node's own sources on a gate runner and failed there.
 - **Not verified here.** No live node was reached: the route table and the same-answer matrix run against in-process nodes, and the
   release numbers were read from the repository's history, not from a deployed fleet.
