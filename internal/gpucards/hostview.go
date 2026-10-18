@@ -68,7 +68,10 @@ func (v HostView) Map() map[string]any {
 		// touch now: the available memory less what running leases have yet to touch and the headroom.
 		out["admits_up_to_gib"] = round1(max(v.Mem.PhysicalGiB-v.HeadroomGiB, 0))
 		out["touch_room_gib"] = round1(max(v.Mem.AvailableGiB-v.Pending.TouchGiB-v.HeadroomGiB, 0))
-		// Whether the commit condition is applied to this host, and the commit a new lease could be charged now.
+		// The room under the line a lease that states no commit is held to (physical RAM, with what running leases have yet to
+		// touch), on every reading: the figure `gpu reserve --ram N` alone has to fit, beside touch_room_gib.
+		out["unstated_commit_room_gib"] = round1(max(v.Mem.PhysicalGiB-v.Mem.CommitUsedGiB-v.Pending.TouchGiB-v.HeadroomGiB, 0))
+		// Whether a commit a lease STATES is judged on this host, and the commit it could state and be charged now.
 		out["commit_limit_enforced"] = v.commitEnforced()
 		if v.commitEnforced() {
 			out["commit_room_gib"] = round1(max(v.Mem.CommitLimitGiB-v.Mem.CommitUsedGiB-v.Pending.CommitGiB-v.HeadroomGiB, 0))
