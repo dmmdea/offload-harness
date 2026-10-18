@@ -330,7 +330,7 @@ $PINNED = @{
   # the Hugging Face LFS sha256 on the reference node. internal/mediacap/modelsizes.go mirrors the sizes
   # (TestKnownModelSizesMatchInstaller). Licences: FastWan2.2-TI2V-5B, the Wan 2.2 / 2.1 VAEs, umt5-xxl, taew2_2,
   # Wan2.1 VACE 1.3B and Depth-Anything V2 Small are Apache-2.0 (commercial use allowed); Chatterbox is MIT;
-  # the ACE-Step 1.5 licence is NOT verified - its commercial_use stays unset until it is checked at the ACE-Step source.
+  # the ACE-Step 1.5 licence is MIT (the LICENSE file of its project and its Hugging Face card, read 2026-10-18; commercial use allowed); the audio lanes have no commercial_use key to set.
   'model-fastwan' = @{
     url  = 'https://huggingface.co/Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF/resolve/main/FastWan2.2-TI2V-5B-q8_0.gguf'
     name = 'FastWan2.2-TI2V-5B-q8_0.gguf'
