@@ -20,7 +20,8 @@ package gpulease
 // not memory in use, and the limit is the line the OS enforces (it refuses allocations there once the page file has reached its
 // maximum, and the current limit moves with a system-managed file). A commit nobody stated (a caller that declares one
 // figure) is that figure standing in for a commit, and is judged as it always was, with what the leases already granted have
-// yet to touch, against physical RAM less the headroom, because a job can commit more than it touches. The check runs on
+// yet to touch, against physical RAM less the headroom (or an enforced commit limit less the headroom when that sits below physical RAM),
+// because a job can commit more than it touches. The check runs on
 // EVERY grant path:
 //
 //   - a card-scoped grant (--devices, --cards, the media admission): inside grantDevicesLocked,
@@ -73,7 +74,8 @@ const WaitHostRAM = "host-ram"
 // ErrHostRAM is the refusal of a grant on host-RAM grounds. The embedded check carries the numbers
 // the decision rested on; Error() is the sentence, which names the condition that refused and its numbers
 // ("waiting for host RAM: needs N GiB, only X GiB of Y GiB physical is available, Z GiB headroom" for the touched set,
-// "waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB headroom" for a commit nobody stated, and
+// "waiting for host RAM: needs N GiB, committed X of Y GiB physical, Z GiB headroom" for a commit nobody stated ("... of Y GiB commit limit ..." where an
+// enforced limit sits below physical RAM), and
 // "waiting for host RAM: needs N GiB of commit, committed X of Y GiB commit limit, Z GiB headroom" for a stated one).
 type ErrHostRAM struct {
 	gpuprobe.HostRAMCheck
@@ -452,7 +454,8 @@ func (m *Manager) HostRAMCheckLoad(need gpuprobe.HostLoad) gpuprobe.HostRAMCheck
 }
 
 // HostRAMCheck is HostRAMCheckLoad for a caller that declares one figure, taken for both quantities. It states no commit, so the
-// commit is judged against physical RAM less the headroom, the line such a caller has always been held to.
+// commit is judged against physical RAM less the headroom (the nearer enforced commit limit, where one sits below it), the line such a
+// caller has always been held to.
 func (m *Manager) HostRAMCheck(needGiB float64) gpuprobe.HostRAMCheck {
 	return m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: needGiB, CommitGiB: needGiB})
 }
