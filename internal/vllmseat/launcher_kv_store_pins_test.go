@@ -104,8 +104,9 @@ func TestLauncherStoreAddressChoiceIsBoundedAndScoped(t *testing.T) {
 		}
 	}
 	// A share that is already mounted is reported from the else branch of the mount check, never mounted again or unmounted: no
-	// line of the launcher runs umount (the hint text names the command; a command line starts with it).
-	if m := regexp.MustCompile(`(?m)^\s*(?:timeout\s+\S+\s+)*umount\b`).FindString(s); m != "" {
+	// line of the launcher runs umount (the hint text and the comments name the command inside parentheses or backticks; a
+	// command starts a line or follows ; & | then do else, optionally behind timeout).
+	if m := regexp.MustCompile(`(?m)(?:^|[;&|]|\bthen\b|\bdo\b|\belse\b)\s*(?:timeout\s+(?:-\S+\s+)*\S+\s+)*umount\s`).FindString(s); m != "" {
 		t.Errorf("the launcher unmounts a share: %q", strings.TrimSpace(m))
 	}
 	if !regexp.MustCompile(`(?s)mountpoint -q "\$SEAT_L2_MOUNT_DIR"; then.*?\n  elif \[ -n "\$SRCADDR" \] && \[ "\$\{SEAT_L2_MOUNT_TYPE:-cifs\}" = cifs \]; then\n    l2_report_mounted\n  fi`).MatchString(s) {
