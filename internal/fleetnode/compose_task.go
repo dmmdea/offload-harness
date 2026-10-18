@@ -54,7 +54,7 @@ func buildComposeVideo(payload json.RawMessage) (core.Request, func(), error) {
 		return core.Request{}, noop, fmt.Errorf("compose-video payload: %w", err)
 	}
 	if len(in.HTML) > 0 || len(in.ProjectDir) > 0 {
-		return core.Request{}, noop, fmt.Errorf("compose-video payload: html and project_dir are not accepted over the fleet — compositions are trusted code (HyperFrames' Chrome runs without a sandbox) and media dispatch is not token-gated; send a vetted template name plus variables")
+		return core.Request{}, noop, fmt.Errorf("compose-video payload: html and project_dir are not accepted over the fleet — compositions are trusted code (HyperFrames' Chrome runs without a sandbox), and the fleet bearer lets a caller render a vetted template, not run code of its own; send a vetted template name plus variables")
 	}
 	if in.Template == "" {
 		return core.Request{}, noop, fmt.Errorf("compose-video payload: template required")
