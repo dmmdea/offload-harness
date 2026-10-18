@@ -48,7 +48,7 @@ func TestSeatScriptsDeriveTheirDirectoryLogically(t *testing.T) {
 	fixedDir := "/ro" + "ot/g7"
 
 	for _, rel := range []string{
-		"seat_fg.sh", "seat_stop.sh", "seat_fg.stale-mp.tests.sh", "lmcache-patches/repatch-lmcache-overlay.sh",
+		"seat_fg.sh", "seat_stop.sh", "seat_fg.stale-mp.tests.sh", "seat_fg.kv-and-store.tests.sh", "lmcache-patches/repatch-lmcache-overlay.sh",
 	} {
 		if strings.Contains(readSeatScript(t, rel), fixedDir) {
 			t.Errorf("%s still names a fixed seat directory: defaults derive from where the script sits", rel)

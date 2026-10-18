@@ -99,6 +99,206 @@ degrade_l2() {
   L2_DEGRADED=1
 }
 L2_DEGRADED=0
+# Which address of the store host to mount (register B-55). A .local store name is resolved by the system resolver to ONE of the
+# addresses the store's mDNS responders answer with, and on the reference store host that is arbitrary: one responder is pinned to
+# its wired NIC (the right answer), another agent answers on every interface with that interface's own address (a Wi-Fi address
+# on the same /24, container bridges, a VPN address). The mount then landed on the Wi-Fi path (writes ~24 MB/s, so the write
+# floor degraded L2), on an unreachable bridge address, or on the VPN address, which refuses the pinned source address: every
+# start for three days ran without L2. So, for a cifs mount whose source is //<name>.local/<share> with a pinned source
+# address (SEAT_L2_MOUNT_SRCADDR), l2_pick_address asks mDNS itself for ALL the A answers (a raw query to 224.0.0.251:5353 with
+# the QU bit, three times in about a second, sent out of the pinned source address) and mounts //<address>/<share> at the FIRST
+# answer inside the pinned source address's IPv4 network (the prefix is read from `ip -4 -o addr`). Anything else keeps the
+# mount by name exactly as before, and the line printed says why: no python, a helper that fails or finds nothing, no answer on
+# that network, a prefix that cannot be read. Names that are not .local, nfs mounts and an unset source pin never get here. The
+# lookup is bounded: `timeout -s KILL 3` around the helper, so it can never hold a seat start. If the store's wired and Wi-Fi
+# addresses sit on ONE network, "first inside the network" cannot tell them apart: name the wired address in SEAT_L2_MOUNT_SRC,
+# either as a RESERVED or static address of the store (an IPv4 literal is mounted as given; a DHCP lease is the 2026-09-04
+# outage above) or as a name that is not .local and that this box resolves to it (such a name is not looked up; a .local name
+# pinned in /etc/hosts is NOT honoured here, because the lookup asks mDNS directly).
+# The address is chosen when the share is MOUNTED, which is once per WSL session. A start that finds the share already mounted
+# does not mount again, does not unmount (another seat may be using it, and a new pick at every start could trade a good mount
+# on one network for the Wi-Fi one) and asks no mDNS: l2_report_mounted says where the share is (the source and the server
+# address, read with findmnt) and how to choose again, and the status file records that address. A share that was mounted at
+# the wrong address stays there until it is unmounted (`umount <dir>` while no seat uses it) and the seat is started again.
+# Two seams exist for the test (seat_fg.kv-and-store.tests.sh) and nothing else sets them: SEAT_FG_TEST_MDNS_CMD names a command
+# that stands in for the lookup (it is called as `<cmd> <name> <source address>` and prints one IPv4 answer per line), and
+# SEAT_FG_TEST_MDNS_DEST (host:port) moves the helper's query off the mDNS group onto a test responder.
+L2_ADDR=""          # the address the share was mounted at when the launcher chose one: status file and degrade messages
+L2_SEEN_ADDR=""     # the server address of a share that was ALREADY mounted when this start found it (read from the mount)
+L2_SEEN_NOTE=""     # and the sentence the degrade messages append for such a share
+MOUNT_SRC="${SEAT_L2_MOUNT_SRC:-}"
+l2_mdns_answers() {   # $1 = the .local name, $2 = the source address; prints each distinct IPv4 answer, in arrival order
+  local py=""
+  if [ -n "${SEAT_FG_TEST_MDNS_CMD:-}" ]; then
+    timeout -s KILL 3 "$SEAT_FG_TEST_MDNS_CMD" "$1" "$2"; return
+  fi
+  if [ -x "$VENV/bin/python" ]; then py="$VENV/bin/python"; else py="$(command -v python3 2>/dev/null)"; fi
+  [ -n "$py" ] || return 127
+  timeout -s KILL 3 "$py" - "$1" "$2" <<'PYEOF'
+import os, random, socket, struct, sys, time
+
+def encode(name):
+    return b"".join(bytes([len(p)]) + p.encode("ascii") for p in name.split(".")) + b"\0"
+
+def read_name(buf, off):
+    labels, end, hops = [], None, 0
+    while True:
+        n = buf[off]
+        if n == 0:
+            off += 1
+            break
+        if n & 0xC0 == 0xC0:
+            if end is None:
+                end = off + 2
+            off = ((n & 0x3F) << 8) | buf[off + 1]
+            hops += 1
+            if hops > 16:
+                raise ValueError("compression loop")
+            continue
+        labels.append(buf[off + 1:off + 1 + n].decode("ascii", "replace").lower())
+        off += 1 + n
+    return ".".join(labels), (off if end is None else end)
+
+def a_answers(buf, name):
+    flags, qd, an, ns, ar = struct.unpack(">HHHHH", buf[2:12])
+    if not flags & 0x8000:
+        return []
+    off, found = 12, []
+    for _ in range(qd):
+        off = read_name(buf, off)[1] + 4
+    for _ in range(an + ns + ar):
+        owner, off = read_name(buf, off)
+        rtype, _cls, _ttl, rdlen = struct.unpack(">HHIH", buf[off:off + 10])
+        off += 10
+        if rtype == 1 and rdlen == 4 and owner == name:
+            found.append(socket.inet_ntoa(buf[off:off + 4]))
+        off += rdlen
+    return found
+
+def main():
+    name = sys.argv[1].rstrip(".").lower()
+    src = sys.argv[2] if len(sys.argv) > 2 else ""
+    host, _, port = os.environ.get("SEAT_FG_TEST_MDNS_DEST", "224.0.0.251:5353").rpartition(":")
+    dest = (host, int(port))
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    if src:
+        try:
+            sock.bind((src, 0))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(src))
+        except OSError:
+            pass
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+    except OSError:
+        pass
+    # id, flags 0, one question: <name> type A, class IN with the QU bit (0x8001): answer me by unicast
+    query = struct.pack(">HHHHHH", random.randrange(1, 65536), 0, 1, 0, 0, 0) + encode(name) + struct.pack(">HH", 1, 0x8001)
+    start = time.monotonic()
+    sends = [0.0, 0.3, 0.6]
+    seen = []
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed >= 1.0:
+            break
+        while sends and elapsed >= sends[0]:
+            sends.pop(0)
+            try:
+                sock.sendto(query, dest)
+            except OSError:
+                pass
+        wait = (sends[0] if sends else 1.0) - elapsed
+        sock.settimeout(max(0.01, min(wait, 1.0 - elapsed)))
+        try:
+            data = sock.recv(9000)
+        except socket.timeout:
+            continue
+        except OSError:
+            time.sleep(0.05)
+            continue
+        try:
+            for a in a_answers(data, name):
+                if a not in seen:
+                    seen.append(a)
+        except (IndexError, ValueError, struct.error, UnicodeError):
+            pass
+    for a in seen:
+        print(a)
+    if not seen:
+        print("no mDNS A answer for " + name, file=sys.stderr)
+    return 0 if seen else 1
+
+try:
+    sys.exit(main())
+except Exception as e:
+    print("mDNS helper failed: %s" % e, file=sys.stderr)
+    sys.exit(2)
+PYEOF
+}
+l2_is_ipv4() {
+  local o
+  [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for o in 1 2 3 4; do [ $(( 10#${BASH_REMATCH[$o]} )) -le 255 ] || return 1; done
+}
+l2_ip2int() { local a b c d; IFS=. read -r a b c d <<< "$1"; echo $(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d )); }
+l2_local_name() {   # $1 = a mount source: prints <name> when it is //<name>.local/<share>, returns 1 for anything else
+  local rest host
+  rest="${1#//}"; host="${rest%%/*}"
+  [ "$rest" != "$host" ] || return 1                 # not the //host/share shape
+  case "$host" in *:*) return 1 ;; esac              # an explicit port is not ours to rewrite
+  case "${host,,}" in *.local) ;; *) return 1 ;; esac
+  printf '%s' "$host"
+}
+l2_report_mounted() {   # the share was already mounted: say where it is and leave it alone; sets L2_SEEN_ADDR and L2_SEEN_NOTE
+  local name src opts a="" hint=""
+  name="$(l2_local_name "$SEAT_L2_MOUNT_SRC")" || return 0
+  read -r src opts <<< "$(findmnt -n -o SOURCE,OPTIONS -M "$SEAT_L2_MOUNT_DIR" 2>/dev/null)"
+  if [[ ",${opts:-}," =~ ,addr=([0-9.]+), ]]; then a="${BASH_REMATCH[1]}"; fi
+  case "${src:-}" in ""|"//$name"/*) hint="; to choose it again, unmount the share while no seat uses it (umount $SEAT_L2_MOUNT_DIR) and restart the seat" ;; esac
+  L2_SEEN_ADDR="$a"
+  L2_SEEN_NOTE=" [the share was already mounted${a:+ at server address $a}; a start does not choose the address again]"
+  echo "seat_fg: cache-server share $SEAT_L2_MOUNT_DIR is already mounted${src:+ from $src}${a:+ (server address $a)} — the store address is chosen only when the share is mounted, so it was not looked up again${hint}"
+}
+l2_pick_address() {   # sets MOUNT_SRC and L2_ADDR when it chooses; prints one seat_fg: line either way
+  local rest name share out rc=0 plen mask net ans chosen="" why="" got=() dup g
+  name="$(l2_local_name "$SEAT_L2_MOUNT_SRC")" || return 0
+  rest="${SEAT_L2_MOUNT_SRC#//}"; share="${rest#*/}"
+  out="$(l2_mdns_answers "$name" "$SRCADDR" 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) why="no mDNS answer within about 1 s" ;;
+    124|137) why="the mDNS lookup timed out (bound 3 s)" ;;
+    127) why="no python interpreter for the mDNS lookup (neither $VENV/bin/python nor python3)" ;;
+    *) why="the mDNS lookup failed (exit $rc)" ;;
+  esac
+  if [ -z "$why" ]; then
+    while IFS= read -r ans; do
+      l2_is_ipv4 "$ans" || continue
+      dup=0; for g in "${got[@]}"; do [ "$g" = "$ans" ] && dup=1; done
+      [ "$dup" -eq 1 ] || got+=("$ans")
+    done <<< "$out"
+    [ "${#got[@]}" -gt 0 ] || why="the mDNS lookup answered nothing usable"
+  fi
+  if [ -z "$why" ]; then
+    plen="$(ip -4 -o addr show 2>/dev/null | awk -v a="$SRCADDR" '{split($4, x, "/"); if (x[1] == a) { print x[2]; exit }}')"
+    if ! l2_is_ipv4 "$SRCADDR"; then why="the source address '$SRCADDR' is not an IPv4 address"
+    else case "$plen" in ''|*[!0-9]*) why="cannot read the prefix of $SRCADDR from ip -4 -o addr" ;; *) [ "$plen" -le 32 ] || why="cannot read the prefix of $SRCADDR from ip -4 -o addr" ;; esac
+    fi
+  fi
+  if [ -n "$why" ]; then
+    echo "seat_fg: cache-server store ${name}: ${why}${got[*]:+ (mDNS answers: ${got[*]})} — mounting by name as before"
+    return 0
+  fi
+  mask=$(( (0xFFFFFFFF << (32 - 10#$plen)) & 0xFFFFFFFF )); net=$(( $(l2_ip2int "$SRCADDR") & mask ))
+  for ans in "${got[@]}"; do
+    if [ $(( $(l2_ip2int "$ans") & mask )) -eq "$net" ]; then chosen="$ans"; break; fi
+  done
+  if [ -z "$chosen" ]; then
+    echo "seat_fg: cache-server store ${name}: mDNS answers: ${got[*]}, none inside ${SRCADDR}/${plen} — mounting by name as before"
+    return 0
+  fi
+  echo "seat_fg: cache-server store ${name}: mDNS answers: ${got[*]} — chose ${chosen}, the first inside ${SRCADDR}/${plen} (the pinned source address's network); mounting //${chosen}/${share} instead of //${name}/${share}"
+  MOUNT_SRC="//${chosen}/${share}"; L2_ADDR="$chosen"
+}
 if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
   mkdir -p "$SEAT_L2_MOUNT_DIR"
   # SEAT_L2_MOUNT_SRCADDR: pin the CIFS client's source address. On a box with two NICs on one subnet (wired +
@@ -117,12 +317,17 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
     MOUNT_OPTS="${MOUNT_OPTS:+$MOUNT_OPTS,}srcaddr=$SRCADDR"; echo "seat_fg: cache-server mount source address pinned to $SRCADDR"
   fi
   if ! mountpoint -q "$SEAT_L2_MOUNT_DIR"; then
-    if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$SEAT_L2_MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "$MOUNT_OPTS"; then
+    if [ -n "$SRCADDR" ] && [ "${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]; then
+      l2_pick_address
+    fi
+    if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "$MOUNT_OPTS"; then
       # Say WHY, in the terms the operator can act on: name resolution, reachability, or the share itself.
       host="${SEAT_L2_MOUNT_SRC#//}"; host="${host%%:*}"; host="${host%%/*}"
       case "${SEAT_L2_MOUNT_TYPE:-cifs}" in nfs|nfs4) port=2049 ;; *) port=445 ;; esac
       case "$host" in
-        *[!0-9.]*) resolved="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')" ;;   # a name: resolve it
+        *[!0-9.]*)
+          if [ -n "$L2_ADDR" ]; then resolved="$L2_ADDR"                                         # mounted at the address mDNS gave: probe that one
+          else resolved="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')"; fi ;;    # a name: resolve it
         *)         resolved="$host" ;;                                                          # an IPv4 literal: probe it as is
       esac
       if [ -z "$resolved" ]; then
@@ -132,8 +337,10 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
       else
         why="'$host' = $resolved answers on $port — check credentials, the share name, and the store's allow-list (source address ${SRCADDR:-unpinned; set SEAT_L2_MOUNT_SRCADDR=auto})"
       fi
-      degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why"
+      degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why${L2_ADDR:+ [the mount was tried at the mDNS-chosen address $L2_ADDR, not by name]}"
     fi
+  elif [ -n "$SRCADDR" ] && [ "${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]; then
+    l2_report_mounted
   fi
 fi
 if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
@@ -168,17 +375,18 @@ if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L
       t1=$(date +%s%N); rm -f "$probe"
       mbps=$(( 67109 / ( (t1 - t0) / 1000000 + 1 ) ))   # 64 MiB = 67,108,864 bytes → decimal MB/s over elapsed ms
       if [ "$mbps" -lt "$MIN_MBPS" ]; then
-        degrade_l2 "share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS} (the tier would be slower than recompute)"
+        degrade_l2 "share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS} (the tier would be slower than recompute)${L2_ADDR:+ [the share is mounted at the mDNS-chosen address $L2_ADDR]}${L2_SEEN_NOTE}"
       else
         echo "seat_fg: cache-server share write probe ~${mbps} MB/s (floor ${MIN_MBPS})"
       fi
     else
       rm -f "$probe"
-      degrade_l2 "cannot write a 64 MiB probe to the share at $SEAT_L2_MOUNT_DIR within 120 s"
+      degrade_l2 "cannot write a 64 MiB probe to the share at $SEAT_L2_MOUNT_DIR within 120 s${L2_SEEN_NOTE}"
     fi
   fi
   if [ "$L2_DEGRADED" -eq 0 ]; then
-    printf 'ok %s mbps=%s\n' "$(date -Is)" "${mbps:-unmeasured}" > "$L2_STATUS" 2>/dev/null || true
+    L2_ON="${L2_ADDR:-$L2_SEEN_ADDR}"     # the address the share is on: chosen by this start, or read from the mount that was already there
+    printf 'ok %s mbps=%s%s\n' "$(date -Is)" "${mbps:-unmeasured}" "${L2_ON:+ addr=$L2_ON}" > "$L2_STATUS" 2>/dev/null || true
   fi
 fi
 
@@ -412,6 +620,16 @@ EXTRA=()
 # must STAY free for the co-residents' growth), floored at SEAT_KV_FLOOR_GIB (a smaller pool is still a seat) and capped
 # at SEAT_KV_CAP_GIB (never more than a profiled start could have taken), passed as --kv-cache-memory-bytes (per worker;
 # vLLM then ignores gpu-memory-utilization). The banner line names every input so a stall can be read back to its cause.
+# A pool the floor raised can still be too small for SEAT_MAX_LEN (register B-54): a card holding ~2.2 GB of desktop graphics
+# memory gave 1.95 GiB, floored to 2.0, and vLLM 0.28 refused every start ("To serve at least one request with the model's max
+# seq len (163840), (2.66 GiB KV cache is needed, which is larger than the available KV cache memory (2.0 GiB)") while
+# llama-swap restarted the seat on each request. SEAT_KV_NEED_GIB (optional) is that "N GiB KV cache is needed" figure for
+# SEAT_MAX_LEN, rounded UP past the second decimal (vLLM prints two, to nearest) and measured again whenever SEAT_MAX_LEN, the
+# parallelism, MTP or the model changes; with it set and the pinned pool below it, --max-model-len -1 is passed instead of SEAT_MAX_LEN, and vLLM 0.28
+# (vllm/v1/core/kv_cache_utils.py _auto_fit_max_model_len, fed the --kv-cache-memory-bytes value) picks the largest length that
+# fits the PINNED pool, never more than the model's own maximum. Unset, SEAT_MAX_LEN is always passed (an auto-fit could exceed the operator's length) and a
+# floored pool is only warned about.
+MAXLEN="${SEAT_MAX_LEN:-131072}"
 KVPIN=()
 # nvidia-smi is resolved HERE, not trusted from PATH: the launcher exports a minimal PATH above, and under WSL the binary lives
 # in /usr/lib/wsl/lib — the first pinned start skipped this whole block in silence because `command -v` came back empty.
@@ -431,10 +649,25 @@ if [ -n "${SEAT_KV_HEADROOM_GIB:-}" ] && [ -n "$NVSMI" ]; then
     fi
   done
   if [ -n "$minfree" ]; then
-    pool_gib="$(awk -v f="$minfree" -v n="$nonkv" -v h="$SEAT_KV_HEADROOM_GIB" -v fl="$kvfloor" -v c="$kvcap" 'BEGIN{p=f/1024-n-h; if(p<fl)p=fl; if(p>c)p=c; printf "%.3f", p}')"
+    # "pool floored raw": the pool as passed, 1 when the computed value was under the floor, and that computed value.
+    pool_calc="$(awk -v f="$minfree" -v n="$nonkv" -v h="$SEAT_KV_HEADROOM_GIB" -v fl="$kvfloor" -v c="$kvcap" 'BEGIN{p=f/1024-n-h; r=p; fd=0; if(p<fl){p=fl; fd=1}; if(p>c)p=c; printf "%.3f %d %.3f", p, fd, r}')"
+    read -r pool_gib pool_floored pool_raw <<< "$pool_calc"
     pool_bytes="$(awk -v p="$pool_gib" 'BEGIN{printf "%d", p*1073741824}')"
     KVPIN=(--kv-cache-memory-bytes "$pool_bytes")
     echo "seat_fg: KV pool PINNED at ${pool_gib} GiB/worker = min free ${minfree} MiB on devices ${DEVS} − non-KV ${nonkv} GiB − headroom ${SEAT_KV_HEADROOM_GIB} GiB (floor ${kvfloor}, cap ${kvcap}) → --kv-cache-memory-bytes ${pool_bytes}; --gpu-memory-utilization ${SEAT_UTIL:-0.88} is ignored by vLLM while the pin is set"
+    # SEAT_KV_NEED_GIB: a decimal number of GiB (digits with at most one point, none at either end); anything else is said and
+    # means unset.
+    kvneed="${SEAT_KV_NEED_GIB:-}"
+    case "$kvneed" in
+      "") ;;
+      *[!0-9.]*|.*|*.|*.*.*) echo "seat_fg: WARNING — SEAT_KV_NEED_GIB='${kvneed}' is not a number of GiB (digits with one optional decimal point); ignored"; kvneed="" ;;
+    esac
+    if [ -n "$kvneed" ] && awk -v p="$pool_gib" -v n="$kvneed" 'BEGIN{exit !(p+0 < n+0)}'; then
+      MAXLEN=-1
+      echo "seat_fg: KV pool ${pool_gib} GiB/worker is below SEAT_KV_NEED_GIB=${kvneed} GiB (what SEAT_MAX_LEN=${SEAT_MAX_LEN:-131072} tokens need) — passing --max-model-len -1 instead: vLLM auto-fits the context to the pinned pool, so this seat serves LESS than SEAT_MAX_LEN (vLLM logs the length it chose: \"Auto-fit max_model_len\")"
+    elif [ -z "$kvneed" ] && [ "${pool_floored:-0}" = 1 ]; then
+      echo "seat_fg: WARNING — the KV pool was FLOORED: free memory allows ${pool_raw} GiB/worker, raised to SEAT_KV_FLOOR_GIB=${kvfloor} GiB. vLLM refuses to start when that is below what SEAT_MAX_LEN=${SEAT_MAX_LEN:-131072} needs (it prints \"N GiB KV cache is needed, which is larger than the available KV cache memory\"). Set SEAT_KV_NEED_GIB=N (that figure) and the launcher passes --max-model-len -1 whenever the pool is below it; unset, SEAT_MAX_LEN is kept"
+    fi
   else
     echo "seat_fg: WARNING — SEAT_KV_HEADROOM_GIB set but $NVSMI answered nothing for devices ${DEVS}; falling back to --gpu-memory-utilization ${SEAT_UTIL:-0.88} — the pool is NOT pinned"
   fi
@@ -443,7 +676,7 @@ KV_POLICY_JSON=""; [ -n "$KV_POLICY" ] && KV_POLICY_JSON=",\"kv_load_failure_pol
 [ -n "$KV_POLICY" ] && echo "seat_fg: kv_load_failure_policy=$KV_POLICY (SEAT_KV_LOAD_FAILURE_POLICY)"
 exec "$VENV/bin/vllm" serve "$MODEL" \
   --host 127.0.0.1 --port "$PORT" --served-model-name "$NAME" "${SEAT_ALIAS:-agent-pool}" \
-  --max-model-len "${SEAT_MAX_LEN:-131072}" "${PAR[@]}" --gpu-memory-utilization "${SEAT_UTIL:-0.88}" \
+  --max-model-len "$MAXLEN" "${PAR[@]}" --gpu-memory-utilization "${SEAT_UTIL:-0.88}" \
   --max-num-seqs "${SEAT_SEQS:-32}" \
   --mamba-cache-mode align --enable-prefix-caching --max-num-batched-tokens "${SEAT_BATCHED:-1567}" "${KVPIN[@]}" \
   --kv-transfer-config "{\"kv_connector\":\"LMCacheMPConnector\",\"kv_role\":\"kv_both\"$KV_POLICY_JSON,\"kv_connector_extra_config\":{\"lmcache.mp.server_urls\":\"127.0.0.1:$MP_PORT\"}}" \
