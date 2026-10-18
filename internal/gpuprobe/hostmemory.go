@@ -81,6 +81,9 @@ type HostLoad struct {
 	TouchGiB float64
 	// CommitGiB is the commit it will be charged: memory the OS promises it, touched or not.
 	CommitGiB float64
+	// CommitStated says CommitGiB is a figure the caller stated or measured (gpu reserve --ram-commit). Not set, the commit is
+	// the touched figure standing in for one.
+	CommitStated bool
 }
 
 // Declares says the job declares any host memory at all: the one test every "does this lease ask the host for something"
