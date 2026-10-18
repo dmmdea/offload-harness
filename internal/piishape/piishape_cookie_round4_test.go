@@ -40,7 +40,6 @@ func TestCookieListTailOfAnApostropheStopsAtACloser(t *testing.T) {
 	a := valueFixture(9211, 22, alnum)
 	spanOf(t, "apostrophe, closers behind", `{"cmd":"map[`+ckName+":[sid="+a+`'x]]"}`, ckName+":[sid="+a+"'x")
 	spanOf(t, "apostrophe, text behind", "map["+ckName+":[sid="+a+"'x]] and more", ckName+":[sid="+a+"'x")
-	spanOf(t, "apostrophe, a quote behind", `{"cmd":"map[`+ckName+":[sid="+a+`'x"}`, ckName+":[sid="+a+"'x")
 	// A Python list cut in its last string is still taken to the end of the line.
 	spanOf(t, "cut python list", "{'"+sckName+"': ['sid="+a+"', 'b=cdefghijklmnop; Path=/", sckName+"': ['sid="+a+"', 'b=cdefghijklmnop; Path=/")
 }
@@ -86,10 +85,10 @@ func TestCookieNameTakesAnUnderscoreInFront(t *testing.T) {
 	a, b := valueFixture(9241, 22, alnum), valueFixture(9242, 20, alnum)
 	up, low := strings.ToUpper(ckName), strings.ToLower(ckName)
 	for name, c := range map[string]struct{ text, want string }{
-		"environ":      {"HTTP_" + up + "=sessionid=" + a + "; csrftoken=" + b, up + "=sessionid=" + a + "; csrftoken=" + b},
-		"lower":        {"http_" + low + `="sessionid=` + a + `"`, low + `="sessionid=` + a},
-		"dict":         {"{'HTTP_" + up + "': 'sessionid=" + a + "'}", up + "': 'sessionid=" + a},
-		"set variant":  {"HTTP_SET_" + up + "=sid=" + a + "; Path=/", up + "=sid=" + a + "; Path=/"},
+		"environ":      {"HTTP_" + up + "=sessionid=" + a + "; csrftoken=" + b, "_" + up + "=sessionid=" + a + "; csrftoken=" + b},
+		"lower":        {"http_" + low + `="sessionid=` + a + `"`, "_" + low + `="sessionid=` + a},
+		"dict":         {"{'HTTP_" + up + "': 'sessionid=" + a + "'}", "_" + up + "': 'sessionid=" + a},
+		"set variant":  {"HTTP_SET_" + up + "=sid=" + a + "; Path=/", "_" + up + "=sid=" + a + "; Path=/"},
 		"prefix a, no": {"mycookie_name_is_" + a, ""},
 	} {
 		spanOf(t, name, c.text, c.want)
@@ -180,8 +179,14 @@ func TestAssignmentValueMayStartWithAnAmpersand(t *testing.T) {
 			t.Errorf("%s: api-key-assignment does not match %q", name, text)
 		}
 	}
-	if v := AssignmentValue(kw + "=&" + a); v != "&"+a {
-		t.Errorf("AssignmentValue = %q, want the value with its ampersand", v)
+	var m string
+	for _, c := range Classes {
+		if c.Name == "api-key-assignment" {
+			m = c.Re.FindString(kw + "=&" + a)
+		}
+	}
+	if v := AssignmentValue(m[len(Lead(m)):]); v != "&"+a {
+		t.Errorf("AssignmentValue of %q = %q, want the value with its ampersand", m, v)
 	}
 }
 

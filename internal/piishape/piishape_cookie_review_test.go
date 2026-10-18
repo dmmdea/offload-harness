@@ -259,8 +259,9 @@ func TestCookieSpanEndsAtAnEscapedApostrophe(t *testing.T) {
 	}
 }
 
-// TestCookieOpenerLimits: what starts a match and what does not. A subscript opens a header, and a name inside
-// another word, an opener more than eight characters from the name and a bare run of commas or ampersands do not.
+// TestCookieOpenerLimits: what starts a match and what does not. A subscript opens a header and so does an underscore
+// in front of the name (HTTP_COOKIE, the CGI and WSGI spelling), and a name inside another word, an opener more than
+// eight characters from the name and a bare run of commas or ampersands do not.
 func TestCookieOpenerLimits(t *testing.T) {
 	v, _, _, _ := spanValues()
 	for _, text := range []string{
@@ -268,6 +269,8 @@ func TestCookieOpenerLimits(t *testing.T) {
 		"h." + ckName + "[sid=" + v + "; b=x]",
 		ckName + "=>sid=" + v,
 		ckName + " => sid=" + v,
+		"HTTP_" + ckName + ": sid=" + v,
+		"my_" + ckName + ": sid=" + v,
 	} {
 		if cookieMatch(text) == "" {
 			t.Errorf("no match in %q", text)
@@ -275,7 +278,7 @@ func TestCookieOpenerLimits(t *testing.T) {
 	}
 	for _, text := range []string{
 		ckName + strings.Repeat(" ", 12) + ": sid=" + v,
-		"my_" + ckName + ": sid=" + v,
+		"my" + ckName + ": sid=" + v,
 		ckName + ": prefs=en,fr,de,es,it,pt,ja",
 		ckName + ": q=aa&bb&cc&dd&ee&ff",
 	} {

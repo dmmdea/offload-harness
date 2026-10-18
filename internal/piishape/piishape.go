@@ -40,11 +40,16 @@ const leadUnderscore = `(?:\b|_|-[A-Za-z]|` + jsonEscape + `|` + ansi + `)`
 // sequence.
 const stop = `\s'",;&\\\x1b`
 
+// redactedMarker is a placeholder an earlier class left in the text ([redacted-class-N]).
+const redactedMarker = `\[redacted-[a-z]+(?:-[a-z]+)*-[0-9]+\]`
+
 // headerGap is one piece of what may stand between an Authorization header's name and its scheme: a
-// non-word character other than a newline (a colon, a bracket, a quote, a comma, a paren, a space), a
-// JSON escape, or the opener of a Go string slice literal. The pieces cover a header line, a printed
-// http.Header, a call that takes the name and the value as two arguments, a subscript and a hash.
-const headerGap = `(?:[^\w\r\n]|` + jsonEscape + `|\[\]string\{)`
+// non-word character that is not white space (a colon, a bracket, a quote, a comma, a paren, a dash), a run of white
+// space, line breaks and indentation included, a JSON escape, the opener of a Go string slice literal, or a
+// placeholder (the value of another scheme in the same list, replaced by an earlier class). The pieces cover a header
+// line, a printed http.Header, a call that takes the name and the value as two arguments, a subscript, a hash, a
+// pretty-printed JSON document, a YAML list and a header with two values.
+const headerGap = `(?:[^\w\s]|\s+|` + jsonEscape + `|\[\]string\{|` + redactedMarker + `)`
 
 // leadRe finds the escape a match begins with.
 var leadRe = regexp.MustCompile(`^(?:` + ansi + `|` + jsonEscape + `)`)
@@ -67,11 +72,13 @@ const keyWords = `(?:api[_-]?key|(?:private|access|auth)[_-]?key|secret|token|pa
 const credName = keyWords + `(?:[_-](?:access|key|secret|token|value|id))*\d*`
 
 // valueBody is a credential value of 12 or more characters. It starts with anything but a stop, '/', '.',
-// '[' or ']' (a path after a key name is meant to stay quiet), may start with a symbol, and runs to the
-// next stop, so it takes in '.', '/', '+', '=', '@', '~' and ':'. The match is the WHOLE value on purpose:
-// the harvest redactor is derived from this table, so a value the pattern stops short of would be written
-// out with its tail.
-const valueBody = `[^` + stop + `/.\[\]][^` + stop + `]{11,}`
+// '[' or ']' (a path after a key name is meant to stay quiet), except that an ampersand may start it, as itself or as
+// the escape Go's encoder writes for it (a generated password begins with one, and the ampersand ends the value
+// everywhere else, in a query string),
+// may start with a symbol, and runs to the next stop, so it takes in '.', '/', '+', '=', '@', '~' and ':'.
+// The match is the WHOLE value on purpose: the harvest redactor is derived from this table, so a value the
+// pattern stops short of would be written out with its tail.
+const valueBody = `(?:&|\\u0026|[^` + stop + `/.\[\]])[^` + stop + `]{11,}`
 
 // htmlEscape is the JSON escape that Go's encoder writes for '<' and '>' (backslash, u, 003c or 003e),
 // so a type argument or a hash rocket in Args that were marshalled by it carries the escape.
@@ -126,6 +133,36 @@ const (
 	typeAnno = `(?:\s*:\s*|\s+)` + typeName + `(?:,\s*` + typeName + `)*`
 )
 
+// credHeader is a header that carries a credential by itself and is printed with a list of values: X-Api-Key,
+// Api-Key, X-Auth-Token, Auth-Token, X-Amz-Security-Token and Security-Token (an underscore for a hyphen, as the
+// CGI environment writes them).
+const credHeader = `(?:x[_-])?(?:api[_-]?key|auth[_-]?token|(?:amz[_-])?security[_-]?token)`
+
+// redactedPrefix opens the body of every placeholder a redactor writes ([redacted-class-N]).
+const redactedPrefix = "redacted-"
+
+// listValue is the first value of a printed list: 12 or more characters that start with anything but a stop, '/',
+// '.', '[' or ']', run to the next stop or closing bracket, and are not the body of a placeholder. A placeholder
+// that stands right behind the name (the value of a header that an earlier class replaced) would otherwise be read
+// as the value of a list whose bracket is the placeholder's own. The pattern has no look-ahead, so the prefix
+// is excluded one position at a time: the first position where the value leaves it.
+func listValue(capture bool) string {
+	listStop := stop + `\]`
+	var alts []string
+	for i := 0; i < len(redactedPrefix); i++ {
+		not := listStop + string(redactedPrefix[i])
+		if i == 0 {
+			not += `/.\[`
+		}
+		alts = append(alts, redactedPrefix[:i]+`[^`+not+`][^`+listStop+`]{`+strconv.Itoa(11-i)+`,}`)
+	}
+	v := `(?:` + strings.Join(alts, `|`) + `)`
+	if capture {
+		return `(` + v + `)`
+	}
+	return v
+}
+
 // assignment builds the api-key-assignment pattern. With capture the value of the match (the quoted body
 // or the unquoted value) is a capturing group, so AssignmentValue can name it; the class itself has none.
 //
@@ -141,11 +178,16 @@ const (
 //   - call is a call that takes the name and the literal as two arguments: Setenv("API_TOKEN", "...").
 //     The comma only counts right behind an opening paren and a quoted name, so a list of strings
 //     (["token", "client_identifier"]) stays quiet. The match starts at the paren.
+//   - list is a credential header (credHeader) whose value is the first element of a list: Go's print of
+//     http.Header (map[X-Api-Key:[...]]), a JSON or Python list, a flow sequence. The value cannot start at
+//     the opening bracket of the plain form, so the list has its own alternative, and the value stops at the
+//     closing bracket.
 func assignment(capture bool) string {
 	plain := `(?:` + leadUnderscore + credName + `(?:\s*` + ansi + `)*\s*[=:]|_(?:pass|pwd)\s*=)\s*(?:` + ansi + `\s*)*(?:` + quotedLiteral(capture) + `|` + plainValue(capture) + `)`
 	quoted := leadUnderscore + credName + afterName + `(?:` + typeAnno + `(?:\s*` + ansi + `)*\s*=|(?:\s*` + ansi + `)*\s*(?::=|[=!]==?|=(?:>|` + htmlEscape + `)|[=:]))\s*(?:` + ansi + `\s*)*[bruf]{0,2}` + quotedLiteral(capture)
 	call := `\(\s*` + openQuote + `[A-Za-z0-9_.-]*` + credName + openQuote + `\s*,\s*[bruf]{0,2}` + quotedLiteral(capture)
-	return `(?:` + quoted + `|` + plain + `|` + call + `)`
+	list := leadUnderscore + credHeader + afterName + `\s*[=:]\s*(?:` + ansi + `\s*)*\[\s*(?:` + quotedLiteral(capture) + `|` + listValue(capture) + `)`
+	return `(?:` + quoted + `|` + plain + `|` + call + `|` + list + `)`
 }
 
 // assignValueRe finds the value inside a whole match of the api-key-assignment class.
@@ -219,6 +261,11 @@ const cookieGap = cookieGapPiece + `{0,8}?`
 // once per match and took the square of its length.
 const cookieLineGap = `(?:[^\w\r\n\[]|` + jsonEscape + `){0,8}?`
 
+// cookieValueGap is the gap behind the punctuation of an opener: the pieces of cookieLineGap, and the start of a string
+// with the prefix of a bytes or raw literal (b'..., r"..., u'..., f'...), which a Python dict, a tuple and an ASGI scope
+// write in front of the quote, and which is a word character that the plain pieces do not take.
+const cookieValueGap = `(?:[^\w\r\n\[]|` + jsonEscape + `|[bruf]{1,2}\\*['"]){0,8}?`
+
 // cookieOpener is what stands between a cookie header's name and the cookies: the punctuation the Basic header
 // takes (up to eight non-word characters, none of them an opening bracket, then a colon, an equals sign or a
 // greater-than sign, then up to eight more; a hash rocket is an equals sign and a greater-than sign, the second of
@@ -227,7 +274,7 @@ const cookieLineGap = `(?:[^\w\r\n\[]|` + jsonEscape + `){0,8}?`
 // the string that holds the cookies, the form of a call that takes the name and the value as two arguments
 // (Header.Set("Cookie", "...")). A bare comma stays quiet: "the cookie, path=/some/long/path" is prose. A header
 // fold may stand before the punctuation and after it.
-const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieLineGap + `[:=>]|` + cookieLineGap + `,\s*\\*['"])` + cookieLineGap + `(?:` + cookieFold + cookieLineGap + `)?`
+const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieLineGap + `[:=>]|` + cookieLineGap + `,\s*[bruf]{0,2}\\*['"])` + cookieValueGap + `(?:` + cookieFold + cookieValueGap + `)?`
 
 // cookieListOpener is the opener of a list: an opening bracket, which the punctuation (a colon or an equals sign, and
 // up to eight more characters) may precede, so a printed Go header, a JSON list, a slice printed behind a space and a
@@ -238,7 +285,7 @@ const cookieListOpener = `(?:` + cookieFold + `)?` + cookieGap + `(?:[:=](?:` + 
 // cookieGoListOpener is the opener of a Go slice literal, the way the Go-syntax print of a header writes it
 // (http.Header{"Set-Cookie":[]string{"a=b", "c=d"}}): the punctuation, then the type, then the brace. The list ends
 // at the closing brace.
-const cookieGoListOpener = `(?:` + cookieFold + `)?` + cookieGap + `[:=](?:` + cookieGapPiece + `|[\r\n]){0,8}?\[\]string\{`
+const cookieGoListOpener = `(?:` + cookieFold + `)?` + cookieGap + `[:=](?:` + cookieGapPiece + `|[\r\n]){0,8}?\[\](?:string|interface\s?\{\s?\}|any)\{`
 
 // cookieQuoteLevels are the numbers of backslashes in front of a double quote that opens or closes a quoted
 // cookie, by how many times the text has been escaped: none on a header line, one in JSON text and in the
@@ -358,7 +405,28 @@ const cookieRunMax = `16`
 // escapes (a shell's escaped dollar sign, backtick, space or semicolon, a JSON escaped slash, a path separator),
 // the same escapes the span takes (cookieBareEscape), so an escape inside the first 12 characters of the only long
 // value does not stop the count.
-const cookieBareLong = `(?:[^\s'",;&\\\]]|\\{1,` + cookieRunMax + `}u[0-9a-fA-F]{4}|\\{1,` + cookieRunMax + `}(?-i:[^"'\\\r\nnru])){12,}`
+//
+// A value may start with an ampersand or a closing bracket, which are not counted (a generated value begins with
+// either, and the ampersand ends a value everywhere else, in a query string), and a closing bracket inside the value
+// is one more character. A printed list (cookieBareLongList) is the exception: there a closing bracket ends the value
+// unless a character of the value follows it.
+const cookieBareLong = `[&\]]?(?:` + cookieBareUnit + `|\]){12,}`
+
+// cookieBareUnit is one counted character of a bare value: any that is not white space, a quote, a comma, a semicolon,
+// an ampersand, a backslash or a closing bracket, a JSON unicode escape, or a backslash run and the character it
+// escapes. The class is case-insensitive, and the escape of a line break, a lowercase n or r, and the lowercase u of
+// a unicode escape are the only characters it leaves out: a capital N, R or U after a backslash (a Windows path, \Name)
+// is an ordinary escape, so the character class stays case-sensitive inside.
+const cookieBareUnit = `[^\s'",;&\\\]]|\\{1,` + cookieRunMax + `}u[0-9a-fA-F]{4}|\\{1,` + cookieRunMax + `}(?-i:[^"'\\\r\nnru])`
+
+// cookieBracketFollower is a character that cannot follow the closing bracket of an unquoted printed list: white space,
+// another closer, a quote, a comma, a semicolon, a backslash (a JSON escape) or an angle bracket. A closing bracket
+// followed by one of them closes the list; followed by anything else it is a character of a cookie value or name
+// (user[id]=v, a value that holds a bracket).
+const cookieBracketFollower = `\s\]})>"'\\,;<`
+
+// cookieBareLongList is a bare cookie value of 12 or more characters in a printed list.
+const cookieBareLongList = `[&\]]?(?:` + cookieBareUnit + `|\][^` + cookieBracketFollower + `]){12,}`
 
 // cookieQuotedLong is a quoted cookie value at a level whose first 12 characters are counted, taken whole: the rest
 // of the body, then the closing quote. With cross, a body that is open at a line break goes on to its closing quote
@@ -461,16 +529,31 @@ func cookieListStepClosing(closer string) string {
 	for _, n := range cookieQuoteLevels {
 		alts = append(alts, cookieClosedString(n))
 	}
-	return `(?:` + strings.Join(alts, `|`) + `|'` + cookieSingleUnit + `*'|[^` + closer + `"'\\]|\\{1,` + cookieRunMax + `}[^"'\\\r\n])`
+	// In a list that a bracket closes, a closing bracket with a character of a value behind it is part of a cookie
+	// value or name, but only behind a character of the value or the name that is not itself an opening bracket: the
+	// closing bracket of an empty list, with the name of an element type behind it ([]string{...}), closes the list, and
+	// an opening bracket stands alone as a step.
+	plain := `[^` + closer + `"'\\]`
+	if closer == `\]` {
+		plain = `[^\[\]"'\\](?:\][^` + cookieBracketFollower + `])?|\[`
+	}
+	return `(?:` + strings.Join(alts, `|`) + `|'` + cookieSingleUnit + `*'|` + plain + `|\\{1,` + cookieRunMax + `}[^"'\\\r\n])`
 }
 
-// cookieListTail is the string that a list ends in when the text is cut in it: open, to the end of its line.
+// cookieTailUnit is one piece of the open single-quoted string a list ends in: as cookieSingleUnit, but it stops at a
+// closing bracket. An apostrophe in the middle of a value (note=don't) opens no string of a Python list, and the text
+// behind it is the closers of the list and, in the Args of a tool call, the quote that closes the string the list sits
+// in and the brace of the object. A list that was cut in its last string holds no closing bracket.
+const cookieTailUnit = `(?:[^'\\\r\n\]]|\\[^\r\n])`
+
+// cookieListTail is the string that a list ends in when the text is cut in it: open, to the end of its line (a
+// single-quoted one, to the first closing bracket or double quote).
 func cookieListTail() string {
 	var alts []string
 	for _, n := range cookieQuoteLevels {
 		alts = append(alts, cookieOpenString(n))
 	}
-	return `(?:` + strings.Join(alts, `|`) + `|'` + cookieSingleUnit + `*)`
+	return `(?:` + strings.Join(alts, `|`) + `|'` + cookieTailUnit + `*)`
 }
 
 // cookieListLong is where a list holds its long value: after an equals sign outside a string (a printed Go
@@ -484,7 +567,9 @@ func cookieListLong(open bool) string {
 		}
 		return q
 	}
-	alts := []string{cookieLongOf(cookieBareLong, open)}
+	// Outside a string the value is the unquoted one of a printed header, and its name may end in a bracket
+	// (user[id]=v), which the equals sign is then behind.
+	alts := []string{`\]?` + cookieLongOf(cookieBareLongList, open)}
 	deepest := cookieQuoteLevels[len(cookieQuoteLevels)-1]
 	for _, n := range cookieQuoteLevels {
 		// A quote of a cookie value inside a string at level n carries 2n+1 backslashes.
@@ -510,15 +595,17 @@ func cookieListBodyClosing(closer string) string {
 	return step + `*?(?:` + cookieListLong(false) + step + `*` + cookieListTail() + `?|` + cookieListLong(true) + `)`
 }
 
-// cookieHeader is the cookie-header class: a line, a bracketed list, or a Go slice literal. A header line takes no
+// cookieHeader is the cookie-header class: a line, a Go slice literal, or a bracketed list. A header line takes no
 // bracket, so on a header that a bracket opens the line cannot match and the list does, and the alternatives never
 // compete; where they do (a gap that skips quotes and an equals sign to reach a long value inside what would be a list),
 // the line goes first: a match is reported only when no thread of higher priority is alive, and a list that never
-// closes, in front of a line that matches, held every match back until the end of the text.
-var cookieHeader = `(?i)` + lead + `(?:set-)?cookie(?:` +
+// closes, in front of a line that matches, held every match back until the end of the text. The slice literal goes
+// before the list: a bracket and the closing bracket of an empty list, with the name of the element type behind it
+// ([]string{...}, []interface {}{...}), read as a list that holds a bracket inside a value.
+var cookieHeader = `(?i)` + leadUnderscore + `(?:set-)?cookie(?:` +
 	cookieOpener + cookieLineBody + `|` +
-	cookieListOpener + cookieListBodyClosing(`\]`) + `|` +
-	cookieGoListOpener + cookieListBodyClosing(`}`) + `)`
+	cookieGoListOpener + cookieListBodyClosing(`}`) + `|` +
+	cookieListOpener + cookieListBodyClosing(`\]`) + `)`
 
 // Class is one refusal class: a name and the pattern that recognizes it.
 type Class struct {
