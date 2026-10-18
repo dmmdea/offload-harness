@@ -41,7 +41,8 @@ import (
 // CommitLimit, Committed_AS counts mappings a process reserved and never touched (CUDA and big mmaps do), and a rule that
 // refused a STATED commit on it would turn work away for a limit nothing enforces. HostMemory.CommitLimitSoft says so, and a
 // stated commit is then not judged (the touched condition and the physical line of an unstated one still are, as they always
-// were on Linux). A reading that cannot say which mode the kernel is in is treated as soft too.
+// were on Linux). A reading that cannot say which mode the kernel is in is treated as strict: it fails closed, because the mode is
+// the one input that says whether the limit is real, and a limit assumed away on an input nobody read is a brake switched off.
 //
 // THE LIMIT MOVES. On a Windows host whose page file is system managed the commit limit is the CURRENT one: Windows grows the
 // file when the commit charge nears it, and the next reading then carries a larger limit (the incident's own readings show 187.7
@@ -405,8 +406,8 @@ func parseOvercommit(text string) (mode int, ok bool) {
 }
 
 // readHostMemoryLinux is the Linux reader over a file-reading seam (os.ReadFile in production). The meminfo figures come from
-// parseMeminfo; the commit limit is hard only when the kernel is in strict mode (vm.overcommit_memory = 2), because in modes 0
-// and 1 it grants allocations past CommitLimit. A mode that cannot be read is not assumed to be strict.
+// parseMeminfo; the commit limit is soft only when the kernel is known to be in mode 0 or 1 (vm.overcommit_memory), because there
+// it grants allocations past CommitLimit. A mode that cannot be read, or parsed, is assumed to be strict (fail closed).
 func readHostMemoryLinux(read func(path string) ([]byte, error)) (HostMemory, bool) {
 	b, err := read("/proc/meminfo")
 	if err != nil {
@@ -421,7 +422,7 @@ func readHostMemoryLinux(read func(path string) ([]byte, error)) (HostMemory, bo
 		if ob, oerr := read("/proc/sys/vm/overcommit_memory"); oerr == nil {
 			mode, known = parseOvercommit(string(ob))
 		}
-		m.CommitLimitSoft = !known || mode != 2
+		m.CommitLimitSoft = known && mode != 2
 	}
 	return m, true
 }
