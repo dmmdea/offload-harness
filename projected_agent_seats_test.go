@@ -27,7 +27,7 @@ import (
 var measuredAgentTiers = map[string]string{
 	"amd-gcn":        "fleet-smoke grounded contract, 2026-09-20; 8GB agent-seat bake, 2026-09-24",
 	"ampere-16":      "blind re-audit 2026-09-16 and the digest-8 gate on the GSQ seat",
-	"ampere-6":       "historical: the RTX 3050 left the reference box 2026-09-04",
+	"ampere-6":       "tier MEASURED 2026-07-26 on an RTX 3050 6GB (docs/tiers/ampere-6.md, register I-13); the reference box ran it again from 2026-10-06 (CT-51 rescope note)",
 	"ampere-8":       "8GB agent-seat bake, 2026-09-24",
 	"blackwell-16":   "ADR 0048 Amendment 1: the GSQ seat on one 5060 Ti, digest-8 8/8",
 	"blackwell-2x16": "the pair seat, digest-8 gate",
