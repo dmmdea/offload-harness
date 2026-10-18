@@ -329,18 +329,21 @@ names — is in-process only and does not close the cross-process gap named abov
   expired)*. A bare heartbeat timeout would expire a descheduled benchmark under exactly the load
   it exists to protect.
 - **An unreadable heartbeat is unknown, and unknown is never stale.** `heartbeatAt` returns the
-  heartbeat and whether it could tell. The content of `hb.<epoch>` when it parses; the file's
+  heartbeat and whether it could tell. The content of `hb.<epoch>` when it parses and is not earlier
+  than the stamp written at the acquisition (a torn write leaves a prefix of the digits, and a prefix of a
+  number is a number: it, zero and a negative number say nothing about the holder); the file's
   modification time when the file is there but its content is no use or the read failed for any reason
   but absence (a renewed heartbeat has the time of its write, an unrenewed one ages out like any); the
-  acquisition stamp only when the file is *settled* absent (no staged file younger than 3 s beside the
-  name, and the name still absent on a second look: a holder that never renewed); unknown otherwise, which
-  the reader passes to the rule as no stamp. A rename that is installing the heartbeat, or one that cannot
+  acquisition stamp only when the read found the name absent and the file is *settled* absent (no staged
+  file younger than 3 s beside the name, and the name still absent on a second look: a holder that never
+  renewed); unknown otherwise, which the reader passes to the rule as no stamp. A rename that is installing the heartbeat, or one that cannot
   be examined, therefore never makes a live lease past its window reclaimable. What frees a holder whose
   heartbeat stays unknown for good is the first half of the rule (wrapper gone, by pid and start time) or
   `gpu release`.
 - **The same rule holds wherever absence would free a lease.** The keeper's look at a heartbeat (`keeperEvidence`: a record that
   cannot be read is held while its keeper is alive) reads it the way `heartbeatAt` does, and a heartbeat that can be neither read nor
-  examined, or whose rename is installing it, is unknown and counts as alive; it used to count as no sign of life, so the sweep
+  examined, or whose rename is installing it, is unknown and counts as alive (for a whole-node record, whose epoch is not known, a
+  staged heartbeat with no live name in the listing of the directory counts as well); it used to count as no sign of life, so the sweep
   removed a live holder's record and claims. A ComfyUI launch marker that is being installed, which can tie a live instance to a
   lease whose wrapper is gone, is unknown and holds that lease for the moment it lasts (`treeUnknown`, at most the 3 s a staged file
   is fresh); it used to be skipped, and the lease was reclaimed with its instance still on the card. What each other consumer does
@@ -451,7 +454,8 @@ concurrency test rather than by reading:
     for deletion and the new one has not taken its name, the file is delete-pending and every open of
     the name fails with `ERROR_ACCESS_DENIED`, whoever shares what. `readSharedFile` waits that out: a
     permission error is retried `removeAttempts` times at `removePause` (about 100 ms, the claim
-    removal's bound) and any other failure is returned at once. Measured on a loaded host with a
+    removal's bound) and any other failure is returned at once (an absent name with a fresh staged file beside it is not a failure
+    yet; see the next bullet). Measured on a loaded host with a
     heartbeat renewed in a loop: 5 failed reads in about 124,000 without the wait, none in about
     108,000 with it. A file that stays unreadable is waited out once, not once per read (below).
   - **A rename that was not refused can still leave the live name absent, and that is not an answer yet.**
@@ -473,7 +477,9 @@ concurrency test rather than by reading:
     three such heartbeats cost a grant 1050 pauses before the memory and 150 after,
     `TestAFreshLeftoverStagedHeartbeatCostsAGrantAtMostOneWaitPerFile`). A card claim has no staged
     name and costs one open and no stat. The wait is on the same switch as the wait for a refused open
-    (`deniedOpenMayClear`): off Windows an absence is answered at once. The ComfyUI launch markers, which
+    (`deniedOpenMayClear`): off Windows `readSharedFile` answers an absence at once (one open, no stat, no pause), and `statSettled`
+    takes its looks without a pause and answers `errRenameInFlight` beside a staged file younger than 3 s, so a crash leftover that
+    young makes a stat site read "cannot be examined" and not "absent" on every platform. The ComfyUI launch markers, which
     Node restamps through a `.tmp` file, are read the same way (`ReadSharedFile`, used by
     `internal/comfyinst`), as are the waiter records and the yield request. The Node readers keep the same
     lists (`STAGING_SUFFIXES` in `render/lease-read.mjs`), and `staging_drift_test.go` fails when a Go
@@ -519,15 +525,23 @@ concurrency test rather than by reading:
     - a second acquirer's spin gave up after 2,186 ms against a lock that was never released (400 pauses of 5 ms and the file operations
       between them; 2 s nominal).
 
-    So the worst hold is bounded and not removed: N x 250 ms, once per file per 5 s per process, which reaches the nominal 2 s at eight
-    files and does not fit the measured 2.19 s at nine. What keeps it to milliseconds is the order: the probe judges every lease, not
-    only the conflicting ones, before the lock, and a wait that ran out is remembered
+    So, before the cap, the worst hold was bounded and not removed: N x 250 ms, once per file per 5 s per process, which reaches the nominal
+    2 s at eight files and does not fit the measured 2.19 s at nine. What keeps it to milliseconds in practice is the order: the probe judges
+    every lease, not only the conflicting ones, before the lock, and a wait that ran out is remembered
     (`TestTheProbeBeforeTheLockPaysTheGateWaitsSoTheLockIsHeldWithoutOne`, for a card grant and for a whole-node grant, counts the gate's
-    pauses with the lock held and wants none; `TestTheWholeNodeVerificationPaysAtMostOneWaitPerFile` counts one wait per file). The cold
-    hold needs leftovers that appear between the probe and the lock, fresh (younger than 3 s) and not read in the last 5 s. On a host with
-    eight or more cards, each with a lease whose writer died in the last 3 s, that could outlast a second acquirer's spin; the acquirer
-    then fails loudly (`the epoch lock ... did not clear`) and never grants. Not built against: the host measured has three
-    cards.
+    pauses with the lock held and wants none; `TestTheWholeNodeVerificationPaysAtMostOneWaitPerFile` counts one wait per file). Leftovers
+    that appear between the probe and the lock, fresh (younger than 3 s) and not read in the last 5 s, on nine or more leases, held the
+    lock past a second acquirer's spin, and it failed loudly (`the epoch lock ... did not clear`) and never granted.
+  - **A hold of the epoch lock spends at most one second of the gate** (`lockGateCap`, half of the 2 s a second acquirer spins). `withEpochLock`
+    registers the hold for its lease directory (`beginEpochHold`, `gate.go`), and once it has run that long on the gate's clock every
+    further read of a lease file in that directory (`readSharedFile`, `statSettled`) that would wait for a rename in flight answers
+    `errRenameInFlight` at once, with no wait and no memory. That is the answer a wait that ran out gives, and every decision under the lock
+    reads it as held (unknown is never stale), so nothing is decided differently: the wait would only have turned an unknown heartbeat into a
+    fresh one. It covers the reads of that directory by whoever makes them in this process, so a read in another thread during a spent hold
+    gets the I/O failure instead of a wait (held or unexaminable to every reader); it never applies to a read outside a hold; the launch
+    markers, in another directory, are not covered. `TestTheGateWaitsOfOneHoldOfTheEpochLockStayInsideTheSpinOfASecondAcquirer` (three, nine and
+    twelve leases) and `TestTheGateWaitsOfACardGrantThatMeetsLeftoversAfterItsProbeStayInsideTheSpin` pin the bound on the gate's clock, and
+    `TestTheCapOfAHoldOfTheEpochLockIsPerHoldAndEndsWithIt` its scope. The measurements above are from before the cap.
   - **The wait is Windows only.** Off Windows nothing is delete-pending (`rename(2)` is atomic and an
     open descriptor never holds one up), so a permission error on a record is a lasting refusal and
     `readSharedFile` returns it at once. The choice is the constant `sharedOpenMeetsDeletePending`
@@ -558,14 +572,15 @@ concurrency test rather than by reading:
     `heartbeat_unknown_test.go` of the reclaim rule. `render/lease-read-stress.test.mjs` pins none of them: with the permission wait
     taken out it still passed 5 of 5 on Windows, because Node opens with `FILE_SHARE_DELETE` and the refusals it counts are the
     writer's. What it pins is that no reader misses, at its size, under a rename-over. A writer in another process renames a
-    different inode over each of three lease files in turn (two seeds per file, alternated) while the five readers loop. The writer
+    different inode over each of two lease files in turn (the record and `meta.json`, two seeds per file, alternated; it does not rename
+    over the card claim, which Go never does and no reader waits for) while the five readers loop. The writer
     OBSERVES that each rename replaced something: after it, the live name has the inode it just installed, and the test wants that of
-    every rename. It also wants some of the writer's renames refused on Windows (the writer and the readers really met: 1 to 6 per
-    600 to 740 renames on one host, 14 to 30 a run in the release lane's runs) and none elsewhere, where `rename(2)` is atomic, so
+    every rename. It also wants some of the writer's renames refused on Windows (the writer and the readers really met: 3 to 37 per
+    612 to 970 renames on one host, 14 to 30 a run in the release lane's runs) and none elsewhere, where `rename(2)` is atomic, so
     it cannot pass without having raced. Its first form linked one seed, which on Linux died on `EEXIST` at the link of the third pass
     (36 renames in, at six lease roots) and on Windows renamed a link onto itself: only the first rename of each file replaced
-    anything, 18 of 11,052 at the six committed roots. It ran three times on Windows (every rename a replacement) and three times on
-    Linux under WSL (about 16,000 renames a run, 0 refused, 0 misses). CI runs it on Linux only (`node --test render/*.test.mjs` is a
+    anything, 18 of 11,052 at the six committed roots. It ran six times on Windows (every rename a replacement, 612 to 738 renames a run) and seven times on
+    Linux under WSL (11,000 to 18,000 renames a run, 0 refused, 0 misses). CI runs it on Linux only (`node --test render/*.test.mjs` is a
     step of the Ubuntu job), so its Windows assertions run on gated hosts only.
   - **A file that is not there is not waited on unless a rename may be installing it, and no read of one under the epoch lock
     multiplies a wait.** `readSharedFile` retries a permission error, and waits for a rename only while a fresh staged file
@@ -578,8 +593,9 @@ concurrency test rather than by reading:
     The reads that wait under the lock are of a file that exists and is refused, and of a name that is absent with a fresh
     staged file beside it (the gate above). A record's writers hold the lock and the sweep removes their leftovers before it
     reads anything (the bullet after the gate), so the second is in practice a heartbeat: for the instant `Renew` swaps a
-    live lease's heartbeat (`Renew` does not take the epoch lock) that is one wait that clears, and it is what keeps the
-    sweep from judging a live lease stale. `readRetries` counts the pauses of the refused open and `gatePauses` those of the
+    live lease's heartbeat (`Renew` does not take the epoch lock) that is one wait that clears; what keeps the sweep from
+    judging a live lease stale is the reclaim rule (an unreadable heartbeat is unknown, and unknown is never stale), and the
+    wait only narrows the window in which it is unknown. `readRetries` counts the pauses of the refused open and `gatePauses` those of the
     gate, as test seams.
   - **A file refused for good is waited out once, not once per read.** A refusal still there when the wait ends is a
     lasting fault (a deny-read ACL on a lease file, a foreign delete whose handle never closes), not a rename in flight.
@@ -647,20 +663,28 @@ or `fs.ErrNotExist` on a lease path was read against it, and so was every consum
     marker cannot be read.
 - **Skipped by an unlocked reader.** `reader.v2` and `reader.legacy` (behind `Inspect`, `InspectFor`, `Leases`, `InspectDir`,
   `InspectDirDetail` and `EpochIsCurrent`) skip a record they cannot read, and a directory listing taken in the instant of a rename does
-  not show the name. For that instant an unlocked caller sees the lease as not live. That is unchanged by this round, and every decision
-  that grants a card or removes a lease reads again under the epoch lock. Advisory callers (`gpu status`, the admission and routing
-  checks, the vision gate, `gpuLeaseHeld` of the fleet baseline, which says so) can still see a lease as free for it; the wait narrows
-  that to the case where it ran out.
+  not show the name. For that instant an unlocked caller sees the lease as not live. That is unchanged by this round. What a listing
+  no longer decides: a grant or a sweep lists under the epoch lock, where no record can be in flight (the writers of the records hold
+  that lock, and the sweep has removed their leftovers first) and the heartbeat is read by its name and not found by listing; the
+  keeper's scan of every heartbeat (the case of a whole-node record) counts a fresh staged heartbeat whose live name is not listed as
+  unknown; and a release that names no epoch (`gpu release`, `ReleaseTarget`) decides "what is held" from a listing without the lock, and
+  counts a fresh staged card record whose live name is not listed as a record that cannot be read (`unreadableCardRecords`), so it
+  refuses with the error that names it where it used to release the other card lease, or say that nothing was held. Advisory callers
+  (`gpu status`, the admission and routing checks, the vision gate, `gpuLeaseHeld` of the fleet baseline, which says so) can still see
+  a lease as free for it; the wait narrows that to the case where it ran out.
 - **Not reachable by the new error.** `readEpoch` reads the epoch counter with a plain `os.ReadFile` and reads an absence as the first
   ever acquisition, but its callers hold the epoch lock and its only writer holds it too, so no rename of the counter is in flight at
   that read. The session registry, the orphan marker, the progress file and the reader audit marker are advisory (nothing there kills or
   releases anything): an unreadable one reads as not registered, not orphaned, progress unknown, and "unreadable".
-- **Known limits, where neither direction is safe.**
+- **Known limits.**
   - `PIDsOfOtherLeases` (the live ComfyUI instances of another lease that a wrapper which lost its lease spares when it stops its own
-    tree) skips a marker it cannot read, so that instance is not spared. The other direction would leave the command of a lease that was
-    lost running on the card.
-  - `leaseDevicesOf` (the cards a detached hold drains and unloads for its lease) reads a lease it cannot find as the whole node's, and
-    says so on stderr; the drain and the unload then act for the whole node.
+    tree) skips a marker it cannot read, so that instance is not spared. Neither direction is safe: the other would leave the command
+    of a lease that was lost running on the card.
+  - `leaseDevicesOf` (the cards a detached hold drains and unloads for its lease) reads a lease whose record is absent as the whole
+    node's, and says so on stderr; the drain and the unload then act for the whole node. A lease it does not find in the listing whose
+    record cannot be read (a rename is installing it) is not that: it asks `RecordState`, lists again when the record is readable by
+    then, and otherwise fails the maintain step with the lease held (`detachedMaintainError` says so, and that `gpu release` frees it),
+    instead of widening the drain and the unload to seats on cards the lease does not hold.
 
 ## Card-scoped leases (record v2)
 
@@ -2397,9 +2421,12 @@ skipped, while the wrapper in its retry window kept running its command and wrot
 25 s of overlap. Now (a) the acquirer side leaves such a record, and its claims, alone while its keeper shows a sign of life within the
 heartbeat TTL (`DefaultHeartbeatTTL`, 120 s, the threshold the reader judges every record's heartbeat by): the epoch's `hb.<epoch>` file
 (its content is the moment of the last renewal; every `hb.*` counts for a `meta.json`, whose epoch is not known) or the record's own
-modification time. A heartbeat is read as the reclaim rule reads it (`keeperEvidence`): its content when it parses, else the file's
-modification time; a file settled absent is no sign; one that can be neither read nor examined, or whose rename is installing it, is
-unknown, and unknown is alive. The whole-node grant, the card grant over a whole-node record and `verifyNoDeviceLeases` (a whole-node grant over a
+modification time. A heartbeat is read as the reclaim rule reads it (`keeperEvidence`): its content when it is a time of renewal (a number
+not below `minHeartbeatMs`, the earliest instant 13 digits of milliseconds can name; a torn write leaves a prefix of the digits, which parses
+and is not one), else the file's modification time; a file settled absent is no sign; one that can be neither read nor examined, or whose
+rename is installing it, is unknown, and unknown is alive. For a `meta.json`, whose epoch is not known, the heartbeats are found by listing the
+lease directory, and a listing does not show a name a rename is installing: a staged `hb.<epoch>.tmp` that is fresh and whose live name is not
+listed counts as an unknown heartbeat (as a launch marker's does), and so does a listing that fails. The whole-node grant, the card grant over a whole-node record and `verifyNoDeviceLeases` (a whole-node grant over a
 card lease whose record cannot be read) refuse with "the lease record cannot be read, and its holder is alive"; the sweep takes the
 record only once that liveness is gone. (b) The keepers above fail closed once their window passes, and every keeper's longest silence
 (its tick or renewal interval plus its window plus the confirming looks, and for the holder its release attempts) is shorter than that
