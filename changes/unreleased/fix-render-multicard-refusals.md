@@ -10,7 +10,7 @@ Two misleading or missing refusals of the render runners, found in the media ses
   default endpoint launches as before, and nothing is launched in the refused case (it never was). The refusal still comes after the single probe of the endpoint, not before it, so a ComfyUI someone started there is reused.
   A caller that matched the old text on this case matches `COMFY-PLACEMENT-MISSING` now (nothing in the harness matches either).
 - **PF-3, the defect.** The `qwen-image/gguf-q5_1` row of `render/multicard-recipes.json` (the 2512 Q5_1 GGUF across two cards, basis `predicted`) ran out of memory in the sampler on its first live run, at 928x1664
-  (1.54 MP, on the storage card, 56 s in). The row held any canvas, so a call at the film geometry, or at no size at all (the qwen-image default is 1328x1328, 1.76 MP), took both cards and failed late.
+  (1.54 MP, on the storage card, 56 s in). The row held any canvas, so a call at that canvas, or at no size at all (the qwen-image default is 1328x1328, 1.76 MP), took both cards and failed late.
 - **PF-3, the fix.** The row carries `maxPixels: 1472700` (1.47 MP) and `maxPixelsNote`; a new `canvasRefusal` (`render/multicard-recipes.mjs`) turns a canvas above it into a refusal that names the row, both sizes, the
   cap, that it is chosen, and the flags to change (`--width` and `--height`, or the single placement). It is enforced where the size is known: `buildRenderGraph` (`render/comfy-render.mjs`, which every path to a
   card-only render passes, one job of a `--batch` included, with the family default resolved) and, for a single `comfy-generate` call that names its canvas, `planImageMulticard` (`render/multicard-image.mjs`),
