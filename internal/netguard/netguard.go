@@ -1,9 +1,10 @@
 // Package netguard holds the shared loopback listen-address guard.
 //
 // Extracted 2026-07-17 from cmd/local-agent (validateListenAddr) for
-// fleet-serve; behavior identical. Both unauthenticated HTTP servers
-// (local-agent's OpenAI shim and fleet-serve) refuse to bind beyond loopback
-// unless the operator explicitly opts into a trusted network.
+// fleet-serve; behavior identical. Both HTTP servers (local-agent's OpenAI
+// shim, which is unauthenticated, and fleet-serve, which needs the fleet
+// bearer on every lane) refuse to bind beyond loopback unless the operator
+// explicitly opts into a trusted network.
 package netguard
 
 import (
@@ -60,7 +61,7 @@ func Validate(addr string, allowNonLocal bool) error {
 // LoopbackAddr reports whether a "host:port" listen address is bound to
 // loopback — the same notion Validate enforces, exported as a FACT for
 // callers that need the answer rather than the refusal (fleet-serve's
-// agent-lane auth gate: a tokenless agent lane is acceptable only on a
+// lane auth gate: a node with no fleet_auth_token is acceptable only on a
 // loopback listener). Malformed/unprovable addresses report false — a
 // listener we cannot prove loopback must be treated as exposed, so the
 // caller fails closed.
