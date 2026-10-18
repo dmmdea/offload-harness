@@ -395,3 +395,65 @@ func TestARenewedHeartbeatCarriesTheFreshFileTimeOfItsStagedFile(t *testing.T) {
 		t.Errorf("the heartbeat renewed a moment ago has a file time %v away from now, want the time of the renewal", age)
 	}
 }
+
+// A heartbeat is the time of the holder's last renewal as a decimal number. The one non-empty tear of it is a prefix of its digits
+// (Renew's in-place fallback is a single write after a truncate), and a prefix of a number is a number: it parses. It says nothing
+// about the holder, because a genuine renewal is never earlier than the stamp written when the lease was taken; a value below that
+// stamp is not a heartbeat, and neither is zero or a negative number. Such a file is aged by its file time like an empty or a garbled
+// one, and not read as a heartbeat from the year the number happens to name (which floors at the acquisition stamp, hours old).
+func TestAHeartbeatThatParsesToLessThanTheStampIsAgedByItsFileTime(t *testing.T) {
+	for _, devs := range [][]string{{card0}, nil} {
+		kind := "whole-node lease"
+		if len(devs) > 0 {
+			kind = "card lease"
+		}
+		for _, which := range []string{"a seven-digit prefix", "a two-digit prefix", "zero", "a negative number"} {
+			content := func(now time.Time) string {
+				full := strconv.FormatInt(now.UnixMilli(), 10)
+				switch which {
+				case "a seven-digit prefix":
+					return full[:7]
+				case "a two-digit prefix":
+					return full[:2]
+				case "zero":
+					return "0"
+				}
+				return "-1"
+			}
+			t.Run(kind+", "+which+", written a moment ago", func(t *testing.T) {
+				m, now := scopedManager(t)
+				l := overdueLease(t, m, now, devs...)
+				defer l.Release()
+				hb := m.heartbeatPath(l.Epoch())
+				if err := os.WriteFile(hb, []byte(content(*now)), 0o666); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Chtimes(hb, *now, *now); err != nil {
+					t.Fatal(err)
+				}
+				refusedAsHeld(t, m, "although its heartbeat file was written a moment ago and only its content is torn", devs...)
+				if got := epochsOf(m.Leases()); len(got) != 1 || got[0] != l.Epoch() {
+					t.Errorf("Leases() = %v with a torn but fresh heartbeat, want [%d]", got, l.Epoch())
+				}
+			})
+			t.Run(kind+", "+which+", ten minutes old", func(t *testing.T) {
+				m, now := scopedManager(t)
+				l := overdueLease(t, m, now, devs...)
+				defer l.Release()
+				hb := m.heartbeatPath(l.Epoch())
+				if err := os.WriteFile(hb, []byte(content(*now)), 0o666); err != nil {
+					t.Fatal(err)
+				}
+				old := now.Add(-10 * time.Minute)
+				if err := os.Chtimes(hb, old, old); err != nil {
+					t.Fatal(err)
+				}
+				next, err := asPID(m, os.Getpid()+1).TryAcquire(ClassMedia, Options{Reason: "second job", Devices: devs, TTL: time.Hour})
+				if err != nil {
+					t.Fatalf("a torn heartbeat nobody has renewed for ten minutes must still let a lapsed lease go: %v", err)
+				}
+				_ = next.Release()
+			})
+		}
+	}
+}

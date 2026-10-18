@@ -206,3 +206,43 @@ func TestAFailedListingOfTheHeartbeatsIsUnknown(t *testing.T) {
 		t.Errorf("a listing of the heartbeats that failed was read as no sign of life, want unknown")
 	}
 }
+
+// The keeper reads a heartbeat the way the reclaim rule does, and a heartbeat that is a prefix of a number is not a time of renewal
+// either: it names an instant in 1970, which is "no sign of life" for a holder that is alive. It is aged by its file time.
+func TestAnUnreadableRecordWhoseHeartbeatIsATornNumberIsHeldWhileTheFileIsFresh(t *testing.T) {
+	for _, content := range []string{"1784981", "17"} {
+		for _, fresh := range []bool{true, false} {
+			name := "content " + content + ", written a moment ago"
+			if !fresh {
+				name = "content " + content + ", ten minutes old"
+			}
+			t.Run(name, func(t *testing.T) {
+				m, l, rec, hb := unreadableRecordFixture(t)
+				if err := os.WriteFile(hb, []byte(content), 0o666); err != nil {
+					t.Fatal(err)
+				}
+				if !fresh {
+					ageFile(t, hb, 10*time.Minute)
+				}
+				other, err := m.TryAcquire(ClassMedia, Options{Reason: "second", TTL: time.Hour, Devices: []string{card0}})
+				if fresh {
+					if err == nil {
+						_ = other.Release()
+						t.Errorf("a second lease (epoch %d) was granted on the card of a live holder whose record cannot be read and whose heartbeat is a torn number written a moment ago", other.Epoch())
+					}
+					if _, serr := os.Stat(rec); serr != nil {
+						t.Errorf("the record of a live holder was swept over a torn heartbeat written a moment ago: %v", serr)
+					}
+					if len(m.ClaimsOf(l.Epoch())) == 0 {
+						t.Errorf("the claims of a live holder were swept over a torn heartbeat written a moment ago")
+					}
+					return
+				}
+				if err != nil {
+					t.Fatalf("an unreadable record whose torn heartbeat nobody has renewed for ten minutes is debris and the card is free: %v", err)
+				}
+				_ = other.Release()
+			})
+		}
+	}
+}
