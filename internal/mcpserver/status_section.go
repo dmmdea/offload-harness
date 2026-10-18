@@ -357,7 +357,11 @@ func hostMemoryClauses(view map[string]any) (lead string, loud bool, tail string
 	why, _ := hm["verdict_why"].(string)
 	switch hm["verdict"] {
 	case string(gpuprobe.HostOver):
-		return fmt.Sprintf("HOST RAM OVER (%s)", why), true, ""
+		lead = fmt.Sprintf("HOST RAM OVER (%s)", why)
+		if clause, _ := hm["stated_commit_note"].(string); clause != "" {
+			lead += " — " + clause
+		}
+		return lead, true, ""
 	case string(gpuprobe.HostNear):
 		return "", false, fmt.Sprintf("host RAM NEAR the limit (%s)", why)
 	}

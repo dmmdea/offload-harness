@@ -184,7 +184,7 @@ func (e *errHostRAMHoldBound) Error() string {
 	} else if e.short.CommitShort && !e.short.TouchShort && e.short.CommitStated {
 		fmt.Fprintf(&b, " If %.1f GiB of commit is more than the command is charged, pass a smaller --ram-commit <GiB>; otherwise wait for the host to free commit and reserve again.", e.short.CommitNeedGiB)
 	} else if e.short.CommitShort && !e.short.TouchShort {
-		fmt.Fprintf(&b, " If %.1f GiB is more than the command is charged, pass a smaller --ram <GiB> (no commit was stated, so the --ram figure is held to physical RAM; --ram-commit <GiB> states a measured one); otherwise wait for the host to free commit and reserve again.", e.short.CommitNeedGiB)
+		fmt.Fprintf(&b, " If %.1f GiB is more than the command is charged, pass a smaller --ram <GiB> (no commit was stated, so the --ram figure is held to physical RAM, or to the commit limit where an enforced one sits below it; --ram-commit <GiB> states a measured one); otherwise wait for the host to free commit and reserve again.", e.short.CommitNeedGiB)
 	} else {
 		fmt.Fprintf(&b, " If %.1f GiB is more than the command loads, pass a smaller --ram <GiB>; otherwise wait for the host to free memory and reserve again.", need)
 	}
