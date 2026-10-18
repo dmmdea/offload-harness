@@ -243,6 +243,17 @@ token. A scope that was a compatibility concession became a hole once a media ta
   under `models/<class>/`, fetched over https from a host listed in the same file (`model_hosts`), so the download that runs
   before ComfyUI starts cannot place a file where ComfyUI loads code or outside the install.
 - **The refusal journal cannot be grown by a caller.** Its throttle is keyed on the caller's address and the reason, never on
-  a field the caller chooses, with a cap on lines per minute and one summary line for the rest.
+  a field the caller chooses, with a cap on lines per minute and one summary line for the rest. A line is the door, the caller's
+  host and one of three constant reasons, nothing else. Health and the jobs feed write the same line for a bearer that is
+  presented and is not the node's (a request with no bearer there is the route working as designed and writes nothing).
+- **The token's strength is the operator's to choose.** The bearer opens every lane and a node does not slow repeated wrong
+  bearers, so the docs say to generate a long random value (`openssl rand -hex 32`); the installer and the config check accept
+  any non-empty value.
+- **What the rollout breaks.** A delegator with no `fleet_auth_token` (a media-only box included), a delegator older than the
+  release that added the bearer to its client, and any software outside this repo that sends no bearer are refused on every lane
+  once the node gains the rule. The release floors are in `docs/FLEET-NODE.md`.
+- **Two answers precede the `401` on some routes.** A door that is closed on the node (`compose-project`, `media-job`) answers
+  `403` first, which health already publishes; under `fleet_ingress_guard: enforce` the guard answers `415`, `421` or `403`
+  before any route runs.
 
 The two accepted weaknesses above (one shared token, no rotation) stand.

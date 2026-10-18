@@ -839,15 +839,30 @@ The rule is one rule for every route that does work or returns a result. Three c
   oversized body are all `401`, not `400`, it learns no job state, and a task type the node does not serve is
   refused for the credential before it is refused for being unserved. The `400` answers (and the 1 MiB, vision and text
   body caps) are what a bearer holder gets. The stt upload, chat, kvslot, PAIR relay, compose-project and media-job doors
-  checked the credential before their body read already.
+  checked the credential before their body read already, and so do the queue routes; a test sends a 20 MiB body without
+  the bearer to every one of these doors and counts the bytes the node reads (none).
+- **Two answers can come before the `401`.** A door that is closed on this node (`compose-project` and `media-job`, which
+  need `fleet_compose_projects` or `fleet_media_inputs`, a token and a bound lane) answers `403` "door closed" before it
+  looks at the bearer, whatever the caller holds. That order is deliberate: `/fleet/health` already tells anyone whether
+  each of them is open (the task is in `supported_task_types` exactly when the door is admitted), so the `403` reveals
+  nothing a caller cannot read from health, and a closed door has no body to protect. Second, the ingress guard wraps
+  every route: with `fleet_ingress_guard: enforce`, a `POST` whose content type is not `application/json` is answered `415`,
+  a request whose `Host` is not an allowed name `421` and one carrying an `Origin` header `403`, all before the route runs
+  and so before the `401`; a caller of an enforcing node can tell a wrong content type from a missing bearer. In the default
+  `warn` mode the guard only logs what it would refuse, and the `401` comes first.
 - **Every refusal of a credential is logged, at every door that checks one.** The dispatch, vision, text, stt upload,
   PAIR relay, chat, kvslot, compose-project and media-job doors, the poll and withdraw of a job, the artifact read and the
   five queue routes each write one line per refused request (subject to the throttle below) and keep the status and body
   they always answered with. The line carries the caller's address, the door (the task type for a lane; `dispatch` for
   `/fleet/dispatch`, whose task type is in a body the node has not read; `poll`, `withdraw`, `chat`, `kvslot` and
   `fleet-queue` for the others) and which of "no bearer", "wrong bearer" or "no token configured" it was; never the
-  credential presented, the configured one or the payload. A door that is closed (compose-project and media-job on a node
-  that has not opted in) answers `403` whatever the caller holds; that is not a credential refusal and it writes no line.
+  credential presented, the configured one or the payload; a test compares each whole line against that shape
+  (`fleetnode: refused a "<door>" request from "<caller host>": <reason>`) on a request whose headers and path are the
+  caller's own text. A door that is closed (compose-project and media-job on a node that has not opted in) answers `403`
+  whatever the caller holds; that is not a credential refusal and it writes no line.
+  `/fleet/health` and the jobs feed are open on purpose, so a request with no bearer there is not a refusal and writes
+  nothing. One that presents a bearer which is not the node's writes the same line (door `health` or `jobs-feed`, reason
+  "wrong bearer"), under the same throttle, and is still answered the reduced view.
   What throttles the journal is never a field the caller chooses (the door and the task type are the caller's own text, and so
   is every header; a test varies each of them from one address): one
   line per caller address and reason every ten seconds, shared by all the doors, at most twenty lines a minute across
@@ -882,9 +897,25 @@ The rule is one rule for every route that does work or returns a result. Three c
   own hash, so one the caller supplies authenticates nothing. What remains: a holder can still put a file of any type under
   `models/<class>/` (a weight file in a pickle-based format is code when ComfyUI loads it), and the node follows redirects from
   a listed host. A `models[]` entry with no `path` is refused at the door too (the runner's parser refuses it as well).
-- **Rollout order: delegators first, then nodes.** Every fleet client already sends the bearer whenever `fleet_auth_token` is
-  set (a per-package test and a source test pin it), so a delegator needs nothing new; a node that gains the rule refuses a
-  caller that has no token. The delegator change is deployed fleet-wide first; before the node change is deployed to a node,
+- **Choose a long random token.** The token is the one secret behind every lane (a render, a project render, a coding-agent
+  run), and a node does not slow down repeated wrong bearers, so its strength is what protects it. Generate it with
+  `openssl rand -hex 32` (64 hex characters) and use the output as the value of `fleet_auth_token`, the same on the node and
+  every delegator. The installer and the config check accept any non-empty value, so a short or guessable one is not caught.
+- **Rollout order: delegators first, then nodes.** Every fleet client in this repo sends the bearer whenever
+  `fleet_auth_token` is set (a per-package test and a source test pin it). What a node that gains the rule refuses, and so
+  what must be in place first:
+  - **A delegator needs the same `fleet_auth_token`**, a media-only box included. Media, stt and compose-video calls were
+    accepted with no token before; with none (or a wrong one) every dispatch, poll and artifact fetch is now `401`. The
+    media client classifies a `401` or `403` as a `config` defer, so the caller sees config defers, and the node's
+    `/fleet/health` reaches that delegator with the lease reason, the store and the weight-file rows withheld, so its node
+    view degrades without an error.
+  - **A delegator must be new enough to send it.** The releases that added the bearer to each client are: text 0.154.0,
+    withdraw 0.143.1, compose 0.160.0, media and stt 0.163.1 and the roster probe's token check 0.167.0. An older delegator
+    gets the same `401` on that lane.
+  - **Software outside this repo that sends no bearer stops working on every lane**, dispatch, poll and artifact fetch alike
+    (the only external stt dispatcher known sends none, see the stt-upload section).
+
+  The delegator change is deployed fleet-wide first; before the node change is deployed to a node,
   `fleet_auth_token` must be present in the config its `fleet-serve` reads (the same value on every delegator and every node).
   A node that listens beyond loopback with no token will not start after the upgrade, and its refusal names the key and the
   config file it read. A node installed by `setup/install.sh` takes the key with `--token-file PATH` (stored in the node's
@@ -1528,13 +1559,14 @@ what an operator of the node needs:
   files directly inside `media_dir`. Before this rule, a caller-named path let any tailnet peer
   make the node overwrite any file its account could write.
 - **Payload input paths (`still`, `ref`, `driver`, `clone`, `audio`) are node-local readable
-  paths**, taken as given. That's the tailnet-trust posture restated: anyone who can dispatch can
-  already run renders; don't extend reach beyond the tailnet.
+  paths**, taken as given. That's the tailnet-trust posture restated: anyone who holds the token and can
+  dispatch can already run renders; don't extend reach beyond the tailnet.
 - `priority` is accepted and ignored (contract-reserved).
-- **Media lanes carry no auth** — the trusted-network posture above is the boundary; revisit
-  if the fleet ever leaves the tailnet. The agent lane is bearer-gated (see
-  [The agent task](#the-agent-task-task_type-agent)); its accepted v1 weaknesses — one shared
-  token, no rotation — are recorded in
+- **Media lanes need the fleet bearer** like every other lane (see
+  [Auth: every lane needs the fleet bearer](#auth-every-lane-needs-the-fleet-bearer)): the dispatch, the poll and the
+  artifact read of a media task are `401` without it on a node that has a token, and a node with none refuses them beyond
+  loopback. The trusted network still bounds who can reach the listener; it is no longer the only boundary. The accepted
+  v1 weaknesses of the bearer — one shared token, no rotation — are recorded in
   [ADR 0023](architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md).
 
 ## Quarantine (0.111.0)

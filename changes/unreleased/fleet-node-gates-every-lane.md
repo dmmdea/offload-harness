@@ -24,7 +24,18 @@
   compose-project and media-job on a node that has not opted in) is not a credential refusal and writes no line. The journal
   cannot be grown by a caller: the throttle is keyed on the caller's address and the reason, shared by all the doors, never
   on the door or the task type (which the caller chooses), at most twenty lines are written a minute across callers, and the
-  first refusal after that minute writes one line counting the rest.
+  first refusal after that minute writes one line counting the rest. A line is the door, the caller's host and one of three
+  constant reasons and nothing else, whatever the request carried. `/fleet/health` and the jobs feed are open on purpose, so a
+  request with no bearer there writes nothing; one that presents a bearer which is not the node's writes the same line (door
+  `health` or `jobs-feed`) under the same throttle and is still answered the reduced view.
+- **Two answers can come before the `401`.** A door that is closed on the node (`compose-project` and `media-job` when the
+  node has not opted in) answers `403` before the bearer, as it always did; health already publishes whether each is open, so
+  the `403` tells a caller nothing it cannot read there. Under `fleet_ingress_guard: enforce` the guard answers a wrong content
+  type `415`, a `Host` outside the allowed names `421` and an `Origin` header `403` before any route runs; in the default `warn`
+  mode it only logs, and the `401` comes first. Both are in the docs now.
+- **Choose a long random token.** The bearer opens every lane and a node does not slow repeated wrong bearers, so
+  `docs/FLEET-NODE.md` and `docs/OPERATOR-GUIDE.md` tell the operator to generate the value with `openssl rand -hex 32`; the
+  installer and the config check accept any non-empty value, as before.
 - **Loopback stays tokenless; everything else fails closed.** A loopback node with no token serves as before, with a
   byte-identical ack and poll (pinned). A node that listens anywhere else with no token refuses every task type with `403 fleet
   lanes require fleet_auth_token on a non-loopback listener` (the status is unchanged; the sentence no longer says "agent lane"),
@@ -58,9 +69,15 @@
   gains a row. A `models[]` entry with no `path` is refused at the door as well (the runner's parser already refused it).
   Left open: a holder can still put a file of any type under `models/<class>/` (a weight file in a pickle-based format is
   code when ComfyUI loads it), and the node follows redirects from a listed host.
-- **Rollout.** Delegators first, then nodes: every fleet client already sends the bearer whenever a token is configured
-  (the previous entry pins it). The delegator change is deployed fleet-wide first; before the node change is deployed to a
-  node, `fleet_auth_token` must be present in the config its `fleet-serve` reads. A node that listens beyond loopback with no
+- **Rollout.** Delegators first, then nodes. Every fleet client in this repo sends the bearer whenever a token is configured
+  (the previous entry pins it), but a node that gains the rule refuses three kinds of caller, and they must be put right
+  first. A delegator with no `fleet_auth_token`, or a wrong one, a media-only box included (media, stt and compose-video calls
+  needed none before), gets `401` on every dispatch, poll and artifact fetch; the media client reports that as a `config`
+  defer, and the node's `/fleet/health` reaches it without the lease reason, the store and the weight-file rows, so its node
+  view degrades with no error. A delegator older than the release that added the bearer to its client is refused the same way:
+  text 0.154.0, withdraw 0.143.1, compose 0.160.0, media and stt 0.163.1, and the roster probe's token check 0.167.0. Software
+  outside this repo that sends no bearer stops working on every lane. The delegator change is deployed fleet-wide first; before
+  the node change is deployed to a node, `fleet_auth_token` must be present in the config its `fleet-serve` reads. A node that listens beyond loopback with no
   token will not start after the upgrade, so give it the token first. `setup/install.sh` takes `--token-file PATH` on a node
   install, stores the key in the node's config (readable by its owner only, handed to the `--user` account with `sudo chown`
   when that is not the installing user, never printed) and refuses, before it writes anything, to register the unit without
@@ -102,6 +119,16 @@
   refusal, counted through the journal's own tally because the throttle hides a second note; the window's summary line
   carrying no presented credential; and `gatedJob` for every task type, with a failed run-graph job hidden on the poll and the
   feed (leaving one more task type out of it turns the test red).
+  A fifth series: every door that takes a body (the chat lane, both kvslot routes, the PAIR relay, the compose-project and
+  media-job doors, the stt upload, the four queue routes with a body, and dispatch, vision and text) is sent a 20 MiB body
+  without the bearer, with a wrong one, and on a node with no token beyond loopback, and must have read none of it (reading the
+  body first in the chat, kvslot, PAIR relay, compose-project doors and the queue guard turns every one of those cases red);
+  a request whose headers and path are the caller's own text is answered with a journal line compared whole against the
+  exact shape (a mutant that appends the User-Agent, URL and X-Forwarded-For turns every door red); a wrong bearer at
+  health and the jobs feed writes one throttled line, shared with the other doors, and none when there is no bearer, the right
+  one, or no token (red before the change: 0 lines where 1 is wanted); and the bearer lint has a fixture for a client that sends
+  its first request bare and sets the bearer only on a second request under the same variable name (it goes unreported when
+  the lint stops ending a request at the next assignment of its name).
 - **Pins to confirm.** The MultiGPU pin is the documented one. The VideoHelperSuite and GGUF commits are the ones one reference
   node's checkout was at, not documented anywhere (`"pin": "unverified"` in the file); confirm them against the fleet before a
   workflow depends on them, and add a row for any other pack a workflow needs.

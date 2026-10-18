@@ -1855,13 +1855,19 @@ type, so a media dispatch, a run-graph, the legacy `stt` lane, the poll and with
 `GET /fleet/media/{name}` need the bearer on a node that has a token (pinned by `bearer_every_lane_test.go`; every refusal of a
 credential, at every door that checks one, writes one journal line through `refuseBearer`, `refuseNoToken` or `queueAuthOK`
 (pinned by `refusal_every_door_test.go`), throttled per caller address and reason, never per door, task type or any header the caller sends, pinned by
-`refusal_throttle_key_test.go`). `/fleet/health` and the jobs feed answer without it, with
+`refusal_throttle_key_test.go`; the whole line is the door, the caller's host and one of three constant reasons, pinned by
+`refusal_line_shape_test.go`; and every door that takes a body checks the bearer before it reads any of it, pinned by
+`auth_before_body_doors_test.go`). `/fleet/health` and the jobs feed answer without it, with
 their private fields withheld (`healthPayload.withoutPrivateFields`: the lease's free-text `reason`, the store steward's status,
-the weight-file rows of the image, video, animation and audio recipes; the jobs feed's `error` text). A run-graph manifest may
+the weight-file rows of the image, video, animation and audio recipes; the jobs feed's `error` text); a request to either
+that presents a bearer which is not the node's is answered the same way and writes the usual journal line (`holdsBearer`,
+door `health` or `jobs-feed`, pinned by `refusal_public_routes_test.go`), while one with no bearer writes nothing. A run-graph manifest may
 name a node pack only at a pinned repository and commit (`render/node-packs.json`, its copy `internal/mediacap/nodepacks.go`
 and `mediacap.CheckManifestNodePacks`, called by `buildRunGraph` before anything is written; the runner's satisfier refuses on
 the same table before its first git command). The rollout order is delegators first, then nodes: every client already sends the
 bearer when it has a token, and a per-package test plus a source test (`TestEveryFleetClientRequestSetsTheBearer`) keep it so.
+What a node that gains the rule refuses, the release floors of each client and the advice on the token's strength are in
+[FLEET-NODE.md](../FLEET-NODE.md#auth-every-lane-needs-the-fleet-bearer).
 
 **A remote media task never picks the node's output path, whatever the bearer says.**
 The builders in `internal/fleetnode/tasks.go` and `compose_task.go` drop a caller's `out`, and
@@ -1940,10 +1946,11 @@ sampler's last cached value, the same pattern the VRAM snapshot already uses.
 **unauthenticated for id/task/model/state/`agent`/timestamps/`wall_ms`** — metadata only, never the
 job's `payload` or its result, so there is nothing there the per-job bearer gate (`handleJob`,
 `GET /fleet/jobs/{id}`) exists to protect. Its `error` string (truncated to 200 runes) is the one
-exception: an `agent: true` row's error text can echo contract content (the goal, a tool-result
-fragment) the way a media row's never does, so when `fleet_auth_token` is configured and the request
-carries no valid bearer, `handleJobs` omits `error` on every agent row while leaving it — and every
-other field on every row, media rows included — unchanged. It exists for
+exception: a row's error text can echo contract content (the goal, a tool-result
+fragment) or a path on the node's disk, so when `fleet_auth_token` is configured and the request
+carries no valid bearer, `handleJobs` omits `error` on every row (every job is gated, agent or not) while leaving
+every other field unchanged. A bearer that is presented and is not the node's also writes the usual throttled
+journal line (door `jobs-feed`); a request with no bearer writes nothing. It exists for
 [fleet-overview](fleet-overview.md)'s cross-node JOBS feed and `fleet-ui`'s per-node job lists; a
 node that predates 0.113.0 answers this route with a permanent 404, which the poller distinguishes
 from a transient failure only by effect (it keeps the node's last-known job list either way) — see

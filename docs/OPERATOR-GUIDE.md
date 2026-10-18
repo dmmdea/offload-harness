@@ -772,7 +772,11 @@ the files), `node_lacks_media_job` (the call carries a still, a reference or a c
 `node_lacks_model` (the node's row for the family you asked for lacks a file) or `node_below_min_vram` (`--min-vram-gb N`). A node that
 is down or busy with a text job is a retryable `capacity` defer instead. `--route local` with `--node` is refused. Without
 `--model` the node renders its own default family, and the answer's `rendered_family` and `rendered_files` say which. Read a node's rows with
-`curl http://node-b:18811/fleet/health` (`media_recipes`; `bytes` -1 is a missing weight). This is the named-node release only: a
+`curl -H "Authorization: Bearer $FLEET_AUTH_TOKEN" http://node-b:18811/fleet/health` (`media_recipes`; `bytes` -1 is a missing
+weight), where `$FLEET_AUTH_TOKEN` holds the node's `fleet_auth_token`. A node that has a token withholds `media_recipes`
+(with `image_recipes`, the store and the lease's reason) from a request without the bearer: a bare `curl` answers `200` with
+the rest of the document and no `media_recipes` key, and a wrong bearer gets that same answer and leaves one line in the
+node's journal. This is the named-node release only: a
 busy lane still does not send a video, animation or audio call to another node by itself.
 
 **Adding a template.** Follow the contract in
@@ -2002,9 +2006,19 @@ jobs feed stay readable without the token, with the lease's free-text reason, th
 job's error text) left out. A run-graph manifest may name a node pack only at a pinned repository and commit
 (`render/node-packs.json`), and a model only under `models/<class>/` from an https host listed there (`model_hosts`): a token
 holder can have the node render, not run code of its choosing or write files where it chooses.
-**Roll it out in this order: every delegator first** (they already send the token whenever it is set, so this changes nothing
-for them), **then every node**, each with the same value. The delegator change is deployed fleet-wide first; before the node
-change is deployed to a node, `fleet_auth_token` must be present in the config its `fleet-serve` reads. A node that already
+**Choose a long random value** for it: it is the one secret behind every lane, and a node does not slow down repeated wrong
+bearers. Generate it with `openssl rand -hex 32` (64 hex characters) and use the output as the value of `fleet_auth_token`,
+the same on every node and every delegator; the installer and the config check accept any non-empty value, so a weak one is
+not caught.
+**Roll it out in this order: every delegator first, then every node**, each with the same value. This repo's clients already
+send the token whenever it is set, but a node that gains the rule refuses three kinds of caller, and they must be put right
+first. (1) A delegator with no `fleet_auth_token`, or a wrong one, a media-only box included (media, stt and compose-video
+calls needed none before): every dispatch, poll and artifact fetch is `401`, the media client reports that as a `config`
+defer, and the node's `/fleet/health` reaches it without the lease reason, the store and the weight-file rows, so its node view
+degrades with no error. (2) A delegator older than the release that added the bearer to its client: text 0.154.0, withdraw
+0.143.1, compose 0.160.0, media and stt 0.163.1, and the roster probe's token check 0.167.0. (3) Software outside this repo
+that sends no bearer, which stops working on every lane. Before the node change is deployed to a node, `fleet_auth_token` must
+be present in the config its `fleet-serve` reads. A node that already
 listens beyond loopback with no token will not start after the upgrade, so give it the token before it; its refusal names the
 key and the config file it read. `setup/install.sh --token-file PATH` stores the key in a Linux node's config and refuses to
 register the unit without one. `local-offload doctor`'s `fleet token` rows show a mismatch before a call is spent.
@@ -2228,7 +2242,7 @@ a terminal line under a job id of its own (a capacity defer, or the "placement r
 | Failure | Fix |
 |---|---|
 | `403 fleet lanes require fleet_auth_token on a non-loopback listener` | The node is bound beyond loopback with no token, so it refuses every lane (a current `fleet-serve` will not start in that state and says so, naming the config file it read: `refusing to serve on ...: ... fleet_auth_token is not set (the config this node read is ...)`). Set `fleet_auth_token` (same value) in that file and on the delegators, and restart `fleet-serve`. |
-| `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. `local-offload doctor` shows it before a call is spent: its `fleet token` rows ask each reachable node whether it accepts this box's token (`OK`, `MISMATCH` = the node has another token, `NO-TOKEN` = the node listens beyond loopback with none, `UNKNOWN`, `UNCHECKED` = refused or unreachable, not asked), one row per `delegate_remotes` slot, never printing a token; a box with no `fleet_auth_token` prints one `NOT SET` line instead. `/fleet/health` ignores the token, so every other row reads healthy either way. |
+| `401 unauthorized` on dispatch or poll | Token mismatch between delegator and worker configs. `local-offload doctor` shows it before a call is spent: its `fleet token` rows ask each reachable node whether it accepts this box's token (`OK`, `MISMATCH` = the node has another token, `NO-TOKEN` = the node listens beyond loopback with none, `UNKNOWN`, `UNCHECKED` = refused or unreachable, not asked), one row per `delegate_remotes` slot, never printing a token; a box with no `fleet_auth_token` prints one `NOT SET` line instead. `/fleet/health` is readable without the token (it reads the bearer only to decide which private fields to leave out), so every other row reads healthy either way. A media call that gets the `401` is a `config` defer on the delegator, and its node view of this node loses the weight-file rows and the lease reason until the token matches. |
 | `agent delegation is disabled on this box` | Set `"agent_delegation_enabled": true` in the **delegator's** config. |
 | Everything places local although a remote exists | Usually correct — idle-local always wins. Force `--route remote --pin-reason operator` to surface the gate's verdict (without a reason `remote` is a hint and the idle local seat takes what no remote can): the defer reason now names the actual cause — no remotes configured, every remote failing its health probe (each error quoted), or a healthy remote failing the gate (`agent_enabled` + `agent_seat_resident` + `output_schema` + the ctx arithmetic above). |
 | `remote "…": hostname … not allowed` | Non-tailnet URL. Loopback, a tailnet CGNAT-range address, a dotless MagicDNS name, or a hostname under a tailnet zone you listed only: `tailnet_suffix` for your own tailnet, `tailnet_suffixes` for another tailnet that shared a node in (it names that node under the SHARER's zone, ADR 0074). `doctor` prints the zones it read. |
