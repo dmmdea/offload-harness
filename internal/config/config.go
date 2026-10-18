@@ -2052,6 +2052,19 @@ type Config struct {
 	// remotes argument REPLACES this list (it does not merge) so a caller can
 	// still target one node deliberately.
 	DelegateRemotes []string `json:"delegate_remotes,omitempty"`
+	// DelegateRemoteClasses declares the DATA CLASS of a fleet node (register SF-40), keyed by the node's base URL
+	// exactly as delegate_remotes lists it (compared without case or a trailing slash). A node that is not
+	// listed is "private-ok": it may be placed any contract, which is how every node behaved before this key. A node
+	// listed as "public" is one whose operator is not this box's operator (a node shared into the tailnet by another
+	// account): it is placed public-data work only, the page digests of offload_research and the fleet-smoke probe,
+	// and never a contract that carries a context document, a diff or a goal an agent_delegate caller typed, because
+	// whatever a contract holds is readable by the node's admin. A private contract is ineligible for such a node on
+	// every placement route (auto, spread, remote, a retry, a replacement); a contract pinned route "remote" with
+	// only public nodes eligible defers, naming the rule, and the exclusion is recorded in the placement reason.
+	// Values: "public" or "private-ok"; any other value, and any key that is not a delegate_remotes entry, fails the
+	// load by name, because a typo here would otherwise read as "private-ok" and send private work out. Like
+	// delegate_remotes it is read once per process: restart the MCP server after changing it.
+	DelegateRemoteClasses map[string]string `json:"delegate_remote_classes,omitempty"`
 	// RetiredKeys are the retired config keys the FILE this value was loaded
 	// from still carries, sorted. Never serialized: it describes the file, not
 	// the settings. Load fills it from the raw bytes so `doctor` can print one
@@ -2454,6 +2467,7 @@ func Default() Config {
 		AgentDelegationEnabled:        false,             // delegator-side surfaces (agent_delegate MCP + CLI placement): opt-in
 		ToolsSchemaProfile:            ToolsProfileFull,  // full|compact: how much prose tools/list carries (compact keeps every tool and parameter, cuts descriptions)
 		DelegateRemotes:               nil,               // fleet node base URLs the delegator considers by default (tailnet-only); per-call remotes replace it
+		DelegateRemoteClasses:         nil,               // empty = every node is private-ok; {"<base>": "public"} keeps private contracts off a node shared in by another account (SF-40)
 		FleetSampler:                  "auto",            // auto|pdh|pdh-shared|global (FLEET-NODE.md)
 		PrimaryGPUUUID:                "",                // "" = largest-total headline rule; set to pin by UUID (FLEET-NODE.md)
 		UMAReserveGiB:                 0,                 // 0 = a unified-memory SoC advertises all of RAM; the rockchip-rk3588 tier seeds 3
@@ -2711,6 +2725,9 @@ func load(path string) (Config, error) {
 	if err := validateToolsSchemaProfile(c.ToolsSchemaProfile); err != nil {
 		return c, err
 	}
+	if err := validateRemoteClasses(c); err != nil {
+		return c, err
+	}
 	// A policy for an overdue lease nobody implements is refused by name: there is no automatic mode,
 	// and a typo must not read as one. (A one-shot verb goes on after this error; loadArmed has already
 	// installed the value, and an unrecognised one installs as hold.)
@@ -2767,6 +2784,69 @@ func validateAuditAllDoors(v string) error {
 		return nil
 	}
 	return fmt.Errorf("audit_all_doors: unknown mode %q (valid: \"\" or \"off\" (default: no trail unless browse asks for one), \"warn\", \"enforce\")", v)
+}
+
+// The two data classes a fleet node can be declared (delegate_remote_classes, register SF-40).
+const (
+	// RemoteClassPublic marks a node whose operator is not this box's operator: it takes public-data work only.
+	RemoteClassPublic = "public"
+	// RemoteClassPrivateOK is the class of every node that is not listed: it may be placed any contract.
+	RemoteClassPrivateOK = "private-ok"
+)
+
+// remoteClassKey reduces a node base URL to what identifies it for delegate_remote_classes: trimmed, lower case,
+// without a trailing slash. It is the same plain normalisation the roster check applies to a call's remotes
+// (delegate.rosterKey), so a node spelled one way in delegate_remotes is found under that spelling here.
+func remoteClassKey(base string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(base), "/"))
+}
+
+// RemoteIsPublic reports whether the operator declared the node at base "public" in delegate_remote_classes. It
+// fails closed: a node that is not listed is private-ok (the key is opt-in, so an unset config changes nothing),
+// but a LISTED node whose value is anything other than "private-ok" reads as public. Load refuses an unknown
+// value, so that second clause is only reachable on a Config built by hand, and there the stricter reading wins.
+func (c Config) RemoteIsPublic(base string) bool {
+	want := remoteClassKey(base)
+	if want == "" {
+		return false
+	}
+	for k, v := range c.DelegateRemoteClasses {
+		if remoteClassKey(k) != want {
+			continue
+		}
+		return strings.ToLower(strings.TrimSpace(v)) != RemoteClassPrivateOK
+	}
+	return false
+}
+
+// validateRemoteClasses refuses a delegate_remote_classes entry by name. A privacy control that fails open on a
+// typo is worse than none: a misspelled value would read as private-ok, and a key that matches no delegate_remotes
+// entry would class nothing, so the node the operator meant to fence would still be sent every private contract.
+// Both fail the load, in sorted key order so the message does not depend on map iteration.
+func validateRemoteClasses(c Config) error {
+	if len(c.DelegateRemoteClasses) == 0 {
+		return nil
+	}
+	roster := make(map[string]bool, len(c.DelegateRemotes))
+	for _, base := range c.DelegateRemotes {
+		roster[remoteClassKey(base)] = true
+	}
+	keys := make([]string, 0, len(c.DelegateRemoteClasses))
+	for k := range c.DelegateRemoteClasses {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		switch strings.ToLower(strings.TrimSpace(c.DelegateRemoteClasses[k])) {
+		case RemoteClassPublic, RemoteClassPrivateOK:
+		default:
+			return fmt.Errorf("delegate_remote_classes[%q]: unknown class %q (valid: %q, a node shared in by another account that takes public-data work only, or %q, the class of a node that is not listed)", RedactBase(k), c.DelegateRemoteClasses[k], RemoteClassPublic, RemoteClassPrivateOK)
+		}
+		if remoteClassKey(k) == "" || !roster[remoteClassKey(k)] {
+			return fmt.Errorf("delegate_remote_classes[%q] is not a delegate_remotes entry, so it would class no node and the node it was meant for would still be placed private contracts; spell it as delegate_remotes does (case and a trailing slash are ignored)", RedactBase(k))
+		}
+	}
+	return nil
 }
 
 // The two tools_schema_profile values.

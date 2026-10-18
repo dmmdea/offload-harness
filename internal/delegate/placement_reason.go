@@ -5,7 +5,7 @@
 // wrongly passed over" without re-deriving the gate by hand.
 //
 // Vocabulary: chosen | queue | backlog | cap | slow | lease | cold | probe |
-// hop | unfit(ctx) | noschema | layer. Each word names the FIRST reason (in the
+// private | hop | unfit(ctx) | noschema | layer. Each word names the FIRST reason (in the
 // EXACT order gate.go's eligibilityVerdict checks it — see that function's
 // own doc; the two are read-only narration over ONE predicate sequence and
 // cannot diverge) a node is not the one running the subtask:
@@ -14,6 +14,10 @@
 //	           cached roster, OR the node's health probe itself failed —
 //	           three shapes of "this node did not prove it can serve the
 //	           seat", the third one carrying the dial/cache detail
+//	private    SF-40: the node is declared public in delegate_remote_classes and
+//	           the contract is not public-data work (dataclass.go) - the
+//	           detail names the door and the context documents that made it
+//	           private
 //	lease      leaseFenceReason: an exclusive or draining hold, or a busy
 //	           lease that is not a plain text reservation (fenced — W-14)
 //	noschema   the CONTRACT carries no output_schema — a subtask-level fact,

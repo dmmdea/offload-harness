@@ -357,6 +357,7 @@
   "agent_delegation_enabled": false,
   "tools_schema_profile": "full",
   "delegate_remotes": null,
+  "delegate_remote_classes": null,
   "fleet_sampler": "auto",
   "primary_gpu_uuid": "",
   "uma_reserve_gib": 0,
