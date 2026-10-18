@@ -2019,10 +2019,11 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   and whether the page-cache part is memory the OS can drop is not verified here. So with the key unset the warm-back is
   admitted against a figure below the incident's, and a node that runs a seat sets `agent_seat_host_ram_gib` from its own
   measurement before it relies on the check.
-* **The warm passes the grant's admission.** The seat's footprint, taken for both quantities, plus what the *other* live
-  leases have yet to load, must leave the headroom of the available RAM and stay under the commit limit less the headroom
-  (`Manager.HostRAMCheckWithout`: the same function
-  as the grant, with the lease being released left out, because its command has exited and it loads nothing more). A host
+* **The warm passes the grant's admission.** The seat's footprint, taken for both quantities and with no commit stated, plus
+  what the *other* live leases have yet to load, must leave the headroom of the available RAM and keep the commit charge under
+  physical RAM less the headroom: the warm-back states no commit, so it is held to physical RAM and not to the commit limit
+  (`TestAWarmBackIsHeldToPhysicalRAMAndNotToTheCommitLimit`). It is `Manager.HostRAMCheckWithout`, the same function
+  as the grant, with the lease being released left out, because its command has exited and it loads nothing more. A host
   that reads NEAR or OVER therefore never warms (`TestAWarmBackIsRefusedWhenTheHostCannotTakeTheSeatAndStaysOwed`,
   `TestAWarmBackDoesNotCountTheLeaseItIsReleasing`).
 * **Never while a lane streams.** Any other live lease that declared host RAM refuses the warm outright, whatever the

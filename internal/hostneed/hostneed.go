@@ -1,6 +1,6 @@
 // Package hostneed decides how much host RAM a GPU lease DECLARES (gpulease.Options.HostRAMGiB),
-// the number the grant admits against the available memory (and, taken as the commit unless the caller states one, against the
-// commit limit): gpuprobe.HostRAMAdmitsLoad.
+// the number the grant admits against the available memory (and, taken as the commit unless the caller states one, against
+// physical RAM less the headroom; a commit the caller states is held to the commit limit): gpuprobe.HostRAMAdmitsLoad.
 //
 // THE PRINCIPLE (AGENTS.md): the cards do the inference; RAM is overflow only. A render whose weights
 // all sit on the card needs no host RAM worth declaring. One whose weights do not fit the card
