@@ -6,11 +6,12 @@ import (
 	"testing"
 )
 
-// TestCompactKeepsTheRunTemplateRules: offload_run_template is the tool a caller reaches for to run a workflow template, and three of
+// TestCompactKeepsTheRunTemplateRules: offload_run_template is the tool a caller reaches for to run a workflow template, and four of
 // its sentences are the rules it is run under, none of which the first sentence says: what a run is allowed for and what a refusal
 // looks like (a paid-API template is a deferral with its class, never a cloud fallback; a licence that is not permissive is refused with
-// its class), that it never downloads a model, and that it stays on this machine's lane (a template that reads input files is never sent
-// to the fleet). A compact list that cut them would leave a caller to guess why a call was refused and to retry it elsewhere. Each pin
+// its class), that it never downloads a model, that it stays on this machine's lane (a template that reads input files is never sent
+// to the fleet), and that a prompt embedding the harness cannot verify is refused under a class of its own (embedding_unverified), which is
+// not a missing file. A compact list that cut them would leave a caller to guess why a call was refused and to retry it elsewhere. Each pin
 // is looked up in the full description first, so a rewording fails loudly.
 func TestCompactKeepsTheRunTemplateRules(t *testing.T) {
 	var full, compact string
@@ -32,6 +33,7 @@ func TestCompactKeepsTheRunTemplateRules(t *testing.T) {
 		"is refused with its class",
 		"It never downloads a model",
 		"is never sent to the fleet",
+		"embedding_unverified",
 	} {
 		if !strings.Contains(full, pin) {
 			t.Errorf("the pinned phrase is not in the full description any more (reworded?): %q", pin)
