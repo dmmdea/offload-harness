@@ -75,7 +75,7 @@ func cookieShapes() []cookieShape {
 		{"tab in a bare value", "a=x\ty", nil, false},
 		{"white space in the first characters of a quoted value", `e="ab cdefghijklmnopqrstuvwxyz"`, []string{"cdefghijklmnopqrstuvwxyz"}, false},
 	}
-	return append(append(shapes, reviewShapes()...), edgeShapes()...)
+	return append(append(append(shapes, reviewShapes()...), edgeShapes()...), round3Shapes()...)
 }
 
 // edgeShapes are values at the edge of the count that starts a match: 12 characters with no white space from the
@@ -226,8 +226,8 @@ var baseCookieWrappers = []cookieWrapper{
 	}},
 }
 
-// cookieWrappers are the base wrappers and the ones the review of the whole-span class added (reviewWrappers).
-var cookieWrappers = append(append([]cookieWrapper{}, baseCookieWrappers...), reviewWrappers()...)
+// cookieWrappers are the base wrappers and the ones the reviews of the whole-span class added (reviewWrappers, round3Wrappers).
+var cookieWrappers = append(append(append([]cookieWrapper{}, baseCookieWrappers...), reviewWrappers()...), round3Wrappers()...)
 
 type cookieCase struct {
 	wrapper string
