@@ -131,7 +131,7 @@ func TestHostVerdict(t *testing.T) {
 		{"nothing available is OVER", HostMemory{PhysicalGiB: 100, AvailableGiB: 0, CommitUsedGiB: 20, CommitLimitGiB: 160}, 8, HostOver},
 		{"a soft commit limit is not a line: commit between it and physical RAM reads OK", HostMemory{PhysicalGiB: 200, AvailableGiB: 60, CommitUsedGiB: 170, CommitLimitGiB: 160, CommitLimitSoft: true}, 8, HostOK},
 		{"a soft commit limit leaves physical RAM a line: commit above it is OVER", HostMemory{PhysicalGiB: 100, AvailableGiB: 60, CommitUsedGiB: 200, CommitLimitGiB: 160, CommitLimitSoft: true}, 8, HostOver},
-		{"a soft commit limit leaves the available line", HostMemory{PhysicalGiB: 100, AvailableGiB: 5, CommitUsedGiB: 200, CommitLimitGiB: 160, CommitLimitSoft: true}, 8, HostNear},
+		{"a soft commit limit leaves the available line", HostMemory{PhysicalGiB: 100, AvailableGiB: 5, CommitUsedGiB: 50, CommitLimitGiB: 160, CommitLimitSoft: true}, 8, HostNear},
 		{"no reading is unknown", HostMemory{}, 8, HostUnknown},
 	}
 	for _, c := range cases {

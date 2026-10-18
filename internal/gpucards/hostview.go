@@ -14,10 +14,11 @@ import (
 // three surfaces build it here, the way they share the card rows, so a session reading one cannot be told
 // something the other contradicts.
 //
-// The word judges the two lines the grant applies (gpuprobe.HostMemory.Verdict): the available physical
-// memory, and the commit limit where the OS enforces one. NEAR is inside the headroom of either, so a lease
-// that declares any host RAM waits; OVER is one of them gone (nothing available, or the commit charge at the
-// limit). It is a statement about room, not about paging: whether the box is paging now needs the page-file
+// The word judges the lines the grant applies (gpuprobe.HostMemory.Verdict): the available physical
+// memory, the commit charge against physical RAM (the line a commit nobody stated is held to), and the commit limit
+// where the OS enforces one. NEAR is inside the headroom of any of them, so a lease that declares any host RAM waits;
+// OVER is one of them gone (nothing available, the commit charge above physical RAM, or at the limit). It is a
+// statement about room, not about paging: whether the box is paging now needs the page-file
 // growth or the pages-out rate, which no surface here reads, so none of them says it. The grant's own rule
 // (gpuprobe.HostRAMAdmitsLoad) is stricter for the load it is asked to admit (it holds a new declaring lease while
 // its need plus what running leases have yet to load would pass either line less the headroom), but it
@@ -93,8 +94,11 @@ func (v HostView) Why() string {
 	if v.Mem.AvailableGiB < v.HeadroomGiB {
 		parts = append(parts, fmt.Sprintf("%.1f of %.1f GiB physical RAM is available", v.Mem.AvailableGiB, v.Mem.PhysicalGiB))
 	}
-	if v.commitEnforced() && v.Mem.CommitUsedGiB > v.Mem.CommitLimitGiB-v.HeadroomGiB {
+	switch {
+	case v.commitEnforced() && v.Mem.CommitUsedGiB > v.Mem.CommitLimitGiB-v.HeadroomGiB:
 		parts = append(parts, fmt.Sprintf("committed %.1f of the %.1f GiB commit limit", v.Mem.CommitUsedGiB, v.Mem.CommitLimitGiB))
+	case v.Mem.CommitUsedGiB > v.Mem.PhysicalGiB-v.HeadroomGiB:
+		parts = append(parts, fmt.Sprintf("committed %.1f of %.1f GiB physical RAM", v.Mem.CommitUsedGiB, v.Mem.PhysicalGiB))
 	}
 	return fmt.Sprintf("%s, %.1f GiB headroom", strings.Join(parts, "; "), v.HeadroomGiB)
 }
@@ -102,7 +106,7 @@ func (v HostView) Why() string {
 func (v HostView) overNote() string {
 	return fmt.Sprintf("%s. This reading cannot say whether the box is paging now; "+
 		"a lease that declares host RAM waits until there is room again (the available RAM less its need and the %.1f GiB headroom, "+
-		"and where the OS enforces a commit limit the commit charge under that limit less the headroom); "+
+		"and the commit charge plus its commit under physical RAM less the headroom, or, for a commit it states, under the commit limit less the headroom where the OS enforces one); "+
 		"end a lease or stop a kept ComfyUI instance to free it", v.Why(), v.HeadroomGiB)
 }
 

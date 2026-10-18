@@ -120,24 +120,26 @@ func (l HostLoad) Declares() bool { return l.TouchGiB > 0 || l.CommitGiB > 0 }
 type HostVerdict string
 
 const (
-	// HostOK: both the available memory and (where the OS enforces one) the room under the commit limit exceed the headroom,
-	// so a lease that declares host RAM can be admitted if it is small enough.
+	// HostOK: the available memory, the room under physical RAM for the commit charge and (where the OS enforces one) the room
+	// under the commit limit all exceed the headroom, so a lease that declares host RAM can be admitted if it is small enough.
 	HostOK HostVerdict = "OK"
 	// HostNear: one of them is inside the headroom, so a lease that declares any host RAM waits.
 	HostNear HostVerdict = "NEAR"
-	// HostOver: one of them is gone: no memory is available, or the commit charge has reached a commit limit the OS enforces
-	// (allocations by other processes can fail). Whether the box is paging NOW is not something this reading can say (that
-	// takes page-file growth or the pages-out rate), so nothing built on the verdict claims it.
+	// HostOver: one of them is gone: no memory is available, or the commit charge is above physical RAM (the line a commit nobody
+	// stated is held to), or it has reached a commit limit the OS enforces (allocations by other processes can fail). Whether the
+	// box is paging NOW is not something this reading can say (that takes page-file growth or the pages-out rate), so nothing
+	// built on the verdict claims it.
 	HostOver HostVerdict = "OVER"
 	// HostUnknown: the reading could not be taken.
 	HostUnknown HostVerdict = "unknown"
 )
 
-// Verdict judges a reading against the configured headroom, by the same two lines HostRAMAdmitsLoad applies: the available
-// physical memory, and the commit limit where the OS enforces one. They are the guard's own conservative lines for the house
-// rule (RAM is overflow only and never makes the box unstable), chosen 2026-10-09 and not measured: a definition of "too
-// little room", not a reading of paging. (Until the two-condition rule it compared the commit charge to physical RAM, a line
-// the grant no longer applies.)
+// Verdict judges a reading against the configured headroom, by the lines HostRAMAdmitsLoad applies: the available physical
+// memory, the commit charge against physical RAM (the line a commit nobody stated is held to, on every reading), and the commit
+// limit where the OS enforces one. OVER is the commit charge above physical RAM, or nothing available, or the limit reached; NEAR
+// is within the headroom of any of them. They are the guard's own conservative lines for the house rule (RAM is overflow only and
+// never makes the box unstable), chosen 2026-10-09 and not measured: a definition of "too little room", not a reading of paging.
+// A reading from a platform whose limit is enforced but carries none is unknown (fail closed).
 func (m HostMemory) Verdict(headroomGiB float64) HostVerdict {
 	if m.PhysicalGiB <= 0 || m.commitLimitMissing() {
 		return HostUnknown
@@ -147,9 +149,9 @@ func (m HostMemory) Verdict(headroomGiB float64) HostVerdict {
 	}
 	hard := !m.CommitLimitSoft && m.CommitLimitGiB > 0
 	switch {
-	case m.AvailableGiB <= 0, hard && m.CommitUsedGiB >= m.CommitLimitGiB:
+	case m.AvailableGiB <= 0, m.CommitUsedGiB > m.PhysicalGiB, hard && m.CommitUsedGiB >= m.CommitLimitGiB:
 		return HostOver
-	case m.AvailableGiB < headroomGiB, hard && m.CommitUsedGiB > m.CommitLimitGiB-headroomGiB:
+	case m.AvailableGiB < headroomGiB, m.CommitUsedGiB > m.PhysicalGiB-headroomGiB, hard && m.CommitUsedGiB > m.CommitLimitGiB-headroomGiB:
 		return HostNear
 	}
 	return HostOK
