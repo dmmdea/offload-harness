@@ -31,8 +31,10 @@ import (
 //     belongs to the next field (the next key of a JSON object, the next header line).
 //   - A line break ends the reach of a keyword once a word has been read since it: the keyword's own line holds its value,
 //     and the next line is the next header. When only punctuation and white space stand between the keyword and the line
-//     break (`Set-Cookie:`, `"Authorization": [`), the value is on the next line, as a YAML list and a pretty-printed JSON
-//     document put it, and the reach goes on. A JSON escape of a line break (a backslash run and an n or an r) is a line
+//     break, and the last of it is a colon, an equals sign, an opening bracket or brace, a comma or a dash
+//     (`Set-Cookie:`, `"Authorization": [`, `"name": "Cookie",`), the value is on the next line, as a YAML list and a
+//     pretty-printed JSON document put it, and the reach goes on; a keyword at the end of a closed call or of a line of
+//     prose has no value on the next line. A JSON escape of a line break (a backslash run and an n or an r) is a line
 //     break.
 //   - A run of 11 or fewer characters, or one that starts beyond the reach, is no value.
 //

@@ -109,3 +109,29 @@ func TestHarvestKeepsATraceThatNamesAHeaderAndNoValue(t *testing.T) {
 		t.Fatalf("want the trace kept: err %v, %d entries, skips %+v", err, len(entries), stats.Skipped)
 	}
 }
+
+// TestResidualFiresWhenAYamlListContinuesBehindARedactedHeader: the cookie class redacts a YAML block list up to the quote that
+// closes its first item, and the header name goes with it, so the items behind it have no keyword in front of them any more.
+// The gate sees the list continue behind the placeholder.
+func TestResidualFiresWhenAYamlListContinuesBehindARedactedHeader(t *testing.T) {
+	a, b := tailFake(7231, 22, tailAlnum), tailFake(7232, 22, tailAlnum)
+	for name, text := range map[string]string{
+		"single quotes": spanSetCk + ":\n  - 'a=" + a + "; Path=/'\n  - 'b=" + b + "'\n",
+		"double quotes": "headers:\n  " + spanCk + ":\n    - \"sid=" + a + "\"\n    - \"b=" + b + "\"\n",
+		"in Args":       reviewJSON(t, map[string]string{"cmd": spanSetCk + ":\n  - 'a=" + a + "; Path=/'\n  - 'b=" + b + "'\n"}),
+	} {
+		r := NewRedactor()
+		out := r.Redact(text)
+		if _, ok := anyRun(a, out, 8); ok {
+			t.Errorf("%s: the first item is still in %q", name, out)
+		}
+		res := r.Residual(out)
+		fired := false
+		for _, c := range res {
+			fired = fired || c == piishape.KeywordRunClass
+		}
+		if _, leaked := anyRun(b, out, 8); leaked && !fired {
+			t.Errorf("%s: the second item is still in %q and the residual gate is quiet (%v)", name, out, res)
+		}
+	}
+}

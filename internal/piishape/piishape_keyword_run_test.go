@@ -159,3 +159,33 @@ func TestKeywordRunCrossesALineBreakOnlyWhereNothingStandsBehindTheKeyword(t *te
 		}
 	}
 }
+
+// TestKeywordRunSeesAListThatContinuesBehindARedactedHeader: a YAML block list is redacted up to the quote that closes its
+// first item, and the header name goes with that item. The items behind it are a list that continues behind the placeholder
+// of a cookie header, and the check reads them as it reads a keyword.
+func TestKeywordRunSeesAListThatContinuesBehindARedactedHeader(t *testing.T) {
+	v := runValue(9151, 22)
+	for name, text := range map[string]string{
+		"single quotes":      "[redacted-cookie-header-1]'\n  - 'b=" + v + "'\n",
+		"double quotes":      "headers:\n  [redacted-cookie-header-2]\"\n    - \"b=" + v + "\"\n",
+		"flush dash":         "[redacted-cookie-header-1]'\n- " + v + "\n",
+		"crlf":               "[redacted-cookie-header-1]'\r\n  - 'b=" + v + "'\r\n",
+		"escaped line break": `{\"cmd\":\"[redacted-cookie-header-1]'\n  - 'b=` + v + `'\n\"}`,
+		"no closing quote":   "[redacted-cookie-header-1]\n  - b=" + v + "\n",
+	} {
+		if !KeywordRun(text) {
+			t.Errorf("%s: the check does not fire on %q", name, text)
+		}
+	}
+	for name, text := range map[string]string{
+		"a short item":        "[redacted-cookie-header-1]'\n  - 'b=short'\n",
+		"a header line":       "[redacted-cookie-header-1]\nContent-Type: application/json\n",
+		"a bullet of prose":   "[redacted-cookie-header-1]\n- the cookie is gone\n",
+		"another class":       "[redacted-api-key-assignment-1]'\n  - 'b=" + v + "'\n",
+		"a dash without item": "[redacted-cookie-header-1]\n---\n" + v,
+	} {
+		if KeywordRun(text) {
+			t.Errorf("%s: the check fires on %q", name, text)
+		}
+	}
+}
