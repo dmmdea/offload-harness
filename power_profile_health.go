@@ -37,11 +37,11 @@ func powerProfileHealthOf(r powerProfileReading) *fleetnode.PowerProfileHealth {
 		h.Reason = "bad_state"
 	case powerNoSchema, powerOtherSchema:
 		h.Reason = "bad_schema"
-	case powerNotDue:
-		h.Reason = "not_due"
 	default:
 		h.AppliedAt = r.ts.UTC().Format(time.RFC3339)
 		switch r.kind {
+		case powerNotDue:
+			h.Reason = "not_due"
 		case powerStaleBoot:
 			h.State, h.Reason = fleetnode.PowerProfileSkipped, "stale_boot"
 		case powerDryRun:
