@@ -136,3 +136,56 @@ func TestAnUnreadableRecordWhoseKeeperIsGoneIsStillDebris(t *testing.T) {
 		})
 	}
 }
+
+// The same holds for a whole-node lease, whose record is meta.json. Its keeper cannot name the epoch of the record it cannot read, so it
+// looks at every heartbeat in the lease directory (keeperEvidence, epoch 0), and that is a LISTING of the directory. A heartbeat whose
+// rename is installing it has its live name absent from the listing and only its staged file in it, so a scan that skips staged names
+// finds no heartbeat at all, and reads the holder as gone. A listing taken in that instant must be told as unknown, as a launch marker's is
+// (tree.go).
+func TestAnUnreadableWholeNodeRecordWhoseHeartbeatIsMidRenameIsHeldAndNotSwept(t *testing.T) {
+	cases := []struct {
+		name    string
+		arrange func(t *testing.T, m *Manager, hb string)
+	}{
+		{"the heartbeat is mid-rename: its live name is not listed and its staged file stands in its place", func(t *testing.T, m *Manager, hb string) { inFlight(t, hb) }},
+		{"the heartbeat is listed but can be neither read nor examined", func(t *testing.T, m *Manager, hb string) {
+			withHeartbeatFaults(t, errHBBoom, errHBBoom)
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			m := scopedRealClock(t)
+			l, err := m.TryAcquire(ClassMedia, Options{Reason: "film", TTL: time.Hour})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = l.Release() })
+			if err := l.Renew(); err != nil {
+				t.Fatal(err)
+			}
+			rec := m.metaPath()
+			ageFile(t, rec, 10*time.Minute) // past the heartbeat TTL and the grace of a claim in progress: the record says nothing
+			restore := UseReadFault(func(p string) error {
+				if p == rec {
+					return &os.PathError{Op: "open", Path: p, Err: os.ErrPermission}
+				}
+				return nil
+			})
+			t.Cleanup(restore)
+			c.arrange(t, m, m.heartbeatPath(l.Epoch()))
+
+			other := asPID(m, os.Getpid()+1)
+			if w, werr := other.TryAcquire(ClassMedia, Options{Reason: "second", TTL: time.Hour}); werr == nil {
+				_ = w.Release()
+				t.Errorf("a second whole-node lease (epoch %d) was granted over a live whole-node holder (epoch %d) whose record cannot be read, while %s", w.Epoch(), l.Epoch(), c.name)
+			}
+			if _, serr := os.Stat(rec); serr != nil {
+				t.Errorf("the record of a live whole-node holder was swept while %s: %v", c.name, serr)
+			}
+			if cl, cerr := other.TryAcquire(ClassMedia, Options{Reason: "card", TTL: time.Hour, Devices: []string{card0}}); cerr == nil {
+				_ = cl.Release()
+				t.Errorf("a card lease (epoch %d) was granted over a live whole-node holder (epoch %d) whose record cannot be read, while %s", cl.Epoch(), l.Epoch(), c.name)
+			}
+		})
+	}
+}
