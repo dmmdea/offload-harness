@@ -55,10 +55,20 @@ const keywordRunLength = 12
 // redactionMarkerRe finds a placeholder a redactor wrote.
 var redactionMarkerRe = regexp.MustCompile(redactedMarker)
 
+// listContinuationRe finds a list that goes on behind the placeholder of a cookie header: a YAML block list is redacted up
+// to the quote that closes its first item, and the header name goes with the item, so the items behind it (a line break,
+// indentation, a dash, an optional quote and a long run, the line break raw or as a JSON escape) have no keyword in front
+// of them any more.
+var listContinuationRe = regexp.MustCompile(`\[redacted-cookie-header-[0-9]+\]['"]?[ \t]*(?:\r?\n|\\+n)[ \t]*-[ \t]+['"]?[^\s'",;\\]{12}`)
+
 // KeywordRun reports whether s holds a credential keyword followed, within KeywordRunReach characters, by a long value
-// run (see above). A placeholder is not read and ends the reach of the keyword in front of it.
+// run (see above), or a list that goes on behind the placeholder of a cookie header. A placeholder is not read and ends
+// the reach of the keyword in front of it.
 func KeywordRun(s string) bool {
 	if strings.Contains(s, "[redacted-") {
+		if listContinuationRe.MatchString(s) {
+			return true
+		}
 		s = redactionMarkerRe.ReplaceAllString(s, "\x00")
 	}
 	spans := keywordSpans(asciiLower(s))
