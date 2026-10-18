@@ -34,6 +34,7 @@
   "fleet_ingress_guard": "",
   "agent_read_floor": "",
   "audit_chain": false,
+  "agent_evidence_reducer": false,
   "pair_workloads_enabled": false,
   "pair_workloads_endpoint": "http://127.0.0.1:14324/v1/workloads/events",
   "pair_node_info_url": "",

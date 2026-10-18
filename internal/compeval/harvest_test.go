@@ -358,6 +358,24 @@ func TestHarvestRefusesLogCollapsedTranscripts(t *testing.T) {
 	}
 }
 
+// A receipt the evidence reducer wrote has lost the raw output it summarised: a trace
+// holding one is refused, like any other body a ladder or a reducer already shortened.
+func TestHarvestRefusesEvidenceReceiptTranscripts(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceFile(t, dir, "receipt.json", sampleTrace("r", "[evidence-receipt: original 9000 chars, 300 lines; each quote below was matched]\nexit=1\n- a test failed\n  > FAIL"))
+	writeTraceFile(t, dir, "clean.json", sampleTrace("c", "raw payload"))
+	entries, stats, err := HarvestTraces(dir, HarvestOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].ID != "hv-clean" {
+		t.Fatalf("expected only the clean trace, got %+v", entries)
+	}
+	if stats.PreCompacted != 1 {
+		t.Fatalf("pre_compacted count %d, want 1", stats.PreCompacted)
+	}
+}
+
 // A malformed trace (tool turn without a tool_call_id) becomes a per-file skip
 // note — never a whole-harvest abort at write time.
 func TestHarvestSkipsStructurallyInvalidTraces(t *testing.T) {
@@ -491,5 +509,28 @@ func TestHarvestedCorpusReplays(t *testing.T) {
 	}
 	if rep.Entries[0].Ratio >= 1.0 {
 		t.Fatalf("60%%-budget replay should compress a long log payload, ratio=%v", rep.Entries[0].Ratio)
+	}
+}
+
+// Ordinary source code assigns to names that hold the word token, and the credential class takes
+// the right-hand side as a value. A later line that merely reuses a call from that value then
+// looks like a leaked tail. That must cost the one trace, with a note, and never the harvest.
+func TestHarvestSkipsATraceWhoseTailCheckTripsAndKeepsTheRest(t *testing.T) {
+	dir := t.TempDir()
+	writeTraceFile(t, dir, "a.json", sampleTrace("a",
+		"internal/x.go:12: "+"tok"+"en = strings.TrimSpace(line)\ninternal/y.go:5: s := strings.TrimSpace(other)\n"))
+	writeTraceFile(t, dir, "b.json", sampleTrace("b", "2026-07-24T10:00:01 INFO starting\nexit status 1"))
+	entries, stats, err := HarvestTraces(dir, HarvestOpts{})
+	if err != nil {
+		t.Fatalf("one trace aborted the whole harvest: %v", err)
+	}
+	if len(entries) != 1 || entries[0].ID != "hv-b" || stats.Harvested != 1 {
+		t.Fatalf("want only trace b harvested, got %d entries, stats %+v", len(entries), stats)
+	}
+	if len(stats.Skipped) != 1 || stats.Skipped[0].File != "a.json" || !strings.Contains(stats.Skipped[0].Reason, "credential value") {
+		t.Fatalf("want a.json skipped with a credential-value note, got %+v", stats.Skipped)
+	}
+	if strings.Contains(stats.Skipped[0].Reason, "TrimSpace") {
+		t.Errorf("the note echoes trace text: %q", stats.Skipped[0].Reason)
 	}
 }

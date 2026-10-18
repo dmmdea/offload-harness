@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
+	"github.com/dmmdea/offload-harness/internal/piishape"
 )
 
 // TraceRecord mirrors cmd/local-agent's on-disk trace shape: record fields are
@@ -102,27 +103,447 @@ type redactor struct {
 	assigned map[string]string // class \x00 matched-text → placeholder
 	counts   map[string]int    // class → next placeholder index
 	Hits     map[string]int    // class → total substitutions (stats)
+	tails    map[string]bool   // every tailWindow-byte window of every credential value replaced so far
 }
 
 func newRedactor() *redactor {
-	return &redactor{assigned: map[string]string{}, counts: map[string]int{}, Hits: map[string]int{}}
+	return &redactor{assigned: map[string]string{}, counts: map[string]int{}, Hits: map[string]int{}, tails: map[string]bool{}}
 }
 
-func (r *redactor) redact(s string) string {
-	for _, p := range redactPatterns {
-		s = p.re.ReplaceAllStringFunc(s, func(m string) string {
-			r.Hits[p.name]++
-			key := p.name + "\x00" + m
-			if ph, ok := r.assigned[key]; ok {
-				return ph
+// tailWindow is the length of a credential value's piece that must not survive redaction.
+const tailWindow = 12
+
+// tailClasses are the classes whose matches are credential values. Email and private-key header
+// text are left out: a piece of an address (its domain) or of a PEM header is ordinary text
+// elsewhere, so a window of it would refuse harvests that hold no secret.
+var tailClasses = map[string]bool{
+	"bearer-token": true, "api-key-assignment": true, "aws-access-key": true,
+	"github-token": true, "provider-key": true, "jwt": true,
+	"basic-auth": true, "auth-field": true, "cookie-header": true,
+}
+
+// placeholderRe finds an earlier substitution inside a later class's match.
+var placeholderRe = regexp.MustCompile(`\[redacted-[a-z-]+-[0-9]+\]`)
+
+// credentialValues are the secret parts of a match: the text after = or : for an assignment (the key
+// name is kept in the output and is not a secret), the text after the word for a bearer token, the
+// whole match for the bare-key classes; for a Basic header and a registry auth field the encoded
+// value, and for a cookie header every long cookie value on the line.
+func credentialValues(class, m string) []string {
+	switch class {
+	case "api-key-assignment":
+		// The value is what the class itself took as the value: the body of a quoted literal, which may hold
+		// a space, a comma, a semicolon or an ampersand, or the unquoted value. Remembering the type
+		// annotation or the call in front of a quoted literal would make ordinary code that shares it look
+		// like a leftover.
+		if v := piishape.AssignmentValue(m); v != "" {
+			return []string{v}
+		}
+		// Not a whole class match (a caller passed a piece): the value follows the last character that
+		// cannot be part of an unquoted one; NAME=value has none, and the value then follows the first =
+		// or :.
+		if i := strings.LastIndexAny(m, " \t\r\n\f'\",;&\\\x1b"); i >= 0 {
+			return []string{m[i+1:]}
+		}
+		if i := strings.IndexAny(m, "=:"); i >= 0 {
+			return []string{strings.TrimLeft(m[i+1:], " \t\n\f\r'\"\\")}
+		}
+	case "auth-field":
+		if i := strings.IndexAny(m, "=:"); i >= 0 {
+			return []string{strings.TrimLeft(m[i+1:], " \t\n\f\r'\"\\")}
+		}
+	case "basic-auth":
+		if f := strings.Fields(m); len(f) > 0 {
+			return []string{f[len(f)-1]}
+		}
+	case "cookie-header":
+		return cookieValues(m)
+	case "bearer-token":
+		if f := strings.Fields(m); len(f) > 0 {
+			return []string{f[len(f)-1]}
+		}
+	}
+	return []string{m}
+}
+
+// cookieAttributes are the Set-Cookie attributes that carry a long value which is ordinary text
+// (a domain, a path, an expiry): they are not remembered, or a harvest that names the same domain
+// elsewhere would be refused. (The values of SameSite, Secure and HttpOnly are at most six characters.)
+var cookieAttributes = map[string]bool{"domain": true, "path": true, "expires": true, "max-age": true}
+
+// cookieNameBefore is the cookie name that stands in front of the equals sign at i: the run of characters
+// back from it that no delimiter of a header, a list or a quoted string breaks.
+func cookieNameBefore(m string, i int) string {
+	j := i
+	for j > 0 && !strings.ContainsRune(" \t\r\n'\",;&\\:[]{}()<>", rune(m[j-1])) {
+		j--
+	}
+	return m[j:i]
+}
+
+// cookieQuoteCloses reports whether a quote that has k backslashes in front of it closes a quoted value that
+// was opened by a quote with b backslashes. The closing quote carries b; a quote inside the value carries twice
+// as many plus one, and an escaped backslash inside the value adds 2b+2 more, so only a run of b plus a
+// multiple of 2b+2 closes it. (A run shorter than b leaves a remainder that is never zero.)
+func cookieQuoteCloses(k, b int) bool { return (k-b)%(2*b+2) == 0 }
+
+// cookieEscapeMax is the longest backslash run that is the escape of a bare value (a unicode escape in text that was
+// escaped four times has sixteen); the class stops at a longer one.
+const cookieEscapeMax = 16
+
+// cookieBareEscapeAt is the length of the escape that starts at q, a backslash run and the character it escapes,
+// when the class takes it into an unquoted value, and 0 when it does not: a quote closes the string the header
+// sits in, and the escape of a line break (an n or an r) ends the line.
+func cookieBareEscapeAt(m string, q int) int {
+	r := 0
+	for q+r < len(m) && m[q+r] == '\\' {
+		r++
+	}
+	if r == 0 || r > cookieEscapeMax || q+r >= len(m) || strings.IndexByte("\"'\r\nnr", m[q+r]) >= 0 {
+		return 0
+	}
+	return r + 1
+}
+
+// cookieValueAfter reads the value that starts at i (just after an equals sign) and returns it, as it stands in the
+// text, and the index where it ends. A value that opens with a double quote and any number of backslashes is the
+// text between that quote and the quote that closes it at that level, whatever stands inside (a space, an
+// apostrophe, an ampersand, a comma, a semicolon, a tab, a shell escape, an HTML escape, a line break), or up to the
+// end of the span when the quote is never closed; the quotes are not part of the value. A line break does not end a
+// quoted value, because a value that is open at one is not finished (the class decides how far such a span goes, and
+// this reads what it was given). A bare value runs to the first space, quote, comma, semicolon or ampersand, and to
+// a backslash that does not begin an escape the class takes into a bare value (a shell escape, a unicode escape).
+func cookieValueAfter(m string, i int) (string, int) {
+	b := 0
+	for i+b < len(m) && m[i+b] == '\\' {
+		b++
+	}
+	if i+b < len(m) && m[i+b] == '"' {
+		p := i + b + 1
+		for q := p; q < len(m); q++ {
+			if m[q] != '"' {
+				continue
 			}
-			r.counts[p.name]++
-			ph := fmt.Sprintf("[redacted-%s-%d]", p.name, r.counts[p.name])
-			r.assigned[key] = ph
-			return ph
-		})
+			// The run of backslashes in front of the quote stops at the opening quote, which is not one.
+			k := 0
+			for m[q-1-k] == '\\' {
+				k++
+			}
+			if cookieQuoteCloses(k, b) {
+				// The b backslashes in front of the quote belong to the closing quote, not to the value.
+				return m[p : q-b], q + 1
+			}
+		}
+		return m[p:], len(m)
+	}
+	q := i
+	for q < len(m) {
+		if m[q] == '\\' {
+			n := cookieBareEscapeAt(m, q)
+			if n == 0 {
+				break
+			}
+			q += n
+			continue
+		}
+		if strings.IndexByte(" \t\r\n'\",;&", m[q]) >= 0 {
+			break
+		}
+		q++
+	}
+	return m[i:q], q
+}
+
+// cookieValues are all the values of 12 or more characters in a cookie span, as they stand in the text: a bare
+// value, or a quoted one taken whole with its quotes, escapes and every character between them. The span is
+// replaced whole, and a value that survives the substitution (a line cut by a quote the walk took for a closing
+// one) must be seen by the value-tail gate, every value and not only the first. The span's short pairs (a theme)
+// and the Set-Cookie attributes are ordinary text.
+func cookieValues(m string) []string {
+	var out []string
+	for i := 0; i < len(m); i++ {
+		if m[i] != '=' {
+			continue
+		}
+		name := cookieNameBefore(m, i)
+		value, end := cookieValueAfter(m, i+1)
+		if end > i+1 {
+			i = end - 1
+		}
+		if cookieAttributes[strings.ToLower(name)] || len(value) < tailWindow {
+			continue
+		}
+		out = append(out, value)
+	}
+	return out
+}
+
+// remember records every tailWindow-byte window of a replaced credential value.
+func (r *redactor) remember(class, m string) {
+	if !tailClasses[class] {
+		return
+	}
+	for _, value := range credentialValues(class, m) {
+		for _, seg := range placeholderRe.Split(value, -1) {
+			for i := 0; i+tailWindow <= len(seg); i++ {
+				r.tails[seg[i:i+tailWindow]] = true
+			}
+		}
+	}
+}
+
+// survivingTail reports whether s still holds tailWindow or more consecutive bytes of a credential
+// value this redactor replaced. A tail such as ".payload.signature" matches no vet class, so the
+// vet cannot see it; the redactor knows which values it was handed.
+func (r *redactor) survivingTail(s string) bool {
+	if len(r.tails) == 0 {
+		return false
+	}
+	for i := 0; i+tailWindow <= len(s); i++ {
+		if r.tails[s[i:i+tailWindow]] {
+			return true
+		}
+	}
+	return false
+}
+
+// redactFirstClass is applied before every other class. The cookie span ends in front of a quote that opens no
+// quoted cookie value, and it crosses everything else on its way, so it has to see the text as it was written: a
+// placeholder left by an earlier class holds a closing bracket that ends an unquoted printed list, and the closing quote
+// that a quoted assignment match leaves behind its placeholder is not the quote that closes the string the header sits
+// in. Run later, the cookie class lost every cookie that stood behind a key-word cookie with a quoted value, and
+// behind a JWT or a Bearer value inside a printed list. A cookie whose name holds a key word (refresh_token=,
+// password=, secret=) is taken whole by the cookie class, as one substitution.
+const redactFirstClass = "cookie-header"
+
+// redactLastClass is applied after every other class. An address-shaped piece can sit inside a
+// credential value (GITHUB_TOKEN: a@b.c:rest); replacing it first would split the value, leave a
+// placeholder where the value must start, and so hide the rest of it from the credential classes.
+// The vet table keeps its order; only the order of substitution differs.
+const redactLastClass = "email"
+
+// redactStage orders the substitution: the first class, then the others in the table's order, then the last.
+func redactStage(name string) int {
+	switch name {
+	case redactFirstClass:
+		return 0
+	case redactLastClass:
+		return 2
+	}
+	return 1
+}
+
+// redact substitutes every class in s. The cookie span can swallow the key word of a credential that follows it on the
+// same line, because it ends in front of a quote that opens no cookie value: in `Cookie: a=<value>; key: "<value>"`
+// the span takes the key word and stops at the quote, and the value behind it is left with no key word for any class.
+// So when the cookie class has substituted anything, the credential classes are also run over the text as it was
+// written, and every credential value of 12 or more characters they find is substituted wherever it still stands
+// (sweepCredentials).
+func (r *redactor) redact(s string) string {
+	orig, cookies := s, r.Hits[redactFirstClass]
+	var spans [][2]int // where the cookie class matched in orig
+	for stage := 0; stage <= 2; stage++ {
+		for _, p := range redactPatterns {
+			if redactStage(p.name) != stage {
+				continue
+			}
+			if p.name == redactFirstClass {
+				s, spans = r.applyFirst(p.name, p.re, s)
+			} else {
+				s = r.apply(p.name, p.re, s)
+			}
+		}
+	}
+	if r.Hits[redactFirstClass] != cookies {
+		s = r.sweepCredentials(orig, s, spans)
 	}
 	return s
+}
+
+// swept is a credential value a credential class found in the text as it was written.
+type swept struct{ class, match, value string }
+
+// sweepCredentials substitutes, in out, the credential values the tail classes find in orig that the substitution left
+// standing, longest first so that a value inside another is not cut. Each is replaced by the placeholder its whole
+// match has (or would have had) in apply, and remembered like any other, so the value-tail gate sees it.
+//
+// A credential whose key word the cookie span swallowed lies in the line the span is in: the key word is inside the span,
+// and its value, which no class lets run past a line break, stands behind the span's end. So the credential classes
+// read only those lines of orig (sweepWindows), not the whole text, and a text of many lines that carry a credential of
+// their own, with one cookie line among them, costs what it cost without the cookie line.
+//
+// The cost of the sweep itself is that of two passes over the text and one map lookup per byte of it, however many
+// values there are: the distinct values are collected into a set first (a value found twice keeps the class and match
+// it was found with first), grouped by their first tailWindow bytes, longest first within a group, and out is read
+// once, from the left. At each position the values that start with the tailWindow bytes standing there are tried,
+// longest first, and the first that is there is taken whole. Searching the text for each value in turn, which this
+// replaced, cost the number of values times the length of the text.
+func (r *redactor) sweepCredentials(orig, out string, spans [][2]int) string {
+	var order []swept
+	seen := map[string]bool{}
+	for _, w := range sweepWindows(orig, spans) {
+		for _, p := range redactPatterns {
+			if p.name == redactFirstClass || !tailClasses[p.name] {
+				continue
+			}
+			for _, m := range p.re.FindAllString(orig[w[0]:w[1]], -1) {
+				m = m[len(piishape.Lead(m)):]
+				for _, v := range credentialValues(p.name, m) {
+					if len(v) >= tailWindow && !seen[v] {
+						seen[v] = true
+						order = append(order, swept{p.name, m, v})
+					}
+				}
+			}
+		}
+	}
+	if len(order) == 0 {
+		return out
+	}
+	sort.SliceStable(order, func(i, j int) bool { return len(order[i].value) > len(order[j].value) })
+	byHead := make(map[string][]int, len(order))
+	for i, f := range order {
+		byHead[f.value[:tailWindow]] = append(byHead[f.value[:tailWindow]], i)
+	}
+	type place struct{ at, end, value int }
+	var places []place
+	counts := make([]int, len(order))
+	for i := 0; i+tailWindow <= len(out); {
+		for _, k := range byHead[out[i:i+tailWindow]] {
+			if v := order[k].value; strings.HasPrefix(out[i:], v) {
+				places = append(places, place{i, i + len(v), k})
+				counts[k]++
+				i += len(v) - 1
+				break
+			}
+		}
+		i++
+	}
+	if len(places) == 0 {
+		return out
+	}
+	// The placeholders are numbered in the order of the values, longest first, as they were when each value was searched
+	// for in turn.
+	holder := make([]string, len(order))
+	for k, f := range order {
+		if counts[k] > 0 {
+			r.Hits[f.class] += counts[k]
+			r.remember(f.class, f.match)
+			holder[k] = r.placeholder(f.class, f.match)
+		}
+	}
+	var b strings.Builder
+	b.Grow(len(out))
+	last := 0
+	for _, pl := range places {
+		b.WriteString(out[last:pl.at])
+		b.WriteString(holder[pl.value])
+		last = pl.end
+	}
+	b.WriteString(out[last:])
+	return b.String()
+}
+
+// sweepWindows are the stretches of orig the sweep reads: from the start of each cookie match to the end of the line it
+// ends in (a raw line break, or the end of the text), overlapping stretches merged. The spans are in order, so the end
+// of the line is looked for once for each line and not once for each span.
+func sweepWindows(orig string, spans [][2]int) [][2]int {
+	var out [][2]int
+	lineEnd := -1
+	for _, sp := range spans {
+		if lineEnd < sp[1] {
+			if i := strings.IndexAny(orig[sp[1]:], "\r\n"); i >= 0 {
+				lineEnd = sp[1] + i
+			} else {
+				lineEnd = len(orig)
+			}
+		}
+		if n := len(out); n > 0 && sp[0] <= out[n-1][1] {
+			out[n-1][1] = lineEnd
+			continue
+		}
+		out = append(out, [2]int{sp[0], lineEnd})
+	}
+	return out
+}
+
+// placeholder is the stable placeholder of a matched text in a class, numbered by first appearance.
+func (r *redactor) placeholder(name, m string) string {
+	key := name + "\x00" + m
+	if ph, ok := r.assigned[key]; ok {
+		return ph
+	}
+	r.counts[name]++
+	ph := fmt.Sprintf("[redacted-%s-%d]", name, r.counts[name])
+	r.assigned[key] = ph
+	return ph
+}
+
+// apply replaces every match of one class in s by its placeholder. A class may start right after a JSON
+// escape (the newline before a line that begins with a key word) or a terminal control sequence (a color
+// code), and the match then carries it. That lead is not part of the credential, so it is kept and the
+// placeholder follows it; replacing it would break the JSON of the Args it sits in.
+func (r *redactor) apply(name string, re *regexp.Regexp, s string) string {
+	return re.ReplaceAllStringFunc(s, func(m string) string {
+		lead := piishape.Lead(m)
+		m = m[len(lead):]
+		r.Hits[name]++
+		r.remember(name, m)
+		return lead + r.placeholder(name, m)
+	})
+}
+
+// applyFirst is apply for the class that goes first, which sees the text as it was written: it also keeps the key of a
+// match whose header name is a key (cookieKeyParts) and returns where in s the matches were.
+func (r *redactor) applyFirst(name string, re *regexp.Regexp, s string) (string, [][2]int) {
+	locs := re.FindAllStringIndex(s, -1)
+	if len(locs) == 0 {
+		return s, nil
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	spans := make([][2]int, 0, len(locs))
+	last := 0
+	for _, loc := range locs {
+		m := s[loc[0]:loc[1]]
+		lead := piishape.Lead(m)
+		m = m[len(lead):]
+		r.Hits[name]++
+		r.remember(name, m)
+		head, tail := cookieKeyParts(m)
+		b.WriteString(s[last:loc[0]])
+		b.WriteString(lead + head + r.placeholder(name, m) + tail)
+		last = loc[1]
+		spans = append(spans, [2]int{loc[0], loc[1]})
+	}
+	b.WriteString(s[last:])
+	return b.String(), spans
+}
+
+// cookieKeyRe is the start of a cookie match whose header name is a key, or an argument: the name is followed by its
+// closing quote ("Cookie": ..., 'Set-Cookie': ..., Header.Set("Cookie", ...)), and the punctuation up to the first
+// character of the first cookie.
+var cookieKeyRe = regexp.MustCompile(`(?i)\A(?:_|-[A-Za-z])?(?:set-)?cookie\\*["'](?:\\+(?:[nrtbf]|u[0-9a-fA-F]{4})|[^\w])*`)
+
+// cookieTailQuoteRe is the closing quote of the last string of a list that a cookie match ends in, and the line break
+// and indentation (raw, or the JSON escape of them) of a pretty-printed list behind it.
+var cookieTailQuoteRe = regexp.MustCompile(`(?:\\*["'])+(?:\\+[nrt]|\s)*\z`)
+
+// cookieKeyParts splits a cookie match whose name is a key of a JSON object, a Python dict or an argument into what is
+// kept and what is replaced: the name, its closing quote and the punctuation up to the first cookie stay, the cookies
+// are replaced, and the closing quote of the last string of a list, which the match took, is put back. A document
+// keyed by the header name is then still a document (the match began inside the key's quotes and ran to the end of the
+// value, and the key lost its closing quote and the document its value). Any other match is replaced whole: head and
+// tail are empty.
+func cookieKeyParts(m string) (head, tail string) {
+	head = cookieKeyRe.FindString(m)
+	if head == "" {
+		return "", ""
+	}
+	if t := cookieTailQuoteRe.FindString(m[len(head):]); t != "" {
+		tail = t
+	}
+	return head, tail
 }
 
 // ClassifyKind buckets an entry by what its TOOL payloads are made of — the
@@ -260,8 +681,9 @@ type HarvestStats struct {
 
 // HarvestTraces reads every *.json trace under dir (sorted by name — the
 // harvest is deterministic), converts, redacts, classifies, and gates. A trace
-// that cannot be parsed or is too short is skipped WITH a note; residual PII
-// after redaction fails the whole harvest.
+// that cannot be parsed or is too short, or that still holds a piece of a redacted
+// credential value, is skipped WITH a note; residual vet-class PII after
+// redaction fails the whole harvest.
 func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) {
 	opts = opts.withDefaults()
 	stats := HarvestStats{Redactions: map[string]int{}, Kinds: map[string]int{}}
@@ -317,13 +739,25 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 				turns[i].ToolCalls[j].Args = red.redact(turns[i].ToolCalls[j].Args)
 			}
 		}
-		for class, n := range red.Hits {
-			stats.Redactions[class] += n
-		}
 		kind := ClassifyKind(turns)
 		// Entry id from the FILE name (unique on disk; already sanitized by the
 		// trace writer) — record ids can collide across goal queues.
 		base := strings.TrimSuffix(filepath.Base(p), ".json")
+		// Exit gate beside the vet: a piece of a redacted credential value that is
+		// still in the text means the redactor stopped short of the value, or that
+		// ordinary text (source code assigning to a name that holds "token") reuses a
+		// piece of what was taken as a value. Either way this trace is left out with
+		// a note; one such trace never costs the others. The same goes for a credential
+		// header keyword that still has a long value run a few characters behind it,
+		// whatever shape stands between them (piishape.KeywordRun): the classes read
+		// shapes, and a shape they do not know leaves the value in the text.
+		if why := redactorLeft(red, turns); why != "" {
+			stats.Skipped = append(stats.Skipped, HarvestNote{File: filepath.Base(p), Reason: why})
+			continue
+		}
+		for class, n := range red.Hits {
+			stats.Redactions[class] += n
+		}
 		entries = append(entries, Entry{
 			ID:              opts.IDPrefix + base,
 			Kind:            kind,
@@ -344,13 +778,43 @@ func HarvestTraces(dir string, opts HarvestOpts) ([]Entry, HarvestStats, error) 
 	return entries, stats, nil
 }
 
+// redactorLeft says why a trace cannot be kept after redaction, or "" when it can: a turn still holds a
+// surviving piece of a credential value the redactor replaced, or a credential header keyword with a long
+// value run behind it. The note does not echo the text.
+func redactorLeft(red *redactor, turns []Turn) string {
+	left := func(s string) string {
+		switch {
+		case red.survivingTail(s):
+			return fmt.Sprintf("still holds %d or more characters of a redacted credential value after redaction (the text is not echoed)", tailWindow)
+		case piishape.KeywordRun(s):
+			return "still holds a credential keyword (cookie, authorization, api key, auth token, security token) with a long value behind it after redaction (the text is not echoed)"
+		}
+		return ""
+	}
+	for _, t := range turns {
+		if why := left(t.Content); why != "" {
+			return why
+		}
+		for _, c := range t.ToolCalls {
+			if why := left(c.Name); why != "" {
+				return why
+			}
+			if why := left(c.Args); why != "" {
+				return why
+			}
+		}
+	}
+	return ""
+}
+
 // countCompactionArtifacts counts tool turns whose body is a PRODUCT of the
 // production ladder (elision marker, skeleton, dedupe reference) or by the
-// optional log-collapse rung, rather than raw content.
+// optional log-collapse rung, or a receipt the optional evidence reducer wrote in
+// place of a command's output, rather than raw content.
 func countCompactionArtifacts(msgs []agent.Msg) int {
 	n := 0
 	for _, m := range msgs {
-		if m.Role == "tool" && (agent.IsCompactionArtifact(m.Content) || agent.IsLogCollapseArtifact(m.Content)) {
+		if m.Role == "tool" && (agent.IsCompactionArtifact(m.Content) || agent.IsLogCollapseArtifact(m.Content) || agent.IsEvidenceReceipt(m.Content)) {
 			n++
 		}
 	}

@@ -416,6 +416,15 @@ type Config struct {
 	// writes today's rows unchanged. Applies wherever a trail is attached (see
 	// audit_all_doors); the local-agent CLI honours it for its own trail too.
 	AuditChain bool `json:"audit_chain,omitempty"`
+	// AgentEvidenceReducer turns on the evidence-preserving reducer for the agent's
+	// build and test results (internal/agent/rung_reducer.go). false (the default)
+	// leaves every tool result exactly as the tool printed it. true: a `run` or
+	// `run_shell` build or test result of 4 KiB or more is replaced by a receipt, a
+	// few claims each over a quote the delegator found in the output, written by the
+	// cascade seat the agent's offload tools already use; any quote it cannot find, a
+	// credential-shaped output, a seat failure or a receipt that is not smaller keeps
+	// the raw output. The key stays off until a seat A/B passes.
+	AgentEvidenceReducer bool `json:"agent_evidence_reducer,omitempty"`
 	// PairWorkloadsEnabled (0.126.0) reports every job this box runs or
 	// delegates to NVIDIA Personal AI Router's Jobs list, through the loopback
 	// workload ingress of PAIR's workload manager (fork
