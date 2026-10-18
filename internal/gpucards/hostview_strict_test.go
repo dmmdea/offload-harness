@@ -63,3 +63,17 @@ func TestTheOverLeadSaysWhatALeaseThatStatesItsCommitIsJudgedOn(t *testing.T) {
 		t.Errorf("OVER on the available memory is not the physical commit line, the lead must not qualify: %q", lead)
 	}
 }
+
+// The note under an OVER verdict says which line a lease that states no commit waits for. Where an enforced commit limit sits below
+// physical RAM that is the limit, and the note says so beside physical RAM.
+func TestTheOverNoteNamesTheEnforcedLimitThatSitsBelowPhysicalRAM(t *testing.T) {
+	mem := gpuprobe.HostMemory{PhysicalGiB: 128, AvailableGiB: 100, CommitUsedGiB: 70, CommitLimitGiB: 64}
+	v := NewHostView(mem, true, 8, gpuprobe.HostLoad{}, gpuprobe.HostLoad{})
+	if v.Verdict != gpuprobe.HostOver {
+		t.Fatalf("setup: 70 committed against a 64 GiB enforced limit is OVER, got %s", v.Verdict)
+	}
+	note, _ := v.Map()["note"].(string)
+	if !strings.Contains(note, "physical RAM (or an enforced commit limit that sits below it)") {
+		t.Errorf("the note must name the enforced limit as the line a commit nobody stated is held to where it sits below physical RAM: %q", note)
+	}
+}
