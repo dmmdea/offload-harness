@@ -23,6 +23,12 @@ import (
 	"time"
 )
 
+// minHeartbeatMs is the earliest instant a heartbeat can name: Renew writes the time of the renewal as milliseconds since the epoch, 13
+// decimal digits from September 2001 until the year 2286, so every genuine heartbeat is at least this and every proper prefix of one (a
+// torn write) is below it. The keeper reads a heartbeat without the lease record that heartbeatAt compares it with (the record is the one
+// that cannot be read), and this is what tells it a torn number from a time of renewal.
+const minHeartbeatMs = 1_000_000_000_000
+
 // keeperSignOfLife is the newest sign that the holder of the lease with this record is alive, taken from what does not need the record
 // read: the heartbeat file hb.<epoch> (its content is the moment of the holder's last renewal) and the record file's modification
 // time (its last write). epoch 0 means the epoch is not known, as it is not for an unreadable meta.json: every hb.* counts then. The

@@ -1241,11 +1241,6 @@ func inspectDirDetailAt(leaseDir string, now time.Time, hbTTL time.Duration) (In
 	return reader{dir: leaseDir, now: now, hbTTL: hbTTL, procStart: processStart}.detail()
 }
 
-// minHeartbeatMs is the earliest instant a heartbeat can name: Renew writes the time of the renewal as milliseconds since the epoch, 13
-// decimal digits from September 2001 until the year 2286, so every genuine heartbeat is at least this and every proper prefix of one (a torn
-// write) is below it. A number below it is not a time of renewal, whatever record it is read beside (keeper.go reads heartbeats without one).
-const minHeartbeatMs = 1_000_000_000_000
-
 // heartbeatAt reads the per-epoch heartbeat beside a lease record and says whether it could tell. The second result is false when the
 // heartbeat is UNKNOWN, and the reclaim rule reads unknown as "not stale" (see reader.judge): a heartbeat that cannot be read says
 // nothing about the holder, and the cost of acting on it is a live lease handed to a second job.
@@ -1273,7 +1268,7 @@ func heartbeatAt(leaseDir string, meta *Meta) (at int64, known bool) {
 	if err == nil {
 		// A genuine renewal is never earlier than the moment the lease was taken. A number below that (a prefix of the digits of a
 		// renewal that was torn, zero, a negative number) parses and is still no heartbeat: it says nothing, like an empty file.
-		floor := max(meta.RenewedAtMs, meta.AcquiredAtMs, minHeartbeatMs)
+		floor := max(meta.RenewedAtMs, meta.AcquiredAtMs, 1)
 		if v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil && v >= floor {
 			return v, true
 		}
