@@ -102,14 +102,22 @@ native CPU/disk offloading (measured unusable on the Mamba-hybrid 27B under WSL2
    with the same options, printing one `seat_fg:` line with every answer and the choice; the status file then reads
    `ok <when> mbps=<n> addr=<address>`. No python, no answer, nothing on that network or a helper that fails or times out
    keeps the mount by name exactly as before (the line says why); a name that is not `.local`, an IPv4 literal, an `nfs` mount
-   and an unset pin are untouched. If the store's wired and Wi-Fi addresses share one network the choice cannot tell them
-   apart: put the wired address in `SEAT_L2_MOUNT_SRC`. Proven by `setup/templates/vllm-seat/seat_fg.kv-and-store.tests.sh`,
+   and an unset pin are untouched. The address is chosen when the share is mounted (once per WSL session): a start that finds
+   it already mounted does not mount again, does not unmount it (another seat may be using it, and a new pick at every start
+   could trade a good mount for the Wi-Fi one) and asks no mDNS; it prints one `seat_fg:` line with the share's source and
+   server address (read with `findmnt`) and how to choose again, the status file then reads `addr=<that server address>`, and
+   a write-floor degrade names it. A share an earlier start mounted at the wrong address stays there until it is unmounted
+   (`umount <SEAT_L2_MOUNT_DIR>` while no seat uses it) and the seat is started again. If the store's wired and Wi-Fi
+   addresses share one network the choice cannot tell them apart: name the wired address in `SEAT_L2_MOUNT_SRC`, as a reserved
+   or static address of the store (never a DHCP lease) or as a name that is not `.local` which this box resolves to it (such a
+   name is not looked up; a `.local` name pinned in `/etc/hosts` is not honoured, the lookup asks mDNS directly). Proven by
+   `setup/templates/vllm-seat/seat_fg.kv-and-store.tests.sh`,
    which runs the whole launcher against stand-ins for the mount, the network and mDNS, and drives the helper alone against a
    loopback responder. When the mount fails the
    seat **degrades to the same-box tier** (0.115.1): `SEAT_L2` is emptied so the MP server registers no store — an
    unmounted base_path is a local directory the adapter would write into while the tier held nothing — the log says
    `CACHE SERVER DEGRADED — <why>`, and the seat's `SEAT_L2_STATUS_FILE` (default `$WORK/seat-l2.status`) records `degraded <when> reason=<why>` (or `ok <when>
-   mbps=<n>`, with ` addr=<address>` appended when the launcher chose the address over mDNS) for readback. Refusing to start was the 0.113.x behaviour; on 2026-09-09 it took the whole agent lane
+   mbps=<n>`, with ` addr=<address>` appended when the launcher chose the address over mDNS, or read the server address of a share that was already mounted) for readback. Refusing to start was the 0.113.x behaviour; on 2026-09-09 it took the whole agent lane
    down for hours (llama-swap turns every start failure into HTTP 500) over a cache accelerator that was merely slow. The share is named by a hostname the box resolves (tailnet
    MagicDNS or static DNS), never a DHCP address — a vanished lease refused every seat start for hours on
    2026-09-04 — and the refusal message says why (does not resolve / port unreachable / share refused).

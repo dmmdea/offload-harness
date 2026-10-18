@@ -1713,9 +1713,18 @@ SEAT_LMCACHE_PYTHONPATH=<seat-dir>/lmcache-overlay   # optional: load LMCache fr
   comes from `ip -4 -o addr`). One `seat_fg:` line names every answer and the choice, and the status file reads
   `ok <stamp> mbps=<n> addr=<address>`. Whatever else happens (no python, no answer, nothing on that network, a helper that
   fails or times out) leaves the mount by name exactly as before, and the line printed says why. A name that is not `.local`,
-  an IPv4 literal, an `nfs` mount and an unset pin are never touched. **Limit:** when the store's wired and Wi-Fi addresses sit
-  on ONE network, "first inside the network" cannot tell them apart; name the wired address in `SEAT_L2_MOUNT_SRC` (a literal
-  is mounted as given). The degrade messages keep their text and name the address when the launcher chose it.
+  an IPv4 literal, an `nfs` mount and an unset pin are never touched. **The address is chosen when the share is mounted** (once
+  per WSL session). A start that finds the share already mounted does not mount again, does not unmount it (another seat may be
+  using it, and a new pick at every start could trade a good mount for the Wi-Fi one) and asks no mDNS; it prints one `seat_fg:`
+  line saying where the share is (source and server address, read with `findmnt`) and how to choose again, the status file then
+  reads `addr=<that server address>`, and a write-floor degrade names it. **A share an earlier start mounted at the wrong address
+  (for example by name, before this change) stays there** until you unmount it while no seat uses it (`umount
+  <SEAT_L2_MOUNT_DIR>`) and start the seat again; restarting the WSL distro does the same. **Limit:** when the store's wired and
+  Wi-Fi addresses sit on ONE network, "first inside the network" cannot tell them apart; name the wired address in
+  `SEAT_L2_MOUNT_SRC` as a reserved or static address of the store (a literal is mounted as given; a DHCP lease is what the rule
+  above forbids) or as a name that is not `.local` which this box resolves to it (a static DNS entry or a hosts-file line: such
+  a name is not looked up, and a `.local` name pinned in `/etc/hosts` is NOT honoured, because the lookup asks mDNS directly).
+  The degrade messages keep their text and name the address when the launcher chose it or found the share mounted at it.
 - `SEAT_LMCACHE_PYTHONPATH` (optional, 0.113.13): a directory prepended to `PYTHONPATH` for BOTH the LMCache
   MP server and the vLLM engine, so the seat imports LMCache from an overlay copy that carries a not-yet-released
   upstream fix, leaving the installed package untouched. Empty/unset = the installed package. The server and the
@@ -1782,7 +1791,11 @@ and after a restart — hit counters alone do not prove the context came back in
 desktop graphics memory gave a pool of 1.95 GiB, floored to 2.0, and vLLM 0.28 refused every start (`2.66 GiB KV cache is needed,
 which is larger than the available KV cache memory (2.0 GiB)` for 163,840 tokens) while llama-swap restarted the seat on every
 request (about 98 failed starts in two days). Set the optional `SEAT_KV_NEED_GIB` to that `N GiB KV cache is needed` figure,
-rounded up. When the pinned pool is below it the launcher passes `--max-model-len -1` instead of `SEAT_MAX_LEN`, and vLLM picks the
+rounded UP past the second decimal (vLLM prints it to two decimals, rounded to nearest: a need of 2.664 prints as `2.66`, and a
+knob typed as `2.66` would then leave a pool of 2.663 GiB "enough" and the refusal in place; write `2.67` or `2.7`). The figure
+belongs to one `SEAT_MAX_LEN`, parallelism, speculative-decoding setting and model: measure it again when any of them changes (a
+stale figure that is too low leaves the refusal in place with no line from the launcher; one that is too high auto-fits a
+context longer than a lowered `SEAT_MAX_LEN`, because `-1` is capped at the model's own maximum, not at `SEAT_MAX_LEN`). When the pinned pool is below it the launcher passes `--max-model-len -1` instead of `SEAT_MAX_LEN`, and vLLM picks the
 largest context that fits the PINNED pool (never above the model's own maximum), so the seat serves LESS than `SEAT_MAX_LEN`; one
 `seat_fg:` line says so and vLLM logs the length it chose (`Auto-fit max_model_len`). Pool at or above the knob: nothing changes.
 Knob unset and the pool floored: `SEAT_MAX_LEN` is kept (an auto-fit could exceed the length you set) and a WARNING names the

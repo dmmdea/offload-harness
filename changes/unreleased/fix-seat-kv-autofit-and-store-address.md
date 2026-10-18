@@ -27,25 +27,39 @@ verbatim into the seat, so both fixes are one file; the tests run that file star
 - **B-55, the fix.** For a cifs mount whose source host is a `.local` name and whose source address is pinned (`auto` or explicit), the launcher collects ALL the mDNS A answers for
   the name with a raw query to `224.0.0.251:5353` (QU bit set, sent three times in about a second, out of the pinned source address) and mounts `//<address>/<share>` at the FIRST
   answer inside the pinned source address's IPv4 network (the prefix is read from `ip -4 -o addr`), with the same options. One `seat_fg:` line prints every answer seen and the one
-  chosen, and the L2 status file reads `ok <stamp> mbps=<n> addr=<address>` (the field is appended only when an address was chosen, so other seats' lines are byte-identical). If the
+  chosen, and the L2 status file reads `ok <stamp> mbps=<n> addr=<address>` (the field is appended only when an address was chosen or read from an already-mounted share, so other
+  seats' lines are byte-identical). If the
   helper fails, times out, finds no answer, or no answer is on that network, or there is no python, the mount is by name exactly as before and the line says why. Names that are not
   `.local`, address literals, nfs mounts and an unset pin never reach the lookup. The degrade messages keep their text (a Go test pins them) and name the address when one was chosen.
+- **B-55, a share that is already mounted (migration).** The address is chosen when the share is MOUNTED, which is once per WSL session; llama-swap restarts the seat on a swap and the next
+  start finds the share mounted. That start does not mount again, does not unmount it (another seat may be using the share, and with two addresses of the store on one network a new pick at every
+  start could trade a good mount for the Wi-Fi one, so there is no automatic remount by design) and asks no mDNS. For a cifs share with a pinned source address and a `.local` name it prints one
+  `seat_fg:` line with the share's source and server address (read with `findmnt -n -o SOURCE,OPTIONS -M <dir>`, the `addr=` option) and, when the share is mounted by name, how to choose again; the status
+  file reads `ok <stamp> mbps=<n> addr=<that address>`; a write-floor or probe degrade appends `[the share was already mounted at server address <a>; a start does not choose the address again]`.
+  **After deploying this, a share an earlier start mounted at the wrong address stays there** until it is unmounted while no seat uses it (`umount <SEAT_L2_MOUNT_DIR>`, then restart the seat), or the WSL
+  distro is restarted. Not verified on the reference box: whether its share is still mounted today.
 - **B-55, the bound.** The helper is a here-doc inside `seat_fg.sh` (no file to install), run with `$VENV/bin/python` or else `python3` under `timeout -s KILL 3`; it listens for 1 s on
   its own and ends. A start can therefore never wait on it for more than 3 s.
 - **Limit, stated.** "The first answer inside the pinned network" cannot separate two addresses of the store that sit on the SAME network (a wired and a Wi-Fi address on one /24).
-  The line printed shows every answer, and an IPv4 literal in `SEAT_L2_MOUNT_SRC` (mounted as given) is the operator's override. The query uses the legacy-unicast form (source port
+  The line printed shows every answer, and the operator's override is to name the wired address in `SEAT_L2_MOUNT_SRC` as a reserved or static IPv4 literal (mounted as given; never a DHCP lease) or as a
+  name that is not `.local` that the box resolves to it (not looked up; a `.local` name pinned in `/etc/hosts` is not honoured, because the lookup asks mDNS directly). The query uses the legacy-unicast form (source port
   other than 5353), which the mDNS RFC makes every responder answer by unicast; a responder that ignores it would be a "no answer" and falls back to the name.
 - **Test seams.** `SEAT_FG_TEST_MDNS_CMD` (a command standing in for the lookup) and `SEAT_FG_TEST_MDNS_DEST` (`host:port` for the helper's query) exist for the test and are documented
   in the script where they are read; nothing in a rendered seat sets them.
 - **Tests (red first).** `setup/templates/vllm-seat/seat_fg.kv-and-store.tests.sh` runs the real launcher from a scratch copy against stand-ins for every command that touches the box
-  (the MP server's unit is never stopped or started, nothing mounts, no GPU is asked, nothing binds a port) and reads the argument list `vllm serve` was exec'd with, the mount command
-  line, the printed lines and the status file: 16 KV cases and 20 store cases, including the embedded helper driven alone against a loopback responder that answers the way real ones
-  do (unicast, query id and question repeated, compression pointers, other names and types mixed in, junk first, only the question it must ask answered). On `origin/main`'s launcher 11
-  KV cases and 16 store cases fail and nine are guards that pass on both sides (pool above or at the knob, knob unset and not floored, no pin, `SEAT_MAX_LEN` default; non-`.local` name,
-  address literal, nfs, no pin). Two Go wrappers (Linux) run it and name every case, and a portable text pin covers the hard bound, the scoping and the single `mount` command. Fifteen
-  mutants of the launcher (the comparison turned round, `-1` never set, the warning never printed, number validation loosened two ways, the first answer taken whatever its network,
-  the last on-network answer taken, no timeout around the lookup, no `.local` guard, no source-pin guard, the status line without the address, the mount ignoring the chosen source, the
-  helper accepting any owner name, no de-duplication, no QU bit) are each caught.
+  (the MP server's unit is never stopped or started, nothing mounts or unmounts, no GPU is asked, nothing binds a port) and reads the argument list `vllm serve` was exec'd with, the mount command
+  line, the printed lines and the status file: 16 KV cases and 33 store cases. The store cases include the embedded helper driven alone against a loopback responder that answers the way real ones
+  do (unicast, query id and question repeated, compression pointers, other names and types mixed in, junk first, only the question it must ask answered), and against a simulated clock and socket
+  (the default destination is the mDNS group and port 5353, 2 or 3 queries, a window of about 1 s, a lost first query still answered, an answer 0.7 s late still heard); a /28 and a /16 pinned address;
+  and a share that is already mounted (left alone, described, never unmounted). On `origin/main`'s launcher 37 of the 49 cases fail and 12 are guards that pass on both sides (pool above or at the
+  knob, knob unset and not floored, no pin, `SEAT_MAX_LEN` default; non-`.local` name, address literal, nfs, no pin; a mounted share with a non-`.local` name, with no pin, and an nfs one). Two Go wrappers
+  (Linux) run it and name every case, and a portable text pin covers the hard bound, the scoping, the single `mount` command, the helper's default destination as the code line that reads it (the
+  comment above the helper says the same words), that no line runs `umount`, and that the already-mounted report is the else branch of the mount check. Mutants of the launcher, each caught: the
+  comparison turned round, `-1` never set, the warning never printed, number validation loosened two ways, the first answer taken whatever its network, the last on-network answer taken, no timeout
+  around the lookup, no `.local` guard, no source-pin guard, the status line without the address, the mount ignoring the chosen source, the helper accepting any owner name, no de-duplication, no QU
+  bit; after review also a wrong default mDNS port and a wrong default group in the code, a hard-coded /24 mask, a listen window of 0.1 s and of 0.5 s, a single query, the already-mounted report
+  removed, the launcher unmounting, the status ignoring the address it read, the degrade note dropped, the advice to unmount printed for a mount made at an address, the report ignoring the `.local`
+  scope. A variant that asks twice survives on purpose: the specification allows 2 or 3 queries.
 - **Docs.** `docs/OPERATOR-GUIDE.md` and `docs/systems/cache-server.md` describe both behaviours; the template seat env lists the pin family as a commented-out block. No Go renderer
   emits any `SEAT_KV_*` line, and `SEAT_KV_NEED_GIB` stays that way on purpose: like the headroom, floor and cap it is a per-box measured figure (it depends on the card, the model and
   `SEAT_MAX_LEN`), so a rendered default would be a guess.

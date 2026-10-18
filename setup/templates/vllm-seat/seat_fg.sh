@@ -111,12 +111,21 @@ L2_DEGRADED=0
 # mount by name exactly as before, and the line printed says why: no python, a helper that fails or finds nothing, no answer on
 # that network, a prefix that cannot be read. Names that are not .local, nfs mounts and an unset source pin never get here. The
 # lookup is bounded: `timeout -s KILL 3` around the helper, so it can never hold a seat start. If the store's wired and Wi-Fi
-# addresses sit on ONE network, "first inside the network" cannot tell them apart: name the wired address in SEAT_L2_MOUNT_SRC
-# (an IPv4 literal is mounted as given).
+# addresses sit on ONE network, "first inside the network" cannot tell them apart: name the wired address in SEAT_L2_MOUNT_SRC,
+# either as a RESERVED or static address of the store (an IPv4 literal is mounted as given; a DHCP lease is the 2026-09-04
+# outage above) or as a name that is not .local and that this box resolves to it (such a name is not looked up; a .local name
+# pinned in /etc/hosts is NOT honoured here, because the lookup asks mDNS directly).
+# The address is chosen when the share is MOUNTED, which is once per WSL session. A start that finds the share already mounted
+# does not mount again, does not unmount (another seat may be using it, and a new pick at every start could trade a good mount
+# on one network for the Wi-Fi one) and asks no mDNS: l2_report_mounted says where the share is (the source and the server
+# address, read with findmnt) and how to choose again, and the status file records that address. A share that was mounted at
+# the wrong address stays there until it is unmounted (`umount <dir>` while no seat uses it) and the seat is started again.
 # Two seams exist for the test (seat_fg.kv-and-store.tests.sh) and nothing else sets them: SEAT_FG_TEST_MDNS_CMD names a command
 # that stands in for the lookup (it is called as `<cmd> <name> <source address>` and prints one IPv4 answer per line), and
 # SEAT_FG_TEST_MDNS_DEST (host:port) moves the helper's query off the mDNS group onto a test responder.
 L2_ADDR=""          # the address the share was mounted at when the launcher chose one: status file and degrade messages
+L2_SEEN_ADDR=""     # the server address of a share that was ALREADY mounted when this start found it (read from the mount)
+L2_SEEN_NOTE=""     # and the sentence the degrade messages append for such a share
 MOUNT_SRC="${SEAT_L2_MOUNT_SRC:-}"
 l2_mdns_answers() {   # $1 = the .local name, $2 = the source address; prints each distinct IPv4 answer, in arrival order
   local py=""
@@ -231,13 +240,28 @@ l2_is_ipv4() {
   for o in 1 2 3 4; do [ $(( 10#${BASH_REMATCH[$o]} )) -le 255 ] || return 1; done
 }
 l2_ip2int() { local a b c d; IFS=. read -r a b c d <<< "$1"; echo $(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d )); }
+l2_local_name() {   # $1 = a mount source: prints <name> when it is //<name>.local/<share>, returns 1 for anything else
+  local rest host
+  rest="${1#//}"; host="${rest%%/*}"
+  [ "$rest" != "$host" ] || return 1                 # not the //host/share shape
+  case "$host" in *:*) return 1 ;; esac              # an explicit port is not ours to rewrite
+  case "${host,,}" in *.local) ;; *) return 1 ;; esac
+  printf '%s' "$host"
+}
+l2_report_mounted() {   # the share was already mounted: say where it is and leave it alone; sets L2_SEEN_ADDR and L2_SEEN_NOTE
+  local name src opts a="" hint=""
+  name="$(l2_local_name "$SEAT_L2_MOUNT_SRC")" || return 0
+  read -r src opts <<< "$(findmnt -n -o SOURCE,OPTIONS -M "$SEAT_L2_MOUNT_DIR" 2>/dev/null)"
+  if [[ ",${opts:-}," =~ ,addr=([0-9.]+), ]]; then a="${BASH_REMATCH[1]}"; fi
+  case "${src:-}" in ""|"//$name"/*) hint="; to choose it again, unmount the share while no seat uses it (umount $SEAT_L2_MOUNT_DIR) and restart the seat" ;; esac
+  L2_SEEN_ADDR="$a"
+  L2_SEEN_NOTE=" [the share was already mounted${a:+ at server address $a}; a start does not choose the address again]"
+  echo "seat_fg: cache-server share $SEAT_L2_MOUNT_DIR is already mounted${src:+ from $src}${a:+ (server address $a)} — the store address is chosen only when the share is mounted, so it was not looked up again${hint}"
+}
 l2_pick_address() {   # sets MOUNT_SRC and L2_ADDR when it chooses; prints one seat_fg: line either way
-  local rest host name share out rc=0 plen mask net ans chosen="" why="" got=() dup g
-  rest="${SEAT_L2_MOUNT_SRC#//}"; host="${rest%%/*}"; share="${rest#*/}"
-  [ "$rest" != "$host" ] || return 0                 # not the //host/share shape
-  case "$host" in *:*) return 0 ;; esac              # an explicit port is not ours to rewrite
-  name="$host"
-  case "${name,,}" in *.local) ;; *) return 0 ;; esac
+  local rest name share out rc=0 plen mask net ans chosen="" why="" got=() dup g
+  name="$(l2_local_name "$SEAT_L2_MOUNT_SRC")" || return 0
+  rest="${SEAT_L2_MOUNT_SRC#//}"; share="${rest#*/}"
   out="$(l2_mdns_answers "$name" "$SRCADDR" 2>/dev/null)" || rc=$?
   case "$rc" in
     0) ;;
@@ -315,6 +339,8 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
       fi
       degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why${L2_ADDR:+ [the mount was tried at the mDNS-chosen address $L2_ADDR, not by name]}"
     fi
+  elif [ -n "$SRCADDR" ] && [ "${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]; then
+    l2_report_mounted
   fi
 fi
 if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
@@ -349,17 +375,18 @@ if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L
       t1=$(date +%s%N); rm -f "$probe"
       mbps=$(( 67109 / ( (t1 - t0) / 1000000 + 1 ) ))   # 64 MiB = 67,108,864 bytes → decimal MB/s over elapsed ms
       if [ "$mbps" -lt "$MIN_MBPS" ]; then
-        degrade_l2 "share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS} (the tier would be slower than recompute)${L2_ADDR:+ [the share is mounted at the mDNS-chosen address $L2_ADDR]}"
+        degrade_l2 "share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS} (the tier would be slower than recompute)${L2_ADDR:+ [the share is mounted at the mDNS-chosen address $L2_ADDR]}${L2_SEEN_NOTE}"
       else
         echo "seat_fg: cache-server share write probe ~${mbps} MB/s (floor ${MIN_MBPS})"
       fi
     else
       rm -f "$probe"
-      degrade_l2 "cannot write a 64 MiB probe to the share at $SEAT_L2_MOUNT_DIR within 120 s"
+      degrade_l2 "cannot write a 64 MiB probe to the share at $SEAT_L2_MOUNT_DIR within 120 s${L2_SEEN_NOTE}"
     fi
   fi
   if [ "$L2_DEGRADED" -eq 0 ]; then
-    printf 'ok %s mbps=%s%s\n' "$(date -Is)" "${mbps:-unmeasured}" "${L2_ADDR:+ addr=$L2_ADDR}" > "$L2_STATUS" 2>/dev/null || true
+    L2_ON="${L2_ADDR:-$L2_SEEN_ADDR}"     # the address the share is on: chosen by this start, or read from the mount that was already there
+    printf 'ok %s mbps=%s%s\n' "$(date -Is)" "${mbps:-unmeasured}" "${L2_ON:+ addr=$L2_ON}" > "$L2_STATUS" 2>/dev/null || true
   fi
 fi
 
@@ -597,7 +624,8 @@ EXTRA=()
 # memory gave 1.95 GiB, floored to 2.0, and vLLM 0.28 refused every start ("To serve at least one request with the model's max
 # seq len (163840), (2.66 GiB KV cache is needed, which is larger than the available KV cache memory (2.0 GiB)") while
 # llama-swap restarted the seat on each request. SEAT_KV_NEED_GIB (optional) is that "N GiB KV cache is needed" figure for
-# SEAT_MAX_LEN; with it set and the pinned pool below it, --max-model-len -1 is passed instead of SEAT_MAX_LEN, and vLLM 0.28
+# SEAT_MAX_LEN, rounded UP past the second decimal (vLLM prints two, to nearest) and measured again whenever SEAT_MAX_LEN, the
+# parallelism, MTP or the model changes; with it set and the pinned pool below it, --max-model-len -1 is passed instead of SEAT_MAX_LEN, and vLLM 0.28
 # (vllm/v1/core/kv_cache_utils.py _auto_fit_max_model_len, fed the --kv-cache-memory-bytes value) picks the largest length that
 # fits the PINNED pool, never more than the model's own maximum. Unset, SEAT_MAX_LEN is always passed (an auto-fit could exceed the operator's length) and a
 # floored pool is only warned about.
