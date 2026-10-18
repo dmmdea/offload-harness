@@ -4561,3 +4561,42 @@ test("models + readiness: two prompt names one annotation covers, the second in 
   assert.deepEqual(verdict(nested, [EMB("sub/foo.safetensors")]), ["present", null, null], "control: the one file answers both names");
   assert.deepEqual(verdict(nested, [EMB("sub/foo.safetensors"), EMB("foo.safetensors")]), ["embedding_unverified", WHY_MANY, ["foo.safetensors", "sub/foo.safetensors"]]);
 });
+
+// ---------------------------------------------------------------------------------------------------------------------------------
+// ComfyUI's embedding search (expand_directory_list) walks every directory below a root with os.walk and no exclusion, so a `.git` directory
+// inside an embeddings root is searched like any other subfolder, while the listing a loader widget offers (recursive_search) skips `.git`. The
+// two are different questions: the prompt lookup counts a file under `.git` as an answer (a second one is `embedding_unverified`), and the
+// class listing, which the loader-widget rule and every other class read, still has no `.git` entry.
+// ---------------------------------------------------------------------------------------------------------------------------------
+
+test("readiness: a file of the name under a .git directory of the embeddings root is a second answer, as ComfyUI's embedding search would walk it", () => {
+  assert.deepEqual(unv([EMB("Foo.pt"), EMB(".git/refs/Foo.pt")], "Foo"), ["embedding_unverified", WHY_MANY, [".git/refs/Foo.pt", "Foo.pt"]]);
+  assert.deepEqual(unv([EMB("main.pt"), EMB("pack/.git/refs/heads/main")], "main"), ["embedding_unverified", WHY_MANY, ["main.pt", "pack/.git/refs/heads/main"]], "a work tree inside a subfolder, the name a branch file carries");
+  assert.deepEqual(unv([EMB("Foo.pt"), EMB("sd15/.git/Foo.safetensors")], "Foo"), ["embedding_unverified", WHY_MANY, ["Foo.pt", "sd15/.git/Foo.safetensors"]], "another extension, one folder deeper");
+  assert.deepEqual(embGot([EMB(".git/refs/Foo.pt")], "Foo"), ["present", ".git/refs/Foo.pt", null], "alone it is the one file ComfyUI would open");
+  assert.equal(embGot([EMB("Foo.pt"), EMB(".git/refs/Other.pt")], "Foo")[0], "present", "a .git file that answers another name is no second answer");
+});
+
+test("inventory: the embeddings class lists no .git entry, keeps those files apart for the prompt lookup, and no other class reads them", () => {
+  const inv = invFrom({ ...TREE, [EMB("Foo.pt")]: { size: 1 }, [EMB(".git/refs/Foo.pt")]: { size: 1 }, [EMB("sd15/.git/x.safetensors")]: { size: 1 }, "D:/x/comfy/models/vae/.git/v.safetensors": { size: 1 } });
+  assert.deepEqual(relsOf(inv, "embeddings"), ["Foo.pt"]);
+  assert.deepEqual(inv.classes.embeddings.unlisted_files.map((f) => f.rel), [".git/refs/Foo.pt", "sd15/.git/x.safetensors"]);
+  assert.equal(inv.classes.embeddings.unlisted, 0, "`unlisted` still counts only the files an extension keeps out");
+  assert.deepEqual(relsOf(inv, "vae"), ["ae.safetensors"], "another class still skips .git");
+  assert.equal(inv.classes.vae.unlisted_files, undefined);
+});
+
+test("readiness: a loader widget's embeddings file is met by its exact path whatever sits under .git, because the combo it reads skips .git", () => {
+  assert.deepEqual(embGot([EMB("cond.safetensors"), EMB(".git/cond.safetensors")], "cond.safetensors", LOADER_ENTRY), ["present", null, null], "the .git copy is no second file");
+  assert.equal(embGot([EMB(".git/cond.safetensors")], "cond.safetensors", LOADER_ENTRY)[0], "missing", "and no file of the combo");
+});
+
+test("readiness (real files): a second file of the name under a .git directory of the embeddings root is unverified, and the exact file alone is present", (t) => {
+  const root = scratchDir(t, "tc-emb-git-").replace(/\\/g, "/");
+  const emb = `${root}/comfy/models/embeddings`;
+  nfs.mkdirSync(`${emb}/.git/refs`, { recursive: true });
+  nfs.writeFileSync(`${emb}/Foo.pt`, "f");
+  assert.deepEqual(realStatus(root, "Foo"), ["present", "Foo.pt", null, null], "one file");
+  nfs.writeFileSync(`${emb}/.git/refs/Foo.pt`, "g");
+  assert.deepEqual(realStatus(root, "Foo"), ["embedding_unverified", null, WHY_MANY, [".git/refs/Foo.pt", "Foo.pt"]], "and a second one under .git");
+});

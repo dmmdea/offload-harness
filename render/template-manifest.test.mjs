@@ -738,3 +738,14 @@ test("resolve: an annotated embedding whose prompt gives it two names is refused
   const r = readyOf(embeddingIo(EVIL, [A_FILE, evil], "embedding:evil_ti, embedding:EVIL_TI"));
   assert.deepEqual([r.ready, r.blocking], [false, ["embedding_unverified"]], "readiness says the same");
 });
+
+// A file under a `.git` directory of the embeddings root is a second answer for the run gate too (ComfyUI's embedding search walks it).
+test("resolve: a second file for the annotated embedding under a .git directory refuses the run as embedding_unverified, and the readiness table agrees", () => {
+  const evil = "embeddings/evil_ti.safetensors";
+  assert.equal(gateOf(embeddingIo(EVIL, [A_FILE, evil])).ok, true, "control: the exact file alone");
+  const io = embeddingIo(EVIL, [A_FILE, evil, "embeddings/.git/refs/evil_ti.safetensors"]);
+  const gone = gateOf(io);
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "embedding_unverified", undefined]);
+  assert.deepEqual(gone.embedding_unverified, [{ path: "models/embeddings/evil_ti.safetensors", reason: WHY_MANY, found: [".git/refs/evil_ti.safetensors", "evil_ti.safetensors"] }]);
+  assert.equal(C.catalogReadiness(catalogOf(io), snapshotOf(io).inventory).tt_emb.ready, false);
+});
