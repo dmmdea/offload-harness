@@ -321,8 +321,8 @@ func TestTheQuotedCounterexampleIsAdmittedOnBothConditions(t *testing.T) {
 // the available memory once it would leave less than the headroom of it: 41.2 GiB (49.1 - 41.2 = 7.9) is refused, 41.0 is not.
 func TestTheDocumentedReadingsAgreeWithTheRule(t *testing.T) {
 	mem := HostMemory{PhysicalGiB: 127.7, AvailableGiB: 49.1, CommitUsedGiB: 129.3, CommitLimitGiB: 187.7}
-	if v := mem.Verdict(8); v != HostOK {
-		t.Errorf("129.3 GiB committed with 49.1 available under a 187.7 limit is OK, not %s", v)
+	if v := mem.Verdict(8); v != HostOver {
+		t.Errorf("129.3 GiB committed on 127.7 GiB of RAM is OVER by the physical line a caller that declares one figure is held to, not %s", v)
 	}
 	over := statedAdmits(mem, true, true, 41.2, 0, 8)
 	if over.OK || !over.TouchShort || over.CommitShort {

@@ -87,7 +87,7 @@ func TestStatusNamesOverLoudlyOnTheBriefLine(t *testing.T) {
 
 func TestStatusNamesNearAsATailAndUnknownNotAtAll(t *testing.T) {
 	// 5 GiB available with an 8 GiB headroom: any lease that declares host RAM waits. Commit is far from its limit.
-	withHost(t, gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 5, CommitUsedGiB: 95, CommitLimitGiB: 160}, true)
+	withHost(t, gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 5, CommitUsedGiB: 40, CommitLimitGiB: 160}, true)
 	view := localLeaseView(context.Background(), freeLeaseConfig(t))
 	if hostBlock(t, view)["verdict"] != "NEAR" {
 		t.Fatalf("5 GiB available with 8 GiB of headroom is NEAR, got %v", hostBlock(t, view)["verdict"])
@@ -98,23 +98,24 @@ func TestStatusNamesNearAsATailAndUnknownNotAtAll(t *testing.T) {
 	}
 
 	// The commit line: 155 of a 160 GiB limit is inside the headroom; with the limit not enforced (Linux heuristic overcommit) it is no line.
-	withHost(t, gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 60, CommitUsedGiB: 155, CommitLimitGiB: 160}, true)
+	withHost(t, gpuprobe.HostMemory{PhysicalGiB: 200, AvailableGiB: 60, CommitUsedGiB: 155, CommitLimitGiB: 160}, true)
 	view = localLeaseView(context.Background(), freeLeaseConfig(t))
 	if hostBlock(t, view)["verdict"] != "NEAR" || !strings.Contains(gpuLeaseVerdictLine(view), "host RAM NEAR the limit (committed 155.0 of the 160.0 GiB commit limit, 8.0 GiB headroom)") {
 		t.Errorf("a commit charge inside the headroom of an enforced limit is NEAR:\n%s", gpuLeaseVerdictLine(view))
 	}
-	withHost(t, gpuprobe.HostMemory{PhysicalGiB: 100, AvailableGiB: 60, CommitUsedGiB: 155, CommitLimitGiB: 160, CommitLimitSoft: true}, true)
+	withHost(t, gpuprobe.HostMemory{PhysicalGiB: 200, AvailableGiB: 60, CommitUsedGiB: 155, CommitLimitGiB: 160, CommitLimitSoft: true}, true)
 	view = localLeaseView(context.Background(), freeLeaseConfig(t))
 	if hm := hostBlock(t, view); hm["verdict"] != "OK" || hm["commit_limit_enforced"] != false {
 		t.Errorf("the same charge against a limit the OS does not enforce is OK, got %v", hm)
 	}
 
-	// The reading of 2026-10-09 (3.2 GiB available, 162.9 GiB committed of a 187.7 GiB limit) is NEAR: the available line is gone
-	// under the headroom, the commit limit is not reached.
+	// The reading of 2026-10-09 (3.2 GiB available, 162.9 GiB committed of a 187.7 GiB limit on 127.7 GiB of RAM) is OVER, as it
+	// always was: the commit charge is above physical RAM, the line a caller that declares one figure is held to, and the
+	// available memory is under the headroom. The commit limit is not reached.
 	withHost(t, gpuprobe.HostMemory{PhysicalGiB: 127.7, AvailableGiB: 3.2, CommitUsedGiB: 162.9, CommitLimitGiB: 187.7}, true)
 	view = localLeaseView(context.Background(), freeLeaseConfig(t))
-	if hostBlock(t, view)["verdict"] != "NEAR" || !strings.Contains(gpuLeaseVerdictLine(view), "host RAM NEAR the limit (3.2 of 127.7 GiB physical RAM is available, 8.0 GiB headroom)") {
-		t.Errorf("the incident reading is NEAR on the available line:\n%s", gpuLeaseVerdictLine(view))
+	if hostBlock(t, view)["verdict"] != "OVER" || !strings.HasPrefix(gpuLeaseVerdictLine(view), "HOST RAM OVER (3.2 of 127.7 GiB physical RAM is available; committed 162.9 of 127.7 GiB physical RAM, 8.0 GiB headroom)") {
+		t.Errorf("the incident reading is OVER, leading the brief line:\n%s", gpuLeaseVerdictLine(view))
 	}
 
 	withHost(t, gpuprobe.HostMemory{}, false)
