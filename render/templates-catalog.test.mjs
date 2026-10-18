@@ -4192,6 +4192,16 @@ test("readiness: one file under two names that share an id answers as written wh
   assert.deepEqual(status({ [EMB("FOO.pt")]: "id:1:7", [EMB2("foo.pt")]: "id:1:8" }), ["embedding_unverified", null, WHY_MANY], "two files: the exact one and a case variant");
 });
 
+// A file reached under several names is reported by the first of them in path order (the name a manifest then carries), never the last.
+test("readiness: one file reached under several names is reported by the first of them in path order, whichever order the tree lists them", () => {
+  const nested = [{ text: "p:\n  base_path: D:/x/comfy/models\n  embeddings: embeddings/s2\n", dir: "D:/x/comfy" }];
+  assert.deepEqual(linkedGot([EMB("s2/foo.bin")], {}, "foo", nested).slice(0, 2), ["present", "foo.bin"], "a root registered inside the default one shows the file as foo.bin, the default root as s2/foo.bin");
+  const tree = { ...TREE, [EMB("z/foo.pt")]: { size: 7 }, [EMB("a/foo.pt")]: { size: 7 } };
+  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: [] }), idIo(tree, { [EMB("z/foo.pt")]: "id:1:7", [EMB("a/foo.pt")]: "id:1:7" }));
+  const r = C.readiness([req("embeddings", "foo", { annotated: false })], inv).requirements[0];
+  assert.deepEqual([r.status, r.resolved], ["present", "a/foo.pt"], "two names of one file by its id");
+});
+
 test("fileIdentity: a device and an index name a file, an index of 0 names nothing, and nodeIo gives the same id to two names of one file", async (t) => {
   assert.equal(C.fileIdentity({ dev: 5n, ino: 9n }), "id:5:9");
   assert.equal(C.fileIdentity({ dev: 5n, ino: 0n }), null, "a file system that has no index reports 0 for every file: those would all be one file");
