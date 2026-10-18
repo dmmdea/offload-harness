@@ -81,7 +81,12 @@ func bodyLaneServer(t *testing.T, key string, loopback bool) *Server {
 
 // post sends one request whose body is the given reader, declared at the given length, through the routed handler.
 func post(s *Server, path string, body io.Reader, length int64, contentType string, hdr map[string]string) *httptest.ResponseRecorder {
-	req := httptest.NewRequest(http.MethodPost, path, body)
+	return send(s, http.MethodPost, path, body, length, contentType, hdr)
+}
+
+// send is post for any method that carries a body.
+func send(s *Server, method, path string, body io.Reader, length int64, contentType string, hdr map[string]string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, body)
 	req.ContentLength = length
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)

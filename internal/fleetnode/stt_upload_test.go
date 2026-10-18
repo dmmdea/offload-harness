@@ -421,7 +421,7 @@ func TestSTTUploadOfAJobCancelledAtTheGateIsRemoved(t *testing.T) {
 
 // D17: the legacy path-taking stt lane joins the bearer rule when the node has a token, so a tailnet
 // peer cannot make the node convert and transcribe an arbitrary node-local file. A node with NO token
-// keeps its behaviour (the lane stays open beyond loopback), so no deployed tokenless node breaks.
+// answers it only on loopback, like every lane (403 beyond it: TestATokenlessNodeBeyondLoopbackRefusesEveryTaskTypeWith403).
 func TestLegacySTTDispatchIsTokenGatedWhenTheNodeHasAToken(t *testing.T) {
 	const body = `{"job_id":"stt-legacy-1","task_type":"stt","payload":{"audio":"/node/local/a.wav"}}`
 	t.Run("token set, no bearer", func(t *testing.T) {

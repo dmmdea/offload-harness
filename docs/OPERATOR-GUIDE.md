@@ -779,8 +779,9 @@ the files), `node_lacks_media_job` (the call carries a still, a reference or a c
 `node_lacks_model` (the node's row for the family you asked for lacks a file) or `node_below_min_vram` (`--min-vram-gb N`). A node that
 is down or busy with a text job is a retryable `capacity` defer instead. `--route local` with `--node` is refused. Without
 `--model` the node renders its own default family, and the answer's `rendered_family` and `rendered_files` say which. Read a node's rows with
-`curl -H "Authorization: Bearer $FLEET_AUTH_TOKEN" http://node-b:18811/fleet/health` (`media_recipes`; `bytes` -1 is a missing
-weight), where `$FLEET_AUTH_TOKEN` holds the node's `fleet_auth_token`. A node that has a token withholds `media_recipes`
+`curl -H @fleet-auth.hdr http://node-b:18811/fleet/health` (`media_recipes`; `bytes` -1 is a missing
+weight), where `fleet-auth.hdr` is a file only you can read that holds one line, `Authorization: Bearer <the node's fleet_auth_token>`
+(the token stays off the command line, where the process list and the shell history would keep it). A node that has a token withholds `media_recipes`
 (with `image_recipes`, the store and the lease's reason) from a request without the bearer: a bare `curl` answers `200` with
 the rest of the document and no `media_recipes` key, and a wrong bearer gets that same answer and leaves one line in the
 node's journal. This is the named-node release only: a
@@ -2063,8 +2064,8 @@ send the token whenever it is set, but a node that gains the rule refuses three 
 first. (1) A delegator with no `fleet_auth_token`, or a wrong one, a media-only box included (media, stt and compose-video
 calls needed none before): every dispatch, poll and artifact fetch is `401`, the media client reports that as a `config`
 defer, and the node's `/fleet/health` reaches it without the lease reason, the store and the weight-file rows, so its node view
-degrades with no error. (2) A delegator older than the release that added the bearer to its client: text 0.154.0, withdraw
-0.143.1, compose 0.160.0, media and stt 0.163.1, and the roster probe's token check 0.167.0. (3) Software outside this repo
+degrades with no error. (2) A delegator older than the first release whose client sends the bearer on a lane: withdraw
+0.146.0, text 0.154.0, compose 0.163.0, stt 0.165.0, the roster probe's token check 0.167.0 and media 0.173.0. (3) Software outside this repo
 that sends no bearer, which stops working on every lane. Before the node change is deployed to a node, `fleet_auth_token` must
 be present in the config its `fleet-serve` reads. A node that already
 listens beyond loopback with no token will not start after the upgrade, so give it the token before it; its refusal names the
