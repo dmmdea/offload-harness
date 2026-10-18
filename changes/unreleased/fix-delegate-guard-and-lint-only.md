@@ -20,7 +20,10 @@
   items, a count that restarts, numbers that jump) and `TestRunAgentTaskRepackAfterACountingLoopIsNotEscalatedToTheCap`
   (end to end against a fake seat, with a fixture that is first shown to be escalated when the loop is not recognised).
   On the unmodified code both failed: the seven loop shapes read `degenerateTail = ""`, and the second attempt was a
-  plain request to the cap (`the attempt after a counting loop is not conditioned against repeating`).
+  plain request to the cap (`the attempt after a counting loop is not conditioned against repeating`). Six mutations of
+  the detector were then run against the table (no end-of-output check, no same-text rule, no span floor, a count floor
+  of 5 for 12, the cut item not dropped, a step other than one); two survived the first table (the same-text rule and the
+  count floor) and three cases were added that fail under each, after which all six are caught.
 
 ### Changed - every tier that binds an agent model states its agent completion budget (D-24)
 
