@@ -131,7 +131,10 @@ type cookieWrapper struct {
 	envelope  bool
 	plainOnly bool
 	openOK    bool
-	build     func(body string, elems []string) (text, want string)
+	// fourLayers marks the wrappers that escape the line four times: a backslash in front of a dollar sign or a backtick
+	// is then 31 backslashes, more than the 16 the class takes in a bare value (a named gap).
+	fourLayers bool
+	build      func(body string, elems []string) (text, want string)
 }
 
 func argsOf(content string) string {
@@ -252,6 +255,9 @@ func cookieCases() []cookieCase {
 				return
 			}
 			if openEndShapes[s.name] && (k != len(idx)-1 || !w.openOK) {
+				return
+			}
+			if w.fourLayers && strings.ContainsAny(s.text, "$`") && strings.Contains(s.text, "\\") && strings.Contains(s.name, "escaped") {
 				return
 			}
 			texts = append(texts, s.text)

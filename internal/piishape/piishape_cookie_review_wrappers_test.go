@@ -70,9 +70,10 @@ func layeredWrapper(layers ...escLayer) cookieWrapper {
 		names[i] = l.name
 	}
 	return cookieWrapper{
-		name:     "layers " + strings.Join(names, "+"),
-		envelope: layers[len(layers)-1].name == "json",
-		openOK:   true,
+		name:       "layers " + strings.Join(names, "+"),
+		envelope:   layers[len(layers)-1].name == "json",
+		openOK:     true,
+		fourLayers: len(layers) >= 4,
 		build: func(body string, _ []string) (string, string) {
 			w := ckName + ": " + body
 			text, want := "one\n"+w+"\nthree", w

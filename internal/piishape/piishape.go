@@ -212,13 +212,14 @@ const cookieGapPiece = `(?:[^\w\r\n]|` + jsonEscape + `)`
 const cookieGap = cookieGapPiece + `{0,8}?`
 
 // cookieOpener is what stands between a cookie header's name and the cookies: the punctuation the Basic header
-// takes (up to eight non-word characters, then a colon, an equals sign or an opening bracket, then up to eight
-// more; a hash rocket is an equals sign and a greater-than sign, the second of which the gap takes), so a header
-// line, a subscript and a hash are covered; or else a comma behind which a quote opens the string that holds the
+// takes (up to eight non-word characters, then a colon, an equals sign, a greater-than sign or an opening bracket,
+// then up to eight more; a hash rocket is an equals sign and a greater-than sign, the second of which the gap takes,
+// and a greater-than sign right behind the name is the end of an XML tag or the head of an arrow), so a header
+// line, a subscript, a hash, an element and an arrow are covered; or else a comma behind which a quote opens the string that holds the
 // cookies, the form of a call that takes the name and the value as two arguments (Header.Set("Cookie", "...")).
 // A bare comma stays quiet: "the cookie, path=/some/long/path" is prose. A header fold may stand before the
 // punctuation and after it.
-const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieGap + `[:=\[]|` + cookieGap + `,\s*\\*['"])` + cookieGap + `(?:` + cookieFold + cookieGap + `)?`
+const cookieOpener = `(?:` + cookieFold + `)?(?:` + cookieGap + `[:=>\[]|` + cookieGap + `,\s*\\*['"])` + cookieGap + `(?:` + cookieFold + cookieGap + `)?`
 
 // cookieListOpener is the opener of a list: the punctuation, which a line break may precede or follow, then an
 // opening bracket. The white space behind the bracket, a pretty-printed list's line breaks and indentation
@@ -343,9 +344,12 @@ const cookieRunMax = `16`
 
 // cookieBareLong is a bare cookie value of 12 or more characters (it ends before a quote, a space, a comma, a
 // semicolon, an ampersand or a closing bracket, so a header in a curl command ends before the quote that closes
-// the string and the value in a printed Go header before the bracket that closes its list); a JSON unicode
-// escape counts as one character.
-const cookieBareLong = `(?:[^\s'",;&\\\]]|\\{1,` + cookieRunMax + `}u[0-9a-fA-F]{4}){12,}`
+// the string and the value in a printed Go header before the bracket that closes its list); an escape counts as
+// one character, a JSON unicode escape (backslash-u and four hex digits) or a backslash run and the character it
+// escapes (a shell's escaped dollar sign, backtick, space or semicolon, a JSON escaped slash, a path separator),
+// the same escapes the span takes (cookieBareEscape), so an escape inside the first 12 characters of the only long
+// value does not stop the count.
+const cookieBareLong = `(?:[^\s'",;&\\\]]|\\{1,` + cookieRunMax + `}u[0-9a-fA-F]{4}|\\{1,` + cookieRunMax + `}(?-i:[^"'\\\r\nnru])){12,}`
 
 // cookieQuotedLong is a quoted cookie value at a level whose first 12 characters are counted, taken whole: the rest
 // of the body, then the closing quote. With cross, a body that is open at a line break goes on to its closing quote
@@ -401,8 +405,9 @@ var cookiePair = func() string {
 
 // cookieBareEscape is a backslash run (a shell escape of a dollar sign, a backtick, a space or a semicolon, a path
 // separator, a JSON escape or a doubled backslash of either) and the character it escapes. Not a quote, which closes
-// the string the header sits in, and not a line break (the JSON escape of one is an n or an r).
-const cookieBareEscape = `\\{1,` + cookieRunMax + `}[^"'\\\r\nnr]`
+// the string the header sits in, and not a line break (the JSON escape of one is a lowercase n or r; the pattern is
+// case-insensitive, and a capital N or R after a backslash, as in a Windows path, is an ordinary escape).
+const cookieBareEscape = `\\{1,` + cookieRunMax + `}(?-i:[^"'\\\r\nnr])`
 
 // cookieStep is one step over the span of a header line: a quoted pair, or any character that is not a quote, a
 // backslash or a line break, or an escape that is not a quote or a line break. The quoted pair comes first, so the
