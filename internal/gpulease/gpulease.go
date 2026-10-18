@@ -605,8 +605,9 @@ type Options struct {
 	// HostRAMCommitGiB is the commit the holder declares it will be charged (stamped as Meta.HostRAMCommitGiB), admitted
 	// against the OS commit limit where the OS enforces one. 0 = the same figure as HostRAMGiB, so a caller that declares one
 	// figure keeps a commit condition at least as strict as its touched one. The two differ for a job that commits more than it
-	// touches (a process tree measured at 27.8 GiB touched and 58.1 GiB charged), and a job whose commit is smaller than its
-	// working set (mapped files count in the working set and not in the commit) cannot say so: it is judged on the larger figure.
+	// touches (a process tree measured at 27.8 GiB touched and 58.1 GiB charged). A job whose commit is smaller than its
+	// working set (mapped files count in the working set and not in the commit) cannot say so by leaving this at 0, which reads
+	// as the touched figure; a commit declared below the working set is taken as stated.
 	HostRAMCommitGiB float64
 	// OnHostRAMWait, when set, is called ONCE per Acquire, at the first refusal on host-RAM grounds
 	// of a request that will keep waiting (Wait > 0): the CLI prints the "waiting for host RAM" line
