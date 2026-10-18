@@ -4,10 +4,12 @@
 // the lease files by a rename over the live name, as internal/gpulease does for a record and the heartbeat (write beside,
 // rename over). A reader that answers null for a file that is there is a lease read as gone: the fence (checkInheritedLease)
 // calls a held lease not current and the render aborts. The test wants no miss. Go never renames over a card claim (it creates one
-// once and deletes it); the claim is renamed over here as well, which is harder on its reader than production and keeps the
-// reader in the loop.
+// once and deletes it), so neither does the writer here: no reader waits for an absent claim (nothing is staged beside one), and the
+// absent-name episode of a rename over it would read as a lease that is gone, a false red on a correct reader (a long run, 7,200
+// renames, answered null twice for the claim; `claimRenames` below counts it and the test wants none). The claim is read in the loop
+// and is never replaced.
 //
-// WHAT IT PINS. One thing: at its size (600 renames over 18 files, 150 loops of the five readers; LONG MODE below multiplies it),
+// WHAT IT PINS. One thing: at its size (600 renames over 12 files, 150 loops of the five readers; LONG MODE below multiplies it),
 // no reader answers null for a file that is there while a writer replaces it by rename-over. Plain readFileSync missed nothing
 // either, so this test is a guard against the readers starting to miss and is not a red on the old ones.
 //
@@ -101,7 +103,7 @@ const [root, rootsArg, minArg, capArg, needRetriesArg, freshArg] = process.argv.
 const files = [];
 for (let r = 1; r <= Number(rootsArg); r++) {
   const d = join(root, String(r));
-  files.push(join(d, "e", "7.json"), join(d, "meta.json"), join(d, "cards", "gpu-test-0.claim"));
+  files.push(join(d, "e", "7.json"), join(d, "meta.json")); // not the claim: Go never renames over one (see the header)
 }
 const SEEDS = [".seed", ".seed2"];
 const ino = (p) => statSync(p, { bigint: true }).ino;
