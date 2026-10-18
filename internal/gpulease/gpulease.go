@@ -1241,15 +1241,21 @@ func inspectDirDetailAt(leaseDir string, now time.Time, hbTTL time.Duration) (In
 	return reader{dir: leaseDir, now: now, hbTTL: hbTTL, procStart: processStart}.detail()
 }
 
+// minHeartbeatMs is the earliest instant a heartbeat can name: Renew writes the time of the renewal as milliseconds since the epoch, 13
+// decimal digits from September 2001 until the year 2286, so every genuine heartbeat is at least this and every proper prefix of one (a torn
+// write) is below it. A number below it is not a time of renewal, whatever record it is read beside (keeper.go reads heartbeats without one).
+const minHeartbeatMs = 1_000_000_000_000
+
 // heartbeatAt reads the per-epoch heartbeat beside a lease record and says whether it could tell. The second result is false when the
 // heartbeat is UNKNOWN, and the reclaim rule reads unknown as "not stale" (see reader.judge): a heartbeat that cannot be read says
 // nothing about the holder, and the cost of acting on it is a live lease handed to a second job.
 //
 // The value, known, is:
 //
-//   - the content of hb.<epoch> when it reads and parses (never earlier than the stamp from the acquisition);
-//   - the file's modification time when the file is there but its content is no use (empty, torn, not a number) or the read failed
-//     for any reason but the file being absent (a permission error that outlasted its wait, an I/O error). The file is aged like any
+//   - the content of hb.<epoch> when it reads and is a number not earlier than the stamp from the acquisition;
+//   - the file's modification time when the file is there but its content is no use (empty, not a number, or a number earlier than the
+//     acquisition, which no renewal can be: a torn write leaves a prefix of the digits, and a prefix of a number is a number) or the read
+//     failed for any reason but the file being absent (a permission error that outlasted its wait, an I/O error). The file is aged like any
 //     heartbeat: Renew writes a staged file and renames it over the live name, so a heartbeat renewed a moment ago has the time of that
 //     write, and one nobody renews goes stale after the TTL, corrupt or not. The time is never earlier than the stamp either;
 //   - the stamp from the acquisition when the file is SETTLED absent (no fresh staged file beside the name, and the name still not
@@ -1265,8 +1271,11 @@ func heartbeatAt(leaseDir string, meta *Meta) (at int64, known bool) {
 	path := filepath.Join(leaseDir, "hb."+strconv.FormatUint(meta.Epoch, 10))
 	b, err := readSharedFile(path)
 	if err == nil {
-		if v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil {
-			return max(v, meta.RenewedAtMs), true
+		// A genuine renewal is never earlier than the moment the lease was taken. A number below that (a prefix of the digits of a
+		// renewal that was torn, zero, a negative number) parses and is still no heartbeat: it says nothing, like an empty file.
+		floor := max(meta.RenewedAtMs, meta.AcquiredAtMs, minHeartbeatMs)
+		if v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil && v >= floor {
+			return v, true
 		}
 		// read, but it says nothing: age the file itself
 	}

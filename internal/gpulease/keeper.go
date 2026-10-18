@@ -34,8 +34,9 @@ func (m *Manager) keeperSignOfLife(epoch uint64, record string) time.Time {
 
 // keeperEvidence is keeperSignOfLife and whether a heartbeat could not be told. A heartbeat is replaced by a rename over the live name
 // WITHOUT the epoch lock, so it is the one lease file that can be in flight under the lock the sweep and the grant hold, and it is read
-// the way the reclaim rule reads it (heartbeatAt): its content when that parses; else the file's modification time, which ages like any
-// heartbeat (a torn or unreadable one that nobody renews goes stale); a file SETTLED absent is no sign (a holder that never renewed);
+// the way the reclaim rule reads it (heartbeatAt): its content when that is a time of renewal (a number not smaller than minHeartbeatMs: a
+// prefix of one, torn, is not); else the file's modification time, which ages like any heartbeat (a torn or unreadable one that nobody
+// renews goes stale); a file SETTLED absent is no sign (a holder that never renewed);
 // and a heartbeat that can be neither read nor examined, or whose rename is installing it, is UNKNOWN. Unknown is no evidence that the
 // holder is gone, so keeperAlive reads it as alive. Reading it as "no sign of life" had the sweep remove the record and the claims of
 // a live holder whose record could not be read, and the next grant take its cards. That holds for the scan of every heartbeat (epoch 0)
@@ -55,11 +56,11 @@ func (m *Manager) keeperEvidence(epoch uint64, record string) (newest time.Time,
 	noteHeartbeat := func(path string) {
 		b, err := readSharedFile(path)
 		if err == nil {
-			if v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil && v > 0 {
+			if v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil && v >= minHeartbeatMs {
 				note(time.UnixMilli(v))
 				return
 			}
-			// read, but it says nothing: age the file itself
+			// read, but it says nothing (empty, not a number, or too small to be a time of renewal): age the file itself
 		}
 		fi, serr := statSettled(path)
 		switch {
