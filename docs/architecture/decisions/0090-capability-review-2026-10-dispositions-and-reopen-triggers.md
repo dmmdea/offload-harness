@@ -57,7 +57,7 @@ could not settle a fact, it is marked unverified, in the form the [style guide](
 | GitSwarm (arXiv 2610.04862) — https://arxiv.org/abs/2610.04862 | **pending the swarm pilot.** **REPLICATED** if the contract-mode swarm pilot beats independent best-of-N at equal episode budget on a Go-test objective through ADR 0088's superiority mode and the Claude Code skill pilot reports; otherwise **DECLINED** (replicated, measured, no gain). | Paper only: no code, no release. The numbers rest on frontier closed models at 100 to 500 episodes. The mechanism is small and cheap to rebuild: a commit graph with a mandatory `informed_by` trailer, worktree-isolated episodes, contribute / nominate / abstain endings and an announce log. | A code release by the paper's authors. |
 
 The three pending rows (Headroom rungs, the CLM paper, GitSwarm) are settled by one amendment after the measurements
-and the gate verdicts exist. Until then "pending" is the honest state; none of the three reads as adopted.
+and the gate verdicts exist. Section 4 is that amendment (2026-10-18); none of the three reads as adopted.
 
 **Clean-room provenance rules.** They apply to every row above or below whose upstream licence this repository cannot
 take, and to the CLM edit tool in particular.
@@ -165,6 +165,22 @@ never imports DeepGEMM, vLLM does, so there is nothing to build in this reposito
 4. Explicit operator approval before the toolchain install or the wheel build, and again before any seat-template
    change. Only an equal-output result that the operator wants becomes an opt-in knob in the vLLM seat template, with
    the wheel pin and the toolchain requirement recorded in the tier's measured note.
+
+### 4. Amendment 2026-10-18: the pending rows settled (ENH-15b)
+
+On 2026-10-18 the operator made measurement opt-in: a model or loop is measured only when the operator orders it, with
+one run, and the result is recorded in the benchmark documentation. No further pre-registered A/B was ordered. So
+every row that was waiting on a gate verdict now ends in a terminal state, and the reopen trigger is unchanged.
+
+| Row | Terminal state | What decided it |
+|---|---|---|
+| Headroom (offload rungs) | **PARKED**. The search rung and the logs rung are merged and default off. | Their non-inferiority A/B was not run. Reopen: an operator order to measure them, or a real run whose context overflow a rung would have absorbed. |
+| The CLM paper | **DECLINED (measured, no need)**. No `edit_context` tool and no CLM benchmark adapter beyond the merged ContextBench port. | `trace-corpus` over the recorded agent-loop runs, read on 2026-10-18. In the window registered before any data (from 2026-10-16), the ladder fired on 0 of 5 runs (Wilson 95% upper bound 0.434). Across all rows from 2026-08-17 it fired on 4 of 9 runs that record it, and all 4 come from rows where the seat reported a bogus 8,192-token window. No run evicted anything, so the pager re-fetch rate has no data. The leased ContextBench smoke was stopped after it drove the host's commit to 168.3 of 171.7 GiB (register B-56, since bounded by the seat launcher's page-cache watcher). The reopen trigger stands: a corpus whose re-fetch rate clears 10%, or a seat on which the ladder fires often. |
+| GitSwarm | **DECLINED (replicated, measured, no gain)**. | Pilot on a real harness issue, same gate for both branches. The swarm of three plus an integrator used 2.6x the output tokens and 2.6x the wall time of one agent. Its slices collapsed into a chain, it missed a fix the single agent made, and blind review scored it 7 against 8. The reopen trigger stands. |
+| multi-harness-rl (acceptance-hygiene ADR) | The seat-by-loop matrix and vocabulary stay **PORTED**. The acceptance-hygiene ADR is **DECLINED**. | Its matrix measured a 9B pair of seats once (32 of 32 each, 16 ties: inconclusive, incumbent kept) and the rest were not run. A standing pre-registration procedure contradicts measurement on order only. Reopen: the operator orders standing measurement. |
+
+The two numbers reserved for the measurement ADRs of this program (0092, acceptance hygiene; 0093, the CLM measurement)
+are not used: their content is the two rows above.
 
 ## Consequences
 
