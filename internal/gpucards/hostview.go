@@ -145,7 +145,7 @@ func (v HostView) Why() string {
 func (v HostView) overNote() string {
 	return fmt.Sprintf("%s. This reading cannot say whether the box is paging now; "+
 		"a lease that declares host RAM waits until there is room again (the available RAM less its need and the %.1f GiB headroom, "+
-		"and the commit charge plus its commit under physical RAM less the headroom, or, for a commit it states, under the commit limit less the headroom where the OS enforces one); "+
+		"and the commit charge plus its commit under physical RAM (or an enforced commit limit that sits below it) less the headroom, or, for a commit it states, under the commit limit less the headroom where the OS enforces one); "+
 		"end a lease or stop a kept ComfyUI instance to free it", v.Why(), v.HeadroomGiB)
 }
 
