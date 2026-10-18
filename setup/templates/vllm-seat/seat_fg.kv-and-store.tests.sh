@@ -114,7 +114,10 @@ maxlen_is() {
 }
 launched() { [ "$RC" = 0 ] && [ -s "$R/vllm.args" ] || PROBLEMS="$PROBLEMS [the launcher did not reach vllm serve (exit $RC)]"; }
 verdict() {
-  if [ -z "$PROBLEMS" ]; then echo "PASS $1"; else
+  if [ -z "$PROBLEMS" ]; then
+    echo "PASS $1"
+    [ -n "${VERBOSE:-}" ] && { echo "    ---- launcher output:"; sed 's/^/    | /' "$R/out"; echo "    ---- mount: $(tr '\n' ' ' < "$R/mount.args" 2>/dev/null)"; }
+  else
     echo "FAIL $1:$PROBLEMS"; echo "    ---- launcher output:"; sed 's/^/    | /' "$R/out"; echo "    ---- vllm argument list:"; sed 's/^/    | /' "$R/vllm.args" 2>/dev/null
     fail=1
   fi
@@ -196,7 +199,7 @@ verdict "SEAT_MAX_LEN empty and the pool enough: the 131072 default is kept"
 # every one of its interfaces' addresses: an address of another network first (198.51.100.7), then one on the launcher's own
 # network (192.0.2.50). The pinned source address is the wired one (auto = the lowest-metric default route).
 STORE=(SEAT_L2_MOUNT_SRC=//store.local/kvcache SEAT_L2_MOUNT_DIR=@R@/mnt SEAT_L2_MOUNT_OPTS=vers=3.1.1,cache=none
-  SEAT_L2_MOUNT_SRCADDR=auto 'SEAT_L2={"type":"fs_native","base_path":"@R@/mnt/store"}')
+  SEAT_L2_MOUNT_SRCADDR=auto "SEAT_L2='{\"type\":\"fs_native\",\"base_path\":\"@R@/mnt/store\"}'")
 mounted_ok() { [ "$RC" = 0 ] && [ -s "$R/mount.args" ] || PROBLEMS="$PROBLEMS [no mount command ran (exit $RC)]"; lacks "CACHE SERVER DEGRADED"; }
 mount_is() { [ "$(mountsrc)" = "$1" ] || PROBLEMS="$PROBLEMS [mounted '$(mountsrc)', want '$1']"; }
 no_helper() { [ ! -e "$R/mdns.argv" ] || PROBLEMS="$PROBLEMS [the mDNS helper ran]"; }

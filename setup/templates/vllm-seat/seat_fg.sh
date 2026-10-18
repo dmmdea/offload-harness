@@ -99,6 +99,182 @@ degrade_l2() {
   L2_DEGRADED=1
 }
 L2_DEGRADED=0
+# Which address of the store host to mount (register B-55). A .local store name is resolved by the system resolver to ONE of the
+# addresses the store's mDNS responders answer with, and on the reference store host that is arbitrary: one responder is pinned to
+# its wired NIC (the right answer), another agent answers on every interface with that interface's own address (a Wi-Fi address
+# on the same /24, container bridges, a VPN address). The mount then landed on the Wi-Fi path (writes ~24 MB/s, so the write
+# floor degraded L2), on an unreachable bridge address, or on the VPN address, which refuses the pinned source address: every
+# start for three days ran without L2. So, for a cifs mount whose source is //<name>.local/<share> with a pinned source
+# address (SEAT_L2_MOUNT_SRCADDR), l2_pick_address asks mDNS itself for ALL the A answers (a raw query to 224.0.0.251:5353 with
+# the QU bit, three times in about a second, sent out of the pinned source address) and mounts //<address>/<share> at the FIRST
+# answer inside the pinned source address's IPv4 network (the prefix is read from `ip -4 -o addr`). Anything else keeps the
+# mount by name exactly as before, and the line printed says why: no python, a helper that fails or finds nothing, no answer on
+# that network, a prefix that cannot be read. Names that are not .local, nfs mounts and an unset source pin never get here. The
+# lookup is bounded: `timeout -s KILL 3` around the helper, so it can never hold a seat start. If the store's wired and Wi-Fi
+# addresses sit on ONE network, "first inside the network" cannot tell them apart: name the wired address in SEAT_L2_MOUNT_SRC
+# (an IPv4 literal is mounted as given).
+# Two seams exist for the test (seat_fg.kv-and-store.tests.sh) and nothing else sets them: SEAT_FG_TEST_MDNS_CMD names a command
+# that stands in for the lookup (it is called as `<cmd> <name> <source address>` and prints one IPv4 answer per line), and
+# SEAT_FG_TEST_MDNS_DEST (host:port) moves the helper's query off the mDNS group onto a test responder.
+L2_ADDR=""          # the address the share was mounted at when the launcher chose one: status file and degrade messages
+MOUNT_SRC="${SEAT_L2_MOUNT_SRC:-}"
+l2_mdns_answers() {   # $1 = the .local name, $2 = the source address; prints each distinct IPv4 answer, in arrival order
+  local py=""
+  if [ -n "${SEAT_FG_TEST_MDNS_CMD:-}" ]; then
+    timeout -s KILL 3 "$SEAT_FG_TEST_MDNS_CMD" "$1" "$2"; return
+  fi
+  if [ -x "$VENV/bin/python" ]; then py="$VENV/bin/python"; else py="$(command -v python3 2>/dev/null)"; fi
+  [ -n "$py" ] || return 127
+  timeout -s KILL 3 "$py" - "$1" "$2" <<'PYEOF'
+import os, random, socket, struct, sys, time
+
+def encode(name):
+    return b"".join(bytes([len(p)]) + p.encode("ascii") for p in name.split(".")) + b"\0"
+
+def read_name(buf, off):
+    labels, end, hops = [], None, 0
+    while True:
+        n = buf[off]
+        if n == 0:
+            off += 1
+            break
+        if n & 0xC0 == 0xC0:
+            if end is None:
+                end = off + 2
+            off = ((n & 0x3F) << 8) | buf[off + 1]
+            hops += 1
+            if hops > 16:
+                raise ValueError("compression loop")
+            continue
+        labels.append(buf[off + 1:off + 1 + n].decode("ascii", "replace").lower())
+        off += 1 + n
+    return ".".join(labels), (off if end is None else end)
+
+def a_answers(buf, name):
+    flags, qd, an, ns, ar = struct.unpack(">HHHHH", buf[2:12])
+    if not flags & 0x8000:
+        return []
+    off, found = 12, []
+    for _ in range(qd):
+        off = read_name(buf, off)[1] + 4
+    for _ in range(an + ns + ar):
+        owner, off = read_name(buf, off)
+        rtype, _cls, _ttl, rdlen = struct.unpack(">HHIH", buf[off:off + 10])
+        off += 10
+        if rtype == 1 and rdlen == 4 and owner == name:
+            found.append(socket.inet_ntoa(buf[off:off + 4]))
+        off += rdlen
+    return found
+
+def main():
+    name = sys.argv[1].rstrip(".").lower()
+    src = sys.argv[2] if len(sys.argv) > 2 else ""
+    host, _, port = os.environ.get("SEAT_FG_TEST_MDNS_DEST", "224.0.0.251:5353").rpartition(":")
+    dest = (host, int(port))
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    if src:
+        try:
+            sock.bind((src, 0))
+            sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_IF, socket.inet_aton(src))
+        except OSError:
+            pass
+    try:
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 255)
+    except OSError:
+        pass
+    # id, flags 0, one question: <name> type A, class IN with the QU bit (0x8001): answer me by unicast
+    query = struct.pack(">HHHHHH", random.randrange(1, 65536), 0, 1, 0, 0, 0) + encode(name) + struct.pack(">HH", 1, 0x8001)
+    start = time.monotonic()
+    sends = [0.0, 0.3, 0.6]
+    seen = []
+    while True:
+        elapsed = time.monotonic() - start
+        if elapsed >= 1.0:
+            break
+        while sends and elapsed >= sends[0]:
+            sends.pop(0)
+            try:
+                sock.sendto(query, dest)
+            except OSError:
+                pass
+        wait = (sends[0] if sends else 1.0) - elapsed
+        sock.settimeout(max(0.01, min(wait, 1.0 - elapsed)))
+        try:
+            data = sock.recv(9000)
+        except socket.timeout:
+            continue
+        except OSError:
+            time.sleep(0.05)
+            continue
+        try:
+            for a in a_answers(data, name):
+                if a not in seen:
+                    seen.append(a)
+        except (IndexError, ValueError, struct.error, UnicodeError):
+            pass
+    for a in seen:
+        print(a)
+    if not seen:
+        print("no mDNS A answer for " + name, file=sys.stderr)
+    return 0 if seen else 1
+
+try:
+    sys.exit(main())
+except Exception as e:
+    print("mDNS helper failed: %s" % e, file=sys.stderr)
+    sys.exit(2)
+PYEOF
+}
+l2_is_ipv4() {
+  local o
+  [[ "$1" =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})$ ]] || return 1
+  for o in 1 2 3 4; do [ $(( 10#${BASH_REMATCH[$o]} )) -le 255 ] || return 1; done
+}
+l2_ip2int() { local a b c d; IFS=. read -r a b c d <<< "$1"; echo $(( (10#$a << 24) | (10#$b << 16) | (10#$c << 8) | 10#$d )); }
+l2_pick_address() {   # sets MOUNT_SRC and L2_ADDR when it chooses; prints one seat_fg: line either way
+  local rest host name share out rc=0 plen mask net ans chosen="" why="" got=() dup g
+  rest="${SEAT_L2_MOUNT_SRC#//}"; host="${rest%%/*}"; share="${rest#*/}"
+  [ "$rest" != "$host" ] || return 0                 # not the //host/share shape
+  case "$host" in *:*) return 0 ;; esac              # an explicit port is not ours to rewrite
+  name="$host"
+  case "${name,,}" in *.local) ;; *) return 0 ;; esac
+  out="$(l2_mdns_answers "$name" "$SRCADDR" 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) why="no mDNS answer within about 1 s" ;;
+    124|137) why="the mDNS lookup timed out (bound 3 s)" ;;
+    127) why="no python interpreter for the mDNS lookup (neither $VENV/bin/python nor python3)" ;;
+    *) why="the mDNS lookup failed (exit $rc)" ;;
+  esac
+  if [ -z "$why" ]; then
+    while IFS= read -r ans; do
+      l2_is_ipv4 "$ans" || continue
+      dup=0; for g in "${got[@]}"; do [ "$g" = "$ans" ] && dup=1; done
+      [ "$dup" -eq 1 ] || got+=("$ans")
+    done <<< "$out"
+    [ "${#got[@]}" -gt 0 ] || why="the mDNS lookup answered nothing usable"
+  fi
+  if [ -z "$why" ]; then
+    plen="$(ip -4 -o addr show 2>/dev/null | awk -v a="$SRCADDR" '{split($4, x, "/"); if (x[1] == a) { print x[2]; exit }}')"
+    if ! l2_is_ipv4 "$SRCADDR"; then why="the source address '$SRCADDR' is not an IPv4 address"
+    else case "$plen" in ''|*[!0-9]*) why="cannot read the prefix of $SRCADDR from ip -4 -o addr" ;; *) [ "$plen" -le 32 ] || why="cannot read the prefix of $SRCADDR from ip -4 -o addr" ;; esac
+    fi
+  fi
+  if [ -n "$why" ]; then
+    echo "seat_fg: cache-server store ${name}: ${why}${got[*]:+ (mDNS answers: ${got[*]})} — mounting by name as before"
+    return 0
+  fi
+  mask=$(( (0xFFFFFFFF << (32 - 10#$plen)) & 0xFFFFFFFF )); net=$(( $(l2_ip2int "$SRCADDR") & mask ))
+  for ans in "${got[@]}"; do
+    if [ $(( $(l2_ip2int "$ans") & mask )) -eq "$net" ]; then chosen="$ans"; break; fi
+  done
+  if [ -z "$chosen" ]; then
+    echo "seat_fg: cache-server store ${name}: mDNS answers: ${got[*]}, none inside ${SRCADDR}/${plen} — mounting by name as before"
+    return 0
+  fi
+  echo "seat_fg: cache-server store ${name}: mDNS answers: ${got[*]} — chose ${chosen}, the first inside ${SRCADDR}/${plen} (the pinned source address's network); mounting //${chosen}/${share} instead of //${name}/${share}"
+  MOUNT_SRC="//${chosen}/${share}"; L2_ADDR="$chosen"
+}
 if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
   mkdir -p "$SEAT_L2_MOUNT_DIR"
   # SEAT_L2_MOUNT_SRCADDR: pin the CIFS client's source address. On a box with two NICs on one subnet (wired +
@@ -117,12 +293,17 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
     MOUNT_OPTS="${MOUNT_OPTS:+$MOUNT_OPTS,}srcaddr=$SRCADDR"; echo "seat_fg: cache-server mount source address pinned to $SRCADDR"
   fi
   if ! mountpoint -q "$SEAT_L2_MOUNT_DIR"; then
-    if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$SEAT_L2_MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "$MOUNT_OPTS"; then
+    if [ -n "$SRCADDR" ] && [ "${SEAT_L2_MOUNT_TYPE:-cifs}" = cifs ]; then
+      l2_pick_address
+    fi
+    if ! timeout 30 mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "$MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "$MOUNT_OPTS"; then
       # Say WHY, in the terms the operator can act on: name resolution, reachability, or the share itself.
       host="${SEAT_L2_MOUNT_SRC#//}"; host="${host%%:*}"; host="${host%%/*}"
       case "${SEAT_L2_MOUNT_TYPE:-cifs}" in nfs|nfs4) port=2049 ;; *) port=445 ;; esac
       case "$host" in
-        *[!0-9.]*) resolved="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')" ;;   # a name: resolve it
+        *[!0-9.]*)
+          if [ -n "$L2_ADDR" ]; then resolved="$L2_ADDR"                                         # mounted at the address mDNS gave: probe that one
+          else resolved="$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}')"; fi ;;    # a name: resolve it
         *)         resolved="$host" ;;                                                          # an IPv4 literal: probe it as is
       esac
       if [ -z "$resolved" ]; then
@@ -132,7 +313,7 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
       else
         why="'$host' = $resolved answers on $port — check credentials, the share name, and the store's allow-list (source address ${SRCADDR:-unpinned; set SEAT_L2_MOUNT_SRCADDR=auto})"
       fi
-      degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why"
+      degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why${L2_ADDR:+ [the mount was tried at the mDNS-chosen address $L2_ADDR, not by name]}"
     fi
   fi
 fi
@@ -168,7 +349,7 @@ if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L
       t1=$(date +%s%N); rm -f "$probe"
       mbps=$(( 67109 / ( (t1 - t0) / 1000000 + 1 ) ))   # 64 MiB = 67,108,864 bytes → decimal MB/s over elapsed ms
       if [ "$mbps" -lt "$MIN_MBPS" ]; then
-        degrade_l2 "share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS} (the tier would be slower than recompute)"
+        degrade_l2 "share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS} (the tier would be slower than recompute)${L2_ADDR:+ [the share is mounted at the mDNS-chosen address $L2_ADDR]}"
       else
         echo "seat_fg: cache-server share write probe ~${mbps} MB/s (floor ${MIN_MBPS})"
       fi
@@ -178,7 +359,7 @@ if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L
     fi
   fi
   if [ "$L2_DEGRADED" -eq 0 ]; then
-    printf 'ok %s mbps=%s\n' "$(date -Is)" "${mbps:-unmeasured}" > "$L2_STATUS" 2>/dev/null || true
+    printf 'ok %s mbps=%s%s\n' "$(date -Is)" "${mbps:-unmeasured}" "${L2_ADDR:+ addr=$L2_ADDR}" > "$L2_STATUS" 2>/dev/null || true
   fi
 fi
 

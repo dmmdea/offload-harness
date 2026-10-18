@@ -120,7 +120,7 @@ func TestLauncherStoreAddressChoiceIsBoundedAndScoped(t *testing.T) {
 	}
 	// A chosen address is said where the reader of a degrade needs it, and the messages keep the text the other test pins.
 	for _, must := range []string{
-		`degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why"`,
+		`degrade_l2 "share $SEAT_L2_MOUNT_SRC did not mount at $SEAT_L2_MOUNT_DIR: $why`,
 		`degrade_l2 "share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS}`,
 		`${L2_ADDR:+`,
 	} {
