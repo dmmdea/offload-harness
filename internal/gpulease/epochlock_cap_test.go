@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -160,3 +161,24 @@ func removeIfExists(path string) error {
 }
 
 func errorsIsInFlight(err error) bool { return errors.Is(err, errRenameInFlight) }
+
+// The lease directory a Manager is given may be spelled any way (forward slashes on Windows, a trailing separator, a "." element); the
+// paths read inside it are built with filepath.Join and so are clean. The hold is found by the cleaned directory, or a cap registered for
+// "D:/x/lease/" never meets the reads of "D:\x\lease\hb.1".
+func TestTheCapFindsItsHoldWhateverTheSpellingOfTheLeaseDirectory(t *testing.T) {
+	c := onGateClock(t)
+	m := scopedRealClock(t)
+	spelled := filepath.ToSlash(m.leaseDir()) + "/./"
+	end := beginEpochHold(spelled)
+	defer end()
+	c.sleep(lockGateCap) // the hold has run for its cap
+	hb := m.heartbeatPath(1)
+	stuckBeside(t, c, hb)
+	gatePauses.Store(0)
+	if _, err := readSharedFile(hb); !errorsIsInFlight(err) {
+		t.Fatalf("readSharedFile = %v, want the I/O failure of a wait that ran out", err)
+	}
+	if got := gatePauses.Load(); got != 0 {
+		t.Errorf("a read inside a hold that had spent its cap paused %d times: the hold registered as %q was not found for %q", got, spelled, hb)
+	}
+}
