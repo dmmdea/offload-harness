@@ -33,7 +33,12 @@
 //
 // EVERY RENAME REPLACES. The writer links a seed file to <live>.tmp and renames that over the live name, a hard link in place of
 // a fresh file so that the loop makes thousands of renames in seconds (a fresh file costs tens of milliseconds on a host with a
-// scanner). A link is only a stand-in for a fresh file while it is a DIFFERENT inode from the one in place: renaming a link over
+// scanner). It sets the time of the link to now before it renames it, because a link has the time of its seed and a reader counts a
+// staged file older than 3 s beside an absent name as a dead writer's leftover and not a rename in flight (lease-read.mjs): without that
+// the writer's own rename in flight would read as a lease that is gone once the run is past 3 s, a false red on a correct reader on
+// a loaded host and in long mode. The seeds are an hour old when the writer starts so that this is checked at any size, and the writer
+// counts the renames whose staged file was older than 2 s when renamed (`staleStaged`) and the test wants none. A link is only a
+// stand-in for a fresh file while it is a DIFFERENT inode from the one in place: renaming a link over
 // another name of the same inode replaces nothing. On POSIX rename(2) then does nothing at all and leaves <live>.tmp where it was
 // (the next link of it fails with EEXIST); on Windows it succeeds even over a name a reader holds open, so no reader ever meets a
 // refusal. A first form linked ONE seed: after the first pass the live name and the seed were the same inode and only that pass
@@ -90,7 +95,7 @@ const nap = (ms) => new Promise((r) => setTimeout(r, ms));
 // in place before. `absentAfter` is how often the live name was absent when it looked right after its own successful rename (the
 // episode of the read gate, seen from the writer; it looks again until the name is back).
 const WRITER = `
-const { linkSync, renameSync, unlinkSync, existsSync, statSync, writeFileSync } = require("node:fs");
+const { linkSync, renameSync, unlinkSync, existsSync, statSync, utimesSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
 const [root, rootsArg, minArg, capArg, needRetriesArg, freshArg] = process.argv.slice(1);
 const files = [];
@@ -145,6 +150,10 @@ try {
       const tmp = path + ".tmp";
       const i = side.get(path);
       if (!unrefused(() => linkSync(path + SEEDS[i], tmp), "linkRetries")) { stats.fails++; continue; }
+      // A link has the time of its seed, which is the start of the run (or older); a staged file the writer has just made is fresh. The time
+      // is shared with the seed's inode, which is harmless: it is the time the writer last staged that body.
+      const now = new Date();
+      utimesSync(tmp, now, now);
       if (Date.now() - statSync(tmp).mtimeMs > STAGED_FRESH_MS) stats.staleStaged++;
       if (!unrefused(() => renameSync(tmp, path), "retries")) {
         stats.fails++;
