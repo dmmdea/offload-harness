@@ -26,6 +26,7 @@ plus one lever Claude Code cannot offer: the three-lane dispatch protocol is inj
 | Commands | `/offload-recon` `/offload-digest` `/offload-pair` | `subtask: true` on the offload agent |
 | Instrument | `~/.claude/state/dispatch-log.jsonl` | Rows tagged `harness:"opencode"` — one adherence read across both harnesses; the Claude Code hooks own the file's rotation, the plugin is append-only. The events, fields and the rows a rewrite must keep emitting are the contract in [dispatch-log.md](dispatch-log.md) |
 | Context instrument | [`cmd/opencode-context`](../../cmd/opencode-context/) over [`internal/occontext`](../../internal/occontext/) | Read-only per-call token, cache, growth, compaction and TTFT report from a copy of opencode's session db — see [Measuring context](#measuring-context) |
+| Which instrument answers what | the dispatch-log scoreboard; the harness ledger | The scoreboard built on the dispatch log (`scripts/scoreboard.js` in the Claude Code config) measures the lead's effort (lead turns, input tokens, bulk reads that delegated nothing, per-lane attribution), so its denominator is the lead's own turns. The harness share gate (when armed) and every savings figure read the ledger instead (`origin_session` and `cards_tokens` per row, `local-offload ledger --by-session`), whose denominator is tokens, so a scoreboard count and a ledger share answer different questions and are never compared as one number |
 
 ## Wire fields the plugin reads
 

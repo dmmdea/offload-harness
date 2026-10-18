@@ -31,18 +31,22 @@ import (
 // struct and rendered below — `Extra json.RawMessage` used to claim otherwise
 // and was never populated or read (removed 0.120.0).
 type Profile struct {
-	CtxSize        int            `json:"ctx_size"`
-	LongCtxSize    int            `json:"long_ctx_size"`
-	KVType         string         `json:"kv_type"`
-	AgentCtxTokens int            `json:"agent_ctx_tokens"`
-	ResidentTier   string         `json:"resident_tier"`
-	Include26B     bool           `json:"include_26b"`
-	MoE26B         string         `json:"moe_26b"`
-	FlashAttn      string         `json:"flash_attn"`
-	Backend        string         `json:"backend"`
-	DualResident   bool           `json:"dual_resident"`
-	Notes          string         `json:"notes"`
-	ConfigSeed     map[string]any `json:"config_seed"`
+	CtxSize        int    `json:"ctx_size"`
+	LongCtxSize    int    `json:"long_ctx_size"`
+	KVType         string `json:"kv_type"`
+	AgentCtxTokens int    `json:"agent_ctx_tokens"`
+	ResidentTier   string `json:"resident_tier"`
+	Include26B     bool   `json:"include_26b"`
+	MoE26B         string `json:"moe_26b"`
+	FlashAttn      string `json:"flash_attn"`
+	Backend        string `json:"backend"`
+	DualResident   bool   `json:"dual_resident"`
+	Notes          string `json:"notes"`
+	// AgentBudgetPolicy is the tier-level marker "loop-default-chosen" (register D-24): the tier keeps
+	// the loop default completion budget on purpose, a figure chosen and not measured. It is not a
+	// config_seed key and never reaches a node's config.json.
+	AgentBudgetPolicy string         `json:"agent_budget_policy"`
+	ConfigSeed        map[string]any `json:"config_seed"`
 	// ConfigSeedMidHigh is the RAM-gated overlay. It was absent here, so a tier whose
 	// ONLY media binding is RAM-gated (ampere-8, blackwell-8 — one of them the 8 GB
 	// reference laptop) had its page claim it "ships no media configuration" while the
@@ -623,6 +627,7 @@ func agentSeatSection(p Profile) string {
 	if s == nil {
 		b.WriteString("This tier declares no persistent vLLM agent seat: the agent lane runs on the\n" +
 			"llama.cpp seat named by `agent_model` above, in the tier's own llama-swap config.\n")
+		b.WriteString(budgetPolicyNote(p))
 		return b.String()
 	}
 	b.WriteString("This tier declares a persistent **vLLM** agent seat, and the installer RENDERS it — the\n" +
@@ -695,6 +700,25 @@ func agentSeatSection(p Profile) string {
 	}
 	b.WriteString(extraSeatsSection(p))
 	return b.String()
+}
+
+// budgetPolicyNote is the paragraph a tier carrying `agent_budget_policy: "loop-default-chosen"`
+// (register D-24, decision D8) adds to its agent-seat section, and "" for every other tier, whose
+// page is unchanged. It says the budget is the loop default BY CHOICE and that the figure is
+// chosen and not measured: a page with no budget on it reads as "unlimited" or "measured
+// elsewhere". A tier that declares a vLLM seat cannot carry the marker (the guard in
+// agent_budget_policy_test.go refuses it: a thinking seat must seed a number), so only the
+// no-vLLM-seat branch of agentSeatSection calls this.
+func budgetPolicyNote(p Profile) string {
+	if p.AgentBudgetPolicy == "" {
+		return ""
+	}
+	return "\n**Completion budget: the loop default, chosen and not measured.** This tier binds an agent model,\n" +
+		"seeds no `agent_max_tokens` and sets `agent_budget_policy: " + p.AgentBudgetPolicy + "`, so its agent runs at the loop's\n" +
+		"default of 1,024 completion tokens on purpose. No seat window has measured a budget for this tier's\n" +
+		"agent seat, and a model that thinks spends its reasoning inside the budget, so the right number is a\n" +
+		"property of the seat. When one is measured, seed `agent_max_tokens` and delete the marker (the guard\n" +
+		"in `agent_budget_policy_test.go` refuses both together).\n"
 }
 
 // storelessNote states that a seat is deliberately without a cache server, and why. The

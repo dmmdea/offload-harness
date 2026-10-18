@@ -783,6 +783,19 @@ local-offload install seed --profile ampere-6 --home /srv/offload-stack --os lin
 `TestEveryShippedSeedIsValid` resolves every tier in the table for **both** platforms, which
 is the gate that would have caught `sd-cli.exe`.
 
+**The agent completion budget (register D-24).** A tier that binds an agent model must say how big the agent's
+completion budget is, because a tier that says nothing runs at the loop default (1,024 tokens) by accident, and a
+model that thinks spends its reasoning inside that budget. It says it in exactly one of three ways: a seeded
+`agent_max_tokens`; `agent_thinking: "off"` in `config_seed` (no think block to starve); or the tier-level marker
+`agent_budget_policy: "loop-default-chosen"`, which keeps the default on purpose and is **chosen, not measured**
+(operator decision D8). The marker is not a `config_seed` key and never reaches a node's `config.json`; it is
+replaced by a seeded number when a seat window measures one. A tier whose `vllm_seat` declares a
+`reasoning_parser` may not use the marker or the exemption and must seed a number.
+`TestEveryAgentSeatingTierStatesItsCompletionBudget` (root package) walks every tier and names the ones that say
+nothing; the tier page of a marked tier (`docs/tiers/`) carries the same words. Adding or removing the marker
+changes the tier's `profiles.json` entry, so a serving config rendered from the old entry reads
+`STALE(profiles_entry_sha256)` in `audit-yaml --against-render` until it is re-rendered.
+
 **vLLM seats, the roster and the layers.** `install seed` decides once, per seat, whether the box can run
 it (the hand-built venv plus that seat's weights) and seeds accordingly:
 
