@@ -363,7 +363,7 @@ func commitLineName(need HostLoad) string {
 // reading falls back to what the box visibly uses: commit used = MemTotal - MemAvailable, limit =
 // MemTotal. That under-counts memory a process reserved and never touched, but it keeps the rule
 // working: the alternative, no reading on a platform that has a reader, makes every lease that
-// declares host RAM wait forever. That reading's commit limit is marked soft (the commit condition is not applied to it).
+// declares host RAM wait forever. That reading's commit limit is marked soft (a commit a lease states is not judged on it; one nobody stated still is, against physical RAM).
 func parseMeminfo(text string) (HostMemory, bool) {
 	want := map[string]*float64{}
 	var total, avail, committed, limit float64

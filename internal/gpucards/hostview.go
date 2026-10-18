@@ -45,7 +45,8 @@ func NewHostView(mem gpuprobe.HostMemory, ok bool, headroomGiB float64, declared
 	return v
 }
 
-// commitEnforced says the reading's commit limit is one the OS enforces (the commit condition is applied to it).
+// commitEnforced says the reading's commit limit is one the OS enforces, so a commit a lease states is judged against it. A commit
+// nobody stated is held to physical RAM less the headroom on every reading, enforced limit or not.
 func (v HostView) commitEnforced() bool { return !v.Mem.CommitLimitSoft && v.Mem.CommitLimitGiB > 0 }
 
 // Map is the JSON block (`host_memory`). Only keys are ever added to it.
@@ -121,7 +122,7 @@ func (v HostView) Line() string {
 	}
 	commit := fmt.Sprintf("commit %.1f of %.1f GiB", v.Mem.CommitUsedGiB, v.Mem.CommitLimitGiB)
 	if !v.commitEnforced() {
-		commit += " (not a limit this OS enforces: the commit condition is not applied)"
+		commit += " (not a limit this OS enforces: a commit a lease states is not judged on it; one it does not state is still held to physical RAM)"
 	}
 	line := fmt.Sprintf("host memory: %s — %.1f GiB physical, %.1f GiB available, %s", v.Verdict, v.Mem.PhysicalGiB, v.Mem.AvailableGiB, commit)
 	switch {

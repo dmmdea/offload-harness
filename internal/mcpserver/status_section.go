@@ -249,7 +249,8 @@ var standingLead = map[string]string{
 // line, so the line always ends in how to join it.
 func gpuLeaseVerdictLine(view map[string]any) string {
 	var b strings.Builder
-	// A host that is OVER (no memory available, or the commit charge at an enforced commit limit) leads the line,
+	// A host that is OVER (no memory available, the commit charge above physical RAM, or the commit charge reaching an enforced
+	// commit limit) leads the line,
 	// whatever the cards are doing: "free" at the head of it would read as "the box has room".
 	hostLead, hostLoud, hostTail := hostMemoryClauses(view)
 	if hostLoud {

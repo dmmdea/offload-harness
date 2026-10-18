@@ -2433,8 +2433,9 @@ reorder does not apply to it.
 ### What `gpu status` and `offload_status` show
 
 `gpu status` (text and `--json`) and `offload_status`'s `gpu_lease` block carry `host_memory`: `physical_gib`,
-`available_gib`, `commit_used_gib`, `commit_limit_gib`, `commit_limit_enforced` (whether the commit condition is applied on this
-host), `headroom_gib`, `declared_live_gib` and `declared_live_commit_gib` (the sums of the working set and the commit the live
+`available_gib`, `commit_used_gib`, `commit_limit_gib`, `commit_limit_enforced` (whether a commit a lease states is
+judged against the commit limit on this host: always on Windows, on Linux only in strict overcommit mode; a commit nobody stated is
+held to physical RAM less the headroom on every host), `headroom_gib`, `declared_live_gib` and `declared_live_commit_gib` (the sums of the working set and the commit the live
 leases declared), `pending_gib` and `pending_commit_gib` (the part of each still to load), `admits_up_to_gib` (the most a touched
 set could ever be admitted at), `touch_room_gib`, `commit_room_gib` and `unstated_commit_room_gib` (what a new lease could touch now,
 what a lease that STATES a commit could be charged now, and what a lease that states none could declare now: physical RAM less the
