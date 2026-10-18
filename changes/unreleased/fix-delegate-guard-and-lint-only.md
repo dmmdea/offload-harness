@@ -4,7 +4,7 @@
   "351", ...`. Every item differs from the one before, so neither the byte-level repeat test nor the line-block test in
   `degenerateTail` had a block to find, and the cut was filed as "the budget was too small". On a delegated run of
   2026-10-15 (a 9B seat, a 4,729-character answer) that sent the second request to the 8,192-token cap with the same
-  sampling; the seat counted on to 1482 and that request spent 145 s of a 197 s re-pack, after which the attempt told
+  sampling; the seat counted on to 1483 and that request spent 145 s of a 197 s re-pack, after which the attempt told
   not to repeat finished the object in 14 s.
 - **What it does now.** `degenerateTail` reads one more shape, last, so every output the earlier tests named keeps its
   words: a run of numbers that rise by exactly one, with the same text between every pair, that spans at least
@@ -15,15 +15,17 @@
   so a loop that counts by two, counts down, or carries other digits in each item is read as before.
 - **Tests, red first.** `TestDegenerateTailReadsAMonotoneCountingLoop` (seven loop shapes: quoted numbers on one line cut
   inside an item, inside the separator and exactly after a number, across a power of ten, a label and a number on each
-  line, bare numbers on each line, unquoted numbers; and seven spared shapes: three years closing a list, nine
+  line, bare numbers on each line, unquoted numbers; and eight spared shapes: three years closing a list, nine
   consecutive numbers, twenty-five years that close the list, a count followed by prose, a numbered list of distinct
-  items, a count that restarts, numbers that jump) and `TestRunAgentTaskRepackAfterACountingLoopIsNotEscalatedToTheCap`
+  items, a count that restarts, numbers that jump, ordinary prose with digits) and
+  `TestRunAgentTaskRepackAfterACountingLoopIsNotEscalatedToTheCap`
   (end to end against a fake seat, with a fixture that is first shown to be escalated when the loop is not recognised).
   On the unmodified code both failed: the seven loop shapes read `degenerateTail = ""`, and the second attempt was a
   plain request to the cap (`the attempt after a counting loop is not conditioned against repeating`). Six mutations of
   the detector were then run against the table (no end-of-output check, no same-text rule, no span floor, a count floor
   of 5 for 12, the cut item not dropped, a step other than one); two survived the first table (the same-text rule and the
-  count floor) and three cases were added that fail under each, after which all six are caught.
+  count floor) and three cases were added that fail under each (eleven numbered lines are spared and twelve are read, and
+  a numbered list of distinct items that ends on three identical ones is spared), after which all six are caught.
 
 ### Changed - every tier that binds an agent model states its agent completion budget (D-24)
 

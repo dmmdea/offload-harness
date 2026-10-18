@@ -15,7 +15,7 @@ import (
 // 9B seat, a 4,729-character answer to structure): the grammar attempt ran out its
 // 2,088-token budget writing `"349", "350", "351", ...` after its last real fact; the cut
 // was read as "the budget was too small", the retry went to the 8,192-token cap and counted
-// on to `"1482"`, and that second request spent 145 s of a 197 s re-pack before the
+// on to `"1483"`, and that second request spent 145 s of a 197 s re-pack before the
 // attempt told not to repeat finished the object in 14 s.
 
 // countedItems is `from` to `to` inclusive, each number quoted, separated by sep.

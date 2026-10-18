@@ -12,7 +12,7 @@ import (
 // before, so neither the byte-level repeat test nor agent.DetectRepetitionLoop (identical
 // lines) has anything to find, and the cut was read as a budget that was too small. On a
 // delegated run of 2026-10-15 that sent the retry to the 8,192-token cap, where the seat
-// counted on to 1482 for 145 s of a 197 s re-pack; the attempt that was finally told not
+// counted on to 1483 for 145 s of a 197 s re-pack; the attempt that was finally told not
 // to repeat finished the object in 14 s.
 //
 // What the tail has is the same text around a number that rises by one. That is what is
