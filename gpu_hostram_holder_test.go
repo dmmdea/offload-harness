@@ -430,7 +430,7 @@ func TestADetachedWaitThatWaitEndsAlsoReleasesTheLease(t *testing.T) {
 			if err == nil {
 				t.Fatalf("the host never admitted the lease: the detached reserve must fail\n%s", stderr)
 			}
-			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB of commit, committed 90.0 of 100.0 GiB commit limit", "within --wait 3s", "being released"} {
+			for _, want := range []string{"waiting for host RAM: needs 30.0 GiB, committed 90.0 of 100.0 GiB physical", "within --wait 3s", "being released"} {
 				if !strings.Contains(err.Error(), want) {
 					t.Errorf("the failure must say %q (what ended the wait, and what happens to the lease): %v", want, err)
 				}
