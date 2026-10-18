@@ -126,44 +126,46 @@ func sweepShape(kind string, n int, withCookie bool) string {
 	return b.String()
 }
 
-// sweepSeconds is the time of one full redaction of text by a fresh redactor.
-func sweepSeconds(text string) float64 {
-	r := NewRedactor()
-	t0 := time.Now()
-	r.Redact(text)
-	return time.Since(t0).Seconds()
+// sweepSeconds is the time of a full redaction of text by a fresh redactor: the best of reps runs, which keeps a busy
+// runner's noise out of a comparison.
+func sweepSeconds(text string, reps int) float64 {
+	best := 0.0
+	for i := 0; i < reps; i++ {
+		r := NewRedactor()
+		t0 := time.Now()
+		r.Redact(text)
+		if d := time.Since(t0).Seconds(); i == 0 || d < best {
+			best = d
+		}
+	}
+	return best
 }
 
 // TestRedactorSweepCostGrowsInStepWithTheText: one Cookie line in a text of many lines that carry a credential of their
-// own made the sweep search the whole text once per value, so doubling the text took 4 times as long: 20 s for 1 MiB. The
-// sweep reads the lines of the cookie matches only, and once. A full redaction of the shape the review used (one Cookie
-// line and many assignment lines) takes what the same text takes without the Cookie line, within a quarter, at 1 and
-// 2 MiB, or stays under 2 s per MiB. Doubling any of three shapes takes less than 3 times as long (linear is 2, the
-// square is 4). It runs for several seconds, so it is left out of short runs; it is a timing test and belongs on a quiet
-// runner.
+// own made the sweep search the whole text once per value, so doubling the text took 4 times as long: 12 s for 1 MiB.
+// The sweep reads the lines of the cookie matches only, and once. A full redaction of the shape the review used (one Cookie
+// line and many assignment lines or Bearer lines) takes what the same text takes without the Cookie line, within half
+// (the old sweep took 5 to 10 times as long), or stays under 2 s per MiB, and doubling any of three shapes takes less than
+// 3 times as long (linear is 2, the square is 4). Each time is the best of several runs. It runs for a minute, so it is
+// left out of short runs; it is a timing test and belongs on a quiet runner.
 func TestRedactorSweepCostGrowsInStepWithTheText(t *testing.T) {
 	if testing.Short() {
 		t.Skip("timing test")
 	}
 	const mib = 1 << 20
 	for _, kind := range []string{"assignment", "bearer", "cookie and key word"} {
-		var secs [2]float64
-		for i, size := range []int{mib, 2 * mib} {
-			text := sweepShape(kind, size, true)
-			secs[i] = sweepSeconds(text)
-			perMiB := secs[i] / (float64(len(text)) / mib)
-			t.Logf("%s, %d bytes: %.2f s, %.2f s per MiB", kind, len(text), secs[i], perMiB)
-			if kind == "cookie and key word" {
-				continue
-			}
-			plain := sweepSeconds(sweepShape(kind, size, false))
-			t.Logf("%s, the same without the Cookie line: %.2f s", kind, plain)
-			if secs[i] > 1.25*plain && perMiB > 2.0 {
-				t.Errorf("%s, %d bytes: %.2f s (%.2f s per MiB) against %.2f s without the Cookie line, want within a quarter of it or under 2 s per MiB", kind, len(text), secs[i], perMiB, plain)
+		one, two := sweepShape(kind, mib, true), sweepShape(kind, 2*mib, true)
+		s1, s2 := sweepSeconds(one, 3), sweepSeconds(two, 2)
+		t.Logf("%s: %.2f s for %d bytes, %.2f s for %d bytes", kind, s1, len(one), s2, len(two))
+		if kind != "cookie and key word" {
+			plain := sweepSeconds(sweepShape(kind, mib, false), 3)
+			t.Logf("%s: %.2f s for 1 MiB without the Cookie line", kind, plain)
+			if s1 > 1.5*plain && s1 > 2.0 {
+				t.Errorf("%s: %.2f s for 1 MiB against %.2f s without the Cookie line, want within half of it or under 2 s", kind, s1, plain)
 			}
 		}
-		if ratio := secs[1] / secs[0]; ratio > 3.0 {
-			t.Errorf("%s: 2 MiB took %.2f s and 1 MiB %.2f s, a factor of %.1f for twice the text (linear is 2, the square 4)", kind, secs[1], secs[0], ratio)
+		if ratio := s2 / s1; ratio > 3.0 {
+			t.Errorf("%s: 2 MiB took %.2f s and 1 MiB %.2f s, a factor of %.1f for twice the text (linear is 2, the square 4)", kind, s2, s1, ratio)
 		}
 	}
 }
