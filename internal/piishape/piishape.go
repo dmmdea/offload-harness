@@ -399,17 +399,16 @@ func cookieCountUnit(n int) string {
 const cookieRunMax = `16`
 
 // cookieBareLong is a bare cookie value of 12 or more characters (it ends before a quote, a space, a comma, a
-// semicolon, an ampersand or a closing bracket, so a header in a curl command ends before the quote that closes
-// the string and the value in a printed Go header before the bracket that closes its list); an escape counts as
-// one character, a JSON unicode escape (backslash-u and four hex digits) or a backslash run and the character it
+// semicolon or an ampersand, so a header in a curl command ends before the quote that closes the string); an
+// escape counts as one character, a JSON unicode escape (backslash-u and four hex digits) or a backslash run and the character it
 // escapes (a shell's escaped dollar sign, backtick, space or semicolon, a JSON escaped slash, a path separator),
 // the same escapes the span takes (cookieBareEscape), so an escape inside the first 12 characters of the only long
 // value does not stop the count.
 //
 // A value may start with an ampersand or a closing bracket, which are not counted (a generated value begins with
 // either, and the ampersand ends a value everywhere else, in a query string), and a closing bracket inside the value
-// is one more character. A printed list (cookieBareLongList) is the exception: there a closing bracket ends the value
-// unless a character of the value follows it.
+// is one more character. A printed list (cookieBareLongList) is the exception: there the value in front of a closing
+// bracket ends at it, unless a character of the value follows it (the bracket that closes the list).
 const cookieBareLong = `[&\]]?(?:` + cookieBareUnit + `|\]){12,}`
 
 // cookieBareUnit is one counted character of a bare value: any that is not white space, a quote, a comma, a semicolon,
@@ -682,8 +681,10 @@ type Class struct {
 //     of punctuation (at least one of : = , > [) may stand between the name and the
 //     scheme, so a printed Go header (map[Authorization:[Basic ...]]), a call
 //     (setHeader('Authorization', 'Basic ...'), Header.Set("Authorization", "Basic ...")),
-//     a subscript and a hash literal are matched; the value ends before a closing
-//     bracket, paren or brace, which base64 never holds.
+//     a subscript and a hash literal are matched; so do a line break and indentation
+//     (a pretty-printed document, a YAML list: a dash is punctuation) and a placeholder
+//     left by an earlier class (the other value of a header with two); the value ends
+//     before a closing bracket, paren or brace, which base64 never holds.
 //   - auth-field: a quoted auth key whose quoted value is an encoded string of 12
 //     or more characters (a container registry's config file).
 //   - cookie-header: a Cookie or Set-Cookie header, taken as one WHOLE SPAN and not a cookie at a time. The
@@ -718,6 +719,13 @@ type Class struct {
 //     closes a header written in single quotes), so a cookie behind one is not covered, and neither is one
 //     behind a bare double quote inside a value (a raw JSON value). The fine-grained grammar of a cookie value
 //     lives only in the harvest redactor, which remembers the values of a span for its value-tail gate.
+//     In a list that a bracket closes, a closing bracket is a character of the cookie when a character of a
+//     value follows it and the one in front of it is no opening bracket (sid=ab]cd, user[id]=v), and the
+//     open string a cut list ends in stops at a closing bracket; the Go-syntax print of any list ([]string{,
+//     []interface {}{, []any{), a bytes or raw prefix in front of a quote (b'cookie'), an underscore in front
+//     of the name (HTTP_COOKIE) and a value that starts with an ampersand or a closing bracket are covered.
+//     The class does not read a YAML block list item, a backtick-quoted value or a HAR name/value pair as an
+//     opener; KeywordRun (keywordrun.go) is the check that fails closed on those.
 //
 // Every class that starts with a word also accepts, right before the word, a JSON string escape
 // (a backslash and n, r, t, b or f, or backslash-u and four hex digits) or a terminal control
@@ -735,13 +743,16 @@ type Class struct {
 // (scheme://user:pass@host), an authorization scheme other than Bearer and Basic
 // (Digest, NTLM), a provider prefix the table does not list (sk_live_, xoxb-), an
 // unsigned JWT, a high-entropy string with no key name or known prefix, a value
-// that starts with '/', '.', '[' or ']', the part of a value after a
+// that starts with '/', '.', '[' or ']' (an ampersand may start one, and a cookie value may start with a closing bracket),
+// the part of a value after a
 // backslash inside it (a double-quoted cookie keeps its escapes, above), an UNQUOTED value after :=, == or => (an identifier or a
 // call, by design), a value passed apart from its name (fmt.Sprintf("password=%s", v)),
 // a terminal control sequence other than escape-bracket-letter (a charset switch,
 // an operating-system command, the one-byte form of the bracket), and a Basic
 // header whose name and scheme (or a cookie header whose name and cookies) are more than
-// eight punctuation characters apart or have a word between them, a cookie behind a
+// eight punctuation characters apart or have a word between them (a placeholder, a line break and a dash are not words),
+// a YAML block list item, a backtick-quoted value and a HAR name/value pair (KeywordRun fails closed on these: the trace
+// is left out, the value is not redacted), a cookie behind a
 // single quote or an apostrophe in an unquoted value, a cookie behind a bare double quote inside an unquoted value,
 // a cookie behind a backslash and a lowercase n or r in an unquoted value (the JSON escape of a line break ends the line,
 // so a raw path such as C:\new\x ends the span there; a capital, as in C:\Name, is an ordinary escape), a bare value

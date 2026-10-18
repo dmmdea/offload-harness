@@ -244,6 +244,44 @@
   1.2 s); the line-first order and the pair rule for a long value remove them, and two searches with new seeds against the final class
   (9,800 units and 16 hill climbs) found none: the units that looked slow at 32 KiB scale linearly at 0.7 to 1.3 s per MiB from 8 KiB to 512
   KiB. A new named gap: a bare value with a shell escape inside four layers of escaping (more than sixteen backslashes) is left whole.
+- **A fourth review of the cookie class: what it takes, and a gate that fails closed.** Each defect below was a value of 12 or more
+  characters left in the text with the residual gate clean, or a document the redaction broke; each has a test that was red before its
+  fix (the failure lines are in the commits). (1) In an unquoted printed list (`map[Cookie:[a=b c=d]]`) a closing bracket is a character
+  of the cookie when a character of a value follows it and the one in front of it is no opening bracket (`sid=ab]cd`, the PHP-style name
+  `user[id]=v`); it used to end the span, and the tail of the value, or the whole cookie, stayed. The empty list of a typed slice literal
+  (`[]string{...}`) still closes, and the slice literal is tried before the bracketed list. (2) The open single-quoted string a cut list
+  ends in stops at a closing bracket, so an apostrophe in a value (`note=don't`) no longer runs through the closers of the Args around it
+  and the redacted Args stay valid JSON. (3) The Go-syntax print of decoded JSON (`[]interface {}{...}`, `[]interface{}{...}`, `[]any{...}`)
+  opens a list like `[]string{...}`. (4) A bytes or raw prefix in front of a quote (`b'cookie'`, `r"..."`) is part of the gap (ASGI scope
+  headers, aiohttp raw headers, dicts of bytes). (5) An underscore in front of the name is no obstacle (`HTTP_COOKIE`, `http_cookie`; the
+  test of the opener limits that pinned `my_Cookie` as a non-match changes with it). (6) A value that starts with an ampersand or a closing
+  bracket is counted, in a cookie, and an ampersand (or Go's escape for one) in the assignment class; the case-sensitive island that keeps a
+  capital N, R or U after a backslash a single character in the count is pinned. (7) The assignment class takes a credential header
+  (`X-Api-Key`, `Api-Key`, `X-Auth-Token`, `X-Amz-Security-Token`) printed with a list of values (`map[X-Api-Key:[...]]`, a JSON or Python
+  list), and a placeholder behind the name is not read as the list's value. (8) The Basic header's gap takes a line break, indentation, a
+  YAML dash and a placeholder left by an earlier class (`json.MarshalIndent`, jq, a YAML list, a header with two values). (9) A cookie match
+  whose header name is a key (`{"Cookie": ...}`, `{'Set-Cookie': [...]}`, `Header.Set("Cookie", "...")`) keeps the name, its closing quote
+  and the punctuation, replaces the cookies and puts back the closing quote of a list's last string, so redacted JSON is still JSON (the
+  other classes still start a match at their key word). (10) The credential sweep reads the text once: the distinct values are collected into
+  a set, grouped by their first 12 bytes and tried longest first at each position of one pass over the output, and the credential classes
+  read the lines of the cookie matches only. It used to search the whole text for each value (one `Cookie` line among many lines with a
+  credential each: 12 s for 1 MiB, 44 s for 2 MiB on one gate runner, 4 times the time for twice the text); one `Cookie` line now costs nothing
+  measurable (1.56 s against 1.55 s without it for 1 MiB, 3.1 s for 2 MiB, on the same runner). The longest-first order, the memory of every swept value
+  for the value-tail gate and the count of the places replaced are pinned by tests that go red against a mutant of each.
+  (11) The residual gate fails closed (`piishape.KeywordRun`, named `credential-keyword-run` by `Redactor.Residual`): a credential header
+  keyword (cookie, authorization, api key, auth token, security token; any case, inside any longer word or name) with a run of 12 or more
+  characters with no white space, quote, comma, semicolon or backslash starting within 32 characters behind it. The harvest leaves such a
+  trace out with a note that does not echo the text, and the evidence reducer keeps the output raw and does not call the seat. A YAML block
+  list item, a backtick-quoted value, a HAR name/value pair, an XML attribute and a scheme other than Bearer and Basic are covered by it
+  and not by new openers: the text is skipped, not redacted. A placeholder is not read and ends the reach of the keyword in front of it; a
+  line break ends the reach once a word has been read, and goes on only behind a colon, an equals sign, an opening bracket or brace, a comma
+  or a dash; another keyword is no part of a run; the placeholder of a cookie header followed by a YAML dash and a long run (the items
+  behind the first of a block list) fires it too. **The trade:** the check is wide on purpose. A test or an identifier whose name starts
+  with a keyword (`TestCookieJarKeepsTheValues`, `authorizationHeaderValue`) is a long run right behind it. Over the Go sources, tests and
+  Markdown of this repository it fires on 5.4 % of the files (125 of 2,311: 34 of 595 Go sources, 76 of 1,544 Go tests, 15 of 172
+  Markdown files), nearly all with a long identifier or word behind a keyword, so a trace that holds such text is skipped and a build
+  output that prints it stays raw; it costs 0.08 s per MiB of redacted text. Still open: a value in doubled apostrophes after a password
+  name, and a credential behind a keyword that is not in the list.
 - **A Go module version is not an email address.** The email pattern read `toolchain@v0.0.1-go1.27.2.linux-amd64`, which every Go stack
   trace and module-cache path carries, as an address. Measured on 9.4 MB of real Go build and test logs cut into 4, 16 and 64 KiB pieces,
   it matched 67.6 % of the 4 KiB pieces (55.7 % of the 64 KiB ones), so the reducer would have kept most Go logs raw; a domain may no
@@ -307,3 +345,8 @@
   pinned by tests, not measured against real traffic; the timings are one series on a noisy shared machine. The widened value class and the tail gate were tested on fixtures only; no real harvested trace was re-run through the redactor here.
   The same holds for the control-sequence, quoted-literal and header shapes: the fixtures are built from pieces, and no real colored
   build log or real harvested trace was run through them. The scan cost (about 1.5 s per MiB; 1.51, 1.54 and 1.54 s) is one series of three runs on a noisy shared machine, and so are the timings of the third review's slow texts (a desk machine at two threads, and a gate runner for the random searches), and the 67-to-82 count of assignment matches is one scan of this repository's tracked text.
+  The fourth review's fixes and the keyword check were tested on fixtures built from pieces, on this repository's text (the 5.4 %
+  figure) and on a census of 825 planted cases of the review's leak families (705 left a value in the text with the gate quiet before,
+  30 after, and 120 are named by the gate; the 30 are a value in doubled apostrophes after a password name, which no class and no keyword covers); no real harvested
+  trace or build log went through the keyword check, so how often it skips a real trace is unmeasured beyond the repository's own files.
+  The sweep's cost was measured on two gate runners, one series each.
