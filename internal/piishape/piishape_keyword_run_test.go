@@ -132,14 +132,13 @@ func TestKeywordRunStopsAtARedactionMarker(t *testing.T) {
 func TestKeywordRunCrossesALineBreakOnlyWhereNothingStandsBehindTheKeyword(t *testing.T) {
 	v := runValue(9141, 22)
 	for name, text := range map[string]string{
-		"yaml list":           sckName + ":\n  - " + v + "\n",
-		"yaml, crlf":          sckName + ":\r\n  - " + v,
-		"pretty json":         "{\n  \"Authorization\": [\n    \"" + v + "\"\n  ]\n}",
-		"har, pretty":         "{\n  \"name\": \"" + ckName + "\",\n  \"value\": \"sid=" + v + "\"\n}",
-		"blank lines":         ckName + ":\n\n   \n" + v,
-		"escaped breaks":      `{\"cmd\":\"` + sckName + `:\n  - ` + v + `\"}`,
-		"yaml name and value": "- name: " + ckName + "\n  value: sid=" + v,
-		"keyword ends a line": "set the " + ckName + "\n" + v,
+		"yaml list":             sckName + ":\n  - " + v + "\n",
+		"yaml, crlf":            sckName + ":\r\n  - " + v,
+		"pretty json":           "{\n  \"Authorization\": [\n    \"" + v + "\"\n  ]\n}",
+		"har, pretty":           "{\n  \"name\": \"" + ckName + "\",\n  \"value\": \"sid=" + v + "\"\n}",
+		"blank lines":           ckName + ":\n\n   \n" + v,
+		"escaped breaks":        `{\"cmd\":\"` + sckName + `:\n  - ` + v + `\"}`,
+		"call split over lines": "req.Header.Set(\n\t\"" + ckName + "\",\n\t\"sid=" + v + "\")",
 	} {
 		if !KeywordRun(text) {
 			t.Errorf("%s: the check does not fire on %q", name, text)
@@ -151,6 +150,9 @@ func TestKeywordRunCrossesALineBreakOnlyWhereNothingStandsBehindTheKeyword(t *te
 		"short cookie, escaped breaks": `{\"cmd\":\"` + ckName + `: theme=dark\nContent-Type: application/json\"}`,
 		"escaped, deeper":              `\\\"` + ckName + `: theme=dark\\nContent-Type: application/json`,
 		"authorization, next header":   "Authorization: Digest\nContent-Type: application/json",
+		"a call that closes":           "r.Header.Get(\"Authorization\")\n\t\tf.mu.Unlock()",
+		"prose ends with the keyword":  "set the " + ckName + "\n" + v,
+		"yaml name and value":          "- name: " + ckName + "\n  value: sid=" + v,
 	} {
 		if KeywordRun(text) {
 			t.Errorf("%s: the check fires on %q", name, text)

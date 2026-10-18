@@ -145,6 +145,7 @@ func keywordSpans(lower string) [][2]int {
 // of a run: Authorization is 13 characters, and "the Cookie and Authorization headers" has no value in it.
 func valueRunNear(s string, end int, starts map[int]int) bool {
 	run, word := 0, false
+	var last byte // the last byte since the keyword that is not white space or a quote
 	limit := end + KeywordRunReach + keywordRunLength
 	for i := end; i < len(s) && i < limit; i++ {
 		if e, ok := starts[i]; ok {
@@ -162,19 +163,24 @@ func valueRunNear(s string, end int, starts map[int]int) bool {
 				j++
 			}
 			if j < len(s) && (s[j] == 'n' || s[j] == 'r') {
-				if word {
+				if word || !opensAValue(last) {
 					return false
 				}
 				i = j
+			} else {
+				last = c
 			}
 		case c == '\n' || c == '\r':
-			if word {
+			if word || !opensAValue(last) {
 				return false
 			}
 			run = 0
-		case c == ' ' || c == '\t' || c == '\f' || c == '\v' || c == '\'' || c == '"' || c == ',' || c == ';':
+		case c == ' ' || c == '\t' || c == '\f' || c == '\v' || c == '\'' || c == '"':
 			run = 0
+		case c == ',' || c == ';':
+			run, last = 0, c
 		default:
+			last = c
 			run++
 			if c == '_' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= 0x80 {
 				word = true
@@ -183,6 +189,18 @@ func valueRunNear(s string, end int, starts map[int]int) bool {
 				return true
 			}
 		}
+	}
+	return false
+}
+
+// opensAValue reports whether the byte before a line break says the value is on the next line: a colon, an equals sign,
+// an opening bracket or brace, a comma or a dash (a YAML key, a pretty-printed list or object, the name of a pair, a call
+// split over lines). A keyword at the end of a line of prose, or of a call that closes (Header.Get("Authorization")),
+// has no value on the next line.
+func opensAValue(last byte) bool {
+	switch last {
+	case ':', '=', '[', '{', ',', '-', '>':
+		return true
 	}
 	return false
 }
