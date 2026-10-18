@@ -19,6 +19,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/netguard"
 )
 
 // APIKeyFromEnv reads the NIM key from env ONLY (never from a config file, so a
@@ -147,11 +149,21 @@ type Client struct {
 
 // New builds a client. base should include the API version segment (e.g.
 // "https://integrate.api.nvidia.com/v1"). A trailing slash is trimmed.
+//
+// A hosted NVIDIA base dials only public addresses (netguard.PublicTransport,
+// register SF-01): the key goes to that host, so a DNS answer that points
+// api.nvidia.com at a private, loopback or tailnet address must not carry it
+// there. Self-hosted NIM bases on the LAN or the tailnet keep the plain
+// transport, since they are private by design and keyless.
 func New(base, apiKey string, timeout time.Duration) *Client {
+	hc := &http.Client{Timeout: timeout}
+	if IsHostedNVIDIA(base) {
+		hc.Transport = netguard.PublicTransport(nil)
+	}
 	return &Client{
 		base:   strings.TrimRight(base, "/"),
 		apiKey: apiKey,
-		http:   &http.Client{Timeout: timeout},
+		http:   hc,
 	}
 }
 
