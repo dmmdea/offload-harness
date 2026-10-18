@@ -23,6 +23,9 @@
 //                                          contains itself), so the models, licence and API signals were read from an incomplete graph
 //           bad_model_path                 a model name or class that would leave its class directory
 //           models_missing / inputs_missing / comfyui_too_old     (resolve only) what the node lacks, as an exact list
+//           embedding_unverified           (resolve only) a prompt embedding the harness does not verify: a case variant answers it, more than one
+//                                          file could answer it, or a file answers a probe name. ComfyUI warns and skips a missing embedding;
+//                                          the harness refuses, because a missing or different embedding silently changes a vetted template's output
 //
 // A model downloaded by the satisfier would be a model the harness chose to fetch; this module never produces a source for one: the
 // runtime manifest (runtimeManifest) names every model by path and leaves `source_url` empty.
@@ -43,12 +46,14 @@ export const CLASS = Object.freeze({
   BAD_MODEL_PATH: "bad_model_path",
   UNKNOWN_TEMPLATE: "unknown_template",
   MODELS_MISSING: "models_missing",
+  EMBEDDING_UNVERIFIED: "embedding_unverified",
   INPUTS_MISSING: "inputs_missing",
   COMFYUI_TOO_OLD: "comfyui_too_old",
   FLEET_NOT_OFFERED: "fleet_not_offered",
 });
 
 const MET = new Set(["present", "present_class_unknown"]);
+const UNVERIFIED = "embedding_unverified"; // the status of a requirement the harness does not verify (templates-catalog.mjs checkEmbedding)
 const SHA256 = /^[0-9a-f]{64}$/i;
 const SAFE_CLASS = /^[A-Za-z0-9_]+$/;
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
@@ -288,18 +293,23 @@ export function readinessFor(row, snapshot, { io }) {
   // `annotated` is what tells it from a name a prompt gives. The manifest and the row list the same models in the same order.
   // embedding_probes are the other names ComfyUI may try for the template's prompts (the name as written before its commas are stripped, and
   // what the encoders that read a prompt without weights take): not requirements, but a file of the node that answers one is a file ComfyUI
-  // may open that no manifest names. They follow the models.
+  // may open that no manifest names. They follow the models. A prompt embedding the harness does not verify (a case variant, more than one
+  // file, a probe hit) is not "missing": it is listed apart, as `embedding_unverified`, with the reason and the files.
   const checked = modelReadiness(manifest.models.map((m, i) => ({ name: m.name, directory: m.directory, annotated: row.models?.[i]?.annotated, embedding_refs: row.models?.[i]?.embedding_refs })), snapshot.inventory, { mode: "directory-aware", probes: row.embedding_probes ?? [] });
-  const embedding_probes = checked.requirements.slice(manifest.models.length).map((p) => ({ name: p.name, directory: p.directory, status: p.status, found: p.found }));
+  const embedding_probes = checked.requirements.slice(manifest.models.length).map((p) => ({ name: p.name, directory: p.directory, status: p.status, reason: p.reason, found: p.found }));
   const models = manifest.models.map((m, i) => {
     const req = checked.requirements[i];
     return {
       name: m.name, directory: m.directory, path: m.path, status: req.status, trust: m.trust,
-      ...(req.found ? { found: req.found } : {}), ...(req.found_in ? { found_in: req.found_in } : {}),
+      ...(req.reason ? { reason: req.reason } : {}), ...(req.found ? { found: req.found } : {}), ...(req.found_in ? { found_in: req.found_in } : {}),
       resolved_path: MET.has(req.status) ? resolvedPath(m, req) : null,
     };
   });
-  const models_missing = [...models.filter((m) => !MET.has(m.status)).map((m) => m.path ?? m.name), ...embedding_probes.map((p) => `models/${p.directory}/${p.name}`)];
+  const models_missing = models.filter((m) => !MET.has(m.status) && m.status !== UNVERIFIED).map((m) => m.path ?? m.name);
+  const embedding_unverified = [
+    ...models.filter((m) => m.status === UNVERIFIED).map((m) => ({ path: m.path ?? m.name, reason: m.reason, found: m.found })),
+    ...embedding_probes.map((p) => ({ path: `models/${p.directory}/${p.name}`, reason: p.reason, found: p.found })),
+  ];
   const inputs = manifest.input_files.map((e) => inputStatus(e, snapshot, io));
   const inputs_missing = inputs.filter((i) => i.status === "missing").map((i) => i.name);
   const comfyui = comfyStatus(row, snapshot);
@@ -307,6 +317,7 @@ export function readinessFor(row, snapshot, { io }) {
   const blocking = [
     ...(verdict.class ? [verdict.class] : []),
     ...(models_missing.length > 0 ? [CLASS.MODELS_MISSING] : []),
+    ...(embedding_unverified.length > 0 ? [CLASS.EMBEDDING_UNVERIFIED] : []),
     ...(inputs_missing.length > 0 ? [CLASS.INPUTS_MISSING] : []),
     ...(comfyui.status === "too_old" ? [CLASS.COMFYUI_TOO_OLD] : []),
   ];
@@ -320,6 +331,7 @@ export function readinessFor(row, snapshot, { io }) {
     models,
     ...(embedding_probes.length > 0 ? { embedding_probes } : {}),
     models_missing,
+    embedding_unverified,
     inputs,
     inputs_missing,
     nodes: { status: manifest.custom_packs.length > 0 ? "packs_required" : "core_only", custom_packs: manifest.custom_packs },
@@ -362,11 +374,14 @@ export function resolveRun(row, snapshot, { io }) {
   if (verdict.outcome !== "run") return verdictAnswer(verdict, row.name);
   const ready = readinessFor(row, snapshot, { io });
   if (ready.models_missing.length > 0) {
-    // An embedding the node holds more than once, or one a file ComfyUI tries first shadows, is not missing; it is refused because the file
-    // ComfyUI opens for it is not the one file the manifest would name (it picks the directory by set order), and the entry says which.
-    const unclear = [...ready.models, ...(ready.embedding_probes ?? [])].filter((m) => m.status === "ambiguous" || m.status === "shadowed");
-    const why = unclear.length === 0 ? "" : `; ${unclear.length} of them ${unclear.length === 1 ? "is" : "are"} held in more than one directory or shadowed by a file ComfyUI tries first, so the file ComfyUI opens is not the one file the manifest would name (${unclear.map((m) => m.path ?? m.name).join(", ")})`;
-    return typed("refuse", CLASS.MODELS_MISSING, row.name, `${ready.models_missing.length} model file(s) are not where ComfyUI would load them from; this release never downloads a model${why}`, { missing: ready.models_missing });
+    return typed("refuse", CLASS.MODELS_MISSING, row.name, `${ready.models_missing.length} model file(s) are not where ComfyUI would load them from; this release never downloads a model`, { missing: ready.models_missing });
+  }
+  if (ready.embedding_unverified.length > 0) {
+    // Nothing is missing here: a case variant answers the name, or more than one file could, or a file answers a probe name. ComfyUI would
+    // load something (or warn and skip, were no file there), and the harness cannot say which file, so it refuses rather than guess: the licence
+    // gate, the hash and the trust record attach to the file the manifest names. Each entry says which name, why, and the files.
+    const why = ready.embedding_unverified.map((e) => `${e.path}: ${e.reason} (${e.found.join(", ")})`).join("; ");
+    return typed("refuse", CLASS.EMBEDDING_UNVERIFIED, row.name, `embedding lookup not verified by the harness: ${why}`, { embedding_unverified: ready.embedding_unverified });
   }
   if (ready.inputs_missing.length > 0) {
     return typed("refuse", CLASS.INPUTS_MISSING, row.name, `${ready.inputs_missing.length} input file(s) the template reads are not staged in the input directory`, { missing: ready.inputs_missing });

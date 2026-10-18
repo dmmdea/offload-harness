@@ -248,22 +248,35 @@ export function modelCovered(names, file) {
 // embeddings class, tried as written and then with .safetensors, .pt and .bin appended (comfy/sd1_clip.py load_embed, read in 0.38.0). No
 // loader node and no file extension is involved, so neither the loader classes nor the suffix test (hasModelExt) see it.
 //
-// WHERE it looks is not a walk through the directories of the class one after the other. expand_directory_list puts every embeddings root
-// and every subdirectory below it (os.walk, links followed) into one Python set(), and load_embed takes the first directory of list(set)
-// that holds the name: the directory that answers is chosen by hash order, which differs from one process to the next. So a file that sits
-// only in a subfolder is found by the bare name, and a name that more than one directory holds is not one file at all. checkEmbedding
-// turns that into `present` (exactly one directory holds it) or `ambiguous`. A directory is one entry however it is reached, and the name
-// as written is asked of isfile first, with no extension filter and under the file system's own case rule (embeddingHits, the scan).
+// WHERE it looks is the narrow part, and it fails CLOSED. ComfyUI warns and skips an embedding it cannot find (sd1_clip.py, "does not
+// exist, ignoring") and runs the prompt without it; the harness refuses instead, because a missing or different embedding silently changes
+// the output of a vetted template, and the licence gate, the hash and the trust record attach to the file the manifest names. So a name a
+// prompt gives is accepted only when EXACTLY ONE physical file answers it, case-exactly (embeddingAnswers): the name as written, then with
+// .safetensors, .pt and .bin appended, on whole path segments, across every embeddings root and its subfolders, one file reached by
+// several paths (a link, a hard link, a root registered inside another) counted once by the file system's own identity. Anything else is
+// refused as `embedding_unverified`, with one of three reasons:
+//   - a case variant answers it: the only file that answers differs in letter case. Whether ComfyUI finds it depends on what the volume
+//     does with a name in another case, and the harness does not ask the volume;
+//   - more than one file could answer it: two directories, two extensions in one directory, a file with no extension beside a listed one,
+//     an exact file beside a case variant. ComfyUI puts every embeddings root and every subdirectory below it (os.walk, links followed)
+//     into one Python set() and load_embed takes the first directory of list(set) that holds the name, so which directory answers varies
+//     from one process to the next, and a manifest can name only one file;
+//   - a probe name (below) is answered by a file of the node.
+// No file answering at all is `missing`, as for any other class. Deliberately not replicated: ComfyUI's set-order choice between the
+// directories that hold a name, its preference of one extension over another within a directory, and the case rule of the volume. The full
+// replica is a later row, to be taken when the first real template needs it; no template of the installed package names an embedding in an
+// active prompt.
 //
-// A file a loader widget names (ConditioningLoader) is a different lookup: the node lists the directories by relative path and opens its
-// value with get_full_path, the exact path under the first root that holds it. checkRequirement gives it the rule of every other class.
+// A file a loader widget names (ConditioningLoader) is a different lookup, and it is unchanged: the node lists the directories by relative
+// path and opens its value with get_full_path, the exact path under the first root that holds it. checkRequirement gives it the rule of
+// every other class.
 //
 // WHAT it reads from a prompt is the tokenizer's, and embeddingRefs ports that path. Names ComfyUI may try beyond the ones it returns
 // (embeddingProbes: the name as written before its commas come off, and what the encoders that read a prompt without weights take) are
-// not requirements; readiness refuses a template when a file of the node answers one. The override step (template-run.mjs) does not use
-// it: it refuses on mentionsEmbedding, a deliberately wider matcher, so that what it lets through is never something the reader finds a
-// file in. The runner's comparison with the manifest (unlistedModels) and the catalog (requiredModels) use embeddingRefs and
-// embeddingCovered, which is the one reading of the reference.
+// not requirements; readiness refuses a template when a file of the node answers one, as `embedding_unverified`. The override step
+// (template-run.mjs) does not use it: it refuses on mentionsEmbedding, a deliberately wider matcher, so that what it lets through is never
+// something the reader finds a file in. The runner's comparison with the manifest (unlistedModels) and the catalog (requiredModels) use
+// embeddingRefs and embeddingCovered, which is the one reading of the reference.
 export const EMBEDDING_EXTS = Object.freeze([".safetensors", ".pt", ".bin"]);
 export const mentionsEmbedding = (s) => typeof s === "string" && /embedding:/i.test(s);
 
@@ -1380,32 +1393,15 @@ function extOf(rel) {
 const extListed = (rel, exts) => exts === null || exts.length === 0 || exts.includes(extOf(rel));
 const byRel = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0);
 
-// foldsCase: does the volume under a root look names up without regard to case (NTFS by default, as on a Windows node's ComfyUI)? `files` are
-// the files under the root (walkFiles). Asked of the first one whose name has a letter that a case swap changes: its name, spelled with the case
-// swapped, is looked up in the folder it is in. A folder that holds both spellings is case-sensitive. A name with no such letter (2023, a name
-// in a script without case) says nothing, so the probe goes on to the next file, at any depth: the root's top-level names may have none. A root
-// with no file that has a letter gives no answer, and has no file a case variant could be matched to either.
-function foldsCase(files, io) {
-  const swap = (s) => [...s].map((ch) => (ch === ch.toLowerCase() ? ch.toUpperCase() : ch.toLowerCase())).join("");
-  for (const f of files) {
-    const cut = f.abs.lastIndexOf("/");
-    const folder = f.abs.slice(0, cut);
-    const other = swap(f.abs.slice(cut + 1));
-    if (other === f.abs.slice(cut + 1)) continue;
-    return !(io.list(folder) ?? []).some((x) => x.name === other) && io.stat(`${folder}/${other}`) !== null;
-  }
-  return false;
-}
-
 // scanModelInventory: what each class would list. A file reachable through several directories is
 // one entry that names them all (a junction to a model drive makes the same file appear twice).
 // Files with an extension the class's core loaders do not accept are only counted in `unlisted`.
 // The embeddings class also records, for each file and each directory that shows it, where the file really is (`reals`, parallel to `dirs`) and,
-// when the io can say, what the file system calls it (`ids`, the same shape: two names of one hard-linked file share one): ComfyUI's lookup is
-// by directory, and a link makes one directory, or one file, appear under several names (embeddingHits). And it records
+// when the io can say, what the file system calls it (`ids`, the same shape: two names of one hard-linked file share one): a link makes one
+// file appear under several names, and the prompt lookup counts a physical file once (embeddingAnswers). And it records
 // the files it does not list (`unlisted_files`, the same shape without a size): load_embed asks for the name as written first, with no
-// extension filter, so a file whose whole name is the reference answers it whatever it ends in. And it records the roots whose volume folds
-// case (`case_insensitive_dirs`): isfile follows the file system, so under such a root `foo` is answered by `FOO.pt` too.
+// extension filter, so a file whose whole name is the reference answers it whatever it ends in. It records no case rule of the volume and asks
+// the io about no name that is not a file it lists: a name in another case is a case variant and is refused, not looked up.
 export function scanModelInventory(roots, io = nodeIo) {
   const classes = {};
   const missing_dirs = [];
@@ -1423,11 +1419,9 @@ export function scanModelInventory(roots, io = nodeIo) {
       }
       map.set(f.rel, { rel: f.rel, dirs: [d.path], ...(real ? { reals: [io.realpath(f.abs)] } : {}), ...(named ? { ids: [io.identity(f.abs)] } : {}), ...(size ? { size: io.stat(f.abs)?.size ?? null } : {}) });
     };
-    const folding = [];
     for (const d of spec.dirs) {
       if (!io.list(d.path)) { missing_dirs.push({ class: cls, path: d.path }); continue; }
       const walked = walkFiles(d.path, io, { follow: true, excludeDirs: [".git"] });
-      if (real && foldsCase(walked, io)) folding.push(d.path);
       for (const f of walked) {
         if (!extListed(f.rel, spec.exts)) { unlisted++; if (real) record(notListed, f, d, false); continue; }
         record(listed, f, d, true);
@@ -1435,7 +1429,7 @@ export function scanModelInventory(roots, io = nodeIo) {
     }
     classes[cls] = {
       dirs: spec.dirs.map((d) => d.path), exts: spec.exts, files: [...listed.values()].sort(byRel), unlisted,
-      ...(real ? { unlisted_files: [...notListed.values()].sort(byRel), case_insensitive_dirs: folding } : {}),
+      ...(real ? { unlisted_files: [...notListed.values()].sort(byRel) } : {}),
     };
   }
   return { classes, missing_dirs };
@@ -1464,7 +1458,7 @@ function indexInventory(inv) {
       pushTo(allBase, baseName(f.rel).toLowerCase(), { class: cls, rel: f.rel });
     }
     // `candidates`: the files a name can be answered by. An embeddings file the class does not list can answer the bare name (scanModelInventory).
-    byClass.set(cls, { exact, lower, base, files: c.files ?? [], exts: c.exts ?? null, dirs: c.dirs ?? [], candidates: [...(c.files ?? []), ...(c.unlisted_files ?? [])], folding: new Set(c.case_insensitive_dirs ?? []) });
+    byClass.set(cls, { exact, lower, base, files: c.files ?? [], exts: c.exts ?? null, dirs: c.dirs ?? [], candidates: [...(c.files ?? []), ...(c.unlisted_files ?? [])] });
   }
   const index = { byClass, allBase };
   indexCache.set(inv, index);
@@ -1479,9 +1473,9 @@ function indexInventory(inv) {
 //   case_mismatch       the right class, another spelling of the name
 //   extension_not_listed  the class's core loaders do not accept this file type (a .gguf in a core loader)
 //   class_unregistered  no directory is registered for the class
-//   ambiguous           (embeddings) more than one directory holds a different file for the name: ComfyUI opens one of them by set order
-//   shadowed            (embeddings) the annotated file is not the one ComfyUI opens for the name a prompt gives; or a file answers a
-//                       probe name (readiness, `probes`), another name ComfyUI may try for the template's prompts
+//   embedding_unverified  (embeddings, a name a prompt gives) the lookup is not verified by the harness, with a `reason`: a case variant
+//                       answers it, more than one file could answer it, or a file answers a probe name (readiness, `probes`), another
+//                       name ComfyUI may try for the template's prompts. `found` lists the files. Only exactly one case-exact file is `present`.
 // A file with no class (an unannotated widget file) is met by its exact name in any class.
 function checkRequirement(req, inv, mode, asFile = false) {
   const name = String(req.name);
@@ -1523,88 +1517,73 @@ function checkRequirement(req, inv, mode, asFile = false) {
 
 const MET = new Set(["present", "present_class_unknown"]);
 
-// embeddingHits: the directories of the class in which ComfyUI would find `name`, and the file each answers with. ComfyUI's directories are
-// every embeddings root and every subdirectory below it (a set, see the top of this section). A file whose path under a root is
-// `<sub>/<candidate>` is what the directory `<root>/<sub>` holds for that candidate, and a path equal to the candidate is the root's own; a
-// candidate is the name as written, then the name with .safetensors, .pt and .bin appended, and one directory answers with the first of
-// those it holds. The match is on whole path segments. `fold` compares in lower case, for the diagnosis of a name in another case.
-// A directory is one entry of the set however it is reached, so a hit is keyed by the directory string (a registered root that lies inside
-// another root is the same string as the subfolder walked from it), and hits that open the same file are one hit: the inventory records
-// where a file really is (`ids` when the io names the file, else `reals`: one per directory that shows it), and a root that is a link to
-// another root, a link inside a root, or a file linked into two directories (a symbolic or a hard link) answers with the same bytes from
-// either. Two copies are two files and stay two hits. Without either (an inventory that carries none) every directory is taken as distinct.
-// Under a root whose volume folds case (`folding`, the roots the inventory found so) isfile answers a name with a file in another case, so
-// the comparison there is in lower case: the file found is still reported by the spelling it has on disk.
-function embeddingHits(files, name, fold = false, folding = new Set()) {
-  const exact = [name, ...EMBEDDING_EXTS.map((e) => name + e)];
-  const lowered = exact.map((s) => s.toLowerCase());
-  const byDir = new Map();
+// The reasons a prompt embedding is `embedding_unverified` (the `reason` of a requirement, and of an entry of the run gate's refusal).
+const WHY_CASE_VARIANT = "a case variant answers it";
+const WHY_SEVERAL_FILES = "more than one file could answer it";
+const WHY_PROBE = "a probe name (embedding_probes) is answered by a file of the node";
+
+// embeddingAnswers: the physical files of the class that answer `name`, each once. A candidate is the name as written, then the name with
+// .safetensors, .pt and .bin appended; a file answers when its path under a root equals a candidate or ends in `/` and a candidate (whole
+// path segments, never a base name that only ends alike), compared case-exactly (`asWritten`) or, for the diagnosis of a case variant,
+// without regard to case. The lookup does not rank candidates or directories: every file that answers counts, and what ComfyUI would
+// choose between them is not replicated (see the top of this section). A file reached by several paths is one answer: the inventory records
+// where a file really is (`ids` when the io names the file, else `reals`: one per directory that shows it), so a root that is a link to
+// another root, a link inside a root, a root registered inside another and a file linked into two directories (symbolic or hard) answer
+// once, while two copies answer twice; an inventory that carries neither is read by the path (root and relative path). One answer that is
+// reached under several names is `asWritten` when any of them is, and is reported by the first of them in path order.
+function embeddingAnswers(files, name) {
+  const written = [name, ...EMBEDDING_EXTS.map((e) => name + e)];
+  const lowered = written.map((s) => s.toLowerCase());
+  const answers = (rel, candidates) => candidates.some((c) => rel === c || rel.endsWith("/" + c));
+  const order = (a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  const byFile = new Map();
   for (const f of files) {
-    const match = (lower) => {
-      const rel = lower ? f.rel.toLowerCase() : f.rel;
-      const candidates = lower ? lowered : exact;
-      const rank = candidates.findIndex((c) => rel === c || rel.endsWith("/" + c));
-      return rank < 0 ? null : { rank, sub: f.rel.slice(0, rel.length - candidates[rank].length) };
-    };
-    const asWritten = fold ? null : match(false);
-    const folded = fold || f.dirs.some((root) => folding.has(root)) ? match(true) : null;
+    const asWritten = answers(f.rel, written);
+    if (!asWritten && !answers(f.rel.toLowerCase(), lowered)) continue;
     f.dirs.forEach((root, i) => {
-      const m = fold || folding.has(root) ? folded : asWritten;
-      if (!m) return;
-      const dir = m.sub === "" ? root : `${root}/${m.sub.slice(0, -1)}`;
-      const prev = byDir.get(dir);
-      if (!prev || m.rank < prev.rank) byDir.set(dir, { rank: m.rank, rel: f.rel, dir, real: f.ids?.[i] ?? f.reals?.[i] ?? null });
+      const key = f.ids?.[i] ?? f.reals?.[i] ?? `${root}/${f.rel}`;
+      const names = byFile.get(key);
+      const one = { key, rel: f.rel, path: `${root}/${f.rel}`, asWritten };
+      if (names) names.push(one); else byFile.set(key, [one]);
     });
   }
-  const order = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
-  const sorted = [...byDir.values()].sort((a, b) => order(a.rel, b.rel) || order(a.dir, b.dir));
-  const opened = new Set();
-  return sorted.filter((h) => {
-    if (h.real === null) return true;
-    if (opened.has(h.real)) return false;
-    opened.add(h.real);
-    return true;
-  });
+  return [...byFile.values()].map((names) => {
+    const exact = names.filter((n) => n.asWritten);
+    const [first] = (exact.length > 0 ? exact : names).sort(order);
+    return { ...first, asWritten: exact.length > 0 };
+  }).sort(order);
 }
 
-// resolveEmbedding: what ComfyUI does with one name on this node: `present` (exactly one directory holds a file for it: `resolved` is
-// that file's path under the class directory, the name a manifest must carry), `ambiguous` (more than one does, so which one it opens
-// varies from run to run: the files are listed, and no file may be named), `case_mismatch` (only a file in another case, under a root
-// whose volume is case-sensitive, where ComfyUI does not find it) or `missing`.
-function resolveEmbedding(c, name) {
-  return lookupEmbedding(c, name).result;
-}
-
-// lookupEmbedding: resolveEmbedding with the file a `present` answer opened, as the key of its hit (`file`: the file system's id for it, or its
-// real path, or null when the inventory records neither). One file can have two paths under the roots (a root registered inside another, a
-// link inside a root) and the answer names it by the first-sorted one, so two answers are about the same file when their keys are equal.
+// lookupEmbedding: what the harness verifies for one name on this node. `present` (exactly one physical file answers it, case-exactly:
+// `resolved` is that file's path under the class directory, the name a manifest must carry, and `file` its key, the file system's id for it
+// or its real path, so that two answers are about the same file when their keys are equal), `embedding_unverified` (a case variant is the only
+// answer, or more than one file could answer; `reason` says which and `found` lists the files, `found_in` the directory of each) or `missing`
+// (nothing answers it).
 function lookupEmbedding(c, name) {
-  const hits = embeddingHits(c.candidates, name, false, c.folding);
-  if (hits.length === 1) return { result: { status: "present", resolved: hits[0].rel }, file: hits[0].real };
-  if (hits.length > 1) {
-    return { result: { status: "ambiguous", found: [...new Set(hits.map((h) => h.rel))].sort(), found_in: hits.map((h) => ({ class: "embeddings", rel: h.rel, dir: h.dir })) }, file: null };
+  const answers = embeddingAnswers(c.candidates, name);
+  if (answers.length === 0) return { result: { status: "missing" }, file: null };
+  const found = [...new Set(answers.map((a) => a.rel))].sort();
+  if (answers.length > 1) {
+    return { result: { status: "embedding_unverified", reason: WHY_SEVERAL_FILES, found, found_in: answers.map((a) => ({ class: "embeddings", rel: a.rel, dir: a.path.slice(0, a.path.lastIndexOf("/")) })) }, file: null };
   }
-  const folded = embeddingHits(c.candidates, name, true, c.folding);
-  if (folded.length > 0) return { result: { status: "case_mismatch", found: [...new Set(folded.map((h) => h.rel))].sort() }, file: null };
-  return { result: { status: "missing" }, file: null };
+  if (!answers[0].asWritten) return { result: { status: "embedding_unverified", reason: WHY_CASE_VARIANT, found }, file: null };
+  return { result: { status: "present", resolved: answers[0].rel }, file: answers[0].key };
 }
 
-// checkEmbedding: an embedding is named by the text that loads it, not by a file: ComfyUI tries the name as written and then with
-// .safetensors, .pt and .bin appended, in the embeddings roots and every subfolder of them, and opens the file of whichever of those
-// directories its set lists first (embeddingHits). The file found is `resolved`, the name a manifest must carry. An annotation whose file
-// answers a name that a prompt gives (`embedding_refs`, recorded by requiredModels) must also be the file ComfyUI opens for that name
-// here: a file it tries first in the same directory is `shadowed`, a name held by several directories is `ambiguous`, and another case is
-// `case_mismatch`, because the licence, the hash and the trust record attach to the annotated file and not to the one that gets loaded.
-// A name no file answers is reported as for any other class when a file of another class does.
+// checkEmbedding: an embedding is named by the text that loads it, not by a file, and the harness accepts a name only when exactly one
+// physical file answers it, case-exactly (embeddingAnswers, lookupEmbedding). The file found is `resolved`, the name a manifest must carry.
+// An annotation whose file answers a name that a prompt gives (`embedding_refs`, recorded by requiredModels) must also be the one file that
+// answers that name here: a second file for it, a case variant, are `embedding_unverified`, because the licence, the hash and the trust
+// record attach to the annotated file and not to a file the harness cannot tell from it. A name no file answers is reported as for any
+// other class when a file of another class does.
 function checkEmbedding(name, directory, c, inv, mode, result, refs = []) {
   const looked = lookupEmbedding(c, name);
   let found = looked.result;
   if (found.status === "present") {
     for (const ref of refs) {
       const { result: r, file } = lookupEmbedding(c, ref);
-      // the same file: by its key when the inventory records one (it does for every file or for none), else by the path both answers name
-      if (r.status === "present" && (looked.file === null ? r.resolved === found.resolved : file === looked.file)) continue;
-      found = r.status === "present" ? { status: "shadowed", found: [r.resolved] } : r;
+      if (r.status === "present" && file === looked.file) continue; // the same file: by its key
+      found = r.status === "present" ? { status: "embedding_unverified", reason: WHY_SEVERAL_FILES, found: [found.resolved, r.resolved].sort() } : r;
       break;
     }
   }
@@ -1622,7 +1601,8 @@ function checkEmbedding(name, directory, c, inv, mode, result, refs = []) {
 // compared: any file with that name, in any class, any folder, any case.
 // `probes` are the other names ComfyUI may try for a template's prompts (embeddingProbes, recorded on the catalog row). They are not
 // requirements, so a name no file answers adds nothing; one a file answers adds an entry after the requirements (`probe: true`, status
-// `shadowed`, `found` the file), because ComfyUI may open that file in place of the one the template needs and no manifest names it.
+// `embedding_unverified`, `found` the files), because ComfyUI may open that file in place of the one the template needs and no manifest
+// names it. Any file that answers counts, in the case written or not, one or several: the harness does not verify which one ComfyUI opens.
 export function readiness(models, inv, { mode = "directory-aware", probes = [] } = {}) {
   const requirements = (Array.isArray(models) ? models : []).map((m) => checkRequirement(m, inv, mode));
   if (mode === "directory-aware") requirements.push(...probeFindings(inv, probes));
@@ -1630,14 +1610,15 @@ export function readiness(models, inv, { mode = "directory-aware", probes = [] }
   return { mode, ready: not_ready_count === 0, requirements, not_ready_count };
 }
 
-// probeFindings: the probe names that a file of the node answers, as requirement entries that are not met.
+// probeFindings: the probe names that a file of the node answers, as requirement entries that are not met. Every probe is asked.
 function probeFindings(inv, probes) {
   const c = Array.isArray(probes) && probes.length > 0 ? indexInventory(inv).byClass.get("embeddings") : undefined;
   if (!c) return [];
   const out = [];
   for (const name of probes) {
-    const r = resolveEmbedding(c, name);
-    if (r.status === "present" || r.status === "ambiguous") out.push({ name, directory: "embeddings", status: "shadowed", found: r.status === "present" ? [r.resolved] : r.found, probe: true });
+    const { result: r } = lookupEmbedding(c, name);
+    if (r.status === "missing") continue;
+    out.push({ name, directory: "embeddings", status: "embedding_unverified", reason: WHY_PROBE, found: r.status === "present" ? [r.resolved] : r.found, probe: true });
   }
   return out;
 }

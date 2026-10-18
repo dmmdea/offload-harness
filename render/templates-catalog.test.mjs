@@ -3880,25 +3880,26 @@ test("models: an embedding an ACTIVE subgraph instance carries in its widgets_va
   assert.deepEqual(r.active.map((m) => [m.directory, m.name]).sort(), [["checkpoints", "inner.safetensors"], ["embeddings", "from_instance"]]);
 });
 
-test("readiness: an embedding is found the way ComfyUI loads it, as written and then with .safetensors, .pt and .bin, and the file found is reported", () => {
+test("readiness: an embedding is found as written or with .safetensors, .pt or .bin appended, and the one file found is reported; two of them are unverified", () => {
   const emb = (name) => `D:/x/comfy/models/embeddings/${name}`;
   const run = (files, name) => {
     const r = C.readiness([req("embeddings", name, { annotated: false })], invFrom({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) })).requirements[0];
     return [r.status, r.resolved ?? null];
   };
-  assert.deepEqual(run([emb("e.safetensors"), emb("e.pt"), emb("e.bin")], "e"), ["present", "e.safetensors"], ".safetensors is tried first");
-  assert.deepEqual(run([emb("e.pt"), emb("e.bin")], "e"), ["present", "e.pt"], "then .pt");
-  assert.deepEqual(run([emb("e.bin")], "e"), ["present", "e.bin"], "then .bin");
+  assert.deepEqual(run([emb("e.safetensors")], "e"), ["present", "e.safetensors"], ".safetensors");
+  assert.deepEqual(run([emb("e.pt")], "e"), ["present", "e.pt"], ".pt");
+  assert.deepEqual(run([emb("e.bin")], "e"), ["present", "e.bin"], ".bin");
+  assert.equal(run([emb("e.safetensors"), emb("e.pt"), emb("e.bin")], "e")[0], "embedding_unverified", "three files could answer it: ComfyUI's preference between them is not replicated");
   assert.deepEqual(run([emb("e.pt"), emb("e")], "e.pt"), ["present", "e.pt"], "a name written with its extension is that file");
   assert.deepEqual(run([emb("sub/e.pt")], "sub/e"), ["present", "sub/e.pt"], "a nested name");
   assert.equal(run([emb("other.pt")], "e")[0], "missing", "no file by that name: missing, not an extension complaint");
-  assert.equal(run([emb("E.pt")], "e")[0], "case_mismatch");
+  assert.equal(run([emb("E.pt")], "e")[0], "embedding_unverified", "a case variant");
 });
 
 // ComfyUI does not look in "each directory of the class in its order". expand_directory_list puts every embeddings root and every
 // subdirectory below it (os.walk) into one set(), and load_embed takes the first directory of list(set) that holds the name, so the
-// directory is chosen by hash order, which differs from one process to the next (a verbatim copy of the loop, over seeds 0 to 11, picked the
-// root file 5 times, sd15/ 4 times and sdxl/ 3 times). A name held by more than one directory is ambiguous; held by one, it is that file.
+// directory is chosen by hash order, which differs from one process to the next. The harness does not replicate that choice: a name that
+// one physical file answers is that file, and a name that more than one could answer is embedding_unverified.
 
 const EMB = (name) => `D:/x/comfy/models/embeddings/${name}`;
 const EMB2 = (name) => `E:/x/overflow/embeddings/${name}`;
@@ -3909,10 +3910,16 @@ const embCheck = (files, name, extra = {}, yamls = []) => {
 };
 const embGot = (files, name, extra, yamls) => { const r = embCheck(files, name, extra, yamls); return [r.status, r.resolved ?? null, r.found ?? null]; };
 
+// The reasons a prompt embedding is embedding_unverified, and the same lookup as embGot with the reason in place of the resolved file.
+const WHY_CASE = "a case variant answers it";
+const WHY_MANY = "more than one file could answer it";
+const WHY_PROBE = "a probe name (embedding_probes) is answered by a file of the node";
+const unv = (files, name, extra, yamls) => { const r = embCheck(files, name, extra, yamls); return [r.status, r.reason ?? null, r.found ?? null]; };
+
 test("readiness: an embedding held only in a subfolder of the embeddings directory is the file ComfyUI loads, because it searches every subfolder", () => {
   assert.deepEqual(embGot([EMB("sd15/e.safetensors")], "e"), ["present", "sd15/e.safetensors", null]);
   assert.deepEqual(embGot([EMB("sd15/deep/e.pt")], "e"), ["present", "sd15/deep/e.pt", null]);
-  assert.deepEqual(embGot([EMB("sd15/e.pt"), EMB("sd15/e.bin")], "e"), ["present", "sd15/e.pt", null], "within one directory the extension order decides");
+  assert.deepEqual(embGot([EMB("sd15/e.pt"), EMB("sd15/e.bin")], "e"), ["embedding_unverified", null, ["sd15/e.bin", "sd15/e.pt"]], "two files in one directory: ComfyUI's extension order is not replicated");
   assert.deepEqual(embGot([EMB("sd15/e.pt")], "sd15/e"), ["present", "sd15/e.pt", null], "a name with a path is that path under the directory");
   assert.deepEqual(embGot([EMB("a/sd15/e.pt")], "sd15/e"), ["present", "a/sd15/e.pt", null], "and under any subfolder");
   assert.equal(embGot([EMB("sd15/e.pt")], "other/e")[0], "missing", "a path that no directory holds is missing");
@@ -3922,24 +3929,6 @@ test("readiness: an embedding held only in a subfolder of the embeddings directo
 test("readiness: an embedding that exists only under another class is wrong_class, naming where", () => {
   const r = embCheck(["D:/x/comfy/models/loras/e.safetensors"], "e");
   assert.deepEqual([r.status, r.found_in], ["wrong_class", [{ class: "loras", rel: "e.safetensors" }]]);
-});
-
-test("readiness: one embedding name held in more than one directory is ambiguous, listing the files, because ComfyUI picks the directory by set order", () => {
-  assert.deepEqual(embGot([EMB("e.pt"), EMB("sd15/e.safetensors")], "e"), ["ambiguous", null, ["e.pt", "sd15/e.safetensors"]], "the root and a subfolder");
-  assert.deepEqual(embGot([EMB("a/e.pt"), EMB("b/e.pt")], "e"), ["ambiguous", null, ["a/e.pt", "b/e.pt"]], "two subfolders");
-  assert.deepEqual(embGot([EMB("e.pt"), EMB2("e.safetensors")], "e", {}, OVERFLOW), ["ambiguous", null, ["e.pt", "e.safetensors"]], "two registered roots");
-  assert.deepEqual(embGot([EMB("e.pt"), EMB2("e.pt")], "e", {}, OVERFLOW), ["ambiguous", null, ["e.pt"]], "one name in both roots, two files (two copies: the inventory tells a link from a copy by where each file really is)");
-  assert.deepEqual(embGot([EMB("e.pt"), EMB("e.safetensors")], "e"), ["present", "e.safetensors", null], "one directory holding two extensions is not ambiguous: the order decides");
-});
-
-test("readiness: an annotated embedding is met only when it is the file ComfyUI opens for the name the prompt gives", () => {
-  const covers = { annotated: true, embedding_refs: ["evil_ti"] };
-  assert.deepEqual(embGot([EMB("evil_ti.pt")], "evil_ti.pt", covers), ["present", "evil_ti.pt", null]);
-  assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.pt", covers), ["shadowed", null, ["evil_ti.safetensors"]], "ComfyUI tries .safetensors first in one directory");
-  assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.safetensors", covers), ["present", "evil_ti.safetensors", null], "the annotation names the file ComfyUI opens");
-  assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.pt", { annotated: true }), ["present", null, null], "an annotation that covers no prompt name is a loader widget's file: its exact path, with no file of the prompt lookup resolved");
-  assert.equal(embGot([EMB("evil_ti.pt"), EMB("sd15/evil_ti.bin")], "evil_ti.pt", covers)[0], "ambiguous", "another directory holds a file for the name");
-  assert.equal(embGot([EMB("Evil_TI.pt")], "Evil_TI.pt", covers)[0], "case_mismatch", "the prompt's name is not that file's spelling");
 });
 
 // embeddingCovered, directly. Each set below holds the very names under test, so the guard or the normalisation named in the message is
@@ -3990,7 +3979,7 @@ test("readiness: an annotated embeddings file that no prompt name covers (a load
 test("readiness: an annotated embeddings entry that carries prompt names keeps the prompt lookup, and a prompt requirement is never read as a loader's", () => {
   const covers = { annotated: true, embedding_refs: ["cond"], node_types: ["CLIPTextEncode"] };
   assert.equal(embGot([EMB("sd15/cond.safetensors")], "cond.safetensors", covers)[0], "present", "ComfyUI finds a subfolder file by the bare name in a prompt");
-  assert.equal(embGot([EMB("cond.safetensors"), EMB("sd15/cond.safetensors")], "cond.safetensors", covers)[0], "ambiguous");
+  assert.equal(embGot([EMB("cond.safetensors"), EMB("sd15/cond.safetensors")], "cond.safetensors", covers)[0], "embedding_unverified");
   assert.equal(embGot([EMB("sd15/cond.safetensors")], "cond", { annotated: false })[0], "present");
 });
 
@@ -4017,12 +4006,12 @@ const linkedGot = (files, links, name, yamls = OVERFLOW, { strip = false } = {})
   return [r.status, r.resolved ?? null, r.found ?? null];
 };
 
-test("readiness: an embeddings root that is a link to another registered root is one directory, so a name both show is present, not ambiguous", () => {
+test("readiness: an embeddings root that is a link to another registered root is one directory, so a name both show is present, not unverified", () => {
   const links = { "E:/x/overflow/embeddings": "D:/x/comfy/models/embeddings" };
   assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt")], links, "e")[0], "present", "the second root is the first directory again");
   assert.equal(linkedGot([EMB("sd15/e.pt"), EMB2("sd15/e.pt")], links, "e")[0], "present", "and so is every subfolder of it");
-  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt")], {}, "e")[0], "ambiguous", "two copies (no link) are two files and stay ambiguous");
-  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt"), EMB("sd15/e.pt")], links, "e")[0], "ambiguous", "a link does not hide a distinct second file");
+  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt")], {}, "e")[0], "embedding_unverified", "two copies (no link) are two files and stay unverified");
+  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt"), EMB("sd15/e.pt")], links, "e")[0], "embedding_unverified", "a link does not hide a distinct second file");
 });
 
 test("readiness: a link inside an embeddings root is one directory with its target", () => {
@@ -4044,7 +4033,7 @@ test("readiness: an annotation that names a file by a longer path is the file a 
   assert.deepEqual(annotatedGot(files, {}, "sd15/neg/foo.pt", { embedding_refs: ["foo"] }, nested), ["present", null], "the long path, a prompt that gives the bare name");
   assert.deepEqual(annotatedGot(files, {}, "foo.pt", { embedding_refs: ["foo"] }, nested), ["present", null], "the short path");
   assert.deepEqual(annotatedGot(files, {}, "sd15/neg/foo.pt", { embedding_refs: ["sd15/neg/foo.pt"] }, nested), ["present", null], "the long path both ways");
-  assert.equal(annotatedGot([...files, EMB("sd15/neg/foo.safetensors")], {}, "sd15/neg/foo.pt", { embedding_refs: ["foo"] }, nested)[0], "shadowed", "a different file in that directory, tried first, still shadows it");
+  assert.equal(annotatedGot([...files, EMB("sd15/neg/foo.safetensors")], {}, "sd15/neg/foo.pt", { embedding_refs: ["foo"] }, nested)[0], "embedding_unverified", "a different file in that directory also answers the name");
 });
 
 test("readiness: an annotation that names a file by one path of a link inside the root is not shadowed by the other path of the same file", () => {
@@ -4055,11 +4044,15 @@ test("readiness: an annotation that names a file by one path of a link inside th
 });
 
 test("readiness: an inventory that records no real paths compares an annotation with a prompt's name by the path", () => {
-  const inv = invFrom({ ...TREE, [EMB("evil_ti.pt")]: { size: 7 }, [EMB("evil_ti.safetensors")]: { size: 7 } });
-  for (const f of [...inv.classes.embeddings.files, ...inv.classes.embeddings.unlisted_files]) { delete f.reals; delete f.ids; }
-  const status = (name) => C.readiness([req("embeddings", name, { annotated: true, embedding_refs: ["evil_ti"] })], inv).requirements[0].status;
-  assert.equal(status("evil_ti.pt"), "shadowed", "the file ComfyUI tries first in the directory is another path");
-  assert.equal(status("evil_ti.safetensors"), "present");
+  const bare = (files) => {
+    const inv = invFrom({ ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) });
+    for (const f of [...inv.classes.embeddings.files, ...inv.classes.embeddings.unlisted_files]) { delete f.reals; delete f.ids; }
+    return (name) => C.readiness([req("embeddings", name, { annotated: true, embedding_refs: ["evil_ti"] })], inv).requirements[0].status;
+  };
+  const two = bare([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")]);
+  assert.equal(two("evil_ti.pt"), "embedding_unverified", "another file answers the name too: it is another path");
+  assert.equal(two("evil_ti.safetensors"), "embedding_unverified", "whichever of the two the annotation names");
+  assert.equal(bare([EMB("evil_ti.safetensors")])("evil_ti.safetensors"), "present", "one file: the annotation and the prompt's name are the same path");
 });
 
 test("readiness: a registered root inside another registered root is the same directory string, which ComfyUI's set holds once", () => {
@@ -4068,10 +4061,10 @@ test("readiness: a registered root inside another registered root is the same di
   assert.equal(status, "present", "the set holds the string for s2 once, whether it is a registered root or walked from the other");
   assert.match(resolved, /foo\.bin$/);
   assert.equal(linkedGot([EMB("s2/foo.bin")], {}, "foo", nested, { strip: true })[0], "present", "by the directory string alone, in an inventory that records no real paths");
-  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt")], {}, "e", OVERFLOW, { strip: true })[0], "ambiguous", "without real paths two roots are taken as two directories");
+  assert.equal(linkedGot([EMB("e.pt"), EMB2("e.pt")], {}, "e", OVERFLOW, { strip: true })[0], "embedding_unverified", "without real paths two roots are taken as two files");
 });
 
-test("readiness (real filesystem): an embeddings directory that is a junction to a second registered root reads present, and a real second copy reads ambiguous", async (t) => {
+test("readiness (real filesystem): an embeddings directory that is a junction to a second registered root reads present, and a real second copy reads unverified", async (t) => {
   const { mkdirSync, writeFileSync, symlinkSync } = await import("node:fs");
   const root = scratchDir(t, "tc-emb-link-").replace(/\\/g, "/");
   mkdirSync(`${root}/comfy/models`, { recursive: true });
@@ -4090,7 +4083,7 @@ test("readiness (real filesystem): an embeddings directory that is a junction to
   mkdirSync(`${root}/copy`, { recursive: true });
   writeFileSync(`${root}/copy/EasyNeg.safetensors`, "y");
   const withCopy = C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls: [...yamls, { text: `q:\n  base_path: ${root}/copy\n  embeddings: .\n`, dir: `${root}/comfy` }] });
-  assert.equal(C.readiness([req("embeddings", "EasyNeg", { annotated: false })], C.scanModelInventory(withCopy, C.nodeIo)).requirements[0].status, "ambiguous", "a different file of the same name is a second file");
+  assert.equal(C.readiness([req("embeddings", "EasyNeg", { annotated: false })], C.scanModelInventory(withCopy, C.nodeIo)).requirements[0].status, "embedding_unverified", "a different file of the same name is a second file");
 });
 
 // Where a file really is, asked of the file system: a directory registered under a spelling that differs only in case is the directory it is
@@ -4142,7 +4135,7 @@ test("readiness (real filesystem): a file hard-linked into two embeddings direct
   assert.equal(status(), "present", "three names of one file: two subfolders of a root and a second registered root");
   mkdirSync(`${root}/overflow/embeddings/copy`, { recursive: true });
   writeFileSync(`${root}/overflow/embeddings/copy/foo.safetensors`, "z"); // a new file of its own
-  assert.equal(status(), "ambiguous", "a copy is a second file");
+  assert.equal(status(), "embedding_unverified", "a copy is a second file");
 });
 
 // The same, with an io that names its files, so the rule holds on a host where hard links or the case rule cannot be made: two names that
@@ -4160,9 +4153,9 @@ const idStatus = (ids) => {
 
 test("readiness: two names that share a file id are one file, whatever their paths; two ids are two files; a file with no id falls back to its real path", () => {
   assert.deepEqual(idStatus({ [EMB("e.pt")]: "id:1:7", [EMB2("e.pt")]: "id:1:7" }), ["present", [["id:1:7", "id:1:7"]]], "one id, two paths");
-  assert.deepEqual(idStatus({ [EMB("e.pt")]: "id:1:7", [EMB2("e.pt")]: "id:1:8" }), ["ambiguous", [["id:1:7", "id:1:8"]]], "two ids");
-  assert.deepEqual(idStatus({}), ["ambiguous", [[null, null]]], "no ids: two real paths, two files");
-  assert.equal(idStatus({ [EMB("e.pt")]: "id:1:7" })[0], "ambiguous", "an id never equals a path");
+  assert.deepEqual(idStatus({ [EMB("e.pt")]: "id:1:7", [EMB2("e.pt")]: "id:1:8" }), ["embedding_unverified", [["id:1:7", "id:1:8"]]], "two ids");
+  assert.deepEqual(idStatus({}), ["embedding_unverified", [[null, null]]], "no ids: two real paths, two files");
+  assert.equal(idStatus({ [EMB("e.pt")]: "id:1:7" })[0], "embedding_unverified", "an id never equals a path");
   assert.equal(invFrom({ ...TREE, [EMB("e.pt")]: { size: 7 } }).classes.embeddings.files[0].ids, undefined, "an io that cannot name files records no ids");
 });
 
@@ -4197,22 +4190,22 @@ test("nodeIo.realpath: gives the spelling the file system keeps, so two spelling
 // extensions its loaders accept, so the inventory also records the embeddings files it does not list, and the bare name can match them.
 // ---------------------------------------------------------------------------------------------------------------------------------
 
-test("readiness: an embeddings file with no extension, or one the class does not list, answers the bare name first, as isfile does", () => {
-  assert.deepEqual(embGot([EMB("foo"), EMB("foo.safetensors")], "foo"), ["present", "foo", null], "isfile(foo) is true, so ComfyUI opens it and never tries foo.safetensors");
+test("readiness: an embeddings file with no extension, or one the class does not list, answers the bare name, as isfile does", () => {
   assert.deepEqual(embGot([EMB("foo")], "foo"), ["present", "foo", null], "alone, it is the file ComfyUI opens");
-  assert.deepEqual(embGot([EMB("foo.v2"), EMB("foo.v2.safetensors")], "foo.v2"), ["present", "foo.v2", null], "a name that already has an unlisted extension is the same case");
+  assert.deepEqual(embGot([EMB("foo.v2")], "foo.v2"), ["present", "foo.v2", null], "a name that already has an unlisted extension is the same case");
+  assert.equal(embGot([EMB("foo"), EMB("foo.safetensors")], "foo")[0], "embedding_unverified", "ComfyUI opens the extension-less file first; the harness does not replicate the preference, and two files could answer");
   assert.deepEqual(embGot([EMB("sd15/foo")], "foo"), ["present", "sd15/foo", null], "in a subfolder too");
 });
 
-test("readiness: an extension-less embeddings file in one directory and a listed file in another are two files, so the name is ambiguous", () => {
-  assert.equal(embGot([EMB("a/foo.pt"), EMB("b/foo")], "foo")[0], "ambiguous");
-  assert.equal(embGot([EMB("a/foo"), EMB("b/foo.safetensors")], "foo")[0], "ambiguous");
+test("readiness: an extension-less embeddings file in one directory and a listed file in another are two files, so the name is unverified", () => {
+  assert.equal(embGot([EMB("a/foo.pt"), EMB("b/foo")], "foo")[0], "embedding_unverified");
+  assert.equal(embGot([EMB("a/foo"), EMB("b/foo.safetensors")], "foo")[0], "embedding_unverified");
   assert.equal(embGot([EMB("foo"), EMB("foo.pt")], "foo.pt")[0], "present", "a name with a listed extension is not answered by the extension-less file");
 });
 
-test("readiness: an annotation named for a listed file is shadowed by the extension-less file of the same stem that ComfyUI opens first", () => {
+test("readiness: an annotation named for a listed file is unverified beside the extension-less file of the same stem, which could answer the name too", () => {
   const covers = { annotated: true, embedding_refs: ["foo"] };
-  assert.deepEqual(embGot([EMB("foo"), EMB("foo.safetensors")], "foo.safetensors", covers), ["shadowed", null, ["foo"]]);
+  assert.deepEqual(embGot([EMB("foo"), EMB("foo.safetensors")], "foo.safetensors", covers), ["embedding_unverified", null, ["foo", "foo.safetensors"]]);
   assert.equal(embGot([EMB("foo.safetensors")], "foo.safetensors", covers)[0], "present");
 });
 
@@ -4225,91 +4218,11 @@ test("inventory: the embeddings class records the files it does not list (with w
 });
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// load_embed finds a file with os.path.isfile, so on a volume that looks names up without regard to case (NTFS by default, which is where a
-// Windows node's ComfyUI runs) the name `foo` is answered by `FOO.pt` too. The inventory asks each embeddings root, through the io, whether
-// its volume folds case, and the lookup compares in lower case under such a root.
-// ---------------------------------------------------------------------------------------------------------------------------------
-
-// An io whose volume looks names up without regard to case: a path in any case finds the entry stored in its own.
-const foldIo = (files) => {
-  const io = memIo(files);
-  const stored = new Map();
-  for (const p of Object.keys(files)) {
-    const parts = p.replace(/\\/g, "/").split("/");
-    for (let i = 2; i <= parts.length; i++) stored.set(parts.slice(0, i).join("/").toLowerCase(), parts.slice(0, i).join("/")); // the file and every directory above it
-  }
-  const fix = (p) => stored.get(String(p).replace(/\\/g, "/").toLowerCase()) ?? p;
-  return { ...io, stat: (p) => io.stat(fix(p)), exists: (p) => io.exists(fix(p)) };
-};
-const foldGot = (files, name, extra = {}, { fold = true } = {}) => {
-  const tree = { ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) };
-  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: [] }), fold ? foldIo(tree) : memIo(tree));
-  const r = C.readiness([req("embeddings", name, { annotated: false, ...extra })], inv).requirements[0];
-  return [r.status, r.resolved ?? null, r.found ?? null];
-};
-
-test("inventory: an embeddings root whose volume folds case is recorded as such, and one that does not is not", () => {
-  const files = { [EMB("Bar.safetensors")]: { size: 1 }, [EMB("sd15/x.pt")]: { size: 1 } };
-  assert.deepEqual(invFrom({ ...TREE, ...files }).classes.embeddings.case_insensitive_dirs, [], "an io that finds names by their exact case");
-  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: [] }), foldIo({ ...TREE, ...files }));
-  assert.deepEqual(inv.classes.embeddings.case_insensitive_dirs, [EMB("").slice(0, -1)]);
-  assert.equal(inv.classes.vae.case_insensitive_dirs, undefined, "only the embeddings class looks names up by a file system's rules");
-});
-
-test("inventory (real filesystem): the probe agrees with what the volume does with a name in another case", async (t) => {
-  const { mkdirSync, writeFileSync, existsSync } = await import("node:fs");
-  const root = scratchDir(t, "tc-emb-case-").replace(/\\/g, "/");
-  mkdirSync(`${root}/comfy/models/embeddings`, { recursive: true });
-  writeFileSync(`${root}/comfy/models/embeddings/Probe.pt`, "x");
-  const folds = existsSync(`${root}/comfy/models/embeddings/pROBE.PT`); // the oracle: ask the volume directly
-  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: `${root}/comfy`, yamls: [] }), C.nodeIo);
-  assert.deepEqual(inv.classes.embeddings.case_insensitive_dirs, folds ? [`${root}/comfy/models/embeddings`] : []);
-  const r = C.readiness([req("embeddings", "probe", { annotated: false })], inv).requirements[0];
-  assert.deepEqual([r.status, r.resolved ?? null], folds ? ["present", "Probe.pt"] : ["case_mismatch", null]);
-});
-
-test("readiness: on a volume that folds case a name is answered by a file in another case, the way os.path.isfile answers it", () => {
-  assert.deepEqual(foldGot([EMB("Bar.safetensors")], "bar"), ["present", "Bar.safetensors", null], "ComfyUI loads it on this node");
-  assert.deepEqual(foldGot([EMB("Bar.safetensors")], "bar", {}, { fold: false }), ["case_mismatch", null, ["Bar.safetensors"]], "a case-sensitive volume does not find it");
-  assert.deepEqual(foldGot([EMB("sd15/E.PT")], "e"), ["present", "sd15/E.PT", null]);
-});
-
-test("readiness: on a volume that folds case a second file differing only in case, in another directory, makes the name ambiguous", () => {
-  assert.deepEqual(foldGot([EMB("foo.pt"), EMB("sd15/FOO.pt")], "foo"), ["ambiguous", null, ["foo.pt", "sd15/FOO.pt"]], "ComfyUI opens either, by set order");
-  assert.deepEqual(foldGot([EMB("foo.pt"), EMB("sd15/FOO.pt")], "foo", {}, { fold: false }), ["present", "foo.pt", null], "on a case-sensitive volume sd15/FOO.pt is another name");
-});
-
-// The probe asks the volume about a name that has a letter in it. A root whose top-level entries have none (a folder called 2023, a name in a
-// script without case) says nothing, so the probe goes down to the first file whose name has a letter: the volume's rule is the same below.
-const foldInv = (files, { fold = true } = {}) => {
-  const tree = { ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) };
-  return C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: [] }), fold ? foldIo(tree) : memIo(tree));
-};
-
-test("inventory: a root with no letter in its top-level names is judged by the first file below it that has one", () => {
-  const root = EMB("").slice(0, -1);
-  assert.deepEqual(foldInv([EMB("2023/Foo.PT")]).classes.embeddings.case_insensitive_dirs, [root], "a folder called 2023");
-  assert.deepEqual(foldInv([EMB("2023/Foo.PT")], { fold: false }).classes.embeddings.case_insensitive_dirs, [], "and a volume that does not fold");
-  assert.deepEqual(foldInv([EMB("2023/9/Foo.PT")]).classes.embeddings.case_insensitive_dirs, [root], "two levels down");
-  assert.deepEqual(foldInv([EMB("\u4eba\u7269/Foo.PT")]).classes.embeddings.case_insensitive_dirs, [root], "a folder in a script without case");
-});
-
-test("readiness: on a volume that folds case, a name is answered by a file in another case under a root whose top-level names have no letter", () => {
-  assert.deepEqual(foldGot([EMB("2023/Foo.PT")], "2023/foo"), ["present", "2023/Foo.PT", null], "ComfyUI loads it: isfile finds 2023/foo.pt");
-  assert.deepEqual(foldGot([EMB("2023/Foo.PT")], "foo"), ["present", "2023/Foo.PT", null], "and by the bare name, from the subfolder");
-  assert.deepEqual(foldGot([EMB("2023/Foo.PT")], "foo", {}, { fold: false }), ["case_mismatch", null, ["2023/Foo.PT"]], "a case-sensitive volume does not find it");
-});
-
-test("readiness: on a volume that folds case, two case variants of one name in two folders with no letter in their names are ambiguous", () => {
-  assert.deepEqual(foldGot([EMB("2023/9/bar.PT"), EMB("7/bar.pt")], "bar.pt"), ["ambiguous", null, ["2023/9/bar.PT", "7/bar.pt"]], "ComfyUI's set holds both folders, and isfile finds a file in each");
-  assert.deepEqual(foldGot([EMB("2023/9/bar.PT"), EMB("7/bar.pt")], "bar.pt", {}, { fold: false }), ["present", "7/bar.pt", null], "on a case-sensitive volume 2023/9/bar.PT is another name");
-});
-
-// ---------------------------------------------------------------------------------------------------------------------------------
 // _try_get_embedding asks load_embed for the name AS WRITTEN first (the first word after the identifier, cut at `<` or `[`), and strips
 // commas from both ends only if that finds nothing. `embedding:foo, a cat` is the name `foo,` first, so a file called `foo,.safetensors` is
 // opened in preference to `foo.safetensors`. embeddingRefs names the stripped name (what the template needs); embeddingProbes names the other
-// names ComfyUI may try, which are not requirements (a node holds no `foo,` file, nearly always) but are refused when a file answers them.
+// names ComfyUI may try, which are not requirements (a node holds no `foo,` file, nearly always) but are refused as embedding_unverified when
+// a file answers them.
 // ---------------------------------------------------------------------------------------------------------------------------------
 
 test("embeddingProbes: the name as written, when commas make it differ from the name embeddingRefs gives", () => {
@@ -4357,8 +4270,8 @@ test("readiness: a file the reading without weights would open is a file ComfyUI
     return [r.ready, r.requirements.slice(1).map((x) => [x.name, x.status, x.found])];
   };
   assert.deepEqual(run([EMB("foo.safetensors")], "embedding:foo(bar) a cat"), [true, []], "no file answers foo(bar)");
-  assert.deepEqual(run([EMB("foo.safetensors"), EMB("foo(bar).safetensors")], "embedding:foo(bar) a cat"), [false, [["foo(bar)", "shadowed", ["foo(bar).safetensors"]]]]);
-  assert.deepEqual(run([EMB("foo.safetensors"), EMB("1.2.safetensors")], "embedding:foo a cat ( embedding:1.2 )"), [false, [["1.2", "shadowed", ["1.2.safetensors"]]]], "a name only that reading gives");
+  assert.deepEqual(run([EMB("foo.safetensors"), EMB("foo(bar).safetensors")], "embedding:foo(bar) a cat"), [false, [["foo(bar)", "embedding_unverified", ["foo(bar).safetensors"]]]]);
+  assert.deepEqual(run([EMB("foo.safetensors"), EMB("1.2.safetensors")], "embedding:foo a cat ( embedding:1.2 )"), [false, [["1.2", "embedding_unverified", ["1.2.safetensors"]]]], "a name only that reading gives");
 });
 
 test("models: the names ComfyUI may also try are recorded beside the requirements, once each, for active nodes only, and not as requirements", () => {
@@ -4375,63 +4288,9 @@ test("readiness: a file that answers a probe name is a file ComfyUI may open in 
     return [r.ready, r.not_ready_count, r.requirements.slice(1).map((x) => [x.name, x.status, x.found])];
   };
   assert.deepEqual(run([EMB("evil_ti.safetensors")], ["evil_ti,"]), [true, 0, []], "no file answers the probe: nothing to report, and no requirement was added");
-  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("evil_ti,.safetensors")], ["evil_ti,"]), [false, 1, [["evil_ti,", "shadowed", ["evil_ti,.safetensors"]]]], "ComfyUI asks for the name as written first");
-  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("sd15/evil_ti,.pt")], ["evil_ti,"]), [false, 1, [["evil_ti,", "shadowed", ["sd15/evil_ti,.pt"]]]], "in a subfolder too");
+  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("evil_ti,.safetensors")], ["evil_ti,"]), [false, 1, [["evil_ti,", "embedding_unverified", ["evil_ti,.safetensors"]]]], "ComfyUI asks for the name as written first");
+  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("sd15/evil_ti,.pt")], ["evil_ti,"]), [false, 1, [["evil_ti,", "embedding_unverified", ["sd15/evil_ti,.pt"]]]], "in a subfolder too");
   assert.equal(C.readiness([req("embeddings", "evil_ti", { annotated: false })], invFrom({ ...TREE, [EMB("evil_ti,.pt")]: { size: 1 } }), { mode: "basename-only", probes: ["evil_ti,"] }).requirements.length, 1, "the older shortcut does not look at probes");
-});
-
-// ---------------------------------------------------------------------------------------------------------------------------------
-// The rules of the case probe, one by one (foldsCase): the first file whose name has a letter a swap changes is asked about in the other case;
-// a name with no such letter says nothing; a folder that holds both spellings is case-sensitive; and the answer is per root.
-// ---------------------------------------------------------------------------------------------------------------------------------
-
-test("inventory: a folder that holds both spellings of a name is a case-sensitive one, whichever is listed first", () => {
-  const dirs = (files) => foldInv(files, { fold: false }).classes.embeddings.case_insensitive_dirs;
-  assert.deepEqual(dirs([EMB("foo.safetensors"), EMB("FOO.SAFETENSORS")]), [], "the twin of the first name is a file of its own");
-  assert.deepEqual(dirs([EMB("FOO.SAFETENSORS"), EMB("foo.safetensors")]), [], "and in the other order");
-  assert.deepEqual(foldGot([EMB("foo.safetensors"), EMB("FOO.SAFETENSORS")], "Foo", {}, { fold: false }), ["case_mismatch", null, ["FOO.SAFETENSORS"]], "neither spelling is Foo, on a volume that tells them apart");
-  assert.deepEqual(foldGot([EMB("foo.safetensors"), EMB("FOO.SAFETENSORS")], "foo", {}, { fold: false }), ["present", "foo.safetensors", null], "and foo is the file of that name");
-});
-
-test("inventory: a name with no letter a case swap changes says nothing, and the probe goes on to the next file", () => {
-  const root = EMB("").slice(0, -1);
-  const dirs = (files) => foldInv(files).classes.embeddings.case_insensitive_dirs;
-  assert.deepEqual(dirs([EMB("01"), EMB("FOO.pt")]), [root], "an extension-less 01 first");
-  assert.deepEqual(foldGot([EMB("01"), EMB("FOO.pt")], "foo"), ["present", "FOO.pt", null]);
-  assert.deepEqual(dirs([EMB("2023/01")]), [], "no file with a letter: no answer, so the root is not recorded as folding");
-  assert.deepEqual(dirs([EMB("2023/01"), EMB("2023/9/x.pt")]), [root], "the first file with a letter, however deep, decides");
-});
-
-test("inventory: the probe swaps the case of each letter, so an all-capital name and an all-lower-case name both have a twin", () => {
-  const root = EMB("").slice(0, -1);
-  assert.deepEqual(foldInv([EMB("BAR.PT")]).classes.embeddings.case_insensitive_dirs, [root], "all capitals: the twin is bar.pt");
-  assert.deepEqual(foldInv([EMB("foo.pt")]).classes.embeddings.case_insensitive_dirs, [root], "all lower case: the twin is FOO.PT");
-  assert.deepEqual(foldGot([EMB("BAR.PT")], "bar"), ["present", "BAR.PT", null]);
-  assert.deepEqual(foldGot([EMB("foo.pt")], "FOO"), ["present", "foo.pt", null]);
-});
-
-// An io whose volume folds case under one prefix only, as a node with a second root on another volume (or another folder with the flag set).
-const foldUnder = (files, prefix) => {
-  const full = foldIo(files);
-  const plain = memIo(files);
-  const under = (p) => String(p).replace(/\\/g, "/").toLowerCase().startsWith(prefix.toLowerCase());
-  return { ...plain, stat: (p) => (under(p) ? full.stat(p) : plain.stat(p)), exists: (p) => (under(p) ? full.exists(p) : plain.exists(p)) };
-};
-const perRootGot = (files, prefix, name) => {
-  const tree = { ...TREE, ...Object.fromEntries(files.map((f) => [f, { size: 7 }])) };
-  const inv = C.scanModelInventory(C.resolveModelRoots({ comfyDir: "D:/x/comfy", yamls: OVERFLOW }), foldUnder(tree, prefix));
-  const r = C.readiness([req("embeddings", name, { annotated: false })], inv).requirements[0];
-  return [r.status, r.resolved ?? null, inv.classes.embeddings.case_insensitive_dirs];
-};
-
-test("readiness: the case rule is the root's own: a case variant is a hit in a root that folds and not in one that does not", () => {
-  const second = EMB2("").slice(0, -1);
-  const first = EMB("").slice(0, -1);
-  assert.deepEqual(perRootGot([EMB2("Bar.pt")], "E:/x", "bar"), ["present", "Bar.pt", [second]], "only the second root folds, and it holds the file");
-  assert.deepEqual(perRootGot([EMB("Bar.pt"), EMB2("Bar.pt")], "E:/x", "bar"), ["present", "Bar.pt", [second]], "the same name in both: the first root, case-sensitive, does not answer bar");
-  assert.deepEqual(perRootGot([EMB("Bar.pt"), EMB2("Bar.pt")], "D:/x", "bar"), ["present", "Bar.pt", [first]], "and the other way round");
-  assert.deepEqual(perRootGot([EMB("Bar.pt"), EMB2("zzz.pt")], "E:/x", "bar"), ["case_mismatch", null, [second]], "the file is in the root that does not fold");
-  assert.equal(perRootGot([EMB("Bar.pt"), EMB2("Bar.pt")], "", "bar")[0], "ambiguous", "both fold: two files answer");
 });
 
 // ---------------------------------------------------------------------------------------------------------------------------------
@@ -4445,8 +4304,8 @@ test("readiness: a probe name that more than one directory holds is a file Comfy
     const r = C.readiness([req("embeddings", "evil_ti", { annotated: false })], inv, { probes: ["evil_ti,"] });
     return [r.ready, r.not_ready_count, r.requirements.slice(1).map((x) => [x.name, x.status, x.found])];
   };
-  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("evil_ti,.pt"), EMB("sd15/evil_ti,.pt")]), [false, 1, [["evil_ti,", "shadowed", ["evil_ti,.pt", "sd15/evil_ti,.pt"]]]], "the root and a subfolder");
-  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("sd15/evil_ti,.pt"), EMB("sd16/evil_ti,.bin")]), [false, 1, [["evil_ti,", "shadowed", ["sd15/evil_ti,.pt", "sd16/evil_ti,.bin"]]]], "two subfolders");
+  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("evil_ti,.pt"), EMB("sd15/evil_ti,.pt")]), [false, 1, [["evil_ti,", "embedding_unverified", ["evil_ti,.pt", "sd15/evil_ti,.pt"]]]], "the root and a subfolder");
+  assert.deepEqual(run([EMB("evil_ti.safetensors"), EMB("sd15/evil_ti,.pt"), EMB("sd16/evil_ti,.bin")]), [false, 1, [["evil_ti,", "embedding_unverified", ["sd15/evil_ti,.pt", "sd16/evil_ti,.bin"]]]], "two subfolders");
 });
 
 test("models: a name only the reading without weights takes is a probe though the CLIP reading names nothing in the text", () => {
@@ -4454,18 +4313,18 @@ test("models: a name only the reading without weights takes is a probe though th
   assert.deepEqual(r.active, [], "the CLIP reading reads 1.2 as the weight of the group");
   assert.deepEqual(r.embedding_probes, ["1.2"]);
   const ready = C.readiness([], invFrom({ ...TREE, [EMB("1.2.safetensors")]: { size: 1 } }), { probes: r.embedding_probes });
-  assert.deepEqual([ready.ready, ready.requirements.map((x) => [x.name, x.status, x.found])], [false, [["1.2", "shadowed", ["1.2.safetensors"]]]], "a file of that name is a file those encoders open");
+  assert.deepEqual([ready.ready, ready.requirements.map((x) => [x.name, x.status, x.found])], [false, [["1.2", "embedding_unverified", ["1.2.safetensors"]]]], "a file of that name is a file those encoders open");
 });
 
-test("readiness: a probe keeps the case the prompt gives: a case-sensitive node opens Evil_TI,.pt for it and does not open evil_ti,.pt", () => {
+test("readiness: a probe keeps the case the prompt gives, and a file in another case answers it as a case variant, so both are unverified", () => {
   const probes = C.requiredModels({ nodes: [promptNode(1, "embedding:Evil_TI, a cat")] }).embedding_probes;
   assert.deepEqual(probes, ["Evil_TI,"]);
   const run = (file) => {
     const r = C.readiness([req("embeddings", "Evil_TI", { annotated: false })], invFrom({ ...TREE, [EMB("Evil_TI.safetensors")]: { size: 1 }, [EMB(file)]: { size: 1 } }), { probes });
     return [r.ready, r.requirements.slice(1).map((x) => [x.name, x.status, x.found])];
   };
-  assert.deepEqual(run("Evil_TI,.pt"), [false, [["Evil_TI,", "shadowed", ["Evil_TI,.pt"]]]]);
-  assert.deepEqual(run("evil_ti,.pt"), [true, []], "another case is another name there");
+  assert.deepEqual(run("Evil_TI,.pt"), [false, [["Evil_TI,", "embedding_unverified", ["Evil_TI,.pt"]]]]);
+  assert.deepEqual(run("evil_ti,.pt"), [false, [["Evil_TI,", "embedding_unverified", ["evil_ti,.pt"]]]], "another case is a case variant, which the harness does not verify");
 });
 
 test("catalog readiness: a template that needs no weights but is blocked by a probe is not counted among the ready ones", () => {
@@ -4479,33 +4338,6 @@ test("catalog readiness: a template that needs no weights but is blocked by a pr
   const s = C.summarizeReadiness(cat, results);
   assert.deepEqual({ local: s.local, zero_model: s.zero_model, needing_weights: s.needing_weights }, { local: 2, zero_model: 2, needing_weights: 0 }, "both need no weights");
   assert.deepEqual({ ...s.ready }, { total: 1, zero_model: 1, with_weights: 0, names: [], by_gate: { open: 0, ack_required: 0, blocked: 0 } }, "only the one the node does not block is ready");
-});
-
-// ---------------------------------------------------------------------------------------------------------------------------------
-// Within one directory the candidates are tried in order: the name as written, then with .safetensors, .pt and .bin appended, and the first
-// file that exists is the one opened. A name that already carries an extension is the case where the sort order of the file names and the
-// order ComfyUI tries them in point opposite ways.
-// ---------------------------------------------------------------------------------------------------------------------------------
-
-test("readiness: within one directory the name as written wins over a file with an extension appended to it, whatever order the names sort in", () => {
-  assert.deepEqual(embGot([EMB("x.pt"), EMB("x.pt.safetensors")], "x.pt"), ["present", "x.pt", null], "isfile(x.pt) is true, so the appended names are never tried");
-  assert.deepEqual(embGot([EMB("sd15/y.pt"), EMB("sd15/y.pt.bin")], "sd15/y.pt"), ["present", "sd15/y.pt", null], "in a subfolder, by its path");
-  assert.deepEqual(embGot([EMB("sd15/y.pt"), EMB("sd15/y.pt.bin")], "y.pt"), ["present", "sd15/y.pt", null], "and by the bare name");
-});
-
-test("readiness: on a volume that folds case the earlier candidate wins whichever of the two files sorts first", () => {
-  assert.deepEqual(foldGot([EMB("FOO.safetensors"), EMB("foo.pt")], "foo"), ["present", "FOO.safetensors", null], ".safetensors is tried before .pt, and isfile finds FOO.safetensors");
-  assert.deepEqual(foldGot([EMB("FOO.pt"), EMB("foo.safetensors")], "foo"), ["present", "foo.safetensors", null], "and the other way round");
-});
-
-// The lookup name keeps its case when it is compared with a lower-cased file name: on a volume that folds case both sides are lowered, and on a
-// case-sensitive one the diagnosis names the file that has another case.
-
-test("readiness: a name with capitals is answered on a volume that folds case, and named in the diagnosis on one that does not", () => {
-  assert.deepEqual(foldGot([EMB("EasyNeg.safetensors")], "EasyNeg"), ["present", "EasyNeg.safetensors", null]);
-  assert.deepEqual(foldGot([EMB("easyneg.safetensors")], "EasyNeg"), ["present", "easyneg.safetensors", null], "a file in lower case, on a volume that folds");
-  assert.deepEqual(foldGot([EMB("easyneg.safetensors")], "EasyNeg", {}, { fold: false }), ["case_mismatch", null, ["easyneg.safetensors"]]);
-  assert.deepEqual(foldGot([EMB("EASYNEG.pt")], "EasyNeg", {}, { fold: false }), ["case_mismatch", null, ["EASYNEG.pt"]]);
 });
 
 // get_full_path tries every registered root in order and returns the first root that holds the file.
@@ -4523,11 +4355,6 @@ test("readiness: a loader widget's embeddings file that sits only in a later reg
 // `embedding_unverified` with the reason, never `present`, and never `missing`: a missing or different embedding silently changes the output
 // of a vetted template, so the harness does not guess which file ComfyUI would open. Nothing answering is still `missing`.
 // ---------------------------------------------------------------------------------------------------------------------------------
-
-const WHY_CASE = "a case variant answers it";
-const WHY_MANY = "more than one file could answer it";
-const WHY_PROBE = "a probe name (embedding_probes) is answered by a file of the node";
-const unv = (files, name, extra, yamls) => { const r = embCheck(files, name, extra, yamls); return [r.status, r.reason ?? null, r.found ?? null]; };
 
 test("readiness: a prompt embedding answered only by a file in another case is embedding_unverified, on any file system, and the exact spelling is present", () => {
   assert.deepEqual(unv([EMB("E.pt")], "e"), ["embedding_unverified", WHY_CASE, ["E.pt"]]);
@@ -4562,6 +4389,7 @@ test("readiness: one file under two names that share an id is one file and prese
 test("readiness: an annotated embedding is met when its file is the one file that answers the name the prompt gives, and unverified otherwise", () => {
   const covers = { annotated: true, embedding_refs: ["evil_ti"] };
   assert.deepEqual(embGot([EMB("evil_ti.pt")], "evil_ti.pt", covers), ["present", "evil_ti.pt", null]);
+  assert.deepEqual(embGot([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.pt", { annotated: true }), ["present", null, null], "an annotation that covers no prompt name is a loader widget's file: its exact path, with no file of the prompt lookup resolved");
   assert.deepEqual(unv([EMB("evil_ti.pt"), EMB("evil_ti.safetensors")], "evil_ti.pt", covers), ["embedding_unverified", WHY_MANY, ["evil_ti.pt", "evil_ti.safetensors"]], "the file ComfyUI tries first in the directory is another file");
   assert.deepEqual(unv([EMB("evil_ti.safetensors"), EMB("evil_ti")], "evil_ti.safetensors", covers), ["embedding_unverified", WHY_MANY, ["evil_ti", "evil_ti.safetensors"]], "so is an extension-less file of the same stem");
   assert.deepEqual(unv([EMB("evil_ti.pt"), EMB("sd15/evil_ti.bin")], "evil_ti.pt", covers), ["embedding_unverified", WHY_MANY, ["evil_ti.pt", "sd15/evil_ti.bin"]], "and one in another directory");

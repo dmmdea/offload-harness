@@ -469,6 +469,16 @@ const embeddingIo = (annotation, models = ["diffusion_models/a.safetensors", "em
 };
 const WEIGHTS_A = (name) => `https://huggingface.co/example-org/weights-a/resolve/main/${name}`;
 
+// The reasons a prompt embedding is refused as embedding_unverified, the one annotation most tests use, and the answers of the run gate.
+const WHY_CASE = "a case variant answers it";
+const WHY_MANY = "more than one file could answer it";
+const WHY_PROBE = "a probe name (embedding_probes) is answered by a file of the node";
+const A_FILE = "diffusion_models/a.safetensors";
+const EVIL = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+const gateOf = (io) => M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+const readyOf = (io) => M.readinessFor(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+const PREFIX = "embedding lookup not verified by the harness: ";
+
 test("verdict: a template whose own prompt names an embedding is refused as license_unknown when nothing annotates the file (the manifest must list it, with a source the map knows)", () => {
   const row = rowOf(catalogOf(embeddingIo(null)), "tt_emb");
   assert.deepEqual(row.models.map((m) => [m.directory, m.name]), [["diffusion_models", "a.safetensors"], ["embeddings", "evil_ti"]]);
@@ -522,42 +532,6 @@ test("resolve: an annotated embedding the node holds in a subfolder runs, and th
   assert.deepEqual(ok.runtime_manifest.models.map((m) => m.path), ["models/diffusion_models/a.safetensors", "models/embeddings/sd15/evil_ti.safetensors"]);
 });
 
-test("resolve: an embedding the node holds in the root and in a subfolder is refused, because ComfyUI opens one of them by set order and the manifest would name only one", () => {
-  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
-  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/sd15/evil_ti.safetensors"]);
-  const row = rowOf(catalogOf(io), "tt_emb");
-  const gone = M.resolveRun(row, snapshotOf(io), { io });
-  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.safetensors"]]);
-  assert.match(gone.detail, /held in more than one directory or shadowed/, "the refusal says why the file is not missing");
-  const m = M.readinessFor(row, snapshotOf(io), { io }).models.find((x) => x.name === "evil_ti.safetensors");
-  assert.deepEqual([m.status, m.resolved_path, m.found], ["ambiguous", null, ["evil_ti.safetensors", "sd15/evil_ti.safetensors"]]);
-});
-
-test("resolve: an annotated embedding that another file of the node shadows is refused, because ComfyUI would open the other file and the licence and hash are the annotated one's", () => {
-  const annotation = { name: "evil_ti.pt", directory: "embeddings", url: WEIGHTS_A("evil_ti.pt") };
-  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.pt", "embeddings/evil_ti.safetensors"]);
-  const row = rowOf(catalogOf(io), "tt_emb");
-  const gone = M.resolveRun(row, snapshotOf(io), { io });
-  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.pt"]]);
-  const m = M.readinessFor(row, snapshotOf(io), { io }).models.find((x) => x.name === "evil_ti.pt");
-  assert.deepEqual([m.status, m.found], ["shadowed", ["evil_ti.safetensors"]]);
-  const alone = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.pt"]);
-  assert.equal(M.resolveRun(rowOf(catalogOf(alone), "tt_emb"), snapshotOf(alone), { io: alone }).ok, true, "with only the annotated file the run is allowed");
-});
-
-test("resolve: a file of no extension that ComfyUI opens first for the name refuses the run, though the inventory lists only the annotated file", () => {
-  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
-  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/evil_ti"]);
-  const row = rowOf(catalogOf(io), "tt_emb");
-  const gone = M.resolveRun(row, snapshotOf(io), { io });
-  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.safetensors"]]);
-  const m = M.readinessFor(row, snapshotOf(io), { io }).models.find((x) => x.name === "evil_ti.safetensors");
-  assert.deepEqual([m.status, m.found], ["shadowed", ["evil_ti"]]);
-  const bare = embeddingIo(null, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/evil_ti"]);
-  const p = M.readinessFor(rowOf(catalogOf(bare), "tt_emb"), snapshotOf(bare), { io: bare }).models.find((x) => x.name === "evil_ti");
-  assert.deepEqual([p.status, p.resolved_path], ["present", "models/embeddings/evil_ti"], "an unannotated prompt name resolves to the file ComfyUI opens, so the manifest names that file");
-});
-
 // ComfyUI asks for `evil_ti,` (the name as written, comma and all) before it strips the comma, so the template whose prompt says
 // `embedding:evil_ti, a cat` may open a file called `evil_ti,.safetensors`, which no manifest names. The catalog row records the name as a probe.
 
@@ -568,34 +542,32 @@ test("catalog: a row records the names ComfyUI may also try for its prompts, and
   assert.ok(!("embedding_probes" in rowOf(catalogOf(), "tt_open")), "a template with no embedding in its prompt keeps the row it had");
 });
 
-test("resolve: a file ComfyUI opens first for the name as written (a comma after the name) refuses the run, because the manifest names another file", () => {
-  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+test("resolve: a file ComfyUI may open for the name as written (a comma after the name) refuses the run as embedding_unverified, because the manifest names another file", () => {
   for (const extra of ["embeddings/evil_ti,.safetensors", "embeddings/sd15/evil_ti,.pt"]) {
-    const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", extra]);
+    const io = embeddingIo(EVIL, [A_FILE, "embeddings/evil_ti.safetensors", extra]);
     const row = rowOf(catalogOf(io), "tt_emb");
     const gone = M.resolveRun(row, snapshotOf(io), { io });
-    assert.deepEqual([gone.ok, gone.class], [false, "models_missing"], extra);
-    assert.deepEqual(gone.missing, ["models/embeddings/evil_ti,"], extra);
-    assert.match(gone.detail, /held in more than one directory or shadowed/, "the refusal says why");
+    assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "embedding_unverified", undefined], extra);
+    assert.deepEqual(gone.embedding_unverified, [{ path: "models/embeddings/evil_ti,", reason: WHY_PROBE, found: [extra.replace("embeddings/", "")] }], extra);
+    assert.ok(gone.detail.startsWith(PREFIX) && gone.detail.includes(WHY_PROBE), "the refusal says why");
     const r = M.readinessFor(row, snapshotOf(io), { io });
-    assert.deepEqual(r.embedding_probes.map((p) => [p.name, p.status, p.found]), [["evil_ti,", "shadowed", [extra.replace("embeddings/", "")]]]);
+    assert.deepEqual(r.embedding_probes.map((p) => [p.name, p.status, p.reason, p.found]), [["evil_ti,", "embedding_unverified", WHY_PROBE, [extra.replace("embeddings/", "")]]]);
     assert.equal(r.ready, false);
   }
-  const alone = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"]);
+  const alone = embeddingIo(EVIL, [A_FILE, "embeddings/evil_ti.safetensors"]);
   const ok = M.resolveRun(rowOf(catalogOf(alone), "tt_emb"), snapshotOf(alone), { io: alone });
   assert.equal(ok.ok, true, "with no file of the written name the run is allowed");
 });
 
-test("resolve: a file the reading without weights would open (an LLM-based text encoder: no cut at parentheses) refuses the run", () => {
-  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+test("resolve: a file the reading without weights would open (an LLM-based text encoder: no cut at parentheses) refuses the run as embedding_unverified", () => {
   const prompt = "embedding:evil_ti(blue) a cat";
-  const files = ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"];
-  const ok = embeddingIo(annotation, files, prompt);
+  const files = [A_FILE, "embeddings/evil_ti.safetensors"];
+  const ok = embeddingIo(EVIL, files, prompt);
   assert.deepEqual(rowOf(catalogOf(ok), "tt_emb").embedding_probes, ["evil_ti(blue)"]);
   assert.equal(M.resolveRun(rowOf(catalogOf(ok), "tt_emb"), snapshotOf(ok), { io: ok }).ok, true, "no file answers the other reading: the run is allowed");
-  const io = embeddingIo(annotation, [...files, "embeddings/evil_ti(blue).safetensors"], prompt);
+  const io = embeddingIo(EVIL, [...files, "embeddings/evil_ti(blue).safetensors"], prompt);
   const gone = M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
-  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti(blue)"]]);
+  assert.deepEqual([gone.ok, gone.class, gone.missing, gone.embedding_unverified], [false, "embedding_unverified", undefined, [{ path: "models/embeddings/evil_ti(blue)", reason: WHY_PROBE, found: ["evil_ti(blue).safetensors"] }]]);
 });
 
 test("readiness table: a file that answers a probe name keeps the template out of the ready list, like the run gate", () => {
@@ -609,28 +581,13 @@ test("readiness table: a file that answers a probe name keeps the template out o
   assert.deepEqual(state(["embeddings/evil_ti,.safetensors"]), [false, 1]);
 });
 
-// An io over the same tree whose volume looks names up without regard to case (NTFS by default): a path in any case finds the entry stored
-// in its own. Only exists and stat fold, which is what the inventory's probe and a file lookup use.
-const foldingIo = (io) => {
-  const fix = (p) => {
-    const parts = String(p).replace(/\\/g, "/").split("/");
-    let cur = `/${parts[1]}`;
-    for (let i = 2; i < parts.length; i++) {
-      const hit = (io.list(cur) ?? []).find((e) => e.name.toLowerCase() === parts[i].toLowerCase());
-      cur = `${cur}/${hit ? hit.name : parts[i]}`;
-    }
-    return cur;
-  };
-  return { ...io, stat: (p) => io.stat(fix(p)), exists: (p) => io.exists(fix(p)) };
-};
-
-test("resolve: on a volume that folds case, a file in another case in another directory is a file ComfyUI may open for the name, so the run is refused", () => {
-  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
-  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/sd15/EVIL_TI.safetensors"]);
-  assert.equal(M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io }).ok, true, "on a case-sensitive volume sd15/EVIL_TI.safetensors is another name");
-  const folded = foldingIo(io);
-  const gone = M.resolveRun(rowOf(catalogOf(folded), "tt_emb"), snapshotOf(folded), { io: folded });
-  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti.safetensors"]]);
+// A file in another case in another directory is a second file, on any file system: the harness does not ask the volume what it does with a
+// name in another case, so it cannot tell that ComfyUI would not open it.
+test("resolve: a file in another case in another directory is a second file that could answer the name, so the run is refused whatever the volume does", () => {
+  const io = embeddingIo(EVIL, [A_FILE, "embeddings/evil_ti.safetensors", "embeddings/sd15/EVIL_TI.safetensors"]);
+  const gone = M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
+  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "embedding_unverified", undefined]);
+  assert.deepEqual(gone.embedding_unverified, [{ path: "models/embeddings/evil_ti.safetensors", reason: WHY_MANY, found: ["evil_ti.safetensors", "sd15/EVIL_TI.safetensors"] }]);
 });
 
 // A loader widget that names an embeddings file (ConditioningLoader) is read by ComfyUI's plain loader rule: the exact relative path under
@@ -665,26 +622,24 @@ test("resolve: a conditioning file a loader widget names runs from the root even
 
 // A probe name that more than one directory holds, and a name only the reading without weights takes, at the run gate.
 
-test("resolve: a probe name that two directories hold refuses the run, and the refusal lists both files", () => {
-  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
-  const io = embeddingIo(annotation, ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors", "embeddings/sd15/evil_ti,.pt", "embeddings/sd16/evil_ti,.bin"]);
+test("resolve: a probe name that two directories hold refuses the run as embedding_unverified, and the refusal lists both files", () => {
+  const io = embeddingIo(EVIL, [A_FILE, "embeddings/evil_ti.safetensors", "embeddings/sd15/evil_ti,.pt", "embeddings/sd16/evil_ti,.bin"]);
   const row = rowOf(catalogOf(io), "tt_emb");
   const gone = M.resolveRun(row, snapshotOf(io), { io });
-  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/evil_ti,"]]);
+  assert.deepEqual([gone.ok, gone.class, gone.missing, gone.embedding_unverified], [false, "embedding_unverified", undefined, [{ path: "models/embeddings/evil_ti,", reason: WHY_PROBE, found: ["sd15/evil_ti,.pt", "sd16/evil_ti,.bin"] }]]);
   const r = M.readinessFor(row, snapshotOf(io), { io });
-  assert.deepEqual(r.embedding_probes.map((p) => [p.name, p.status, p.found]), [["evil_ti,", "shadowed", ["sd15/evil_ti,.pt", "sd16/evil_ti,.bin"]]]);
+  assert.deepEqual(r.embedding_probes.map((p) => [p.name, p.status, p.found]), [["evil_ti,", "embedding_unverified", ["sd15/evil_ti,.pt", "sd16/evil_ti,.bin"]]]);
 });
 
-test("resolve: a name only the reading without weights takes (`a cat ( embedding:1.2 )`) is a probe, and a file of that name refuses the run", () => {
-  const annotation = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
+test("resolve: a name only the reading without weights takes (`a cat ( embedding:1.2 )`) is a probe, and a file of that name refuses the run as embedding_unverified", () => {
   const prompt = "a cat ( embedding:1.2 )";
-  const files = ["diffusion_models/a.safetensors", "embeddings/evil_ti.safetensors"];
-  const ok = embeddingIo(annotation, files, prompt);
+  const files = [A_FILE, "embeddings/evil_ti.safetensors"];
+  const ok = embeddingIo(EVIL, files, prompt);
   assert.deepEqual(rowOf(catalogOf(ok), "tt_emb").embedding_probes, ["1.2"]);
   assert.equal(M.resolveRun(rowOf(catalogOf(ok), "tt_emb"), snapshotOf(ok), { io: ok }).ok, true, "no file answers 1.2: the run is allowed");
-  const io = embeddingIo(annotation, [...files, "embeddings/1.2.safetensors"], prompt);
+  const io = embeddingIo(EVIL, [...files, "embeddings/1.2.safetensors"], prompt);
   const gone = M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
-  assert.deepEqual([gone.ok, gone.class, gone.missing], [false, "models_missing", ["models/embeddings/1.2"]]);
+  assert.deepEqual([gone.ok, gone.class, gone.missing, gone.embedding_unverified], [false, "embedding_unverified", undefined, [{ path: "models/embeddings/1.2", reason: WHY_PROBE, found: ["1.2.safetensors"] }]]);
   assert.equal(C.catalogReadiness(catalogOf(io), snapshotOf(io).inventory).tt_emb.ready, false, "and the readiness table agrees");
 });
 
@@ -693,15 +648,6 @@ test("resolve: a name only the reading without weights takes (`a cat ( embedding
 // variant, more than one file, or a file that answers a probe name is refused under its own class, `embedding_unverified`, with the reason
 // (not `models_missing`: nothing is missing, the harness cannot say which file ComfyUI would open). Nothing answering is `models_missing`.
 // ---------------------------------------------------------------------------------------------------------------------
-
-const WHY_CASE = "a case variant answers it";
-const WHY_MANY = "more than one file could answer it";
-const WHY_PROBE = "a probe name (embedding_probes) is answered by a file of the node";
-const A_FILE = "diffusion_models/a.safetensors";
-const EVIL = { name: "evil_ti.safetensors", directory: "embeddings", url: WEIGHTS_A("evil_ti.safetensors") };
-const gateOf = (io) => M.resolveRun(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
-const readyOf = (io) => M.readinessFor(rowOf(catalogOf(io), "tt_emb"), snapshotOf(io), { io });
-const PREFIX = "embedding lookup not verified by the harness: ";
 
 test("resolve: a name that more than one file could answer is refused as embedding_unverified, not models_missing, and the entry says which files", () => {
   const io = embeddingIo(EVIL, [A_FILE, "embeddings/evil_ti.safetensors", "embeddings/sd15/evil_ti.safetensors"]);

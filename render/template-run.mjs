@@ -114,7 +114,7 @@ export function convertForRun({ workflow, objectInfo, comfyVersion = null, minCo
 // asks for is reported as `models/embeddings/<name>` unless the manifest names, under models/embeddings, a file for it (embeddingCovered):
 // the name or the name with .safetensors, .pt or .bin appended, at the top of the directory or in any subfolder, because ComfyUI searches
 // them all. The manifest of a run carries the one file readiness found on the node, subfolder and extension included (a name that more than
-// one directory holds is refused before this point), so a name that no file of the node answers to is not in it and is reported.
+// one file could answer is refused before this point), so a name that no file of the node answers to is not in it and is reported.
 export function unlistedModels(graph, manifestModels) {
   const names = new Set();
   const embeddings = new Set();
