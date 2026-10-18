@@ -64,7 +64,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { awaitTreeGone, killTree, scratchDir } from "./test-scratch.mjs";
 import { checkInheritedLease, readCardClaim, readEpochRecord, readLease } from "./gpu-lock.mjs";
@@ -78,6 +78,9 @@ const CAP_MS = 60_000 * SCALE;
 // File reads one loop of the five readers makes: readEpochRecord 1 (e/7.json), readLease 1 (meta.json), readCardClaim 1 (the claim),
 // checkInheritedLease 2 (the record and the one claim it names), leaseProgressFile 1 (the record, which names the progress file).
 const READS_PER_LOOP = 6;
+// A staged file older than this, beside an absent name, is a dead writer's leftover to the reader (lease-read.mjs counts one fresh for
+// 3 s), and not a rename in flight. A writer whose staged file is old when it renames is not the writer of a lease file.
+const STAGED_FRESH_MS = 2000;
 const WINDOWS = process.platform === "win32";
 const nap = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -89,7 +92,7 @@ const nap = (ms) => new Promise((r) => setTimeout(r, ms));
 const WRITER = `
 const { linkSync, renameSync, unlinkSync, existsSync, statSync, writeFileSync } = require("node:fs");
 const { join } = require("node:path");
-const [root, rootsArg, minArg, capArg, needRetriesArg] = process.argv.slice(1);
+const [root, rootsArg, minArg, capArg, needRetriesArg, freshArg] = process.argv.slice(1);
 const files = [];
 for (let r = 1; r <= Number(rootsArg); r++) {
   const d = join(root, String(r));
@@ -98,7 +101,8 @@ for (let r = 1; r <= Number(rootsArg); r++) {
 const SEEDS = [".seed", ".seed2"];
 const ino = (p) => statSync(p, { bigint: true }).ino;
 const pause = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-const stats = { renames: 0, replaced: 0, absentAfter: 0, retries: 0, linkRetries: 0, fails: 0, capped: false, crashed: null };
+const stats = { renames: 0, replaced: 0, absentAfter: 0, staleStaged: 0, retries: 0, linkRetries: 0, fails: 0, capped: false, crashed: null };
+const STAGED_FRESH_MS = Number(freshArg);
 // The inode of the live name, looked at right after the writer's own rename. The name can be absent for tens of milliseconds after
 // a rename that was not refused (the episode the read gate waits for), so an ENOENT is looked at again, counted once, and only a name
 // that stays absent for 5 s is an error. The 5 s is a DEADLINE and not a count of pauses: Atomics.wait(1) sleeps a whole timer tick on
@@ -141,6 +145,7 @@ try {
       const tmp = path + ".tmp";
       const i = side.get(path);
       if (!unrefused(() => linkSync(path + SEEDS[i], tmp), "linkRetries")) { stats.fails++; continue; }
+      if (Date.now() - statSync(tmp).mtimeMs > STAGED_FRESH_MS) stats.staleStaged++;
       if (!unrefused(() => renameSync(tmp, path), "retries")) {
         stats.fails++;
         try { unlinkSync(tmp); } catch {}
@@ -172,6 +177,9 @@ function seedRoot(dir) {
     writeFileSync(path, body);
     writeFileSync(path + ".seed", body);
     writeFileSync(path + ".seed2", body);
+    // The seeds are an hour old when the writer starts, so a staged file that is a link of one is old unless the writer made it fresh.
+    const old = new Date(Date.now() - 3600_000);
+    for (const seed of [".seed", ".seed2"]) utimesSync(path + seed, old, old);
   }
 }
 
@@ -187,7 +195,7 @@ test("the readers never answer null for a lease file that is there while a write
     dirs.push(d);
   }
   const minRetries = WINDOWS ? 1 : 0;
-  child = spawn(process.execPath, ["-e", WRITER, root, String(ROOTS), String(MIN_RENAMES), String(CAP_MS), String(minRetries)], { stdio: ["ignore", "pipe", "inherit"], windowsHide: true });
+  child = spawn(process.execPath, ["-e", WRITER, root, String(ROOTS), String(MIN_RENAMES), String(CAP_MS), String(minRetries), String(STAGED_FRESH_MS)], { stdio: ["ignore", "pipe", "inherit"], windowsHide: true });
   let out = "";
   child.stdout.on("data", (d) => { out += d; });
   const closed = new Promise((resolve) => child.on("close", resolve));
@@ -214,9 +222,10 @@ test("the readers never answer null for a lease file that is there while a write
   await closed;
   assert.ok(out.trim(), "the writer printed nothing: it never ran (its own stderr is above)");
   const w = JSON.parse(out.trim());
-  t.diagnostic(`${loops} loops of the five readers (about ${loops * READS_PER_LOOP} file reads) against ${w.renames} renames (${w.replaced} observed to replace a different inode than the one in place, ${w.retries} refused and retried, ${w.linkRetries} link refusals, ${w.absentAfter} met the live name absent right after the writer's own rename, ${w.fails} given up): ${JSON.stringify(miss)}`);
+  t.diagnostic(`${loops} loops of the five readers (about ${loops * READS_PER_LOOP} file reads) against ${w.renames} renames (${w.replaced} observed to replace a different inode than the one in place, ${w.retries} refused and retried, ${w.linkRetries} link refusals, ${w.absentAfter} met the live name absent right after the writer's own rename, ${w.staleStaged} staged files older than the reader's freshness when renamed, ${w.fails} given up): ${JSON.stringify(miss)}`);
 
   assert.equal(w.crashed, null, `the writer stopped on an error after ${w.renames} renames: ${w.crashed}`);
+  assert.equal(w.staleStaged, 0, `${w.staleStaged} of ${w.renames} renames installed a staged file that was already older than ${STAGED_FRESH_MS} ms: a reader counts a staged file that old beside an absent name as a dead writer's leftover and answers "not there", so a run past 3 s would read its own writer's rename in flight as a lease that is gone`);
   assert.equal(w.replaced, w.renames, `only ${w.replaced} of ${w.renames} renames were observed to put a different inode than the one in place under the live name: a rename of a link over its own inode replaces nothing and no reader can be refused by it`);
   if (WINDOWS) {
     assert.ok(w.retries > 0, `no rename was refused in ${w.renames} renames against ${loops} reader loops (capped: ${w.capped}): the writer and the readers never met, so this run proves nothing`);
