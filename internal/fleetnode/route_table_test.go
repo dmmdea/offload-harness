@@ -12,11 +12,19 @@ package fleetnode
 //   - any other route is a row of refusalDoors or an entry of publicRoutes, and a public route is read-only.
 //
 // A row that names no route is as wrong as a route with no row: the table would be testing a door that is gone.
+//
+// The comparison sees what registerRoutes registers, so a second place that registers a route would escape it. The source test
+// at the end closes that: a route is registered by a call to HandleFunc or Handle only inside registerRoutes, and the one mux
+// Handler builds is handed to registerRoutes and to nothing else.
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"sort"
 	"strings"
 	"testing"
@@ -157,4 +165,61 @@ func withoutPattern(patterns []string, remove string, add ...string) []string {
 		}
 	}
 	return append(out, add...)
+}
+
+// The routes the node serves are the ones registerRoutes registers and no others: no function of the package registers a route
+// on a mux of its own, and the only mux built is Handler's, which it hands to registerRoutes and wraps in the ingress guard.
+func TestRoutesAreRegisteredOnlyThroughRegisterRoutes(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	fset := token.NewFileSet()
+	registerCalls := 0
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(fset, name, nil, 0)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		for _, decl := range file.Decls {
+			inside := ""
+			if fd, ok := decl.(*ast.FuncDecl); ok {
+				inside = fd.Name.Name
+			}
+			ast.Inspect(decl, func(n ast.Node) bool {
+				call, ok := n.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				sel, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				at := fset.Position(call.Pos())
+				switch sel.Sel.Name {
+				case "HandleFunc", "Handle":
+					if len(call.Args) != 2 { // a route takes a pattern and a handler; syscall.Handle(h) is a conversion
+						return true
+					}
+					if inside != "registerRoutes" {
+						t.Errorf("%s: a route is registered by %s in %q; register it in registerRoutes, which route_table_test.go holds to the credential tables", at, sel.Sel.Name, inside)
+					} else {
+						registerCalls++
+					}
+				case "NewServeMux":
+					if inside != "Handler" {
+						t.Errorf("%s: %q builds a mux of its own; the node serves the one Handler builds and hands to registerRoutes", at, inside)
+					}
+				}
+				return true
+			})
+		}
+	}
+	if registerCalls == 0 {
+		t.Fatal("no route registration was found in registerRoutes: the source test no longer sees what it guards")
+	}
 }
