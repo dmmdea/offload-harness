@@ -54,7 +54,7 @@ Detailed documentation lives in `docs/`. This file only routes you there.
 3. Make the change.
 4. Update the affected docs **in the same pull request** when behavior, responsibilities, flows,
    invariants, interfaces, or glossary concepts change.
-5. Make sure docs and code agree before you finish. CI's docs lint (`TestDocsLint`) checks structure;
+5. Make sure docs and code agree before you finish. No test checks doc wording any more;
    you check meaning. If they disagree and you cannot resolve it, say so explicitly in the PR.
 
 Do not put detailed system behavior in this file — it belongs in `docs/`.
