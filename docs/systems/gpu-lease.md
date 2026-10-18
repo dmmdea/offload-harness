@@ -2732,7 +2732,7 @@ leases declared), `pending_gib` and `pending_commit_gib` (the part of each still
 set could ever be admitted at), `touch_room_gib`, `commit_room_gib` and `unstated_commit_room_gib` (what a new lease could touch now,
 what a lease that STATES a commit could be charged now, and what a lease that states none could declare now: physical RAM (or an enforced commit limit that sits below it) less the
 commit charge, what running leases have yet to touch and the headroom; each less the headroom and never below 0),
-`verdict_why` (which line a NEAR or OVER verdict rests on, with its numbers) and one **verdict**, built by `gpucards.HostView` for
+`verdict_why` (which line a NEAR or OVER verdict rests on, with its numbers), `stated_commit_note` (on an OVER that rests on the commit charge above physical RAM alone: what a lease that states its commit is judged on instead) and one **verdict**, built by `gpucards.HostView` for
 all three surfaces so they cannot disagree. The verdict judges the lines the grant applies:
 
 | host verdict | meaning |
