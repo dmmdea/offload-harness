@@ -807,7 +807,9 @@ const (
 // 40-byte rule or 26 bytes of padding anywhere in the window read as a runaway on
 // output that was only long. agent.DetectRepetitionLoop wants four lines and sees
 // neither `"", "", ""` nor spaces on ONE line, which is the shape a single-line JSON
-// object runs to its cap in, so the byte-level repeat test covers that.
+// object runs to its cap in, so the byte-level repeat test covers that. A list that
+// COUNTS (`"349", "350", "351"`) repeats no byte and no line, and is read last, by the
+// number that rises by one (countingLoop).
 func degenerateTail(content string) string {
 	if strings.TrimSpace(content) == "" {
 		return "nothing but whitespace"
@@ -825,7 +827,12 @@ func degenerateTail(content string) string {
 	}
 	// Longer blocks last, so that every output the original two tests named keeps the
 	// words it had: this one only names what they read as content.
-	return repeatedBlock(window, degenerateShortPeriod+1, degenerateMaxPeriod)
+	if why := repeatedBlock(window, degenerateShortPeriod+1, degenerateMaxPeriod); why != "" {
+		return why
+	}
+	// A count repeats no byte, so it comes after every repeat test: it only names what they
+	// read as content (agentrepack_count.go).
+	return countingLoop(window)
 }
 
 // repeatedBlock says what the end of tail repeats when a block of between from and

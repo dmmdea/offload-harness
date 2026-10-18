@@ -3480,6 +3480,10 @@ func runLedger(args []string) error {
 	// line names both token counts rather than only the input one.
 	fmt.Printf("tokens kept local (est.): %d in + %d out (~$%.2f Opus value — an estimate, not billed savings)\n",
 		s.TokensSaved, s.TokensOut, s.EstValueKeptLocal)
+	// D-96: a window that reaches back before 0.117.7 sums rows that priced generated tokens at zero.
+	if caveat := ledgerLifetimeCaveat(sinceTS); caveat != "" {
+		fmt.Println(caveat)
+	}
 	if len(s.ExcludedNonProduction) > 0 {
 		fmt.Printf("left out: test, bake and measurement traffic (%s job(s)); --include-test-traffic counts it\n", describeExcluded(s.ExcludedNonProduction))
 	}

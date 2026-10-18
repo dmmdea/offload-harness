@@ -19,6 +19,13 @@
 This tier declares no persistent vLLM agent seat: the agent lane runs on the
 llama.cpp seat named by `agent_model` above, in the tier's own llama-swap config.
 
+**Completion budget: the loop default, chosen and not measured.** This tier binds an agent model,
+seeds no `agent_max_tokens` and sets `agent_budget_policy: loop-default-chosen`, so its agent runs at the loop's
+default of 1,024 completion tokens on purpose. No seat window has measured a budget for this tier's
+agent seat, and a model that thinks spends its reasoning inside the budget, so the right number is a
+property of the seat. When one is measured, seed `agent_max_tokens` and delete the marker (the guard
+in `agent_budget_policy_test.go` refuses both together).
+
 ## Media
 
 This tier serves these media **seats** — models in its own llama-swap config, rendered
