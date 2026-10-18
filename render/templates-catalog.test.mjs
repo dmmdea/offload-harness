@@ -4086,8 +4086,9 @@ test("readiness (real filesystem): an embeddings directory that is a junction to
   assert.equal(C.readiness([req("embeddings", "EasyNeg", { annotated: false })], C.scanModelInventory(withCopy, C.nodeIo)).requirements[0].status, "embedding_unverified", "a different file of the same name is a second file");
 });
 
-// Where a file really is, asked of the file system: a directory registered under a spelling that differs only in case is the directory it is
-// (the file system keeps one spelling on disk), and ComfyUI opens the same bytes from either string of its set, so neither is an ambiguity.
+// Where a file really is, asked of the file system: on a local volume that keeps one spelling on disk, a directory registered under a spelling
+// that differs only in case is the directory it is, and the same bytes are not a second file. A virtual or cloud drive may keep the spelling it
+// is given; there the two spellings read as two files and are refused, which this test (skipped off such a volume) does not claim otherwise.
 test("readiness (real filesystem): one directory registered under a spelling that differs only in case is one directory, on a volume that folds case", async (t) => {
   const { mkdirSync, writeFileSync, symlinkSync, existsSync } = await import("node:fs");
   const root = scratchDir(t, "tc-emb-spell-").replace(/\\/g, "/");
@@ -4186,7 +4187,7 @@ test("fileIdentity: a device and an index name a file, an index of 0 names nothi
   assert.equal(C.nodeIo.identity(`${dir}/b.bin`), id);
 });
 
-test("nodeIo.realpath: gives the spelling the file system keeps, so two spellings of one folder read the same", async (t) => {
+test("nodeIo.realpath: on a local volume that keeps one spelling on disk, two spellings of one folder read the same", async (t) => {
   const { mkdirSync, existsSync } = await import("node:fs");
   const dir = scratchDir(t, "tc-Spell-").replace(/\\/g, "/");
   mkdirSync(`${dir}/Models`, { recursive: true });

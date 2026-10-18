@@ -121,7 +121,9 @@ in the nine steps above is unchanged:
   are two readers of the template, and the licence gate, the FLUX bar and trust on first use read only the manifest) defers
   `TEMPLATE_MODEL_UNLISTED`, its `ref` the first such file, before preflight and before anything is posted. An embedding the prompt text
   names (`embedding:<name>`, read as ComfyUI's tokenizer reads it) is such a file, as `models/embeddings/<name>`, and a file for it at the top
-  of that directory or in any subfolder lists it. Limit: this comparison and the override check both read the string values of the graph, so
+  of that directory or in any subfolder lists it. The gate that wrote the manifest accepted the name only when exactly one case-exact file
+  answers it (`embedding_unverified` otherwise): prompt embeddings fail closed even though ComfyUI warns and skips a missing one, because a
+  missing or different embedding silently changes the output of a vetted template. Limit: this comparison and the override check both read the string values of the graph, so
   an embedding assembled while the graph runs by string nodes (a concatenation of two overrides, for example) is seen by neither.
 
 The runtime manifest names each model by the path it was found at and has no `source_url`: step 4 therefore never downloads for a

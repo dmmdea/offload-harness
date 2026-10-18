@@ -106,11 +106,13 @@ export const nodeIo = {
   stat: (p) => {
     try { const st = statSync(p); return { size: st.size, isDir: st.isDirectory(), isFile: st.isFile() }; } catch { return null; }
   },
-  // realpath: the native one, which gives the spelling the file system keeps (the drive letter and the folders in their own case); the JS one
-  // returns the case it was given, so one directory registered under two spellings would read as two.
+  // realpath: the native one, which resolves links; on a local volume that keeps one spelling on disk it also gives that spelling, where the JS
+  // one returns the case it was given. It is a fallback key and no promise of one spelling: a virtual or cloud drive may return the case it was
+  // given, and then one folder registered under two spellings reads as two files and is refused (embedding_unverified), never accepted wrongly.
   realpath: (p) => { try { return slash(realpathSync.native(p)); } catch { return slash(p); } },
   // identity: what the file system calls this file (`id:<device>:<index>`), or null when it cannot say. Two names of one file, a hard link,
-  // share it, and no path tells them apart.
+  // share it, and no path tells them apart. Like the real path, it is the file system's own word: a drive whose index is derived from the path
+  // gives two spellings two ids, and that reads as two files as well.
   identity: (p) => { try { return fileIdentity(statSync(p, { bigint: true })); } catch { return null; } },
   writeText: (p, s) => { writeFileSync(p, s); },
 };

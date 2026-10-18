@@ -17,7 +17,8 @@
   other case is refused with a typed class: `flux_barred`, `custom_nodes`, `license_unknown` (a repository the map does not list, a weights
   file with no Hugging Face source, or a map entry that was inferred from a sibling and not read: unknown is not permissive),
   `license_conditional`, `license_non_commercial`, `template_unreadable`, `subgraph_unexpanded`, `bad_model_path`, and what the node lacks with the exact list:
-  `models_missing`, `inputs_missing`, `comfyui_too_old`. Nothing is leased, started or sent for a refused template. A run never downloads a
+  `models_missing`, `embedding_unverified` (a prompt embedding the harness does not verify, below), `inputs_missing`, `comfyui_too_old`. Nothing
+  is leased, started or sent for a refused template. A run never downloads a
   model: the runtime manifest names each model by the path it was found at and carries no source.
 - **Where it runs.** On this machine's lane only. The fleet door takes an API-format graph and a template is converted on the node that
   runs it, so a call that names a route beyond local, remotes or a node is refused as `fleet_not_offered`. A template that reads input files
@@ -69,13 +70,12 @@
   licence gate and trust on first use never read it, which contradicted "an override never retargets a file". One reading of the reference
   (`embeddingRefs` and `embeddingCovered` in `templates-catalog.mjs`) serves the catalog and the runner's comparison; the override check keeps
   its own, wider matcher (`mentionsEmbedding`), so that what it lets through is never a text the reader finds a file in.
-  - Where ComfyUI looks. Not in the directories of the class one after the other: `expand_directory_list` puts every embeddings root and every
-    subfolder below it (links followed) into a Python `set`, and `load_embed` opens the file of the first directory of that set that holds the
-    name, so the directory that answers is chosen by hash order and differs from one process to the next (a verbatim copy of the loop, over
-    hash seeds 0 to 11, opened `e.pt` of the root 5 times, `sd15/e.safetensors` 2 times and `sdxl/e.safetensors` 5 times). Two things follow. A
-    file that sits only in a subfolder (`sd15/foo.safetensors`, a common layout) is the file `embedding:foo` loads. And a name that more than one
-    directory holds (the root and a subfolder, two subfolders, two registered roots) is not one file: the trust record, the hash and the licence
-    approval would attach to a file ComfyUI may not open.
+  - Where ComfyUI looks, and what the harness does about it. Not in the directories of the class one after the other: `expand_directory_list`
+    puts every embeddings root and every subfolder below it (links followed) into a Python `set`, and `load_embed` opens the file of the first
+    directory of that set that holds the name, so the directory that answers is chosen by hash order and differs from one process to the next.
+    Two things follow. A file that sits only in a subfolder (`sd15/foo.safetensors`, a common layout) is the file `embedding:foo` loads. And a
+    name that more than one directory holds (the root and a subfolder, two subfolders, two registered roots) is not one file: the trust record,
+    the hash and the licence approval would attach to a file ComfyUI may not open. The harness does not replicate that choice (next bullet).
   - Override: any string value that contains `embedding:`, in any letter case, is refused as `override_is_file`. ComfyUI matches a lower-case
     word that starts with the identifier; matching it anywhere and in any case is the fail-closed side.
   - Runner: a string input of the converted graph that names an embedding the way ComfyUI reads it is read as text and no longer as a file
@@ -89,25 +89,35 @@
     template whose own prompt names an unannotated embedding is therefore `license_unknown` and refused; an annotated one is read by the
     licence gate like any weights file. Text that only looks like a reference to the override's wider matcher (`Embedding: a primer`,
     `wordembedding:vec`) names nothing here.
-  - Readiness resolves a name the way ComfyUI does, directory by directory: the candidates are the name as written and then with the three
-    extensions, in the roots and every subfolder. A file the class does not list answers the name as written too (no extension, or a whole
-    name that is the reference), because `load_embed` asks `isfile` for the name first with no extension filter; the inventory records those
-    files (`unlisted_files`) for this class. One directory that holds a file is `present` and the runtime manifest names that file
-    (`models/embeddings/<sub>/<name>.<ext>` for one in a subfolder, which the host-RAM figure can size and the satisfier and the trust check
-    can find); within one directory the order is as written, `.safetensors`, `.pt`, `.bin`. More than one directory is the new status
-    `ambiguous`, listing the files, and the run is refused as `models_missing` with the entry named, so the manifest never names a file ComfyUI
-    might not open. A directory is one entry of ComfyUI's set however it is reached, and the inventory tells a link from a copy: it records
-    where each embeddings file really is (`reals`, the path as the file system spells it, so a root registered with the drive letter or a folder
-    in another case is the same directory) and what the file system calls it (`ids`, so two hard links of one file are one file), and hits
-    that open the same file are one hit. A root that is a link to another registered root (a model drive reached through the default
-    directory), a link inside a root, a root registered inside another and one file linked into two directories (symbolic or hard) are each
-    one directory; two copies stay two files and stay `ambiguous`. A file system that gives no file identity falls back to the real path, so
-    there a hard link reads as two files. An annotated file that is not
-    the one ComfyUI opens for the name a prompt gives (a `.safetensors` beside an annotated `.pt`) is the new status `shadowed`. The lookup
-    follows the volume, as `isfile` does: on a case-sensitive volume a file in another case is `case_mismatch`, and under a root whose volume
-    folds case (NTFS by default; the scan asks each root through the io, the first file below it whose name has a letter, spelled in the other case, and records the roots
-    that do as `case_insensitive_dirs`) the comparison is in lower case, so a case variant is a hit, reported by its spelling on disk, and
-    two case variants in two directories are `ambiguous`; a node with none is `models_missing`, listed by the name the text gives.
+  - Fail closed, deliberately narrower than ComfyUI. ComfyUI warns and skips an embedding it cannot find (`comfy/sd1_clip.py` logs
+    `embedding:<name> does not exist, ignoring`, drops the word and runs the prompt without it). The harness refuses instead: a missing or
+    different embedding silently changes the output of a vetted template, and the licence class, the hash and the trust record attach to the
+    file the manifest names. Readiness therefore accepts a name a prompt gives only when exactly one physical file answers it, case-exactly:
+    the name as written, then with `.safetensors`, `.pt` and `.bin` appended, on whole path segments, in the roots and every subfolder. A file
+    the class does not list answers the name as written too (no extension, or a whole name that is the reference), because `load_embed` asks
+    `isfile` for it first with no extension filter; the inventory records those files (`unlisted_files`) for this class. One such file is
+    `present`, and the runtime manifest names it (`models/embeddings/<sub>/<name>.<ext>` for one in a subfolder, which the host-RAM figure can
+    size and the satisfier and the trust check can find). A file reached by several paths is one file, by the file system's own word: the
+    inventory records where each embeddings file really is (`reals`) and what the file system calls it (`ids`, so two hard links of one file
+    are one file), and answers that open the same file are one answer. A root that is a link to another registered root (a model drive reached
+    through the default directory), a link inside a root, a root registered inside another and one file linked into two directories (symbolic
+    or hard) are each one file; two copies are two files. A file system that gives no file identity falls back to the real path, so there a
+    hard link reads as two files; a drive that keeps the case it is given, or derives its file index from the path, can show one folder
+    registered under two spellings as two files, and that is refused too. Everything else with a file in it is refused as the new status
+    `embedding_unverified`, with a `reason` and the files in `found`:
+    - a case variant answers it: the only file that answers differs in letter case. Whether ComfyUI finds it depends on what the volume does
+      with a name in another case, and the harness does not ask the volume;
+    - more than one file could answer it: the root and a subfolder, two subfolders, two registered roots, two extensions in one directory, a
+      file with no extension beside a listed one, an exact file beside a case variant of it, and an annotated file (`embedding_refs`) beside
+      another file that answers the same name. ComfyUI would pick one by set order or by extension, and a manifest can name only one file;
+    - a probe name is answered by a file of the node (below).
+    A node with no file for the name is `missing`, listed by the name the text gives (`models_missing` at the gate). The gate answers
+    `models_missing` first when both apply, then `embedding_unverified` (the class, the code `TEMPLATE_EMBEDDING_UNVERIFIED`, the detail
+    `embedding lookup not verified by the harness: <name>: <reason> (<files>)`, and the list in `embedding_unverified`); `readiness` blocks on
+    both, in that order, and the readiness table, `nodeReadiness` and `summarizeReadiness` do not count such a template as ready. Deliberately
+    not replicated: ComfyUI's choice between the directories that hold a name, its preference of one extension over another within a
+    directory, and the case rule of the volume. The full replica is a later row, to be taken when the first real template needs it; no template
+    of the installed package names an embedding in an active prompt.
   - A loader widget's embeddings file is not a prompt name. An annotated entry of the embeddings class that records no prompt name is the
     file a `ConditioningLoader` widget carries (three templates of the installed package, the Marigold depth, albedo and surface-normal
     ones). That node lists the directories by relative path (a subfolder file is `sd15/x`) and opens its value with the exact path under the
@@ -120,9 +130,11 @@
     text is not cut at parentheses and no group weight is read (`embedding:foo(bar)` names `foo(bar)`, `a cat ( embedding:1.2 )` names
     `1.2`). A template does not say which encoder runs, and the two readings differ in both directions, so the CLIP reading stays the
     requirement. `embeddingProbes` returns the other names; they are not requirements (listing them would refuse every prompt with a comma
-    after the name), the catalog row carries them as `embedding_probes` only when there are some, and readiness adds an entry (`shadowed`,
-    `probe: true`, the file in `found`) after the requirements when a file of the node answers one. The template is then not ready and the
-    run gate refuses it as `models_missing`, naming the probe name, because ComfyUI may open a file that no manifest names.
+    after the name), the catalog row carries them as `embedding_probes` only when there are some, and readiness adds an entry
+    (`embedding_unverified`, `probe: true`, the reason, the files in `found`) after the requirements when a file of the node answers one, in
+    any letter case and however many files answer. Every probe of a prompt is asked, the second as well as the first. The template is then
+    not ready and the run gate refuses it as `embedding_unverified` (nothing is missing), naming the probe name, because ComfyUI may open a
+    file that no manifest names.
   - Grammar: the reader is a port of the tokenizer path of `comfy/sd1_clip.py` (`token_weights`, `tokenize_with_weights`,
     `_try_get_embedding`), compared with the extracted functions of that file on 150,000 generated texts with no difference. The text is cut
     at parentheses and a closed group loses a numeric tail, so `(embedding:name:1.2)` is `name` and a bare `embedding:name:1.2` is the name
@@ -133,19 +145,19 @@
     returned is the one after the comma retry and the reading is the CLIP tokenizer's, the one embeddings are made for, and the names the
     other tries (the name as written, the reading without weights) are probes, not requirements (above); `embedding:` with no readable
     name, and a text nested more than 500 groups deep (ComfyUI reads about 900), are the empty name, which every caller refuses; the
-    inventory skips `.git` directories (ComfyUI's walk enters them); the volume's case rule is probed once per root, with the first file
-    below it that has a letter a case swap changes (at any depth: a root whose top-level names are 2023 or a script without case is judged by the
-    files below), and applied to every subfolder of it, so a single directory marked case-sensitive inside a case-folding volume, or a link
-    into another volume, is judged by its root's answer; a root with no such file has no case variant to match.
+    inventory skips `.git` directories (ComfyUI's walk enters them).
   - Limit: the override check and the runner's comparison both read the string values of the graph, so an embedding assembled while the graph
     runs by string nodes (a concatenation of two overrides, for example) is neither refused nor compared with the manifest, and the licence
     gate, the hash and the trust record never see the file it loads. "An override never retargets a file or names an embedding" is true of the
     values an override sets, not of text built from them.
-  - Measured read only on the installed package (`json 0.1.96`, 578 templates): the catalog is byte-identical before and after this round
-    (897 model entries, 3 of them annotations of the embeddings class), and so are the per-template verdicts and the readiness counts on a
-    snapshot of the measuring machine (649 requirements missing, 214 present). The only `embedding:` text in the package is in the markdown notes
-    of four `video_minimax_h3_*` templates, which are not read (they are refused as `license_conditional`). That snapshot holds no embedding
-    file, so the resolver was measured on fixture trees and on random trees on a real file system (see the tests below).
+  - Measured read only on the installed package (`json 0.1.96`, 578 templates in the index, 593 template files): the catalog is
+    byte-identical before and after the simplification (897 model entries, 3 of them annotations of the embeddings class, the loader-widget
+    conditioning files that the prompt lookup does not touch; no row carries `embedding_probes` or an annotation `embedding_refs`), and so are
+    the per-template verdicts and the readiness per template on a snapshot of the measuring machine (649 requirements missing, 214 present;
+    the snapshot itself differs only by the dropped `case_insensitive_dirs` field). The only `embedding:` text in the package is in the
+    markdown notes of four `video_minimax_h3_*` templates, which are not read (they are refused as `license_conditional`). That snapshot
+    holds no embedding file, so the lookup was tested on fixture trees and on real files, links and hard links in a scratch directory (see
+    the tests below).
 - **Why a tool and not a `template=` argument on `offload_run_graph`.** Measured at 0.186.0: an average tool costs 1,019 tokens in the full
   profile and 672 compact, so one more tool is about +3.2% of the 31-tool full list. The registered design accepts that cost, and the
   `template=` argument was only its fallback for a cost that proved unacceptable. The new tool's own entry is 2,833 bytes of `tools/list` in
@@ -195,61 +207,49 @@
   grammar, two of the catalog, three of readiness and one of `embeddingCovered`), 4 of `render/template-manifest.test.mjs` (an embedding held
   only in a subfolder, an annotated one in a subfolder, a name held in the root and in a subfolder, an annotated file another file shadows), 2 of
   `render/template-run.test.mjs`, and the root prose test `run_template_docs_test.go` (the docs say how ComfyUI finds an embedding and name the
-  string-node limit; it refuses the first wording of the lookup, a walk through the class directories in order that matched a whole path only). The tests that pinned the
-  old premise were replaced: "the first one in ComfyUI's order decides" (two roots) became the two-root ambiguous case, and "a nested listed name
-  is not matched by its base name alone" became its opposite. Guards written with them pass on the new code and bite under mutation: the
-  override check is at least as wide as the reader (a corpus), Python's whitespace set and float() rules, a text of 150,000 groups, a text
-  nested 600 deep, a model file name that holds an identifier-like word, and a file under another class. Two comparisons were run in a scratch
-  directory and are not committed: the reader against the extracted functions of `comfy/sd1_clip.py` on 150,000 generated texts (27,440 with a
-  reference), no difference (it found one: float() does not strip U+001C, which `str.split()` does); and the resolver against a verbatim copy of
-  `load_embed` over every order the directory set can take, on 600 random trees on a real file system (6,000 name checks: 1,457 present, 565
-  ambiguous, 3,978 missing), no difference. Thirty mutations of the new code, one per scratch copy of `render/`, each fail at least one test: the
-  suffix match of the resolver and of the coverage test, merging the subfolders of a root into one directory, merging the roots (one entry
-  per file), the last candidate winning, only the first root of a file, case-exact coverage, the directory-escape guard, an annotation not
-  verified against its names, not recorded, not passed to readiness, no case diagnosis, no wrong-class diagnosis, the ambiguous listing
-  emptied, no explanation of an unclear embedding in the refusal, a case-insensitive identifier (twice), a bare weight stripped, no cut at
-  parentheses, no skip of whitespace, any group tail as a weight, float() without `inf`, `nan` or digit underscores or with the wrong
-  whitespace, JavaScript's whitespace, escapes not honoured, no depth bound, a spread of a group's pieces, and a gate on the wide matcher in
-  the catalog and in the runner.
-- **Embedding resolver round (six findings of a second review).** Each fix has a commit of failing tests before it. Loader widget
-  (`render/templates-catalog.test.mjs` 1, `render/template-manifest.test.mjs` 2 failed): the exact-path rule, a root file with a subfolder
-  copy, and the run gate; the one earlier assertion that pinned the prompt lookup for an annotation without prompt names was changed to the
-  loader rule. Physical directory (4 failed, one on a real junction in a scratch tree): a root that links to another root, a link inside a
-  root, a root registered inside another, and two copies that must stay ambiguous. Unlisted files (4 failed): an extension-less file
-  answering the name first, the same stem in another directory, an annotation it shadows, and the inventory record; a run-gate test of it
-  was added with the fix and passed at once. Case folding (4 failed, one through the run gate): the roots the scan records, a case variant
-  alone, and two variants in two directories; a test that sets the scan's probe against what the real file system does with a name in
-  another case was added with the fix and passed at once. Name as written (5 failed) and the reading without weights (3 failed): the probe
-  list, the catalog row, readiness and the run gate. Nineteen mutations of the new code, each applied to the real file, run, and restored byte-identical, each fail at least one
-  test: dispatch on the class name alone, `annotated` not forwarded by `readinessFor`, the hit key back to root and subfolder, no collapse by
-  real file, real paths not recorded, unlisted files not recorded or not candidates, the case probe always false, the lookup ignoring the
-  folding roots, the folding roots not recorded, the name as written dropped, probe findings not added, not passed by `readinessFor`, not
-  explained in the refusal, not recorded on the row, not passed by the readiness table, the reading without weights dropped, read
-  without its escapes, and the empty name probed. The reader's expected probe names were compared with the extracted functions of `comfy/sd1_clip.py` on a dozen
-  texts in both modes. Measured read only on the installed package (578 templates): the catalog rows are byte-identical before and after,
-  the readiness counts on a snapshot of the measuring machine are unchanged (649 requirements missing, 214 present), and each of the three
-  Marigold templates (depth, albedo, surface normal) reads its conditioning file `present`, `in_subfolder` and `present` for a root file, a
-  subfolder file and both, the same as at the commit before the embedding work, on a synthetic inventory.
-- **Embedding resolver round (third review).** Each fix has a commit of failing tests before it; the findings that were gaps in the tests
-  (the code was right) have a commit of tests that pass at once and were each shown to bite by a one-line change to a scratch copy of
-  `render/`. Fixed: one directory registered under a spelling that differs only in case (a lower-case drive letter or folder in
-  `extra_model_paths.yaml` beside a junction target spelled another way), which read as two directories because `nodeIo.realpath` kept the
-  case it was given: it is the native one now; one file hard-linked into several embeddings directories, which a path cannot tell from a
-  copy: the inventory records the file system's own id for each file (`ids`, beside `reals`) and keys a hit by it, falling back to the real
-  path for a file the io cannot name; an annotated embedding refused as `shadowed` by the same file under its other path (a root registered
-  inside another root, a link inside a root), because `checkEmbedding` compared two path strings: it compares the file now; a root whose
-  top-level names have no letter that a case swap changes (`2023`, a script without case), which read as case-sensitive: the probe takes the
-  first file below the root whose name has one; a template with no model rows that a probe name blocks, counted as ready by
-  `summarizeReadiness`; the loader widget wording ("the first root", now "the first root that holds it", with a prose test); and the two real
-  file system tests that made their folders by hand and turned `test-scratch.test.mjs` red (they use `scratchDir`). Pinned by tests that
-  were missing: the folder that holds both spellings, the skip of a name with no swappable letter, the case swap, the per-root answer of the
-  case rule, a probe name held by two directories, a probe that keeps its case, a probe from a text the CLIP reading reads nothing from, the
-  name as written winning over a file with an extension appended to it, and a name with capitals compared in lower case. Measured: the
-  directory spelling and the hard link on this machine's NTFS (real files, a real junction); the zero-index guard and the fall-back by path
-  through an io that names its files; the rest through ios that fold or do not.
-  Not verified here: a file system that gives no file index (the id is then absent and a hard link there reads as two files), a network share's
-  index, ReFS, a directory marked case-sensitive inside a case-folding volume (the root's answer is applied to every subfolder, as before), and
-  a case-sensitive Linux volume with real files (the real-file-system tests skip when the volume does not fold case or links cannot be made).
+  string-node limit; it refuses the first wording of the lookup, a walk through the class directories in order that matched a whole path
+  only). The test that pinned "a nested listed name is not matched by its base name alone" became its opposite. Guards written with them pass
+  on the new code and bite under mutation: the override check is at least as wide as the reader (a corpus), Python's whitespace set and
+  float() rules, a text of 150,000 groups, a text nested 600 deep, a model file name that holds an identifier-like word, and a file under
+  another class. The reader was compared with the extracted functions of `comfy/sd1_clip.py` on 150,000 generated texts (27,440 with a
+  reference), no difference (it found one: float() does not strip U+001C, which `str.split()` does); that comparison ran in a scratch
+  directory and is not committed. Mutations of the reader, one per scratch copy of `render/`, each fail at least one test: a case-insensitive
+  identifier (twice), a bare weight stripped, no cut at parentheses, no skip of whitespace, any group tail as a weight, float() without `inf`,
+  `nan` or digit underscores or with the wrong whitespace, JavaScript's whitespace, escapes not honoured, no depth bound, a spread of a
+  group's pieces, and a gate on the wide matcher in the catalog and in the runner.
+- **Earlier review rounds of the embedding lookup (what still stands).** Each fix had a commit of failing tests before it. A loader widget's
+  embeddings file (a `ConditioningLoader`) is met by its exact path under the first root that holds it, and the prompt lookup does not apply
+  to it (`readinessFor` forwards `annotated` so the run gate makes the same split). A physical file is one file however it is reached: the
+  inventory records the file system's id and real path of each embeddings file, so a junction to another registered root, a link inside a
+  root, a root registered inside another and a hard link are one file, and two copies stay two. A file the class does not list answers the
+  name as written (`unlisted_files`). The probe names are asked against the node, and a template with no model rows that a probe blocks is
+  not counted as ready by `summarizeReadiness`. The real file system tests make their folders with `scratchDir` (they had turned
+  `test-scratch.test.mjs` red).
+- **Embedding lookup simplified (round six).** Four review rounds had made the prompt lookup a replica of ComfyUI's set-order choice on every
+  file system, and every finding was on synthetic input: in the installed package (`json 0.1.96`) the catalog holds no embedding
+  requirement and no probe. The lookup is now the narrow, fail-closed one above. Gone: the case-folding probe and the inventory's
+  `case_insensitive_dirs`, every rule that depended on whether a volume folds case, the choice within one directory between extensions, and the
+  statuses `ambiguous` and `shadowed` (and `case_mismatch` for a prompt embedding); the loader-widget rule is unchanged. Written red first (a
+  commit of tests only): 8 tests of `render/templates-catalog.test.mjs` and 7 of `render/template-manifest.test.mjs` failed on the code before
+  the change: a case variant, an exact file beside a case variant, two files in one or several directories, a file beside an annotated one
+  that ComfyUI tries first, a probe hit (refused as `models_missing` before), a file that answers only the SECOND probe of a prompt (the
+  earlier tests lacked it: a mutant that asked only the first probe passed all three test files), the inventory's case rule and probe, and
+  the order of `models_missing` before the new class. The class list of the Go door passed at once. The two real-NTFS layouts (a
+  case-sensitive root holding `Foo.pt` with a junction first in the walk to a folder that folds case; a root holding `EasyNeg.safetensors`
+  beside a case-sensitive subfolder holding `Zed.pt`) are tests that skip where the per-directory case flag or the link cannot be made; their
+  synthetic twins run everywhere. Removed, because they pinned the dropped behaviour: thirteen tests that asked a volume or a root to fold case
+  (the inventory's case rule, the probe against a real volume, a case variant answered on a folding volume, two variants in two directories, a
+  root with no letter in its top-level names, the swap of each letter, the folder that holds both spellings, the per-root case rule, the
+  earlier candidate winning on a folding volume, a name with capitals), the one that pinned the extension order within a directory, two
+  superseded by the new tests (a name held in several directories; an annotation met only when it is the file ComfyUI opens), and in the
+  manifest tests the folding io and three superseded tests of the old statuses; the rest that named the old statuses were converted. Twenty
+  mutations of the new code, one per scratch copy of `render/`, each fail at least one test: the exact-case compare lowered, no identity
+  dedup, a case variant read as present, more than one file read as present, a probe hit ignored, only the first probe asked, probe findings
+  not added, the whole-segment match loosened to a suffix, the case flag of a file under two names taken from the first, annotation names
+  not checked, the two reasons swapped, `.bin` not tried, unlisted files not candidates, the class missing from `blocking`, the gate not
+  refusing the class, the gate checking it before `models_missing`, unverified entries also listed as `models_missing`, probe hits missing
+  from the list, the reason missing from the entries, and the class constant misspelled; one of them (the case flag of a file under two
+  names) survived the first set of tests and has a test of its own.
 - **Manifest-side normalisation tests.** `unlistedModels` lower-cases the manifest path, turns its backslashes into slashes and drops the
   `models/<class>/` prefix, and every test manifest was lower case with forward slashes, so no test could fail on that step. Both fixtures
   (`LISTED_MODELS` in `template-run.test.mjs`, `LISTED` in `comfy-run-graph.test.mjs`) now hold a mixed-case entry
@@ -263,10 +263,13 @@
   converter loads a file for that the catalog did not name would show as a `TEMPLATE_MODEL_UNLISTED` defer on a live run).
   An embedding loaded by a live ComfyUI: the directory set and the tokenizer path are read from ComfyUI's source (0.38.0) and compared with
   its extracted functions in Python, not run in a live ComfyUI, and no template of the installed package names one in an active prompt, so the
-  catalog path has no real template to be measured on. The resolver on the real model tree of a node: the measuring machine's snapshot holds
-  no embedding file. The junction layout of a model drive was reproduced with a real junction in a scratch tree, not on a node. The case
-  probe was checked on the file system of the measuring machine only (it folds case); a case-sensitive volume is covered by an io that
-  does not fold, not by a second machine. The probe names (the name as written, the reading without weights) were not run through a live
+  catalog path has no real template to be measured on. The lookup on the real model tree of a node: the measuring machine's snapshot holds
+  no embedding file. The junction layout of a model drive was reproduced with a real junction in a scratch tree, not on a node. The two
+  real-NTFS tests (a root with the per-directory case flag) skip where the flag cannot be set; on the machine they were written on, setting it
+  was refused (access denied), so they have not run on a real volume, and their synthetic twins did. A folder registered under two spellings
+  on a virtual or cloud drive (one that keeps the case it is given, or derives its file index from the path) was read as two files by the
+  earlier code of this branch on a drive of that kind; at this head it is refused for the same reason by reading the code, not by a run
+  on such a drive. The probe names (the name as written, the reading without weights) were not run through a live
   encoder: ComfyUI's extracted functions give the names, and which text encoder a template uses is not asked.
   One template running end to end under a GPU lease, the acceptance measurement of this tool, queued after this
   change. The production wiring of the conversion against a live ComfyUI (the `/object_info` and `/system_stats` reads in
@@ -274,4 +277,6 @@
   first sighting hash on a 20 GB file. The Go door's production path on a box's real tree (tested on a fixture tree and a canned script). The template run's host-RAM
   declaration against a real template under a lease on a node (tested on stat tables and sparse files through the real admission).
 - **Not built.** Fleet placement of a template; model downloads (a missing model is a refusal that lists it); an acknowledgement path for a
-  conditional or non-commercial template; staging a template's sample input files; custom node packs; a CLI verb and a fleet task for the tool.
+  conditional or non-commercial template; staging a template's sample input files; custom node packs; a CLI verb and a fleet task for the tool. Later, with its trigger: the full replica of ComfyUI's embedding
+  lookup (its choice between the directories that hold a name, its extension preference and the case rule of the volume), taken when the first
+  real template needs it.

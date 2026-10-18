@@ -1108,6 +1108,7 @@ node lacks is checked after them.
 | `template_unreadable`, `bad_model_path` | refused | the index lists a file that cannot be read; a model name or class directory that would leave its class directory |
 | `subgraph_unexpanded` | refused | the catalog's walk left a subgraph instance unexpanded: it is nested more than 8 levels deep (the converter expands 64), or its subgraph contains itself (the converter refuses that too). The models, the licence class, the FLUX bar and the host-RAM figure are all read from that walk, so a template it could not finish is refused instead of run on a list that may be short |
 | `models_missing`, `inputs_missing`, `comfyui_too_old` | refused | what this node lacks, with the exact list (`missing`) or both versions |
+| `embedding_unverified` | refused | a prompt embedding the harness does not verify (a case variant answers it, more than one file could answer it, or a file answers a probe name), with each name, the reason and the files (`embedding_unverified`) |
 | `unknown_template` | refused | no template of that name in this node's package |
 
 A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `class`, `code` (`TEMPLATE_<CLASS>`), `template` and a
@@ -1154,25 +1155,37 @@ A Defer carries `deferred:true`; a refusal carries `refused:true`. Both carry `c
    `.safetensors`, `.pt` or `.bin` appended, at the top of the directory or in any subfolder (ComfyUI searches every subfolder; whole path
    segments, never a base name that only ends alike). ComfyUI does not walk the embeddings directories in order: `expand_directory_list` puts
    every embeddings root and every subfolder below it into a Python `set`, and `load_embed` opens the file of the first directory of that set
-   that holds the name, so the directory that answers is chosen by hash order and differs from one process to the next. A name is read as the
+   that holds the name, so the directory that answers is chosen by hash order and differs from one process to the next. The harness does not replicate that
+   choice (below). A name is read as the
    tokenizer reads it (`embeddingRefs`, a port of `token_weights`, `tokenize_with_weights` and `_try_get_embedding` in `comfy/sd1_clip.py`):
    the text is cut at parentheses and a closed group loses a numeric tail, so `(embedding:name:1.2)` is `name` and a bare `embedding:name:1.2`
    is the name `name:1.2`; the lower-case identifier starts the text or follows whitespace or a parenthesis; whitespace after it is skipped;
    the name ends at whitespace, `(`, `<` or `[`; commas come off both ends. The catalog lists a name its own prompt gives under the
    `embeddings` class, unless an annotation of that class covers it (the annotation records the name), so the licence gate and trust on first
-   use read it like any weights file (a name with no source is `license_unknown`). Readiness resolves it the way ComfyUI does: exactly one
-   directory that holds a file for the name is `present` and the runtime manifest names that file, subfolder and extension included; more than
-   one (the root and a subfolder, two subfolders, two registered roots holding two copies) is `ambiguous`, refused as `models_missing` because
-   the file ComfyUI opens varies from run to run and the manifest would name only one; a directory reached two ways (a root that links to
-   another registered root, a link inside a root, a root registered inside another, a registered spelling in another case) is one directory,
-   and a file linked into two directories (symbolic or hard) is one file, because the inventory records where each file really is (the path as
-   the file system spells it) and what the file system calls it; a file system that gives no identity falls back to the path; a file the class does not list (no extension) answers the name as written first, as `isfile` does; under a root
-   whose volume folds case (NTFS by default, probed per root) a case variant is a hit; an annotated file that is not the one ComfyUI opens
-   for the name the prompt gives (a `.safetensors` beside an annotated `.pt`) is `shadowed`; a node that holds none is `models_missing`,
-   listed by the name the text gives. A loader widget's embeddings file (`ConditioningLoader`) is not a prompt name: it is met by its exact
+   use read it like any weights file (a name with no source is `license_unknown`). Readiness verifies it, and fails closed. ComfyUI warns and skips an embedding it cannot find
+   (`comfy/sd1_clip.py` logs `embedding:<name> does not exist, ignoring` and runs the prompt without it); the harness refuses, because a
+   missing or different embedding silently changes the output of a vetted template, and the licence class, the hash and the trust record
+   attach to the file the manifest names. So the lookup is deliberately narrower than ComfyUI's: a name is accepted only when exactly one
+   physical file answers it, case-exactly (the name as written, or with `.safetensors`, `.pt` or `.bin` appended, on whole path segments, in
+   the roots and every subfolder; a file the class does not list, with no extension, answers the name as written, as `isfile` does), and
+   then it is `present` and the runtime manifest names that file, subfolder and extension included. A file reached by several paths is one
+   file, by the file system's own word (the inventory records where each embeddings file really is and what the file system calls it): a
+   root that links to another registered root, a link inside a root, a root registered inside another and a file linked into two
+   directories (symbolic or hard) are each one file, two copies are two, and a file system that gives no identity falls back to the real
+   path. Every other outcome with a file in it is refused under its own class, `embedding_unverified` (not `models_missing`: nothing is
+   missing), with the reason: a case variant answers it (the only file differs in letter case; whether ComfyUI finds it depends on the
+   volume, and the harness does not ask the volume); more than one file could answer it (the root and a subfolder, two subfolders, two
+   registered roots, two extensions in one directory, a file with no extension beside a listed one, an exact file beside a case variant
+   of it, an annotated file beside another file that answers the same name); or a probe name is answered by a file of the node (below). A
+   node that holds none is `models_missing`, listed by the name the text gives. When both apply the gate answers `models_missing`
+   first, then `embedding_unverified`, whose answer lists each name with its reason and files. Not replicated, on purpose: ComfyUI's
+   choice between the directories that hold a name, its preference of one extension over another, and the case rule of the volume.
+   The full replica is a later row, to be taken when the first real template needs it (no template of the installed package names an
+   embedding in an active prompt). A loader widget's embeddings file (`ConditioningLoader`) is not a prompt name: it is met by its exact
    path like a file of any other class. Names ComfyUI may also try for a prompt (the name as written before its commas come off, and the
    names the LLM-based text encoders take when they read the text without weights) are not requirements; the catalog row records them
-   (`embedding_probes`) and a file of the node that answers one makes the template not ready (`shadowed`, `models_missing` at the gate).
+   (`embedding_probes`) and a file of the node that answers one, in any case and however many, makes the template not ready and refuses the
+   run as `embedding_unverified` (a probe name is answered by a file of the node). Every probe of a prompt is asked.
    A graph run is not compared.
 4. The converted graph goes through the run-graph preflight and is posted. The result is the run-graph envelope with `template`,
    `license_class`, `reads_input`, `local_only` and `fleet_note` beside the outputs, and `tofu_first_seen` when a run recorded a
@@ -1221,7 +1234,8 @@ and that is what keeps templates in `license_unknown`. On one node (<node-a>, Co
 
 **Not built in this release.** Fleet placement of a template; model downloads (a missing model is a refusal that lists it); an
 acknowledgement path for a conditional or non-commercial template; staging of a template's sample input files; custom node
-packs; a CLI verb and a fleet task for it. An override that would retarget a model or input file, or name an embedding, is refused, not
+packs; a CLI verb and a fleet task for it. Later, with its trigger: the full replica of ComfyUI's embedding lookup (its choice between
+the directories that hold a name, its extension preference and the case rule of the volume), taken when the first real template needs it. An override that would retarget a model or input file, or name an embedding, is refused, not
 supported: the gate checks the file the template names, so a different file would run unchecked (text that string nodes assemble while
 the graph runs is the one thing the checks do not see; step 3).
 One template running end to end under a GPU lease is the acceptance measurement of this tool, and it has not been run.

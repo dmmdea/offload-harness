@@ -420,7 +420,8 @@ template names and the hash it declares, node packs, licence class, API or not, 
 first release of the tool will run: not a paid API template (a Defer, `api_paid`), not FLUX-family, no custom node pack, readable,
 and a permissive licence class (or none); every other licence, `unknown` and an inferred map entry included, is refused under
 its own typed class. `resolve` is the gate in front of a run: that verdict, then what the node lacks (`models_missing`,
-`inputs_missing`, `comfyui_too_old`, each with the exact list), then the runtime manifest, which names every model by the path
+`inputs_missing`, `comfyui_too_old`, each with the exact list; a prompt embedding it does not verify is `embedding_unverified`, with the
+reason and the files), then the runtime manifest, which names every model by the path
 it was found at and carries no `source_url`, so a run never downloads. `template-run.mjs` is the run side: it finds a template by
 name in the node's own package, converts it with the converter above and the running ComfyUI's listing, and applies the
 overrides. The run-graph runner takes it as `comfy-run-graph.mjs --template NAME [--overrides FILE] [--seed N]`: the template is
