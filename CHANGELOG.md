@@ -6,6 +6,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.191.3] - 2026-10-19 - node-swap refuses a node it cannot see instead of rolling back against it, and the rendered WSL2 seat env exports HOUSE_KV_SPLIT=1
+
+### Fixed - node-swap refuses a node it cannot see instead of rolling back against it
+
+- **What.** On Windows, `node-swap` now lists a process on the target's file name even when CIM will not give it the process's path or command line, and marks it unreadable. A swap that stops and restarts the node refuses on such a process with the step `process-access`. It names the pid and says to run the swap at the node's elevation. The refusal comes before anything is hashed or touched, on a dry run as on a real one. A restart that starts the node at another elevation than the swap now fails verification with a message that names the unreadable pid, instead of "no process appeared".
+- **Why.** A fleet node restarted over `ssh localhost` runs elevated in session 0. An unelevated swap read its CIM row with an empty path and command line and filtered it out. On 2026-10-19 such a swap found no node to stop. It installed the new exe, and the restart script replaced the node. The swap then saw no new node within 2 minutes and rolled back against the running node; the rollback failed only because that node locked the new exe. The dry run before it had reported OK.
+- **Check.** On that node, the branch's `node-swap --dry-run` refused unelevated (`process-access`, naming the running node's pid) and passed through `ssh localhost` (verify-hash, wait-idle, dry-run ok). One test (`TestSwapRefusesANodeItCannotRead`) drives `Run` with an unreadable holder and checks that nothing was touched.
+- **Docs.** `docs/systems/node-swap.md` covers the step and the pitfall.
+
+### Changed - the rendered WSL2 seat env exports HOUSE_KV_SPLIT=1
+
+- **What.** `setup/templates/vllm-seat/windows-wsl/seat.env` now carries `export HOUSE_KV_SPLIT=1`, with a comment that says what it does. The vLLM patches README and the operator guide no longer tell the operator to add the line after rendering.
+- **Why.** A WSL2 seat on vLLM 0.29 or later dies at start unless the house KV-split patch is applied and this variable is set. The renderer did not write it, so every rendered seat needed a hand edit. An unpatched vLLM never reads the variable, so the line is safe on any version.
+- **Check.** The rendered template contains the export, and `seat_fg.sh` sources the env file, so the variable reaches vLLM the same way `VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS` does. The production pair seat has run with the same line since 2026-10-18.
+
 ## [0.191.2] - 2026-10-19 - the vLLM seat kit builds a WSL2 seat on vLLM 0.32 and LMCache 0.5.6, and the nightly offload-dream run finishes
 
 ### Added - the vLLM seat kit can build a WSL2 seat on vLLM 0.32 and LMCache 0.5.6
