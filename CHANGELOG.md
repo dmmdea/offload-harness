@@ -6,6 +6,26 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.191.1] - 2026-10-18 - a vLLM seat on WSL2 no longer holds its checkpoint twice in host RAM, and ADR 0090's pending rows are settled
+
+### Changed - ADR 0090's pending rows are settled
+
+- **What.** Section 4 of ADR 0090 (capability review 2026-10) gives a terminal state to every row that was waiting on a gate verdict:
+  - the Headroom offload rungs are PARKED (merged, default off, not measured);
+  - the CLM paper is DECLINED as measured with no need (the ladder fired on 0 of 5 recorded agent runs in the registered window; no run evicted anything);
+  - GitSwarm is DECLINED as replicated and measured with no gain;
+  - the acceptance-hygiene ADR is DECLINED.
+
+  ADR numbers 0092 and 0093 are not used.
+- **Why.** Since 2026-10-18 a model or loop is measured only on the operator's order, with one run, so no further pre-registered A/B will settle these rows.
+
+### Fixed - a vLLM seat on WSL2 no longer holds its checkpoint twice in host RAM
+
+- **What.** `setup/templates/vllm-seat/seat_fg.sh` starts a watcher before it becomes `vllm serve`. On WSL2 only, once the engine answers `/health` the watcher drops the guest's clean page cache, and it drops it again whenever the cache passes `SEAT_CACHE_CAP_GIB` (default 4), until the engine exits. Each drop logs `seat_fg: page cache dropped (A GiB -> B GiB; cap C GiB)` to the seat log. Native Linux is unchanged: there, page cache is reclaimable kernel memory, not host commit.
+- **Why.** vLLM reads the checkpoint through the page cache and keeps none of it mapped once the weights are on the cards. On WSL2 that cache is VM memory, which the host cannot take back until the guest frees it. On a 128 GiB WSL2 box, loading the INT4 27B pair seat moved host commit from 76.6 to 150 of 171.7 GiB, and 23 GiB of that was page cache. Over hours of long-context work the same growth reached 168 GiB, which pushes the host into its page file (register B-56). The operator rule is no swapping and no out-of-memory.
+- **Operator step on a WSL2 seat box.** In `.wslconfig`, set `swap=0`, and set `autoMemoryReclaim=dropCache` instead of `gradual`. Both take effect at the next `wsl --shutdown`; `swapoff -a` inside the distro turns swap off at once.
+- **Check.** The seat was installed on the 3-card reference box and loaded through its normal launcher with one request. The seat log printed `page cache dropped (23 GiB -> 1 GiB; cap 4 GiB)`. Host commit went from 149.7 to 128.0 GiB, the VM from 68.7 to 46.8 GiB, and available physical memory from 31 to 51 GiB, with the seat still answering.
+
 ## [0.191.0] - 2026-10-18 - the hosted NVIDIA client dials public addresses only, nodes publish their GPU power-profile state, a node shared in by another account takes public-data work only, the vLLM seat logs its host memory and doctor flags an undeclared one, and the doc-wording tests are gone
 
 ### Removed - tests that only checked the wording of docs
