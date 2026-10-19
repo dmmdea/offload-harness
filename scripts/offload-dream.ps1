@@ -10,7 +10,7 @@
 [CmdletBinding()]
 param(
   [string]$Bin     = '',  # resolved below: $PSScriptRoot is EMPTY inside param() defaults under [CmdletBinding()] on Windows PowerShell 5.1
-  [string]$DataDir = "$env:USERPROFILE\.local-offload",
+  [string]$DataDir = '',  # resolved below from the harness itself (`data status`); pass it only to point the whole run somewhere else
   [switch]$Gepa,            # allow the codex prompt-reflection (paid; SELF-THROTTLED below)
   [int]$GepaMinDays = 7,    # min days between codex GEPA runs (cost control)
   [int]$GepaMinHard = 30,   # min hard cases required before a GEPA run is worth it
@@ -28,7 +28,23 @@ if (-not $Bin) {
     Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
 }
 if (-not $Bin -or -not (Test-Path $Bin)) { throw 'local-offload.exe not found: pass -Bin <path> or set LOCAL_OFFLOAD_BIN' }
-$ledger  = Join-Path $DataDir 'ledger.jsonl'
+
+# Ask the harness where it keeps each file instead of assuming %USERPROFILE%\.local-offload. A node whose
+# config sets `home` (data on a data drive, never C:) or names a path key by hand reads its stats from
+# there, and adopting into the old default would write tonight's thresholds beside a tree the harness no
+# longer reads (found 2026-10-18 when two nodes moved their home off C:). A binary without `data status`
+# keeps the per-user default.
+$loc = @{}
+if (-not $DataDir) {
+  $eap = $ErrorActionPreference; $ErrorActionPreference = 'Continue'   # a native stderr line must not throw here
+  $statusJson = (& $Bin data status --json 2>$null) | Out-String
+  $ErrorActionPreference = $eap
+  try { foreach ($l in ($statusJson | ConvertFrom-Json).locations) { $loc[$l.key] = $l.path } } catch {}
+  $DataDir = if ($loc['home']) { $loc['home'] } else { Join-Path $env:USERPROFILE '.local-offload' }
+}
+function Live($key, $leaf) { if ($loc[$key]) { $loc[$key] } else { Join-Path $DataDir $leaf } }
+
+$ledger  = Live 'ledger_path' 'ledger.jsonl'
 $staging = Join-Path $DataDir 'staging'
 $backup  = Join-Path $DataDir ('backup-' + (Get-Date -Format 'yyyyMMdd'))
 $marker  = Join-Path $DataDir 'DREAM-PROPOSAL.md'
@@ -46,6 +62,19 @@ function Log($m) {
   $line = (Get-Date -Format 'HH:mm:ss') + '  ' + $m
   try { Add-Content -Path $logFile -Value $line } catch {}
   Write-Output $line
+}
+
+# Invoke-Bin runs the harness binary and returns its stdout lines; the exit code and the stderr lines land in
+# $script:BinExit and $script:BinErr. Windows PowerShell 5.1 turns each stderr line of a native command into an
+# error record, and under 'Stop' the first one ends the script: confhead-calibrate exits 0 but notes on stderr
+# the test traffic it left out, so the run died there every night, before optimize and before any adoption
+# (found 2026-10-18 on a fleet node). Keeping stderr apart also keeps it out of the JSON that callers parse.
+function Invoke-Bin([string[]]$A) {
+  $ErrorActionPreference = 'Continue'
+  $all = & $Bin $A 2>&1
+  $script:BinExit = $LASTEXITCODE
+  $script:BinErr  = @($all | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
+  $all | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" }
 }
 
 # Clamp-Thresholds caps each per-task threshold in $New to within $MaxDelta of the
@@ -90,7 +119,7 @@ try {
   # Bounded (--n 200) and fail-safe: a shadow-label error does NOT abort the cycle.
   Log 'running shadow-label (drain queue -> confhead labels)'
   try {
-    $shadowOut = & $Bin shadow-label --n 200 2>&1
+    $shadowOut = @(Invoke-Bin @('shadow-label', '--n', '200')) + $BinErr
     Log ($shadowOut -join "`n")
   } catch {
     Log ('shadow-label failed (non-fatal): ' + $_)
@@ -98,21 +127,21 @@ try {
 
   # PHASE 1 - inference-free stats jobs -> STAGING (no codex, no GPU)
   $jobs = @(
-    @{ name='calibrate';         out=(Join-Path $staging 'thresholds.json');          live=(Join-Path $DataDir 'thresholds.json') },
-    @{ name='health';            out=(Join-Path $staging 'tier_overrides.json');       live=(Join-Path $DataDir 'tier_overrides.json') },
-    @{ name='train-router';      out=(Join-Path $staging 'router-weights.json');       live=(Join-Path $DataDir 'router-weights.json') },
-    @{ name='train-confhead';    out=(Join-Path $staging 'confhead-weights.json');     live=(Join-Path $DataDir 'confhead-weights.json') },
-    @{ name='confhead-calibrate';out=(Join-Path $staging 'confhead-thresholds.json'); live=(Join-Path $DataDir 'confhead-thresholds.json') }
+    @{ name='calibrate';         out=(Join-Path $staging 'thresholds.json');          live=(Live 'thresholds_path' 'thresholds.json') },
+    @{ name='health';            out=(Join-Path $staging 'tier_overrides.json');       live=(Live 'tier_overrides_path' 'tier_overrides.json') },
+    @{ name='train-router';      out=(Join-Path $staging 'router-weights.json');       live=(Live 'router_weights_path' 'router-weights.json') },
+    @{ name='train-confhead';    out=(Join-Path $staging 'confhead-weights.json');     live=(Live 'confhead_path' 'confhead-weights.json') },
+    @{ name='confhead-calibrate';out=(Join-Path $staging 'confhead-thresholds.json'); live=(Live 'confhead_thresholds_path' 'confhead-thresholds.json') }
   )
   foreach ($j in $jobs) {
     Log ('running ' + $j.name + ' -> staging')
-    $out = & $Bin $j.name --out $j.out 2>&1
+    $out = @(Invoke-Bin @($j.name, '--out', $j.out)) + $BinErr
     [void]$report.Add('## ' + $j.name)
     foreach ($l in ($out | Select-Object -Last 12)) { [void]$report.Add('    ' + $l) }
     [void]$report.Add('')
   }
   Log 'running optimize (exemplar selection)'
-  $optOut = & $Bin optimize 2>&1
+  $optOut = @(Invoke-Bin @('optimize')) + $BinErr
   [void]$report.Add('## optimize')
   foreach ($l in ($optOut | Select-Object -Last 8)) { [void]$report.Add('    ' + $l) }
   [void]$report.Add('')
@@ -125,7 +154,7 @@ try {
     $lastRun = $null
     if (Test-Path $gepaState) { try { $lastRun = (Get-Content $gepaState -Raw | ConvertFrom-Json).last_run } catch {} }
     $daysSince = if ($lastRun) { ((Get-Date) - [datetime]$lastRun).TotalDays } else { 99999 }
-    $hardJson = (& $Bin audit-sample --n 500 --hard --json 2>&1 | Out-String)
+    $hardJson = (Invoke-Bin @('audit-sample', '--n', '500', '--hard', '--json') | Out-String)
     $hardCount = 0; try { $hardCount = @($hardJson | ConvertFrom-Json).Count } catch {}
     if ($daysSince -lt $GepaMinDays) {
       Log ('gepa: not due (' + [math]::Round($daysSince,1) + 'd since last < ' + $GepaMinDays + 'd) - no codex spend')
@@ -165,8 +194,8 @@ try {
   if ($hasConfheadStaged) {
     Log 'running confhead-eval (adoption gate: AURC + paired-bootstrap CI)'
     try {
-      $evalOut = & $Bin confhead-eval 2>&1
-      if ($LASTEXITCODE -ne 0) { throw "confhead-eval exited $LASTEXITCODE" }
+      $evalOut = Invoke-Bin @('confhead-eval')
+      if ($BinExit -ne 0) { throw ("confhead-eval exited $BinExit" + $(if ($BinErr) { ': ' + ($BinErr -join ' | ') } else { '' })) }
       $evalJson = $evalOut -join "`n"
       Log ('confhead-eval: ' + $evalJson)
       $evalObj = $evalJson | ConvertFrom-Json
