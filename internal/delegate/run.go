@@ -4251,28 +4251,36 @@ func (r *runner) localRunCapRoom() (room int, note string) {
 	if limit <= 0 {
 		return unlimitedHeadroom, ""
 	}
+	ahead, note := r.localRunLine()
+	return max(limit-ahead, 0), note
+}
+
+// localRunLine is how many runs are registered on the local seat's run-cap line right now (running and
+// waiting), with the note localRunCapRoom publishes. An unset seat or an unreadable registry counts none.
+func (r *runner) localRunLine() (ahead int, note string) {
+	limit := r.cfg.FleetConcurrencyLimit()
 	seat := strings.TrimSpace(r.cfg.AgentPlannerModel(""))
 	if seat == "" {
-		return limit, "no agent seat configured, so no run could be counted"
+		return 0, "no agent seat configured, so no run could be counted"
 	}
 	reg, err := gpuactivity.Open(r.cfg.GPULockPath, r.cfg.StateDir)
 	if err != nil {
 		r.localSlotWarn.Do(func() {
 			log.Printf("delegate: the local run registry could not be opened (%v); the local seat's run-cap line is read as empty", err)
 		})
-		return limit, fmt.Sprintf("run registry unreadable (%v), read as empty", err)
+		return 0, fmt.Sprintf("run registry unreadable (%v), read as empty", err)
 	}
 	// A seat pinned to ONE card shares it with every other seat on it, so its line is the
 	// card's (plan P5): the same reading the node's own gate makes (OnSeatPinned). A seat that
 	// spans cards, or whose pin is unknown, keeps the per-seat line.
 	pins, _ := r.cfg.ModelPins(seat)
 	runs := reg.OnSeatPinned(time.Now(), pins, seat)
-	ahead := len(runs)
+	ahead = len(runs)
 	where := "on seat " + seat
 	if len(pins) == 1 {
 		where = "on card " + pins[0] + " (seat " + seat + ")"
 	}
-	return max(limit-ahead, 0), fmt.Sprintf("%d run(s) registered %s, cap %d", ahead, where, limit)
+	return ahead, fmt.Sprintf("%d run(s) registered %s, cap %d", ahead, where, limit)
 }
 
 // untried filters a fleet snapshot down to the nodes this subtask has not
@@ -6103,6 +6111,14 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 		switch {
 		case r.route == "local":
 			reason = "route=local forced"
+			// A reasoned pin joins the local seat's line only while the line has room (pinline.go).
+			if r.pin.reason != "" && r.pin.asked == "local" {
+				release, refused := r.admitPinnedLocal(ctx, localView)
+				if refused != nil {
+					return finish(*refused)
+				}
+				defer release()
+			}
 		case r.route == "remote" && chosen.Local:
 			// An explicit remote route with nothing eligible must NOT silently
 			// fall local — defer loudly and let the caller decide. The diagnosis

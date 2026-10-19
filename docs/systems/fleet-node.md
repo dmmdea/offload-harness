@@ -1491,7 +1491,7 @@ the authoritative pin it always had. Everything this document says of `route=loc
 | `privacy` | `local` | the material may not leave this box (credentials, unreleased or brand-isolated data) |
 | `locality` | `local` | the work needs something only this box has (a local service, files the contract cannot carry inline, this box's own seat as the thing under comparison) |
 | `measurement` | `local`, `remote` | the call measures a specific place (a benchmark, a bake, a seat A/B) |
-| `operator` | `local`, `remote` | the operator named this placement for this call |
+| `operator` | `local`, `remote` | the human operator typed this placement in this conversation; a subagent, workflow stage or script never has it |
 
 - **Intake.** A value outside the set, a reason with the wrong route (`privacy` with `remote`) and a reason with a route that is not a pin
   (`auto`, `spread`, `queue`, or `offload_research`'s default `spread`) are refused before any placement with an error that lists the valid
@@ -1508,6 +1508,13 @@ the authoritative pin it always had. Everything this document says of `route=loc
   `unreasoned`. Its reason is on every ledger row (`pin_reason`, with `route_asked`) and on every result (`results[].pin_reason`). A call that
   carries a browse grant (`allow_browse`, ADR 0060) is pinned under the implied reason `locality` when it gives none: the browse tool drives
   this machine's own browser, which a hint must not move.
+- **A reasoned `local` pin is bounded by the seat's line** (ADR 0078 amendment, 2026-10-19). It joins the local seat's run-cap line only
+  while fewer than `fleet_max_queue_depth` runs (default twice `fleet_max_concurrent_jobs`, the bound every fleet node applies to its own
+  backlog) are registered there and admitted by this process; past that depth it defers at once as `capacity`, never re-placed, and the
+  reason names the line's depth, the fleet nodes with a free worker right now, and that a call without the pin would use them
+  (`delegate/pinline.go`, `admitPinnedLocal`). Before this, every pinned subtask waited its whole wall in the line.
+- **`offload_research` refuses `privacy` and `locality`.** Its pages are public and travel inline in the contract, so neither reason can
+  be true of a research call; `measurement` and `operator` stay valid.
 - **A reasonless `local`** is applied as `auto` (`resolvePin` rebinds the run's route, and `runner.pin` keeps what the caller asked, so
   every one of the three dozen `r.route` sites sees the route placement uses). The idle seat takes the first `room` subtasks of its run-cap
   line, the overflow goes over the unchanged `remoteEligible` gate to the remotes with room and then to the capacity wait, a call that fits
