@@ -101,6 +101,13 @@ func TestRepackSilentSeatStillStalls(t *testing.T) {
 	if !wire.Deferred || wire.DeferClass != core.DeferClassInfrastructure || !strings.Contains(wire.Reason, "stalled: no progress for") || !strings.Contains(wire.Reason, "in repack") {
 		t.Fatalf("want an infrastructure stall in repack, got deferred=%v class=%s reason=%q", wire.Deferred, wire.DeferClass, wire.Reason)
 	}
+	// A starved runner can let the 200 ms allowance run out between the loop's end and
+	// the first request (CI 2026-10-19, a 572 s package run): the stall then fires with
+	// nothing sent, repack_attempts is a correct 0, and no silent stream was exercised.
+	// The streaming test above still fails if a re-pack is never sent at all.
+	if wire.RepackAttempts == 0 && fake.grammarCNT.Load() == 0 {
+		t.Skip("the stall fired before the re-pack request was sent (starved runner): nothing about a silent stream was exercised")
+	}
 	if wire.RepackAttempts != 1 {
 		t.Fatalf("repack_attempts = %d, want 1", wire.RepackAttempts)
 	}
