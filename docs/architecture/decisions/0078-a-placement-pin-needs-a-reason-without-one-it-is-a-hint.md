@@ -229,6 +229,27 @@ reasons are for the surfaces where a session decides.
 - **Leave a remote hint's overflow to the capacity wait.** Rejected, for the reasons in decision 5.
 - **Read the cascade's workhorse as the text lane's seat.** Rejected in decision 9.
 
+## Amendment 2026-10-19: a reasoned local pin is bounded by the seat's line
+
+The reason closed the reasonless door and a claimed reason re-opened it. A workflow's agents each passed `route:"local"`,
+`pin_reason:"operator"` to `offload_research` with no operator order behind it; 36 runs registered on one seat, 184 subtasks deferred
+`node_busy`, the median latency was the 600 s wall, and four fleet nodes had free workers. The harness cannot tell a true operator
+reason from a claimed one, so the bound does not depend on telling them apart:
+
+- A reasoned local pin joins the seat's run-cap line only while the line is shallower than `fleet_max_queue_depth` (default twice the
+  run cap), the bound every fleet node already applies to its own backlog (register S-04/C-25). The depth is the deeper of the
+  registry's count and the pinned subtasks this process admitted and has not finished, which closes the gap while a fan-out's runs
+  have not registered yet. Past it the subtask defers at once as `capacity`, is never re-placed (the pin holds), and its reason names
+  the depth, the fleet nodes with a free worker, and that dropping the pin would use them. Unlimited depth admits everything.
+- `offload_research` refuses `privacy` and `locality`: its pages are public and travel inline, so neither can be true of it.
+- The `operator` text in both schemas now says the human operator typed the placement in this conversation, and that a subagent,
+  workflow stage or script never has it.
+- `offload_status` publishes `fleet.agent_slots` (`total`, `local`, `fleet`): the cluster's whole agent concurrency from the live
+  roster, the number a fan-out of harness calls is cut to. The workflow behind this amendment ran about 30 agents into about 8 slots.
+
+Code: `internal/delegate/pinline.go` (`admitPinnedLocal`), `runner.localRunLine` in `run.go`, `handleResearch` in
+`internal/mcpserver/mcpserver.go`.
+
 ## Related code
 
 - `internal/delegate/pin.go`: the closed set, `CheckPinReason`, `resolvePin`, `remoteHint`, the hint clause (`stampPin`,

@@ -95,7 +95,7 @@ var compactKeep = []compactKeepEntry{
 	},
 	{
 		Tools:    []string{"agent_delegate", "offload_research"},
-		Sentence: "operator: the operator named this placement for this call; route local or remote.",
+		Sentence: "operator: the human operator typed this placement in this conversation (a subagent, workflow stage or script never has it, and a claimed reason is still bounded by the pinned seat's line); route local or remote.",
 		Why:      "pin_reason vocabulary: operator, the operator named this placement",
 	},
 	{

@@ -5215,7 +5215,7 @@ func runResearch(args []string) error {
 	fs.Var(&accept, "accept", "extra acceptance check appended to the grounded default (repeatable)")
 	schemaPath := fs.String("schema", "", "path to a JSON Schema for the per-page digest (default: key_facts/numbers/quotes/verdict)")
 	route := fs.String("route", "spread", "placement: spread (default) | auto | local | remote (local and remote are a PIN only with --pin-reason; without one they are hints that placement may override)")
-	pinReason := fs.String("pin-reason", "", "why this call is pinned to --route local or remote: "+strings.Join(delegate.PinReasons(), " | ")+" (privacy and locality take --route local only; measurement and operator take either). Without it local and remote are hints. Refused with any other route")
+	pinReason := fs.String("pin-reason", "", "why this call is pinned to --route local or remote: "+strings.Join(delegate.PinReasons(), " | ")+" (research takes measurement or operator only; both take either route). Without it local and remote are hints. Refused with any other route")
 	timeout := fs.Int("timeout", 0, "per-page contract budget in seconds (default 300, cap 900)")
 	fetchTimeout := fs.Int("fetch-timeout", 0, "per-page fetch timeout in seconds (default 30)")
 	_ = fs.Parse(args)
@@ -5224,6 +5224,9 @@ func runResearch(args []string) error {
 	}
 	// Before the config is loaded or a page is fetched (ADR 0078): the engine checks again.
 	if err := delegate.CheckPinReason(*route, *pinReason); err != nil {
+		return err
+	}
+	if err := delegate.CheckResearchPinReason(*pinReason); err != nil {
 		return err
 	}
 	cfg := loadCfg(fs)

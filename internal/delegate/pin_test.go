@@ -925,6 +925,7 @@ func TestABrowseGrantPinsALocalRouteUnderTheImpliedReasonLocality(t *testing.T) 
 	node, url := acceptingNode(t, "node-a", "zorblax from A", withHeadroom(8, 0))
 	cfg := pinCfg(t)
 	cfg.FleetMaxConcurrentJobs = 1
+	cfg.FleetMaxQueueDepth = 3 // the seat's line holds all three (pinline.go bounds a pinned line at this depth)
 	browse := plainContract()
 	browse.AllowBrowse, browse.BrowseHosts = true, []string{"docs.example"}
 	plain := pages(2)

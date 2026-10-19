@@ -403,10 +403,11 @@ func TestOffloadResearchCarriesThePinReasonToEveryPageAndHintsTheRest(t *testing
 		}
 		return results
 	}
-	for i, r := range pages(`,"pin_reason":"locality"`) {
+	// measurement, not locality: a research call's pages are public and inline, so the door refuses privacy and locality.
+	for i, r := range pages(`,"pin_reason":"measurement"`) {
 		row := r.(map[string]any)
-		if row["pin_reason"] != "locality" || row["placement"] != "route=local forced" {
-			t.Errorf("pinned page %d = pin_reason %v, placement %v, want locality and the unchanged forced placement", i, row["pin_reason"], row["placement"])
+		if row["pin_reason"] != "measurement" || row["placement"] != "route=local forced" {
+			t.Errorf("pinned page %d = pin_reason %v, placement %v, want measurement and the unchanged forced placement", i, row["pin_reason"], row["placement"])
 		}
 	}
 	for i, r := range pages(``) {
@@ -418,8 +419,8 @@ func TestOffloadResearchCarriesThePinReasonToEveryPageAndHintsTheRest(t *testing
 			t.Errorf("hinted page %d placement = %q, want it to say the hint was honoured", i, placement)
 		}
 	}
-	if st := s.pins.Snapshot(); st.Reasoned["locality"] != 3 || st.Hints != 3 || st.HintsOverridden != 0 {
-		t.Errorf("tally %+v, want 3 pages pinned under locality and 3 hinted pages, none overridden", st)
+	if st := s.pins.Snapshot(); st.Reasoned["measurement"] != 3 || st.Hints != 3 || st.HintsOverridden != 0 {
+		t.Errorf("tally %+v, want 3 pages pinned under measurement and 3 hinted pages, none overridden", st)
 	}
 }
 
