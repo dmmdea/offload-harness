@@ -38,7 +38,8 @@ patch -p1 -d "$SP" --forward --dry-run < vllm-patches/house-kv-split-0.32.0.patc
 grep -c HOUSE-KV-SPLIT "$SP/vllm/v1/worker/utils.py"     # non-zero once applied
 ```
 
-Then add `export HOUSE_KV_SPLIT=1` to the seat env. The renderer does not emit it yet.
+The WSL2 seat env the renderer writes (`windows-wsl/seat.env`) already carries `export HOUSE_KV_SPLIT=1`; an unpatched vLLM
+never reads it. A seat env written by hand needs the line added.
 
 At the next start, every tensor-parallel rank logs:
 
