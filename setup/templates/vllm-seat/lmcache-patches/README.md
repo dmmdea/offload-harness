@@ -52,6 +52,52 @@ running MP server has the old one loaded. The previous tree is kept at `$OVERLAY
 To build a second overlay beside a live one (a new vLLM/LMCache venv under test), give both variables new paths:
 `VENV=<seat-dir>/vllm-env-new OVERLAY=<seat-dir>/lmcache-overlay-new`. The live seat is not touched.
 
+## LMCache 0.5.6 on WSL2 (`wsl2-0.5.6/`)
+
+The set in `wsl2-0.5.6/` is for a tensor-parallel seat on WSL2 running LMCache 0.5.6 (with vLLM 0.32.0). It holds one
+patch, `07-house-wsl2-no-direct-copy.diff`.
+
+**Why.** LMCache 0.5.6 turns on a copy-engine direct path by default (PR #5308). It hands the pinned L1 pool's host
+addresses to `cudaMemcpyBatchAsync`. That is valid only where registered host memory is device-addressable at the same
+address, which is the device attribute `cudaDevAttrCanUseHostPointerForRegisteredMem`.
+
+`batch_memcpy_supported()` checks that attribute on ROCm only, not on CUDA. On WSL2, with three Blackwell cards, driver
+CUDA 13.4 and runtime 13.0:
+- every device reports the attribute as 0;
+- `cudaHostGetDevicePointer` returns an address different from the host pointer, whether the memory is registered
+  Mapped or Mapped|Portable, on every registering and current device.
+
+**What fails without it.** The MP server's first store logs success, a `~CUDAEvent` illegal-memory-access warning follows,
+and every later store or retrieve fails in `stage_block_ids` while requests wait Deferred. Registering the pool Portable
+does not help.
+
+**What the patch does.** It sets `_HAS_BATCH_MEMCPY_ASYNC = False` in `v1/multiprocess/object_group_transfer.py`, so
+every transfer takes the staged path. It logs `HOUSE-WSL2-NO-DIRECT-COPY` once per server start, with what native support
+would have been.
+
+**Measured on a tp2 seat** (two 16 GB Blackwell cards, fp8 KV, a GDN hybrid, 163,840-token window):
+- a 23,764-token needle prompt came back from the L2 store after eviction (23,520 external hit tokens, TTFT 3.0 s against
+  24.1 s cold);
+- it came back again after a full engine and MP server restart (3.6 s);
+- 0 illegal-access lines.
+
+**Status of the other patches on 0.5.6:**
+- 01 (#4253), 05 (#4709) and 06 (#5249) are upstream in 0.5.6 under other names. They neither apply nor reverse-apply, so
+  this set leaves them out.
+- 02 and 04 (pipeline-parallel layouts) do not apply to 0.5.6 and are not ported yet. A pipeline seat stays on a 0.5.5
+  overlay.
+
+```sh
+PATCHES=<seat-dir>/lmcache-patches/wsl2-0.5.6 VENV=<seat-dir>/vllm-env-032 OVERLAY=<seat-dir>/lmcache-overlay-056 \
+  bash lmcache-patches/repatch-lmcache-overlay.sh
+```
+
+The build checks the `no_direct_copy` marker, read from the source because without a GPU the stock flag is False too.
+This set has no smoke test, because `smoke-overlay.py` tests 0.5.5 internals.
+
+The same seat also needs vLLM's KV allocation split into regions, or it does not start on WSL2: see
+`../vllm-patches/README.md`.
+
 ## After a version change
 
 Point the seat at a **new** L2 `base_path`. A version change can alter the bytes of a page without changing its size,

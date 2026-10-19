@@ -1,0 +1,192 @@
+--- a/vllm/v1/worker/utils.py
++++ b/vllm/v1/worker/utils.py
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import math
++import os
+ from collections import defaultdict
+ from collections.abc import Iterable, Mapping, Sequence
+ from dataclasses import dataclass, field, replace
+@@ -576,6 +577,12 @@
+     if not kv_cache_config.kv_cache_tensors:
+         return {}
+ 
++    # HOUSE-KV-SPLIT (off unless HOUSE_KV_SPLIT=1): one backing allocation per region.
++    if device.type != "meta" and _house_kv_split_enabled():
++        return _allocate_kv_cache_split(
++            kv_cache_config, device, layout, kernel_block_sizes
++        )
++
+     sizes = {tensor.size for tensor in kv_cache_config.kv_cache_tensors}
+     assert len(sizes) == 1, "KV cache tensors must share one backing allocation."
+     raw_size = sizes.pop()
+@@ -627,6 +634,168 @@
+     return kv_caches
+ 
+ 
++# HOUSE-KV-SPLIT ----------------------------------------------------------------
++# vLLM 0.29+ backs all of a worker's KV cache with ONE torch.zeros allocation (see
++# allocate_kv_cache). On WSL2 the dxg layer refuses to export an allocation of about
++# 3.3 GB or more through CUDA IPC (`make_resident` -12), and LMCache's CudaIPCWrapper
++# exports every layer's storage that way. vLLM 0.28 gave each KV tensor its own
++# ~548 MiB allocation and exported fine; HOUSE_KV_SPLIT=1 restores that shape.
++#
++# Not supported under the toggle (they assume one storage): SimpleCPUOffload, and the
++# NIXL / MoRIIO / Mooncake connectors' single-storage fast paths. The LMCache MP
++# connector wraps each layer view on its own, so it works with either shape.
++_HOUSE_KV_SPLIT_ENV = "HOUSE_KV_SPLIT"
++
++
++def _house_kv_split_enabled() -> bool:
++    """Whether HOUSE_KV_SPLIT asks for one backing allocation per region."""
++    raw = os.environ.get(_HOUSE_KV_SPLIT_ENV, "")
++    value = raw.strip().lower()
++    if value in ("", "0", "false", "no", "off"):
++        return False
++    if value in ("1", "true", "yes", "on"):
++        return True
++    raise ValueError(f"{_HOUSE_KV_SPLIT_ENV} must be 0 or 1, got {raw!r}.")
++
++
++def _allocate_kv_cache_split(
++    kv_cache_config: KVCacheConfig,
++    device: torch.device,
++    layout: KVCacheLayout,
++    kernel_block_sizes: list[int] | None,
++) -> dict[str, torch.Tensor]:
++    """``allocate_kv_cache`` with one backing allocation per region.
++
++    A KVCacheTensor is a placement, not an allocation: it puts ``len(layers)``
++    layers in the one pool, layer ``l`` at ``offset + l * layer_stride``, and the
++    tensors of different cache groups overlay the same bytes. The unit vLLM 0.28
++    allocated (one buffer shared by the same-slot layer of every group) is the
++    region here: the union of the layer slots ``[start, start + layer_stride)`` that
++    overlap. Each region gets its own ``torch.zeros`` buffer, and every layer view
++    is rebuilt on it with the dtype, shape and strides of the single-buffer path,
++    shifted only by the region start, so layers that overlay still share their bytes.
++    On a non-CPU device the caching allocator is emptied first, so that no region is
++    carved out of a cached block of a larger segment.
++
++    Raises rather than quietly keeping the one big buffer when the config cannot be
++    cut (layers interleaved block by block, a spec that takes the raw backing, ROCm):
++    the caller asked for small allocations, and the failure would otherwise surface
++    minutes later, inside the KV connector's IPC export.
++    """
++    if current_platform.is_rocm():
++        raise NotImplementedError(
++            f"{_HOUSE_KV_SPLIT_ENV}=1 is not supported on ROCm, where the single "
++            "backing is page-padded for MoRIIO."
++        )
++
++    if device.type != "cpu":
++        # On the --kv-cache-memory-bytes path nothing frees the caching allocator's
++        # cached blocks between profile_run() and this allocation, so a region could
++        # be carved out of a cached profile-run segment, and LMCache's
++        # storage._share_cuda_() would export that whole segment (CUDA IPC exports
++        # the segment, not the tensor). Empty the cache first: every region then gets
++        # a segment of its own size.
++        accelerator = getattr(torch, "accelerator", None)
++        if hasattr(accelerator, "empty_cache"):
++            accelerator.empty_cache()
++        else:
++            torch.cuda.empty_cache()
++
++    # The geometry of every layer view comes from the stock code, run on the meta
++    # device: nothing is allocated, and dtype, shape, stride and offset are exactly
++    # what the single buffer gives. This also runs the stock same-size assertion.
++    stock = allocate_kv_cache(
++        kv_cache_config, torch.device("meta"), layout, kernel_block_sizes
++    )
++    pool_size = kv_cache_config.kv_cache_tensors[0].size
++
++    slots: list[tuple[int, int, str]] = []
++    for tensor in kv_cache_config.kv_cache_tensors:
++        for index, name in enumerate(tensor.layers):
++            view = stock[name]
++            if view.dim() != 4:
++                raise NotImplementedError(
++                    f"{_HOUSE_KV_SPLIT_ENV}=1: layer {name!r} takes the raw KV "
++                    "backing (its spec has no layer views), which cannot be cut."
++                )
++            itemsize = view.element_size()
++            start = view.storage_offset() * itemsize
++            slot_start = tensor.offset + index * tensor.layer_stride
++            if start != slot_start:
++                raise RuntimeError(
++                    f"{_HOUSE_KV_SPLIT_ENV}=1: layer {name!r} starts at byte {start}, "
++                    f"not at its slot ({slot_start}); the placement rule changed."
++                )
++            # One past the last byte the view touches (all strides are positive).
++            touched_end = start
++            if view.numel():
++                touched_end += itemsize * (
++                    1 + sum((n - 1) * s for n, s in zip(view.shape, view.stride()))
++                )
++            if touched_end > pool_size:
++                # Meta views are not bounds-checked; the single buffer would fail too.
++                raise RuntimeError(
++                    f"layer {name!r} addresses {touched_end} bytes of a "
++                    f"{pool_size}-byte KV cache allocation."
++                )
++            slot_end = min(slot_start + tensor.layer_stride, pool_size)
++            if touched_end > slot_end:
++                raise NotImplementedError(
++                    f"{_HOUSE_KV_SPLIT_ENV}=1: layer {name!r} is not contiguous in "
++                    f"its slot: layout {layout.name} interleaves layers block by "
++                    "block, so no smaller allocation keeps the byte layout. Use a "
++                    "layer-outermost layout (VLLM_KV_CACHE_LAYOUT=LBHNC or LBNHC) or "
++                    f"unset {_HOUSE_KV_SPLIT_ENV}."
++                )
++            slots.append((slot_start, slot_end, name))
++
++    # Overlapping slots (the same-slot layers of the cache groups) form one region.
++    regions: list[list[int]] = []
++    region_of: dict[str, int] = {}
++    for start, end, name in sorted(slots):
++        if regions and start < regions[-1][1]:
++            regions[-1][1] = max(regions[-1][1], end)
++        else:
++            regions.append([start, end])
++        region_of[name] = len(regions) - 1
++
++    buffers = [
++        torch.zeros(end - start, dtype=torch.int8, device=device)
++        for start, end in regions
++    ]
++
++    # `stock` is in the single-buffer path's insertion order; keep it.
++    kv_caches: dict[str, torch.Tensor] = {}
++    for name, view in stock.items():
++        region = region_of[name]
++        itemsize = view.element_size()
++        offset = view.storage_offset() * itemsize - regions[region][0]
++        if offset % itemsize:
++            raise ValueError(
++                f"layer {name!r} starts {offset} bytes into its region, which is not "
++                f"a multiple of its {itemsize}-byte element."
++            )
++        base = buffers[region]
++        if view.dtype != base.dtype:
++            # The same storage, typed like the layer, so as_strided can place it.
++            base = torch.empty(0, dtype=view.dtype, device=device)
++            base.set_(buffers[region].untyped_storage())
++        kv_caches[name] = torch.as_strided(
++            base, view.shape, view.stride(), offset // itemsize
++        )
++
++    mib = 1024 * 1024
++    logger.info(
++        "%s=1: split the %.1f MiB KV cache into %d region(s) of %.1f-%.1f MiB.",
++        _HOUSE_KV_SPLIT_ENV,
++        pool_size / mib,
++        len(regions),
++        min(end - start for start, end in regions) / mib,
++        max(end - start for start, end in regions) / mib,
++    )
++    return kv_caches
++
++
+ def prepare_kernel_block_sizes(
+     kv_cache_config: KVCacheConfig, attn_groups: list[list[AttentionGroup]]
+ ) -> list[int]:

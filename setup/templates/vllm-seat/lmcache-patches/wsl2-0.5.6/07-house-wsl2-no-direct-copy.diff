@@ -1,0 +1,26 @@
+# HOUSE-WSL2-NO-DIRECT-COPY (LMCache 0.5.6, WSL2 only): turn off the copy-engine direct path (PR #5308), which
+# faults where registered host memory is not device-addressable (cudaDevAttrCanUseHostPointerForRegisteredMem == 0).
+# See ../README.md, section 'LMCache 0.5.6 on WSL2'.
+--- a/lmcache/v1/multiprocess/object_group_transfer.py
++++ b/lmcache/v1/multiprocess/object_group_transfer.py
+@@ -54,9 +54,18 @@
+ # ``batch_memcpy_supported`` and ``direct_copy_format_supported`` are
+ # native-only and exported together with ``execute_direct_copy_transfer``, so
+ # the ``hasattr`` check guards them.
+-_HAS_BATCH_MEMCPY_ASYNC: bool = (
++# HOUSE-WSL2-NO-DIRECT-COPY: the copy-engine direct path (LMCache PR #5308) hands the pinned
++# L1 pool's host addresses to cudaMemcpyBatchAsync. That is only valid where registered host
++# memory is device-addressable at the same address
++# (cudaDevAttrCanUseHostPointerForRegisteredMem == 1); WSL2 reports 0 on every device and the
++# MP server then faults with an illegal memory access on its first store or retrieve.
++# batch_memcpy_supported() gates this only on ROCm, so the path stays off here and every
++# transfer takes the staged path below.
++_HAS_BATCH_MEMCPY_ASYNC: bool = False
++init_logger(__name__).warning(
++    "HOUSE-WSL2-NO-DIRECT-COPY: copy-engine direct path off (native support would be %s)",
+     hasattr(device_ops, "execute_direct_copy_transfer")
+-    and device_ops.batch_memcpy_supported()
++    and device_ops.batch_memcpy_supported(),
+ )
+ # Layouts already reported as ineligible, so a model whose format never
+ # qualifies logs once instead of once per request.

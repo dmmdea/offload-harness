@@ -29,9 +29,19 @@
 # The engine and its MP server must run the same patch set: an engine with 04 against a server without it does not
 # start (the old server drops the 8-frame REGISTER and the engine's register times out after mq_timeout).
 # A patch whose change is already in the base (patch -R --dry-run applies) is SKIPPED and recorded, never forced.
+# The verify step checks the marker of each patch FILE present in $PATCHES, so a set that leaves a patch out does not
+# demand its marker.
+#
+# A second set, wsl2-0.5.6/ (base LMCache 0.5.6, a tensor-parallel seat on WSL2), holds one patch:
+#   07-house-wsl2-no-direct-copy.diff  turn off the copy-engine direct path (LMCache PR #5308), which faults on WSL2
+#                                   (cudaDevAttrCanUseHostPointerForRegisteredMem == 0). 01, 05 and 06 are upstream in
+#                                   0.5.6 under other names and do not apply; 02 and 04 are not ported to 0.5.6 yet, so a
+#                                   pipeline seat stays on a 0.5.5 overlay. See README.md.
 #
 #   bash repatch-lmcache-overlay.sh                                          # rebuild the default overlay
 #   VENV=<seat-dir>/vllm-env-030 OVERLAY=<seat-dir>/lmcache-overlay-055 bash repatch-lmcache-overlay.sh
+#   PATCHES=<seat-dir>/lmcache-patches/wsl2-0.5.6 VENV=<seat-dir>/vllm-env-032 OVERLAY=<seat-dir>/lmcache-overlay-056 \
+#     bash repatch-lmcache-overlay.sh                                        # LMCache 0.5.6 on WSL2
 set -u
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The seat directory: SEAT_DIR when given, else the parent of this script's directory, but only when seat_fg.sh sits
@@ -105,17 +115,26 @@ def _pr4709():
 def _pr5249():
     from lmcache.integration.vllm.vllm_multi_process_adapter import LMCacheMPSchedulerAdapter as S
     return "reserve_last_token" in inspect.signature(S.maybe_submit_lookup_request).parameters
+def _no_direct_copy():
+    # Read from the source: without a GPU the stock flag is False too, so the value alone proves nothing.
+    import lmcache.v1.multiprocess.object_group_transfer as t
+    src = inspect.getsource(t)
+    return "HOUSE-WSL2-NO-DIRECT-COPY" in src and "_HAS_BATCH_MEMCPY_ASYNC: bool = False" in src
 marker("register_bind", _register_bind)
 marker("pr4709", _pr4709)
 marker("pr5249", _pr5249)
+marker("no_direct_copy", _no_direct_copy)
 print("lmcache=%s" % lmcache.__version__)
 PYEOF
 )"
 echo "$OUT" | grep -E '^[a-z0-9_]+='
-WANT="from_overlay=True fused_kv=True pp_layout=True"
+WANT="from_overlay=True"
+[ -e "$PATCHES/01-pr4253.diff" ] && WANT="$WANT fused_kv=True"
+[ -e "$PATCHES/02-house-pp-layout.diff" ] && WANT="$WANT pp_layout=True"
 [ -e "$PATCHES/04-house-pp-register-bind.diff" ] && WANT="$WANT register_bind=True"
 [ -e "$PATCHES/05-backport-pr4709.diff" ] && WANT="$WANT pr4709=True"
 [ -e "$PATCHES/06-backport-pr5249.diff" ] && WANT="$WANT pr5249=True"
+[ -e "$PATCHES/07-house-wsl2-no-direct-copy.diff" ] && WANT="$WANT no_direct_copy=True"
 for want in $WANT; do
   echo "$OUT" | grep -qx "$want" || { echo "repatch: VERIFY FAILED ($want missing) — overlay left untouched; inspect $NEW"; exit 1; }
 done
