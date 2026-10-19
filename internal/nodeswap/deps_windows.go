@@ -29,6 +29,7 @@ type cimProcRow struct {
 	ProcessId      int    `json:"ProcessId"`
 	CommandLine    string `json:"CommandLine"`
 	ExecutablePath string `json:"ExecutablePath"`
+	Name           string `json:"Name"`
 }
 
 // findProcessesByExeWindows enumerates every process whose ExecutablePath
@@ -41,6 +42,13 @@ type cimProcRow struct {
 // exe with the same base name (local-offload.exe vs
 // local-offload-fleet.exe, per the 2026-09-23/24 <node-b> deploy records) — a
 // name-only filter would return the wrong process's holders.
+//
+// The one exception is a row the OS will not describe: CIM returns an EMPTY ExecutablePath and
+// CommandLine for a process that runs elevated (or as another account) when this process is not
+// elevated. Measured 2026-10-19 on a Windows node: a fleet node restarted over `ssh localhost` ran
+// elevated in session 0, and an unelevated swap saw no node to stop and no new node to verify,
+// then rolled back against the running node. Such a row is returned when its Name is the target's
+// file name, marked Unreadable, so the swap can refuse instead of guessing.
 func findProcessesByExeWindows(exePath string) ([]ProcessInfo, error) {
 	abs, err := filepath.Abs(exePath)
 	if err != nil {
@@ -48,9 +56,9 @@ func findProcessesByExeWindows(exePath string) ([]ProcessInfo, error) {
 	}
 	script := fmt.Sprintf(
 		`Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | `+
-			`Where-Object { $_.ExecutablePath -and ($_.ExecutablePath -ieq %s) } | `+
-			`Select-Object ProcessId,CommandLine,ExecutablePath | ConvertTo-Json -Compress`,
-		psQuote(abs))
+			`Where-Object { ($_.ExecutablePath -and ($_.ExecutablePath -ieq %s)) -or (-not $_.ExecutablePath -and ($_.Name -ieq %s)) } | `+
+			`Select-Object ProcessId,CommandLine,ExecutablePath,Name | ConvertTo-Json -Compress`,
+		psQuote(abs), psQuote(filepath.Base(abs)))
 	raw, err := runPowerShell(context.Background(), 20*time.Second, script)
 	if err != nil {
 		return nil, fmt.Errorf("CIM process query failed: %w (output: %s)", err, truncate(raw, 300))
@@ -65,7 +73,7 @@ func findProcessesByExeWindows(exePath string) ([]ProcessInfo, error) {
 	}
 	procs := make([]ProcessInfo, 0, len(rows))
 	for _, r := range rows {
-		procs = append(procs, ProcessInfo{PID: r.ProcessId, CommandLine: r.CommandLine, ExecutablePath: r.ExecutablePath})
+		procs = append(procs, ProcessInfo{PID: r.ProcessId, CommandLine: r.CommandLine, ExecutablePath: r.ExecutablePath, Unreadable: r.ExecutablePath == ""})
 	}
 	return procs, nil
 }

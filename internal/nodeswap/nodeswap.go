@@ -29,6 +29,8 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -191,6 +193,11 @@ type ProcessInfo struct {
 	PID            int
 	CommandLine    string
 	ExecutablePath string
+	// Unreadable: a process with the target's file name whose path and command line the OS
+	// would not give this process (Windows: it runs elevated or as another account, and CIM
+	// returns both empty). Nothing can tell whether it is the node, so a swap that stops and
+	// restarts the node refuses on it (refuseUnreadableHolders).
+	Unreadable bool
 }
 
 // HealthInfo is the subset of GET /fleet/health this package reasons about.
@@ -361,6 +368,16 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 	// hashed, waited on, stopped or renamed, on a dry run as on a real one. Only whether the key is there was recorded.
 	if c := plan.FleetKey; c != nil && !c.Present && healthBeyondLoopback(plan.HealthURL) {
 		return fail("fleet-key", fmt.Sprintf("this node's health URL (%s) is beyond loopback and its config (%s) holds no fleet_auth_token: every lane of the new binary requires the fleet bearer, and fleet-serve will not start on a non-loopback address without the key. Put fleet_auth_token in that config (the value is never read here) and run the swap again, or pass --skip-fleet-key-check when this box's config is not the node's", plan.HealthURL, c.Config))
+	}
+
+	// 0b. A swap that stops and restarts the node must be able to see the node. A process on the
+	// target's file name that this process cannot read (elevated, or another account's) is one it
+	// can neither stop nor tell apart from the new node, and the swap would roll back against a
+	// running node (2026-10-19). Refused here, before anything is touched, on a dry run too.
+	if plan.RestartTaskName != "" || plan.RestartCommand != "" {
+		if err := refuseUnreadableHolders(plan, deps); err != nil {
+			return fail("process-access", err.Error())
+		}
 	}
 
 	// 1. Verify the staged binary's hash before anything else is touched.
@@ -668,6 +685,30 @@ func splitLeases(info GPULeaseInfo, cards []string, stoppable map[int]bool) (hol
 		}
 	}
 	return holding, leftAlone
+}
+
+// refuseUnreadableHolders returns an error naming every process on plan.Target's file name whose
+// path and command line the OS would not give this process. An enumeration error is left to the
+// steps that list processes later, which report it in their own words.
+func refuseUnreadableHolders(plan Plan, deps Deps) error {
+	if deps.FindProcessesByExe == nil {
+		return nil
+	}
+	procs, err := deps.FindProcessesByExe(plan.Target)
+	if err != nil {
+		return nil
+	}
+	var pids []string
+	for _, p := range procs {
+		if p.Unreadable {
+			pids = append(pids, strconv.Itoa(p.PID))
+		}
+	}
+	if len(pids) == 0 {
+		return nil
+	}
+	return fmt.Errorf("pid %s runs a program named %s whose path and command line this process cannot read: it runs elevated or as another account (a node restarted over `ssh localhost` runs elevated). node-swap could neither stop it nor see the new node start, and would roll back against a running node. Nothing was touched. Run node-swap at the node's elevation (an elevated shell, or through `ssh localhost`)",
+		strings.Join(pids, ", "), filepath.Base(plan.Target))
 }
 
 // mayStop reports whether this deploy may stop p: stopForSwap stops the node process (the
@@ -1027,12 +1068,17 @@ func verifyRunning(ctx context.Context, plan Plan, deps Deps, expectedHash strin
 		find = deps.FindProcessesByExe
 	}
 	var lastErr error
+	var unreadable []string // the last poll's processes on the target's name that this process cannot read
 	for {
 		procs, perr := find(plan.Target)
 		if perr != nil {
 			lastErr = perr
 		}
+		unreadable = unreadable[:0]
 		for _, p := range procs {
+			if p.Unreadable {
+				unreadable = append(unreadable, strconv.Itoa(p.PID))
+			}
 			if !strings.Contains(p.CommandLine, match) {
 				continue
 			}
@@ -1058,6 +1104,10 @@ func verifyRunning(ctx context.Context, plan Plan, deps Deps, expectedHash strin
 		if deps.Now().After(deadline) {
 			if lastErr != nil {
 				return 0, "", "", fmt.Errorf("no verified new %q process within %s: %w", match, timeout, lastErr)
+			}
+			if len(unreadable) > 0 {
+				return 0, "", "", fmt.Errorf("no %q process this process can read appeared within %s, but pid %s runs %s unreadably: the restart started the node at another elevation (or account) than node-swap runs at, so it cannot be verified from here; run node-swap at the node's elevation",
+					match, timeout, strings.Join(unreadable, ", "), filepath.Base(plan.Target))
 			}
 			return 0, "", "", fmt.Errorf("no %q process appeared within %s", match, timeout)
 		}

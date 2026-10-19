@@ -85,7 +85,8 @@ func (s *fakeState) deps() Deps {
 		FindProcessesByExe: func(exePath string) ([]ProcessInfo, error) {
 			var out []ProcessInfo
 			for _, p := range s.procs {
-				if p.ExecutablePath == exePath {
+				// An Unreadable row has no path to match: the Windows finder returns it by name.
+				if p.ExecutablePath == exePath || p.Unreadable {
 					out = append(out, p)
 				}
 			}

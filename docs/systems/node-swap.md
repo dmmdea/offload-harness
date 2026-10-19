@@ -145,6 +145,16 @@ rollback branch is unit-tested with fakes, no real Windows box required):
    anything, on a dry run as on a real one. A loopback or standalone node (no health URL) is not
    checked. `--skip-fleet-key-check` (`-SkipFleetKeyCheck` on the Windows launcher) leaves the
    check out, for a box whose config is not the node's; the Linux launcher forwards `--config`.
+   **Process access (Windows).** A swap that stops and restarts the node (`--restart-task` or
+   `--restart-command`) next lists the processes on the target. CIM gives an unelevated process an
+   EMPTY path and command line for a process that runs elevated or as another account, and a node
+   restarted over `ssh localhost` runs elevated. Such a row, on the target's file name, is one the
+   swap can neither stop nor tell apart from the new node, so the engine refuses with the step
+   `process-access`, naming the pid, before anything is hashed or touched, on a dry run as on a
+   real one. Run the swap at the node's elevation (an elevated shell, or through `ssh localhost`).
+   The swap that hit this (2026-10-19) saw no node to stop and no new node to verify, and rolled
+   back against the running node. The rollback failed only because the running node locked the
+   new exe.
 1. **Verify hash** — the staged binary's sha256 must equal `--sha256` before anything is
    touched.
 2. **Wait idle** — poll `--health-url`'s `/fleet/health` until `running=0, queued=0` (skipped
@@ -315,6 +325,11 @@ no real binary or fleet node needed.
   bind address; a node whose config was never told its real address still skips the
   idle-wait exactly as before (hash-only verification, no false sense of safety). Passing
   `--health-url` explicitly always overrides the auto-resolve either way.
+- Running the swap unelevated against a node that runs elevated (a Windows node last restarted
+  over `ssh localhost`, which `fleet-node-restart.ps1` launches elevated in session 0): refused at
+  `process-access`. Run the swap through `ssh localhost` (or an elevated shell) so the stop, the
+  restart and the verification all run at one elevation. A restart that starts the node at another
+  elevation than the swap runs at fails verification with a message that names the unreadable pid.
 - Setting both `--restart-task` and `--restart-command` — rejected up front
   (`nodeswap.validatePlan`); pick one restart mechanism per node.
 - Passing a `--backup-suffix` that already starts with `bak-` (e.g.
