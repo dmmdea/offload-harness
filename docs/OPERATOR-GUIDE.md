@@ -1762,8 +1762,8 @@ SEAT_LMCACHE_PYTHONPATH=<seat-dir>/lmcache-overlay   # optional: load LMCache fr
   First use: LMCache PR #4253 (fp8-KV / FlashInfer store corruption on GDN hybrids, LMCache #4247).
 - **A seat on WSL2 with vLLM ≥ 0.30 and LMCache 0.5.6 needs two house patches.**
   - **vLLM (start).** vLLM ≥ 0.29 backs a worker's KV cache with one allocation, and WSL2 refuses to export one that large through CUDA IPC, so the seat dies at start (`dxgkio_make_resident: Ioctl failed: -12` in the guest's kernel log).
-    - Fix: apply `setup/templates/vllm-seat/vllm-patches/house-kv-split-<vllm version>.patch` to the venv and put `export HOUSE_KV_SPLIT=1` in the seat env.
-    - The renderer does not emit that line yet, so add it after rendering.
+    - Fix: apply `setup/templates/vllm-seat/vllm-patches/house-kv-split-<vllm version>.patch` to the venv.
+    - The rendered WSL2 seat env already exports `HOUSE_KV_SPLIT=1`, and an unpatched vLLM never reads it; a seat env written by hand needs the line.
     - Then the seat log shows `HOUSE_KV_SPLIT=1: split the … KV cache into N region(s)`.
   - **LMCache (first store).** LMCache 0.5.6's copy-engine direct path faults on WSL2: the MP server logs an illegal memory access on its first store or retrieve, and requests then hang.
     - Fix: build the overlay from the `wsl2-0.5.6` set, `PATCHES=<seat-dir>/lmcache-patches/wsl2-0.5.6 bash lmcache-patches/repatch-lmcache-overlay.sh`.
