@@ -6,6 +6,20 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.194.0] - 2026-10-20 - New installs seed the 28 values five tiers' live nodes run, and ADR 0086 (an overdue lease's holder is asked to yield) is Accepted
+
+### Changed - ADR 0086 is Accepted
+
+- **What it does.** ADR 0086 (an overdue lease's holder is asked to yield, never taken from) moves from Proposed to Accepted, in its frontmatter and in the decisions index, with an acceptance section dated 2026-10-14. No code changes: the `gpu_on_overdue` key shipped in 0.186.0 and its behaviour is unchanged.
+- **Why.** The operator accepted `request` on 2026-10-14 (ask the holder, never kill), and the record still read Proposed.
+
+### Fixed - tier seeds now carry the 28 values five tiers' live nodes measurably run
+
+- **What it does.** `setup/templates/profiles.json` gains or corrects 28 `config_seed` keys, so a NEW install of each tier seeds what the live nodes run. blackwell-3x16: the fp8mixed edit unet (was Q5_1), `inpaint_vae` builtin, the `wan22` entry in `videogen_families` (fp8_scaled native pair) and `videogen_upscale_model` 4x-UltraSharp. ampere-6: the animate, music, run-graph, video and voice scripts seeded blank, so a 6 GB card no longer advertises ComfyUI routes it cannot run. amd-gcn (17 keys): the audio.cpp binary moves to v0.9.1, the same five scripts go blank, and the z-image-turbo stable-diffusion.cpp image lane is seeded (engine, family, 8 steps, cfg 1, model, text encoder, VAE, Vulkan flags, `imagegen_timeout_sec` 1800). rockchip-rk3588: `compose_script` blank. ampere-8 `config_seed_ram_mid_high`: `gen_edit_script`. Paths use the seed's own `__OFFLOAD_HOME__` and `__EXE__` tokens. It changes only what a new install seeds and never touches an existing config. The tier pages under `docs/tiers/` are regenerated, and the 16 GB comfy-tier seed test now pins the fp8mixed edit unet for blackwell-3x16.
+- **Not seeded.** The ampere-8 node also runs a wan22 video recipe, but the ampere-8 overlay keeps no video or music keys: the 2026-07-23 decision waits for an ampere-8 bake, `install-config-seed.test.ps1` pins it, and no ampere-8 Wan render is on record.
+- **Why.** An audit of six live nodes' configs against their tiers' seeds found these keys measurably right on the node and missing or stale in the seed, so a fresh install would have started from a worse config than the node it was meant to reproduce.
+- **Check.** `go run ./cmd/gentiers .` regenerated the pages; `go test` on the root package, `internal/tierseed` and `internal/config` passes, including `TestTierDocsAreCurrent` and the seed-rule tests; `setup/tests/install-config-seed.test.ps1` passes.
+
 ## [0.193.0] - 2026-10-19 - agent_delegate lint_only previews the acceptance lint and placement without running, and a multicard image call above the canvas cap is refused before the lease
 
 ### Changed - docs record LMCache PR #4253 as merged upstream, with the overlay still required
