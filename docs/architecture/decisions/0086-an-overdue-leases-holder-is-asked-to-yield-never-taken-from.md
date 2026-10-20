@@ -1,5 +1,5 @@
 ---
-status: Proposed
+status: Accepted
 date: "2026-10-13"
 ---
 
@@ -133,6 +133,12 @@ the two is the operator's to confirm.
   P12 mandatory first. Rejected.
 - **`request` as the default.** The plan's default. Rejected by the operator for this build: the default stays the current
   behaviour and asking is opt-in.
+
+## Acceptance 2026-10-14
+
+The operator accepted this record on 2026-10-14, answering the overdue-lease question with `request`: ask the holder, let it
+free the cards in the ordinary way, never kill. Asking stays opt-in per node, as decided above: one node sets `gpu_on_overdue = request`
+since 2026-10-14, and the others keep the unset default, where nobody is asked.
 
 ## Related code
 
