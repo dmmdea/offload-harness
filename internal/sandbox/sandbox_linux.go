@@ -5,10 +5,12 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -22,8 +24,9 @@ import (
 // deniedSyscalls are never-legitimate-for-a-task syscalls; a caged process that
 // invokes one is KILLED (SIGSYS) — a clean, definitive deny that a program
 // cannot ignore and retry around (unlike an errno). Every name must exist in the
-// amd64 syscall table (an unknown name fails the whole filter load — proven by
-// the live suite). The i386/compat ABI is closed separately by installArchGuard.
+// syscall table of every caged arch, amd64 and arm64 (an unknown name fails the whole
+// filter load — proven by the live suite). The compat ABIs (i386 on amd64, 32-bit arm
+// on arm64) are closed separately by installArchGuard.
 var deniedSyscalls = []string{
 	"ptrace",                                       // debugger attach / memory poke
 	"mount", "umount2", "pivot_root", "move_mount", // mount-table escapes
@@ -36,17 +39,42 @@ var deniedSyscalls = []string{
 	"fsopen", "fsconfig", "fsmount", "fspick", "open_tree", "mount_setattr", // the new mount API
 	"kexec_file_load",                        // load a new kernel (image-fd variant)
 	"open_by_handle_at", "name_to_handle_at", // by-handle open bypasses Landlock path resolution
-	"io_uring_setup", "io_uring_enter", "io_uring_register", // async ring whose queued ops evade syscall filtering
 	"setns",         // re-enter another namespace
 	"fanotify_init", // filesystem-wide notification (broad read)
 	"quotactl",      // filesystem quota control
+	// SF-17 (measured 2026-10-03 against the run allowlist): pidfd_getfd copies a file
+	// descriptor out of another process, and no allowlisted program references it.
+	// pidfd_send_signal stays ALLOWED: Go's os package signals children through it and
+	// probes it on the first child spawn, so denying it kills go build and go test.
+	// memfd_create stays ALLOWED because denying it buys no containment: Landlock grants
+	// execute wherever it grants read, so a caged command may already write a program into
+	// its scratch dir and run it (go test does exactly that), and an image started from a
+	// memfd inherits the same cage. With no writable path at all it still adds nothing: a
+	// caged process can run any code in its own address space (mmap PROT_EXEC, as the i386
+	// probe does), and that code is caged the same way.
+	"pidfd_getfd",
 }
 
-// Available reports whether the OS cage can be enforced on this host: Landlock
-// present (ABI >= 1), seccomp supported, and unprivileged user namespaces
-// enabled. Used as the capability gate — a future shell tool is granted ONLY
-// when this is true (fail-closed).
-func Available() (bool, string) {
+// unavailableSyscalls fail with EPERM instead of killing the caller. They are optional
+// kernel features that runtimes probe at startup and fall back from, so a kill took the
+// program down with them: node died in the cage at io_uring_setup (libuv probes it; audit
+// syscall=425, 2026-10-03). The io_uring ring must stay unavailable, because its queued
+// operations evade syscall filtering, and EPERM keeps it so: there is no ring to retry
+// around. Docker's default profile and kernel.io_uring_disabled=2 refuse it the same way.
+var unavailableSyscalls = []string{"io_uring_setup", "io_uring_enter", "io_uring_register"}
+
+// Available reports whether the OS cage can be enforced on this host: an
+// architecture the cage can guard, Landlock present (ABI >= 1), seccomp supported,
+// and unprivileged user namespaces enabled. Used as the capability gate — a future
+// shell tool is granted ONLY when this is true (fail-closed).
+func Available() (bool, string) { return available(runtime.GOARCH) }
+
+// available is Available for one architecture. The arch is checked first, so an
+// architecture the cage cannot guard is refused on any host, Landlock present or not.
+func available(goarch string) (bool, string) {
+	if ok, why := archSupported(goarch); !ok {
+		return false, why
+	}
 	abi, err := llsys.LandlockGetABIVersion()
 	if err != nil || abi < 1 {
 		return false, fmt.Sprintf("Landlock unavailable (abi=%d, err=%v)", abi, err)
@@ -147,28 +175,29 @@ func runWorker() error {
 		return fmt.Errorf("chdir worktree %q: %w", spec.Worktree, err)
 	}
 
-	// (3) seccomp: KILL on any denied syscall, and set no_new_privs (required
-	// before Landlock). TSYNC applies the filter to every thread; default-allow
-	// so the Go runtime + the command run normally. None of the worker's own
-	// remaining syscalls (landlock_*, prctl, chdir, execve) are on the denylist.
+	// (3) seccomp: KILL on any denied syscall, EPERM on the unavailable ones, and
+	// set no_new_privs (required before Landlock). TSYNC applies the filter to every
+	// thread; default-allow so the Go runtime + the command run normally. None of the
+	// worker's own remaining syscalls (landlock_*, prctl, chdir, execve) are on either list.
 	if err := seccomp.LoadFilter(seccomp.Filter{
 		NoNewPrivs: true,
 		Flag:       seccomp.FilterFlagTSync,
 		Policy: seccomp.Policy{
 			DefaultAction: seccomp.ActionAllow,
-			Syscalls: []seccomp.SyscallGroup{{
-				Action: seccomp.ActionKillProcess,
-				Names:  deniedSyscalls,
-			}},
+			Syscalls: []seccomp.SyscallGroup{
+				{Action: seccomp.ActionKillProcess, Names: deniedSyscalls},
+				{Action: seccomp.ActionErrno, Names: unavailableSyscalls}, // EPERM
+			},
 		},
 	}); err != nil {
 		return fmt.Errorf("install seccomp: %w", err)
 	}
 
-	// (3b) Close the i386/compat-ABI bypass of the denylist: a stacked arch-guard
-	// that KILLs any non-x86_64 syscall (the denylist filter is x86_64-only and
-	// returns ALLOW for foreign arches). seccomp takes the most-restrictive result
-	// across all installed filters, so this hard-blocks the i386 (int 0x80) path.
+	// (3b) Close the compat-ABI bypass of the denylist: a stacked arch-guard that
+	// KILLs any syscall whose audit arch is not the native one (the denylist filter
+	// covers the native arch only and returns ALLOW for foreign arches). seccomp takes
+	// the most-restrictive result across all installed filters, so this hard-blocks
+	// the i386 (int 0x80) path on amd64 and the 32-bit arm path on arm64.
 	if err := installArchGuard(); err != nil {
 		return fmt.Errorf("install arch-guard: %w", err)
 	}
@@ -327,26 +356,71 @@ func dotGitFileNote(gp, step string, err error) string {
 	return fmt.Sprintf("%s is NOT masked read-only (%s: %v): a command in this cage can write into it and point git at a directory of its own", gp, step, err)
 }
 
+// nativeAuditArch is the seccomp audit arch of the architecture the cage runs on, and
+// whether the cage supports it at all. It used to be x86_64 everywhere, which on arm64
+// killed every syscall of every caged command (SF-44 probe, 2026-10-03).
+func nativeAuditArch(goarch string) (uint32, bool) {
+	switch goarch {
+	case "amd64":
+		return uint32(unix.AUDIT_ARCH_X86_64), true
+	case "arm64":
+		return uint32(unix.AUDIT_ARCH_AARCH64), true
+	}
+	return 0, false
+}
+
+// archSupported reports whether the cage can guard this architecture, and why not.
+func archSupported(goarch string) (bool, string) {
+	if _, ok := nativeAuditArch(goarch); !ok {
+		return false, fmt.Sprintf("the cage supports amd64 and arm64, not %s (no native seccomp arch guard)", goarch)
+	}
+	return true, ""
+}
+
+// archGuardProgram is the arch guard for goarch as classic BPF. seccomp_data.arch is a
+// u32 at byte offset 4: A = arch; if A == native -> ALLOW (the denylist filter then
+// decides); else -> KILL_PROCESS.
+func archGuardProgram(goarch string) ([]unix.SockFilter, error) {
+	native, ok := nativeAuditArch(goarch)
+	if !ok {
+		_, why := archSupported(goarch)
+		return nil, errors.New(why)
+	}
+	return []unix.SockFilter{
+		{Code: 0x20, K: 4},                                     // BPF_LD|BPF_W|BPF_ABS  A = mem[4] (arch)
+		{Code: 0x15, Jt: 1, Jf: 0, K: native},                  // BPF_JMP|BPF_JEQ|BPF_K  ==native ? skip the kill
+		{Code: 0x06, K: uint32(unix.SECCOMP_RET_KILL_PROCESS)}, // BPF_RET|BPF_K          foreign arch -> kill
+		{Code: 0x06, K: uint32(unix.SECCOMP_RET_ALLOW)},        // BPF_RET|BPF_K          native -> allow (denylist applies)
+	}, nil
+}
+
 // installArchGuard adds a tiny classic-BPF seccomp filter that KILLs any syscall
-// whose audit arch is not x86_64. go-seccomp-bpf builds a single-arch (x86_64)
-// filter that returns its default action (ALLOW) for every other arch, so on a
-// CONFIG_IA32_EMULATION kernel the denylist is bypassable via the i386 (int 0x80)
-// ABI. The kernel evaluates ALL installed seccomp filters and takes the
-// most-restrictive result, so stacking this guard hard-blocks the foreign-arch
-// path regardless of what the denylist filter returns. Installed AFTER the
-// denylist (which set no_new_privs, required before SECCOMP_SET_MODE_FILTER).
+// whose audit arch is not the NATIVE one (x86_64 on amd64, aarch64 on arm64).
+// go-seccomp-bpf builds a single-arch filter that returns its default action (ALLOW)
+// for every other arch, so on a kernel with a compat ABI (i386 int 0x80 on amd64,
+// 32-bit arm on arm64) the denylist is bypassable through it. The kernel evaluates
+// ALL installed seccomp filters and takes the most-restrictive result, so stacking
+// this guard hard-blocks the foreign-arch path regardless of what the denylist filter
+// returns. Installed AFTER the denylist (which set no_new_privs, required before
+// SECCOMP_SET_MODE_FILTER), and with TSYNC like the denylist: without it the guard sat
+// on the installing thread only, while the Go runtime may run the final exec on another
+// thread, whose image then carried the denylist and no guard (SF-17 review: i386 calls
+// survived the cage under load).
 func installArchGuard() error {
-	// seccomp_data.arch is a u32 at byte offset 4. Classic BPF:
-	//   A = arch; if A == AUDIT_ARCH_X86_64 -> ALLOW; else -> KILL_PROCESS
-	filter := []unix.SockFilter{
-		{Code: 0x20, K: 4}, // BPF_LD|BPF_W|BPF_ABS  A = mem[4] (arch)
-		{Code: 0x15, Jt: 1, Jf: 0, K: uint32(unix.AUDIT_ARCH_X86_64)}, // BPF_JMP|BPF_JEQ|BPF_K  ==x86_64 ? skip the kill
-		{Code: 0x06, K: uint32(unix.SECCOMP_RET_KILL_PROCESS)},        // BPF_RET|BPF_K          foreign arch -> kill
-		{Code: 0x06, K: uint32(unix.SECCOMP_RET_ALLOW)},               // BPF_RET|BPF_K          x86_64 -> allow (denylist applies)
+	filter, err := archGuardProgram(runtime.GOARCH)
+	if err != nil {
+		return err
 	}
 	prog := unix.SockFprog{Len: uint16(len(filter)), Filter: &filter[0]}
-	if _, _, errno := unix.Syscall(unix.SYS_SECCOMP, uintptr(unix.SECCOMP_SET_MODE_FILTER), 0, uintptr(unsafe.Pointer(&prog))); errno != 0 {
+	// With TSYNC the call returns 0 on success; when a thread cannot be synchronized it
+	// attaches nothing and returns that thread's id, with no errno.
+	tid, _, errno := unix.Syscall(unix.SYS_SECCOMP, uintptr(unix.SECCOMP_SET_MODE_FILTER),
+		uintptr(unix.SECCOMP_FILTER_FLAG_TSYNC), uintptr(unsafe.Pointer(&prog)))
+	if errno != 0 {
 		return fmt.Errorf("seccomp(SET_MODE_FILTER) arch-guard: %w", errno)
+	}
+	if tid != 0 {
+		return fmt.Errorf("seccomp(SET_MODE_FILTER) arch-guard: thread %d could not be synchronized", tid)
 	}
 	return nil
 }
