@@ -43,6 +43,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `animategen_engine` | `sdcpp` |
 | `animategen_frames` | `33` |
 | `animategen_height` | `512` |
+| `animategen_script` | `` |
 | `animategen_sdcpp_backend` | `vulkan0` |
 | `animategen_sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__` |
 | `animategen_sdcpp_max_tokens` | `5800` |
@@ -54,18 +55,33 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `animategen_timeout_sec` | `5400` |
 | `animategen_width` | `288` |
 | `audiocpp_backend` | `vulkan` |
-| `audiocpp_bin` | `__OFFLOAD_HOME__/audiocpp-v0.9.0-native-v3/audiocpp_cli__EXE__` |
+| `audiocpp_bin` | `__OFFLOAD_HOME__/audiocpp-v0.9.1-native-v3/audiocpp_cli__EXE__` |
 | `audiocpp_device` | `0` |
 | `audiocpp_music_family` | `ace_step` |
 | `audiocpp_music_model` | `__OFFLOAD_HOME__/models/ace-step/ace-step-1.5-turbo-bf16.gguf` |
 | `audiocpp_voice_family` | `chatterbox` |
 | `audiocpp_voice_model` | `__OFFLOAD_HOME__/models/chatterbox/chatterbox-q8_0.gguf` |
 | `compose_script` | `render/compose-hyperframes.mjs` |
+| `imagegen_cfg` | `1` |
+| `imagegen_engine` | `sdcpp` |
+| `imagegen_family` | `z-image-turbo` |
+| `imagegen_steps` | `8` |
+| `imagegen_timeout_sec` | `1800` |
 | `musicgen_engine` | `audiocpp` |
+| `musicgen_script` | `` |
+| `run_graph_script` | `` |
+| `sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__` |
+| `sdcpp_extra_args` | `--backend vulkan0 --fa --vae-tiling -v` |
+| `sdcpp_llm` | `__OFFLOAD_HOME__/models/z-image/Qwen3-4B-Instruct-2507-Q4_K_M.gguf` |
+| `sdcpp_model` | `__OFFLOAD_HOME__/models/z-image/z_image_turbo-Q8_0.gguf` |
+| `sdcpp_model_kind` | `diffusion` |
+| `sdcpp_vae` | `__OFFLOAD_HOME__/models/z-image/zimage_ae.safetensors` |
 | `videogen_families` | `{"fastwan":{"cfg":1,"commercial_use":true,"engine":"sdcpp","flow_shift":5,"fps":24,"frames":49,"height":480,"license":"Apache-2.0","sampler":"euler","sdcpp_backend":"vulkan0","sdcpp_bin":"__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__","sdcpp_max_tokens":5200,"sdcpp_model":"__OFFLOAD_HOME__/models/wan22-ti2v-5b/FastWan2.2-TI2V-5B-q8_0.gguf","sdcpp_t5xxl":"__OFFLOAD_HOME__/models/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf","sdcpp_tae":"__OFFLOAD_HOME__/models/wan22-ti2v-5b/taew2_2.safetensors","sdcpp_vae":"__OFFLOAD_HOME__/models/wan22-ti2v-5b/Wan2.2_VAE.safetensors","sdcpp_vae_stride":16,"steps":3,"width":832}}` |
 | `videogen_family` | `fastwan` |
+| `videogen_script` | `` |
 | `videogen_timeout_sec` | `7200` |
 | `voicegen_engine` | `audiocpp` |
+| `voicegen_script` | `` |
 
 `__OFFLOAD_HOME__` is replaced with the install root at render time.
 

@@ -39,6 +39,7 @@ honestly serves text only.
 
 | key | value |
 |---|---|
+| `gen_edit_script` | `render/comfy-edit.mjs` |
 | `imagegen_ckpt` | `hidream_o1_image_bf16.safetensors` |
 | `imagegen_family` | `hidream-o1` |
 | `imagegen_script` | `render/comfy-generate.mjs` |

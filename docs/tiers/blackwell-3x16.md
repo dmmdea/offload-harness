@@ -99,7 +99,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `compose_script` | `render/compose-hyperframes.mjs` |
 | `gen_edit_preset` | `lightning8` |
 | `gen_edit_script` | `render/comfy-edit.mjs` |
-| `gen_edit_unet` | `qwen-image-edit-2511-Q5_1.gguf` |
+| `gen_edit_unet` | `qwen_image_edit_2511_fp8mixed.safetensors` |
 | `imagegen_cfg` | `1` |
 | `imagegen_ckpt` | `krea2_turbo_bf16.safetensors` |
 | `imagegen_family` | `krea2` |
@@ -109,9 +109,11 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `imagegen_vae` | `qwen_image_vae.safetensors` |
 | `inpaint_ckpt` | `RealVisXL_V5.0_fp16.safetensors` |
 | `inpaint_script` | `render/comfy-inpaint.mjs` |
+| `inpaint_vae` | `builtin` |
 | `upscale_model` | `4x-UltraSharp.pth` |
 | `upscale_script` | `render/comfy-upscale.mjs` |
 | `videogen_audio_vae` | `ltx-2.5-audio-vae-bf16.safetensors` |
+| `videogen_families` | `{"wan22":{"text_encoder":"umt5_xxl_fp8_e4m3fn_scaled.safetensors","unet_high":"wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors","unet_low":"wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors","wan_loader":"native"}}` |
 | `videogen_family` | `ltx25` |
 | `videogen_fps` | `24` |
 | `videogen_frames` | `121` |
@@ -120,6 +122,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `videogen_text_encoder` | `gemma4-12b-with-proj-ltx-2.5-comfy-int8-convrot.safetensors` |
 | `videogen_timeout_sec` | `5400` |
 | `videogen_transformer` | `ltx-2.5-22b-distilled-transformer-comfy-int8-convrot.safetensors` |
+| `videogen_upscale_model` | `4x-UltraSharp.pth` |
 | `videogen_video_vae` | `ltx-2.5-video-vae-conv-bf16.safetensors` |
 | `videogen_width` | `1280` |
 
