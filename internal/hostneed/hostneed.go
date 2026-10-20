@@ -256,9 +256,24 @@ const wanComputeContextGiB = 0.5
 // blocks (the 13.3 GiB expert less its 3 GiB resident share), so 0.8.
 const wanStorageOverheadGiB = 0.8
 
-// CardOnly is the card-only Wan placement a call asked for (--wan-placement multicard on the Wan 2.2 graph), and what the call says about it.
+// ltxResidentDefaultGiB is the share of the LTX-2.5 DiT the card-only placement keeps on the compute card when the call names none:
+// render/wf-ltx25-i2v.mjs LTX25_RESIDENT_GB_DEFAULT. Measured on one run at 1280x704x121: the compute card peaked at 11.54 GiB, the storage card at 12.71.
+const ltxResidentDefaultGiB = 9.0
+
+// ltxUpscalerGiB is the x2 latent upscaler (0.93 GiB), which has no device input and loads on the compute card; ltxStorageVAEsGiB is the video and audio VAE
+// (1.37 + 0.34 GiB, rounded up), which the graph puts on the storage card. render/wan-multicard.mjs LTX_UPSCALER_GIB and LTX_STORAGE_VAES_GIB.
+// The LTX-2.5 stages leave the sampler's activations out (about 1.6 GiB with the context at 1280x704x121, unmeasured above it), so this sizing and the
+// runner's check judge the weights alone.
+const (
+	ltxUpscalerGiB    = 1.0
+	ltxStorageVAEsGiB = 1.8
+)
+
+// CardOnly is the card-only placement a call asked for (--wan-placement multicard on the Wan 2.2 graph, or on the LTX-2.5 one), and what the call says about it.
 type CardOnly struct {
-	// ResidentGiB is --wan-resident-gb: the share of each expert kept on the compute card.
+	// LTX is true for the LTX-2.5 graph: one DiT (not two experts) split over the pair with the compute card first, sized by ltx* above.
+	LTX bool
+	// ResidentGiB is --wan-resident-gb: the share of each expert (of the DiT, for LTX) kept on the compute card; 0 is the family's default.
 	ResidentGiB float64
 	// SageAttention is true when COMFY_EXTRA_ARGS carries --use-sage-attention (or an argparse prefix of it): the runner then sizes the compute card's
 	// activations at wanActivationsSageGiB. Read from the process environment only (Facts.Env): an `env COMFY_EXTRA_ARGS=...` prefix inside the wrapped
@@ -354,6 +369,16 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		// ceiling, and with the film-size run's 12.2 GiB it would refuse the call that run measured (3.0 + 12.2 = 15.2 > 14.9). It stays the storage
 		// card's margin.
 		reserve := f.reserve()
+		if co.LTX {
+			// The LTX-2.5 stages: the compute card holds its share of the DiT, the latent upscaler and the context; the storage card the rest of the DiT, both VAEs and the
+			// context. The text encoder is off the cards before the DiT lands (OffloadFreeAfterEncode), so it is no stage. The activations are unmeasured and not in it.
+			compute := co.ResidentGiB + ltxUpscalerGiB + wanComputeContextGiB
+			storage := expert - co.ResidentGiB + ltxStorageVAEsGiB + wanStorageOverheadGiB
+			if expert > 0 && small > 0 && storage <= small-reserve && compute <= large {
+				return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB DiT + %.1f GiB of latent upscaler + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card; the sampler's activations are unmeasured and not counted) and the storage card %.1f GiB of donor blocks + %.1f GiB of VAEs + %.1f GiB for the context = %.1f GiB (of %.1f usable), so each card fits its stage, the text encoder is taken off the cards before the DiT lands, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, ltxUpscalerGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, ltxStorageVAEsGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+			}
+			return fitToCard(src, family, set, total, f, ""), true
+		}
 		activations, activationsWord := wanActivationsGiB, "film-size activations"
 		if co.SageAttention {
 			activations, activationsWord = wanActivationsSageGiB, "film-size activations (sage attention)"
@@ -465,6 +490,18 @@ func (o VideoOverrides) apply(fb config.VideoFamilyBinding) config.VideoFamilyBi
 // ForVideoWith is ForVideo for a call that names weight files of its own: the family's binding with
 // those files put over it.
 func ForVideoWith(cfg config.Config, renderFamily string, over VideoOverrides, f Facts) (Need, bool) {
+	return forVideo(cfg, renderFamily, over, f, nil)
+}
+
+// ForVideoCardOnly is ForVideoWith for a Wan 2.2 or LTX-2.5 call that asked for the card-only placement (videogen_placement: multicard, which passes
+// --wan-placement multicard): the same stage rule command.go applies to the runner's own flags (estimateWith). residentGiB is --wan-resident-gb
+// (0 = the runner's default share for the family: 3 for Wan, 9 for LTX), extraArgs the COMFY_EXTRA_ARGS the runner will see (sage attention, Wan only). Any other family is
+// sized as ForVideoWith does.
+func ForVideoCardOnly(cfg config.Config, renderFamily string, over VideoOverrides, residentGiB float64, extraArgs string, f Facts) (Need, bool) {
+	return forVideo(cfg, renderFamily, over, f, &CardOnly{ResidentGiB: residentGiB, SageAttention: sageAttention(extraArgs)})
+}
+
+func forVideo(cfg config.Config, renderFamily string, over VideoOverrides, f Facts, co *CardOnly) (Need, bool) {
 	f.Cfg = withDir(f.Cfg, cfg)
 	fam := strings.TrimSpace(renderFamily)
 	label := fam
@@ -472,7 +509,22 @@ func ForVideoWith(cfg config.Config, renderFamily string, over VideoOverrides, f
 		label = strings.TrimSpace(cfg.VideoGenFamily)
 	}
 	runner, fb := mediacap.VideoBinding(cfg, fam)
-	return estimate(videoFamily(label), mediacap.VideoModelFilesFor(runner, over.apply(fb)), f)
+	family := videoFamily(label)
+	if family != "wan22" && family != "ltx25" {
+		co = nil // only the Wan 2.2 and LTX-2.5 graphs have the card-only placement
+	}
+	if co != nil {
+		c := *co
+		c.LTX = family == "ltx25"
+		if c.ResidentGiB <= 0 {
+			c.ResidentGiB = wanResidentDefaultGiB
+			if c.LTX {
+				c.ResidentGiB = ltxResidentDefaultGiB
+			}
+		}
+		co = &c
+	}
+	return estimateWith(family, mediacap.VideoModelFilesFor(runner, over.apply(fb)), f, co)
 }
 
 // withDir keeps the facts' own ComfyDir when it has one, else the binding's.

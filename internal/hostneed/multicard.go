@@ -66,7 +66,7 @@ func estimatePlaced(route Route, family string, files []mediacap.ModelFile, f Fa
 		// storage card. A larger share raises the compute peak; a smaller one puts the same bytes on the storage card, which is the card whose
 		// room is thinner (a 5 GiB share of the 19.1 GiB fp8mixed DiT is 15.0 GiB there, and a whole DiT on one card ran out of memory at load). The
 		// storage figure is never LOWERED by a larger share: no run measured that, so the row's own figure stands. For a row whose storage peak is
-		// its text-encoder stage (the 2.1 bf16 one, now held back), a smaller share is refused somewhat early; that is the conservative side.
+		// its text-encoder stage (the 2.1 bf16 one), a smaller share is refused somewhat early; that is the conservative side.
 		shift := *f.ResidentGiB - row.ResidentGiB
 		compute += shift
 		if shift < 0 {

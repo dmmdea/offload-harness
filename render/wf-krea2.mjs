@@ -58,6 +58,15 @@
 // the positive, a real negative is encoded (active at cfg > 1, i.e. only when
 // a caller also overrides cfg upward deliberately).
 
+//
+// CARD-ONLY PLACEMENT (placement "multicard", render/multicard-recipes.mjs row krea2/bf16): the DiT is split by a
+// DisTorch2 byte allocation between two cards (its resident share on the compute card cuda:1, the rest on the
+// storage card cuda:0 beside the text encoder and the VAE), launched --gpu-only so no weight sits in host RAM. That
+// is the house placement on a box whose cards are smaller than the model; the pool flags above stay for a launch
+// that is not card-only, and a call may not ask for both.
+
+import { findRecipe, multicardLoaders, PLACEMENTS, PLACEMENT_DEFAULT } from "./multicard-recipes.mjs";
+
 /** The turbo-distilled recipe the checkpoint was shipped with (template widgets). */
 export const KREA2_RECIPE = { steps: 8, cfg: 1.0 };
 
@@ -73,6 +82,9 @@ export function buildKrea2({
   poolVvramGb = 0,
   poolCompute = "cuda:0", poolDonor = "cuda:1",
   filenamePrefix = "render",
+  // placement: "single" (default: the plain or pooled graph above) | "multicard" (the card-only recipe). residentGb overrides
+  // the recipe's share of the DiT on the compute card; the single placement ignores it.
+  placement = PLACEMENT_DEFAULT, residentGb,
 } = {}) {
   if (!prompt) throw new Error("buildKrea2: prompt is required");
   if (!unet) throw new Error("buildKrea2: unet is required");
@@ -85,12 +97,19 @@ export function buildKrea2({
   if (!Number.isFinite(poolVvramGb) || poolVvramGb < 0) {
     throw new Error(`buildKrea2: poolVvramGb must be >= 0, got ${poolVvramGb}`);
   }
+  if (!PLACEMENTS.includes(placement)) {
+    throw new Error(`buildKrea2: placement must be ${PLACEMENTS.join("|")}, got ${JSON.stringify(placement)}`);
+  }
+  if (placement === "multicard" && poolVvramGb > 0) {
+    throw new Error("buildKrea2: the card-only placement splits the DiT by its own allocation; poolVvramGb is the other placement, so name one of them");
+  }
   // Shared qwen_image_vae (8x) + DiT patch size 2 → pixel dims must be /16,
   // same arithmetic as wf-qwen-image.mjs.
   width = Math.max(64, Math.floor(width / 16) * 16);
   height = Math.max(64, Math.floor(height / 16) * 16);
 
-  const g = {
+  const recipe = placement === "multicard" ? findRecipe({ route: "image", family: "krea2", unet, clip }) : null;
+  const g = recipe ? multicardLoaders(recipe, { unet, clip, vae, residentGb }) : {
     "1": poolVvramGb > 0
       ? {
           class_type: "UNETLoaderDisTorch2MultiGPU",
@@ -111,8 +130,8 @@ export function buildKrea2({
     "3": poolVvramGb > 0
       ? { class_type: "VAELoaderMultiGPU", inputs: { vae_name: vae, device: poolDonor } }
       : { class_type: "VAELoader", inputs: { vae_name: vae } },
-    "6": { class_type: "CLIPTextEncode", inputs: { text: prompt, clip: ["2", 0] } },
   };
+  g["6"] = { class_type: "CLIPTextEncode", inputs: { text: prompt, clip: ["2", 0] } };
   g["7"] = String(negative).trim()
     ? { class_type: "CLIPTextEncode", inputs: { text: negative, clip: ["2", 0] } }
     : { class_type: "ConditioningZeroOut", inputs: { conditioning: ["6", 0] } };

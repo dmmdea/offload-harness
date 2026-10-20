@@ -23,7 +23,7 @@ import {
   checkComfyDevices, createOomWatch, PACK_MULTIGPU, PACK_GGUF,
 } from "./wan-multicard.mjs";
 import {
-  findRecipe, recipeResident, recipePeaks, multicardLoaders, canvasRefusal, PLACEMENTS, PLACEMENT_DEFAULT, MULTICARD_STORAGE, MULTICARD_COMPUTE,
+  findRecipe, recipeResident, recipePeaks, multicardLoaders, canvasRefusal, rowDevices, PLACEMENTS, PLACEMENT_DEFAULT,
 } from "./multicard-recipes.mjs";
 
 /** The image runners' flags: the Wan placement's --wan-placement, --wan-resident-gb and --wan-cards with the prefix dropped. */
@@ -137,11 +137,16 @@ export function planImageMulticard({
   });
   checkResident(recipe, residentGb, pair);
   checkPeaks(recipe, residentGb, pair, flags);
-  const launch = launchFn ? launchFn(pair, { comfyDir, recipe }) : relabel(() => multicardLaunch(pair, { comfyDir, packDirsFn: (d) => imagePackDirs(d, recipe, listFn) }));
+  // a compute-first row (rowDevices) is launched with the compute card first, under that order's own instance key
+  const devices = rowDevices(recipe);
+  const launch = launchFn ? launchFn(pair, { comfyDir, recipe }) : relabel(() => multicardLaunch(pair, { comfyDir, packDirsFn: (d) => imagePackDirs(d, recipe, listFn), order: devices.order }));
   const plan = { pair, launch, residentGb, recipe, comfyDir, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
   const share = residentGb === null ? "the whole DiT on the compute card" : `${residentGb} GiB of the DiT resident on the compute card`;
-  say(`placement: multicard on ${pair.source}: ${line("storage", MULTICARD_STORAGE, pair.storage)}; ${line("compute", MULTICARD_COMPUTE, pair.compute)}; recipe ${recipe.id}, ${share}; basis ${recipe.basis}; ${computeChosen(pair)}`);
+  const cardLines = devices.compute === "cuda:0"
+    ? `${line("compute", devices.compute, pair.compute)}; ${line("storage", devices.storage, pair.storage)}`
+    : `${line("storage", devices.storage, pair.storage)}; ${line("compute", devices.compute, pair.compute)}`;
+  say(`placement: multicard on ${pair.source}: ${cardLines}; recipe ${recipe.id}, ${share}; basis ${recipe.basis}; ${computeChosen(pair)}`);
   return plan;
 }
 
@@ -180,7 +185,7 @@ export async function verifyImagePlacement(api, plan, { fetchImpl = fetch } = {}
   } catch (e) {
     throw new Error(`IMAGE-PLACEMENT-MISMATCH: GET /system_stats gave no device list (${e?.message || e}), so the cards ComfyUI numbered cannot be checked. Nothing was submitted.`);
   }
-  const problems = checkComfyDevices(body?.devices, plan.pair);
+  const problems = checkComfyDevices(body?.devices, plan.pair, plan.launch?.order);
   if (problems.length) throw new Error(`IMAGE-PLACEMENT-MISMATCH: ${problems.join("; ")}. Nothing was submitted.`);
   const loaders = Object.values(recipeLoaderNodes(plan));
   const classes = ["OffloadFreeForDecode", ...new Set(loaders.map((n) => n.class_type))];

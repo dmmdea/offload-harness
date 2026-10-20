@@ -3171,6 +3171,15 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if fb.WanDecode != "" {
 		args = append(args, "--wan-decode", fb.WanDecode)
 	}
+	// videogen_placement multicard (the Wan 2.2 and LTX-2.5 graphs only): the card-only placement on the lease's two cards, no host RAM. The runner owns the
+	// placement and its ComfyUI instance; --wan-resident-gb is the GiB of each expert (of the DiT, for LTX-2.5) kept on the compute card (unset = the runner's default).
+	wanMulticard := cardOnlyVideo(fb, renderFamily)
+	if wanMulticard {
+		args = append(args, "--wan-placement", config.PlacementMulticard)
+		if fb.WanResidentGB > 0 {
+			args = append(args, "--wan-resident-gb", strconv.FormatFloat(fb.WanResidentGB, 'f', -1, 64))
+		}
+	}
 	// LTX-2.5 family bindings (quality-first weight binding, same pattern as the
 	// Wan flags above): filenames + fps + the pooled-DiT placement from config.
 	// Gap 5: an explicit per-request `transformer` param wins over this box's
@@ -3197,7 +3206,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if fb.FPS > 0 {
 		args = append(args, "--fps", strconv.Itoa(fb.FPS))
 	}
-	if fb.PoolVvramGB > 0 {
+	if fb.PoolVvramGB > 0 && !ltxMulticardVideo(fb, renderFamily) { // the card-only placement is the other placement of the same DiT: the runner refuses both
 		args = append(args, "--pool-vvram-gb", strconv.FormatFloat(fb.PoolVvramGB, 'f', -1, 64))
 		if fb.PoolCompute != "" {
 			args = append(args, "--pool-compute", fb.PoolCompute)
@@ -3240,7 +3249,13 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	// ComfyUI's default device (MultiGPU #220) — an un-pooled seat has no pool keys to
 	// place it and must not silently land on ComfyUI's default device instead, which
 	// on this box's enumeration is the display card.
-	env := append(p.comfyGenEnvFor(grant, !p.cfg.VideoPooled()), grant.Env...)
+	var env []string
+	if wanMulticard {
+		// two cards: no pin, no dynamic VRAM (the runner drops both for the launch anyway); the operator's extra args stay
+		env = append(append(p.genEnv(), multicardLaunch(p.cfg).Env()...), grant.Env...)
+	} else {
+		env = append(p.comfyGenEnvFor(grant, !p.cfg.VideoPooled()), grant.Env...)
+	}
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}

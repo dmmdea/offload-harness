@@ -68,6 +68,17 @@ type Token struct {
 	SinceMs int64 `json:"since_ms"`
 	// PolledMs is when the call last proved it was there: the clock the grace and the TTL run on.
 	PolledMs int64 `json:"polled_ms"`
+	// WaitingFor is WaitHostRAM while the call's last reading of the lane found only host RAM in its way (its cards free,
+	// nobody ahead), as a waiter's record says it (MarkToken). Empty for any other wait.
+	WaitingFor string `json:"waiting_for,omitempty"`
+}
+
+// HoldsItsCardsAgainst is Waiter.HoldsItsCardsAgainst for a place in line: a place whose call waits only on host RAM does
+// not hold its cards against a request that declares none (G6). Measured 2026-10-20 on the reference 3-card box: two image
+// tickets waiting for 46.8 GiB of host RAM kept their places on a card for three hours, and a 0 GiB two-card pooled render
+// queued behind them for 36 minutes with every card idle, because this rule covered waiters and not places.
+func (t Token) HoldsItsCardsAgainst(declaresHostRAM bool) bool {
+	return declaresHostRAM || t.WaitingFor != WaitHostRAM
 }
 
 // Since is when the call first joined the line.
@@ -228,7 +239,16 @@ func (m *Manager) Tokens() []Token {
 // exists and never writes one: a token that was dropped (served, or consumed by a waiter), pruned
 // or never existed answers false and stays gone. The arrival time is untouched. Callers join
 // whatever repeats it before they drop the token, so a touch cannot bring a spent place back.
-func (m *Manager) TouchToken(id string) bool {
+func (m *Manager) TouchToken(id string) bool { return m.touchToken(id, nil) }
+
+// MarkToken is TouchToken that also records what the call is waiting for (Token.WaitingFor): WaitHostRAM when its last
+// reading of the lane found only host RAM in the way, "" for anything else. Same rules as a touch: it refreshes a token
+// that exists and never writes one.
+func (m *Manager) MarkToken(id, waitingFor string) bool {
+	return m.touchToken(id, func(t *Token) { t.WaitingFor = waitingFor })
+}
+
+func (m *Manager) touchToken(id string, mark func(*Token)) bool {
 	id = strings.TrimSpace(id)
 	if !tokenIDPattern.MatchString(id) {
 		return false
@@ -244,6 +264,9 @@ func (m *Manager) TouchToken(id string) bool {
 		return false
 	}
 	t.PolledMs = m.now().UnixMilli()
+	if mark != nil {
+		mark(&t)
+	}
 	b, err := json.Marshal(t)
 	if err != nil {
 		return false
@@ -273,7 +296,7 @@ func (m *Manager) tokenBlocks(self Waiter) bool {
 		if t.ID == self.Token || !m.tokenLive(t) {
 			continue
 		}
-		if t.SinceMs < self.SinceMs && devicesConflict(t.Devices, self.Devices) {
+		if t.SinceMs < self.SinceMs && devicesConflict(t.Devices, self.Devices) && t.HoldsItsCardsAgainst(self.HostRAMGiB > 0) {
 			return true
 		}
 	}

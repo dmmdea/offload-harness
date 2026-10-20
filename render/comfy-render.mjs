@@ -35,7 +35,7 @@
 //        --clip qwen3vl_8b_bf16.safetensors --vae qwen_image_2.1_vae_bf16.safetensors \
 //        [--schedule official|comfy|turbo] [--transparent 1] [--steps 40 --cfg 1]
 //   node comfy-render.mjs <out.png> "<prompt>" --family qwen-image ... --placement multicard [--resident-gb N] [--cards <a>,<b>]
-//        (the card-only placement of the 2512 recipe; the -2.1 rows are held back: render/multicard-recipes.json; flags spelled `--flag value`)
+//        (the card-only placement; recipes: render/multicard-recipes.json, whose rows are all launchable; flags spelled `--flag value`)
 //
 // --family is a closed set (KNOWN_FAMILIES). An unrecognised value exits 2 BEFORE any
 // ComfyUI work: it used to fall through to the SDXL graph silently, so a typo'd
@@ -211,6 +211,7 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
       poolCompute: flags["pool-compute"] || undefined,
       poolDonor: flags["pool-donor"] || undefined,
       width, height, seed,
+      ...(placement === "multicard" ? { placement, residentGb } : {}),
     });
   } else if (flags.family === "qwen-image") {
     // Model-family-correct graph: Qwen-Image 2512 is an SD3-latent DiT whose text
@@ -279,8 +280,8 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
     if (String(flags.ckpt || env.COMFY_CKPT).toLowerCase().endsWith(".gguf")) {
       throw new UsageError("error: --family qwen-image-2.1 has no GGUF loader wired (2.1 GGUFs need the leejet ComfyUI-GGUF fork) — bind the bf16 or int8_convrot .safetensors UNET");
     }
-    // v1 is SINGLE-CARD: placement comes from the launch profile (comfy_cuda_device
-    // + dynamic VRAM streaming), not from a DisTorch2 pool. Pool flags would be
+    // The single placement is SINGLE-CARD: placement comes from the launch profile (comfy_cuda_device
+    // + dynamic VRAM streaming), not from a DisTorch2 pool (the card-only one is --placement multicard, above). Pool flags would be
     // parsed and never consulted — the silent-config state the pool warnings exist
     // to prevent — so they are refused until a pooled 2.1 loader is wired.
     for (const k of ["pool-vvram", "pool-compute", "pool-donor"]) {

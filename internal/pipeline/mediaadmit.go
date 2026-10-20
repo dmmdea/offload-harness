@@ -332,6 +332,10 @@ func videoNeed(cfg config.Config, token, renderFamily string, over hostneed.Vide
 	// quant of the binding it renders with.
 	fb := cfg.ResolveVideoFamilyBinding(renderFamily)
 	foot := footKey{videoFootprintFamily(renderFamily), videoFootprintQuant(fb, renderFamily), "video-gen"}
+	if cardOnlyVideo(fb, renderFamily) {
+		// The card-only Wan and LTX-2.5 placement ignores the pool keys and the pin: the pair is the lease's (mediamulticard.go).
+		return videoMulticardNeed(cfg, token, renderFamily, over, fb).withFootprint(foot)
+	}
 	if cfg.VideoPooled() {
 		return pooledNeed(token, cfg.VideoGenPoolCompute, cfg.VideoGenPoolDonor).declaresRAM(videoRAM(cfg, renderFamily, over)).withFootprint(foot)
 	}

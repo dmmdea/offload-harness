@@ -156,6 +156,27 @@ func TestAbsentTokenDoesNotBlockLaterWaiters(t *testing.T) {
 	}
 }
 
+// A place whose call waits only on host RAM does not hold its card against a request that declares none, and still does
+// against one that declares some (G6, as for a waiter). The live failure, 2026-10-20: two image tickets short of 46.8 GiB
+// held places on a card for three hours and a 0 GiB pooled render sat behind them with every card idle.
+func TestAPlaceWaitingOnHostRAMDoesNotHoldBackARequestDeclaringNone(t *testing.T) {
+	m, now := tokenManager(t)
+	tok, err := m.LeaveToken(ClassMedia, Options{Devices: []string{"gpu-aaaa"}}, *now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !m.MarkToken(tok.ID, WaitHostRAM) {
+		t.Fatal("marking a live place failed")
+	}
+	*now = now.Add(5 * time.Second)
+	if w := registerAt(t, m, Options{Devices: []string{"gpu-aaaa"}}); !m.isFrontOfQueue(w) {
+		t.Fatal("a 0 GiB request queued behind a place that waits only on host RAM")
+	}
+	if w := registerAt(t, m, Options{Devices: []string{"gpu-aaaa"}, HostRAMGiB: 8}); m.isFrontOfQueue(w) {
+		t.Fatal("a request that declares host RAM passed a place that waits for host RAM")
+	}
+}
+
 // A token on another card never blocks (disjoint backfill, as for any waiter).
 func TestALiveTokenDoesNotBlockADisjointWaiter(t *testing.T) {
 	m, now := tokenManager(t)

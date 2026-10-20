@@ -456,6 +456,12 @@ func (lt *liveTicket) step(ctx context.Context, cs *cycleState) {
 			lt.lostN = 0 // the lane's state really changed: the next time it reads free is a new question
 			lt.mu.Unlock()
 		}
+		// The place says what this reading found: a call short only of host RAM does not hold its cards against a request
+		// that declares none (core.PlaceMarker), and any other reading takes that back.
+		lt.mu.Lock()
+		place := lt.t.Place
+		lt.mu.Unlock()
+		core.MarkPlace(lt.runner, place, verdict.HostRAMOnly())
 	}
 	// A lane that reads free runs the call here and now. A lane the pipeline could not read is not a free lane (the card
 	// table is slowest to read exactly when a heavy render holds the card): the fleet is looked at in this same scan, and

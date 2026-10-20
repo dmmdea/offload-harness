@@ -1,8 +1,8 @@
-"""Harness-owned ComfyUI nodes for the card-only (multicard) Wan 2.2 placement.
+"""Harness-owned ComfyUI nodes for the card-only (multicard) Wan 2.2, LTX-2.5, image and edit placements.
 
 ComfyUI loads this folder through render/comfyui-ext/extra_model_paths.yaml (its `custom_nodes` key),
 which render/wan-multicard.mjs passes with --extra-model-paths-config. It is never copied into the
-shared install. Two parts:
+shared install. Four parts:
 
 1. A READ-ONLY safetensors reader, active only when the harness sets OFFLOAD_RO_LOAD=1 in the
    ComfyUI process. Stock ComfyUI (dynamic VRAM off, which --gpu-only implies) opens a safetensors file
@@ -18,6 +18,19 @@ shared install. Two parts:
    read-only, so such a write would not corrupt the file: it would crash ComfyUI with a Windows access
    violation. None exists on the Wan load path read at ComfyUI 0.38.0 (under --gpu-only the weights are
    copied to the card, not assigned in place) and the runs made so far wrote none.
+   With the reader, and under the same OFFLOAD_RO_LOAD=1, a diffusion model whose every tensor is a plain
+   float (bf16, fp16, fp32) and that names no operations of its own is built with ComfyUI's mixed-precision
+   layers and an empty quantization config. Stock ComfyUI builds such a model with real weight tensors and,
+   under --gpu-only, moves it whole to the offload card (cuda:0) before DisTorch2 splits it
+   (comfy.sd.load_diffusion_model_state_dict: model.to(offload_device)), so a DiT bigger than one card runs
+   out of memory there (krea2 bf16, 24.48 GiB, on a 15.9 GiB card, 2026-10-20). The mixed-precision layers
+   create no weight until the load, and then take the file's tensor as it is (comfy/ops.py,
+   _load_quantized_module, a layer with no quantization entry), so the model is built empty, filled from the
+   read-only map without a copy, and its blocks reach the cards only through DisTorch2's allocation. That is
+   the path every unquantized layer of an fp8mixed checkpoint already takes (the 2511 edit). A GGUF or
+   quantized checkpoint (its loader passes its own operations, or the file carries a quantization marker)
+   keeps ComfyUI's own path. Here the loaded weights ARE the read-only map until DisTorch2 copies them to a
+   card, so the assumption above covers this path too.
 
 2. OffloadFreeForDecode, a pass-through LATENT node that sits between the last sampler and a plain
    VAEDecode. With --gpu-only the offload device IS the card, so ComfyUI's own "unload" frees
@@ -26,7 +39,41 @@ shared install. Two parts:
    that certain and visible: it saves the latent first (optional), collects garbage, returns every
    card's cached blocks to the driver, reports each card's memory, and refuses to continue when the
    decode card cannot hold a plain decode, because ComfyUI would then retry the decode tiled with its
-   own temporal chunking and the clip would carry the seam the plain decode exists to avoid.
+   own temporal chunking and the clip would carry the seam the plain decode exists to avoid. With
+   `check` false (the LTX-2.5 graph, whose VAEDecodeTiled is sized by its tiles, not by the whole
+   latent) it frees the cards and reports them without that test.
+
+3. OffloadCLIPLoaderDisTorch2, the DisTorch2 text-encoder loader for an encoder that is bigger than one card
+   (the 16.33 GiB bf16 Qwen3-VL-8B of qwen-image-2.1). ComfyUI-MultiGPU's own CLIPLoaderDisTorch2MultiGPU
+   cannot load it card-only: under --gpu-only ComfyUI builds the whole encoder on the text-encoder card
+   (comfy.sd.CLIP.__init__ asks text_encoder_initial_device, which answers the load device when the
+   load and offload devices are the same card) and only then does the DisTorch2 allocation apply, so the
+   build runs out of memory on a 15.9 GiB card. This node runs the stock loader with that one answer
+   changed to the CPU (so the encoder is built and filled off the cards, from the read-only map), then
+   places it at once through DisTorch2's own load path, block by block, onto the cards its allocation
+   string names, and checks that no weight is left in host RAM.
+
+4. OffloadFreeAfterEncode, a pass-through of the positive and negative CONDITIONING that takes the text
+   encoder off every card (the LTX-2.5 card-only graph: the 14.3 GiB Gemma encoder and the 20 GiB int8 DiT do
+   not fit the two cards together, and the DiT is placed at the first sampler). Under --gpu-only ComfyUI's
+   own unload frees nothing (its offload device IS the card), so the node does it itself: it drops the
+   encoder from comfy.model_management.current_loaded_models without going through model_unload (which would
+   move the weights to the offload device, the card), replaces every parameter and buffer that sits on a
+   card with an empty CPU tensor, returns the cached blocks to the driver, reports each card's memory before
+   and after, and raises OFFLOAD-TE-STILL-RESIDENT if any of the encoder's tensors is still on a CUDA device.
+   The CLIP is spent after it. The harness loads this pack with --cache-none, so the next prompt builds and
+   places the encoder again from the read-only map.
+
+5. An eviction guard for a model placed across cards, under the same OFFLOAD_RO_LOAD=1 and only with
+   --gpu-only. ComfyUI frees room for a new load by "unloading" the models on its device
+   (comfy.model_management.free_memory; with --disable-smart-memory it unloads every one of them, whatever
+   the need), and its unload moves the model to its offload device, which under --gpu-only IS a card. For a
+   DisTorch2 split that gathers the whole model onto one card: the 20 GiB LTX-2.5 DiT, still needed by the
+   second sampler, was pulled onto the 15.9 GiB compute card when the latent upsampler loaded, and the run
+   ran out of memory there (2026-10-20). So LoadedModel.model_unload refuses, for a model whose weights
+   span a card other than its offload device: the model stays where its allocation put it, the new load
+   takes the room that is free, and the model leaves the cards when its last reference goes (--cache-none),
+   as it always did. A model wholly on its offload card, and a dead one, take ComfyUI's own path.
 """
 import gc
 import json
@@ -122,8 +169,83 @@ def _install_readonly_loader():
     _say("read-only safetensors reader installed (a safetensors file is mapped read-only, not copy-on-write)")
 
 
+def _install_lazy_diffusion_build():
+    import torch
+    import comfy.ops
+    import comfy.sd
+
+    original = comfy.sd.load_diffusion_model_state_dict
+    plain = (torch.bfloat16, torch.float16, torch.float32)
+
+    def weight_dtype(sd, metadata):
+        # the dtype holding most of the weight bytes, or None when a tensor is not a plain float or the file carries a quantization marker
+        if metadata and "_quantization_metadata" in metadata:
+            return None
+        sizes = {}
+        for name, tensor in sd.items():
+            if name.endswith((".comfy_quant", "scaled_fp8")) or tensor.dtype not in plain:
+                return None
+            sizes[tensor.dtype] = sizes.get(tensor.dtype, 0) + tensor.numel() * tensor.element_size()
+        return max(sizes, key=sizes.get) if sizes else None
+
+    def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable_dynamic=False):
+        if model_options.get("custom_operations") is None:
+            dtype = weight_dtype(sd, metadata)
+            if dtype is not None:
+                model_options = dict(model_options, custom_operations=comfy.ops.mixed_precision_ops({}, compute_dtype=dtype))
+                _say(f"diffusion model built empty and filled from the map ({len(sd)} tensors, {dtype}), not built on the offload card")
+        return original(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
+
+    comfy.sd.load_diffusion_model_state_dict = load_diffusion_model_state_dict
+    _say("lazy diffusion-model build installed (an unquantized DiT is built without weights and takes the read-only map's tensors)")
+
+
+def _spans_other_cards(patcher):
+    """True when the patcher's model is a DisTorch2 placement, or holds a tensor on a card other than its offload device."""
+    offload = getattr(patcher, "offload_device", None)
+    if getattr(offload, "type", None) != "cuda":
+        return False
+    model = getattr(patcher, "model", None)
+    if model is None:
+        return False
+    if getattr(model, "_distorch_v2_meta", None) is not None:
+        return True
+    import itertools
+    for tensor in itertools.chain(model.parameters(), model.buffers()):
+        device = tensor.device
+        if device.type == "cuda" and device.index != offload.index:
+            return True
+    return False
+
+
+def _install_split_eviction_guard():
+    import comfy.model_management as mm
+    args = getattr(mm, "args", None)  # the parsed command line model_management imported (comfy.cli_args)
+    if not getattr(args, "gpu_only", False):
+        return
+    stock = getattr(mm.LoadedModel, "model_unload", None)
+    if stock is None:
+        raise RuntimeError("offload_multicard: comfy.model_management.LoadedModel has no model_unload, so the split-model eviction guard cannot be installed")
+    if getattr(stock, "_offload_split_guard", False):
+        return
+
+    def model_unload(self, memory_to_free=None, unpatch_weights=True):
+        patcher = self.model
+        if patcher is not None and _spans_other_cards(patcher):
+            _say(f"kept {type(patcher.model).__name__} on its cards: under --gpu-only its offload device is {patcher.offload_device}, so an unload "
+                 f"would gather the whole split model onto that one card; it leaves the cards when its last reference goes")
+            return False
+        return stock(self, memory_to_free, unpatch_weights)
+
+    model_unload._offload_split_guard = True
+    mm.LoadedModel.model_unload = model_unload
+    _say("split-model eviction guard installed (a model placed across cards is never gathered onto its offload card)")
+
+
 if os.environ.get("OFFLOAD_RO_LOAD") == "1":
     _install_readonly_loader()
+    _install_lazy_diffusion_build()
+    _install_split_eviction_guard()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -183,14 +305,14 @@ class OffloadFreeForDecode:
     def INPUT_TYPES(cls):
         return {
             "required": {"samples": ("LATENT",)},
-            "optional": {"vae": ("VAE",), "save_prefix": ("STRING", {"default": ""})},
+            "optional": {"vae": ("VAE",), "save_prefix": ("STRING", {"default": ""}), "check": ("BOOLEAN", {"default": True})},
         }
 
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "free"
     CATEGORY = "offload"
 
-    def free(self, samples, vae=None, save_prefix=""):
+    def free(self, samples, vae=None, save_prefix="", check=True):
         ui = {}
         saved = ""
         if save_prefix:
@@ -215,8 +337,11 @@ class OffloadFreeForDecode:
         index = getattr(device, "index", None)
         if index is None:
             index = _cards()[0]
-        need = _decode_need_gib(samples, vae)
         free = next(c["free_gib"] for c in after if c["card"] == f"cuda:{index}")
+        if not check:
+            _say(f"cuda:{index} has {free:.2f} GiB free for the decode (no plain-decode check: a tiled decode is sized by its tiles)")
+            return {"ui": ui, "result": (samples,)}
+        need = _decode_need_gib(samples, vae)
         if free < need:
             where = f" The sampled latent is saved as {saved} in ComfyUI's output directory." if saved else ""
             raise RuntimeError(
@@ -228,5 +353,169 @@ class OffloadFreeForDecode:
         return {"ui": ui, "result": (samples,)}
 
 
-NODE_CLASS_MAPPINGS = {"OffloadFreeForDecode": OffloadFreeForDecode}
-NODE_DISPLAY_NAME_MAPPINGS = {"OffloadFreeForDecode": "Free the cards for a plain decode (harness)"}
+# ---------------------------------------------------------------------------------------------
+# 3. a text encoder bigger than one card, built off the cards and placed block by block
+# ---------------------------------------------------------------------------------------------
+
+# Parameters and buffers that may stay on the CPU after the placement (a few small tensors DisTorch2's load list does not move); more than this
+# is a weight left in host RAM and the node refuses.
+HOST_WEIGHT_LIMIT_BYTES = 64 * 1024 ** 2
+
+
+def _stock_clip_loader():
+    # looked up when asked, never at import: ComfyUI loads the packs in no fixed order
+    import nodes
+    stock = nodes.NODE_CLASS_MAPPINGS.get("CLIPLoaderDisTorch2MultiGPU")
+    if stock is None:
+        raise RuntimeError("OFFLOAD-TE-NOPACK: ComfyUI has no CLIPLoaderDisTorch2MultiGPU (the ComfyUI-MultiGPU pack), which this node wraps")
+    return stock
+
+
+def _weight_bytes_by_device(module):
+    # nbytes, not numel x element_size: a quantized weight (comfy_kitchen's QuantizedTensor) reports its logical dtype's element size, twice
+    # an int8 weight's real storage, while its nbytes is the storage it holds
+    totals = {}
+    for tensor in list(module.parameters()) + list(module.buffers()):
+        key = str(tensor.device)
+        totals[key] = totals.get(key, 0) + tensor.nbytes
+    return totals
+
+
+def _gib_line(totals):
+    return ", ".join(f"{name} {size / GIB:.2f} GiB" for name, size in sorted(totals.items())) or "no weights"
+
+
+class OffloadCLIPLoaderDisTorch2:
+    """CLIP loader. Builds the text encoder off the cards, then places its blocks on the cards `expert_mode_allocations` names (DisTorch2)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # the stock loader's own inputs (its `type` list follows the installed ComfyUI), without the two the allocation string makes moot
+        stock = _stock_clip_loader().INPUT_TYPES()
+        optional = {k: v for k, v in stock.get("optional", {}).items() if k not in ("virtual_vram_gb", "donor_device")}
+        return {"required": dict(stock["required"]), "optional": optional}
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load"
+    CATEGORY = "offload"
+
+    def load(self, clip_name, type, device="cuda:0", expert_mode_allocations="", eject_models=False):
+        import torch
+        import comfy.model_management as mm
+
+        if not str(expert_mode_allocations).strip():
+            raise ValueError("OFFLOAD-TE-NOSPLIT: expert_mode_allocations is empty, so this would build the whole encoder on one card, which is what this node exists to avoid")
+        stock = _stock_clip_loader()()
+        original = mm.text_encoder_initial_device
+
+        def off_card(load_device, offload_device, model_size=0):
+            _say(f"text encoder {clip_name}: {model_size / GIB:.2f} GiB built off the cards (load device {load_device}), not on {load_device} as --gpu-only would")
+            return torch.device("cpu")
+
+        mm.text_encoder_initial_device = off_card
+        try:
+            out = stock.override(clip_name=clip_name, type=type, device=device, virtual_vram_gb=0.0, donor_device="cpu",
+                                 expert_mode_allocations=expert_mode_allocations, eject_models=eject_models)
+        finally:
+            mm.text_encoder_initial_device = original
+
+        clip = out[0]
+        model = clip.patcher.model
+        built = _weight_bytes_by_device(model)
+        _say(f"text encoder {clip_name} built: {_gib_line(built)}")
+        started = time.time()
+        # the load ComfyUI makes itself when the build was on the load device (comfy.sd.CLIP.__init__), now through DisTorch2's allocation
+        mm.load_models_gpu([clip.patcher], force_full_load=True)
+        gc.collect()
+        placed = _weight_bytes_by_device(model)
+        _say(f"text encoder {clip_name} placed in {time.time() - started:.1f} s by {expert_mode_allocations!r} (compute card {device}): {_gib_line(placed)}")
+        host = sum(size for name, size in placed.items() if name.startswith("cpu"))
+        if host > HOST_WEIGHT_LIMIT_BYTES:
+            raise RuntimeError(
+                f"OFFLOAD-TE-HOSTWEIGHT: {host / GIB:.2f} GiB of the text encoder {clip_name} is still in host RAM after the placement "
+                f"({_gib_line(placed)}); a card-only run keeps no weight in host RAM, so it stops here")
+        return out
+
+
+# ---------------------------------------------------------------------------------------------
+# 4. take the text encoder off the cards once the prompt is encoded
+# ---------------------------------------------------------------------------------------------
+
+def _drop_from_loaded_models(model):
+    # ComfyUI's own unload would move the weights to the offload device, which under --gpu-only is the card itself (and, for a DisTorch2 placement,
+    # would first try to put the whole encoder on one card). So the entry is removed from the list without going through model_unload; a patcher
+    # clone (the same module under another patcher) is matched by its module.
+    import comfy.model_management as mm
+    dropped = 0
+    for index in reversed(range(len(mm.current_loaded_models))):
+        loaded = mm.current_loaded_models[index]
+        patcher = loaded.model
+        if patcher is not None and getattr(patcher, "model", None) is model:
+            mm.current_loaded_models.pop(index)
+            finalizer = getattr(loaded, "model_finalizer", None)
+            if finalizer is not None:
+                finalizer.detach()
+            loaded.model_finalizer = None
+            loaded.real_model = None
+            dropped += 1
+    return dropped
+
+
+def _free_card_weights(model):
+    # Every parameter and buffer that sits on a card is replaced by an empty CPU tensor, so the card's allocation goes when the last reference to the
+    # weight does. The encoder is spent after this: nothing may encode with it again.
+    import torch
+    freed = {}
+    for module in model.modules():
+        for table, empty in ((module._parameters, lambda: torch.nn.Parameter(torch.empty(0), requires_grad=False)), (module._buffers, lambda: torch.empty(0))):
+            for name, tensor in list(table.items()):
+                if tensor is not None and tensor.device.type == "cuda":
+                    key = str(tensor.device)
+                    freed[key] = freed.get(key, 0) + tensor.nbytes
+                    table[name] = empty()
+    return freed
+
+
+class OffloadFreeAfterEncode:
+    """Pass-through CONDITIONING pair. Takes the text encoder (`clip`) off every card; wire the prompt's conditioning through it so it runs before the sampler."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"positive": ("CONDITIONING",), "negative": ("CONDITIONING",), "clip": ("CLIP",)}}
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("positive", "negative")
+    FUNCTION = "release"
+    CATEGORY = "offload"
+
+    def release(self, positive, negative, clip):
+        patcher = getattr(clip, "patcher", None)
+        model = getattr(patcher, "model", None)
+        if model is None:
+            raise ValueError("OFFLOAD-TE-NOMODEL: the CLIP input carries no text-encoder model (clip.patcher.model), so there is nothing to release")
+        before = [_card_line(i) for i in _cards()]
+        held = {name: size for name, size in _weight_bytes_by_device(model).items() if name.startswith("cuda")}
+        dropped = _drop_from_loaded_models(model)
+        backup = getattr(patcher, "backup", None)
+        if isinstance(backup, dict):
+            backup.clear()
+        freed = _free_card_weights(model)
+        seconds = _release_cards() if _cards() else 0.0
+        after = [_card_line(i) for i in _cards()]
+        _say(f"text encoder released: {_gib_line(held)} on the cards, {_gib_line(freed)} freed, {dropped} loaded-model entr{'y' if dropped == 1 else 'ies'} dropped ({seconds:.1f} s)")
+        _say(f"cards before the release: {json.dumps(before)}")
+        _say(f"cards after the release: {json.dumps(after)}")
+        left = {name: size for name, size in _weight_bytes_by_device(model).items() if name.startswith("cuda") and size > 0}
+        if left:
+            raise RuntimeError(
+                f"OFFLOAD-TE-STILL-RESIDENT: {_gib_line(left)} of the text encoder is still on a card after the release, and the DiT placed at the first "
+                f"sampler needs the room; the run stops here. cards: {json.dumps(after)}")
+        return (positive, negative)
+
+
+NODE_CLASS_MAPPINGS = {"OffloadFreeForDecode": OffloadFreeForDecode, "OffloadCLIPLoaderDisTorch2": OffloadCLIPLoaderDisTorch2, "OffloadFreeAfterEncode": OffloadFreeAfterEncode}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "OffloadFreeForDecode": "Free the cards for a plain decode (harness)",
+    "OffloadCLIPLoaderDisTorch2": "Load CLIP, built off the cards and split by DisTorch2 (harness)",
+    "OffloadFreeAfterEncode": "Take the text encoder off the cards after the prompt is encoded (harness)",
+}

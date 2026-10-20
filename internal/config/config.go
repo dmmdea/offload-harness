@@ -1194,6 +1194,18 @@ type Config struct {
 	// other VAEs nobody measured and keep VAEDecodeTiled. Default "tiled" = the runner's own
 	// default (WAN_DECODE_DEFAULT; TestWanDecodeMirrorsTheBuilder keeps them equal).
 	VideoGenWanDecode string `json:"videogen_wan_decode,omitempty"`
+	// VideoGenPlacement is the placement of the Wan 2.2 video seat ("" or "single" = one render card, today's; "multicard" = the card-only
+	// placement on the box's two non-display cards, render/wan-multicard.mjs: no host RAM, the experts are the fp8 safetensors files or the
+	// Q8_0 GGUF files, named by videogen_unet_high / videogen_unet_low, which the placement requires). The door leases the pair, passes
+	// --wan-placement multicard and drops the single-card pin and dynamic VRAM, the way gen_edit_placement does for the edit door. The Wan 2.2 graph
+	// has it, and so has LTX-2.5 (videogen_family ltx25: one int8 DiT split over the pair with the compute card as cuda:0, the text encoder released
+	// after the prompt is encoded; it has no experts and needs a .safetensors transformer, not the bf16 one); any other family renders as before. An
+	// unknown value is a config error.
+	VideoGenPlacement string `json:"videogen_placement,omitempty"`
+	// VideoGenWanResidentGB is videogen_placement multicard's --wan-resident-gb: the GiB of each expert kept on the compute card (0 = the
+	// runner's own default, 3; the lower bound of 0 GiB resident is therefore set on the runner, not here). 0..64. For LTX-2.5 it is the GiB of the
+	// DiT kept on the compute card (0 = the runner's default, 9).
+	VideoGenWanResidentGB float64 `json:"videogen_wan_resident_gb,omitempty"`
 	// VideoGenFamily selects the I2V graph family the video route renders with:
 	// "" or "wan22" = the Wan 2.2 two-expert graph (legacy default, unchanged);
 	// "ltx25" = the LTX-2.5 22B distilled joint-audio two-pass graph (the measured
@@ -3187,9 +3199,9 @@ func warnMulticardLaunchTo(c Config, w io.Writer, where, key, seat string) {
 
 // imageRecipeFamilies / editRecipeFamilies are the graph families that have a LAUNCHABLE card-only recipe: a row of render/multicard-recipes.json that is not
 // held back (a test in this package pins them to it). A family outside them, bound to a multicard placement, is refused by the runner by name on every call;
-// qwen-image-2.1 is outside them while both its rows (int8_convrot and bf16) are held back.
+// qwen-image-2.1 is inside them through its bf16 and int8_convrot rows (no row is held back today).
 var (
-	imageRecipeFamilies = map[string]bool{"qwen-image": true}
+	imageRecipeFamilies = map[string]bool{"qwen-image": true, "krea2": true, "qwen-image-2.1": true}
 	editRecipeFamilies  = map[string]bool{EditFamily2511: true}
 )
 

@@ -80,9 +80,78 @@ func multicardNeed(route hostneed.Route, cfg config.Config, token string) mediaN
 	return n
 }
 
+// wanMulticardVideo reports a video call that runs the Wan 2.2 graph on the card-only placement: the binding that renders asks for it
+// (videogen_placement / videogen_families[...].placement) and the family is Wan 2.2 (renderFamily "" is the runner's own default, Wan). Any
+// other family renders as it always did.
+func wanMulticardVideo(fb config.VideoFamilyBinding, renderFamily string) bool {
+	return fb.WanMulticard() && (renderFamily == "" || renderFamily == videoFamilyWanSentinel)
+}
+
+// ltxMulticardVideo reports a video call that runs the LTX-2.5 graph on the card-only placement (render/wan-multicard.mjs, --model ltx25): the binding that renders
+// asks for it and the family is ltx25 (an LTX call always names it: argModel "ltx25"). The runner puts the compute card first for it (cuda:0, ComfyUI-MultiGPU #220).
+func ltxMulticardVideo(fb config.VideoFamilyBinding, renderFamily string) bool {
+	return fb.WanMulticard() && renderFamily == "ltx25"
+}
+
+// cardOnlyVideo reports a video call on the card-only placement, whichever graph (Wan 2.2 or LTX-2.5) it runs.
+func cardOnlyVideo(fb config.VideoFamilyBinding, renderFamily string) bool {
+	return wanMulticardVideo(fb, renderFamily) || ltxMulticardVideo(fb, renderFamily)
+}
+
+// ltxTransformerRefusal is the sentence for a DiT the card-only LTX-2.5 placement cannot run, "" for one it can: the runner loads a .safetensors file through the
+// DisTorch2 loader (a GGUF file is not one), and the bf16 DiT (about 39 GiB) does not fit the two cards. An unnamed file is the builder's default, the int8 one.
+// The runner refuses the same two (render/wan-multicard.mjs refuseUnmeasuredLtx) only after the pair was held.
+func ltxTransformerRefusal(name string) string {
+	name = strings.TrimSpace(name)
+	switch {
+	case name == "":
+		return ""
+	case !strings.HasSuffix(strings.ToLower(name), ".safetensors"):
+		return fmt.Sprintf("videogen_placement is multicard, but the transformer %q is not a .safetensors file, which the card-only LTX-2.5 placement loads through the DisTorch2 loader: the runner would refuse it by name after the pair was held, so nothing was leased; bind a .safetensors transformer, or unset videogen_placement", name)
+	case strings.Contains(strings.ToLower(name), "bf16"):
+		return fmt.Sprintf("videogen_placement is multicard, but the transformer %q is the bf16 LTX-2.5 DiT (about 39 GiB), which does not fit two 16 GiB cards: the runner would refuse it by name after the pair was held, so nothing was leased; bind the int8 transformer, or unset videogen_placement", name)
+	}
+	return ""
+}
+
+// videoMulticardNeed is multicardNeed for the video door (videogen_placement: multicard), Wan 2.2 or LTX-2.5. The video door has no recipe row: the runner
+// (render/wan-multicard.mjs) sizes the placement itself, so the door leases the pair, declares the host RAM that placement earns
+// (hostneed.ForVideoCardOnly: 0 when both cards hold their stage) and refuses, before any lease, the one thing the runner would refuse after it:
+// for Wan an expert nobody named (the builder's defaults are the Q4_K files, which fit one card and were not measured split); for LTX-2.5, which has no
+// experts, a transformer the placement cannot run (ltxTransformerRefusal).
+func videoMulticardNeed(cfg config.Config, token, renderFamily string, over hostneed.VideoOverrides, fb config.VideoFamilyBinding) mediaNeed {
+	n := mediaNeed{Kind: needMulticard, Token: token, PlacementKey: "videogen_placement"}
+	n.RAMPair = func(vramGiB float64, cardsGiB []float64) hostneed.Need {
+		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vramGiB, CardsGiB: cardsGiB, Placement: hostneed.PlacementMulticard}
+		if need, ok := hostneed.ForVideoCardOnly(cfg, renderFamily, over, fb.WanResidentGB, cfg.ComfyExtraArgs, f); ok {
+			return need
+		}
+		return hostneed.ClassDefault(f)
+	}
+	if ltxMulticardVideo(fb, renderFamily) {
+		transformer := fb.Transformer
+		if t := strings.TrimSpace(over.Transformer); t != "" {
+			transformer = t // the request's own file wins over the binding's, as the runner is handed it
+		}
+		n.Refusal = ltxTransformerRefusal(transformer)
+		return n
+	}
+	for _, e := range []struct{ key, name string }{{"videogen_unet_high", fb.UnetHigh}, {"videogen_unet_low", fb.UnetLow}} {
+		if strings.TrimSpace(e.name) == "" {
+			n.Refusal = fmt.Sprintf("videogen_placement is multicard, but %s names no expert: the card-only placement runs the fp8 safetensors or the Q8_0 GGUF experts and refuses the builder's default Q4_K files, so the runner would refuse it by name after the pair was held; nothing was leased. Bind %s (and the other expert), or unset videogen_placement", e.key, e.key)
+			break
+		}
+	}
+	return n
+}
+
 // qwenImageDefaultSide is the side of the canvas a qwen-image call renders when the request names none (render/comfy-render.mjs, the qwen-image builder's
 // 1328): 1328 x 1328 is 1.76 MP, above the image row's cap, so a card-only call that names no size is refused too.
 const qwenImageDefaultSide = 1328
+
+// imageDefaultSide is the side of the canvas each family with a capped card-only row renders when the request names none (the builder's own default:
+// render/comfy-render.mjs). A family missing here is left to the runner.
+var imageDefaultSide = map[string]int{"qwen-image": qwenImageDefaultSide, "krea2": 1024, "qwen-image-2.1": 2048}
 
 // forCanvas holds a card-only image call to its row's canvas cap (mediacap.MulticardRow.MaxPixels) from the request's own width and height, before any
 // lease: the runner refuses the same canvas (render/multicard-recipes.mjs canvasRefusal) only after the pair was held and its seats drained. A side the
@@ -94,14 +163,15 @@ func (n mediaNeed) forCanvas(params map[string]any) mediaNeed {
 	}
 	w, h := paramIntOr(params, "width", 0), paramIntOr(params, "height", 0)
 	if w <= 0 || h <= 0 {
-		if n.Row.Family != "qwen-image" {
+		side, ok := imageDefaultSide[n.Row.Family]
+		if !ok {
 			return n
 		}
 		if w <= 0 {
-			w = qwenImageDefaultSide
+			w = side
 		}
 		if h <= 0 {
-			h = qwenImageDefaultSide
+			h = side
 		}
 	}
 	asked := int64(w) * int64(h)

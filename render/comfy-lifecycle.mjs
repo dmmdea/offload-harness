@@ -553,6 +553,11 @@ export function profileMismatch(argv, profile) {
     if (profile.multicard.sage === false && argv.map(String).some(isSageAttentionToken)) {
       why.push("it runs with --use-sage-attention, which holds about 3 GiB more activations at film size than this launch was sized for (the default attention)");
     }
+    // A GGUF expert needs the ComfyUI-GGUF pack in the custom-node whitelist (wan-multicard.mjs planMulticard sets `gguf`); a kept instance launched without it cannot load the graph.
+    // The whitelist rides the argv as its own tokens, matched here by the folder name, case-insensitively.
+    if (profile.multicard.gguf === true && !argv.map((t) => String(t).toLowerCase()).includes("comfyui-gguf")) {
+      why.push("its custom-node whitelist has no ComfyUI-GGUF, which a GGUF expert needs");
+    }
   }
   return why.join("; ");
 }
@@ -973,7 +978,7 @@ export async function ensureComfy(opts = {}) {
   // render is killed by its own runner, so it asks for nothing and its launch stays byte for byte what it was.
   const idleSecs = (keep || warm) ? resolveIdleBound(env, log) : 0;
   // `sage` says which attention the call was sized for (wan-multicard.mjs planMulticard sets it); a launch that does not say keeps the old shape, { cards } alone
-  if (launch) profile.multicard = { cards: [...launch.cards], ...(typeof launch.sage === "boolean" ? { sage: launch.sage } : {}) };
+  if (launch) profile.multicard = { cards: [...launch.cards], ...(typeof launch.sage === "boolean" ? { sage: launch.sage } : {}), ...(launch.gguf === true ? { gguf: true } : {}) };
   // Can this call launch an instance on `api` at all? A keyed instance owns its --port; the
   // default endpoint is what an unlaunched ComfyUI listens on; an UNKEYED instance on any other
   // endpoint has no --port of its own, so only the operator's own extra args can put it there.

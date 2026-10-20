@@ -46,7 +46,7 @@ func readRecipes(t *testing.T) recipeFile {
 func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 	file := readRecipes(t)
 	rows := MulticardRows()
-	if len(rows) != len(file.Rows) || len(rows) != 5 {
+	if len(rows) != len(file.Rows) || len(rows) != 6 {
 		t.Fatalf("%d rows here, %d in render/multicard-recipes.json", len(rows), len(file.Rows))
 	}
 	measured, blocked := 0, 0
@@ -72,11 +72,11 @@ func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 			measured++
 		}
 	}
-	if measured != 1 {
-		t.Errorf("%d measured rows; only the 2511 fp8mixed edit ran with the read-only loader", measured)
+	if measured != 5 {
+		t.Errorf("%d measured rows; the 2512 Q5_1, krea2 bf16 and qwen-image-2.1 bf16 and int8_convrot image rows and the 2511 fp8mixed edit row ran card-only", measured)
 	}
-	if blocked != 2 {
-		t.Errorf("%d held-back rows; only the two qwen-image-2.1 ones: int8_convrot (its DiT on cuda:1 no run has made) and bf16 (its text encoder is built whole on the storage card)", blocked)
+	if blocked != 0 {
+		t.Errorf("%d held-back rows; every row has had a card-only run, so none is held back", blocked)
 	}
 }
 
@@ -93,15 +93,15 @@ func TestFindMulticardRowPicksTheRecipeOfTheFilesAndRefusesTheRest(t *testing.T)
 		{"image", "qwen-image", "qwen-image-2512-Q5_1.gguf", "", "qwen-image/gguf-q5_1"},
 		{"image", "qwen-image", "qwen-image-2512-Q5_1.gguf", "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen-image/gguf-q5_1"},
 		{"edit", "qwen-image-edit-2511", "qwen_image_edit_2511_fp8mixed.safetensors", "", "qwen-image-edit-2511/fp8mixed"},
+		{"image", "krea2", "krea2_turbo_bf16.safetensors", "qwen3vl_4b_bf16.safetensors", "krea2/bf16"},
+		{"image", "krea2", "krea2_turbo_bf16.safetensors", "", "krea2/bf16"},
+		{"image", "qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", "qwen-image-2.1/bf16"},
+		{"image", "qwen-image-2.1", "qwen_image_2.1_uc_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", "qwen-image-2.1/bf16"},
+		{"image", "qwen-image-2.1", "qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", "qwen-image-2.1/int8_convrot"},
+		{"image", "qwen-image-2.1", "qwen-image-2.1-UC-int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", "qwen-image-2.1/int8_convrot"},
 		{"edit", "qwen-image-edit-2511", "QWEN-IMAGE-EDIT-2511-Q5_1.GGUF", "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen-image-edit-2511/gguf-q5_1"},
 		// no recipe: another family, another quant, the other route, an int8 or a wrong-kind text encoder, nothing named
-		// and the two qwen-image-2.1 DiTs, whose rows exist but are held back (int8_convrot: its DiT on cuda:1 was never run; bf16: its text encoder is built whole on
-		// the storage card before the split applies; see TestAHeldBackRowIsNotARecipeAndSaysWhy)
-		{"image", "qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", ""},
-		{"image", "qwen-image-2.1", "qwen_image_2.1_uc_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", ""},
-		{"image", "qwen-image-2.1", "qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", ""},
-		{"image", "qwen-image-2.1", "qwen-image-2.1-UC-int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", ""},
-		{"image", "krea2", "krea2_turbo_bf16.safetensors", "qwen3vl_4b_bf16.safetensors", ""},
+		{"image", "krea2", "krea2_turbo_fp8.safetensors", "qwen3vl_4b_bf16.safetensors", ""},
 		{"image", "sdxl", "x.safetensors", "", ""},
 		{"image", "qwen-image", "qwen_image_2512_bf16.safetensors", "", ""},
 		{"image", "qwen-image", "qwen-image-2512-Q4_K_M.gguf", "", ""},
@@ -133,70 +133,13 @@ func TestFindMulticardRowPicksTheRecipeOfTheFilesAndRefusesTheRest(t *testing.T)
 	}
 }
 
-// A row that is held back stays in the table (the proof arm that lifts the hold builds its graph from it) but is no recipe: FindMulticardRow does not return
-// it, so the estimate, the doctor and the typed doors treat the binding as one without a recipe, and BlockedMulticardRow says which row and why.
-func TestAHeldBackRowIsNotARecipeAndSaysWhy(t *testing.T) {
-	fs := files("qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors")
-	if got := FindMulticardRow("image", "qwen-image-2.1", fs); got != nil {
-		t.Fatalf("the held-back int8_convrot row was found as a recipe: %s", got.ID)
-	}
-	held := BlockedMulticardRow("image", "qwen-image-2.1", fs)
-	if held == nil || held.ID != "qwen-image-2.1/int8_convrot" {
-		t.Fatalf("the held-back row = %v, want qwen-image-2.1/int8_convrot", held)
-	}
-	for _, want := range []string{"cuda:1", "illegal memory access", "cuda:0"} {
-		if !strings.Contains(held.Blocked, want) {
-			t.Errorf("the reason must say why (%q missing): %q", want, held.Blocked)
-		}
-	}
-	// the bf16 row is held back too: a live card-only run built the whole 16.33 GiB text encoder on the 15.9 GiB storage card before the DisTorch2 split applied
-	for _, unet := range []string{"qwen_image_2.1_bf16.safetensors", "qwen_image_2.1_uc_bf16.safetensors"} {
-		bf := files(unet, "qwen3vl_8b_bf16.safetensors")
-		if got := FindMulticardRow("image", "qwen-image-2.1", bf); got != nil {
-			t.Fatalf("%s: the held-back bf16 row was found as a recipe: %s", unet, got.ID)
-		}
-		heldBF := BlockedMulticardRow("image", "qwen-image-2.1", bf)
-		if heldBF == nil || heldBF.ID != "qwen-image-2.1/bf16" {
-			t.Fatalf("%s: the held-back row = %v, want qwen-image-2.1/bf16", unet, heldBF)
-		}
-		for _, want := range []string{"--gpu-only", "16.33 GiB bf16 text encoder", "cuda:0, a 15.9 GiB card", "before the DisTorch2 allocation that splits it is applied", "text encoder per card", "measured arm"} {
-			if !strings.Contains(heldBF.Blocked, want) {
-				t.Errorf("%s: the reason must say why (%q missing): %q", unet, want, heldBF.Blocked)
-			}
-		}
-	}
-	// a call with no row at all is not held back, and a launchable row is not either
-	if got := BlockedMulticardRow("image", "qwen-image", files("qwen-image-2512-Q5_1.gguf", "")); got != nil {
-		t.Errorf("the 2512 Q5_1 row is not held back: %v", got)
-	}
-	if got := BlockedMulticardRow("edit", "qwen-image-edit-2511", files("qwen_image_edit_2511_fp8mixed.safetensors", "")); got != nil {
-		t.Errorf("the 2511 fp8mixed row is not held back: %v", got)
-	}
-	if got := BlockedMulticardRow("image", "krea2", files("krea2_turbo_bf16.safetensors", "")); got != nil {
-		t.Errorf("a family with no row is not held back: %v", got)
-	}
-	// an int8 text encoder is refused as one before a row is looked for
-	if got := BlockedMulticardRow("image", "qwen-image-2.1", files("qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_int8.safetensors")); got != nil {
-		t.Errorf("a banned text encoder has no row, held back or not: %v", got)
-	}
-	// the doctor asks for no MultiGPU class for a binding the runner would refuse
-	cfg := bare()
-	cfg.ImageGenFamily, cfg.ImageGenCkpt, cfg.ImageGenCLIP, cfg.ImageGenPlacement = "qwen-image-2.1", "qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", "multicard"
-	if got := imageNodeClasses(cfg); len(got) != 0 {
-		t.Errorf("a held-back binding names no extra node classes: %v", got)
-	}
-	cfg.ImageGenCkpt = "qwen_image_2.1_bf16.safetensors"
-	if got := imageNodeClasses(cfg); len(got) != 0 {
-		t.Errorf("the held-back bf16 binding names no extra node classes: %v", got)
-	}
-}
-
 // Each row's loaders name the classes the runner puts in the graph; the doctor asks ComfyUI for exactly those.
 func TestARowsNodeClassesAreItsLoadersClasses(t *testing.T) {
 	want := map[string][]string{
 		"qwen-image-2.1/int8_convrot":    {"UNETLoaderMultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-2.1/bf16":            {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image/gguf-q5_1":           {"UnetLoaderGGUFDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
+		"krea2/bf16":                     {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-edit-2511/fp8mixed":  {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-edit-2511/gguf-q5_1": {"UnetLoaderGGUFDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 	}
@@ -222,13 +165,19 @@ func TestRouteNeedsListTheMultiGPUClassesForAMulticardBinding(t *testing.T) {
 	if got := img("qwen-image", "qwen-image-2512-Q5_1.gguf", "", false); strings.Join(got, ",") != "UnetLoaderGGUF" {
 		t.Errorf("without the placement the doctor asks for what it always did: %v", got)
 	}
-	if got := img("qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", true); len(got) != 0 {
-		t.Errorf("a multicard 2.1 bf16 binding is held back (the runner refuses it by name), so the doctor asks for no extra class: %v", got)
+	if got := img("qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", true); strings.Join(got, ",") != "UNETLoaderDisTorch2MultiGPU,CLIPLoaderDisTorch2MultiGPU,VAELoaderMultiGPU" {
+		t.Errorf("a multicard 2.1 bf16 binding: %v", got)
+	}
+	if got := img("qwen-image-2.1", "qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", true); strings.Join(got, ",") != "UNETLoaderMultiGPU,CLIPLoaderDisTorch2MultiGPU,VAELoaderMultiGPU" {
+		t.Errorf("a multicard 2.1 int8_convrot binding: %v", got)
 	}
 	if got := img("qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", false); len(got) != 0 {
 		t.Errorf("a single 2.1 binding names only core classes: %v", got)
 	}
-	if got := img("krea2", "krea2_turbo_bf16.safetensors", "", true); len(got) != 0 {
+	if got := img("krea2", "krea2_turbo_bf16.safetensors", "", true); strings.Join(got, ",") != "UNETLoaderDisTorch2MultiGPU,CLIPLoaderMultiGPU,VAELoaderMultiGPU" {
+		t.Errorf("a multicard krea2 bf16 binding: %v", got)
+	}
+	if got := img("hidream-o1", "o1.safetensors", "", true); len(got) != 0 {
 		t.Errorf("a family with no recipe is refused by the runner, and the doctor asks for nothing extra: %v", got)
 	}
 	ed := bare()

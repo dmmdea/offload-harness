@@ -64,7 +64,7 @@ func QueuedClaimsBefore(m *gpulease.Manager, cards []gpuprobe.Card, ownToken str
 		add(w.Devices)
 	}
 	for _, t := range m.Tokens() {
-		if t.ID == ownToken || !m.TokenLive(t) || !ahead(t.SinceMs) {
+		if t.ID == ownToken || !m.TokenLive(t) || !t.HoldsItsCardsAgainst(declaresHostRAM) || !ahead(t.SinceMs) {
 			continue
 		}
 		add(t.Devices)

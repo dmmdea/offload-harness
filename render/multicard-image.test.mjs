@@ -29,9 +29,9 @@ const CARDS = W.parseCardTable(CSV);
 const LEASE = { GPU_LEASE_DEVICES: "gpu-cccc3333-dddd-eeee-ffff-000000000000,gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" };
 const BF16 = "qwen_image_2.1_bf16.safetensors";
 const INT8 = "qwen_image_2.1_int8_convrot.safetensors";
-// qwen-image-2.1 has two rows, both held back (render/multicard-recipes.json "blocked"): the planner refuses them by name.
+// qwen-image-2.1 has two rows, both launchable: the bf16 one (bound by default here) and the int8_convrot one (INT8).
 const HELD21 = { family: "qwen-image-2.1", unet: BF16, clip: "qwen3vl_8b_bf16.safetensors" };
-// The launchable image row, and the default of plan(): the 2512 Q5_1 GGUF (3 GiB of the DiT resident on the compute card, peaks 4.9 / 12.6 GiB, 1.6 GiB of activations).
+// The launchable image row, and the default of plan(): the 2512 Q5_1 GGUF (10 GiB of the DiT resident on the compute card, measured peaks 11.9 / 8.3 GiB, 1.6 GiB of activations).
 const GGUF = { family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: undefined };
 // The measured edit row: the 2511 fp8mixed DiT through DisTorch2 (9 GiB resident), the other launchable row that splits its DiT.
 const FP8 = { route: "edit", family: "qwen-image-edit-2511", unet: "qwen_image_edit_2511_fp8mixed.safetensors", clip: undefined };
@@ -82,50 +82,52 @@ test("a plan: the lease's two non-display cards, the same pair, key and launch t
   assert.equal(p.launch.cudaVisibleDevices, w.launch.cudaVisibleDevices);
   assert.deepEqual(p.launch.env, w.launch.env);
   assert.equal(p.recipe.id, "qwen-image/gguf-q5_1");
-  assert.equal(p.residentGb, 3);
+  assert.equal(p.residentGb, 10);
   assert.equal(p.env.COMFY_INSTANCE, p.launch.key);
   assert.equal(p.env.COMFY_CARD_UUID, "");
   assert.match(p.launch.key, /^mc-/);
 });
 
-// The 2.1 bf16 recipe is held back (render/multicard-recipes.json "blocked"): a live card-only run built the whole 16.33 GiB text encoder on the 15.9 GiB storage card
-// before the split applied and ran out of memory. The planner refuses it by name, whatever the cards and the lease, before the card table is read or a lease is spent.
-test("the 2.1 bf16 binding is refused as held back on two 16 GB cards under the lease, before the card table is read", () => {
+// The 2.1 bf16 recipe launches: its 16.33 GiB text encoder is built off the cards by the harness's own loader, so the pair of 16 GB cards holds it (a live run with the
+// stock DisTorch2 loader built the whole encoder on the storage card and ran out of memory there).
+test("the 2.1 bf16 binding plans on two 16 GB cards under the lease, with 8 GiB of the DiT resident on the compute card", () => {
   for (const unet of [BF16, "qwen_image_2.1_uc_bf16.safetensors"]) {
-    const held = { route: "image", ...HELD21, unet, flags: { placement: "multicard" }, env: { ...LEASE }, comfyDir: "/c", listFn: INSTALLED };
-    assert.throws(() => I.planImageMulticard({ ...held, cards: () => CARDS }), /qwen-image-2\.1\/bf16.*held back.*16\.33 GiB bf16 text encoder/s, unet);
-    assert.throws(() => I.planImageMulticard({ ...held, cards: never }), /qwen-image-2\.1\/bf16.*held back/s, "refused before the driver is asked anything");
-    assert.throws(() => I.planImageMulticard({ ...held, cards: () => CARDS, flags: { placement: "multicard", "resident-gb": "6" } }), /held back/, "a smaller resident share does not lift the hold");
+    const p = I.planImageMulticard({ route: "image", ...HELD21, unet, flags: { placement: "multicard" }, env: { ...LEASE }, comfyDir: "/c", listFn: INSTALLED, cards: () => CARDS });
+    assert.equal(p.recipe.id, "qwen-image-2.1/bf16", unet);
+    assert.equal(p.residentGb, 8);
   }
+  const six = I.planImageMulticard({ route: "image", ...HELD21, flags: { placement: "multicard", "resident-gb": "6" }, env: { ...LEASE }, comfyDir: "/c", listFn: INSTALLED, cards: () => CARDS });
+  assert.equal(six.residentGb, 6);
 });
 
 test("say names the recipe, the two cards and their roles, once", () => {
   const lines = [];
   plan({ say: (l) => lines.push(l) });
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 0 .*; compute cuda:1 = idx 2 .*; recipe qwen-image\/gguf-q5_1, 3 GiB of the DiT resident on the compute card; basis predicted/);
+  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 0 .*; compute cuda:1 = idx 2 .*; recipe qwen-image\/gguf-q5_1, 10 GiB of the DiT resident on the compute card; basis measured/);
 });
 
 test("--resident-gb reaches the plan; a plain-pin recipe refuses it; one the compute card cannot hold beside the activations is refused with the numbers", () => {
   assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "7.5" } }).residentGb, 7.5);
-  // the one plain-pin recipe (int8_convrot) is held back, so the planner refuses it by name whatever else the call says, before any card table is read
-  assert.throws(() => plan({ ...HELD21, unet: INT8, flags: { placement: "multicard", "resident-gb": "3" }, cards: never }), /int8_convrot.*held back/s);
-  assert.throws(() => plan({ ...HELD21, unet: INT8, cards: never }), /int8_convrot.*held back/s);
+  // the one plain-pin recipe (int8_convrot) holds the whole DiT on the compute card, so it has no resident share to set
+  assert.throws(() => plan({ ...HELD21, unet: INT8, flags: { placement: "multicard", "resident-gb": "3" } }), /whole DiT on the compute card/);
+  assert.equal(plan({ ...HELD21, unet: INT8 }).recipe.id, "qwen-image-2.1/int8_convrot");
   // the compute card (15.9 GiB) less the recipe's 1.6 GiB of activations and the 0.5 GiB context holds at most 13.8 GiB of the DiT
   assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "14" } }), /--resident-gb 14.*compute card \(idx 2, 15\.9 GiB\).*1\.6 GiB for the sampler's activations.*at most 13\.8 GiB/s);
 });
 
 test("a recipe whose per-card peak does not fit the leased cards (after --reserve-vram) is refused with the card and the figure", () => {
+  // 12 GiB cards: the recipe's 10 GiB share leaves the compute card too little beside the 1.6 GiB of activations and the 0.5 GiB context
   const small = W.parseCardTable([`0, ${U0}, Small A, 12288, 12000, Disabled, No`, `2, ${U2}, Small B, 12288, 12000, Disabled, No`].join("\n"));
-  assert.throws(() => plan({ cards: () => small }), /qwen-image\/gguf-q5_1.*storage card.*12\.6 GiB.*12\.0 GiB.*usable/s);
-  // a call that asks for less reserve fits where the default one does not: the 12.6 GiB storage peak against 13.0 GiB less the default 1.0 GiB reserve
+  assert.throws(() => plan({ cards: () => small }), /compute card \(idx 2, 12\.0 GiB\).*qwen-image\/gguf-q5_1.*at most 9\.9 GiB/s);
+  // 13 GiB cards hold the 11.9 GiB compute peak under the default 1.0 GiB reserve, and not under a 1.5 GiB one
   const tight = W.parseCardTable([`0, ${U0}, Tight A, 13312, 13000, Disabled, No`, `2, ${U2}, Tight B, 13312, 13000, Disabled, No`].join("\n"));
-  assert.throws(() => plan({ cards: () => tight }), /needs the storage card.*to hold 12\.6 GiB.*13\.0 GiB \(12\.0 GiB usable/s);
-  assert.ok(plan({ cards: () => tight, flags: { placement: "multicard", "reserve-vram": "0.2" } }), "a 0.2 GiB reserve leaves 12.8 GiB");
+  assert.ok(plan({ cards: () => tight }), "11.9 GiB fits 12.0 usable");
+  assert.throws(() => plan({ cards: () => tight, flags: { placement: "multicard", "reserve-vram": "1.5" } }), /needs the compute card.*to hold 11\.9 GiB.*13\.0 GiB \(11\.5 GiB usable/s);
 });
 
 test("the compute card's peak moves with the resident share, and --reserve-vram counts against both cards", () => {
-  // 2512 Q5_1 GGUF: 3 GiB resident is 4.9 GiB on the compute card. 13.2 GiB passes the activations check (at most 13.8) but is 15.1 GiB against 14.9 usable.
+  // 2512 Q5_1 GGUF: 10 GiB resident is 11.9 GiB on the compute card. 13.2 GiB passes the activations check (at most 13.8) but is 15.1 GiB against 14.9 usable.
   assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "12" } }), "13.9 GiB fits 14.9 GiB usable");
   assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "13.2" } }), /needs the compute card.*to hold 15\.1 GiB.*14\.9 GiB usable after --reserve-vram 1/s);
   assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "13.2", "reserve-vram": "0.1" } }), "the same share fits when the call asks for less reserve");
@@ -146,13 +148,14 @@ test("a resident share below the recipe's moves the same bytes onto the storage 
   // --reserve-vram counts against the storage card too
   assert.ok(plan(share(5, { "reserve-vram": "0.5" })), "15.0 GiB fits 15.4 usable");
   assert.throws(() => plan(share(7, { "reserve-vram": "3.5" })), /needs the storage card.*to hold 13\.0 GiB.*12\.4 GiB usable/s, "13.0 GiB on the storage card against 15.9 - 3.5");
-  // the 2512 Q5_1 GGUF: 12.6 GiB on the storage card at the row's 3 GiB share, so a share of 0 puts all 14.3 GiB of the DiT there (15.6 GiB, the benchmark's measured peak)
-  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "0" } }), /needs the storage card.*to hold 15\.6 GiB/s);
-  assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "1" } }).residentGb, 1, "14.6 GiB on the storage card fits 14.9 usable");
+  // the 2512 Q5_1 GGUF: 8.3 GiB on the storage card at the row's 10 GiB share, so a share of 0 counts all 10 GiB more there (18.3 GiB)
+  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "0" } }), /needs the storage card.*to hold 18\.3 GiB/s);
+  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "3" } }), /needs the storage card.*to hold 15\.3 GiB/s, "the 3 GiB share that ran out of memory on the storage card at 928x1664");
+  assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "4" } }).residentGb, 4, "14.3 GiB on the storage card fits 14.9 usable");
 });
 
 test("refused before any card table is read: no recipe, a --graph file, and no card named at all", () => {
-  assert.throws(() => plan({ cards: never, family: "krea2", unet: "k.safetensors" }), /no measured card-only recipe for krea2.*--pool-vvram/s);
+  assert.throws(() => plan({ cards: never, family: "hidream-o1", unet: "o1.safetensors" }), /no measured card-only recipe for hidream-o1/);
   assert.throws(() => plan({ cards: never, unet: "qwen_image_2512_bf16.safetensors", family: "qwen-image" }), /bf16 fits no card/);
   assert.throws(() => plan({ cards: never, clip: "qwen3vl_8b_int8.safetensors" }), /int8.*30 dB/s);
   assert.throws(() => plan({ cards: never, isGraph: true }), /posts a --graph file/);
@@ -234,9 +237,8 @@ test("verifyImagePlacement stops the run, before anything is submitted, when Com
   await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { pack: false }) }), /IMAGE-PLACEMENT-PACK.*offload_multicard.*Nothing was submitted/s);
 });
 
-// A plan for the held-back 2.1 bf16 row, built by hand: the planner refuses that row by name, but the proof arm that lifts the hold goes through
-// verifyImagePlacement with exactly these loaders (the DiT and the text encoder both through DisTorch2), so the check of their classes and inputs stays covered
-// with the row's data, beside the launchable rows' own.
+// A plan for the 2.1 bf16 row: the DiT through DisTorch2 and the text encoder through the harness's own loader, so the check of their classes and inputs is covered
+// with the row's data, beside the other launchable rows' own.
 const heldPlan = () => {
   const r = RECIPES.find((x) => x.id === "qwen-image-2.1/bf16");
   return { ...plan(), recipe: r, residentGb: r.unet.residentGb };
@@ -244,7 +246,7 @@ const heldPlan = () => {
 
 test("verifyImagePlacement asks for the recipe's own loader classes too: a class the pack does not register is MISSING_NODE with the pack hint, and nothing is submitted", async () => {
   const p = heldPlan();
-  for (const [cls, pack] of [["CLIPLoaderDisTorch2MultiGPU", /ComfyUI-MultiGPU/], ["UNETLoaderDisTorch2MultiGPU", /ComfyUI-MultiGPU/], ["VAELoaderMultiGPU", /ComfyUI-MultiGPU/]]) {
+  for (const [cls, pack] of [["OffloadCLIPLoaderDisTorch2", /offload_multicard/], ["UNETLoaderDisTorch2MultiGPU", /ComfyUI-MultiGPU/], ["VAELoaderMultiGPU", /ComfyUI-MultiGPU/]]) {
     await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { absent: [cls] }) }), (e) => e.message.startsWith("MISSING_NODE: ") && e.message.includes(cls) && pack.test(e.message) && /Nothing was submitted/.test(e.message), cls);
   }
   // a GGUF recipe also needs ComfyUI-GGUF to have registered its DisTorch2 loader
@@ -259,14 +261,14 @@ test("verifyImagePlacement refuses a loader whose pack no longer declares an inp
     I.verifyImagePlacement("http://x", e, { fetchImpl: objectInfoFor(e, { without: { UNETLoaderDisTorch2MultiGPU: ["expert_mode_allocations"] } }) }),
     /^Error: IMAGE-PLACEMENT-NODE-INPUT: .*UNETLoaderDisTorch2MultiGPU.*expert_mode_allocations.*qwen-image-edit-2511\/fp8mixed.*silently.*Nothing was submitted/s,
   );
-  const p = heldPlan(); // the held-back 2.1 bf16 row's data: the DiT and the text encoder both through DisTorch2
+  const p = heldPlan(); // the 2.1 bf16 row: the DiT through DisTorch2, the text encoder through the harness's own loader
   await assert.rejects(
     I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { without: { UNETLoaderDisTorch2MultiGPU: ["expert_mode_allocations"] } }) }),
     /^Error: IMAGE-PLACEMENT-NODE-INPUT: .*UNETLoaderDisTorch2MultiGPU.*expert_mode_allocations.*qwen-image-2\.1\/bf16.*silently.*Nothing was submitted/s,
   );
   await assert.rejects(
-    I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { without: { CLIPLoaderDisTorch2MultiGPU: ["expert_mode_allocations", "eject_models"] } }) }),
-    /CLIPLoaderDisTorch2MultiGPU.*expert_mode_allocations, eject_models/s,
+    I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { without: { OffloadCLIPLoaderDisTorch2: ["expert_mode_allocations", "eject_models"] } }) }),
+    /OffloadCLIPLoaderDisTorch2.*expert_mode_allocations, eject_models/s,
   );
   // an answer that carries no input section says nothing about inputs, so it is not a refusal
   await I.verifyImagePlacement("http://x", e, { fetchImpl: objectInfoFor(e, { bare: ["UNETLoaderDisTorch2MultiGPU"] }) });
@@ -337,9 +339,9 @@ test("comfy-generate, comfy-render and comfy-edit refuse a multicard call that n
 test("comfy-generate refuses a family with no recipe by name, and a batch is refused the same way", async (t) => {
   const dir = scratchDir(t, "mc-img-");
   const env = scrubbedEnv(dir);
-  const k = await run("comfy-generate.mjs", [join(dir, "o.png"), "p", "--family", "krea2", "--ckpt", "k.safetensors", "--placement", "multicard"], env);
+  const k = await run("comfy-generate.mjs", [join(dir, "o.png"), "p", "--family", "hidream-o1", "--ckpt", "o1.safetensors", "--placement", "multicard"], env);
   assert.equal(k.code, 2, k.err);
-  assert.match(k.err, /no measured card-only recipe for krea2/);
+  assert.match(k.err, /no measured card-only recipe for hidream-o1/);
   const jobs = join(dir, "jobs.jsonl");
   writeFileSync(jobs, JSON.stringify({ prompt: "p", out: join(dir, "a.png") }) + "\n");
   const b = await run("comfy-generate.mjs", ["--batch", jobs, "--family", "qwen-image", "--ckpt", "qwen_image_2512_bf16.safetensors", "--placement", "multicard"], env);
@@ -399,8 +401,8 @@ test("WAN_COMPUTE_UUID names the compute card of the image placement too, refuse
 });
 
 test("the override is judged like any other choice: the recipe's resident and peak checks run on the card it names, not on the larger one", () => {
-  // 24 GiB beside 16 GiB: unnamed, the larger card (idx 0) computes. The GGUF recipe holds 4.9 GiB on the compute card at its 3 GiB share (+1 GiB per GiB of share)
-  // and 12.6 GiB on the storage card (which a larger share does not lower), against the 1 GiB --reserve-vram.
+  // 24 GiB beside 16 GiB: unnamed, the larger card (idx 0) computes. The GGUF recipe holds 11.9 GiB on the compute card at its 10 GiB share (+1 GiB per GiB of share)
+  // and 8.3 GiB on the storage card (which a larger share does not lower), against the 1 GiB --reserve-vram.
   const unequal = W.parseCardTable([`0, ${U0}, Test GPU Big, 24576, 24000, Disabled, No`, `2, ${U2}, Test GPU Small, 16384, 16000, Disabled, No`].join("\n"));
   const naming = { ...LEASE, WAN_COMPUTE_UUID: "2" };
   const share = (gb) => ({ cards: () => unequal, flags: { placement: "multicard", "resident-gb": String(gb) } });
@@ -420,7 +422,7 @@ test("the image placement's one line ends with the rule that chose the compute c
   const lines = [];
   plan({ cards: () => RANKED, say: (l) => lines.push(l) });
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 2 .*; compute cuda:1 = idx 0 .*; recipe qwen-image\/gguf-q5_1, 3 GiB of the DiT resident on the compute card; basis predicted; compute card chosen: the faster card: 300 W board power against 180 W$/);
+  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 2 .*; compute cuda:1 = idx 0 .*; recipe qwen-image\/gguf-q5_1, 10 GiB of the DiT resident on the compute card; basis measured; compute card chosen: the faster card: 300 W board power against 180 W$/);
   lines.length = 0;
   plan({ cards: () => [...RANKED, CARDS[1]], env: { ...LEASE, WAN_COMPUTE_UUID: "1" }, say: (l) => lines.push(l) });
   assert.match(lines[0], /compute card chosen: the faster card: 300 W board power against 180 W \(WAN_COMPUTE_UUID names "1", which does not name exactly one of the two cards \(idx 2, idx 0\); ranked instead\)$/);

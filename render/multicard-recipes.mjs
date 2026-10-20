@@ -6,21 +6,25 @@
 // for each; internal/hostneed keeps a copy of the figures that decide a host-RAM declaration, and a Go test pins the copy).
 //   cuda:0 = the STORAGE card: the text encoder, the VAE and the donor blocks of the DiT;
 //   cuda:1 = the COMPUTE card: the DiT's resident share and the sampler's activations.
-// The same two names the Wan placement uses (wf-wan22-i2v.mjs), so one launch (wan-multicard.mjs multicardLaunch) serves both.
+// The same two names the Wan placement uses (wf-wan22-i2v.mjs), so one launch (wan-multicard.mjs multicardLaunch) serves both. A row with
+// `cardOrder: "compute-first"` (the qwen-image-2.1 rows, whose DiT runs comfy_kitchen kernels that work only on cuda:0) is launched the other way round,
+// the LTX-2.5 placement's launch: cuda:0 computes and cuda:1 stores (rowDevices says where each loader goes).
 //
-// WHAT IT REFUSES, by name and before a lease is taken: a family or quant with no recipe (2512 bf16 fits no card, krea2 has its
-// own pool flags, SDXL and HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
-// the int8_convrot DiT is a different file and a recipe of its own, held back for now: its `blocked` sentence says why); a text
-// encoder other than the one the recipe was built for.
-// A row can carry a CANVAS CAP (`maxPixels`, refused by canvasRefusal): the launchable image row is held to 1.47 MP, a number chosen and not measured, because its first
-// live run ran out of memory at 928x1664 (1.54 MP). The edit rows have `maxMegapixels` instead, the edit canvas their peaks were scaled to (comfy-edit.mjs refuses above it).
+// WHAT IT REFUSES, by name and before a lease is taken: a family or quant with no recipe (2512 bf16 fits no card, SDXL and
+// HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
+// the int8_convrot DiT is a different file and a recipe of its own); a text encoder other than the one the recipe was built for.
+// A row can carry a CANVAS CAP (`maxPixels`, refused by canvasRefusal; its `maxPixelsNote` says whether it was measured): the 2512 Q5_1 GGUF row is held to
+// 1536x1152 (measured at 1328x1328 and 928x1664), the krea2 bf16 row to 1536x1024 (measured), the 2.1 bf16 row to the family's 2048x2048 default. The edit rows have `maxMegapixels` instead, the edit canvas their peaks were scaled to (comfy-edit.mjs refuses above it).
 // A row can be HELD BACK: it stays in the table (its data is the proof arm's), carries a `blocked` sentence that says why, and
-// findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. Both qwen-image-2.1 rows are held back today:
-// int8_convrot (its DiT on cuda:1 never ran) and bf16 (under --gpu-only ComfyUI builds the whole 16.33 GiB text encoder on the 15.9 GiB
-// storage card before the DisTorch2 split is applied, and ran out of memory there). The launchable image row is the 2512 Q5_1 GGUF.
+// findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. No row is held back today (the qwen-image-2.1 int8_convrot row was, until
+// a card-only run of it was measured). The launchable image rows are the 2512 Q5_1 GGUF, the krea2 bf16 DiT (its text encoder loads with the CLIP type
+// the row names, `clipType`, "krea2"; a row without one is "qwen_image") and the qwen-image-2.1 bf16 and int8_convrot DiTs.
 // An fp8 text encoder is never placed on cuda:1 (two measured runs aborted the process there), so a recipe pins it whole to
-// cuda:0; only a bf16 encoder too big for one card is split (the two held-back 2.1 rows are the ones that do), and a test walks every
-// recipe to keep it that way.
+// cuda:0 (in both card orders an encoder computes on cuda:0); only a bf16 encoder too big for one card is split (the two 2.1 rows are the ones that do), and a test walks every
+// recipe to keep it that way. That encoder is the `distorch2-host` clip loader: under --gpu-only the stock DisTorch2 loader builds the whole
+// 16.33 GiB encoder on one 15.9 GiB card before its allocation applies, so the harness's own OffloadCLIPLoaderDisTorch2
+// (render/comfyui-ext/nodes/offload_multicard) builds it off the cards and places it block by block (the plain `distorch2` kind stays for a split
+// encoder that does fit one card while it is built).
 //
 // Classes are the ones ComfyUI-MultiGPU's own NODE_CLASS_MAPPINGS registers (read from the installed pack's __init__.py): the
 // plain UNETLoaderMultiGPU / CLIPLoaderMultiGPU / VAELoaderMultiGPU (input `device`), the UNETLoaderDisTorch2MultiGPU and
@@ -32,6 +36,25 @@ import { readFileSync } from "node:fs";
 
 export const MULTICARD_STORAGE = "cuda:0";
 export const MULTICARD_COMPUTE = "cuda:1";
+
+/** A row's `cardOrder`: "storage-first" (absent, the default: the two names above) or "compute-first" (rowDevices). The spellings are wan-multicard.mjs's CARD_ORDER_*. */
+export const CARD_ORDER_STORAGE_FIRST = "storage-first";
+export const CARD_ORDER_COMPUTE_FIRST = "compute-first";
+
+/**
+ * rowDevices: where a row's loaders put each weight, as ComfyUI numbers the two cards, and the order the launch lists them in (wan-multicard.mjs multicardLaunch).
+ * A storage-first row (no `cardOrder`) is launched storage card first: the DiT computes on cuda:1, its donor blocks and the VAE are on cuda:0. A compute-first
+ * row (`cardOrder: "compute-first"`, the qwen-image-2.1 rows) is launched compute card first, so its DiT computes on cuda:0: that DiT runs comfy_kitchen's
+ * fused kernels, which run only on cuda:0 here (ComfyUI-MultiGPU #220; a 2026-10-20 run of the 2.1 bf16 DiT computing on cuda:1 staged every kernel's tensors
+ * through host RAM, host free memory fell 12.5 GB in its first step, and the process aborted). The text encoder computes on cuda:0 in both orders (the device
+ * every encoder of this table ran on; an fp8 one aborted on cuda:1) and parks its split share on cuda:1; the VAE is on the storage card in both.
+ */
+export function rowDevices(row) {
+  if (row && row.cardOrder === CARD_ORDER_COMPUTE_FIRST) {
+    return { order: CARD_ORDER_COMPUTE_FIRST, compute: "cuda:0", storage: "cuda:1", encoder: "cuda:0", encoderDonor: "cuda:1" };
+  }
+  return { order: CARD_ORDER_STORAGE_FIRST, compute: MULTICARD_COMPUTE, storage: MULTICARD_STORAGE, encoder: MULTICARD_STORAGE, encoderDonor: MULTICARD_COMPUTE };
+}
 
 /** The placements of the image and edit builders: single is today's graph (the default), multicard is the card-only one. */
 export const PLACEMENTS = Object.freeze(["single", "multicard"]);
@@ -56,22 +79,22 @@ const BANNED_TEXT_ENCODER = /int8|int4|nf4/i;
 
 const FAMILY_HINTS = Object.freeze({
   "qwen-image": "2512 bf16 fits no card (a 38 GiB DiT); bind the Q5_1 GGUF (14.3 GiB), which has a recipe",
-  krea2: "its 24.5 GiB DiT is split by the pool flags (--pool-vvram/--pool-compute/--pool-donor), which are a different placement and stay as they are",
+  krea2: "the card-only recipe is the bf16 DiT with the bf16 Qwen3-VL-4B text encoder; bind those files",
   sdxl: "it fits one card, so there is nothing to place across two",
   "hidream-o1": "it fits one card pair only with host RAM and was never measured card-only",
   "hidream-o1-dev": "it fits one card pair only with host RAM and was never measured card-only",
-  "qwen-image-2.1": "no DiT of this family has a launchable recipe today: the int8_convrot and the bf16 rows are both held back (see each row's `blocked`)",
+  "qwen-image-2.1": "the card-only recipes are the bf16 and int8_convrot DiTs with the bf16 Qwen3-VL-8B text encoder; bind those files",
 });
 
 // The hints above describe the IMAGE route's rows. The edit route has its own, because a family can have rows on one route and none on the other:
-// qwen-image-2.1 has two image rows (both held back) and no edit row, and its edit graph takes no placement argument, so lifting the image holds would not give it one.
+// qwen-image-2.1 has two image rows and no edit row, and its edit graph takes no placement argument, so the image rows would not give it one.
 const EDIT_FAMILY_HINTS = Object.freeze({
   "qwen-image-2.1": "the 2.1 edit graph has no card-only placement (it takes no placement argument), so there is no recipe for it to hold back or lift",
 });
 
 /**
  * routeOffer: what the table offers on a route, as one sentence read from the table itself: the launchable rows, then the held-back ones. Written by hand it went
- * stale: it listed qwen-image-2.1 as having recipes after both of that family's rows were held back.
+ * stale: it listed qwen-image-2.1 as having recipes after both of that family's rows were held back (a row held back is named, never offered).
  */
 function routeOffer(route) {
   const mine = RECIPES.filter((r) => r.route === route);
@@ -133,21 +156,21 @@ export function canvasRefusal(row, width, height) {
 }
 
 /**
- * allocationString: DisTorch2's expert-bytes allocation that keeps `residentGb` GiB of the DiT on the compute card and the remainder
- * on the storage card. The unit letter is required (`cuda:0,*` alone is rejected), so the share is always written with `gb`.
+ * allocationString: DisTorch2's expert-bytes allocation that keeps `residentGb` GiB on the device `first` (by default the compute card of a storage-first row) and
+ * the remainder on `rest` (by default its storage card). The unit letter is required (`cuda:0,*` alone is rejected), so the share is always written with `gb`.
  */
-export function allocationString(residentGb) {
+export function allocationString(residentGb, first = MULTICARD_COMPUTE, rest = MULTICARD_STORAGE) {
   if (typeof residentGb !== "number" || !Number.isFinite(residentGb) || residentGb < 0) {
     throw new Error(`allocationString: residentGb must be a number of GiB, 0 or more, got ${JSON.stringify(residentGb)}`);
   }
-  return `${MULTICARD_COMPUTE},${Number(residentGb.toFixed(2))}gb;${MULTICARD_STORAGE},*`;
+  return `${first},${Number(residentGb.toFixed(2))}gb;${rest},*`;
 }
 
 /**
  * recipePeaks: the per-card VRAM peak (GiB) a call on this recipe is held to at a given resident share (null = the recipe's own, or a plain pin that has none).
  * The DiT's total is the invariant: --resident-gb keeps that many GiB of it on the compute card and the allocation string sends the REMAINDER to the storage
  * card. A larger share raises the compute peak; a smaller one puts the same bytes on the storage card. The storage figure is never lowered by a larger share,
- * because no run measured that: the recipe's own stands. For a recipe whose storage peak is its text-encoder stage (the 2.1 bf16 one, now held back) a smaller share is
+ * because no run measured that: the recipe's own stands. For a recipe whose storage peak is its text-encoder stage (the 2.1 bf16 one) a smaller share is
  * therefore refused somewhat early, on the conservative side.
  */
 export function recipePeaks(row, residentGb) {
@@ -177,16 +200,17 @@ export function recipeResident(row, override) {
  */
 export function multicardLoaders(row, { unet, clip, vae, residentGb } = {}) {
   const share = recipeResident(row, residentGb);
+  const d = rowDevices(row);
   let unetNode;
   switch (row.unet.loader) {
     case "plain":
-      unetNode = { class_type: "UNETLoaderMultiGPU", inputs: { unet_name: unet, weight_dtype: "default", device: MULTICARD_COMPUTE } };
+      unetNode = { class_type: "UNETLoaderMultiGPU", inputs: { unet_name: unet, weight_dtype: "default", device: d.compute } };
       break;
     case "distorch2":
-      unetNode = { class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: MULTICARD_COMPUTE, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(share), eject_models: false } };
+      unetNode = { class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: d.compute, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(share, d.compute, d.storage), eject_models: false } };
       break;
     case "gguf-distorch2":
-      unetNode = { class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: MULTICARD_COMPUTE, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(share), eject_models: false } };
+      unetNode = { class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: d.compute, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(share, d.compute, d.storage), eject_models: false } };
       break;
     default:
       throw new Error(`multicardLoaders: recipe ${row.id} names the DiT loader ${JSON.stringify(row.unet.loader)}, which is none of plain|distorch2|gguf-distorch2`);
@@ -194,17 +218,22 @@ export function multicardLoaders(row, { unet, clip, vae, residentGb } = {}) {
   let clipNode;
   switch (row.clip.loader) {
     case "plain":
-      clipNode = { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: clip, type: "qwen_image", device: MULTICARD_STORAGE } };
+      clipNode = { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: d.encoder } };
       break;
     case "distorch2":
-      clipNode = { class_type: "CLIPLoaderDisTorch2MultiGPU", inputs: { clip_name: clip, type: "qwen_image", device: MULTICARD_STORAGE, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(row.clip.residentGb), eject_models: false } };
+      clipNode = { class_type: "CLIPLoaderDisTorch2MultiGPU", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: d.encoder, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(row.clip.residentGb, d.encoderDonor, d.encoder), eject_models: false } };
+      break;
+    case "distorch2-host":
+      // the harness's own loader: the encoder is built off the cards and placed by the allocation (it computes on `device`, cuda:0; the `residentGb` of it is
+      // parked on the other card, cuda:1, and streamed across at encode time), so it never has to fit one card while it is built
+      clipNode = { class_type: "OffloadCLIPLoaderDisTorch2", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: d.encoder, expert_mode_allocations: allocationString(row.clip.residentGb, d.encoderDonor, d.encoder), eject_models: false } };
       break;
     default:
-      throw new Error(`multicardLoaders: recipe ${row.id} names the text-encoder loader ${JSON.stringify(row.clip.loader)}, which is none of plain|distorch2`);
+      throw new Error(`multicardLoaders: recipe ${row.id} names the text-encoder loader ${JSON.stringify(row.clip.loader)}, which is none of plain|distorch2|distorch2-host`);
   }
   return {
     "1": unetNode,
     "2": clipNode,
-    "3": { class_type: "VAELoaderMultiGPU", inputs: { vae_name: vae, device: MULTICARD_STORAGE } },
+    "3": { class_type: "VAELoaderMultiGPU", inputs: { vae_name: vae, device: d.storage } },
   };
 }

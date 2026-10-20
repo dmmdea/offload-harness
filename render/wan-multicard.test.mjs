@@ -3,7 +3,7 @@
 // the HTTP probes and the pid checks are injected; the only real I/O is scratch folders (scratchDir) under the OS temp dir, gone when their test ends.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, writeFileSync, appendFileSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import {
   buildWan22I2V, WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE,
@@ -13,6 +13,7 @@ import * as L from "./comfy-lifecycle.mjs";
 import * as O from "./comfy-ownership.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { scratchDir } from "./test-scratch.mjs";
+import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { parseArgs, buildGraphFromArgs, buildGraphForRun, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
 
 // Synthetic ids: a repeated-nibble head is a placeholder to the leak gate, and none of these names a real card.
@@ -115,8 +116,11 @@ test("every non-core class the multicard graph names has a MISSING_NODE hint, th
 test("multicard refuses what was not measured, and a bad placement, with the reason", () => {
   assert.throws(() => buildWan22I2V({ ...ARGS, placement: "everywhere" }), /placement must be single\|multicard/);
   assert.throws(() => buildWan22I2V({ ...ARGS, placement: "multicard", fast: true }), /native recipe only/);
-  assert.throws(() => buildWan22I2V({ ...ARGS, highUnet: "h.gguf", placement: "multicard" }), /GGUF/);
-  assert.throws(() => buildWan22I2V({ ...ARGS, lowUnet: "l.GGUF", placement: "multicard" }), /GGUF/);
+  // a Q8_0 GGUF expert is built: the GGUF flavour of the DisTorch2 loader, the same compute card and allocation, no weight_dtype
+  const q8 = buildWan22I2V({ ...ARGS, highUnet: "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf", lowUnet: "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf", placement: "multicard", residentGb: 2 });
+  for (const [id, unet] of [["7", "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf"], ["9", "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf"]]) {
+    assert.deepEqual(q8[id], { class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: "cuda:1", virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: "cuda:1,2gb;cuda:0,*", eject_models: false } });
+  }
   // the single placement still takes both
   assert.doesNotThrow(() => buildWan22I2V({ ...ARGS, fast: true }));
 });
@@ -245,6 +249,18 @@ test("packDirs finds the packs by name whatever the case, and refuses a missing 
   assert.throws(() => M.packDirs("/c", listing(["ComfyUI-VideoHelperSuite"])), /no comfyui-multigpu pack.*DisTorch2/);
   assert.throws(() => M.packDirs("/c", listing(["ComfyUI-MultiGPU"])), /no comfyui-videohelpersuite pack.*mp4/);
   assert.throws(() => M.packDirs("/nowhere/at/all"), /no comfyui-multigpu pack/, "an unreadable custom_nodes is no pack");
+});
+
+test("LTX-2.5 under multicard: the launch lists the compute card first and the DiT computes on cuda:0 (an int8 DiT faults elsewhere, ComfyUI-MultiGPU #220)", () => {
+  const opts = { comfyDir: "/c", packDirsFn: () => ["ComfyUI-MultiGPU"] };
+  const launch = M.multicardLaunch(pair(), { ...opts, order: M.CARD_ORDER_COMPUTE_FIRST });
+  assert.equal(launch.cudaVisibleDevices, `${U0},${U2}`, "compute first: it becomes cuda:0");
+  assert.deepEqual(launch.cards, [U0, U2]);
+  assert.equal(launch.key, "mcc-cccc3333-aaaa1111");
+  assert.notEqual(launch.key, M.multicardLaunch(pair(), opts).key, "a kept storage-first ComfyUI is never taken for this one");
+  const g = buildLtx25I2V({ imagePath: "s.png", prompt: "p", multicard: { residentGb: 9 } });
+  assert.equal(g["5"].inputs.compute_device, "cuda:0");
+  assert.equal(g["5"].inputs.expert_mode_allocations, "cuda:0,9gb;cuda:1,*");
 });
 
 test("multicardLaunch: the two uuids storage first, the placement's flags, the reader switched on, an instance of its own", () => {
@@ -600,15 +616,21 @@ test("tiledSeamFrames reproduces the temporal tiling of VAEDecodeTiled: where on
   assert.equal(M.describeFrames([]), "");
 });
 
-test("planMulticard refuses --fast and a GGUF or unnamed expert before anything starts, not after the cold start", () => {
+test("planMulticard refuses --fast and an unnamed expert before anything starts, and takes a GGUF expert with the GGUF pack", (t) => {
   assert.doesNotThrow(() => planWith());
   assert.throws(() => planWith({ fast: true }), /native recipe only.*drop --fast/);
-  assert.throws(() => planWith({ "high-unet": "h.gguf" }), /--high-unet.*h\.gguf.*GGUF/);
-  assert.throws(() => planWith({ "low-unet": "L.GGUF" }), /--low-unet.*L\.GGUF.*GGUF/);
+  const nodes = scratchDir(t, "wan-mc-");
+  for (const d of ["ComfyUI-MultiGPU", "ComfyUI-VideoHelperSuite", "ComfyUI-GGUF"]) mkdirSync(join(nodes, "custom_nodes", d), { recursive: true });
+  const gguf = planWith({ "high-unet": "Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf", "low-unet": "Wan2.2-I2V-A14B-LowNoise-Q8_0.gguf" }, {
+    comfyDir: nodes, launchFn: (p, o) => M.multicardLaunch(p, o),
+  });
+  assert.equal(gguf.launch.gguf, true);
+  assert.ok(gguf.launch.flags.includes("ComfyUI-GGUF"), "the GGUF pack is whitelisted");
+  assert.equal(planWith().launch.gguf, undefined, "an fp8 launch is the old shape");
   for (const flag of ["high-unet", "low-unet"]) {
     const flags = { "wan-placement": "multicard", ...EXPERTS };
     delete flags[flag];
-    assert.throws(() => planWith({}, { flags }), new RegExp(`needs --${flag}.*fp8 safetensors expert.*default experts are GGUF`));
+    assert.throws(() => planWith({}, { flags }), new RegExp(`needs --${flag}.*fp8 safetensors file or a Q8_0 GGUF file.*default experts are Q4_K GGUF`));
     assert.throws(() => planWith({ [flag]: "" }), new RegExp(`needs --${flag}`), "an empty name is no name");
   }
 });

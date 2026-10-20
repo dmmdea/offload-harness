@@ -39,9 +39,16 @@
 //   Sage attention: with --use-sage-attention (or an argparse prefix of 8+ characters) in COMFY_EXTRA_ARGS the sampler's activations are sized at 15.2 GiB at the
 //   film's size (12.2 without it), so the default --wan-resident-gb 3 is refused from about 58k tokens up on a 15.9 GiB card and a sage film call passes --wan-resident-gb 0 (0.2 at
 //   most at 720x1280x81, 2.5 at 720x1280x65; 720x1280x61 still admits 3.1); the lease sizing holds 15.2 GiB for any clip, so --ram 0 states the real figure for a smaller one.
+//   --wan-placement multicard --model ltx25 is the same placement for LTX-2.5 (a 20 GiB int8 DiT, a 14 GiB Gemma encoder): the lease's compute card is cuda:0 (the launch lists it
+//   first: an int8 DiT that computes on another device faults, ComfyUI-MultiGPU #220) and the storage card cuda:1; --wan-resident-gb N (default 9) is the GiB of the DiT kept on
+//   the compute card, the encoder is split over both cards and taken off them once the prompt is encoded (OffloadFreeAfterEncode), and both VAEs sit on the storage card. No
+//   --wan-decode, --high-unet or --low-unet; a bf16 or GGUF --transformer is refused. A split model stays on its cards when ComfyUI loads the latent upscaler (the
+//   pack's eviction guard), and OffloadFreeForDecode (check false) empties both cards before the tiled decodes. Measured on one run at 1280x704x121 with the default shares:
+//   peaks 11.54 GiB compute and 12.71 GiB storage, 124.0 s of ComfyUI time; a larger share or clip is unmeasured.
 //   --wan-decode plain under multicard frees both cards of the experts before the plain VAEDecode and saves the sampled latent
 //   (a LATENT line names it); a plain decode that ComfyUI retried tiled fails the run (WAN-DECODE-FALLBACK) and keeps the clip beside <out> as
-//   <name>.seamed<ext>; --wan-loader is not used. Needs --high-unet / --low-unet to name the fp8 safetensors experts. The wait is 7200 s unless
+//   <name>.seamed<ext>; --wan-loader is not used. Needs --high-unet / --low-unet to name the experts: the fp8 safetensors files, or the Q8_0 GGUF files (14.349 GiB each, loaded through the
+//   GGUF flavour of the DisTorch2 loader; the launch then also loads ComfyUI-GGUF and the donor is the storage card, never host RAM). The wait is 7200 s unless
 //   --wait-sec / COMFY_WAIT_SEC say otherwise, and the run watches the instance's console for an out-of-memory wedge (WAN-OOM).
 //
 // Before anything is submitted, every node class the graph names is checked against the
@@ -147,6 +154,11 @@ export function runsWanGraph(flags) {
   return !flags.graph && !NON_WAN_MODELS.includes(flags.model);
 }
 
+// runsLtxGraph: does this invocation build the LTX-2.5 graph (so --wan-placement multicard places it)?
+export function runsLtxGraph(flags) {
+  return !flags.graph && flags.model === "ltx25";
+}
+
 // ComfyUI's LoadImage reads from <COMFY_DIR>/input. Stage the still there.
 function stageInput(stillPath) {
   return stageToInput("render_in", stillPath);
@@ -247,6 +259,8 @@ export function buildGraphFromArgs(pos, flags, { stage = stageInput, vramTotalBy
       if (flags["pool-vvram-gb"]) common.poolVvramGb = Number(flags["pool-vvram-gb"]);
       if (flags["pool-compute"]) common.poolCompute = flags["pool-compute"];
       if (flags["pool-donor"]) common.poolDonor = flags["pool-donor"];
+      // multicard (planMulticard) is the card-only placement: the DiT's resident share on the compute card (the builder holds the encoder's split)
+      if (multicard) common.multicard = { residentGb: multicard.residentGb };
       graph = buildLtx25I2V(common);
     } else {
       // The decode mode goes to the Wan builder alone: Hunyuan 1.5 and LTX 2.5 keep their own
@@ -309,7 +323,7 @@ export async function verifyMulticardDevices(api, plan, { fetchImpl = fetch } = 
   } catch (e) {
     throw new Error(`WAN-PLACEMENT-MISMATCH: GET /system_stats gave no device list (${e?.message || e}), so the cards ComfyUI numbered cannot be checked`);
   }
-  const problems = checkComfyDevices(body?.devices, plan.pair);
+  const problems = checkComfyDevices(body?.devices, plan.pair, plan.launch?.order);
   if (problems.length) throw new Error(`WAN-PLACEMENT-MISMATCH: ${problems.join("; ")}. Nothing was submitted.`);
 }
 
@@ -318,10 +332,12 @@ export async function verifyMulticardDevices(api, plan, { fetchImpl = fetch } = 
 // only under the plain decode, so the node-class preflight alone would let any other decode run without the reader: this asks for it every time,
 // and, unlike that preflight, an answer that cannot be had is a refusal too (the server just answered /system_stats).
 export async function verifyMulticardPack(api, plan, { fetchImpl = fetch } = {}) {
-  const res = await missingNodeClasses(api, { 1: { class_type: "OffloadFreeForDecode" } }, { fetchImpl });
+  // the LTX-2.5 graph names the pack's encoder loader and release beside the decode's free node
+  const asked = plan?.family === "ltx25" ? ["OffloadCLIPLoaderDisTorch2", "OffloadFreeAfterEncode", "OffloadFreeForDecode"] : ["OffloadFreeForDecode"];
+  const res = await missingNodeClasses(api, Object.fromEntries(asked.map((cls, i) => [i + 1, { class_type: cls }])), { fetchImpl });
   if (!res.checked) throw new Error(`WAN-PLACEMENT-PACK: cannot tell whether the harness's node pack (offload_multicard) loaded: ${res.reason}. Nothing was submitted.`);
   if (res.missing.length) {
-    throw new Error(`WAN-PLACEMENT-PACK: ComfyUI at ${api} has no OffloadFreeForDecode, so the harness's node pack offload_multicard failed to import (it refuses to load when its read-only safetensors reader cannot be installed, and without that reader each expert would charge its whole file to host commit): ComfyUI's console log says why (${comfyLogPath(COMFY_DIR, plan.launch.key)}). Nothing was submitted.`);
+    throw new Error(`WAN-PLACEMENT-PACK: ComfyUI at ${api} has no ${res.missing.join(" or ")}, so the harness's node pack offload_multicard failed to import (it refuses to load when its read-only safetensors reader cannot be installed, and without that reader each expert would charge its whole file to host commit): ComfyUI's console log says why (${comfyLogPath(COMFY_DIR, plan.launch.key)}). Nothing was submitted.`);
   }
 }
 
@@ -356,7 +372,7 @@ export async function generate(out, API, pos, flags, multicard, io = {}) {
   // chose, by flag or environment, is theirs.
   const chosen = flags["wait-sec"] || x.env.COMFY_WAIT_SEC;
   const waitSec = Number(chosen || (multicard ? MULTICARD_WAIT_SEC : 5400));
-  if (multicard && !chosen) x.stderr(`WAN-WAIT-NOTE: no --wait-sec or COMFY_WAIT_SEC, so the wait for the video is ${MULTICARD_WAIT_SEC} s (the 20-step film recipe was projected at about 5170 s and measured 5136 s of runner wall); pass --wait-sec <seconds> to change it`);
+  if (multicard && !chosen) x.stderr(`WAN-WAIT-NOTE: no --wait-sec or COMFY_WAIT_SEC, so the wait for the video is ${MULTICARD_WAIT_SEC} s (${multicard.family === "ltx25" ? "the one LTX-2.5 run on the two cards, 1280x704x121, took 124 s of ComfyUI time and 146 s of runner wall" : "the 20-step film recipe was projected at about 5170 s and measured 5136 s of runner wall"}); pass --wait-sec <seconds> to change it`);
   const h = await x.poll({
     api: API, promptId, waitSec,
     isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
@@ -409,7 +425,7 @@ const USAGE = 'usage: node comfy-video.mjs <out.mp4> <still> "<prompt>" [--model
  */
 export function planRun(argv, { env = process.env, comfyDir = COMFY_DIR, planFn = planMulticard, say = (m) => console.error(m) } = {}) {
   const { pos, flags } = parseArgs(argv);
-  const multicard = planFn({ flags, env, comfyDir, isWanGraph: runsWanGraph(flags), say });
+  const multicard = planFn({ flags, env, comfyDir, isWanGraph: runsWanGraph(flags), isLtxGraph: runsLtxGraph(flags), say });
   const api = comfyApi(flags.api, multicard ? multicard.env : env);
   const note = multicard ? portNote(flags, multicard.env, api) : "";
   const slot = {

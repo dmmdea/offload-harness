@@ -9,12 +9,13 @@ import "regexp"
 // internal/hostneed's host-RAM declaration) and what it was measured to hold. TestTheMulticardRowsAreTheRunnersRecipes fails when either side moves.
 //
 // Measured is true only for a row whose host growth was read in a run that used the read-only safetensors loader (a card-only run that charged no
-// weight file to host commit). Every image arm of the 2026-10-11 two-card benchmark ran the stock loader, so only the 2511 fp8mixed edit is measured;
-// the other four are predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
+// weight file to host commit). The 2511 fp8mixed edit, the 2512 Q5_1 GGUF, the krea2 bf16 DiT and the qwen-image-2.1 bf16 and int8_convrot DiTs are
+// measured; the 2511 Q5_1 GGUF edit is predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
 //
-// A row can be held back (Blocked): it stays in the table, but it is no recipe to FindMulticardRow. Both qwen-image-2.1 rows are held back today:
-// int8_convrot (its DiT on cuda:1 never ran) and bf16 (ComfyUI builds the whole 16.33 GiB text encoder on the 15.9 GiB storage card before the split
-// applies, and a live card-only run ran out of memory there), so the only launchable image row is the 2512 Q5_1 GGUF.
+// A row can be held back (Blocked): it stays in the table, but it is no recipe to FindMulticardRow. No row is held back today. The qwen-image-2.1 rows'
+// 16.33 GiB bf16 text encoder is bigger than a card, and under --gpu-only ComfyUI would build the whole of it on one card before a DisTorch2 split
+// applies; the "distorch2-host" clip loader is the harness's own node that builds it off the cards and places it block by block. The 2.1 rows launch
+// compute-first (the JSON's "cardOrder"; cuda:0 is the compute card) because the 2.1 model's fused and int8 kernels run on cuda:0 only.
 
 // MulticardRow is one recipe: the identity of the call it serves, how the runner loads it and the figures that decide a declaration.
 type MulticardRow struct {
@@ -23,7 +24,8 @@ type MulticardRow struct {
 	// that names no text encoder (the builder's own).
 	UnetMatch, ClipMatch, DefaultClip string
 	// UnetLoader is plain (the whole DiT on the compute card), distorch2 or gguf-distorch2 (a split DiT); ClipLoader is plain (the encoder whole on
-	// the storage card) or distorch2 (a bf16 encoder too big for one card, split over both).
+	// the storage card), distorch2 (a split encoder that fits one card while it is built) or distorch2-host (a bf16 encoder too big for one card, built off
+	// the cards and split over both by the harness's own loader).
 	UnetLoader, ClipLoader string
 	// ResidentGiB is the share of a split DiT kept on the compute card; ClipResidentGiB the share of a split text encoder.
 	ResidentGiB, ClipResidentGiB float64
@@ -53,13 +55,13 @@ func (r MulticardRow) Plain() bool { return r.UnetLoader == "plain" }
 
 var multicardRows = []MulticardRow{
 	{ID: "qwen-image-2.1/int8_convrot", Route: "image", Family: "qwen-image-2.1", Quant: "int8_convrot", UnetMatch: `int8.*\.safetensors$`, ClipMatch: "bf16",
-		UnetLoader: "plain", ClipLoader: "distorch2", ClipResidentGiB: 5, ComputeGiB: 9.0, StorageGiB: 13.6, Packs: []string{"multigpu"},
-		Blocked: "the card-only placement puts this recipe's int8 DiT on cuda:1, and no run has: the benchmark arms the row cites ran the int8 DiT on cuda:0 with the bf16 text encoder on cuda:1, the reverse. A comfy_kitchen int8 model run through ComfyUI-MultiGPU with the compute device off cuda:0 is a recorded illegal memory access in the int8 dispatch path (upstream issue 220, unfixed; it is why the pooled LTX-2.5 seat keeps compute cuda:0). Run one int8 arm with the DiT on cuda:1, then clear \"blocked\" on this row in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go; the bf16 DiT row of this family is held back too (the 16.33 GiB bf16 text encoder this row also names cannot be built on the storage card), so lifting this row needs that fixed as well, and no qwen-image-2.1 file has a card-only recipe today"},
+		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 5, ComputeGiB: 12.3, StorageGiB: 5.9, Measured: true, MaxPixels: 4194304, Packs: []string{"multigpu"}},
 	{ID: "qwen-image-2.1/bf16", Route: "image", Family: "qwen-image-2.1", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16",
-		UnetLoader: "distorch2", ResidentGiB: 8, ClipLoader: "distorch2", ClipResidentGiB: 5, ComputeGiB: 10.8, StorageGiB: 14.2, Packs: []string{"multigpu"},
-		Blocked: "under --gpu-only ComfyUI builds the whole 16.33 GiB bf16 text encoder on the storage card (cuda:0, a 15.9 GiB card) before the DisTorch2 allocation that splits it is applied, so a live card-only run of this recipe ran out of memory 1.4 s in, with 14.10 GiB allocated, while the encoder was still being built; no resident share or peak figure in this row changes that. A loader that builds the text encoder per card, or one measured arm that fits the pair, lifts it: then clear blocked on this row in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go"},
+		UnetLoader: "distorch2", ResidentGiB: 8, ClipLoader: "distorch2-host", ClipResidentGiB: 8, ComputeGiB: 10.9, StorageGiB: 8.2, Measured: true, MaxPixels: 4194304, Packs: []string{"multigpu"}},
 	{ID: "qwen-image/gguf-q5_1", Route: "image", Family: "qwen-image", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
-		UnetLoader: "gguf-distorch2", ResidentGiB: 3, ClipLoader: "plain", ComputeGiB: 4.9, StorageGiB: 12.6, MaxPixels: 1472700, LoraLoader: "LoraLoaderModelOnly", Packs: []string{"multigpu", "gguf"}},
+		UnetLoader: "gguf-distorch2", ResidentGiB: 10, ClipLoader: "plain", ComputeGiB: 11.9, StorageGiB: 8.3, Measured: true, MaxPixels: 1769472, LoraLoader: "LoraLoaderModelOnly", Packs: []string{"multigpu", "gguf"}},
+	{ID: "krea2/bf16", Route: "image", Family: "krea2", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16", DefaultClip: "qwen3vl_4b_bf16.safetensors",
+		UnetLoader: "distorch2", ResidentGiB: 11, ClipLoader: "plain", ComputeGiB: 13.2, StorageGiB: 13.1, Measured: true, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/fp8mixed", Route: "edit", Family: "qwen-image-edit-2511", Quant: "fp8mixed", UnetMatch: `fp8mixed.*\.safetensors$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
 		UnetLoader: "distorch2", ResidentGiB: 9, ClipLoader: "plain", ComputeGiB: 13.0, StorageGiB: 11.0, Measured: true, MaxMegapixels: 2.0, LoraLoader: "LoraLoaderBypassModelOnly", Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/gguf-q5_1", Route: "edit", Family: "qwen-image-edit-2511", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
@@ -145,9 +147,11 @@ func matchMulticardRow(route, family string, files []ModelFile) *MulticardRow {
 }
 
 // NodeClasses are the node classes the runner's graph names for this recipe's loaders (render/multicard-recipes.mjs multicardLoaders): the DiT's,
-// the text encoder's and the VAE's. All of them come from ComfyUI-MultiGPU, and the GGUF DisTorch2 loader needs ComfyUI-GGUF beside it.
+// the text encoder's and the VAE's. All of them come from ComfyUI-MultiGPU, and the GGUF DisTorch2 loader needs ComfyUI-GGUF beside it. A distorch2-host
+// text encoder is the runner's OffloadCLIPLoaderDisTorch2, a class of the harness's own pack (never in custom_nodes: the launch the runner makes loads it, and its
+// preflight asks for it by name); it wraps ComfyUI-MultiGPU's CLIPLoaderDisTorch2MultiGPU, so that is the class named here for the doctor to check.
 func (r MulticardRow) NodeClasses() []string {
 	unet := map[string]string{"plain": "UNETLoaderMultiGPU", "distorch2": "UNETLoaderDisTorch2MultiGPU", "gguf-distorch2": "UnetLoaderGGUFDisTorch2MultiGPU"}[r.UnetLoader]
-	clip := map[string]string{"plain": "CLIPLoaderMultiGPU", "distorch2": "CLIPLoaderDisTorch2MultiGPU"}[r.ClipLoader]
+	clip := map[string]string{"plain": "CLIPLoaderMultiGPU", "distorch2": "CLIPLoaderDisTorch2MultiGPU", "distorch2-host": "CLIPLoaderDisTorch2MultiGPU"}[r.ClipLoader]
 	return []string{unet, clip, "VAELoaderMultiGPU"}
 }

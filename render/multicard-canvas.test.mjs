@@ -1,8 +1,8 @@
 // node --test render/multicard-canvas.test.mjs
-// The canvas cap of the card-only image recipe (register PF-3). The qwen-image/gguf-q5_1 row (the 2512 Q5_1 GGUF across two cards) ran out of memory on its first
-// live run, at 928x1664 (1.54 MP). No canvas of this row has been measured, so the cap is CHOSEN, not measured: it is the largest canvas the evidence shows a same-size
-// Q5_1 GGUF ran on two cards (the 2511 edit at 1.47 MP), and it sits below the canvas that failed. A call above it is refused by name, before anything starts where the
-// runner can say so, instead of being held on two cards until the sampler runs out of memory. Pure: no card table, no ComfyUI.
+// The canvas cap of the card-only image recipe (register PF-3). The qwen-image/gguf-q5_1 row (the 2512 Q5_1 GGUF across two cards, 10 GiB of the DiT resident on the
+// compute card) was measured at 1328x1328 (the family default) and 928x1664 on 2026-10-20; the cap is 1536x1152, 0.3 % above the larger measured canvas. A call above
+// it is refused by name, before anything starts where the runner can say so, instead of being held on two cards until the sampler runs out of memory. Pure: no card
+// table, no ComfyUI.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
@@ -18,18 +18,19 @@ import { scratchDir } from "./test-scratch.mjs";
 const HERE = dirname(fileURLToPath(import.meta.url));
 
 const IMAGE_ROW = "qwen-image/gguf-q5_1";
-const OOM = { width: 928, height: 1664 }; // the canvas of the live two-card run that ran out of memory
+const BIG = { width: 2048, height: 1024 }; // 2.10 MP: above every canvas this row was measured at
+const MEASURED = [{ width: 1328, height: 1328 }, { width: 928, height: 1664 }]; // the canvases of the measured two-card runs
 const row = (id = IMAGE_ROW) => R.RECIPES.find((r) => r.id === id);
 
 // ---- the table ----------------------------------------------------------------------------------------------------------------
 
-test("the image row carries a pixel cap below the canvas that ran out of memory, and its evidence says the cap was chosen, not measured", () => {
+test("the image row carries a pixel cap that takes every measured canvas, and its note says where the cap comes from", () => {
   const r = row();
   assert.ok(r.maxPixels > 0, "the row has a cap");
-  assert.ok(r.maxPixels < OOM.width * OOM.height, "and the canvas that failed is above it");
-  assert.ok(r.maxPixels >= 1.47e6, "it is not below the 1.47 MP edit canvas a same-size Q5_1 GGUF is recorded to have run on two cards");
-  assert.match(r.evidence, /chosen, not measured/);
-  assert.equal(r.basis, "predicted", "a cap does not promote the row");
+  for (const c of MEASURED) assert.ok(c.width * c.height <= r.maxPixels, `${c.width}x${c.height} was measured, so it is under the cap`);
+  assert.ok(r.maxPixels < BIG.width * BIG.height);
+  assert.match(r.maxPixelsNote, /measured at 1328x1328/);
+  assert.equal(r.basis, "measured");
 });
 
 test("the edit rows keep their megapixel cap and the image row has no megapixel one (the two caps mean different things)", () => {
@@ -42,26 +43,26 @@ test("the edit rows keep their megapixel cap and the image row has no megapixel 
 
 // ---- canvasRefusal ----------------------------------------------------------------------------------------------------------------
 
-test("canvasRefusal: the canvas that ran out of memory is refused, in words that name the row, both sizes, the cap, that it is chosen, and the flags to change", () => {
-  const why = R.canvasRefusal(row(), OOM.width, OOM.height);
+test("canvasRefusal: a canvas above the cap is refused, in words that name the row, both sizes, the cap, where it comes from, and the flags to change", () => {
+  const why = R.canvasRefusal(row(), BIG.width, BIG.height);
   assert.match(why, /qwen-image\/gguf-q5_1/);
-  assert.match(why, /928x1664/);
-  assert.match(why, /1\.54 MP/);
-  assert.match(why, /at most 1\.47 MP/);
-  assert.match(why, /chosen, not measured/);
+  assert.match(why, /2048x1024/);
+  assert.match(why, /2\.10 MP/);
+  assert.match(why, /at most 1\.77 MP/);
+  assert.match(why, /measured at 1328x1328/);
   assert.match(why, /--width.*--height/);
   assert.match(why, /single placement/);
   assert.doesNotMatch(why, /[A-Za-z]:[\/]|GPU-[0-9a-f]{8}/, "no path or card id");
 });
 
-test("canvasRefusal: a canvas at or under the cap passes, one pixel row over it is refused, and the family default (1328x1328) is above it", () => {
+test("canvasRefusal: a canvas at or under the cap passes, one pixel row over it is refused, and the measured canvases (the family default among them) are under it", () => {
   const cap = row().maxPixels;
   const w = 1024, h = Math.floor(cap / w);
   assert.equal(R.canvasRefusal(row(), w, h), "", "at the cap (rounded down to a whole row)");
   assert.equal(R.canvasRefusal(row(), 1024, 1024), "");
   assert.equal(R.canvasRefusal(row(), 512, 512), "");
   assert.notEqual(R.canvasRefusal(row(), w, h + 1 + Math.ceil((cap - w * h) / w)), "", "over the cap");
-  assert.notEqual(R.canvasRefusal(row(), 1328, 1328), "", "the qwen-image default canvas is above the cap");
+  for (const c of MEASURED) assert.equal(R.canvasRefusal(row(), c.width, c.height), "", `${c.width}x${c.height}, a measured canvas`);
 });
 
 test("canvasRefusal: the cap itself is taken and one pixel over it is not (a row with a round cap, so the boundary is exact)", () => {
@@ -85,16 +86,16 @@ const POS = ["out.png", "a clay character", "7"];
 const GGUF = ["--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf"];
 const flagsOf = (argv) => { const f = {}; for (let i = 0; i < argv.length; i += 2) f[argv[i].slice(2)] = argv[i + 1]; return f; };
 const build = (argv, { pos = POS, ...extra } = {}) => buildRenderGraph({ pos, flags: flagsOf(argv), env: {}, random: () => 0.5, ...extra });
-const MC = { multicard: { residentGb: 3 } };
-const refused = (e) => e instanceof UsageError && /qwen-image\/gguf-q5_1.*928x1664.*at most 1\.47 MP/s.test(e.message);
+const MC = { multicard: { residentGb: 10 } };
+const refused = (e) => e instanceof UsageError && /qwen-image\/gguf-q5_1.*2048x1024.*at most 1\.77 MP/s.test(e.message);
 
-test("comfy-render: --placement multicard at the canvas that ran out of memory is refused by name, named by flags or by position", () => {
-  assert.throws(() => build([...GGUF, "--placement", "multicard", "--width", "928", "--height", "1664"], MC), refused);
-  assert.throws(() => build([...GGUF, "--placement", "multicard"], { ...MC, pos: [...POS, "928", "1664"] }), refused);
+test("comfy-render: --placement multicard at a canvas above the cap is refused by name, named by flags or by position", () => {
+  assert.throws(() => build([...GGUF, "--placement", "multicard", "--width", "2048", "--height", "1024"], MC), refused);
+  assert.throws(() => build([...GGUF, "--placement", "multicard"], { ...MC, pos: [...POS, "2048", "1024"] }), refused);
 });
 
-test("comfy-render: --placement multicard with no size named is refused too, because the family default (1328x1328) is above the cap, and says which flags to pass", () => {
-  assert.throws(() => build([...GGUF, "--placement", "multicard"], MC), (e) => e instanceof UsageError && /1328x1328.*at most 1\.47 MP.*--width.*--height/s.test(e.message));
+test("comfy-render: --placement multicard with no size named builds the multicard graph, because the family default (1328x1328) is a measured canvas", () => {
+  assert.equal(build([...GGUF, "--placement", "multicard"], MC).graph["1"].class_type, "UnetLoaderGGUFDisTorch2MultiGPU");
 });
 
 test("comfy-render: --placement multicard at a canvas under the cap builds the multicard graph", () => {
@@ -103,7 +104,7 @@ test("comfy-render: --placement multicard at a canvas under the cap builds the m
 });
 
 test("comfy-render: the single placement is not held to the cap (this is the card-only recipe's limit, not the model's)", () => {
-  const g = build([...GGUF, "--width", "928", "--height", "1664"]).graph;
+  const g = build([...GGUF, "--width", "2048", "--height", "1024"]).graph;
   assert.equal(g["1"].class_type, "UnetLoaderGGUF");
 });
 
@@ -120,7 +121,7 @@ const plan = (over = {}) => I.planImageMulticard({
 });
 
 test("planImageMulticard: a canvas above the cap is refused before the card table is read, a canvas under it and none at all are planned", () => {
-  assert.throws(() => plan({ canvas: OOM, cards: never }), /qwen-image\/gguf-q5_1.*928x1664.*at most 1\.47 MP/s);
+  assert.throws(() => plan({ canvas: BIG, cards: never }), /qwen-image\/gguf-q5_1.*2048x1024.*at most 1\.77 MP/s);
   assert.equal(plan({ canvas: { width: 1024, height: 1024 } }).recipe.id, IMAGE_ROW);
   assert.equal(plan().recipe.id, IMAGE_ROW, "a call that names no canvas is judged where the size is known (the graph builder)");
   assert.equal(plan({ canvas: {} }).recipe.id, IMAGE_ROW);
@@ -149,13 +150,13 @@ const run = (script, args, env) => new Promise((resolve, reject) => {
   c.on("close", (code) => resolve({ code, out, err }));
 });
 
-test("comfy-generate: a single multicard call that names the canvas that ran out of memory is refused with exit 2 before any card is read; one that names a small canvas gets as far as the cards", async (t) => {
+test("comfy-generate: a single multicard call that names a canvas above the cap is refused with exit 2 before any card is read; one that names a small canvas gets as far as the cards", async (t) => {
   const dir = scratchDir(t, "mc-canvas-");
   const env = scrubbedEnv(dir);
   const flags = ["--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf", "--placement", "multicard", "--no-lock"];
-  const big = await run("comfy-generate.mjs", [join(dir, "o.png"), "a bottle", ...flags, "--width", "928", "--height", "1664"], env);
+  const big = await run("comfy-generate.mjs", [join(dir, "o.png"), "a bottle", ...flags, "--width", "2048", "--height", "1024"], env);
   assert.equal(big.code, 2, big.err);
-  assert.match(big.err, /PLACEMENT REFUSED:.*928x1664.*at most 1.47 MP/s);
+  assert.match(big.err, /PLACEMENT REFUSED:.*2048x1024.*at most 1.77 MP/s);
   assert.doesNotMatch(big.err, /needs the two cards/, "the canvas is judged before the cards");
   const small = await run("comfy-generate.mjs", [join(dir, "o.png"), "a bottle", ...flags, "--width", "1024", "--height", "1024"], env);
   assert.equal(small.code, 2, small.err);
@@ -167,7 +168,7 @@ test("comfy-generate: a --batch is not refused for a shared canvas (a job names 
   const env = scrubbedEnv(dir);
   const jobs = join(dir, "jobs.jsonl");
   writeFileSync(jobs, JSON.stringify({ prompt: "p", out: join(dir, "a.png"), width: 1024, height: 1024 }) + "\n");
-  const b = await run("comfy-generate.mjs", ["--batch", jobs, "--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf", "--placement", "multicard", "--no-lock", "--width", "928", "--height", "1664"], env);
+  const b = await run("comfy-generate.mjs", ["--batch", jobs, "--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf", "--placement", "multicard", "--no-lock", "--width", "2048", "--height", "1024"], env);
   assert.equal(b.code, 2, b.err);
   assert.doesNotMatch(b.err, /cannot take a/);
   assert.match(b.err, /needs the two cards it runs on/);

@@ -255,33 +255,20 @@ func TestAMulticardCallIsNeverDegradedToTheWholeNode(t *testing.T) {
 }
 
 // A binding the recipe table has no row for is refused before any lease is spent, naming the key, because the runner would refuse it by name
-// after the pair had been held and the host's memory declared: krea2 (it keeps --pool-*), 2512 bf16 (38 GiB fits no card), sdxl. A row that exists and is
-// held back is refused the same way, and says which row and why: the 2.1 int8 DiT (its DiT on cuda:1 never ran) and the 2.1 bf16 DiT (ComfyUI builds its
-// whole 16.33 GiB text encoder on the 15.9 GiB storage card before the DisTorch2 split applies; a live card-only run ran out of memory 1.4 s in).
+// after the pair had been held and the host's memory declared: krea2 fp8 (only the bf16 DiT has a row), 2512 bf16 (38 GiB fits no card), sdxl. No row is held back
+// today; a row that was would be refused the same way, with its reason (mediamulticard.go names it).
 func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		bind func(*config.Config)
-		// held lists the words a held-back row's refusal must carry (empty = the binding has no row at all)
-		held []string
 	}{
-		{name: "krea2", bind: func(c *config.Config) {
-			krea2Binding(c)
-			c.ImageGenPlacement = "multicard"
+		{name: "krea2 fp8", bind: func(c *config.Config) {
+			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenPlacement = "krea2", "krea2_turbo_fp8.safetensors", "multicard"
 		}},
 		{name: "2512 bf16", bind: func(c *config.Config) {
 			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenPlacement = "qwen-image", "qwen_image_2512_bf16.safetensors", "multicard"
 		}},
 		{name: "sdxl", bind: func(c *config.Config) { c.ImageGenPlacement = "multicard" }},
-		{name: "2.1 int8 DiT, held back", bind: func(c *config.Config) {
-			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenCLIP, c.ImageGenPlacement = "qwen-image-2.1", "qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", "multicard"
-		}, held: []string{"qwen-image-2.1/int8_convrot", "held back", "illegal memory access"}},
-		{name: "2.1 bf16 DiT, held back", bind: func(c *config.Config) {
-			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenCLIP, c.ImageGenPlacement = "qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", "multicard"
-		}, held: []string{"qwen-image-2.1/bf16", "held back", "text encoder", "16.33 GiB", "15.9 GiB"}},
-		{name: "2.1 bf16 DiT of the fast family, held back", bind: func(c *config.Config) {
-			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenCLIP, c.ImageGenPlacement = "qwen-image-2.1", "qwen_image_2.1_uc_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", "multicard"
-		}, held: []string{"qwen-image-2.1/bf16", "held back", "text encoder", "16.33 GiB", "15.9 GiB"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: tc.bind})
@@ -291,16 +278,6 @@ func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 			}
 			if n := len(f.m.Leases()) + len(f.started()) + len(f.m.Tokens()); n != 0 {
 				t.Errorf("%d lease/runner/place for a call the runner would refuse", n)
-			}
-			// a row that exists and is held back says which one and why, so the operator knows it is a hold and not a gap in the table
-			for _, want := range tc.held {
-				if !strings.Contains(res.Reason, want) {
-					t.Errorf("the refusal of a held-back row must say %q: %s", want, res.Reason)
-				}
-			}
-			// and the recipes the table "has" are the ones that can launch, not the held-back ones: today the 2512 Q5_1 GGUF alone on the image route
-			if len(tc.held) > 0 && !strings.Contains(res.Reason, "multicard-recipes.json has qwen-image/gguf-q5_1)") {
-				t.Errorf("the list of recipes offers a held-back row: %s", res.Reason)
 			}
 		})
 	}
@@ -568,19 +545,25 @@ func TestAMulticardNeedDeclaresRAMFromThePairNotTheLargestCard(t *testing.T) {
 		t.Errorf("an edit canvas of 3.0 MP is above the recipe's 2.0 MP cap: %.1f GiB, want the ordinary streaming figure", got)
 	}
 
-	// a PREDICTED row declares the ordinary estimate until a run has measured it: an early merge costs a wasteful wait, never a false 0
-	img := imageNeed(f.cfg, "")
-	if img.Kind != needMulticard {
-		t.Fatalf("the image binding: kind %v", img.Kind)
+	// a PREDICTED row (the 2511 Q5_1 GGUF edit) declares the ordinary estimate until a run has measured it: an early merge costs a wasteful wait, never a false 0
+	gguf := f.cfg
+	gguf.GenEditUnet = "qwen-image-edit-2511-Q5_1.gguf"
+	predicted := editNeed(gguf, "")
+	if predicted.Kind != needMulticard {
+		t.Fatalf("the GGUF edit binding: kind %v", predicted.Kind)
 	}
-	ordinary := f.cfg
-	ordinary.ImageGenPlacement = ""
-	want := f.p.declaredRAM(ctx, imageNeed(ordinary, ""), cards, pairIDs())
+	ordinary := gguf
+	ordinary.GenEditPlacement = ""
+	want := f.p.declaredRAM(ctx, editNeed(ordinary, ""), cards, pairIDs())
 	if want <= 0 {
-		t.Fatalf("premise: the ordinary 2512 GGUF estimate on a 16 GiB card is %.1f GiB, want something to compare with", want)
+		t.Fatalf("premise: the ordinary 2511 GGUF estimate on a 16 GiB card is %.1f GiB, want something to compare with", want)
 	}
-	if got := f.p.declaredRAM(ctx, img, cards, pairIDs()); got != want {
-		t.Errorf("the predicted 2512 GGUF row: %.1f GiB, want the ordinary estimate %.1f GiB", got, want)
+	if got := f.p.declaredRAM(ctx, predicted, cards, pairIDs()); got != want {
+		t.Errorf("the predicted 2511 GGUF row: %.1f GiB, want the ordinary estimate %.1f GiB", got, want)
+	}
+	// the measured 2512 GGUF image row declares 0 on the pair
+	if got := f.p.declaredRAM(ctx, imageNeed(f.cfg, ""), cards, pairIDs()); got != 0 {
+		t.Errorf("the measured 2512 GGUF row: %.1f GiB, want 0", got)
 	}
 
 	// a binding without the key is the need it always was
@@ -673,9 +656,15 @@ func TestMediaLaneFreeJudgesAMulticardImageCall(t *testing.T) {
 	}
 }
 
+// krea2Fp8MulticardBinding asks for the card-only placement with a DiT that has no recipe row: krea2 fp8 (only the bf16 DiT has one).
+func krea2Fp8MulticardBinding(c *config.Config) {
+	krea2Binding(c)
+	c.ImageGenCkpt, c.ImageGenPlacement = "krea2_turbo_fp8.safetensors", "multicard"
+}
+
 // A binding with no recipe is not judged free by omission: the probe says it did not judge, and why.
 func TestMediaLaneFreeSaysWhenAMulticardBindingHasNoRecipe(t *testing.T) {
-	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) { krea2Binding(c); c.ImageGenPlacement = "multicard" }})
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: krea2Fp8MulticardBinding})
 	v := f.p.MediaLaneFree(context.Background(), laneReq(map[string]any{}))
 	if !strings.Contains(v.Why, "not judged") || !strings.Contains(v.Why, "no card-only recipe") {
 		t.Errorf("verdict = %+v, want it said that the binding was not judged and why", v)
@@ -725,12 +714,13 @@ func multicardLaneCases() []laneCase {
 				}
 				t.Cleanup(func() { mediaSlots.release([]string{A}) })
 			}},
-		{name: "multicard, a short host and a predicted row that declares the ordinary set", spec: mc, grants: false, mustSeeBusy: true,
+		// the measured row declares no host RAM, so a short host is no reason to wait: the weights live on the two cards
+		{name: "multicard, a short host and a measured row that declares no host RAM", spec: mc, grants: true,
 			setup: func(t *testing.T, f *admitFixture) { f.useHost(t, func() gpuprobe.HostMemory { return shortHost(95) }) }},
 		{name: "multicard on a box with one non-display card (the real admission refuses; the probe may not judge)", spec: mc, grants: false,
 			setup: func(t *testing.T, f *admitFixture) { f.cards[2].Display = true }},
 		{name: "multicard with no recipe (the real admission refuses; the probe says it did not judge)", grants: false,
-			spec: admitSpec{order: admitOrder, mutate: func(c *config.Config) { krea2Binding(c); c.ImageGenPlacement = "multicard" }}},
+			spec: admitSpec{order: admitOrder, mutate: krea2Fp8MulticardBinding}},
 	}
 }
 
