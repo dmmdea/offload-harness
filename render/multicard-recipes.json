@@ -111,6 +111,42 @@
       "maxMegapixels": 2.0,
       "packs": ["multigpu", "gguf"],
       "evidence": "Benchmark 2026-10-11, section 4.6: Q5_1 GGUF at 1.47 MP on two 5060 Ti with every weight on the storage card: success in 192.3 s but only 0.3 GiB free there, 'too thin for production'; the benchmark's own prediction for a 3 GiB resident share on the compute card is storage about 12.6 GiB and compute about 4.9 GiB at that 1.47 MP canvas, not run. The compute figure here is scaled to the 2.0 MP cap this row claims, as the fp8mixed row's is: the 1.9 GiB the compute card held at 1.4727 MP grows to 2.6 GiB, so 3 + 2.6 = 5.6 GiB. The run used the read-only loader (host growth 1.50 GiB)."
+    },
+    {
+      "id": "qwen-image-2.1-edit/int8_convrot",
+      "route": "edit",
+      "family": "qwen-image-2.1",
+      "quant": "int8_convrot",
+      "cardOrder": "compute-first",
+      "unetMatch": "int8.*\\.safetensors$",
+      "clipMatch": "bf16",
+      "unet": { "loader": "plain" },
+      "clip": { "loader": "distorch2-host", "residentGb": 5 },
+      "basis": "predicted",
+      "peakGiB": { "compute": 13.9, "storage": 8.0 },
+      "activationsGiB": 2.3,
+      "packs": ["multigpu"],
+      "maxPixels": 4194304,
+      "maxPixelsNote": "chosen, not measured: the DiT sequence (the target's latent plus every reference's, one token per 16x16 pixels; planEdit counts images + 1 grids of resolution squared) at which the image route measured this row's activations, 2048x2048 (16384 tokens); no edit has been run card-only",
+      "evidence": "Predicted, not run. The loaders, resident shares and card order are the image route's measured row of the same quant (2026-10-20): the int8_convrot DiT (6.76 GiB) loaded whole on the compute card, the bf16 Qwen3-VL-8B text encoder built off the cards by OffloadCLIPLoaderDisTorch2 and freed by OffloadFreeAfterEncode before the DiT loads. The edit graph adds three things no run has measured: the Qwen3-VL vision tower running inside the DisTorch2-split encoder, the VAE encode of each reference image on the storage card beside the parked encoder share, and the prefix K/V cache (device gpu: kept on the compute card only when ComfyUI finds twice its size free there, else the prefix is recomputed each step, never host RAM). The peaks are ceilings reasoned from those pieces; a live run with the read-only loader replaces them."
+    },
+    {
+      "id": "qwen-image-2.1-edit/bf16",
+      "route": "edit",
+      "family": "qwen-image-2.1",
+      "quant": "bf16",
+      "cardOrder": "compute-first",
+      "unetMatch": "bf16.*\\.safetensors$",
+      "clipMatch": "bf16",
+      "unet": { "loader": "distorch2", "residentGb": 8 },
+      "clip": { "loader": "distorch2-host", "residentGb": 8 },
+      "basis": "predicted",
+      "peakGiB": { "compute": 14.4, "storage": 11.0 },
+      "activationsGiB": 2.4,
+      "packs": ["multigpu"],
+      "maxPixels": 4194304,
+      "maxPixelsNote": "chosen, not measured: the DiT sequence (the target's latent plus every reference's, one token per 16x16 pixels; planEdit counts images + 1 grids of resolution squared) at which the image route measured this row's activations, 2048x2048 (16384 tokens); no edit has been run card-only",
+      "evidence": "Predicted, not run. The loaders, resident shares and card order are the image route's measured row of the same quant (2026-10-20): the bf16 DiT with 8 GiB resident on the compute card, the bf16 Qwen3-VL-8B text encoder built off the cards by OffloadCLIPLoaderDisTorch2 and freed by OffloadFreeAfterEncode before the DiT loads. The edit graph adds three things no run has measured: the Qwen3-VL vision tower running inside the DisTorch2-split encoder, the VAE encode of each reference image on the storage card beside the parked encoder share, and the prefix K/V cache (device gpu: kept on the compute card only when ComfyUI finds twice its size free there, else the prefix is recomputed each step, never host RAM). The peaks are ceilings reasoned from those pieces; a live run with the read-only loader replaces them."
     }
   ]
 }

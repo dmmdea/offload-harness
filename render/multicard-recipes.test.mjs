@@ -19,9 +19,9 @@ test("the devices: the storage card is cuda:0 and the compute card cuda:1, the s
   assert.equal(MULTICARD_COMPUTE, "cuda:1");
 });
 
-test("the table holds the six recipes, each with its evidence and an honest basis; the 2.1 int8_convrot and bf16, 2512 Q5_1 and krea2 bf16 image rows and the 2511 fp8mixed edit row were measured card-only", () => {
+test("the table holds the eight recipes, each with its evidence and an honest basis; the 2.1 int8_convrot and bf16, 2512 Q5_1 and krea2 bf16 image rows and the 2511 fp8mixed edit row were measured card-only", () => {
   assert.deepEqual(RECIPES.map((r) => r.id).sort(), [
-    "krea2/bf16", "qwen-image-2.1/bf16", "qwen-image-2.1/int8_convrot", "qwen-image-edit-2511/fp8mixed", "qwen-image-edit-2511/gguf-q5_1", "qwen-image/gguf-q5_1",
+    "krea2/bf16", "qwen-image-2.1-edit/bf16", "qwen-image-2.1-edit/int8_convrot", "qwen-image-2.1/bf16", "qwen-image-2.1/int8_convrot", "qwen-image-edit-2511/fp8mixed", "qwen-image-edit-2511/gguf-q5_1", "qwen-image/gguf-q5_1",
   ]);
   for (const r of RECIPES) {
     assert.ok(["measured", "predicted"].includes(r.basis), r.id);
@@ -107,7 +107,7 @@ test("a (family, quant) with no recipe is refused by name, never guessed", () =>
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_fp8.safetensors" }), /no measured card-only recipe for qwen-image-2\.1/);
   assert.match(refusal({ route: "image", family: "qwen-image", unet: "qwen-image-2512-Q4_K_M.gguf" }), /no measured card-only recipe for qwen-image/);
   assert.match(refusal({ route: "edit", family: "qwen-image-edit-2511", unet: "qwen-image-edit-2511-Q4_K_M.gguf" }), /no measured card-only recipe for qwen-image-edit-2511/);
-  assert.match(refusal({ route: "edit", family: "qwen-image-2.1", unet: "qwen_image_2.1_bf16.safetensors" }), /no measured card-only recipe for qwen-image-2\.1 edit/);
+  assert.match(refusal({ route: "edit", family: "qwen-image-2.1", unet: "qwen_image_2.1_fp8.safetensors" }), /no measured card-only recipe for qwen-image-2\.1 edit/);
   assert.match(refusal({ route: "image", family: "qwen-image-2.1" }), /needs the DiT file/, "no DiT named: nothing to match a recipe against");
 });
 
@@ -134,15 +134,8 @@ test("the refusal of a family with no row names the route's launchable rows and 
   assert.match(refusal({ route: "image", family: "flux", unet: "flux.safetensors" }), /qwen-image\/gguf-q5_1/);
 });
 
-// The qwen-image-2.1 hint is written for the image route (its two rows). The edit route has no row for the family, and the 2.1 edit graph takes no placement at all,
-// so the image rows would not give it a recipe: the edit refusal says that, and names nothing as held back.
-test("the edit route's refusal of qwen-image-2.1 says the 2.1 edit graph has no card-only placement, not that image rows are held back", () => {
-  const msg = refusal({ route: "edit", family: "qwen-image-2.1", unet: "qwen_image_2.1_bf16.safetensors", clip: "qwen3vl_8b_bf16.safetensors" });
-  assert.match(msg, /no measured card-only recipe for qwen-image-2\.1 edit/);
-  assert.match(msg, /2\.1 edit graph has no card-only placement/);
-  assert.doesNotMatch(msg, /held back|int8_convrot|\bbf16 rows\b/, "the image rows' holds are not the edit route's business");
-  assert.match(msg, /qwen-image-edit-2511\/fp8mixed/, "it still says which edit rows do have a recipe");
-  // the image route keeps the hint that stops an unmatched 2.1 DiT file reading as "bind one of the rows listed before it"
+// The qwen-image-2.1 hint is written for the image route: an unmatched 2.1 DiT file must not read as "bind one of the rows listed before it".
+test("the image route's refusal of an unmatched qwen-image-2.1 DiT file keeps the hint", () => {
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_fp8.safetensors" }), /the recipes of this family are int8_convrot, bf16; the card-only recipes are the bf16 and int8_convrot DiTs with the bf16 Qwen3-VL-8B text encoder/s);
 });
 

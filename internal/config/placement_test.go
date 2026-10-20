@@ -78,7 +78,7 @@ func TestImagePlacementIsAnOverlayKeyAndWarnsOnAnUnsupportedFamily(t *testing.T)
 		t.Errorf("Load of a bad placement: %v", err)
 	}
 
-	// the recipe's families: qwen-image and krea2 on the image route (qwen-image-2.1 has two rows, bf16 and int8_convrot, both launchable), the 2511 graph on the edit route; every other is said at load
+	// the recipe's families: qwen-image and krea2 on the image route (qwen-image-2.1 has two rows, bf16 and int8_convrot, both launchable), the 2511 graph and qwen-image-2.1 on the edit route; every other is said at load
 	say := func(c Config) string {
 		var buf bytes.Buffer
 		warnMediaGenBindingTrapsTo(c, &buf)
@@ -96,10 +96,7 @@ func TestImagePlacementIsAnOverlayKeyAndWarnsOnAnUnsupportedFamily(t *testing.T)
 			t.Errorf("%s has a recipe: %q", fam, out)
 		}
 	}
-	if out := say(Config{GenEditFamily: FamilyQwenImage21, GenEditPlacement: "multicard", GPUCardScopedLeases: true}); !strings.Contains(out, "gen_edit_placement") || !strings.Contains(out, no) {
-		t.Errorf("the 2.1 edit graph has none: %q", out)
-	}
-	for _, fam := range []string{"", EditFamily2511} {
+	for _, fam := range []string{"", EditFamily2511, FamilyQwenImage21} {
 		if out := say(Config{GenEditFamily: fam, GenEditPlacement: "multicard", GPUCardScopedLeases: true}); strings.Contains(out, no) {
 			t.Errorf("edit family %q has a recipe: %q", fam, out)
 		}
@@ -121,20 +118,27 @@ func TestLaunchProfileWarningsOnMulticardSeats(t *testing.T) {
 	if out := say(seat); strings.Contains(out, "warning") {
 		t.Fatalf("a clean multicard seat warns of nothing: %q", out)
 	}
-	// ignored under multicard, and said at load
+	// ignored under multicard: a deliberate config, so doctor says it (MulticardLaunchNotes) and load does not
+	notes := func(c Config) string { return strings.Join(c.MulticardLaunchNotes(), "\n") }
 	pin := seat
 	pin.ComfyCudaDevice = "1"
-	if out := say(pin); !strings.Contains(out, "comfy_cuda_device") || !strings.Contains(out, "not applied") || !strings.Contains(out, "imagegen_placement") {
+	if out := say(pin); strings.Contains(out, "comfy_cuda_device") {
+		t.Errorf("a config that pins the single-card routes is not a mistake, and load stays quiet: %q", out)
+	}
+	if out := notes(pin); !strings.Contains(out, "comfy_cuda_device") || !strings.Contains(out, "not applied") || !strings.Contains(out, "imagegen_placement") {
 		t.Errorf("the device pin is the lease's two cards under multicard: %q", out)
 	}
 	dyn := seat
 	dyn.ComfyDynamicVRAM = "on"
-	if out := say(dyn); !strings.Contains(out, "comfy_dynamic_vram") || !strings.Contains(out, "--gpu-only") {
+	if out := say(dyn); strings.Contains(out, "comfy_dynamic_vram") {
+		t.Errorf("load stays quiet about dynamic VRAM too: %q", out)
+	}
+	if out := notes(dyn); !strings.Contains(out, "comfy_dynamic_vram") || !strings.Contains(out, "--gpu-only") {
 		t.Errorf("a multicard launch runs --gpu-only: %q", out)
 	}
 	off := seat
 	off.ComfyDynamicVRAM = "off"
-	if out := say(off); strings.Contains(out, "comfy_dynamic_vram") {
+	if out := notes(off); strings.Contains(out, "comfy_dynamic_vram") {
 		t.Errorf("off is what the launch does anyway: %q", out)
 	}
 	pool := seat
@@ -143,8 +147,13 @@ func TestLaunchProfileWarningsOnMulticardSeats(t *testing.T) {
 		t.Errorf("a pooled seat is another placement; its keys are ignored under multicard: %q", out)
 	}
 	edit := Config{GenEditPlacement: "multicard", GPUCardScopedLeases: true, ComfyCudaDevice: "2"}
-	if out := say(edit); !strings.Contains(out, "comfy_cuda_device") || !strings.Contains(out, "gen_edit_placement") {
+	if out := notes(edit); !strings.Contains(out, "comfy_cuda_device") || !strings.Contains(out, "gen_edit_placement") {
 		t.Errorf("the edit seat too: %q", out)
+	}
+	// a family that only inherits the flat value is named in the same note, not given one of its own
+	both := Config{ImageGenPlacement: "multicard", GenEditPlacement: "multicard", ComfyCudaDevice: "2", ComfyDynamicVRAM: "on", ImageGenFamilies: map[string]FamilyOverlay{"qwen-image": {"imagegen_placement": json.RawMessage(`"multicard"`), "license": json.RawMessage(`"x"`), "commercial_use": json.RawMessage(`false`)}}}
+	if got := both.MulticardLaunchNotes(); len(got) != 2 || !strings.Contains(got[0], `imagegen_families["qwen-image"]`) {
+		t.Errorf("one note per setting, however many seats inherit it: %q", got)
 	}
 	// without card-scoped leases the call holds the whole node and names no cards, so the runner refuses it
 	whole := Config{ImageGenFamily: "qwen-image", ImageGenPlacement: "multicard"}

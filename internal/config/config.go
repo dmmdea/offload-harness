@@ -3057,7 +3057,21 @@ func (c Config) NIMBaseEnforced() bool {
 //     servers, so absence of the env is a smell, not proof. The two seats warn
 //     independently so the message names the config key actually at fault.
 func warnImageGenBindingTraps(c Config) {
-	warnMediaGenBindingTrapsTo(c, os.Stderr)
+	warnMediaGenBindingTrapsTo(c, bindingTrapSink{os.Stderr})
+}
+
+// bindingTrapSeen holds the binding-trap warnings this process already said. Load runs once per consumer, not once per process (`gpu status` loads the
+// config five times), and each load re-checked the bindings and said every warning again; a warning is said once per process, like remoteEndpointNoteOnce.
+var bindingTrapSeen sync.Map
+
+// bindingTrapSink writes each distinct warning line once per process: warnings are written a line per Write, so the line is the key.
+type bindingTrapSink struct{ w io.Writer }
+
+func (s bindingTrapSink) Write(p []byte) (int, error) {
+	if _, seen := bindingTrapSeen.LoadOrStore(string(p), true); seen {
+		return len(p), nil
+	}
+	return s.w.Write(p)
 }
 
 // warnMediaGenBindingTrapsTo carries the body with an injectable sink so the
@@ -3179,15 +3193,9 @@ func warnImageBindingTo(c Config, w io.Writer, where string) {
 	}
 }
 
-// warnMulticardLaunchTo carries the launch traps both multicard seats share: the settings the card-only launch ignores, and the host that cannot
-// lease the two cards at all. key and seat name the binding in the message.
+// warnMulticardLaunchTo carries the launch trap both multicard seats share: the host that cannot lease the two cards at all. key and seat name the binding in
+// the message. The two settings the card-only launch ignores are not traps (the flat values still serve the single-card routes): MulticardLaunchNotes says them, in doctor.
 func warnMulticardLaunchTo(c Config, w io.Writer, where, key, seat string) {
-	if c.ComfyCudaDevice != "" {
-		fmt.Fprintf(w, "warning: %scomfy_cuda_device %q is not applied to the multicard %s seat (%s) — the lease's two cards place it; the pin applies to the single-card routes only\n", where, c.ComfyCudaDevice, seat, key)
-	}
-	if c.ComfyDynamicVRAM == "on" {
-		fmt.Fprintf(w, "warning: %scomfy_dynamic_vram is on while the %s seat is multicard (%s) — the card-only launch runs --gpu-only (dynamic VRAM off) and ignores the setting\n", where, seat, key)
-	}
 	if !c.GPUCardScopedLeases {
 		noun := "render"
 		if seat == "edit" {
@@ -3197,12 +3205,47 @@ func warnMulticardLaunchTo(c Config, w io.Writer, where, key, seat string) {
 	}
 }
 
+// MulticardLaunchNotes says, once each, the two flat settings a multicard seat ignores: comfy_cuda_device (the lease's two cards place the seat) and
+// comfy_dynamic_vram "on" (the card-only launch runs --gpu-only). Both still serve the single-card routes, so they describe a deliberate config, not a mistake:
+// doctor prints them and config load does not. The seats are the default image and edit bindings and every named family that resolves to multicard; a family
+// overlay carries imagegen_* / gen_edit_* keys only, so a family always inherits the flat values and is named in the same note, not given one of its own.
+func (c Config) MulticardLaunchNotes() []string {
+	var seats []string
+	if c.ImageMulticard() {
+		seats = append(seats, "imagegen_placement")
+	}
+	if c.EditMulticard() {
+		seats = append(seats, "gen_edit_placement")
+	}
+	for _, name := range sortedFamilyNames(c.ImageGenFamilies) {
+		if cp, _, _, err := applyOverlay(c, name, c.ImageGenFamilies[name], imageOverlay); err == nil && cp.ImageMulticard() {
+			seats = append(seats, fmt.Sprintf("imagegen_families[%q]", name))
+		}
+	}
+	for _, name := range sortedFamilyNames(c.GenEditFamilies) {
+		if cp, _, _, err := applyOverlay(c, name, c.GenEditFamilies[name], editOverlay); err == nil && cp.EditMulticard() {
+			seats = append(seats, fmt.Sprintf("gen_edit_families[%q]", name))
+		}
+	}
+	var notes []string
+	if len(seats) == 0 {
+		return notes
+	}
+	if c.ComfyCudaDevice != "" {
+		notes = append(notes, fmt.Sprintf("comfy_cuda_device %q is not applied to the multicard seats (%s) — the lease's two cards place them; the pin applies to the single-card routes only", c.ComfyCudaDevice, strings.Join(seats, ", ")))
+	}
+	if c.ComfyDynamicVRAM == "on" {
+		notes = append(notes, fmt.Sprintf("comfy_dynamic_vram is on while these seats are multicard (%s) — the card-only launch runs --gpu-only (dynamic VRAM off) and ignores the setting", strings.Join(seats, ", ")))
+	}
+	return notes
+}
+
 // imageRecipeFamilies / editRecipeFamilies are the graph families that have a LAUNCHABLE card-only recipe: a row of render/multicard-recipes.json that is not
 // held back (a test in this package pins them to it). A family outside them, bound to a multicard placement, is refused by the runner by name on every call;
-// qwen-image-2.1 is inside them through its bf16 and int8_convrot rows (no row is held back today).
+// qwen-image-2.1 is inside them through its bf16 and int8_convrot rows on both routes (no row is held back today).
 var (
 	imageRecipeFamilies = map[string]bool{"qwen-image": true, "krea2": true, "qwen-image-2.1": true}
-	editRecipeFamilies  = map[string]bool{EditFamily2511: true}
+	editRecipeFamilies  = map[string]bool{EditFamily2511: true, FamilyQwenImage21: true}
 )
 
 func sortedKeys(m map[string]bool) string {
@@ -3246,6 +3289,9 @@ func warnEditBindingTo(c Config, w io.Writer, where string) {
 		}
 		if c.GenEditMegapixels != 0 {
 			fmt.Fprintf(w, "warning: %sgen_edit_megapixels is set on the qwen-image-2.1 edit binding — that graph sizes by gen_edit_resolution; the runner refuses the flag and EVERY edit will defer\n", where)
+		}
+		if c.EditMulticard() && (c.GenEditCacheDevice == "auto" || c.GenEditCacheDevice == "cpu") {
+			fmt.Fprintf(w, "warning: %sgen_edit_cache_device is %q on a multicard qwen-image-2.1 edit binding — that can pin the prefix cache in host RAM, so the runner refuses it and EVERY edit will defer; leave it unset (the runner's default there is gpu) or bind gpu or off\n", where, c.GenEditCacheDevice)
 		}
 		if where == "" {
 			fmt.Fprintln(w, "warning: gen_edit_family is qwen-image-2.1 on the DEFAULT edit binding — ADR 0058 ships it only as a named gen_edit_families opt-in")

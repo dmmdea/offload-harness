@@ -51,7 +51,8 @@
 // references (<image2>..<imageN> in the prompt). Up to 10 (the official limit;
 // the node itself grows to 16). The model path runs through QwenImage21Cache so
 // the prefix KV-cache placement is a binding choice (device auto|gpu|cpu|off —
-// "off" and "gpu" stay out of the host-RAM prefetch path of ComfyUI #16443).
+// "off" and "gpu" stay out of the host-RAM prefetch path of ComfyUI #16443). Under the card-only placement
+// the cache device is gpu (the default there) or off: auto and cpu can pin the cache in host RAM.
 
 import { findRecipe, multicardLoaders, PLACEMENTS, PLACEMENT_DEFAULT } from "./multicard-recipes.mjs";
 
@@ -221,7 +222,7 @@ function requireResolution(r) {
   }
 }
 
-function loaders({ unet, clip, vae, placement = PLACEMENT_DEFAULT, residentGb }) {
+function loaders({ unet, clip, vae, placement = PLACEMENT_DEFAULT, residentGb, route = "image" }) {
   requireName(unet, "unet (the 2.1 diffusion model, e.g. qwen_image_2.1_bf16.safetensors)");
   requireName(clip, "clip (the Qwen3-VL-8B text encoder, e.g. qwen3vl_8b_bf16.safetensors)");
   requireName(vae, "vae (the 2.1 RGBA VAE, e.g. qwen_image_2.1_vae_bf16.safetensors)");
@@ -235,7 +236,7 @@ function loaders({ unet, clip, vae, placement = PLACEMENT_DEFAULT, residentGb })
   }
   if (placement === "multicard") {
     // The card-only placement (render/multicard-recipes.mjs): the loaders of the recipe for this DiT file, nothing else of the graph changes.
-    return multicardLoaders(findRecipe({ route: "image", family: "qwen-image-2.1", unet, clip }), { unet, clip, vae, residentGb });
+    return multicardLoaders(findRecipe({ route, family: "qwen-image-2.1", unet, clip }), { unet, clip, vae, residentGb });
   }
   return {
     "1": { class_type: "UNETLoader", inputs: { unet_name: unet, weight_dtype: "default" } },
@@ -345,6 +346,8 @@ export function buildQwenImage21({
  * on image_1's grid — so the output takes the target's aspect. transparent keeps
  * both the sources' alpha (JoinImageWithAlpha: LoadImage flattens to RGB and
  * returns alpha as an inverted MASK) and the output's; otherwise RGB in, RGB out.
+ * placement "multicard" takes the loaders of the edit recipe for the DiT file and reads the conditioning through
+ * OffloadFreeAfterEncode (node 14), which frees the encoder after its text and vision pass; cacheDevice then defaults to gpu.
  */
 export function buildQwenImage21Edit({
   images, prompt, negative = "",
@@ -354,10 +357,13 @@ export function buildQwenImage21Edit({
   scheduler = QWEN_IMAGE_21_RECIPE.scheduler,
   schedule = "comfy",
   resolution = QWEN_IMAGE_21_RESOLUTION,
-  cacheDevice = "auto", cacheDtype = "default",
+  cacheDevice, cacheDtype = "default",
   transparent = false,
   seed = Math.floor(Math.random() * 1e15),
   filenamePrefix = "edit",
+  // placement: "single" (default, the graph that always was) | "multicard" (the card-only recipe for the DiT file, two cards, no host RAM;
+  // render/multicard-recipes.mjs). residentGb overrides the recipe's share of a split DiT on the compute card; the single placement ignores it.
+  placement = PLACEMENT_DEFAULT, residentGb,
 } = {}) {
   if (!Array.isArray(images) || images.length === 0) {
     throw new Error("buildQwenImage21Edit: images is required (images[0] is the edit target)");
@@ -369,8 +375,12 @@ export function buildQwenImage21Edit({
     if (typeof im !== "string" || !im.trim()) throw new Error(`buildQwenImage21Edit: images[${i}] must be a staged input filename`);
   });
   if (typeof prompt !== "string" || !prompt.trim()) throw new Error("buildQwenImage21Edit: prompt is required");
-  if (!QWEN_IMAGE_21_CACHE_DEVICES.includes(cacheDevice)) {
-    throw new Error(`buildQwenImage21Edit: cacheDevice must be one of ${QWEN_IMAGE_21_CACHE_DEVICES.join("|")}, got ${cacheDevice}`);
+  const cache = cacheDevice ?? (placement === "multicard" ? "gpu" : "auto");
+  if (!QWEN_IMAGE_21_CACHE_DEVICES.includes(cache)) {
+    throw new Error(`buildQwenImage21Edit: cacheDevice must be one of ${QWEN_IMAGE_21_CACHE_DEVICES.join("|")}, got ${cache}`);
+  }
+  if (placement === "multicard" && (cache === "auto" || cache === "cpu")) {
+    throw new Error(`buildQwenImage21Edit: --cache-device ${cache} can pin the prefix cache in host RAM, which the card-only placement does not use: gpu or off`);
   }
   if (!QWEN_IMAGE_21_CACHE_DTYPES.includes(cacheDtype)) {
     throw new Error(`buildQwenImage21Edit: cacheDtype must be one of ${QWEN_IMAGE_21_CACHE_DTYPES.join("|")}, got ${cacheDtype}`);
@@ -384,8 +394,8 @@ export function buildQwenImage21Edit({
   requireResolution(resolution);
   if (!Number.isInteger(seed) || seed < 0) throw new Error(`buildQwenImage21Edit: seed must be a non-negative integer, got ${seed}`);
 
-  const g = loaders({ unet, clip, vae });
-  g["4"] = { class_type: "QwenImage21Cache", inputs: { model: ["1", 0], device: cacheDevice, dtype: cacheDtype } };
+  const g = loaders({ unet, clip, vae, placement, residentGb, route: "edit" });
+  g["4"] = { class_type: "QwenImage21Cache", inputs: { model: ["1", 0], device: cache, dtype: cacheDtype } };
 
   const enc = {
     clip: ["2", 0],
@@ -406,13 +416,20 @@ export function buildQwenImage21Edit({
     enc[`images.image_${i + 1}`] = src;
   });
   g["5"] = { class_type: "TextEncodeQwenImage21", inputs: enc };
+  // multicard: as in buildQwenImage21, the encoder (its vision tower and the reference VAE encode run inside node 5) is taken off both cards before the DiT lands;
+  // the sampler reads the conditioning through node 14, the latent from node 5 (node 14 has no latent input)
+  let cond = "5";
+  if (placement === "multicard") {
+    g["14"] = { class_type: "OffloadFreeAfterEncode", inputs: { positive: ["5", 0], negative: ["5", 1], clip: ["2", 0] } };
+    cond = "14";
+  }
   if (schedule === "turbo") {
     // The Turbo checkpoint's saved sigmas through the same custom-sampler wiring as the
     // T2I graph: the cached model drives the guider, the encoder's own latent is denoised.
     g["6"] = { class_type: "RandomNoise", inputs: { noise_seed: seed } };
     g["7"] = s.cfg === 1
-      ? { class_type: "BasicGuider", inputs: { model: ["4", 0], conditioning: ["5", 0] } }
-      : { class_type: "CFGGuider", inputs: { model: ["4", 0], positive: ["5", 0], negative: ["5", 1], cfg: s.cfg } };
+      ? { class_type: "BasicGuider", inputs: { model: ["4", 0], conditioning: [cond, 0] } }
+      : { class_type: "CFGGuider", inputs: { model: ["4", 0], positive: [cond, 0], negative: [cond, 1], cfg: s.cfg } };
     g["8"] = { class_type: "KSamplerSelect", inputs: { sampler_name: sampler } };
     g["9"] = { class_type: "ManualSigmas", inputs: { sigmas: formatSigmas(turboSigmas(s.steps)) } };
     g["10"] = {
@@ -424,7 +441,7 @@ export function buildQwenImage21Edit({
       class_type: "KSampler",
       inputs: {
         seed, steps: s.steps, cfg: s.cfg, sampler_name: sampler, scheduler, denoise: 1.0,
-        model: ["4", 0], positive: ["5", 0], negative: ["5", 1], latent_image: ["5", 2],
+        model: ["4", 0], positive: [cond, 0], negative: [cond, 1], latent_image: ["5", 2],
       },
     };
   }
