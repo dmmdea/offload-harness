@@ -56,7 +56,8 @@
 // `residentGb` on the compute card and the rest on the storage card; the encoder is built off the cards and split over both
 // (OffloadCLIPLoaderDisTorch2); both VAEs sit on the storage card. The DiT and the encoder do not fit the two cards together, so
 // OffloadFreeAfterEncode (render/comfyui-ext) takes the encoder off the cards after the prompt is encoded and before the first sampler
-// places the DiT. multicard and poolVvramGb are exclusive.
+// places the DiT; OffloadFreeForDecode (check off: the decode is tiled) frees the cards of the DiT after the second sampler and before the
+// two decodes on the storage card. multicard and poolVvramGb are exclusive.
 
 /** Distilled two-pass schedules from the official template (fixed, part of the recipe). */
 export const LTX25_BASE_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0";
@@ -71,9 +72,9 @@ export const LTX25_TEMPLATE_NEGATIVE = "pc game, console game, video game, carto
  */
 export const LTX25_COMPUTE_DEVICE = "cuda:0";
 export const LTX25_STORAGE_DEVICE = "cuda:1";
-/** GiB of the DiT kept on the compute card (the storage card holds the rest, about 11 GiB, and both VAEs). CHOSEN, not measured: no LTX-2.5 run on the two cards was made. */
+/** GiB of the DiT kept on the compute card (the storage card holds the rest, about 11 GiB, and both VAEs). Measured at 1280x704x121: peaks 11.54 GiB compute, 12.71 GiB storage. */
 export const LTX25_RESIDENT_GB_DEFAULT = 9;
-/** The DisTorch2 split of the Gemma encoder over the two cards: 7 GiB on the compute card, the rest (about 7.3 GiB) on the storage card. CHOSEN, not measured. */
+/** The DisTorch2 split of the Gemma encoder over the two cards: 7 GiB on the compute card, the rest on the storage card (measured 7.07 and 7.26 GiB allocated). */
 export const LTX25_TE_ALLOCATION_DEFAULT = `${LTX25_COMPUTE_DEVICE},7gb;${LTX25_STORAGE_DEVICE},*`;
 
 export function buildLtx25I2V({
@@ -191,7 +192,9 @@ export function buildLtx25I2V({
     "27": { class_type: "RandomNoise", inputs: { noise_seed: seed + 1 } },
     "28": { class_type: "ManualSigmas", inputs: { sigmas: LTX25_REFINE_SIGMAS } },
     "29": { class_type: "SamplerCustomAdvanced", inputs: { noise: ["27", 0], guider: ["25", 0], sampler: ["26", 0], sigmas: ["28", 0], latent_image: ["24", 0] } },
-    "30": { class_type: "LTXVSeparateAVLatent", inputs: { av_latent: ["29", 0] } },
+    // multicard: frees the cards of the DiT before the decodes (the 11 GiB of its blocks share the storage card with both VAEs) and reports them
+    ...(multicard ? { "36": { class_type: "OffloadFreeForDecode", inputs: { samples: ["29", 0], vae: ["6", 0], check: false } } } : {}),
+    "30": { class_type: "LTXVSeparateAVLatent", inputs: { av_latent: [multicard ? "36" : "29", 0] } },
     // ---- decode + mux (template tile params) ----
     "31": { class_type: "VAEDecodeTiled", inputs: { tile_size: 512, overlap: 64, temporal_size: 64, temporal_overlap: 16, samples: ["30", 0], vae: ["6", 0] } },
     "32": { class_type: "LTXVAudioVAEDecode", inputs: { samples: ["30", 1], audio_vae: ["7", 0] } },

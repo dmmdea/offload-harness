@@ -190,7 +190,7 @@ class FreeNode(unittest.TestCase):
         self.assertEqual(node.RETURN_TYPES, ("LATENT",))
         inputs = node.INPUT_TYPES()
         self.assertEqual(list(inputs["required"]), ["samples"])
-        self.assertEqual(sorted(inputs["optional"]), ["save_prefix", "vae"])
+        self.assertEqual(sorted(inputs["optional"]), ["check", "save_prefix", "vae"])
         out = node().free(self.samples)  # no card visible in this process
         self.assertIs(out["result"][0], self.samples)
 

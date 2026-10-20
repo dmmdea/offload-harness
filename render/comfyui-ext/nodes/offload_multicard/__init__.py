@@ -39,7 +39,9 @@ shared install. Four parts:
    that certain and visible: it saves the latent first (optional), collects garbage, returns every
    card's cached blocks to the driver, reports each card's memory, and refuses to continue when the
    decode card cannot hold a plain decode, because ComfyUI would then retry the decode tiled with its
-   own temporal chunking and the clip would carry the seam the plain decode exists to avoid.
+   own temporal chunking and the clip would carry the seam the plain decode exists to avoid. With
+   `check` false (the LTX-2.5 graph, whose VAEDecodeTiled is sized by its tiles, not by the whole
+   latent) it frees the cards and reports them without that test.
 
 3. OffloadCLIPLoaderDisTorch2, the DisTorch2 text-encoder loader for an encoder that is bigger than one card
    (the 16.33 GiB bf16 Qwen3-VL-8B of qwen-image-2.1). ComfyUI-MultiGPU's own CLIPLoaderDisTorch2MultiGPU
@@ -61,6 +63,17 @@ shared install. Four parts:
    and after, and raises OFFLOAD-TE-STILL-RESIDENT if any of the encoder's tensors is still on a CUDA device.
    The CLIP is spent after it. The harness loads this pack with --cache-none, so the next prompt builds and
    places the encoder again from the read-only map.
+
+5. An eviction guard for a model placed across cards, under the same OFFLOAD_RO_LOAD=1 and only with
+   --gpu-only. ComfyUI frees room for a new load by "unloading" the models on its device
+   (comfy.model_management.free_memory; with --disable-smart-memory it unloads every one of them, whatever
+   the need), and its unload moves the model to its offload device, which under --gpu-only IS a card. For a
+   DisTorch2 split that gathers the whole model onto one card: the 20 GiB LTX-2.5 DiT, still needed by the
+   second sampler, was pulled onto the 15.9 GiB compute card when the latent upsampler loaded, and the run
+   ran out of memory there (2026-10-20). So LoadedModel.model_unload refuses, for a model whose weights
+   span a card other than its offload device: the model stays where its allocation put it, the new load
+   takes the room that is free, and the model leaves the cards when its last reference goes (--cache-none),
+   as it always did. A model wholly on its offload card, and a dead one, take ComfyUI's own path.
 """
 import gc
 import json
@@ -187,9 +200,52 @@ def _install_lazy_diffusion_build():
     _say("lazy diffusion-model build installed (an unquantized DiT is built without weights and takes the read-only map's tensors)")
 
 
+def _spans_other_cards(patcher):
+    """True when the patcher's model is a DisTorch2 placement, or holds a tensor on a card other than its offload device."""
+    offload = getattr(patcher, "offload_device", None)
+    if getattr(offload, "type", None) != "cuda":
+        return False
+    model = getattr(patcher, "model", None)
+    if model is None:
+        return False
+    if getattr(model, "_distorch_v2_meta", None) is not None:
+        return True
+    import itertools
+    for tensor in itertools.chain(model.parameters(), model.buffers()):
+        device = tensor.device
+        if device.type == "cuda" and device.index != offload.index:
+            return True
+    return False
+
+
+def _install_split_eviction_guard():
+    import comfy.model_management as mm
+    args = getattr(mm, "args", None)  # the parsed command line model_management imported (comfy.cli_args)
+    if not getattr(args, "gpu_only", False):
+        return
+    stock = getattr(mm.LoadedModel, "model_unload", None)
+    if stock is None:
+        raise RuntimeError("offload_multicard: comfy.model_management.LoadedModel has no model_unload, so the split-model eviction guard cannot be installed")
+    if getattr(stock, "_offload_split_guard", False):
+        return
+
+    def model_unload(self, memory_to_free=None, unpatch_weights=True):
+        patcher = self.model
+        if patcher is not None and _spans_other_cards(patcher):
+            _say(f"kept {type(patcher.model).__name__} on its cards: under --gpu-only its offload device is {patcher.offload_device}, so an unload "
+                 f"would gather the whole split model onto that one card; it leaves the cards when its last reference goes")
+            return False
+        return stock(self, memory_to_free, unpatch_weights)
+
+    model_unload._offload_split_guard = True
+    mm.LoadedModel.model_unload = model_unload
+    _say("split-model eviction guard installed (a model placed across cards is never gathered onto its offload card)")
+
+
 if os.environ.get("OFFLOAD_RO_LOAD") == "1":
     _install_readonly_loader()
     _install_lazy_diffusion_build()
+    _install_split_eviction_guard()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -249,14 +305,14 @@ class OffloadFreeForDecode:
     def INPUT_TYPES(cls):
         return {
             "required": {"samples": ("LATENT",)},
-            "optional": {"vae": ("VAE",), "save_prefix": ("STRING", {"default": ""})},
+            "optional": {"vae": ("VAE",), "save_prefix": ("STRING", {"default": ""}), "check": ("BOOLEAN", {"default": True})},
         }
 
     RETURN_TYPES = ("LATENT",)
     FUNCTION = "free"
     CATEGORY = "offload"
 
-    def free(self, samples, vae=None, save_prefix=""):
+    def free(self, samples, vae=None, save_prefix="", check=True):
         ui = {}
         saved = ""
         if save_prefix:
@@ -281,8 +337,11 @@ class OffloadFreeForDecode:
         index = getattr(device, "index", None)
         if index is None:
             index = _cards()[0]
-        need = _decode_need_gib(samples, vae)
         free = next(c["free_gib"] for c in after if c["card"] == f"cuda:{index}")
+        if not check:
+            _say(f"cuda:{index} has {free:.2f} GiB free for the decode (no plain-decode check: a tiled decode is sized by its tiles)")
+            return {"ui": ui, "result": (samples,)}
+        need = _decode_need_gib(samples, vae)
         if free < need:
             where = f" The sampled latent is saved as {saved} in ComfyUI's output directory." if saved else ""
             raise RuntimeError(
@@ -313,10 +372,12 @@ def _stock_clip_loader():
 
 
 def _weight_bytes_by_device(module):
+    # nbytes, not numel x element_size: a quantized weight (comfy_kitchen's QuantizedTensor) reports its logical dtype's element size, twice
+    # an int8 weight's real storage, while its nbytes is the storage it holds
     totals = {}
     for tensor in list(module.parameters()) + list(module.buffers()):
         key = str(tensor.device)
-        totals[key] = totals.get(key, 0) + tensor.numel() * tensor.element_size()
+        totals[key] = totals.get(key, 0) + tensor.nbytes
     return totals
 
 
@@ -410,7 +471,7 @@ def _free_card_weights(model):
             for name, tensor in list(table.items()):
                 if tensor is not None and tensor.device.type == "cuda":
                     key = str(tensor.device)
-                    freed[key] = freed.get(key, 0) + tensor.numel() * tensor.element_size()
+                    freed[key] = freed.get(key, 0) + tensor.nbytes
                     table[name] = empty()
     return freed
 

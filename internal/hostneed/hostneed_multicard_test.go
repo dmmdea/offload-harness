@@ -9,8 +9,8 @@ import (
 )
 
 // THE CARD-ONLY IMAGE AND EDIT PLACEMENT (comfy-generate.mjs / comfy-render.mjs / comfy-edit.mjs --placement multicard, render/multicard-recipes.json).
-// Two things must both hold before a call declares 0 host RAM: a recipe whose host growth was MEASURED with the read-only loader (today only the
-// 2511 fp8mixed edit; every image arm of the 2026-10-11 benchmark ran the stock loader, so the rest are predicted) and its per-card peaks fitting
+// Two things must both hold before a call declares 0 host RAM: a recipe whose host growth was MEASURED with the read-only loader (the 2511 fp8mixed
+// edit, the 2512 Q5_1 GGUF, krea2 bf16 and the 2.1 bf16 DiT; the 2511 Q5_1 GGUF edit is still predicted) and its per-card peaks fitting
 // the TWO cards the lease holds, each less the runner's reserve. A recipe that is only predicted, or does not fit, is the ordinary estimate, the honest
 // streaming figure, with the reason in the detail.
 
@@ -225,10 +225,10 @@ func TestTheEditRouteReadsThePlacementFromTheFacts(t *testing.T) {
 	if n, ok := ForRoute(RouteImage, img, f); !ok || n.GiB != 0 || !strings.Contains(n.Detail, "qwen-image/gguf-q5_1") {
 		t.Fatalf("the image binding's placement, on the measured 2512 Q5_1 row: %v %v, want 0", n, ok)
 	}
-	// the 2.1 bf16 row is predicted too (its text encoder is built off the cards by the harness's own loader, a transient staging the estimate declares)
+	// the 2.1 bf16 row is measured too (its text encoder is built off the cards by the harness's own loader; the staging is transient, gone before sampling)
 	bf16 := config.Config{ComfyDir: f.Cfg.ComfyDir, ImageGenFamily: "qwen-image-2.1", ImageGenCkpt: "qwen_image_2.1_bf16.safetensors", ImageGenCLIP: "qwen3vl_8b_bf16.safetensors"}
-	if n, ok := ForRoute(RouteImage, bf16, f); !ok || n.GiB <= 0 || !strings.Contains(n.Detail, "qwen-image-2.1/bf16") || !strings.Contains(n.Detail, "predicted") {
-		t.Fatalf("a predicted row declares the set: %v %v", n, ok)
+	if n, ok := ForRoute(RouteImage, bf16, f); !ok || n.GiB != 0 || !strings.Contains(n.Detail, "qwen-image-2.1/bf16") {
+		t.Fatalf("the image binding's placement, on the measured 2.1 bf16 row: %v %v, want 0", n, ok)
 	}
 	// the 2.1 int8_convrot row is held back, so the same placement is no recipe there: the ordinary estimate, with no card-only note
 	held := config.Config{ComfyDir: f.Cfg.ComfyDir, ImageGenFamily: "qwen-image-2.1", ImageGenCkpt: "qwen_image_2.1_int8_convrot.safetensors", ImageGenCLIP: "qwen3vl_8b_bf16.safetensors"}
@@ -262,12 +262,15 @@ func TestOnlyAMeasuredCardOnlyDeclarationIsMarkedCardOnly(t *testing.T) {
 	if n := need(t, editFp8Cmd, two); n.GiB != 0 || !n.CardOnly {
 		t.Fatalf("the measured fp8mixed row on two fitting cards: %+v, want 0 and marked card-only", n)
 	}
+	if n := need(t, img21Cmd, two); n.GiB != 0 || !n.CardOnly {
+		t.Fatalf("the measured 2.1 bf16 row on two fitting cards: %+v, want 0 and marked card-only", n)
+	}
 	for name, c := range map[string]struct {
 		cmd string
 		f   Facts
 	}{
 		"a predicted row":                      {editGgufCmd, two},
-		"a held-back row":                      {img21Cmd, two},
+		"a held-back row":                      {strings.Replace(img21Cmd, "qwen_image_2.1_bf16", "qwen_image_2.1_int8_convrot", 1), two},
 		"a row that does not fit":              {editFp8Cmd, imgFacts(t, 12, 12)},
 		"one card":                             {editFp8Cmd, imgFacts(t, 15.9)},
 		"no placement":                         {without(editFp8Cmd), two},

@@ -299,6 +299,13 @@ export function buildQwenImage21({
     },
   };
   g["5"] = { class_type: "EmptyLatentImage", inputs: { width: W, height: H, batch_size: 1 } };
+  // multicard: the 16.33 GiB encoder and the DiT's share do not fit the cards together, so the harness's OffloadFreeAfterEncode (render/comfyui-ext) takes
+  // the encoder off both cards once the prompt is encoded; the sampler reads the conditioning through it, so the release lands before the DiT does
+  let cond = "4";
+  if (placement === "multicard") {
+    g["14"] = { class_type: "OffloadFreeAfterEncode", inputs: { positive: ["4", 0], negative: ["4", 1], clip: ["2", 0] } };
+    cond = "14";
+  }
 
   if (schedule === "official" || schedule === "turbo") {
     g["6"] = { class_type: "RandomNoise", inputs: { noise_seed: seed } };
@@ -307,8 +314,8 @@ export function buildQwenImage21({
     // cannot express — a CFGGuider then carries the negative, as diffusers does
     // when true_cfg_scale > 1.
     g["7"] = s.cfg === 1
-      ? { class_type: "BasicGuider", inputs: { model: ["1", 0], conditioning: ["4", 0] } }
-      : { class_type: "CFGGuider", inputs: { model: ["1", 0], positive: ["4", 0], negative: ["4", 1], cfg: s.cfg } };
+      ? { class_type: "BasicGuider", inputs: { model: ["1", 0], conditioning: [cond, 0] } }
+      : { class_type: "CFGGuider", inputs: { model: ["1", 0], positive: [cond, 0], negative: [cond, 1], cfg: s.cfg } };
     g["8"] = { class_type: "KSamplerSelect", inputs: { sampler_name: sampler } };
     const sigmas = schedule === "turbo" ? turboSigmas(s.steps) : qwenImage21Sigmas({ width: W, height: H, steps: s.steps });
     g["9"] = { class_type: "ManualSigmas", inputs: { sigmas: formatSigmas(sigmas) } };
@@ -321,7 +328,7 @@ export function buildQwenImage21({
       class_type: "KSampler",
       inputs: {
         seed, steps: s.steps, cfg: s.cfg, sampler_name: sampler, scheduler, denoise: 1.0,
-        model: ["1", 0], positive: ["4", 0], negative: ["4", 1], latent_image: ["5", 0],
+        model: ["1", 0], positive: [cond, 0], negative: [cond, 1], latent_image: ["5", 0],
       },
     };
   }

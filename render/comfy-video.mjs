@@ -42,7 +42,9 @@
 //   --wan-placement multicard --model ltx25 is the same placement for LTX-2.5 (a 20 GiB int8 DiT, a 14 GiB Gemma encoder): the lease's compute card is cuda:0 (the launch lists it
 //   first: an int8 DiT that computes on another device faults, ComfyUI-MultiGPU #220) and the storage card cuda:1; --wan-resident-gb N (default 9) is the GiB of the DiT kept on
 //   the compute card, the encoder is split over both cards and taken off them once the prompt is encoded (OffloadFreeAfterEncode), and both VAEs sit on the storage card. No
-//   --wan-decode, --high-unet or --low-unet; a bf16 or GGUF --transformer is refused. No LTX-2.5 run was made on the two cards: the default shares are chosen, not measured.
+//   --wan-decode, --high-unet or --low-unet; a bf16 or GGUF --transformer is refused. A split model stays on its cards when ComfyUI loads the latent upscaler (the
+//   pack's eviction guard), and OffloadFreeForDecode (check false) empties both cards before the tiled decodes. Measured on one run at 1280x704x121 with the default shares:
+//   peaks 11.54 GiB compute and 12.71 GiB storage, 124.0 s of ComfyUI time; a larger share or clip is unmeasured.
 //   --wan-decode plain under multicard frees both cards of the experts before the plain VAEDecode and saves the sampled latent
 //   (a LATENT line names it); a plain decode that ComfyUI retried tiled fails the run (WAN-DECODE-FALLBACK) and keeps the clip beside <out> as
 //   <name>.seamed<ext>; --wan-loader is not used. Needs --high-unet / --low-unet to name the experts: the fp8 safetensors files, or the Q8_0 GGUF files (14.349 GiB each, loaded through the
@@ -330,8 +332,8 @@ export async function verifyMulticardDevices(api, plan, { fetchImpl = fetch } = 
 // only under the plain decode, so the node-class preflight alone would let any other decode run without the reader: this asks for it every time,
 // and, unlike that preflight, an answer that cannot be had is a refusal too (the server just answered /system_stats).
 export async function verifyMulticardPack(api, plan, { fetchImpl = fetch } = {}) {
-  // the LTX-2.5 graph names the pack's other two classes instead of the decode's free node
-  const asked = plan?.family === "ltx25" ? ["OffloadCLIPLoaderDisTorch2", "OffloadFreeAfterEncode"] : ["OffloadFreeForDecode"];
+  // the LTX-2.5 graph names the pack's encoder loader and release beside the decode's free node
+  const asked = plan?.family === "ltx25" ? ["OffloadCLIPLoaderDisTorch2", "OffloadFreeAfterEncode", "OffloadFreeForDecode"] : ["OffloadFreeForDecode"];
   const res = await missingNodeClasses(api, Object.fromEntries(asked.map((cls, i) => [i + 1, { class_type: cls }])), { fetchImpl });
   if (!res.checked) throw new Error(`WAN-PLACEMENT-PACK: cannot tell whether the harness's node pack (offload_multicard) loaded: ${res.reason}. Nothing was submitted.`);
   if (res.missing.length) {
@@ -370,7 +372,7 @@ export async function generate(out, API, pos, flags, multicard, io = {}) {
   // chose, by flag or environment, is theirs.
   const chosen = flags["wait-sec"] || x.env.COMFY_WAIT_SEC;
   const waitSec = Number(chosen || (multicard ? MULTICARD_WAIT_SEC : 5400));
-  if (multicard && !chosen) x.stderr(`WAN-WAIT-NOTE: no --wait-sec or COMFY_WAIT_SEC, so the wait for the video is ${MULTICARD_WAIT_SEC} s (${multicard.family === "ltx25" ? "an LTX-2.5 run on the two cards has no measured time" : "the 20-step film recipe was projected at about 5170 s and measured 5136 s of runner wall"}); pass --wait-sec <seconds> to change it`);
+  if (multicard && !chosen) x.stderr(`WAN-WAIT-NOTE: no --wait-sec or COMFY_WAIT_SEC, so the wait for the video is ${MULTICARD_WAIT_SEC} s (${multicard.family === "ltx25" ? "the one LTX-2.5 run on the two cards, 1280x704x121, took 124 s of ComfyUI time and 146 s of runner wall" : "the 20-step film recipe was projected at about 5170 s and measured 5136 s of runner wall"}); pass --wait-sec <seconds> to change it`);
   const h = await x.poll({
     api: API, promptId, waitSec,
     isDone: (entry) => !!firstOutputFile(entry.outputs, graph),

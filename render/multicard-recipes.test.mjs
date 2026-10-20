@@ -19,7 +19,7 @@ test("the devices: the storage card is cuda:0 and the compute card cuda:1, the s
   assert.equal(MULTICARD_COMPUTE, "cuda:1");
 });
 
-test("the table holds the six recipes, each with its evidence and an honest basis; the 2512 Q5_1 and krea2 bf16 image rows and the 2511 fp8mixed edit row were measured card-only", () => {
+test("the table holds the six recipes, each with its evidence and an honest basis; the 2.1 bf16, 2512 Q5_1 and krea2 bf16 image rows and the 2511 fp8mixed edit row were measured card-only", () => {
   assert.deepEqual(RECIPES.map((r) => r.id).sort(), [
     "krea2/bf16", "qwen-image-2.1/bf16", "qwen-image-2.1/int8_convrot", "qwen-image-edit-2511/fp8mixed", "qwen-image-edit-2511/gguf-q5_1", "qwen-image/gguf-q5_1",
   ]);
@@ -29,7 +29,7 @@ test("the table holds the six recipes, each with its evidence and an honest basi
     assert.ok(r.peakGiB.compute > 0 && r.peakGiB.storage > 0 && r.activationsGiB > 0, r.id);
     assert.ok(["image", "edit"].includes(r.route), r.id);
   }
-  assert.deepEqual(RECIPES.filter((r) => r.basis === "measured").map((r) => r.id), ["qwen-image/gguf-q5_1", "krea2/bf16", "qwen-image-edit-2511/fp8mixed"]);
+  assert.deepEqual(RECIPES.filter((r) => r.basis === "measured").map((r) => r.id), ["qwen-image-2.1/bf16", "qwen-image/gguf-q5_1", "krea2/bf16", "qwen-image-edit-2511/fp8mixed"]);
   // a row that may not launch says why, in a sentence; the qwen-image-2.1 int8_convrot row is held back, so the launchable image rows are the 2512 Q5_1 GGUF, krea2 bf16 and the 2.1 bf16
   assert.deepEqual(RECIPES.filter((r) => "blocked" in r).map((r) => r.id).sort(), ["qwen-image-2.1/int8_convrot"]);
   assert.deepEqual(RECIPES.filter((r) => r.route === "image" && !("blocked" in r)).map((r) => r.id).sort(), ["krea2/bf16", "qwen-image-2.1/bf16", "qwen-image/gguf-q5_1"]);
@@ -53,27 +53,27 @@ test("findRecipe: the DiT's file picks the row", () => {
 });
 
 // The int8_convrot DiT is a comfy_kitchen int8 model. ComfyUI-MultiGPU's int8 dispatch path hits an illegal memory access when the compute device is not
-// cuda:0 (upstream issue 220, unfixed, and the reason the pooled LTX-2.5 seat keeps compute cuda:0). This row puts that DiT on cuda:1, and the benchmark arms
-// it cites ran the int8 DiT on cuda:0 with the text encoder on cuda:1: the placement itself never ran. So the runner refuses it by name, before a lease is spent.
-test("the int8_convrot recipe is held back: its DiT on cuda:1 was never run, and the int8 path is known to fault on a non-default device", () => {
+// cuda:0 (upstream issue 220, unfixed). The 2.1 rows launch compute-first, so this row's DiT lands on cuda:0, but no card-only run of the row has been made on
+// the two non-display cards (the arms it cites used the display card), so the runner refuses it by name, before a lease is spent.
+test("the int8_convrot recipe is held back: no card-only run of it on the two non-display cards", () => {
   const msg = refusal({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors" });
   assert.match(msg, /qwen-image-2\.1\/int8_convrot.*held back/s);
-  assert.match(msg, /cuda:1.*illegal memory access/s);
-  assert.match(msg, /cuda:0.*text encoder on cuda:1/s, "the arms the row cites ran the other way round");
+  assert.match(msg, /no card-only run/);
+  assert.match(msg, /compute-first.*cuda:0.*illegal memory access/s, "the launch order puts the int8 DiT where its kernels run");
   assert.match(msg, /blocked/, "and says where to lift it");
   assert.match(refusal({ ...QI21, unet: "qwen-image-2.1-UC-int8_convrot.safetensors" }), /held back/, "the live fast family's file name matches the row");
   // the data of the held-back row is kept (the proof arm builds its graph from it), and the loaders it names are unchanged
   assert.equal(row("qwen-image-2.1/int8_convrot").unet.loader, "plain");
   // the bf16 DiT of the same family is not held back, and its encoder is no longer a reason to hold the int8 row back either
   assert.equal(find({ ...QI21, unet: "qwen_image_2.1_bf16.safetensors" }).id, "qwen-image-2.1/bf16");
-  assert.doesNotMatch(msg, /cannot be built on the storage card/, "the harness's own loader builds the bf16 encoder; the int8 DiT on cuda:1 is the only reason left");
+  assert.doesNotMatch(msg, /cannot be built on the storage card/, "the harness's own loader builds the bf16 encoder; the missing run is the only reason left");
   // the order of refusals is unchanged: an int8 text encoder is refused as one first
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors", clip: "qwen3vl_8b_int8_convrot.safetensors" }), /int8.*30 dB/s);
 });
 
 // The bf16 row was predicted from a benchmark whose text encoder lived in host RAM, which the card-only placement forbids. Run card-only with the stock DisTorch2 loader, under
 // --gpu-only ComfyUI built the whole 16.33 GiB encoder on the 15.9 GiB storage card before the allocation string that splits it was attached: out of memory 1.4 s in.
-// The row now names the harness's own loader (distorch2-host), which builds the encoder off the cards and places it block by block.
+// The row now names the harness's own loader (distorch2-host), which builds the encoder off the cards and places it block by block; a compute-first card-only run measured it.
 test("the bf16 recipe is launchable through the harness's own text-encoder loader, which builds the 16.33 GiB encoder off the cards", () => {
   for (const unet of ["qwen_image_2.1_bf16.safetensors", "qwen_image_2.1_uc_bf16.safetensors"]) {
     assert.equal(find({ ...QI21, unet }).id, "qwen-image-2.1/bf16", unet);
@@ -82,13 +82,15 @@ test("the bf16 recipe is launchable through the harness's own text-encoder loade
   assert.ok(!("blocked" in r));
   assert.equal(r.unet.loader, "distorch2");
   assert.deepEqual(r.clip, { loader: "distorch2-host", residentGb: 8 });
-  assert.equal(r.basis, "predicted");
-  assert.deepEqual(r.peakGiB, { compute: 11.0, storage: 10.1 });
-  assert.deepEqual(recipePeaks(r, null), { compute: 11.0, storage: 10.1 });
-  assert.equal(recipePeaks(r, 4).storage, 14.1, "a smaller resident share moves the DiT's bytes onto the storage card, one for one");
+  assert.equal(r.basis, "measured");
+  assert.equal(r.cardOrder, "compute-first");
+  assert.deepEqual(r.peakGiB, { compute: 10.9, storage: 8.2 });
+  assert.deepEqual(recipePeaks(r, null), { compute: 10.9, storage: 8.2 });
+  assert.equal(recipePeaks(r, 4).storage, 12.2, "a smaller resident share moves the DiT's bytes onto the storage card, one for one");
   assert.equal(r.maxPixels, 2048 * 2048);
-  assert.match(r.maxPixelsNote, /chosen, not measured/);
-  assert.match(r.evidence, /16\.33 GiB \(the 13\.3 GiB once written here was the DiT file/, "the evidence line's wrong figure is corrected, not left standing");
+  assert.match(r.maxPixelsNote, /measured at 2048x2048/);
+  assert.match(r.evidence, /16\.33 GiB/);
+  assert.match(r.evidence, /280\.0 s, peaks 10\.90 GiB on the compute card and 8\.12 GiB on the storage card/);
   // an int8 text encoder is still refused as one first, and a file no row matches is still no recipe
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_bf16.safetensors", clip: "qwen3vl_8b_int8.safetensors" }), /int8.*30 dB/s);
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_fp8.safetensors" }), /no measured card-only recipe for qwen-image-2\.1/);
@@ -179,15 +181,16 @@ test("recipeResident: the recipe's default, an override only where the DiT is sp
 
 // ---- the loader nodes, exactly -----------------------------------------------------------------------------
 
+// the 2.1 rows launch compute-first (their fused kernels run on cuda:0 only): cuda:0 is the compute card there, cuda:1 the storage card
 test("2.1 int8_convrot: the DiT whole on the compute card, the bf16 text encoder split over both cards by the harness's loader, the VAE on the storage card", () => {
   const r = row("qwen-image-2.1/int8_convrot");
   const l = multicardLoaders(r, { unet: "qwen_image_2.1_int8_convrot.safetensors", clip: "qwen3vl_8b_bf16.safetensors", vae: "qwen_image_2.1_vae_bf16.safetensors" });
-  assert.deepEqual(l["1"], { class_type: "UNETLoaderMultiGPU", inputs: { unet_name: "qwen_image_2.1_int8_convrot.safetensors", weight_dtype: "default", device: "cuda:1" } });
+  assert.deepEqual(l["1"], { class_type: "UNETLoaderMultiGPU", inputs: { unet_name: "qwen_image_2.1_int8_convrot.safetensors", weight_dtype: "default", device: "cuda:0" } });
   assert.deepEqual(l["2"], {
     class_type: "OffloadCLIPLoaderDisTorch2",
     inputs: { clip_name: "qwen3vl_8b_bf16.safetensors", type: "qwen_image", device: "cuda:0", expert_mode_allocations: allocationString(r.clip.residentGb), eject_models: false },
   });
-  assert.deepEqual(l["3"], { class_type: "VAELoaderMultiGPU", inputs: { vae_name: "qwen_image_2.1_vae_bf16.safetensors", device: "cuda:0" } });
+  assert.deepEqual(l["3"], { class_type: "VAELoaderMultiGPU", inputs: { vae_name: "qwen_image_2.1_vae_bf16.safetensors", device: "cuda:1" } });
 });
 
 test("2.1 bf16: the DiT through DisTorch2 with its resident share on the compute card, the encoder through the harness's loader with 8 GiB on it", () => {
@@ -195,14 +198,14 @@ test("2.1 bf16: the DiT through DisTorch2 with its resident share on the compute
   const l = multicardLoaders(r, { unet: "qwen_image_2.1_bf16.safetensors", clip: "qwen3vl_8b_bf16.safetensors", vae: "v.safetensors" });
   assert.deepEqual(l["1"], {
     class_type: "UNETLoaderDisTorch2MultiGPU",
-    inputs: { unet_name: "qwen_image_2.1_bf16.safetensors", weight_dtype: "default", compute_device: "cuda:1", virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(r.unet.residentGb), eject_models: false },
+    inputs: { unet_name: "qwen_image_2.1_bf16.safetensors", weight_dtype: "default", compute_device: "cuda:0", virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(r.unet.residentGb, "cuda:0", "cuda:1"), eject_models: false },
   });
   assert.deepEqual(l["2"], {
     class_type: "OffloadCLIPLoaderDisTorch2",
     inputs: { clip_name: "qwen3vl_8b_bf16.safetensors", type: "qwen_image", device: "cuda:0", expert_mode_allocations: "cuda:1,8gb;cuda:0,*", eject_models: false },
   });
   const o = multicardLoaders(r, { unet: "qwen_image_2.1_bf16.safetensors", clip: "qwen3vl_8b_bf16.safetensors", vae: "v.safetensors", residentGb: 6 });
-  assert.equal(o["1"].inputs.expert_mode_allocations, "cuda:1,6gb;cuda:0,*");
+  assert.equal(o["1"].inputs.expert_mode_allocations, "cuda:0,6gb;cuda:1,*");
 });
 
 test("2512 and 2511 GGUF: the GGUF DisTorch2 loader, compute on cuda:1; the fp8 text encoder and the VAE pinned to cuda:0 and never to cuda:1", () => {

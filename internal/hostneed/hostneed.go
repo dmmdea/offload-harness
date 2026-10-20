@@ -257,12 +257,13 @@ const wanComputeContextGiB = 0.5
 const wanStorageOverheadGiB = 0.8
 
 // ltxResidentDefaultGiB is the share of the LTX-2.5 DiT the card-only placement keeps on the compute card when the call names none:
-// render/wf-ltx25-i2v.mjs LTX25_RESIDENT_GB_DEFAULT. CHOSEN, not measured: no LTX-2.5 run was made on two cards.
+// render/wf-ltx25-i2v.mjs LTX25_RESIDENT_GB_DEFAULT. Measured on one run at 1280x704x121: the compute card peaked at 11.54 GiB, the storage card at 12.71.
 const ltxResidentDefaultGiB = 9.0
 
 // ltxUpscalerGiB is the x2 latent upscaler (0.93 GiB), which has no device input and loads on the compute card; ltxStorageVAEsGiB is the video and audio VAE
 // (1.37 + 0.34 GiB, rounded up), which the graph puts on the storage card. render/wan-multicard.mjs LTX_UPSCALER_GIB and LTX_STORAGE_VAES_GIB.
-// The LTX-2.5 stages leave the sampler's activations out: nothing says what they are, so this sizing and the runner's check judge the weights alone.
+// The LTX-2.5 stages leave the sampler's activations out (about 1.6 GiB with the context at 1280x704x121, unmeasured above it), so this sizing and the
+// runner's check judge the weights alone.
 const (
 	ltxUpscalerGiB    = 1.0
 	ltxStorageVAEsGiB = 1.8

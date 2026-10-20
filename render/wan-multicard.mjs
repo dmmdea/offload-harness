@@ -4,7 +4,8 @@
 // launch lists the COMPUTE card first (multicardLaunch, order "compute-first"), under an instance key of its own (multicardInstanceKey), and the graph
 // (wf-ltx25-i2v.mjs) puts the DiT's resident share on cuda:0 and the donor blocks, the VAEs and half of the text encoder on cuda:1. Everything below that
 // does not say Wan applies to both: the cards, the display refusal, the lease cross-check, the roles, the packs. The sizes of LTX's own stages are
-// LTX_* below, and none of them was measured on a run: no LTX-2.5 render was made on the two cards.
+// LTX_* below. One LTX-2.5 render was made on the two cards (1280x704x121, the default 9 GiB share): the compute card peaked at 11.54 GiB, the storage
+// card at 12.71 GiB, 124.0 s of ComfyUI time; no larger clip was run.
 //
 // WHAT IT IS. The two experts (13.3 GiB each) do not fit one 16 GiB card with the activations of a film-size
 // clip (720x1280x81 needs about 12.2 GiB beyond the 3 GiB of an expert kept resident: the film-size run's 15.18 GiB peak; the 4-step benchmark
@@ -593,16 +594,16 @@ function checkResident(residentGb, pair, flags, attention = "default") {
 
 /**
  * The LTX-2.5 stage sizes of the card-only placement (render/wf-ltx25-i2v.mjs; internal/hostneed declares against the same figures). The file sizes are
- * measured (the int8 convrot DiT 20.03 GiB, the video VAE 1.37, the audio VAE 0.34, the x2 latent upscaler 0.93), rounded up; the rest is CHOSEN, not measured,
- * because no LTX-2.5 run was made on the two cards:
+ * measured (the int8 convrot DiT 20.03 GiB, the video VAE 1.37, the audio VAE 0.34, the x2 latent upscaler 0.93), rounded up; the overhead is the Wan one:
  *   LTX_DIT_GIB               the DiT (20.03 GiB on disk);
  *   LTX_STORAGE_VAES_GIB      what the graph puts beside the donor blocks on the storage card: the video and the audio VAE (1.71 GiB);
  *   LTX_UPSCALER_GIB          the latent upscaler, which has no device input and loads on the compute card (cuda:0, ComfyUI's default device);
  *   LTX_STORAGE_OVERHEAD_GIB  the CUDA context and the allocator's slack on the storage card, the Wan placement's 0.8 (WAN_STORAGE_OVERHEAD_GIB);
- * and the compute card keeps WAN_COMPUTE_CONTEXT_GIB free. The sampler's activations are NOT in the check: nothing says what they are at 1920x1088x121 (or at
- * 1280x704x121), so the check refuses only a share the compute card plainly cannot hold with nothing else on it, and a share that fits it can still run out of
- * memory in the first sampler step. The text encoder (14.32 GiB, split by LTX25_TE_ALLOCATION_DEFAULT) is gone from the cards before the DiT lands, so it is
- * not a stage of either card.
+ * and the compute card keeps WAN_COMPUTE_CONTEXT_GIB free. The sampler's activations are NOT in the check. The one run (1280x704x121, a 9 GiB share) peaked at
+ * 11.54 GiB on the compute card, so the sampler and the context took about 1.6 GiB beyond the share and the upscaler there; nothing says what they take at
+ * 1920x1088x121. The check refuses only a share the compute card plainly cannot hold with nothing else on it, so a share above the measured one, or a bigger
+ * clip, can still run out of memory in the first sampler step. The text encoder (14.32 GiB, split by LTX25_TE_ALLOCATION_DEFAULT, measured 7.07 GiB on the
+ * compute card and 7.26 on the storage card) is gone from the cards before the DiT lands, so it is not a stage of either card.
  */
 export const LTX_DIT_GIB = 20.1;
 export const LTX_STORAGE_VAES_GIB = 1.8;
@@ -634,7 +635,7 @@ function checkLtxResident(residentGb, pair, flags) {
   const computeGib = pair.compute.totalMiB / 1024, storageGib = pair.storage.totalMiB / 1024;
   const most = computeGib - LTX_UPSCALER_GIB - WAN_COMPUTE_CONTEXT_GIB;
   if (residentGb > most) {
-    throw placementError(`--wan-resident-gb ${residentGb} (the DiT's share on the compute card for --model ltx25) leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) ${(computeGib - residentGb).toFixed(1)} GiB for the ${LTX_UPSCALER_GIB} GiB latent upscaler, ${WAN_COMPUTE_CONTEXT_GIB} GiB of CUDA context and the sampler's activations, which nobody measured for LTX-2.5: at most ${most.toFixed(1)} GiB can be resident there before nothing is left for them, and the default ${LTX25_RESIDENT_GB_DEFAULT} is a share chosen, not a measured one`);
+    throw placementError(`--wan-resident-gb ${residentGb} (the DiT's share on the compute card for --model ltx25) leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) ${(computeGib - residentGb).toFixed(1)} GiB for the ${LTX_UPSCALER_GIB} GiB latent upscaler, ${WAN_COMPUTE_CONTEXT_GIB} GiB of CUDA context and the sampler's activations (about 1.6 GiB measured at 1280x704x121): at most ${most.toFixed(1)} GiB can be resident there before nothing is left for them, and the default ${LTX25_RESIDENT_GB_DEFAULT} is the measured share`);
   }
   const donor = LTX_DIT_GIB - residentGb;
   const stored = donor + LTX_STORAGE_VAES_GIB + LTX_STORAGE_OVERHEAD_GIB;
@@ -707,9 +708,9 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
   if (ltx) {
     // The LTX-2.5 launch lists the compute card first (cuda:0 computes: ComfyUI-MultiGPU #220), loads the MultiGPU pack and the harness's own and nothing else (the graph
-    // writes its mp4 with core nodes), and is sized by LTX's own stages, none of them measured on a run: the planner says so, once.
+    // writes its mp4 with core nodes), and is sized by LTX's own stages, measured on one run at 1280x704x121: the planner says what was and was not measured, once.
     checkLtxResident(residentGb, pair, flags);
-    say("LTX-PLACEMENT-NOTE: no LTX-2.5 run was made on the two cards: the resident share and the text-encoder split are chosen, not measured, and the sampler's activations at this geometry are unmeasured, so a share that passes here can still run out of memory in the first sampler step; lower --wan-resident-gb if it does, and pass --wait-sec (the " + MULTICARD_WAIT_SEC + " s default is the Wan film's)");
+    say("LTX-PLACEMENT-NOTE: one LTX-2.5 run was made on the two cards: 1280x704x121 with the default " + LTX25_RESIDENT_GB_DEFAULT + " GiB share peaked at 11.54 GiB on the compute card and 12.71 GiB on the storage card, 124 s of ComfyUI time; a larger share or clip is unmeasured and can run out of memory in the first sampler step (lower --wan-resident-gb if it does), and the " + MULTICARD_WAIT_SEC + " s default wait is the Wan film's (pass --wait-sec to change it)");
     const launch = launchFn(pair, { comfyDir, packDirsFn: (d) => packDirs(d, undefined, [PACK_MULTIGPU]), order: CARD_ORDER_COMPUTE_FIRST });
     const plan = { pair, launch, residentGb, family: "ltx25", env: multicardEnv(env, launch) };
     const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;

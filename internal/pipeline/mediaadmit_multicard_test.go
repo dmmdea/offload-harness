@@ -560,19 +560,25 @@ func TestAMulticardNeedDeclaresRAMFromThePairNotTheLargestCard(t *testing.T) {
 		t.Errorf("an edit canvas of 3.0 MP is above the recipe's 2.0 MP cap: %.1f GiB, want the ordinary streaming figure", got)
 	}
 
-	// a PREDICTED row declares the ordinary estimate until a run has measured it: an early merge costs a wasteful wait, never a false 0
-	img := imageNeed(f.cfg, "")
-	if img.Kind != needMulticard {
-		t.Fatalf("the image binding: kind %v", img.Kind)
+	// a PREDICTED row (the 2511 Q5_1 GGUF edit) declares the ordinary estimate until a run has measured it: an early merge costs a wasteful wait, never a false 0
+	gguf := f.cfg
+	gguf.GenEditUnet = "qwen-image-edit-2511-Q5_1.gguf"
+	predicted := editNeed(gguf, "")
+	if predicted.Kind != needMulticard {
+		t.Fatalf("the GGUF edit binding: kind %v", predicted.Kind)
 	}
-	ordinary := f.cfg
-	ordinary.ImageGenPlacement = ""
-	want := f.p.declaredRAM(ctx, imageNeed(ordinary, ""), cards, pairIDs())
+	ordinary := gguf
+	ordinary.GenEditPlacement = ""
+	want := f.p.declaredRAM(ctx, editNeed(ordinary, ""), cards, pairIDs())
 	if want <= 0 {
-		t.Fatalf("premise: the ordinary 2512 GGUF estimate on a 16 GiB card is %.1f GiB, want something to compare with", want)
+		t.Fatalf("premise: the ordinary 2511 GGUF estimate on a 16 GiB card is %.1f GiB, want something to compare with", want)
 	}
-	if got := f.p.declaredRAM(ctx, img, cards, pairIDs()); got != want {
-		t.Errorf("the predicted 2512 GGUF row: %.1f GiB, want the ordinary estimate %.1f GiB", got, want)
+	if got := f.p.declaredRAM(ctx, predicted, cards, pairIDs()); got != want {
+		t.Errorf("the predicted 2511 GGUF row: %.1f GiB, want the ordinary estimate %.1f GiB", got, want)
+	}
+	// the measured 2512 GGUF image row declares 0 on the pair
+	if got := f.p.declaredRAM(ctx, imageNeed(f.cfg, ""), cards, pairIDs()); got != 0 {
+		t.Errorf("the measured 2512 GGUF row: %.1f GiB, want 0", got)
 	}
 
 	// a binding without the key is the need it always was
@@ -665,9 +671,15 @@ func TestMediaLaneFreeJudgesAMulticardImageCall(t *testing.T) {
 	}
 }
 
+// krea2Fp8MulticardBinding asks for the card-only placement with a DiT that has no recipe row: krea2 fp8 (only the bf16 DiT has one).
+func krea2Fp8MulticardBinding(c *config.Config) {
+	krea2Binding(c)
+	c.ImageGenCkpt, c.ImageGenPlacement = "krea2_turbo_fp8.safetensors", "multicard"
+}
+
 // A binding with no recipe is not judged free by omission: the probe says it did not judge, and why.
 func TestMediaLaneFreeSaysWhenAMulticardBindingHasNoRecipe(t *testing.T) {
-	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) { krea2Binding(c); c.ImageGenPlacement = "multicard" }})
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: krea2Fp8MulticardBinding})
 	v := f.p.MediaLaneFree(context.Background(), laneReq(map[string]any{}))
 	if !strings.Contains(v.Why, "not judged") || !strings.Contains(v.Why, "no card-only recipe") {
 		t.Errorf("verdict = %+v, want it said that the binding was not judged and why", v)
@@ -717,12 +729,13 @@ func multicardLaneCases() []laneCase {
 				}
 				t.Cleanup(func() { mediaSlots.release([]string{A}) })
 			}},
-		{name: "multicard, a short host and a predicted row that declares the ordinary set", spec: mc, grants: false, mustSeeBusy: true,
+		// the measured row declares no host RAM, so a short host is no reason to wait: the weights live on the two cards
+		{name: "multicard, a short host and a measured row that declares no host RAM", spec: mc, grants: true,
 			setup: func(t *testing.T, f *admitFixture) { f.useHost(t, func() gpuprobe.HostMemory { return shortHost(95) }) }},
 		{name: "multicard on a box with one non-display card (the real admission refuses; the probe may not judge)", spec: mc, grants: false,
 			setup: func(t *testing.T, f *admitFixture) { f.cards[2].Display = true }},
 		{name: "multicard with no recipe (the real admission refuses; the probe says it did not judge)", grants: false,
-			spec: admitSpec{order: admitOrder, mutate: func(c *config.Config) { krea2Binding(c); c.ImageGenPlacement = "multicard" }}},
+			spec: admitSpec{order: admitOrder, mutate: krea2Fp8MulticardBinding}},
 	}
 }
 

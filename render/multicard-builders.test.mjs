@@ -20,29 +20,41 @@ const BF16 = "qwen_image_2.1_bf16.safetensors";
 const QI21 = { prompt: "a glass bottle", unet: BF16, clip: "qwen3vl_8b_bf16.safetensors", vae: "qwen_image_2.1_vae_bf16.safetensors", seed: 42 };
 const classes = (g) => Object.values(g).map((n) => n.class_type);
 const rest = (g) => Object.fromEntries(Object.entries(g).filter(([id]) => !["1", "2", "3"].includes(id)));
+// the 2.1 multicard graph also routes the conditioning through node 14 (OffloadFreeAfterEncode), which frees the encoder before the sampler; this drops it and points
+// its readers back at node 4, so what is left compares with the single graph link for link
+const rest21 = (g) => {
+  const back = JSON.parse(JSON.stringify(rest(g)), (k, v) => (Array.isArray(v) && v.length === 2 && v[0] === "14" ? ["4", v[1]] : v));
+  delete back["14"];
+  return back;
+};
+const RELEASE = { class_type: "OffloadFreeAfterEncode", inputs: { positive: ["4", 0], negative: ["4", 1], clip: ["2", 0] } };
 
 // ---- qwen-image-2.1 text-to-image -------------------------------------------------------------------------------
 
-test("2.1 int8_convrot multicard is held back: the builder refuses it by name instead of building a graph that puts the int8 DiT on cuda:1", () => {
+test("2.1 int8_convrot multicard is held back: the builder refuses it by name instead of building a graph for it", () => {
   assert.throws(() => buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard" }), /int8_convrot.*held back/s);
   assert.throws(() => buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard", residentGb: 3 }), /int8_convrot.*held back/s);
   // the single graph of the same file is untouched
   assert.equal(buildQwenImage21({ ...QI21, unet: INT8 })["1"].class_type, "UNETLoader");
 });
 
-// The bf16 row's loaders: the DiT through DisTorch2 with its resident share on cuda:1, the text encoder through the harness's own loader (built off the cards, then
-// split over both: under --gpu-only the stock DisTorch2 loader would build the whole 16.33 GiB encoder on the 15.9 GiB storage card first), the VAE on cuda:0.
-test("2.1 bf16 multicard builds the row's graph: only the three loaders change, and the text encoder is the harness's own loader", () => {
+// The bf16 row's loaders on a compute-first launch (the 2.1 model's fused kernels run on cuda:0 only, so cuda:0 is the compute card): the DiT through DisTorch2 with
+// its resident share on cuda:0, the text encoder through the harness's own loader (built off the cards, then split over both: under --gpu-only the stock DisTorch2
+// loader would build the whole 16.33 GiB encoder on one card first), computing on cuda:0 with 8 GiB parked on cuda:1, the VAE on cuda:1 (the storage card).
+test("2.1 bf16 multicard builds the row's graph: the three loaders change and node 14 frees the encoder, and the text encoder is the harness's own loader", () => {
   const single = buildQwenImage21({ ...QI21 });
   const g = buildQwenImage21({ ...QI21, placement: "multicard" });
-  assert.deepEqual(rest(g), rest(single), "every node but the three loaders is the single graph's, link for link");
+  assert.deepEqual(rest21(g), rest(single), "every node but the three loaders and the release is the single graph's, link for link");
+  assert.deepEqual(g["14"], RELEASE, "the encoder is freed between the encode and the sampler");
   assert.deepEqual([g["1"].class_type, g["2"].class_type, g["3"].class_type], ["UNETLoaderDisTorch2MultiGPU", "OffloadCLIPLoaderDisTorch2", "VAELoaderMultiGPU"]);
-  assert.equal(g["1"].inputs.expert_mode_allocations, allocationString(8));
-  assert.equal(g["2"].inputs.expert_mode_allocations, allocationString(8), "8 GiB of the encoder is parked on the compute card");
-  assert.equal(g["2"].inputs.device, "cuda:0", "the encoder computes on the storage card");
+  assert.equal(g["1"].inputs.compute_device, "cuda:0");
+  assert.equal(g["1"].inputs.expert_mode_allocations, "cuda:0,8gb;cuda:1,*");
+  assert.equal(g["2"].inputs.expert_mode_allocations, "cuda:1,8gb;cuda:0,*", "8 GiB of the encoder is parked on the storage card");
+  assert.equal(g["2"].inputs.device, "cuda:0", "the encoder computes on the compute card, where its kernels run");
+  assert.equal(g["3"].inputs.device, "cuda:1");
   assert.equal(g["2"].inputs.type, "qwen_image");
-  assert.equal(buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 })["1"].inputs.expert_mode_allocations, allocationString(6), "the override moves the DiT's share, not the encoder's");
-  assert.equal(buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 })["2"].inputs.expert_mode_allocations, allocationString(8));
+  assert.equal(buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 })["1"].inputs.expert_mode_allocations, "cuda:0,6gb;cuda:1,*", "the override moves the DiT's share, not the encoder's");
+  assert.equal(buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 })["2"].inputs.expert_mode_allocations, "cuda:1,8gb;cuda:0,*");
   // the single graph of the same file is untouched: the stock loaders, and no MultiGPU class anywhere in it
   assert.deepEqual([single["1"].class_type, single["2"].class_type, single["3"].class_type], ["UNETLoader", "CLIPLoader", "VAELoader"]);
   assert.ok(!classes(single).some((c) => /MultiGPU|Offload/.test(c)), "no MultiGPU class in the single graph");
@@ -76,21 +88,22 @@ test("2.1 multicard with the hold lifted (a copy of the builder over a table wit
     assert.ok(unet && LOADERS[r.quant], `${r.id}: name its DiT file and its three loader classes here`);
     const single = lifted.buildQwenImage21({ ...QI21, unet });
     const g = lifted.buildQwenImage21({ ...QI21, unet, placement: "multicard" });
-    assert.deepEqual(rest(g), rest(single), `${r.id}: every node but the three loaders is the single graph's, link for link`);
+    assert.deepEqual(rest21(g), rest(single), `${r.id}: every node but the three loaders and the release is the single graph's, link for link`);
+    assert.deepEqual(g["14"], RELEASE, r.id);
     assert.deepEqual([g["1"].class_type, g["2"].class_type, g["3"].class_type], LOADERS[r.quant], r.id);
     assert.deepEqual({ 1: g["1"], 2: g["2"], 3: g["3"] }, recipes.multicardLoaders(r, { unet, clip: QI21.clip, vae: QI21.vae }), `${r.id}: the loaders are the recipe's own`);
     assert.ok(!classes(g).some((c) => ["UNETLoader", "CLIPLoader", "VAELoader"].includes(c)), `${r.id}: no stock loader is left beside the MultiGPU ones`);
     assert.equal(g["2"].inputs.device, "cuda:0", r.id);
-    assert.equal(g["3"].inputs.device, "cuda:0", r.id);
+    assert.equal(g["3"].inputs.device, "cuda:1", r.id);
   }
-  // the bf16 DiT: through DisTorch2, compute on cuda:1, the recipe's resident share in the allocation, models kept
+  // the bf16 DiT: through DisTorch2, compute on cuda:0 (compute-first), the recipe's resident share in the allocation, models kept
   const bf16 = lifted.buildQwenImage21({ ...QI21, placement: "multicard" });
-  assert.equal(bf16["1"].inputs.compute_device, "cuda:1");
-  assert.equal(bf16["1"].inputs.expert_mode_allocations, "cuda:1,8gb;cuda:0,*");
+  assert.equal(bf16["1"].inputs.compute_device, "cuda:0");
+  assert.equal(bf16["1"].inputs.expert_mode_allocations, "cuda:0,8gb;cuda:1,*");
   assert.equal(bf16["1"].inputs.eject_models, false);
-  assert.equal(lifted.buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 })["1"].inputs.expert_mode_allocations, "cuda:1,6gb;cuda:0,*");
-  // the int8 DiT is a plain pin on cuda:1 and has no share to set
-  assert.equal(lifted.buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard" })["1"].inputs.device, "cuda:1");
+  assert.equal(lifted.buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 })["1"].inputs.expert_mode_allocations, "cuda:0,6gb;cuda:1,*");
+  // the int8 DiT is a plain pin on the compute card, cuda:0, and has no share to set
+  assert.equal(lifted.buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard" })["1"].inputs.device, "cuda:0");
   assert.throws(() => lifted.buildQwenImage21({ ...QI21, unet: INT8, placement: "multicard", residentGb: 3 }), /whole DiT on the compute card/);
 });
 
@@ -207,7 +220,7 @@ test("comfy-render: --placement multicard builds the multicard graph of the fami
   // the 2.1 bf16 binding builds at the family's default 2048x2048 canvas, which is exactly the row's cap; its int8_convrot sibling is held back and refused by name
   const g21 = build([...QI21_ARGV, "--placement", "multicard"], { multicard: { residentGb: 8 } }).graph;
   assert.equal(g21["2"].class_type, "OffloadCLIPLoaderDisTorch2");
-  assert.equal(g21["1"].inputs.expert_mode_allocations, allocationString(8));
+  assert.equal(g21["1"].inputs.expert_mode_allocations, allocationString(8, "cuda:0", "cuda:1"));
   assert.throws(() => build(["--family", "qwen-image-2.1", "--ckpt", INT8, "--clip", QI21.clip, "--vae", QI21.vae, "--placement", "multicard"], { multicard: { residentGb: 8 } }), (e) => e instanceof UsageError && /qwen-image-2\.1\/int8_convrot.*held back/s.test(e.message));
 });
 

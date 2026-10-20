@@ -72,11 +72,11 @@ func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 			measured++
 		}
 	}
-	if measured != 3 {
-		t.Errorf("%d measured rows; the 2512 Q5_1 and krea2 bf16 image rows and the 2511 fp8mixed edit row ran card-only with the read-only loader", measured)
+	if measured != 4 {
+		t.Errorf("%d measured rows; the 2512 Q5_1, krea2 bf16 and qwen-image-2.1 bf16 image rows and the 2511 fp8mixed edit row ran card-only with the read-only loader", measured)
 	}
 	if blocked != 1 {
-		t.Errorf("%d held-back rows; only the qwen-image-2.1 int8_convrot one (its DiT on cuda:1 no run has made)", blocked)
+		t.Errorf("%d held-back rows; only the qwen-image-2.1 int8_convrot one (no card-only run of it has been made)", blocked)
 	}
 }
 
@@ -145,7 +145,7 @@ func TestAHeldBackRowIsNotARecipeAndSaysWhy(t *testing.T) {
 	if held == nil || held.ID != "qwen-image-2.1/int8_convrot" {
 		t.Fatalf("the held-back row = %v, want qwen-image-2.1/int8_convrot", held)
 	}
-	for _, want := range []string{"cuda:1", "illegal memory access", "cuda:0"} {
+	for _, want := range []string{"no card-only run", "illegal memory access", "cuda:0"} {
 		if !strings.Contains(held.Blocked, want) {
 			t.Errorf("the reason must say why (%q missing): %q", want, held.Blocked)
 		}

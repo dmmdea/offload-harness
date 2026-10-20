@@ -739,14 +739,27 @@ on a card with an empty CPU tensor, returns the cached blocks to the driver, log
 `OFFLOAD-TE-STILL-RESIDENT` if any of the encoder's tensors is still on a CUDA device. Because the pack is loaded with `--cache-none`, the next prompt builds and
 places the encoder again.
 
-Defaults, all **chosen, not measured**: `--wan-resident-gb` (here the GiB of the DiT kept on the compute card) is 9, so the storage card holds the other
+**Two more things keep the split DiT on its cards.** Loading the latent upscaler between the two samplers makes ComfyUI free memory on cuda:0, and with
+`--disable-smart-memory` that unloads every model there. Under `--gpu-only` the DiT's offload device is cuda:0 itself, so the unload copies the whole split
+DiT onto cuda:0: the first two-card run did exactly that and ran out of memory at the upscaler (the compute card at 15.3 GiB). The pack's **eviction guard**
+(installed with the read-only reader, `OFFLOAD_RO_LOAD=1`, under `--gpu-only` only) wraps `LoadedModel.model_unload`: a model whose weights sit on a card
+other than its offload device, or that DisTorch2 placed, is kept where it is and logged (`kept LTXAV on its cards`), and leaves the cards when its last reference
+goes. Then `OffloadFreeForDecode` (node 36, `check` false: a tiled decode is sized by its tiles, so the plain-decode test is skipped) sits between the second
+sampler and the audio-video split, and empties both cards before the two VAEs decode.
+
+**Measured** on one run (1280x704x121 at 24 fps, the default shares, the int8 DiT and encoder): 124.0 s of ComfyUI time (146 s runner wall). The encoder was
+built off the cards and placed in 9.8 s, 7.07 GiB on the compute card and 7.26 GiB on the storage card, and released in 0.8 s, leaving 14.51 and 13.40 GiB
+free. The first sampler ran 8 steps at 2.88 s/it and the second 3 steps at 5.66 s/it. The decode release took the cards from 3.34 and 2.21 GiB free to 14.46
+and 13.40 GiB in 0.9 s. The per-card peaks (NVML) were 11.54 GiB on the compute card and 12.71 GiB on the storage card. Host free memory dipped from 84.7 to
+63.4 GiB while the encoder was staged off the cards, and was back at 81.3 GiB at the end. The clip is 5.04 s with AAC audio and coherent frames.
+
+Defaults: `--wan-resident-gb` (here the GiB of the DiT kept on the compute card) is 9, so the storage card holds the other
 11 GiB beside both VAEs (20.1 - 9 + 1.8 + 0.8 context = 13.7 GiB of its 15.9, less `--reserve-vram`); the encoder split is 7 GiB on the compute card and the rest on the
-storage card. The planner refuses, before ComfyUI starts, a share the compute card plainly cannot hold (its size less the 1 GiB latent upscaler and the 0.5 GiB
-context, 14.4 GiB on a 15.9 GiB card) and one that leaves the storage card more than it can hold; the sampler's activations are not in either check because
-no LTX-2.5 run was made on the two cards, so a share that passes can still run out of memory in the first sampler step (an `LTX-PLACEMENT-NOTE` says so every
+storage card. Both were measured on the run above, and nothing larger was run. The planner refuses, before ComfyUI starts, a share the compute card plainly cannot hold (its size less the 1 GiB latent upscaler and the 0.5 GiB
+context, 14.4 GiB on a 15.9 GiB card) and one that leaves the storage card more than it can hold. The sampler's activations are not in either check: they
+took about 1.6 GiB with the context at 1280x704x121 and are unmeasured above it, so a larger share or clip can still run out of memory in the first sampler step (an `LTX-PLACEMENT-NOTE` says so every
 run; lower the share if it does). It also refuses a non-`.safetensors` or bf16 `--transformer` (about 39 GiB), `--pool-vvram-gb` (the other placement of the
-same DiT), and there is no expert, `--fast` or GGUF check, because the graph has none. The wait is 7200 s unless `--wait-sec` / `COMFY_WAIT_SEC` says otherwise;
-an LTX-2.5 time on the two cards is unmeasured. The typed door sizes the host RAM on the same stages (the DiT's share, the upscaler and the context on the compute
+same DiT), and there is no expert, `--fast` or GGUF check, because the graph has none. The wait is 7200 s unless `--wait-sec` / `COMFY_WAIT_SEC` says otherwise. The typed door sizes the host RAM on the same stages (the DiT's share, the upscaler and the context on the compute
 card; the rest of the DiT, both VAEs and the context on the storage card; the encoder is gone before the DiT) and declares 0 GiB when both fit, and refuses a
 `.gguf` or bf16 transformer before any lease. The 2026-08-12 single-card-class timing of this family (247 s for a 5 s clip at 1920x1088) is a different placement.
 
@@ -786,7 +799,8 @@ completes (`--cache-none` drops its inputs). The pass-through node `OffloadFreeF
 `VAEDecode`) is meant to make that certain, and shows it. It saves the sampled latent first (`latents/render_wan`; a `LATENT` line names it, because an
 80-minute sample is never worth losing to a failed decode), collects garbage, returns every card's cached blocks to the driver, logs each
 card's free memory before and after, and stops the run with `OFFLOAD-DECODE-NOFIT` and the numbers when the VAE's card has less free than
-85 % of ComfyUI's decode estimate (the measured need was 83 % of it). A stop is deliberate: ComfyUI would otherwise retry the decode tiled,
+85 % of ComfyUI's decode estimate (the measured need was 83 % of it); with its `check` input false (the LTX-2.5 graph, whose decodes are tiled and sized by
+their tiles) it skips that test, logs the free memory and passes the latent on. A stop is deliberate: ComfyUI would otherwise retry the decode tiled,
 with its own temporal chunking, which is the seam the plain decode exists to avoid. A plain decode is judged by this run's console, through a cursor made before the prompt is submitted (a kept instance's log holds earlier
 runs' lines, which do not count). When it shows `Ran out of memory when regular VAE decoding`, ComfyUI retried the decode tiled with
 temporal tiles it sized itself, so the clip is not the single pass that was asked for and can seam where its tiles meet: the finished clip
@@ -903,50 +917,60 @@ pair does) names the compute card for the image and edit placements too. The typ
 daemon's environment (their runner child inherits the process environment) and, for a `gpu reserve ... --` command, in the shell. The recipe's peak and resident checks judge whichever card
 the variable names, and the plan's line ends with `compute card chosen: <the rule>`.
 
+**The 2.1 rows launch compute-first.** A row with `"cardOrder": "compute-first"` (both `qwen-image-2.1` rows) starts its pair instance with the compute card listed first, so
+`cuda:0` is the COMPUTE card and `cuda:1` the STORAGE card (instance key `mcc-<compute>-<storage>`, the LTX-2.5 placement's order), and the loaders follow (`rowDevices` in
+`render/multicard-recipes.mjs`): the DiT computes on `cuda:0` with its resident share there, the text encoder computes on `cuda:0` with its parked share on `cuda:1`, and the VAE
+sits on `cuda:1`. The 2.1 model calls comfy_kitchen's fused kernels (`ck.adaln`, `rms_rope`, the int8 ops), which run on `cuda:0` only; off it ComfyUI-MultiGPU CPU-stages tensors
+through host RAM (`[MultiGPU DLPack] CPU-staging tensor from cuda:1 to cuda:0 (P2P unavailable)`), and a storage-first 2.1 render aborted at the first sampler step
+(`Fatal Python error: Aborted` in `reset_prefix_cache`, 406 s in, host free RAM down 12.5 GB). Every other row keeps the storage-first order above.
+
 | Route | Binding | DiT loader / text-encoder loader | Peak per card, compute / storage (GiB) | Basis |
 |---|---|---|---|---|
-| image | `qwen-image-2.1`, int8 convrot DiT, bf16 text encoder | plain pin / harness loader, built off the cards (5 GiB on the compute card) | 9.0 / 13.6 | predicted, **held back** (below) |
-| image | `qwen-image-2.1`, bf16 DiT, bf16 text encoder | DisTorch2 (8 GiB resident) / harness loader, built off the cards (8 GiB on the compute card) | 11.0 / 10.1, at the 4.19 MP (2048x2048) canvas cap | predicted |
-| image | `qwen-image` 2512, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (3 GiB resident) / plain | 4.9 / 12.6 | predicted |
+| image | `qwen-image-2.1`, int8 convrot DiT, bf16 text encoder | plain pin / harness loader, built off the cards (5 GiB on the storage card), compute-first | 9.0 / 13.6 | predicted, **held back** (below) |
+| image | `qwen-image-2.1`, bf16 DiT, bf16 text encoder | DisTorch2 (8 GiB resident) / harness loader, built off the cards (8 GiB on the storage card), compute-first | 10.9 / 8.2, at the 4.19 MP (2048x2048) canvas cap | **measured** |
+| image | `qwen-image` 2512, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (10 GiB resident) / plain | 11.9 / 8.3, at the 1.77 MP canvas cap | **measured** |
+| image | `krea2`, bf16 DiT, bf16 text encoder | DisTorch2 (11 GiB resident), built empty from the read-only map / plain | 13.2 / 13.1, at the 1.57 MP canvas cap | **measured** |
 | edit | `qwen-image-edit-2511`, fp8mixed DiT, fp8 text encoder | DisTorch2 (9 GiB resident), bypass LoRA / plain | 13.0 / 11.0, at the 2.0 MP canvas cap | **measured** |
 | edit | `qwen-image-edit-2511`, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (3 GiB resident) / plain | 5.6 / 12.6, at the 2.0 MP canvas cap | predicted |
 
-**A row can be held back, and the `qwen-image-2.1` int8 convrot row is.** It puts a comfy_kitchen int8 DiT on `cuda:1`. ComfyUI-MultiGPU's int8 dispatch path has a recorded illegal
-memory access when the compute device is not `cuda:0` (upstream issue 220, unfixed; it is why the pooled LTX-2.5 seat keeps compute `cuda:0`), and the
-benchmark arms the row cites ran the int8 DiT on `cuda:0` with the bf16 text encoder on `cuda:1`, the reverse of the recipe, so the placement itself never ran.
+**A row can be held back, and the `qwen-image-2.1` int8 convrot row is.** No card-only run of it has been made on the two non-display cards: the benchmark arms it cites used
+the display card, so its peaks are arithmetic. ComfyUI-MultiGPU's int8 dispatch path has a recorded illegal memory access when the compute device is not `cuda:0` (upstream issue 220,
+unfixed); the compute-first launch puts this row's int8 DiT on `cuda:0`, where its kernels run, so the device is no longer the reason, only the missing run is.
 A held-back row carries a `blocked` sentence (`render/multicard-recipes.json`, `Blocked` in `internal/mediacap/multicard.go`, pinned together): it stays in the
 table for the proof arm, but it is no recipe. `findRecipe` refuses it by name for every caller (the planner, the builders, the runners), `FindMulticardRow` does not
-return it, so the host-RAM estimate, the doctor and the typed doors see a binding without a recipe, and the door's refusal says which row is held back and why. One int8
-arm with the DiT on `cuda:1` lifts it (clear `blocked` and `Blocked`).
+return it, so the host-RAM estimate, the doctor and the typed doors see a binding without a recipe, and the door's refusal says which row is held back and why. One render
+on the row lifts it (clear `blocked` and `Blocked`).
 
-**The 2.1 bf16 text encoder is built off the cards.** The bf16 Qwen3-VL-8B encoder is 16.33 GiB, more than the 15.9 GiB storage card. Under `--gpu-only` ComfyUI takes the
-text encoder's initial device from the text-encoder device (`cuda:0`) and builds the whole encoder there before the DisTorch2 allocation string that splits it is attached, so the stock
-`CLIPLoaderDisTorch2MultiGPU` ran out of memory 1.4 s in (14.10 GiB allocated) on the one live card-only run of this row; the 13.3 GiB the row's old evidence line called the
+**The 2.1 bf16 text encoder is built off the cards.** The bf16 Qwen3-VL-8B encoder is 16.33 GiB, more than a 15.9 GiB card. Under `--gpu-only` ComfyUI takes the
+text encoder's initial device from the text-encoder device and builds the whole encoder there before the DisTorch2 allocation string that splits it is attached, so the stock
+`CLIPLoaderDisTorch2MultiGPU` ran out of memory 1.4 s in (14.10 GiB allocated) on the first live card-only run of this row; the 13.3 GiB the row's old evidence line called the
 encoder's share is the bf16 DiT file's size, not the encoder's. The row therefore names the `distorch2-host` text-encoder loader: the harness's own
 `OffloadCLIPLoaderDisTorch2` (`render/comfyui-ext/nodes/offload_multicard`), which runs the stock loader with ComfyUI's one answer to "where is the encoder built" changed to the CPU,
-then places it at once through DisTorch2's own load path, block by block, by the allocation `cuda:1,8gb;cuda:0,*`: 8 GiB of the encoder lands on the compute card and 8.33 GiB on the storage
-card, and the node refuses to continue if more than 64 MiB of weights are left in host RAM. The encoder computes on the storage card (`cuda:0`, which also keeps its embedding blocks);
-the share parked on the compute card is streamed across block by block at encode time, so the compute card runs no encoder activations. Host RAM is used transiently, at load time only:
-the encoder is staged whole on the CPU while it is built and filled (16.33 GiB, read through the read-only map, released when the placement ends) and no weight stays there during
-sampling. The recipe relies on the encoder leaving both cards when its last text-encode node completes (`--cache-none` drops it), before the sampler lands the DiT's share on the compute card; the live proof render has to confirm that.
-The peaks are arithmetic, not measured. At encode the storage card holds 8.33 GiB of encoder + 0.24 VAE + 0.5 context + about 1.0 activations = 10.1 GiB and the compute card 8.0 + 0.5 = 8.5 GiB;
-at sample the compute card holds 8.0 DiT share + 2.5 activations at 2048x2048 + 0.5 context = 11.0 GiB and the storage card the 5.25 GiB donor blocks + 0.24 + 0.5 = 6.0 GiB plus the VAE
-decode working set (not measured). The row's canvas cap is 2048x2048, the family default, chosen and not measured. The int8 convrot row names the same loader.
-The launchable card-only IMAGE rows are therefore the 2.1 bf16 DiT (predicted), the 2512 Q5_1 GGUF and the krea2 bf16 DiT (both measured, below; the edit rows are unchanged). The load-time warning of
+then places it at once through DisTorch2's own load path, block by block, by the allocation `cuda:1,8gb;cuda:0,*`: on the compute-first launch 8 GiB of the encoder lands on the storage card
+(`cuda:1`) and 8.33 GiB on the compute card (`cuda:0`, where it computes and keeps its embedding blocks), and the node refuses to continue if more than 64 MiB of weights are left in host RAM.
+Host RAM is used transiently, at load time only: the encoder is staged on the CPU while it is built and filled (read through the read-only map, released when the placement ends) and no
+weight stays there during sampling. The graph then routes the conditioning through `OffloadFreeAfterEncode` (node 14 of `wf-qwen-image-21.mjs`), which drops the encoder from
+ComfyUI's loaded models and frees both cards before the sampler loads the DiT; it raises `OFFLOAD-TE-STILL-RESIDENT` if an encoder tensor is still on a card.
+Measured 2026-10-20 at 2048x2048 (the family default and the row's cap), 40 steps: the encoder placed in 7.3 s (`cuda:0` 8.33 GiB, `cuda:1` 8.00 GiB, 0 on the CPU), the release freed both
+cards in 0.8 s (14.48 and 14.80 GiB free after it), the DiT built empty and landed 8 GiB on `cuda:0` and 5.25 GiB on `cuda:1`, and the sampler ran 5.57 s per step: 280.0 s, peaks
+10.90 GiB on the compute card and 8.12 GiB on the storage card. Host free memory dipped only while the weights streamed to the cards (64.6 GiB free at the encoder load, 75.0 at the DiT
+load, from 83.9) and held at 81 GiB through sampling. The int8 convrot row names the same loader.
+The launchable card-only IMAGE rows are therefore the 2.1 bf16 DiT, the 2512 Q5_1 GGUF and the krea2 bf16 DiT, all measured (below; the edit rows are unchanged). The load-time warning of
 `imagegen_placement` agrees: a box that binds `qwen-image-2.1` to `multicard` is no longer told every render will be refused.
 
-**Measured and predicted.** A row is *measured* only when its per-card peaks were read in a run that used the read-only loader. Three rows have one:
+**Measured and predicted.** A row is *measured* only when its per-card peaks were read in a run that used the read-only loader. Four rows have one:
 - the 2511 fp8mixed edit (2026-10-11 benchmark, section 4.6: 1.47 MP on two RTX 5060 Ti 16 GB, 145.5 s, 9.4 s per step, peaks 11.9 GiB on the compute card and
   10.9 GiB on the storage card, 1.87 GiB of host growth; one card cannot hold the model and the merging LoRA loader ran out of memory, which is
   why the recipe uses the bypass loader). A 2026-10-20 run of the lightning 8-step recipe at 1024x1024 on a 300 W + 180 W pair took 110.6 s, peaks 11.40 and 10.60 GiB;
 - the 2512 Q5_1 GGUF (2026-10-20, resident 10 GiB, 0 GiB host RAM declared on the lease): 1328x1328 in 415.2 s (peaks 11.84 GiB compute, 8.26 GiB storage) and
   928x1664 in 401.3 s (11.74 and 8.26 GiB);
 - the krea2 bf16 DiT (2026-10-20, 0 GiB host RAM declared): 1024x1024 at resident 12 in 82.1 s (14.30 and 12.10 GiB) and 1536x1024 at resident 11 in 68.5 s
-  (13.15 and 13.10 GiB). The row's resident share is 11.
+  (13.15 and 13.10 GiB). The row's resident share is 11;
+- the 2.1 bf16 DiT (2026-10-20, compute-first, 0 GiB host RAM declared): 2048x2048 in 280.0 s (10.90 and 8.12 GiB), above.
 
 Every image arm of the 10-11 benchmark ran the stock loader, which charges each weight file to host
-commit, so the two other rows keep what the arms showed (the 2.1 int8 and bf16 arms ran pixel-identical to the single-card render; the int8 row is held back) and
-the split shares and peaks are arithmetic from them: they are *predicted*, and the file says so per row (`basis`, `evidence`). A live run
+commit, so the two other rows (the 2.1 int8 convrot image row, held back, and the 2511 Q5_1 GGUF edit row) keep what the arms showed and
+their split shares and peaks are arithmetic from them: they are *predicted*, and the file says so per row (`basis`, `evidence`). A live run
 with the read-only loader promotes a row: flip `basis` in `render/multicard-recipes.json` and `Measured` in `internal/mediacap/multicard.go`
 (`TestTheMulticardRowsAreTheRunnersRecipes` fails until both agree).
 
@@ -1028,10 +1052,9 @@ nobody has measured would admit on a guess; this errs toward waiting for the hos
 did not reach the sampler (the encoder was built whole on the storage card); the harness's own loader that replaces it (`OffloadCLIPLoaderDisTorch2`) has not run yet, so where the encoder's
 bytes land, the host RAM its staging takes and the two peaks are the first things a live proof render of the row has to read; the out-of-memory watch, the tiled-decode verdict
 and the loader-input check are tested against fakes and the benchmark's log lines, not against a live wedge; the typed edit door records no footprint or host peak
-(the single-card edit route never did), so nothing yet cross-checks a measured zero against the host's real growth. The read-only reader mapped the bf16 text encoder in that one live run (750 tensors, 16.33 GiB), but nothing has run it past the
-build (the other tests use fakes of the loaders);
+(the single-card edit route never did), so nothing yet cross-checks a measured zero against the host's real growth;
 the installed ComfyUI-MultiGPU is a newer commit than the one the benchmark pinned (the loader classes the recipes name are present, checked by name);
-the 2512 Q5_1 peaks are arithmetic (the 2.1 bf16 row's split shares are too); the port fallback for a pair instance with neither `--api` nor `COMFY_API` is untested; the lane
+the 2511 Q5_1 GGUF edit row's peaks are arithmetic; the port fallback for a pair instance with neither `--api` nor `COMFY_API` is untested; the lane
 probe answers for the image route, not for the edit route; and a box with three non-display cards is refused until a pair is named with `gpu reserve --devices`,
 because which two of three is a measurement nobody made.
 
@@ -2334,8 +2357,8 @@ recorded as known offenders with their reason rather than silently skipped — a
   runner makes before anything starts; [`render/wan-multicard.test.mjs`](../../render/wan-multicard.test.mjs) pins it
 - [`render/comfyui-ext/extra_model_paths.yaml`](../../render/comfyui-ext/extra_model_paths.yaml) and
   [`render/comfyui-ext/nodes/offload_multicard/__init__.py`](../../render/comfyui-ext/nodes/offload_multicard/__init__.py) — the
-  harness-owned ComfyUI code the placement loads through `--extra-model-paths-config`: the read-only safetensors reader and
-  `OffloadFreeForDecode` ([tests](../../render/comfyui-ext/test_offload_multicard.py), run by
+  harness-owned ComfyUI code the placement loads through `--extra-model-paths-config`: the read-only safetensors reader, the lazy DiT build,
+  the split-model eviction guard, `OffloadCLIPLoaderDisTorch2`, `OffloadFreeAfterEncode` and `OffloadFreeForDecode` ([tests](../../render/comfyui-ext/test_offload_multicard.py), run by
   [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs))
 - [`render/comfyui-ext/extra_model_paths_idle.yaml`](../../render/comfyui-ext/extra_model_paths_idle.yaml) and
   [`render/comfyui-ext/idle-nodes/offload_idle/__init__.py`](../../render/comfyui-ext/idle-nodes/offload_idle/__init__.py) — the idle bound a
