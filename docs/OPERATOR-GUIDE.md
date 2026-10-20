@@ -1652,7 +1652,7 @@ second device exists:
   | `--venv`, `--hf-home` | the vLLM virtualenv and the HF cache, required, as paths INSIDE the distro (`/opt/seat/vllm-env`, `/hf`); the defaults hang off `--home` and `$HF_HOME`, which are Windows paths here, so they are refused. `--venv` is written to `SEAT_VENV`, so the seat runs the venv the check looked in |
   | `--model-path` | optional: pin the exact HF snapshot directory, a distro path (a Windows path is refused). Without it the one snapshot under the tier's `model_repo` is used, and two snapshots are an error. Either way the snapshot is written to `SEAT_MODEL`, so the seat serves the weights the check resolved and not whichever revision `seat_fg.sh`'s default repo id would pick |
   | `--wsl-seat-dir` | the seat directory inside the distro (default `/opt/seat`) |
-  | `--lmcache-overlay` | the patched LMCache directory, a distro path; required for an fp8 KV seat with a cache server, because stock LMCache restores fp8 pages corrupt (upstream PR #4253). windows-wsl only: a seat that starts through systemd has no LMCache wiring, so the flag is refused there |
+  | `--lmcache-overlay` | the patched LMCache directory, a distro path; required for an fp8 KV seat with a cache server, because stock LMCache restores fp8 pages corrupt (upstream PR #4253, merged upstream on 2026-09-28 and contained in the v0.5.6rc5 release-candidate tags as read on 2026-10-19; the flag stays required until the seat runs an LMCache build that contains the merge). windows-wsl only: a seat that starts through systemd has no LMCache wiring, so the flag is refused there |
   | `--cache-mount-src`, `--cache-mount-opts` | the export the wrapper mounts before the MP server starts (`//store.example/kvcache`) and its mount options; empty = already mounted. Refused for a seat with no cache server (the tier declares none, or `--config` binds it storeless), where nothing would mount it |
   | `--host-prefix` | where this machine reads the distro's filesystem for the prerequisite check (`//wsl.localhost/<distro>`); never written to a file. When it is a `wsl.localhost` or `wsl$` share its name must be `--distro`; when it cannot be read the error says so instead of asking for a venv |
 
@@ -1760,6 +1760,10 @@ SEAT_LMCACHE_PYTHONPATH=<seat-dir>/lmcache-overlay   # optional: load LMCache fr
   one variable feeds both. Build the overlay from whatever LMCache is installed plus the fix, and REBUILD it after
   any `pip install -U lmcache` so the patch rides the new base; when the fix ships in a release, unset the variable.
   First use: LMCache PR #4253 (fp8-KV / FlashInfer store corruption on GDN hybrids, LMCache #4247).
+  Upstream state, read from the GitHub API on 2026-10-19: #4253 was merged on 2026-09-28 (merge commit
+  `1847435fa4`) and #4247 is closed. The merge is contained in the v0.5.6rc5 tags (published 2026-10-12 and
+  2026-10-13), a release candidate with no final 0.5.6 seen. Keep the variable set until the seat runs an
+  LMCache build that contains the merge; that seat move is tracked elsewhere.
 - **A seat on WSL2 with vLLM ≥ 0.30 and LMCache 0.5.6 needs two house patches.**
   - **vLLM (start).** vLLM ≥ 0.29 backs a worker's KV cache with one allocation, and WSL2 refuses to export one that large through CUDA IPC, so the seat dies at start (`dxgkio_make_resident: Ioctl failed: -12` in the guest's kernel log).
     - Fix: apply `setup/templates/vllm-seat/vllm-patches/house-kv-split-<vllm version>.patch` to the venv.

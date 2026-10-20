@@ -276,12 +276,18 @@ eviction and after a restart — hit counters alone do not prove fidelity).
   rank's layout bound to its own pages), loaded through `SEAT_LMCACHE_PYTHONPATH`; the first request
   after an MP server start still gets 0 L2 hits until register-time binding lands.
 - **The overlay kit ships in `setup/templates/vllm-seat/lmcache-patches/`** (base LMCache 0.5.5): the
-  fp8-store fix (#4253), the per-rank layout patch, register-time binding, the #4709 and #5249
+  fp8-store fix (#4253, merged upstream, see the next bullet), the per-rank layout patch, register-time binding, the #4709 and #5249
   backports, a CPU-only smoke test and `repatch-lmcache-overlay.sh`, which builds the overlay beside
   the live one, verifies one marker per patch and swaps it in only while no MP server has it loaded
   (its README has the steps). With the #4709 backport a failed L2 load is handed back to vLLM:
   `SEAT_KV_LOAD_FAILURE_POLICY=recompute` in the seat env recomputes it, vLLM's default fails the
   request, and the script refuses to deploy the backport into a seat without `recompute`.
+- **Upstream state of #4253 (read from the GitHub API on 2026-10-19).** LMCache PR #4253 (the fp8 / GDN
+  store fix, issue #4247) was merged on 2026-09-28 (merge commit `1847435fa4`), and issue #4247 is
+  closed. The merge is contained in the LMCache v0.5.6rc5 tags (published 2026-10-12 and 2026-10-13),
+  which are a release candidate: no final 0.5.6 had been seen. The overlay therefore stays required
+  until the seat runs an LMCache build that contains the merge; that seat move is tracked elsewhere,
+  and the `--lmcache-overlay` flag keeps its rules until then.
 
 ## Error handling
 
