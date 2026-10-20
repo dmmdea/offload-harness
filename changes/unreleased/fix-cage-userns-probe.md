@@ -1,0 +1,5 @@
+### Fixed - the Linux cage no longer reports itself usable where AppArmor refuses its user namespace (register SF-46)
+
+- **What it does.** `sandbox.Available()` now creates the cage's namespaces once per process, with the same attributes the cage uses, around a system `true`, and reports a refusal by name. Where `kernel.apparmor_restrict_unprivileged_userns=1` (the Ubuntu 24.04 default) refuses a user namespace to an unprofiled binary, the reason says so. The agent then logs `shell requested but OS sandbox unavailable (...) — NOT granted (fail-closed)` and advertises neither `run_shell` nor `run`, where before it logged `shell ON` and every caged call failed with `fork/exec ...: permission denied`.
+- **Not changed.** Nothing ran uncaged before either: the cage failed closed. A host that should run caged commands needs an AppArmor profile that allows a user namespace for the harness binary, or the sysctl lowered; this change does neither.
+- **Why.** The two sysctls `Available()` read were not the whole gate, so a model spent steps on tools that could not run, and the log said the cage was on.
