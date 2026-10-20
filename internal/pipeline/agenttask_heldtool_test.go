@@ -57,9 +57,12 @@ func heldToolLoop(hold time.Duration, mu *sync.Mutex, sawIDs *[]bool) func(int64
 // per-token progress signal, so a tool call the parser holds for longer than
 // the stall allowance completes; the same seat NOT declared vLLM gets the
 // historical body and the same hold is filed as a stall — the 2026-09-23 E2E
-// defer, reproduced.
+// defer, reproduced. The allowance is 1 s, not a few hundred ms: the declared
+// seat's frames come every 20 ms, but a starved CI runner once left a gap past
+// a 300 ms allowance and deferred the declared arm; the 3 s hold still outlasts
+// it, so the undeclared arm stalls as before.
 func TestRunAgentTaskHeldToolCallOnVLLMSeatIsProgress(t *testing.T) {
-	restore := compressLiveness(t, 300*time.Millisecond, 100*time.Millisecond, core.AgentCeilingSecCap)
+	restore := compressLiveness(t, time.Second, 100*time.Millisecond, core.AgentCeilingSecCap)
 	defer restore()
 	for _, declared := range []bool{true, false} {
 		name := map[bool]string{true: "vllm-declared", false: "undeclared"}[declared]
@@ -68,7 +71,7 @@ func TestRunAgentTaskHeldToolCallOnVLLMSeatIsProgress(t *testing.T) {
 			var sawIDs []bool
 			fake := &agentFake{
 				rosterIDs:  []string{agentTestSeat},
-				loopStream: heldToolLoop(1200*time.Millisecond, &mu, &sawIDs),
+				loopStream: heldToolLoop(3*time.Second, &mu, &sawIDs),
 			}
 			srv := fake.server(t)
 			defer srv.Close()
