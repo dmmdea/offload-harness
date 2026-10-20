@@ -86,7 +86,7 @@ const qwenImageDefaultSide = 1328
 
 // imageDefaultSide is the side of the canvas each family with a capped card-only row renders when the request names none (the builder's own default:
 // render/comfy-render.mjs). A family missing here is left to the runner.
-var imageDefaultSide = map[string]int{"qwen-image": qwenImageDefaultSide, "krea2": 1024}
+var imageDefaultSide = map[string]int{"qwen-image": qwenImageDefaultSide, "krea2": 1024, "qwen-image-2.1": 2048}
 
 // forCanvas holds a card-only image call to its row's canvas cap (mediacap.MulticardRow.MaxPixels) from the request's own width and height, before any
 // lease: the runner refuses the same canvas (render/multicard-recipes.mjs canvasRefusal) only after the pair was held and its seats drained. A side the

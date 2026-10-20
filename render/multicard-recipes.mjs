@@ -12,16 +12,18 @@
 // HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
 // the int8_convrot DiT is a different file and a recipe of its own, held back for now: its `blocked` sentence says why); a text
 // encoder other than the one the recipe was built for.
-// A row can carry a CANVAS CAP (`maxPixels`, refused by canvasRefusal): the launchable image row is held to 1.47 MP, a number chosen and not measured, because its first
-// live run ran out of memory at 928x1664 (1.54 MP). The edit rows have `maxMegapixels` instead, the edit canvas their peaks were scaled to (comfy-edit.mjs refuses above it).
+// A row can carry a CANVAS CAP (`maxPixels`, refused by canvasRefusal): a number chosen and not measured (the 2512 Q5_1 GGUF row is held to 1.47 MP because its first
+// live run ran out of memory at 928x1664, 1.54 MP; the 2.1 bf16 row to the family's 2048x2048 default). The edit rows have `maxMegapixels` instead, the edit canvas their peaks were scaled to (comfy-edit.mjs refuses above it).
 // A row can be HELD BACK: it stays in the table (its data is the proof arm's), carries a `blocked` sentence that says why, and
-// findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. Both qwen-image-2.1 rows are held back today:
-// int8_convrot (its DiT on cuda:1 never ran) and bf16 (under --gpu-only ComfyUI builds the whole 16.33 GiB text encoder on the 15.9 GiB
-// storage card before the DisTorch2 split is applied, and ran out of memory there). The launchable image rows are the 2512 Q5_1 GGUF and
-// the krea2 bf16 DiT (its text encoder loads with the CLIP type the row names, `clipType`, "krea2"; a row without one is "qwen_image").
+// findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. The qwen-image-2.1 int8_convrot row is held back today
+// (its int8 DiT on cuda:1 never ran). The launchable image rows are the 2512 Q5_1 GGUF, the krea2 bf16 DiT (its text encoder loads with the CLIP type
+// the row names, `clipType`, "krea2"; a row without one is "qwen_image") and the qwen-image-2.1 bf16 DiT.
 // An fp8 text encoder is never placed on cuda:1 (two measured runs aborted the process there), so a recipe pins it whole to
-// cuda:0; only a bf16 encoder too big for one card is split (the two held-back 2.1 rows are the ones that do), and a test walks every
-// recipe to keep it that way.
+// cuda:0; only a bf16 encoder too big for one card is split (the two 2.1 rows are the ones that do), and a test walks every
+// recipe to keep it that way. That encoder is the `distorch2-host` clip loader: under --gpu-only the stock DisTorch2 loader builds the whole
+// 16.33 GiB encoder on one 15.9 GiB card before its allocation applies, so the harness's own OffloadCLIPLoaderDisTorch2
+// (render/comfyui-ext/nodes/offload_multicard) builds it off the cards and places it block by block (the plain `distorch2` kind stays for a split
+// encoder that does fit one card while it is built).
 //
 // Classes are the ones ComfyUI-MultiGPU's own NODE_CLASS_MAPPINGS registers (read from the installed pack's __init__.py): the
 // plain UNETLoaderMultiGPU / CLIPLoaderMultiGPU / VAELoaderMultiGPU (input `device`), the UNETLoaderDisTorch2MultiGPU and
@@ -61,11 +63,11 @@ const FAMILY_HINTS = Object.freeze({
   sdxl: "it fits one card, so there is nothing to place across two",
   "hidream-o1": "it fits one card pair only with host RAM and was never measured card-only",
   "hidream-o1-dev": "it fits one card pair only with host RAM and was never measured card-only",
-  "qwen-image-2.1": "no DiT of this family has a launchable recipe today: the int8_convrot and the bf16 rows are both held back (see each row's `blocked`)",
+  "qwen-image-2.1": "the card-only recipe is the bf16 DiT with the bf16 Qwen3-VL-8B text encoder; bind those files (the int8_convrot row is held back, see its `blocked`)",
 });
 
 // The hints above describe the IMAGE route's rows. The edit route has its own, because a family can have rows on one route and none on the other:
-// qwen-image-2.1 has two image rows (both held back) and no edit row, and its edit graph takes no placement argument, so lifting the image holds would not give it one.
+// qwen-image-2.1 has two image rows and no edit row, and its edit graph takes no placement argument, so the image rows would not give it one.
 const EDIT_FAMILY_HINTS = Object.freeze({
   "qwen-image-2.1": "the 2.1 edit graph has no card-only placement (it takes no placement argument), so there is no recipe for it to hold back or lift",
 });
@@ -148,7 +150,7 @@ export function allocationString(residentGb) {
  * recipePeaks: the per-card VRAM peak (GiB) a call on this recipe is held to at a given resident share (null = the recipe's own, or a plain pin that has none).
  * The DiT's total is the invariant: --resident-gb keeps that many GiB of it on the compute card and the allocation string sends the REMAINDER to the storage
  * card. A larger share raises the compute peak; a smaller one puts the same bytes on the storage card. The storage figure is never lowered by a larger share,
- * because no run measured that: the recipe's own stands. For a recipe whose storage peak is its text-encoder stage (the 2.1 bf16 one, now held back) a smaller share is
+ * because no run measured that: the recipe's own stands. For a recipe whose storage peak is its text-encoder stage (the 2.1 bf16 one) a smaller share is
  * therefore refused somewhat early, on the conservative side.
  */
 export function recipePeaks(row, residentGb) {
@@ -200,8 +202,13 @@ export function multicardLoaders(row, { unet, clip, vae, residentGb } = {}) {
     case "distorch2":
       clipNode = { class_type: "CLIPLoaderDisTorch2MultiGPU", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: MULTICARD_STORAGE, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(row.clip.residentGb), eject_models: false } };
       break;
+    case "distorch2-host":
+      // the harness's own loader: the encoder is built off the cards and placed by the allocation (its compute card is `device`, the storage card; the
+      // `residentGb` of it is parked on the compute card and streamed across at encode time), so it never has to fit one card while it is built
+      clipNode = { class_type: "OffloadCLIPLoaderDisTorch2", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: MULTICARD_STORAGE, expert_mode_allocations: allocationString(row.clip.residentGb), eject_models: false } };
+      break;
     default:
-      throw new Error(`multicardLoaders: recipe ${row.id} names the text-encoder loader ${JSON.stringify(row.clip.loader)}, which is none of plain|distorch2`);
+      throw new Error(`multicardLoaders: recipe ${row.id} names the text-encoder loader ${JSON.stringify(row.clip.loader)}, which is none of plain|distorch2|distorch2-host`);
   }
   return {
     "1": unetNode,

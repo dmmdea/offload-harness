@@ -29,7 +29,7 @@ const CARDS = W.parseCardTable(CSV);
 const LEASE = { GPU_LEASE_DEVICES: "gpu-cccc3333-dddd-eeee-ffff-000000000000,gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" };
 const BF16 = "qwen_image_2.1_bf16.safetensors";
 const INT8 = "qwen_image_2.1_int8_convrot.safetensors";
-// qwen-image-2.1 has two rows, both held back (render/multicard-recipes.json "blocked"): the planner refuses them by name.
+// qwen-image-2.1 has two rows: the bf16 one launches, the int8_convrot one is held back (render/multicard-recipes.json "blocked") and the planner refuses it by name.
 const HELD21 = { family: "qwen-image-2.1", unet: BF16, clip: "qwen3vl_8b_bf16.safetensors" };
 // The launchable image row, and the default of plan(): the 2512 Q5_1 GGUF (3 GiB of the DiT resident on the compute card, peaks 4.9 / 12.6 GiB, 1.6 GiB of activations).
 const GGUF = { family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: undefined };
@@ -88,15 +88,16 @@ test("a plan: the lease's two non-display cards, the same pair, key and launch t
   assert.match(p.launch.key, /^mc-/);
 });
 
-// The 2.1 bf16 recipe is held back (render/multicard-recipes.json "blocked"): a live card-only run built the whole 16.33 GiB text encoder on the 15.9 GiB storage card
-// before the split applied and ran out of memory. The planner refuses it by name, whatever the cards and the lease, before the card table is read or a lease is spent.
-test("the 2.1 bf16 binding is refused as held back on two 16 GB cards under the lease, before the card table is read", () => {
+// The 2.1 bf16 recipe launches: its 16.33 GiB text encoder is built off the cards by the harness's own loader, so the pair of 16 GB cards holds it (a live run with the
+// stock DisTorch2 loader built the whole encoder on the storage card and ran out of memory there).
+test("the 2.1 bf16 binding plans on two 16 GB cards under the lease, with 8 GiB of the DiT resident on the compute card", () => {
   for (const unet of [BF16, "qwen_image_2.1_uc_bf16.safetensors"]) {
-    const held = { route: "image", ...HELD21, unet, flags: { placement: "multicard" }, env: { ...LEASE }, comfyDir: "/c", listFn: INSTALLED };
-    assert.throws(() => I.planImageMulticard({ ...held, cards: () => CARDS }), /qwen-image-2\.1\/bf16.*held back.*16\.33 GiB bf16 text encoder/s, unet);
-    assert.throws(() => I.planImageMulticard({ ...held, cards: never }), /qwen-image-2\.1\/bf16.*held back/s, "refused before the driver is asked anything");
-    assert.throws(() => I.planImageMulticard({ ...held, cards: () => CARDS, flags: { placement: "multicard", "resident-gb": "6" } }), /held back/, "a smaller resident share does not lift the hold");
+    const p = I.planImageMulticard({ route: "image", ...HELD21, unet, flags: { placement: "multicard" }, env: { ...LEASE }, comfyDir: "/c", listFn: INSTALLED, cards: () => CARDS });
+    assert.equal(p.recipe.id, "qwen-image-2.1/bf16", unet);
+    assert.equal(p.residentGb, 8);
   }
+  const six = I.planImageMulticard({ route: "image", ...HELD21, flags: { placement: "multicard", "resident-gb": "6" }, env: { ...LEASE }, comfyDir: "/c", listFn: INSTALLED, cards: () => CARDS });
+  assert.equal(six.residentGb, 6);
 });
 
 test("say names the recipe, the two cards and their roles, once", () => {
@@ -234,9 +235,8 @@ test("verifyImagePlacement stops the run, before anything is submitted, when Com
   await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { pack: false }) }), /IMAGE-PLACEMENT-PACK.*offload_multicard.*Nothing was submitted/s);
 });
 
-// A plan for the held-back 2.1 bf16 row, built by hand: the planner refuses that row by name, but the proof arm that lifts the hold goes through
-// verifyImagePlacement with exactly these loaders (the DiT and the text encoder both through DisTorch2), so the check of their classes and inputs stays covered
-// with the row's data, beside the launchable rows' own.
+// A plan for the 2.1 bf16 row: the DiT through DisTorch2 and the text encoder through the harness's own loader, so the check of their classes and inputs is covered
+// with the row's data, beside the other launchable rows' own.
 const heldPlan = () => {
   const r = RECIPES.find((x) => x.id === "qwen-image-2.1/bf16");
   return { ...plan(), recipe: r, residentGb: r.unet.residentGb };
@@ -244,7 +244,7 @@ const heldPlan = () => {
 
 test("verifyImagePlacement asks for the recipe's own loader classes too: a class the pack does not register is MISSING_NODE with the pack hint, and nothing is submitted", async () => {
   const p = heldPlan();
-  for (const [cls, pack] of [["CLIPLoaderDisTorch2MultiGPU", /ComfyUI-MultiGPU/], ["UNETLoaderDisTorch2MultiGPU", /ComfyUI-MultiGPU/], ["VAELoaderMultiGPU", /ComfyUI-MultiGPU/]]) {
+  for (const [cls, pack] of [["OffloadCLIPLoaderDisTorch2", /offload_multicard/], ["UNETLoaderDisTorch2MultiGPU", /ComfyUI-MultiGPU/], ["VAELoaderMultiGPU", /ComfyUI-MultiGPU/]]) {
     await assert.rejects(I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { absent: [cls] }) }), (e) => e.message.startsWith("MISSING_NODE: ") && e.message.includes(cls) && pack.test(e.message) && /Nothing was submitted/.test(e.message), cls);
   }
   // a GGUF recipe also needs ComfyUI-GGUF to have registered its DisTorch2 loader
@@ -259,14 +259,14 @@ test("verifyImagePlacement refuses a loader whose pack no longer declares an inp
     I.verifyImagePlacement("http://x", e, { fetchImpl: objectInfoFor(e, { without: { UNETLoaderDisTorch2MultiGPU: ["expert_mode_allocations"] } }) }),
     /^Error: IMAGE-PLACEMENT-NODE-INPUT: .*UNETLoaderDisTorch2MultiGPU.*expert_mode_allocations.*qwen-image-edit-2511\/fp8mixed.*silently.*Nothing was submitted/s,
   );
-  const p = heldPlan(); // the held-back 2.1 bf16 row's data: the DiT and the text encoder both through DisTorch2
+  const p = heldPlan(); // the 2.1 bf16 row: the DiT through DisTorch2, the text encoder through the harness's own loader
   await assert.rejects(
     I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { without: { UNETLoaderDisTorch2MultiGPU: ["expert_mode_allocations"] } }) }),
     /^Error: IMAGE-PLACEMENT-NODE-INPUT: .*UNETLoaderDisTorch2MultiGPU.*expert_mode_allocations.*qwen-image-2\.1\/bf16.*silently.*Nothing was submitted/s,
   );
   await assert.rejects(
-    I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { without: { CLIPLoaderDisTorch2MultiGPU: ["expert_mode_allocations", "eject_models"] } }) }),
-    /CLIPLoaderDisTorch2MultiGPU.*expert_mode_allocations, eject_models/s,
+    I.verifyImagePlacement("http://x", p, { fetchImpl: objectInfoFor(p, { without: { OffloadCLIPLoaderDisTorch2: ["expert_mode_allocations", "eject_models"] } }) }),
+    /OffloadCLIPLoaderDisTorch2.*expert_mode_allocations, eject_models/s,
   );
   // an answer that carries no input section says nothing about inputs, so it is not a refusal
   await I.verifyImagePlacement("http://x", e, { fetchImpl: objectInfoFor(e, { bare: ["UNETLoaderDisTorch2MultiGPU"] }) });
