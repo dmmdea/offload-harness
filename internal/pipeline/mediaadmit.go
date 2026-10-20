@@ -66,6 +66,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -113,6 +114,8 @@ type mediaNeed struct {
 	// Refusal, when not empty, is why the call is refused before any lease is spent (a card-only binding with no recipe). The runner would refuse it
 	// by name after the pair was held and the host's memory declared.
 	Refusal string
+	// Row is the card-only recipe the binding matched (needMulticard, nil = none), kept so forCanvas can hold the request's canvas to the row's cap.
+	Row *mediacap.MulticardRow
 }
 
 // footKey is a footprint-store identity: family, quant, task.

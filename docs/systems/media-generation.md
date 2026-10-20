@@ -898,6 +898,17 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
   the key. The same goes for an edit binding whose
   `gen_edit_megapixels` pins a canvas above the recipe's 2.0 MP cap, which the runner honours verbatim: the peaks are scaled to the cap, and a larger canvas
   has no measured or scaled figure. The runner refuses the same bindings by name, as a second line of defence.
+- *A canvas above the image row's cap is refused before any lease.* The 2512 Q5_1 GGUF row carries `maxPixels: 1472700` (1.47 MP, `MaxPixels` in
+  `internal/mediacap/multicard.go`, pinned to the JSON by `TestTheMulticardRowsAreTheRunnersRecipes`). The number is **chosen, not measured**: the row's first live
+  two-card run, at 928x1664 (1.54 MP), ran out of memory in the sampler, and no canvas of the row has been measured. The door judges the request's own `width` and
+  `height` (`mediaNeed.forCanvas`, `internal/pipeline/mediamulticard.go`), a side it leaves out being the qwen-image default of 1328, so **a default-size (1328x1328, 1.76 MP)
+  call is refused too**. The refusal names the cap, the asked size and the way out (a smaller width and height, or unset `imagegen_placement` for the single-card
+  placement), and nothing was leased. The runner holds the same cap (`canvasRefusal`, `render/multicard-recipes.mjs`) after the pair was held, as the second line. The edit
+  rows have no pixel cap, only the 2.0 MP edit canvas above; the batch door does not judge its jobs' sizes, the runner refuses an over-cap job on its own.
+- *A card-only call with no placement is refused up front.* A runner started under `gpu reserve --devices <a>,<b>` without `--placement multicard`, aimed at a
+  non-default ComfyUI endpoint that nothing answers on, ends with `COMFY-PLACEMENT-MISSING` (`ensureComfy`, `render/comfy-lifecycle.mjs`) instead of a
+  start-it-yourself line: it names the two leased cards and `--placement multicard`, the one flag that keys the pair's own instance and launches it. An endpoint that answers
+  is still reused, and nothing is launched in the refused case.
 - *The runner gets the lease's cards and nothing else.* `--placement multicard` and `GPU_LEASE_DEVICES`; no `COMFY_CARD_UUID` or `COMFY_API` (the pair has
   an instance of its own, keyed by the two cards and shared with the Wan placement), no `comfy_cuda_device` pin and no dynamic VRAM (both contradict two
   cards under `--gpu-only`; the runner would drop them for the launch anyway), and no `--pool-*` (a pool is another placement). The operator's

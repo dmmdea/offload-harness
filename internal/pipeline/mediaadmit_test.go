@@ -216,7 +216,9 @@ func newAdmitFixtureWith(t *testing.T, spec admitSpec) *admitFixture {
 // image starts one generate_image call in the background and returns its result channel.
 func (f *admitFixture) image(extra map[string]any) <-chan core.Result {
 	f.t.Helper()
-	params := map[string]any{"out": filepath.Join(f.dir, fmt.Sprintf("out-%d.png", time.Now().UnixNano()))}
+	// 1024x1024 is inside the card-only image row's canvas cap; a call that names no size renders the qwen-image default (1.76 MP), which a multicard call
+	// is refused up front (mediaNeed.forCanvas), and these tests are about the lease, not that refusal.
+	params := map[string]any{"out": filepath.Join(f.dir, fmt.Sprintf("out-%d.png", time.Now().UnixNano())), "width": 1024, "height": 1024}
 	for k, v := range extra {
 		params[k] = v
 	}

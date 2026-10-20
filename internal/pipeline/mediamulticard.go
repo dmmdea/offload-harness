@@ -67,6 +67,7 @@ func multicardNeed(route hostneed.Route, cfg config.Config, token string) mediaN
 		files = mediacap.ImageModelFiles(cfg)
 	}
 	row := mediacap.FindMulticardRow(string(route), family, files)
+	n.Row = row
 	switch {
 	case row == nil:
 		n.Refusal = noRecipeRefusal(n.PlacementKey, string(route), family, files)
@@ -76,6 +77,39 @@ func multicardNeed(route hostneed.Route, cfg config.Config, token string) mediaN
 		n.Refusal = fmt.Sprintf("%s is multicard, but gen_edit_megapixels pins a %.1f MP edit canvas and the card-only recipe %s is scaled to at most %.1f MP: the runner would refuse it by name after the pair was held, so nothing was leased; lower gen_edit_megapixels to %.1f or less, or unset %s",
 			n.PlacementKey, cfg.GenEditMegapixels, row.ID, row.MaxMegapixels, row.MaxMegapixels, n.PlacementKey)
 	}
+	return n
+}
+
+// qwenImageDefaultSide is the side of the canvas a qwen-image call renders when the request names none (render/comfy-render.mjs, the qwen-image builder's
+// 1328): 1328 x 1328 is 1.76 MP, above the image row's cap, so a card-only call that names no size is refused too.
+const qwenImageDefaultSide = 1328
+
+// forCanvas holds a card-only image call to its row's canvas cap (mediacap.MulticardRow.MaxPixels) from the request's own width and height, before any
+// lease: the runner refuses the same canvas (render/multicard-recipes.mjs canvasRefusal) only after the pair was held and its seats drained. A side the
+// request leaves out is the family's default when this file knows it; a canvas that cannot be judged here is left to the runner. Any other need, a row
+// without a cap and a call already refused come back unchanged.
+func (n mediaNeed) forCanvas(params map[string]any) mediaNeed {
+	if n.Kind != needMulticard || n.Refusal != "" || n.Row == nil || n.Row.MaxPixels <= 0 {
+		return n
+	}
+	w, h := paramIntOr(params, "width", 0), paramIntOr(params, "height", 0)
+	if w <= 0 || h <= 0 {
+		if n.Row.Family != "qwen-image" {
+			return n
+		}
+		if w <= 0 {
+			w = qwenImageDefaultSide
+		}
+		if h <= 0 {
+			h = qwenImageDefaultSide
+		}
+	}
+	asked := int64(w) * int64(h)
+	if asked <= n.Row.MaxPixels {
+		return n
+	}
+	n.Refusal = fmt.Sprintf("%s is multicard, but the card-only recipe %s is held to a canvas of at most %.2f MP (%d pixels; a number chosen, not measured) and this call asks for %dx%d (%.2f MP): the runner would refuse it by name after the pair was held, so nothing was leased; ask for a smaller width and height, or unset %s to render on a single card",
+		n.PlacementKey, n.Row.ID, float64(n.Row.MaxPixels)/1e6, n.Row.MaxPixels, w, h, float64(asked)/1e6, n.PlacementKey)
 	return n
 }
 

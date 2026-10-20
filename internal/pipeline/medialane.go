@@ -159,7 +159,7 @@ func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf
 		return ln, "this binding is not a ComfyUI one", false
 	}
 	ln.token = paramStr(req.Params, "waiter_token")
-	ln.need = imageNeed(cfg, ln.token)
+	ln.need = imageNeed(cfg, ln.token).forCanvas(req.Params)
 	if ln.need.Refusal != "" {
 		return ln, ln.need.Refusal, false // the admission refuses it before any lease; the lane is not in question
 	}
