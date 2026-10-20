@@ -47,12 +47,34 @@
 // load through ComfyUI-MultiGPU's `CLIPLoaderMultiGPU`/`VAELoaderMultiGPU`
 // pinned to poolDonor instead. poolVvramGb <= 0 keeps the plain nodes
 // (comfy_cuda_device already pins the whole process to one card there).
+//
+// CARD-ONLY PLACEMENT (multicard: { residentGb, teAllocation }; comfy-video.mjs --wan-placement multicard --model ltx25, planned by
+// render/wan-multicard.mjs): the 20 GiB int8 DiT and the 14 GiB Gemma encoder go on the lease's two non-display cards through the DisTorch2
+// loaders, the donor is the other card and never system RAM. cuda:0 is the COMPUTE card and cuda:1 the STORAGE card: the reverse of the Wan
+// graph, because an int8 DiT that computes on any device but cuda:0 faults with an illegal memory access (ComfyUI-MultiGPU #220, archived,
+// no fix coming), so the launch lists the compute card first (wan-multicard.mjs multicardLaunch, order "compute-first"). The DiT keeps
+// `residentGb` on the compute card and the rest on the storage card; the encoder is built off the cards and split over both
+// (OffloadCLIPLoaderDisTorch2); both VAEs sit on the storage card. The DiT and the encoder do not fit the two cards together, so
+// OffloadFreeAfterEncode (render/comfyui-ext) takes the encoder off the cards after the prompt is encoded and before the first sampler
+// places the DiT. multicard and poolVvramGb are exclusive.
 
 /** Distilled two-pass schedules from the official template (fixed, part of the recipe). */
 export const LTX25_BASE_SIGMAS = "1.0, 0.99375, 0.9875, 0.98125, 0.975, 0.909375, 0.725, 0.421875, 0.0";
 export const LTX25_REFINE_SIGMAS = "0.85, 0.7250, 0.4219, 0.0";
 /** The template's own negative (applies at the conditioning level; dual CFG stays 1/1). */
 export const LTX25_TEMPLATE_NEGATIVE = "pc game, console game, video game, cartoon, childish, ugly";
+
+/**
+ * The card-only placement's devices, as ComfyUI numbers them under the compute-first launch (wan-multicard.mjs): cuda:0 is the COMPUTE card, cuda:1 the
+ * STORAGE card. The reverse of the Wan graph's pair (wf-wan22-i2v.mjs), because the int8 DiT faults with an illegal memory access when it computes on
+ * any device but cuda:0 (ComfyUI-MultiGPU #220).
+ */
+export const LTX25_COMPUTE_DEVICE = "cuda:0";
+export const LTX25_STORAGE_DEVICE = "cuda:1";
+/** GiB of the DiT kept on the compute card (the storage card holds the rest, about 11 GiB, and both VAEs). CHOSEN, not measured: no LTX-2.5 run on the two cards was made. */
+export const LTX25_RESIDENT_GB_DEFAULT = 9;
+/** The DisTorch2 split of the Gemma encoder over the two cards: 7 GiB on the compute card, the rest (about 7.3 GiB) on the storage card. CHOSEN, not measured. */
+export const LTX25_TE_ALLOCATION_DEFAULT = `${LTX25_COMPUTE_DEVICE},7gb;${LTX25_STORAGE_DEVICE},*`;
 
 export function buildLtx25I2V({
   imagePath, prompt, negative = "",
@@ -67,6 +89,7 @@ export function buildLtx25I2V({
   i2vStrengthBase = 0.7, i2vStrengthRefine = 1.0,
   imgCompression = 18, resizeLonger = 1536,
   poolVvramGb = 0, poolCompute = "cuda:0", poolDonor = "cuda:1",
+  multicard = null,                      // { residentGb, teAllocation }: the card-only placement (header)
   filenamePrefix = "render_ltx25",
 } = {}) {
   if (!imagePath) throw new Error("buildLtx25I2V: imagePath is required");
@@ -77,6 +100,14 @@ export function buildLtx25I2V({
   if (!Number.isFinite(poolVvramGb) || poolVvramGb < 0) {
     throw new Error(`buildLtx25I2V: poolVvramGb must be >= 0, got ${poolVvramGb}`);
   }
+  if (multicard && poolVvramGb > 0) {
+    throw new Error("buildLtx25I2V: multicard and poolVvramGb are two placements of the same DiT; pass one of them");
+  }
+  const residentGb = multicard ? Number(multicard.residentGb ?? LTX25_RESIDENT_GB_DEFAULT) : 0;
+  if (multicard && (!Number.isFinite(residentGb) || residentGb < 0)) {
+    throw new Error(`buildLtx25I2V: multicard.residentGb must be >= 0, got ${multicard.residentGb}`);
+  }
+  const teAllocation = multicard ? String(multicard.teAllocation || LTX25_TE_ALLOCATION_DEFAULT) : "";
   if (!negative) negative = LTX25_TEMPLATE_NEGATIVE;
   // Template arithmetic, done here: final dims /32-aligned (ResolutionSelector
   // multiple=32); stage-1 runs at exactly half; length = seconds*fps + 1 unless
@@ -85,7 +116,18 @@ export function buildLtx25I2V({
   height = Math.max(64, Math.floor(height / 32) * 32);
   if (!length || length <= 0) length = Math.round(seconds * frameRate) + 1;
 
-  const loader = poolVvramGb > 0
+  const loader = multicard
+    ? {
+        class_type: "UNETLoaderDisTorch2MultiGPU",
+        inputs: {
+          unet_name: transformer, weight_dtype: "default",
+          compute_device: LTX25_COMPUTE_DEVICE, virtual_vram_gb: 0,
+          donor_device: "cpu",           // the donor is the storage card, named in the allocation string, never system RAM
+          expert_mode_allocations: `${LTX25_COMPUTE_DEVICE},${Number(residentGb.toFixed(2))}gb;${LTX25_STORAGE_DEVICE},*`,
+          eject_models: false,
+        },
+      }
+    : poolVvramGb > 0
     ? {
         class_type: "UNETLoaderDisTorch2MultiGPU",
         inputs: {
@@ -98,20 +140,28 @@ export function buildLtx25I2V({
       }
     : { class_type: "UNETLoader", inputs: { unet_name: transformer, weight_dtype: "default" } };
 
+  // where the guiders read the conditioning: node 11, or under multicard node 35 (OffloadFreeAfterEncode, which hands it on unchanged)
+  const cond = multicard ? "35" : "11";
   const g = {
     // inputs + preprocess (template: resize longer dim → LTXVPreprocess)
     "1": { class_type: "LoadImage", inputs: { image: imagePath } },
     "2": { class_type: "ResizeImageMaskNode", inputs: { resize_type: "scale longer dimension", "resize_type.longer_size": resizeLonger, scale_method: "lanczos", input: ["1", 0] } },
     "3": { class_type: "LTXVPreprocess", inputs: { img_compression: imgCompression, image: ["2", 0] } },
     // models
-    "4": poolVvramGb > 0
+    "4": multicard
+      ? { class_type: "OffloadCLIPLoaderDisTorch2", inputs: { clip_name: textEncoder, type: "ltxv", device: LTX25_COMPUTE_DEVICE, expert_mode_allocations: teAllocation, eject_models: false } }
+      : poolVvramGb > 0
       ? { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: textEncoder, type: "ltxv", device: poolDonor } }
       : { class_type: "CLIPLoader", inputs: { clip_name: textEncoder, type: "ltxv", device: "default" } },
     "5": loader,
-    "6": poolVvramGb > 0
+    "6": multicard
+      ? { class_type: "VAELoaderMultiGPU", inputs: { vae_name: videoVae, device: LTX25_STORAGE_DEVICE } }
+      : poolVvramGb > 0
       ? { class_type: "VAELoaderMultiGPU", inputs: { vae_name: videoVae, device: poolDonor } }
       : { class_type: "VAELoader", inputs: { vae_name: videoVae } },
-    "7": poolVvramGb > 0
+    "7": multicard
+      ? { class_type: "VAELoaderMultiGPU", inputs: { vae_name: audioVae, device: LTX25_STORAGE_DEVICE } }
+      : poolVvramGb > 0
       ? { class_type: "VAELoaderMultiGPU", inputs: { vae_name: audioVae, device: poolDonor } }
       : { class_type: "VAELoader", inputs: { vae_name: audioVae } },
     "8": { class_type: "LatentUpscaleModelLoader", inputs: { model_name: latentUpscaler } },
@@ -119,12 +169,14 @@ export function buildLtx25I2V({
     "9": { class_type: "CLIPTextEncode", inputs: { text: prompt, clip: ["4", 0] } },
     "10": { class_type: "CLIPTextEncode", inputs: { text: negative, clip: ["4", 0] } },
     "11": { class_type: "LTXVConditioning", inputs: { frame_rate: frameRate, positive: ["9", 0], negative: ["10", 0] } },
+    // multicard: takes the encoder off the cards once both prompts are encoded; the guiders read the conditioning through it, so it runs before the first sampler
+    ...(multicard ? { "35": { class_type: "OffloadFreeAfterEncode", inputs: { positive: ["11", 0], negative: ["11", 1], clip: ["4", 0] } } } : {}),
     // ---- stage 1: base pass at half resolution, joint AV ----
     "12": { class_type: "EmptyLTXVLatentVideo", inputs: { width: width / 2, height: height / 2, length, batch_size: 1 } },
     "13": { class_type: "LTXVImgToVideoInplace", inputs: { strength: i2vStrengthBase, bypass: false, vae: ["6", 0], image: ["3", 0], latent: ["12", 0] } },
     "14": { class_type: "LTXVEmptyLatentAudio", inputs: { frames_number: length, frame_rate: frameRate, batch_size: 1, audio_vae: ["7", 0] } },
     "15": { class_type: "LTXVConcatAVLatent", inputs: { video_latent: ["13", 0], audio_latent: ["14", 0] } },
-    "16": { class_type: "LTXVDualCFGGuider", inputs: { video_cfg: 1, audio_cfg: 1, model: ["5", 0], positive: ["11", 0], negative: ["11", 1] } },
+    "16": { class_type: "LTXVDualCFGGuider", inputs: { video_cfg: 1, audio_cfg: 1, model: ["5", 0], positive: [cond, 0], negative: [cond, 1] } },
     "17": { class_type: "KSamplerSelect", inputs: { sampler_name: "euler_ancestral" } },
     "18": { class_type: "RandomNoise", inputs: { noise_seed: seed } },
     "19": { class_type: "ManualSigmas", inputs: { sigmas: LTX25_BASE_SIGMAS } },
@@ -134,7 +186,7 @@ export function buildLtx25I2V({
     "22": { class_type: "LTXVLatentUpsampler", inputs: { samples: ["21", 0], upscale_model: ["8", 0], vae: ["6", 0] } },
     "23": { class_type: "LTXVImgToVideoInplace", inputs: { strength: i2vStrengthRefine, bypass: false, vae: ["6", 0], image: ["3", 0], latent: ["22", 0] } },
     "24": { class_type: "LTXVConcatAVLatent", inputs: { video_latent: ["23", 0], audio_latent: ["21", 1] } },
-    "25": { class_type: "LTXVDualCFGGuider", inputs: { video_cfg: 1, audio_cfg: 1, model: ["5", 0], positive: ["11", 0], negative: ["11", 1] } },
+    "25": { class_type: "LTXVDualCFGGuider", inputs: { video_cfg: 1, audio_cfg: 1, model: ["5", 0], positive: [cond, 0], negative: [cond, 1] } },
     "26": { class_type: "KSamplerSelect", inputs: { sampler_name: "euler_ancestral" } },
     "27": { class_type: "RandomNoise", inputs: { noise_seed: seed + 1 } },
     "28": { class_type: "ManualSigmas", inputs: { sigmas: LTX25_REFINE_SIGMAS } },

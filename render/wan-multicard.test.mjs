@@ -13,6 +13,7 @@ import * as L from "./comfy-lifecycle.mjs";
 import * as O from "./comfy-ownership.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { scratchDir } from "./test-scratch.mjs";
+import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { parseArgs, buildGraphFromArgs, buildGraphForRun, verifyMulticardDevices, verifyMulticardPack } from "./comfy-video.mjs";
 
 // Synthetic ids: a repeated-nibble head is a placeholder to the leak gate, and none of these names a real card.
@@ -248,6 +249,18 @@ test("packDirs finds the packs by name whatever the case, and refuses a missing 
   assert.throws(() => M.packDirs("/c", listing(["ComfyUI-VideoHelperSuite"])), /no comfyui-multigpu pack.*DisTorch2/);
   assert.throws(() => M.packDirs("/c", listing(["ComfyUI-MultiGPU"])), /no comfyui-videohelpersuite pack.*mp4/);
   assert.throws(() => M.packDirs("/nowhere/at/all"), /no comfyui-multigpu pack/, "an unreadable custom_nodes is no pack");
+});
+
+test("LTX-2.5 under multicard: the launch lists the compute card first and the DiT computes on cuda:0 (an int8 DiT faults elsewhere, ComfyUI-MultiGPU #220)", () => {
+  const opts = { comfyDir: "/c", packDirsFn: () => ["ComfyUI-MultiGPU"] };
+  const launch = M.multicardLaunch(pair(), { ...opts, order: M.CARD_ORDER_COMPUTE_FIRST });
+  assert.equal(launch.cudaVisibleDevices, `${U0},${U2}`, "compute first: it becomes cuda:0");
+  assert.deepEqual(launch.cards, [U0, U2]);
+  assert.equal(launch.key, "mcc-cccc3333-aaaa1111");
+  assert.notEqual(launch.key, M.multicardLaunch(pair(), opts).key, "a kept storage-first ComfyUI is never taken for this one");
+  const g = buildLtx25I2V({ imagePath: "s.png", prompt: "p", multicard: { residentGb: 9 } });
+  assert.equal(g["5"].inputs.compute_device, "cuda:0");
+  assert.equal(g["5"].inputs.expert_mode_allocations, "cuda:0,9gb;cuda:1,*");
 });
 
 test("multicardLaunch: the two uuids storage first, the placement's flags, the reader switched on, an instance of its own", () => {

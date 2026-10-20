@@ -47,10 +47,12 @@ export const NODE_PACKS = Object.freeze({
   OffloadFreeForDecode: "offload_multicard, the harness's own pack in render/comfyui-ext (loaded by --wan-placement multicard; when it is missing it failed to import, see ComfyUI's console log)",
   // the 2.1 bf16 recipe's text-encoder loader (a 16.33 GiB encoder built off the cards): same harness pack, which also needs ComfyUI-MultiGPU
   OffloadCLIPLoaderDisTorch2: "offload_multicard, the harness's own pack in render/comfyui-ext (it wraps ComfyUI-MultiGPU's CLIPLoaderDisTorch2MultiGPU; when it is missing it failed to import, see ComfyUI's console log)",
+  // the LTX-2.5 card-only graph's release of the text encoder between the prompt and the first sampler: same harness pack
+  OffloadFreeAfterEncode: "offload_multicard, the harness's own pack in render/comfyui-ext (loaded by --wan-placement multicard --model ltx25; when it is missing it failed to import, see ComfyUI's console log)",
 });
 
 // The classes of the packs this harness ships itself (render/comfyui-ext): never installed into a ComfyUI's custom_nodes.
-const HARNESS_OWN_CLASSES = new Set(["OffloadFreeForDecode", "OffloadCLIPLoaderDisTorch2"]);
+const HARNESS_OWN_CLASSES = new Set(["OffloadFreeForDecode", "OffloadCLIPLoaderDisTorch2", "OffloadFreeAfterEncode"]);
 
 // graphClasses: the distinct class_type values of an API-format graph, in first-seen order.
 export function graphClasses(graph) {

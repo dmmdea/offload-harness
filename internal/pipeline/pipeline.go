@@ -3171,9 +3171,9 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if fb.WanDecode != "" {
 		args = append(args, "--wan-decode", fb.WanDecode)
 	}
-	// videogen_placement multicard (the Wan 2.2 graph only): the card-only placement on the lease's two cards, no host RAM. The runner owns the
-	// placement and its ComfyUI instance; --wan-resident-gb is the GiB of each expert kept on the compute card (unset = the runner's default).
-	wanMulticard := wanMulticardVideo(fb, renderFamily)
+	// videogen_placement multicard (the Wan 2.2 and LTX-2.5 graphs only): the card-only placement on the lease's two cards, no host RAM. The runner owns the
+	// placement and its ComfyUI instance; --wan-resident-gb is the GiB of each expert (of the DiT, for LTX-2.5) kept on the compute card (unset = the runner's default).
+	wanMulticard := cardOnlyVideo(fb, renderFamily)
 	if wanMulticard {
 		args = append(args, "--wan-placement", config.PlacementMulticard)
 		if fb.WanResidentGB > 0 {
@@ -3206,7 +3206,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	if fb.FPS > 0 {
 		args = append(args, "--fps", strconv.Itoa(fb.FPS))
 	}
-	if fb.PoolVvramGB > 0 {
+	if fb.PoolVvramGB > 0 && !ltxMulticardVideo(fb, renderFamily) { // the card-only placement is the other placement of the same DiT: the runner refuses both
 		args = append(args, "--pool-vvram-gb", strconv.FormatFloat(fb.PoolVvramGB, 'f', -1, 64))
 		if fb.PoolCompute != "" {
 			args = append(args, "--pool-compute", fb.PoolCompute)

@@ -1,8 +1,8 @@
-"""Harness-owned ComfyUI nodes for the card-only (multicard) Wan 2.2, image and edit placements.
+"""Harness-owned ComfyUI nodes for the card-only (multicard) Wan 2.2, LTX-2.5, image and edit placements.
 
 ComfyUI loads this folder through render/comfyui-ext/extra_model_paths.yaml (its `custom_nodes` key),
 which render/wan-multicard.mjs passes with --extra-model-paths-config. It is never copied into the
-shared install. Three parts:
+shared install. Four parts:
 
 1. A READ-ONLY safetensors reader, active only when the harness sets OFFLOAD_RO_LOAD=1 in the
    ComfyUI process. Stock ComfyUI (dynamic VRAM off, which --gpu-only implies) opens a safetensors file
@@ -50,6 +50,17 @@ shared install. Three parts:
    changed to the CPU (so the encoder is built and filled off the cards, from the read-only map), then
    places it at once through DisTorch2's own load path, block by block, onto the cards its allocation
    string names, and checks that no weight is left in host RAM.
+
+4. OffloadFreeAfterEncode, a pass-through of the positive and negative CONDITIONING that takes the text
+   encoder off every card (the LTX-2.5 card-only graph: the 14.3 GiB Gemma encoder and the 20 GiB int8 DiT do
+   not fit the two cards together, and the DiT is placed at the first sampler). Under --gpu-only ComfyUI's
+   own unload frees nothing (its offload device IS the card), so the node does it itself: it drops the
+   encoder from comfy.model_management.current_loaded_models without going through model_unload (which would
+   move the weights to the offload device, the card), replaces every parameter and buffer that sits on a
+   card with an empty CPU tensor, returns the cached blocks to the driver, reports each card's memory before
+   and after, and raises OFFLOAD-TE-STILL-RESIDENT if any of the encoder's tensors is still on a CUDA device.
+   The CLIP is spent after it. The harness loads this pack with --cache-none, so the next prompt builds and
+   places the encoder again from the read-only map.
 """
 import gc
 import json
@@ -365,8 +376,85 @@ class OffloadCLIPLoaderDisTorch2:
         return out
 
 
-NODE_CLASS_MAPPINGS = {"OffloadFreeForDecode": OffloadFreeForDecode, "OffloadCLIPLoaderDisTorch2": OffloadCLIPLoaderDisTorch2}
+# ---------------------------------------------------------------------------------------------
+# 4. take the text encoder off the cards once the prompt is encoded
+# ---------------------------------------------------------------------------------------------
+
+def _drop_from_loaded_models(model):
+    # ComfyUI's own unload would move the weights to the offload device, which under --gpu-only is the card itself (and, for a DisTorch2 placement,
+    # would first try to put the whole encoder on one card). So the entry is removed from the list without going through model_unload; a patcher
+    # clone (the same module under another patcher) is matched by its module.
+    import comfy.model_management as mm
+    dropped = 0
+    for index in reversed(range(len(mm.current_loaded_models))):
+        loaded = mm.current_loaded_models[index]
+        patcher = loaded.model
+        if patcher is not None and getattr(patcher, "model", None) is model:
+            mm.current_loaded_models.pop(index)
+            finalizer = getattr(loaded, "model_finalizer", None)
+            if finalizer is not None:
+                finalizer.detach()
+            loaded.model_finalizer = None
+            loaded.real_model = None
+            dropped += 1
+    return dropped
+
+
+def _free_card_weights(model):
+    # Every parameter and buffer that sits on a card is replaced by an empty CPU tensor, so the card's allocation goes when the last reference to the
+    # weight does. The encoder is spent after this: nothing may encode with it again.
+    import torch
+    freed = {}
+    for module in model.modules():
+        for table, empty in ((module._parameters, lambda: torch.nn.Parameter(torch.empty(0), requires_grad=False)), (module._buffers, lambda: torch.empty(0))):
+            for name, tensor in list(table.items()):
+                if tensor is not None and tensor.device.type == "cuda":
+                    key = str(tensor.device)
+                    freed[key] = freed.get(key, 0) + tensor.numel() * tensor.element_size()
+                    table[name] = empty()
+    return freed
+
+
+class OffloadFreeAfterEncode:
+    """Pass-through CONDITIONING pair. Takes the text encoder (`clip`) off every card; wire the prompt's conditioning through it so it runs before the sampler."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"positive": ("CONDITIONING",), "negative": ("CONDITIONING",), "clip": ("CLIP",)}}
+
+    RETURN_TYPES = ("CONDITIONING", "CONDITIONING")
+    RETURN_NAMES = ("positive", "negative")
+    FUNCTION = "release"
+    CATEGORY = "offload"
+
+    def release(self, positive, negative, clip):
+        patcher = getattr(clip, "patcher", None)
+        model = getattr(patcher, "model", None)
+        if model is None:
+            raise ValueError("OFFLOAD-TE-NOMODEL: the CLIP input carries no text-encoder model (clip.patcher.model), so there is nothing to release")
+        before = [_card_line(i) for i in _cards()]
+        held = {name: size for name, size in _weight_bytes_by_device(model).items() if name.startswith("cuda")}
+        dropped = _drop_from_loaded_models(model)
+        backup = getattr(patcher, "backup", None)
+        if isinstance(backup, dict):
+            backup.clear()
+        freed = _free_card_weights(model)
+        seconds = _release_cards() if _cards() else 0.0
+        after = [_card_line(i) for i in _cards()]
+        _say(f"text encoder released: {_gib_line(held)} on the cards, {_gib_line(freed)} freed, {dropped} loaded-model entr{'y' if dropped == 1 else 'ies'} dropped ({seconds:.1f} s)")
+        _say(f"cards before the release: {json.dumps(before)}")
+        _say(f"cards after the release: {json.dumps(after)}")
+        left = {name: size for name, size in _weight_bytes_by_device(model).items() if name.startswith("cuda") and size > 0}
+        if left:
+            raise RuntimeError(
+                f"OFFLOAD-TE-STILL-RESIDENT: {_gib_line(left)} of the text encoder is still on a card after the release, and the DiT placed at the first "
+                f"sampler needs the room; the run stops here. cards: {json.dumps(after)}")
+        return (positive, negative)
+
+
+NODE_CLASS_MAPPINGS = {"OffloadFreeForDecode": OffloadFreeForDecode, "OffloadCLIPLoaderDisTorch2": OffloadCLIPLoaderDisTorch2, "OffloadFreeAfterEncode": OffloadFreeAfterEncode}
 NODE_DISPLAY_NAME_MAPPINGS = {
     "OffloadFreeForDecode": "Free the cards for a plain decode (harness)",
     "OffloadCLIPLoaderDisTorch2": "Load CLIP, built off the cards and split by DisTorch2 (harness)",
+    "OffloadFreeAfterEncode": "Take the text encoder off the cards after the prompt is encoded (harness)",
 }

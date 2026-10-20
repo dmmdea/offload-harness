@@ -130,10 +130,15 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 			Transformer: c.Flags["transformer"], UnetHigh: c.Flags["high-unet"],
 			UnetLow: c.Flags["low-unet"], TextEncoder: c.Flags["text-encoder"],
 		}
-		// The card-only Wan placement (--wan-placement multicard) is read for the Wan graph alone: no other family has it.
+		// The card-only placement (--wan-placement multicard) is read for the Wan and LTX-2.5 graphs alone: no other family has it.
 		var cardOnly *CardOnly
-		if model == "wan22" && strings.EqualFold(strings.TrimSpace(c.Flags["wan-placement"]), "multicard") {
-			cardOnly = &CardOnly{ResidentGiB: wanResidentGiB(c.Flags), SageAttention: sageAttention(f.env("COMFY_EXTRA_ARGS"))}
+		if strings.EqualFold(strings.TrimSpace(c.Flags["wan-placement"]), "multicard") {
+			switch model {
+			case "wan22":
+				cardOnly = &CardOnly{ResidentGiB: wanResidentGiB(c.Flags), SageAttention: sageAttention(f.env("COMFY_EXTRA_ARGS"))}
+			case "ltx25":
+				cardOnly = &CardOnly{LTX: true, ResidentGiB: residentGiBOr(c.Flags, ltxResidentDefaultGiB)}
+			}
 		}
 		return estimateWith(model, mediacap.VideoModelFilesFor(model, fb), f, cardOnly)
 	}
@@ -159,13 +164,18 @@ func sageAttention(extra string) bool {
 // wanResidentGiB reads --wan-resident-gb (the share of each Wan expert the card-only placement keeps on the compute card). The runner
 // refuses a value it cannot read or one outside 0..64 before it starts, so sizing the call as the default one is only ever a sizing.
 func wanResidentGiB(flags map[string]string) float64 {
+	return residentGiBOr(flags, wanResidentDefaultGiB)
+}
+
+// residentGiBOr is wanResidentGiB with the default of the graph the call names (the LTX-2.5 DiT's share is the same flag, with a default of its own).
+func residentGiBOr(flags map[string]string, dflt float64) float64 {
 	raw, ok := flags["wan-resident-gb"]
 	if !ok {
-		return wanResidentDefaultGiB
+		return dflt
 	}
 	v, err := strconv.ParseFloat(strings.TrimSpace(raw), 64)
 	if err != nil || math.IsNaN(v) || v < 0 || v > 64 {
-		return wanResidentDefaultGiB
+		return dflt
 	}
 	return v
 }

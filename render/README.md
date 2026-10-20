@@ -150,6 +150,13 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   shared ComfyUI). Under `--wan-decode plain` the experts are freed from both cards before the plain `VAEDecode`, and the sampled latent
   is saved first. `--wan-loader` is not read, and an unnamed expert (the builder's defaults are the Q4_K GGUF files) and `--fast` are refused before anything starts (not measured); a `.gguf` expert also loads ComfyUI-GGUF in the launch, and the typed `video` door reaches the placement from config (`videogen_placement: multicard`, `videogen_wan_resident_gb`). A driver script that wraps the helper is not a recognised render helper, so its lease declares the class default unless its `gpu reserve` passes `--ram 0` (the verb says so on a second line). Detail and numbers:
   `docs/systems/media-generation.md`.
+- **LTX-2.5 on two cards and no host RAM, `--wan-placement multicard --model ltx25`** (`render/wf-ltx25-i2v.mjs`, `wan-multicard.mjs`; no `--wan-decode`, `--high-unet` or `--low-unet`).
+  The same placement as Wan with the roles' device numbers reversed: the launch lists the COMPUTE card first, so **cuda:0 is the compute card and cuda:1 the storage card**,
+  because an int8 DiT that computes on any other device faults (ComfyUI-MultiGPU #220); its instance key is `mcc-<compute head>-<storage head>`, distinct from the Wan key of the same pair.
+  The DiT (`UNETLoaderDisTorch2MultiGPU`, `cuda:0,<R>gb;cuda:1,*`, `virtual_vram_gb` 0, `donor_device` `cpu`) keeps `--wan-resident-gb` GiB (default 9, chosen) on the compute card; the Gemma encoder
+  (`OffloadCLIPLoaderDisTorch2`, `ltxv`, split `cuda:0,7gb;cuda:1,*`) is released from both cards by `OffloadFreeAfterEncode` after the prompt is encoded and before the first sampler places the DiT
+  (`OFFLOAD-TE-STILL-RESIDENT` if any weight stays); both VAEs sit on cuda:1. A bf16 or GGUF `--transformer` and `--pool-vvram-gb` are refused. No LTX-2.5 run was made on the two cards: the shares are chosen,
+  and the sampler's activations are unmeasured (`LTX-PLACEMENT-NOTE`). Details: `docs/systems/media-generation.md`, "LTX-2.5 on two cards".
 - **Qwen-Image on two cards, `--placement multicard`** (`comfy-generate.mjs`, `comfy-render.mjs`, `comfy-edit.mjs`; default `single`, today's graph, byte for byte). The text encoder and the VAE
   load on one leased non-display card and the DiT on the other, or split between them, through the MultiGPU loaders, with the
   recipe of `render/multicard-recipes.json` (the 2512 Q5_1 GGUF, the krea2 and 2.1 bf16 DiTs and the 2511 edit fp8mixed and Q5_1; the 2.1 int8 convrot row is held back, and 2512 bf16 and sdxl

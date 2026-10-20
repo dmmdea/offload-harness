@@ -1197,11 +1197,14 @@ type Config struct {
 	// VideoGenPlacement is the placement of the Wan 2.2 video seat ("" or "single" = one render card, today's; "multicard" = the card-only
 	// placement on the box's two non-display cards, render/wan-multicard.mjs: no host RAM, the experts are the fp8 safetensors files or the
 	// Q8_0 GGUF files, named by videogen_unet_high / videogen_unet_low, which the placement requires). The door leases the pair, passes
-	// --wan-placement multicard and drops the single-card pin and dynamic VRAM, the way gen_edit_placement does for the edit door. Only the
-	// Wan 2.2 graph has it; any other family renders as before. An unknown value is a config error.
+	// --wan-placement multicard and drops the single-card pin and dynamic VRAM, the way gen_edit_placement does for the edit door. The Wan 2.2 graph
+	// has it, and so has LTX-2.5 (videogen_family ltx25: one int8 DiT split over the pair with the compute card as cuda:0, the text encoder released
+	// after the prompt is encoded; it has no experts and needs a .safetensors transformer, not the bf16 one); any other family renders as before. An
+	// unknown value is a config error.
 	VideoGenPlacement string `json:"videogen_placement,omitempty"`
 	// VideoGenWanResidentGB is videogen_placement multicard's --wan-resident-gb: the GiB of each expert kept on the compute card (0 = the
-	// runner's own default, 3; the lower bound of 0 GiB resident is therefore set on the runner, not here). 0..64.
+	// runner's own default, 3; the lower bound of 0 GiB resident is therefore set on the runner, not here). 0..64. For LTX-2.5 it is the GiB of the
+	// DiT kept on the compute card (0 = the runner's default, 9).
 	VideoGenWanResidentGB float64 `json:"videogen_wan_resident_gb,omitempty"`
 	// VideoGenFamily selects the I2V graph family the video route renders with:
 	// "" or "wan22" = the Wan 2.2 two-expert graph (legacy default, unchanged);
