@@ -1,4 +1,10 @@
-// wan-multicard.mjs — the card-only placement for Wan 2.2 14B fp8 I2V (comfy-video.mjs --wan-placement multicard).
+// wan-multicard.mjs — the card-only placement for Wan 2.2 14B fp8 I2V and for LTX-2.5 22B int8 (comfy-video.mjs --wan-placement multicard [--model ltx25]).
+//
+// LTX-2.5 (--model ltx25) is the same placement with the roles' device numbers REVERSED: its int8 DiT must compute on cuda:0 (ComfyUI-MultiGPU #220), so its
+// launch lists the COMPUTE card first (multicardLaunch, order "compute-first"), under an instance key of its own (multicardInstanceKey), and the graph
+// (wf-ltx25-i2v.mjs) puts the DiT's resident share on cuda:0 and the donor blocks, the VAEs and half of the text encoder on cuda:1. Everything below that
+// does not say Wan applies to both: the cards, the display refusal, the lease cross-check, the roles, the packs. The sizes of LTX's own stages are
+// LTX_* below, and none of them was measured on a run: no LTX-2.5 render was made on the two cards.
 //
 // WHAT IT IS. The two experts (13.3 GiB each) do not fit one 16 GiB card with the activations of a film-size
 // clip (720x1280x81 needs about 12.2 GiB beyond the 3 GiB of an expert kept resident: the film-size run's 15.18 GiB peak; the 4-step benchmark
@@ -31,6 +37,7 @@ import { fileURLToPath } from "node:url";
 import { leaseDevices } from "./gpu-lock.mjs";
 import { isSageAttentionToken } from "./comfy-lifecycle.mjs";
 import { WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE } from "./wf-wan22-i2v.mjs";
+import { LTX25_RESIDENT_GB_DEFAULT, LTX25_TE_ALLOCATION_DEFAULT, LTX25_COMPUTE_DEVICE, LTX25_STORAGE_DEVICE } from "./wf-ltx25-i2v.mjs";
 
 /** Where the harness-owned ComfyUI-side code lives (next to this file): the yaml ComfyUI is pointed at, and the node folder it names. */
 export const EXT_DIR = join(dirname(fileURLToPath(import.meta.url)), "comfyui-ext");
@@ -83,9 +90,12 @@ export function wanPlacementMode(flags) {
   return raw;
 }
 
-/** wanResidentGb parses --wan-resident-gb: GiB of each expert kept on the compute card (default the measured 3). 0 is allowed (all weights on the storage card). */
-export function wanResidentGb(flags) {
-  if (!("wan-resident-gb" in flags)) return WAN_RESIDENT_GB_DEFAULT;
+/**
+ * wanResidentGb parses --wan-resident-gb: GiB of each expert kept on the compute card (default the measured 3). 0 is allowed (all weights on the storage card).
+ * Under --model ltx25 the same flag is the GiB of the one DiT kept on the compute card, and `dflt` is LTX's default (planMulticard).
+ */
+export function wanResidentGb(flags, dflt = WAN_RESIDENT_GB_DEFAULT) {
+  if (!("wan-resident-gb" in flags)) return dflt;
   const raw = flags["wan-resident-gb"];
   const n = Number(raw);
   if (raw === undefined || raw === "" || !Number.isFinite(n) || n < 0 || n > 64) {
@@ -348,9 +358,22 @@ export function packDirs(comfyDir, list = (d) => readdirSync(d, { withFileTypes:
   return out;
 }
 
-/** instanceKey: the multicard instance of this pair of cards (INSTANCE_KEY_RE in comfy-lifecycle.mjs). */
-export function multicardInstanceKey(pair) {
+/**
+ * The order the launch lists a pair's two cards in, which is the order ComfyUI numbers them in: "storage-first" (the Wan and image placements: cuda:0 is the
+ * storage card, cuda:1 the compute card) or "compute-first" (LTX-2.5: cuda:0 computes, because its int8 DiT faults on any other device, ComfyUI-MultiGPU #220).
+ */
+export const CARD_ORDER_STORAGE_FIRST = "storage-first";
+export const CARD_ORDER_COMPUTE_FIRST = "compute-first";
+
+/**
+ * instanceKey: the multicard instance of this pair of cards (INSTANCE_KEY_RE in comfy-lifecycle.mjs). The compute-first instance has its own prefix
+ * (mcc-, then the compute card's head, then the storage card's), not the same two heads the other way round: a pair whose roles an override
+ * reversed (WAN_COMPUTE_UUID) has a storage-first key that spells exactly that, and the two launches number the cards differently, so a kept ComfyUI of one
+ * must never be taken for the other.
+ */
+export function multicardInstanceKey(pair, order = CARD_ORDER_STORAGE_FIRST) {
   const head = (c) => c.uuid.replace(/^GPU-/i, "").slice(0, 8).toLowerCase();
+  if (order === CARD_ORDER_COMPUTE_FIRST) return `mcc-${head(pair.compute)}-${head(pair.storage)}`;
   return `mc-${head(pair.storage)}-${head(pair.compute)}`;
 }
 
@@ -363,16 +386,21 @@ export function multicardInstanceKey(pair) {
  *                        whitelist the measurement ran with (the packs found by name + the harness's own);
  *   env                  OFFLOAD_RO_LOAD=1 turns the read-only safetensors reader on inside that ComfyUI;
  *   key                  the instance key, so it has its own port, directories and launch marker.
+ * `order` "compute-first" (LTX-2.5) lists the COMPUTE card first, so it is cuda:0, under the instance key of that order; the launch then carries `order` so the
+ * device check (checkComfyDevices) knows which card should be which. Absent, the launch is the storage-first one, byte for byte.
  * The flags join the harness's own (--disable-smart-memory --cache-none --reserve-vram), which the measured recipe also used.
  */
-export function multicardLaunch(pair, { comfyDir, packDirsFn = packDirs, yaml = EXT_YAML } = {}) {
+export function multicardLaunch(pair, { comfyDir, packDirsFn = packDirs, yaml = EXT_YAML, order = CARD_ORDER_STORAGE_FIRST } = {}) {
   if (!comfyDir) throw placementError("COMFY_DIR is not set, so the custom-node packs the placement needs cannot be found");
   if (!existsSync(yaml)) throw placementError(`the harness's ComfyUI extension file is missing: ${yaml}`);
   const packs = packDirsFn(comfyDir);
+  const computeFirst = order === CARD_ORDER_COMPUTE_FIRST;
+  const [first, second] = computeFirst ? [pair.compute, pair.storage] : [pair.storage, pair.compute];
   return {
-    key: multicardInstanceKey(pair),
-    cards: [pair.storage.uuid, pair.compute.uuid],
-    cudaVisibleDevices: `${pair.storage.uuid},${pair.compute.uuid}`,
+    key: multicardInstanceKey(pair, order),
+    cards: [first.uuid, second.uuid],
+    cudaVisibleDevices: `${first.uuid},${second.uuid}`,
+    ...(computeFirst ? { order } : {}),
     flags: ["--gpu-only", "--disable-pinned-memory", "--extra-model-paths-config", yaml,
       "--disable-all-custom-nodes", "--whitelist-custom-nodes", ...packs, EXT_NODE_PACK],
     env: { CUDA_DEVICE_ORDER: "PCI_BUS_ID", OFFLOAD_RO_LOAD: "1" },
@@ -395,19 +423,22 @@ export function multicardEnv(env, launch) {
  * checkComfyDevices compares what the running ComfyUI reports (GET /system_stats devices) with the two cards it was
  * pinned to: cuda:0 should be the storage card and cuda:1 the compute card. ComfyUI numbers its cards in the order of
  * CUDA_VISIBLE_DEVICES; a count, a size or a model name that does not match means the pin did not take. Returns the problems found.
+ * `order` "compute-first" (LTX-2.5) swaps the two: cuda:0 should be the compute card and cuda:1 the storage card.
  * What it can prove is the count, the size (to 5 percent) and the model name ("cuda:N <torch name> : <allocator>" holds the nvidia-smi name) of each
  * device. It cannot tell two cards of one model apart, and /system_stats carries no UUID: the order of two such cards is the pin's
  * (CUDA_VISIBLE_DEVICES lists UUIDs, storage first) and the roles' (chooseRoles: of two cards of one model the lower UUID stores, unless WAN_COMPUTE_UUID names the other).
  * A pair of two models (a faster board beside a slower one of one size) is told apart by the model name, so its roles are verified card by card.
  */
-export function checkComfyDevices(devices, pair) {
+export function checkComfyDevices(devices, pair, order = CARD_ORDER_STORAGE_FIRST) {
   const problems = [];
   const cuda = (Array.isArray(devices) ? devices : []).filter((d) => d && d.type === "cuda");
   if (cuda.length !== 2) {
     problems.push(`ComfyUI sees ${cuda.length} CUDA device(s), not the 2 it was pinned to`);
     return problems;
   }
-  const want = [["cuda:0 (storage)", pair.storage], ["cuda:1 (compute)", pair.compute]];
+  const want = order === CARD_ORDER_COMPUTE_FIRST
+    ? [["cuda:0 (compute)", pair.compute], ["cuda:1 (storage)", pair.storage]]
+    : [["cuda:0 (storage)", pair.storage], ["cuda:1 (compute)", pair.compute]];
   want.forEach(([label, card], i) => {
     const got = cuda[i];
     const gib = Number(got.vram_total) / 1024 ** 3, expect = card.totalMiB / 1024;
@@ -561,6 +592,63 @@ function checkResident(residentGb, pair, flags, attention = "default") {
 }
 
 /**
+ * The LTX-2.5 stage sizes of the card-only placement (render/wf-ltx25-i2v.mjs; internal/hostneed declares against the same figures). The file sizes are
+ * measured (the int8 convrot DiT 20.03 GiB, the video VAE 1.37, the audio VAE 0.34, the x2 latent upscaler 0.93), rounded up; the rest is CHOSEN, not measured,
+ * because no LTX-2.5 run was made on the two cards:
+ *   LTX_DIT_GIB               the DiT (20.03 GiB on disk);
+ *   LTX_STORAGE_VAES_GIB      what the graph puts beside the donor blocks on the storage card: the video and the audio VAE (1.71 GiB);
+ *   LTX_UPSCALER_GIB          the latent upscaler, which has no device input and loads on the compute card (cuda:0, ComfyUI's default device);
+ *   LTX_STORAGE_OVERHEAD_GIB  the CUDA context and the allocator's slack on the storage card, the Wan placement's 0.8 (WAN_STORAGE_OVERHEAD_GIB);
+ * and the compute card keeps WAN_COMPUTE_CONTEXT_GIB free. The sampler's activations are NOT in the check: nothing says what they are at 1920x1088x121 (or at
+ * 1280x704x121), so the check refuses only a share the compute card plainly cannot hold with nothing else on it, and a share that fits it can still run out of
+ * memory in the first sampler step. The text encoder (14.32 GiB, split by LTX25_TE_ALLOCATION_DEFAULT) is gone from the cards before the DiT lands, so it is
+ * not a stage of either card.
+ */
+export const LTX_DIT_GIB = 20.1;
+export const LTX_STORAGE_VAES_GIB = 1.8;
+export const LTX_UPSCALER_GIB = 1.0;
+export const LTX_STORAGE_OVERHEAD_GIB = WAN_STORAGE_OVERHEAD_GIB;
+
+/** LTX-2.5 under multicard: a .safetensors DiT the DisTorch2 loader reads, and one that fits the pair at all (a bf16 DiT is about 39 GiB, the two cards hold 31.8). */
+function refuseUnmeasuredLtx(flags) {
+  const name = typeof flags.transformer === "string" ? flags.transformer.trim() : "";
+  if (name && !/\.safetensors$/i.test(name)) {
+    throw new Error(`--wan-placement multicard places the LTX-2.5 DiT as a .safetensors file through the DisTorch2 loader; --transformer ${JSON.stringify(name)} is not one: use --wan-placement single for it`);
+  }
+  if (/bf16/i.test(name)) {
+    throw new Error(`--wan-placement multicard places the int8 LTX-2.5 DiT (20 GiB); --transformer ${JSON.stringify(name)} is the bf16 one (about 39 GiB), which does not fit two 16 GiB cards: use --wan-placement single for it`);
+  }
+  if ("pool-vvram-gb" in flags) {
+    throw new Error("--wan-placement multicard and --pool-vvram-gb are two placements of the same DiT: pass one of them");
+  }
+}
+
+/**
+ * checkLtxResident: the LTX-2.5 DiT's resident share against the two cards (checkResident's counterpart). The compute card holds the share, the latent upscaler and
+ * its context, and whatever the sampler needs beyond them is unmeasured (LTX_* above), so the share is refused only where nothing is left for it; the storage card
+ * holds the rest of the DiT (the donor blocks), both VAEs and its context inside its size less --reserve-vram.
+ */
+function checkLtxResident(residentGb, pair, flags) {
+  const reserveRaw = Number(flags["reserve-vram"]);
+  const reserve = Number.isFinite(reserveRaw) && reserveRaw > 0 ? reserveRaw : DEFAULT_RESERVE_GIB;
+  const computeGib = pair.compute.totalMiB / 1024, storageGib = pair.storage.totalMiB / 1024;
+  const most = computeGib - LTX_UPSCALER_GIB - WAN_COMPUTE_CONTEXT_GIB;
+  if (residentGb > most) {
+    throw placementError(`--wan-resident-gb ${residentGb} (the DiT's share on the compute card for --model ltx25) leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) ${(computeGib - residentGb).toFixed(1)} GiB for the ${LTX_UPSCALER_GIB} GiB latent upscaler, ${WAN_COMPUTE_CONTEXT_GIB} GiB of CUDA context and the sampler's activations, which nobody measured for LTX-2.5: at most ${most.toFixed(1)} GiB can be resident there before nothing is left for them, and the default ${LTX25_RESIDENT_GB_DEFAULT} is a share chosen, not a measured one`);
+  }
+  const donor = LTX_DIT_GIB - residentGb;
+  const stored = donor + LTX_STORAGE_VAES_GIB + LTX_STORAGE_OVERHEAD_GIB;
+  const usable = storageGib - reserve;
+  if (stored > usable) {
+    const least = LTX_DIT_GIB + LTX_STORAGE_VAES_GIB + LTX_STORAGE_OVERHEAD_GIB - usable;
+    const way = least <= most
+      ? `a --wan-resident-gb of at least ${least.toFixed(1)} (and at most ${most.toFixed(1)}) keeps enough of the DiT on the compute card`
+      : "no resident share fits both cards: lease two larger cards";
+    throw placementError(`--wan-resident-gb ${residentGb} leaves the storage card (idx ${pair.storage.index}, ${storageGib.toFixed(1)} GiB) ${donor.toFixed(1)} GiB of donor blocks + ${LTX_STORAGE_VAES_GIB} GiB for the two VAEs + ${LTX_STORAGE_OVERHEAD_GIB} GiB for the context = ${stored.toFixed(1)} GiB against ${usable.toFixed(1)} GiB usable (the card less ${reserve} GiB of --reserve-vram): ${way}`);
+  }
+}
+
+/**
  * geometryNote: what the planner says about a clip bigger than the film's (720x1280x81), "" at the film's size and under. Nothing above that size was
  * measured: wanActivationsGib holds the film's 12.2 GiB there while the sampler's activations are expected to grow with the tokens, so the resident-share
  * check passes a bigger clip on a figure that is soft, and the run could run out of memory on the compute card with both cards held. The planner does not
@@ -601,20 +689,33 @@ export function portNote(flags, env, api, label = "wan-placement") {
  * every request it cannot honour: the placement's own flags spelled with '=', a graph that is not the Wan 2.2 one, --fast or a
  * unnamed expert, no cards named, not two cards, a card the lease does not hold, a display card or one whose display
  * state is unknown, a resident share the compute card cannot hold, a missing pack. `cards` reads the driver's card table
- * (injectable); `isWanGraph` says whether this invocation builds the Wan 2.2 graph; `leaseDevicesFn` names the cards the lease holds.
+ * (injectable); `isWanGraph` says whether this invocation builds the Wan 2.2 graph; `isLtxGraph` whether it builds the LTX-2.5 one (--model ltx25: the same
+ * placement with the compute card first, its own sizes and no experts, --fast or GGUF to refuse); `leaseDevicesFn` names the cards the lease holds.
  */
-export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, spawnSync: smiRun, cards = () => queryCardsRanked(smiRun), launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
+export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, isLtxGraph = false, spawnSync: smiRun, cards = () => queryCardsRanked(smiRun), launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
   refuseEqualsSpelling(flags);
   const mode = wanPlacementMode(flags);
   if (mode !== "multicard") return null;
-  if (!isWanGraph) {
-    throw new Error(`--wan-placement multicard places the Wan 2.2 graph; this invocation builds ${flags.graph ? "a --graph file" : `--model ${flags.model}`}, which it does not touch`);
+  const ltx = !isWanGraph && isLtxGraph;
+  if (!isWanGraph && !ltx) {
+    throw new Error(`--wan-placement multicard places the Wan 2.2 graph and the LTX-2.5 one (--model ltx25); this invocation builds ${flags.graph ? "a --graph file" : `--model ${flags.model}`}, which it does not touch`);
   }
-  refuseUnmeasuredWan(flags);
-  const residentGb = wanResidentGb(flags);
+  if (ltx) refuseUnmeasuredLtx(flags); else refuseUnmeasuredWan(flags);
+  const residentGb = ltx ? wanResidentGb(flags, LTX25_RESIDENT_GB_DEFAULT) : wanResidentGb(flags);
   const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn });
   const pair = resolveWanCards({ tokens, source, cards: cards(), compute: computeOverride(env) });
   if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
+  if (ltx) {
+    // The LTX-2.5 launch lists the compute card first (cuda:0 computes: ComfyUI-MultiGPU #220), loads the MultiGPU pack and the harness's own and nothing else (the graph
+    // writes its mp4 with core nodes), and is sized by LTX's own stages, none of them measured on a run: the planner says so, once.
+    checkLtxResident(residentGb, pair, flags);
+    say("LTX-PLACEMENT-NOTE: no LTX-2.5 run was made on the two cards: the resident share and the text-encoder split are chosen, not measured, and the sampler's activations at this geometry are unmeasured, so a share that passes here can still run out of memory in the first sampler step; lower --wan-resident-gb if it does, and pass --wait-sec (the " + MULTICARD_WAIT_SEC + " s default is the Wan film's)");
+    const launch = launchFn(pair, { comfyDir, packDirsFn: (d) => packDirs(d, undefined, [PACK_MULTIGPU]), order: CARD_ORDER_COMPUTE_FIRST });
+    const plan = { pair, launch, residentGb, family: "ltx25", env: multicardEnv(env, launch) };
+    const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
+    say(`ltx25-placement: multicard on ${source}: ${line("compute", LTX25_COMPUTE_DEVICE, pair.compute)}; ${line("storage", LTX25_STORAGE_DEVICE, pair.storage)}; ${residentGb} GiB of the DiT resident on the compute card; text encoder split ${LTX25_TE_ALLOCATION_DEFAULT}, released from the cards after the prompt is encoded; ${computeChosen(pair)}`);
+    return plan;
+  }
   const attention = wanAttentionMode(env);
   const unsized = geometryNote(flags, attention);
   if (unsized) say(unsized);

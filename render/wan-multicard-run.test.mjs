@@ -55,9 +55,9 @@ test("planRun: the card-only plan's launch and environment ride in the lease slo
   assert.equal(planRun([...ARGV, "--api", "http://127.0.0.1:18852"], { env: { ...LEASE }, planFn, say: () => {} }).note, "", "a port the caller gave needs no note");
 });
 
-test("planRun: the placement is for the Wan 2.2 graph only, so another model or a --graph file is refused before any card is read", () => {
+test("planRun: the placement is for the Wan 2.2 and LTX-2.5 graphs only, so another model or a --graph file is refused before any card is read", () => {
   const env = { ...LEASE };
-  assert.throws(() => planRun(["o.mp4", "s.png", "p", "--model", "ltx25", "--wan-placement", "multicard"], { env }), /places the Wan 2\.2 graph; this invocation builds --model ltx25/);
+  assert.throws(() => planRun(["o.mp4", "s.png", "p", "--model", "h3", "--wan-placement", "multicard"], { env }), /places the Wan 2\.2 graph and the LTX-2\.5 one \(--model ltx25\); this invocation builds --model h3/);
   assert.throws(() => planRun(["o.mp4", "s.png", "p", "--model", "hunyuan", "--wan-placement", "multicard"], { env }), /--model hunyuan/);
   assert.throws(() => planRun(["o.mp4", "--graph", "wf.json", "--wan-placement", "multicard"], { env }), /builds a --graph file/);
 });

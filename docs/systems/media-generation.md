@@ -679,7 +679,7 @@ exactly two, a token that names no card, a `--wan-cards` card the lease does not
 Enabled or `display_attached` Yes, the harness's own rule, so a monitor on a sleeping screen counts) and a card whose display state the
 driver does not report (never assumed screenless). It also refuses what was not measured or cannot run, in the same place, before the
 lease slot is taken, llama-swap is unloaded or ComfyUI starts: `--fast`, an expert nobody named (`--high-unet` and
-`--low-unet` are required: the builder's defaults are the Q4_K GGUF files, which fit one card and were not measured split), another family (`--model ltx25`, a `--graph` file), a `--wan-resident-gb`
+`--low-unet` are required: the builder's defaults are the Q4_K GGUF files, which fit one card and were not measured split), another family (`--model h3|hunyuan|ace`, a `--graph` file; `--model ltx25` is placed by "LTX-2.5 on two cards" below), a `--wan-resident-gb`
 that one of the two cards cannot hold at the call's geometry (the compute card: its size less a chosen 0.5 GiB margin for the CUDA context, less the sampler's
 activations, the benchmark's reserved allocator peaks as an envelope of 0.31 GiB per 1,000 tokens (never under 2 GiB) capped at the film-size run's
 measured 12.2 GiB beyond the resident share (above the film's size nothing was measured: a bigger clip is held at 12.2 and a `WAN-GEOMETRY-NOTE` says so before the check, with what a proportional extrapolation gives, leaving the share and `--wait-sec` to the caller; the activations read the attention mode from `COMFY_EXTRA_ARGS`: 15.2 GiB at film size under `--use-sage-attention`, the line between the two measured sage points below it, 12.2 without it), so 3.2 GiB of an expert at most at film size (0.2 under sage) and 9.1 at the default 832x480x49; the storage card: the
@@ -708,7 +708,43 @@ unknown value is a config error, as for `gen_edit_placement`) with `videogen_une
 `videogen_wan_resident_gb` (0 = the runner's default of 3). For the Wan 2.2 graph the door then leases the box's two non-display cards as a set
 (the same lease path as the edit door: gpu_lease_unavailable, never one card or the whole node when it cannot), declares the stage-rule host RAM
 (0 when both cards hold their stage), passes `--wan-placement multicard` and, above 0, `--wan-resident-gb N`, and launches with no single-card pin and
-no dynamic VRAM. A binding that names no expert is refused before any lease. Another family renders as before.
+no dynamic VRAM. A binding that names no expert is refused before any lease. For `videogen_family: ltx25` (or a `videogen_families["ltx25"]` entry) the same keys
+place the LTX-2.5 graph, below. Another family renders as before.
+
+**LTX-2.5 on two cards** (`--wan-placement multicard --model ltx25`; `render/wf-ltx25-i2v.mjs`, `render/wan-multicard.mjs`, `OffloadFreeAfterEncode` in `render/comfyui-ext`).
+The 20.03 GiB int8 convrot DiT and the 14.32 GiB Gemma text encoder (clip type `ltxv`) are bigger than one 16 GB card together and apart from the sampler's
+activations, so they run pooled across the lease's two non-display cards through DisTorch2, the donor being the other card and never system RAM. This is
+the Wan placement with the roles' device numbers reversed, for one reason: an int8 DiT that computes on any device other than cuda:0 faults with an
+illegal memory access (ComfyUI-MultiGPU issue #220, archived upstream, no fix coming). So the launch lists the COMPUTE card first in
+`CUDA_VISIBLE_DEVICES` (CUDA numbers the visible cards in that order) and **cuda:0 is the compute card, cuda:1 the storage card**, where the Wan and image
+launches list the storage card first. The compute-first launch has its own instance key, `mcc-<compute uuid head>-<storage uuid head>` (the Wan key is
+`mc-<storage>-<compute>`, and a pair whose roles WAN_COMPUTE_UUID reversed would spell the same two heads the other way round), so a kept ComfyUI of one order
+is never reused for the other, and the device check after the start compares cuda:0 with the compute card and cuda:1 with the storage card. The cards are chosen
+as for Wan (the lease's, never a display card; the compute card by the same `chooseRoles` rule).
+
+The graph: the DiT is `UNETLoaderDisTorch2MultiGPU` with `compute_device` `cuda:0`, `expert_mode_allocations` `cuda:0,<R>gb;cuda:1,*`, `virtual_vram_gb` 0,
+`donor_device` `cpu` (with an allocation string and `virtual_vram_gb` 0 the loader ignores it: the donor is the storage card), `eject_models` false and
+`weight_dtype` `default`; the text encoder is `OffloadCLIPLoaderDisTorch2` (built off the cards from the read-only map and placed block by block, host RAM
+refused) with `type` `ltxv`, `device` `cuda:0` and the split `cuda:0,7gb;cuda:1,*`; both VAEs are `VAELoaderMultiGPU` on `cuda:1`. The latent upscaler has no
+device input and loads on cuda:0. The DiT is a quantized checkpoint, so it is built empty and filled from the read-only map and reaches the cards only when
+the first sampler loads it through DisTorch2. The encoder and the DiT do not fit the two cards at once (34.4 GiB of weights against 31.8, before the VAEs),
+so the encoder must be gone from the cards before that: **`OffloadFreeAfterEncode`** sits between the conditioning (node 11) and the two guiders, takes both
+conditionings and the CLIP, and returns the conditionings unchanged. Under `--gpu-only` ComfyUI's own unload frees nothing (its offload device is the card,
+and unloading would first copy the weights there), so the node removes the encoder from `current_loaded_models` itself, replaces every parameter and buffer
+on a card with an empty CPU tensor, returns the cached blocks to the driver, logs each card's memory before and after, and stops the run with
+`OFFLOAD-TE-STILL-RESIDENT` if any of the encoder's tensors is still on a CUDA device. Because the pack is loaded with `--cache-none`, the next prompt builds and
+places the encoder again.
+
+Defaults, all **chosen, not measured**: `--wan-resident-gb` (here the GiB of the DiT kept on the compute card) is 9, so the storage card holds the other
+11 GiB beside both VAEs (20.1 - 9 + 1.8 + 0.8 context = 13.7 GiB of its 15.9, less `--reserve-vram`); the encoder split is 7 GiB on the compute card and the rest on the
+storage card. The planner refuses, before ComfyUI starts, a share the compute card plainly cannot hold (its size less the 1 GiB latent upscaler and the 0.5 GiB
+context, 14.4 GiB on a 15.9 GiB card) and one that leaves the storage card more than it can hold; the sampler's activations are not in either check because
+no LTX-2.5 run was made on the two cards, so a share that passes can still run out of memory in the first sampler step (an `LTX-PLACEMENT-NOTE` says so every
+run; lower the share if it does). It also refuses a non-`.safetensors` or bf16 `--transformer` (about 39 GiB), `--pool-vvram-gb` (the other placement of the
+same DiT), and there is no expert, `--fast` or GGUF check, because the graph has none. The wait is 7200 s unless `--wait-sec` / `COMFY_WAIT_SEC` says otherwise;
+an LTX-2.5 time on the two cards is unmeasured. The typed door sizes the host RAM on the same stages (the DiT's share, the upscaler and the context on the compute
+card; the rest of the DiT, both VAEs and the context on the storage card; the encoder is gone before the DiT) and declares 0 GiB when both fit, and refuses a
+`.gguf` or bf16 transformer before any lease. The 2026-08-12 single-card-class timing of this family (247 s for a 5 s clip at 1920x1088) is a different placement.
 
 **The launch.** The runner starts its own ComfyUI, a keyed instance `mc-<storage uuid head>-<compute uuid head>`: its own port (from
 `--api` or `COMFY_API`, which must not be the unkeyed instance's 8188; with neither it falls back to the per-card port, and a ComfyUI

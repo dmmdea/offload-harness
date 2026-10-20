@@ -144,7 +144,11 @@ func videoNeeds(cfg config.Config) (family string, files []needFile, classes []s
 	files = videoFamilyFilesLabeled(family, fb, "videogen_")
 	switch family {
 	case "ltx25":
-		if fb.PoolVvramGB > 0 {
+		if fb.WanMulticard() {
+			// The card-only placement (videogen_placement: multicard, render/wan-multicard.mjs): the DiT and both VAEs through MultiGPU and the encoder through the
+			// harness's loader, which wraps MultiGPU's DisTorch2 CLIP loader. The harness's own classes (render/comfyui-ext) are not custom_nodes and not listed.
+			classes = []string{"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"}
+		} else if fb.PoolVvramGB > 0 {
 			// The text encoder and both VAEs pin off ComfyUI's default device too
 			// (2026-09-24 fix, wf-ltx25-i2v.mjs) - same pack as the DiT loader.
 			classes = []string{"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"}

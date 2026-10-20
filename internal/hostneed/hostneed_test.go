@@ -762,11 +762,11 @@ func TestTheResidentDefaultMirrorsTheRunner(t *testing.T) {
 	}
 }
 
-// Only the Wan graph has this placement: the flag on another family, or on a --graph file, is not read as it.
+// Only the Wan and LTX-2.5 graphs have this placement: the flag on another family (h3 here), or on a --graph file, is not read as it.
 //
 // The pair is two 24 GiB cards on purpose: the card-only stage maths (a share of the expert + 12.2 GiB of activations on one card, the rest of the
-// expert + 0.8 GiB on the other) cannot fit LTX 2.5's 20 GiB transformer on two 16 GiB cards, so there the figure is the ordinary one with or
-// without the model == "wan22" guard in RenderCall.Estimate, and a test on such a pair passes with the guard deleted (the review of
+// expert + 0.8 GiB on the other) cannot fit a 20 GiB transformer on two 16 GiB cards, so there the figure is the ordinary one with or
+// without the model guard in RenderCall.Estimate, and a test on such a pair passes with the guard deleted (the review of
 // 2026-10-11 deleted it and nothing failed). On 24 GiB cards the unguarded code would declare 0 for a call that streams the whole set.
 func TestTheMulticardFlagMeansNothingToAnotherFamily(t *testing.T) {
 	f := ltxFacts(t, 24)
@@ -774,12 +774,12 @@ func TestTheMulticardFlagMeansNothingToAnotherFamily(t *testing.T) {
 	ltx := func(flags string) Need {
 		return Resolve(Request{Class: gpulease.ClassMedia, Args: strings.Fields("node render/comfy-video.mjs o.mp4 s.png p " + flags)}, f)
 	}
-	a, b := ltx("--model ltx25"), ltx("--model ltx25 --wan-placement multicard")
+	a, b := ltx("--model h3"), ltx("--model h3 --wan-placement multicard")
 	if a.GiB <= 0 {
-		t.Fatalf("the premise of this test: ltx25 does not fit one 24 GiB card and streams from RAM, got %v", a)
+		t.Fatalf("the premise of this test: h3 does not fit one 24 GiB card and streams from RAM, got %v", a)
 	}
 	if a.GiB != b.GiB || a.Detail != b.Detail {
-		t.Fatalf("ltx25 with the flag = %v, without = %v", b, a)
+		t.Fatalf("h3 with the flag = %v, without = %v", b, a)
 	}
 	for _, n := range []Need{a, b} {
 		if strings.Contains(n.Detail, "card-only") {
