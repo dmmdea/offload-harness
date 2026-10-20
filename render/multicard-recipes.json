@@ -12,12 +12,13 @@
       "clipMatch": "bf16",
       "unet": { "loader": "plain" },
       "clip": { "loader": "distorch2-host", "residentGb": 5 },
-      "basis": "predicted",
-      "blocked": "no card-only run of this row has been made on the two non-display cards. The 2.1 rows launch compute-first, so this row's int8 DiT now lands whole on cuda:0, where comfy_kitchen's int8 kernels run (off cuda:0 they are a recorded illegal memory access, upstream issue 220, unfixed), and its bf16 text encoder is built off the cards and split over both by the harness's OffloadCLIPLoaderDisTorch2, as the measured bf16 row's is; the benchmark arms the row cites used the display card. Its peaks are arithmetic. Run one render on this row, then clear \"blocked\" on it in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go",
-      "peakGiB": { "compute": 9.0, "storage": 13.6 },
-      "activationsGiB": 2.2,
+      "basis": "measured",
+      "peakGiB": { "compute": 12.3, "storage": 5.9 },
+      "activationsGiB": 2.3,
       "packs": ["multigpu"],
-      "evidence": "Benchmark 2026-10-11, qwen-image-2.1 int8_convrot DiT with the bf16 text encoder at 2048x2048, 40 steps: two plain pins 213.4 s and the text-encoder layer split 215.1 s against 238.4 s on one card, pixel-identical to the single-card render (max abs diff 0); per-card peaks 13.55 GiB on the card that held the text encoder and 8.89 GiB on the card that held the DiT. The arms ran the stock loader, and the split's allocation string was not recorded, so the 5 GiB share of the text encoder on the compute card is this file's choice (11.3 GiB of the 16.3 GiB encoder stays on the storage card, beside the VAE)."
+      "maxPixels": 4194304,
+      "maxPixelsNote": "measured at 2048x2048 (4,194,304 pixels, the qwen-image-2.1 family default), the cap; no larger canvas has been run card-only",
+      "evidence": "Measured 2026-10-20 on the 5070 Ti (compute) and a 5060 Ti (storage), launched compute-first (cuda:0 is the compute card), with the live fast binding's file (qwen-image-2.1-UC-int8_convrot, 6.76 GiB). The bf16 Qwen3-VL-8B text encoder (16.33 GiB) is built off the cards by the harness's OffloadCLIPLoaderDisTorch2 and placed by cuda:1,5gb;cuda:0,* in 6.1 s: cuda:0 11.36 GiB, cuda:1 4.97 GiB, 0 GiB on the CPU; OffloadFreeAfterEncode then frees both cards in 0.8 s (14.51 and 14.80 GiB free) before the int8 DiT loads whole on cuda:0, where comfy_kitchen's int8 kernels run. 2048x2048, 40 steps at 2.57 s/it: 179.9 s. Per-card peaks by phase: the encoder 12.27 GiB on the compute card and 5.09 on the storage card, the sampler 9.04 GiB on the compute card (the 6.76 GiB DiT and 2.3 GiB of activations and context), the VAE decode 5.84 GiB on the storage card. Host physical memory dipped to 50.6 GiB free (from 84.5) for about 10 s while the encoder was staged on its way to the cards and held at 81.7 through sampling; no weight stayed in host RAM. The 2026-10-11 benchmark had run the same DiT across two cards in 213.4 s with the display card as one of them, pixel-identical to the single-card render."
     },
     {
       "id": "qwen-image-2.1/bf16",

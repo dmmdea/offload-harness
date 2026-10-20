@@ -35,7 +35,7 @@
 //        --clip qwen3vl_8b_bf16.safetensors --vae qwen_image_2.1_vae_bf16.safetensors \
 //        [--schedule official|comfy|turbo] [--transparent 1] [--steps 40 --cfg 1]
 //   node comfy-render.mjs <out.png> "<prompt>" --family qwen-image ... --placement multicard [--resident-gb N] [--cards <a>,<b>]
-//        (the card-only placement; recipes: render/multicard-recipes.json, which holds back the -2.1 int8_convrot row; flags spelled `--flag value`)
+//        (the card-only placement; recipes: render/multicard-recipes.json, whose rows are all launchable; flags spelled `--flag value`)
 //
 // --family is a closed set (KNOWN_FAMILIES). An unrecognised value exits 2 BEFORE any
 // ComfyUI work: it used to fall through to the SDXL graph silently, so a typo'd

@@ -9,14 +9,13 @@ import "regexp"
 // internal/hostneed's host-RAM declaration) and what it was measured to hold. TestTheMulticardRowsAreTheRunnersRecipes fails when either side moves.
 //
 // Measured is true only for a row whose host growth was read in a run that used the read-only safetensors loader (a card-only run that charged no
-// weight file to host commit). The 2511 fp8mixed edit, the 2512 Q5_1 GGUF, the krea2 bf16 DiT and the qwen-image-2.1 bf16 DiT are measured; the 2511
-// Q5_1 GGUF edit is predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
+// weight file to host commit). The 2511 fp8mixed edit, the 2512 Q5_1 GGUF, the krea2 bf16 DiT and the qwen-image-2.1 bf16 and int8_convrot DiTs are
+// measured; the 2511 Q5_1 GGUF edit is predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
 //
-// A row can be held back (Blocked): it stays in the table, but it is no recipe to FindMulticardRow. The qwen-image-2.1 int8_convrot row is held back today
-// (no card-only run of it), so the launchable image rows are the 2512 Q5_1 GGUF, the krea2 bf16 DiT and the qwen-image-2.1 bf16 DiT. That one's
+// A row can be held back (Blocked): it stays in the table, but it is no recipe to FindMulticardRow. No row is held back today. The qwen-image-2.1 rows'
 // 16.33 GiB bf16 text encoder is bigger than a card, and under --gpu-only ComfyUI would build the whole of it on one card before a DisTorch2 split
 // applies; the "distorch2-host" clip loader is the harness's own node that builds it off the cards and places it block by block. The 2.1 rows launch
-// compute-first (the JSON's "cardOrder"; cuda:0 is the compute card) because the 2.1 model's fused kernels run on cuda:0 only.
+// compute-first (the JSON's "cardOrder"; cuda:0 is the compute card) because the 2.1 model's fused and int8 kernels run on cuda:0 only.
 
 // MulticardRow is one recipe: the identity of the call it serves, how the runner loads it and the figures that decide a declaration.
 type MulticardRow struct {
@@ -56,8 +55,7 @@ func (r MulticardRow) Plain() bool { return r.UnetLoader == "plain" }
 
 var multicardRows = []MulticardRow{
 	{ID: "qwen-image-2.1/int8_convrot", Route: "image", Family: "qwen-image-2.1", Quant: "int8_convrot", UnetMatch: `int8.*\.safetensors$`, ClipMatch: "bf16",
-		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 5, ComputeGiB: 9.0, StorageGiB: 13.6, Packs: []string{"multigpu"},
-		Blocked: "no card-only run of this row has been made on the two non-display cards. The 2.1 rows launch compute-first, so this row's int8 DiT now lands whole on cuda:0, where comfy_kitchen's int8 kernels run (off cuda:0 they are a recorded illegal memory access, upstream issue 220, unfixed), and its bf16 text encoder is built off the cards and split over both by the harness's OffloadCLIPLoaderDisTorch2, as the measured bf16 row's is; the benchmark arms the row cites used the display card. Its peaks are arithmetic. Run one render on this row, then clear \"blocked\" on it in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go"},
+		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 5, ComputeGiB: 12.3, StorageGiB: 5.9, Measured: true, MaxPixels: 4194304, Packs: []string{"multigpu"}},
 	{ID: "qwen-image-2.1/bf16", Route: "image", Family: "qwen-image-2.1", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16",
 		UnetLoader: "distorch2", ResidentGiB: 8, ClipLoader: "distorch2-host", ClipResidentGiB: 8, ComputeGiB: 10.9, StorageGiB: 8.2, Measured: true, MaxPixels: 4194304, Packs: []string{"multigpu"}},
 	{ID: "qwen-image/gguf-q5_1", Route: "image", Family: "qwen-image", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",

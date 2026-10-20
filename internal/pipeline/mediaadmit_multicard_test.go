@@ -255,14 +255,12 @@ func TestAMulticardCallIsNeverDegradedToTheWholeNode(t *testing.T) {
 }
 
 // A binding the recipe table has no row for is refused before any lease is spent, naming the key, because the runner would refuse it by name
-// after the pair had been held and the host's memory declared: krea2 fp8 (only the bf16 DiT has a row), 2512 bf16 (38 GiB fits no card), sdxl. A row that exists and is
-// held back is refused the same way, and says which row and why: the 2.1 int8 DiT (its DiT on cuda:1 never ran).
+// after the pair had been held and the host's memory declared: krea2 fp8 (only the bf16 DiT has a row), 2512 bf16 (38 GiB fits no card), sdxl. No row is held back
+// today; a row that was would be refused the same way, with its reason (mediamulticard.go names it).
 func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		bind func(*config.Config)
-		// held lists the words a held-back row's refusal must carry (empty = the binding has no row at all)
-		held []string
 	}{
 		{name: "krea2 fp8", bind: func(c *config.Config) {
 			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenPlacement = "krea2", "krea2_turbo_fp8.safetensors", "multicard"
@@ -271,9 +269,6 @@ func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenPlacement = "qwen-image", "qwen_image_2512_bf16.safetensors", "multicard"
 		}},
 		{name: "sdxl", bind: func(c *config.Config) { c.ImageGenPlacement = "multicard" }},
-		{name: "2.1 int8 DiT, held back", bind: func(c *config.Config) {
-			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenCLIP, c.ImageGenPlacement = "qwen-image-2.1", "qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", "multicard"
-		}, held: []string{"qwen-image-2.1/int8_convrot", "held back", "illegal memory access"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: tc.bind})
@@ -283,16 +278,6 @@ func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 			}
 			if n := len(f.m.Leases()) + len(f.started()) + len(f.m.Tokens()); n != 0 {
 				t.Errorf("%d lease/runner/place for a call the runner would refuse", n)
-			}
-			// a row that exists and is held back says which one and why, so the operator knows it is a hold and not a gap in the table
-			for _, want := range tc.held {
-				if !strings.Contains(res.Reason, want) {
-					t.Errorf("the refusal of a held-back row must say %q: %s", want, res.Reason)
-				}
-			}
-			// and the recipes the table "has" are the ones that can launch, not the held-back ones: the 2.1 bf16, the 2512 Q5_1 GGUF and krea2 bf16 on the image route
-			if len(tc.held) > 0 && !strings.Contains(res.Reason, "multicard-recipes.json has qwen-image-2.1/bf16, qwen-image/gguf-q5_1, krea2/bf16)") {
-				t.Errorf("the list of recipes offers a held-back row: %s", res.Reason)
 			}
 		})
 	}

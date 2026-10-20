@@ -12,14 +12,13 @@
 //
 // WHAT IT REFUSES, by name and before a lease is taken: a family or quant with no recipe (2512 bf16 fits no card, SDXL and
 // HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
-// the int8_convrot DiT is a different file and a recipe of its own, held back for now: its `blocked` sentence says why); a text
-// encoder other than the one the recipe was built for.
+// the int8_convrot DiT is a different file and a recipe of its own); a text encoder other than the one the recipe was built for.
 // A row can carry a CANVAS CAP (`maxPixels`, refused by canvasRefusal; its `maxPixelsNote` says whether it was measured): the 2512 Q5_1 GGUF row is held to
 // 1536x1152 (measured at 1328x1328 and 928x1664), the krea2 bf16 row to 1536x1024 (measured), the 2.1 bf16 row to the family's 2048x2048 default. The edit rows have `maxMegapixels` instead, the edit canvas their peaks were scaled to (comfy-edit.mjs refuses above it).
 // A row can be HELD BACK: it stays in the table (its data is the proof arm's), carries a `blocked` sentence that says why, and
-// findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. The qwen-image-2.1 int8_convrot row is held back today
-// (its int8 DiT on cuda:1 never ran). The launchable image rows are the 2512 Q5_1 GGUF, the krea2 bf16 DiT (its text encoder loads with the CLIP type
-// the row names, `clipType`, "krea2"; a row without one is "qwen_image") and the qwen-image-2.1 bf16 DiT.
+// findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. No row is held back today (the qwen-image-2.1 int8_convrot row was, until
+// a card-only run of it was measured). The launchable image rows are the 2512 Q5_1 GGUF, the krea2 bf16 DiT (its text encoder loads with the CLIP type
+// the row names, `clipType`, "krea2"; a row without one is "qwen_image") and the qwen-image-2.1 bf16 and int8_convrot DiTs.
 // An fp8 text encoder is never placed on cuda:1 (two measured runs aborted the process there), so a recipe pins it whole to
 // cuda:0 (in both card orders an encoder computes on cuda:0); only a bf16 encoder too big for one card is split (the two 2.1 rows are the ones that do), and a test walks every
 // recipe to keep it that way. That encoder is the `distorch2-host` clip loader: under --gpu-only the stock DisTorch2 loader builds the whole
@@ -84,7 +83,7 @@ const FAMILY_HINTS = Object.freeze({
   sdxl: "it fits one card, so there is nothing to place across two",
   "hidream-o1": "it fits one card pair only with host RAM and was never measured card-only",
   "hidream-o1-dev": "it fits one card pair only with host RAM and was never measured card-only",
-  "qwen-image-2.1": "the card-only recipe is the bf16 DiT with the bf16 Qwen3-VL-8B text encoder; bind those files (the int8_convrot row is held back, see its `blocked`)",
+  "qwen-image-2.1": "the card-only recipes are the bf16 and int8_convrot DiTs with the bf16 Qwen3-VL-8B text encoder; bind those files",
 });
 
 // The hints above describe the IMAGE route's rows. The edit route has its own, because a family can have rows on one route and none on the other:
@@ -95,7 +94,7 @@ const EDIT_FAMILY_HINTS = Object.freeze({
 
 /**
  * routeOffer: what the table offers on a route, as one sentence read from the table itself: the launchable rows, then the held-back ones. Written by hand it went
- * stale: it listed qwen-image-2.1 as having recipes after both of that family's rows were held back.
+ * stale: it listed qwen-image-2.1 as having recipes after both of that family's rows were held back (a row held back is named, never offered).
  */
 function routeOffer(route) {
   const mine = RECIPES.filter((r) => r.route === route);

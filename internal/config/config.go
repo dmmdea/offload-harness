@@ -3199,7 +3199,7 @@ func warnMulticardLaunchTo(c Config, w io.Writer, where, key, seat string) {
 
 // imageRecipeFamilies / editRecipeFamilies are the graph families that have a LAUNCHABLE card-only recipe: a row of render/multicard-recipes.json that is not
 // held back (a test in this package pins them to it). A family outside them, bound to a multicard placement, is refused by the runner by name on every call;
-// qwen-image-2.1 is inside them through its bf16 row (its int8_convrot row is held back).
+// qwen-image-2.1 is inside them through its bf16 and int8_convrot rows (no row is held back today).
 var (
 	imageRecipeFamilies = map[string]bool{"qwen-image": true, "krea2": true, "qwen-image-2.1": true}
 	editRecipeFamilies  = map[string]bool{EditFamily2511: true}

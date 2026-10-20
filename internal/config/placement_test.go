@@ -78,7 +78,7 @@ func TestImagePlacementIsAnOverlayKeyAndWarnsOnAnUnsupportedFamily(t *testing.T)
 		t.Errorf("Load of a bad placement: %v", err)
 	}
 
-	// the recipe's families: qwen-image and krea2 on the image route (qwen-image-2.1 has two rows, both held back, so no launchable recipe), the 2511 graph on the edit route; every other is said at load
+	// the recipe's families: qwen-image and krea2 on the image route (qwen-image-2.1 has two rows, bf16 and int8_convrot, both launchable), the 2511 graph on the edit route; every other is said at load
 	say := func(c Config) string {
 		var buf bytes.Buffer
 		warnMediaGenBindingTrapsTo(c, &buf)
@@ -189,7 +189,7 @@ func TestThePlacementWarningKnowsExactlyTheFamiliesThatHaveARecipe(t *testing.T)
 	img, edit := map[string]bool{}, map[string]bool{}
 	for _, r := range file.Rows {
 		if r.Blocked != "" {
-			continue // a row that is held back is no recipe: a family whose rows are all held back has none, and the load-time warning says so
+			continue // a row that is held back is no recipe (none is today): a family whose rows are all held back has none, and the load-time warning says so
 		}
 		switch r.Route {
 		case "image":

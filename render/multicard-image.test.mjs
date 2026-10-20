@@ -29,7 +29,7 @@ const CARDS = W.parseCardTable(CSV);
 const LEASE = { GPU_LEASE_DEVICES: "gpu-cccc3333-dddd-eeee-ffff-000000000000,gpu-aaaa1111-bbbb-cccc-dddd-eeeeeeeeeeee" };
 const BF16 = "qwen_image_2.1_bf16.safetensors";
 const INT8 = "qwen_image_2.1_int8_convrot.safetensors";
-// qwen-image-2.1 has two rows: the bf16 one launches, the int8_convrot one is held back (render/multicard-recipes.json "blocked") and the planner refuses it by name.
+// qwen-image-2.1 has two rows, both launchable: the bf16 one (bound by default here) and the int8_convrot one (INT8).
 const HELD21 = { family: "qwen-image-2.1", unet: BF16, clip: "qwen3vl_8b_bf16.safetensors" };
 // The launchable image row, and the default of plan(): the 2512 Q5_1 GGUF (10 GiB of the DiT resident on the compute card, measured peaks 11.9 / 8.3 GiB, 1.6 GiB of activations).
 const GGUF = { family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: undefined };
@@ -109,9 +109,9 @@ test("say names the recipe, the two cards and their roles, once", () => {
 
 test("--resident-gb reaches the plan; a plain-pin recipe refuses it; one the compute card cannot hold beside the activations is refused with the numbers", () => {
   assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "7.5" } }).residentGb, 7.5);
-  // the one plain-pin recipe (int8_convrot) is held back, so the planner refuses it by name whatever else the call says, before any card table is read
-  assert.throws(() => plan({ ...HELD21, unet: INT8, flags: { placement: "multicard", "resident-gb": "3" }, cards: never }), /int8_convrot.*held back/s);
-  assert.throws(() => plan({ ...HELD21, unet: INT8, cards: never }), /int8_convrot.*held back/s);
+  // the one plain-pin recipe (int8_convrot) holds the whole DiT on the compute card, so it has no resident share to set
+  assert.throws(() => plan({ ...HELD21, unet: INT8, flags: { placement: "multicard", "resident-gb": "3" } }), /whole DiT on the compute card/);
+  assert.equal(plan({ ...HELD21, unet: INT8 }).recipe.id, "qwen-image-2.1/int8_convrot");
   // the compute card (15.9 GiB) less the recipe's 1.6 GiB of activations and the 0.5 GiB context holds at most 13.8 GiB of the DiT
   assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "14" } }), /--resident-gb 14.*compute card \(idx 2, 15\.9 GiB\).*1\.6 GiB for the sampler's activations.*at most 13\.8 GiB/s);
 });
