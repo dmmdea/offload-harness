@@ -2228,7 +2228,16 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
 
   | node | measured | n | working-set swing | headroom adopted |
   |---|---|---|---|---|
-  | (none yet: the first acceptance runs of cluster overflow, on the nodes that take it, are the first) | | | | 8 (chosen) |
+  | reference 3-card box | 2026-10-11 | 30 | **lane-run swing, not interactive-use swing.** Per run, over the lane's own samples (every 0.5 s; 89 to 2,272 per run): system commit less the lane process tree's private bytes moved a median of 9.9 GiB (range 0.5 to 44.9) and available RAM plus the tree's working set a median of 5.4 GiB (0.3 to 35.7). The raw system counters, which include the lane's own load, moved commit a median of 27.9 GiB (7.1 to 69.3) and available RAM 16.4 GiB (2.3 to 36.2) | 8 (chosen) |
+
+  The row is the 30 lane timelines (`timeline.csv`, one per Wan 2.x multi-card run) of the 2026-10-11 acceptance work on that box,
+  not a run made for this table. The sampler read the system commit and available counters at the same instants as the lane's
+  process tree (private bytes, working set), so the swing is that of a box with a lane running; other tenants' jobs are mixed in
+  (one run read 154 GiB committed while the lane's own private peak was 26.4 GiB), as are the driver and the display. It is
+  therefore an upper bound on what a lane-free interactive session moves and says nothing yet about interactive use. The
+  largest per-run swings (44.9 and 35.7 GiB) exceed the 8 GiB headroom; the headroom stays the chosen floor, since the rule
+  already counts a running lane in the commit and available readings. The 2026-10-14 before/after snapshot pairs (4 runs) are not
+  folded in: they show one vLLM seat's load, not a swing. Rows for the other nodes are still owed.
 
 * **What each render held is recorded, not guessed.** Every sampled GPU render records, beside its VRAM peak, the peak
   PRIVATE and the peak RESIDENT memory of its process tree (`gpulease.TreeMemory`, sampled by gpugen on the same tick) into
