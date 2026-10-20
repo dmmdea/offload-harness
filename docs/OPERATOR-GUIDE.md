@@ -2301,6 +2301,18 @@ right answers), SHAPE-ONLY (`nonempty:`/`min_items:` alone — passes garbage). 
 happens; fix the acceptance before reusing the contract (authoring rule: anchor ≥1 check to
 content that appears in the docs but not in the goal; contracts/README.md).
 
+Previewing a contract without running it (register D-109): `agent_delegate` takes an optional `lint_only: true`. The call
+does everything intake does (context_paths read, caps, validation, the acceptance lint), then returns before any
+dispatch: no job, no GPU lease, no queue entry, no seat warm-up, and no model runs. The answer is
+`{lint_only: true, dispatched: false, subtasks: [{index, acceptance_lint, placement: {route, where, node, reason}}]}`; a
+subtask intake refused is a contract-class defer at its own index, as in a real call. `placement` is what the joint deal
+would choose from the readings taken now (the local lease file, the local seat's in-flight count, the run line, and one
+health read per fleet node): `where` is `local`, `node` (named in `node`), `capacity_wait` (every eligible node is full),
+`no_eligible_node` or `not_computed`. Only routes `auto`, `remote` and `local` are read ahead; `spread` and `queue` answer
+`not_computed` with the reason, and the placement reads are bounded at 4 s, so a down node cannot hold the call. The pick
+is a preview: a lease taken or a refusal before the real call can still move it. Use it to fix acceptance and size a
+contract for free before paying for the run.
+
 Closed-at authority: a contract whose checks all carry an authority qualifier (`@answer:`, `@field=<name>:`,
 `@grounded:`; contracts/README.md) and all passed publishes the weakest of them as
 `results[].acceptance_authority` (`answer`, `field` or `grounded`), and the delegation-log row carries the same

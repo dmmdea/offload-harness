@@ -390,6 +390,14 @@ that is not there, a context past the box's cap, a blank goal), so a valid sibli
 - **The valid subtasks run** as they always did, and the call is flagged `isError` by the same rule as any other result
   (nothing succeeded and something failed, was lost or was skipped), so a rejection beside a delivered answer is a
   successful call. `acceptance_lint` stays on the result it belongs to.
+- **`lint_only: true` stops after the lint (D-109).** `agent_delegate` runs intake and `LintAcceptance` exactly as above,
+  then returns before `RunWith`: no job id, no lease, no queue, no seat warm-up, no model. The reply is
+  `{lint_only, dispatched: false, note, subtasks: [{index, acceptance_lint, placement: {route, where, node, reason}}]}`,
+  one row per subtask sent (a rejected one is the same contract-class defer, at its index). The placement comes from
+  `delegate.PlanPlacement`, which takes only the readings `RunWith` takes before it deals (the lease file, the local
+  seat's in-flight count, the run registry, one `/fleet/health` GET per node, all bounded at 4 s) and calls the same deal
+  (`dealAutoRemoteRoom`); routes `spread` and `queue` answer `where: not_computed`. It is a preview of the deal, not a
+  promise: a lease or a node's refusal between the preview and the real call can change it.
 - **A caller that reads `results[i]` by index must tolerate a contract-class defer inside an otherwise delivered call.**
   The position of a result is the position of the subtask.
 - **Two refusals stay whole-call.** More than 8 subtasks (`agent_delegate`) is refused for its number, counted on the

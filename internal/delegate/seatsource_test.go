@@ -1,7 +1,7 @@
 package delegate
 
 // C-95: which source supplies the LOCAL seat. On a box that declares layers the
-// placement table's seat wins over agent_model (the documented ADR 0039 rule), so
+// placement table's seat wins over agent_model (the documented ADR 0052 rule), so
 // a config copy that repoints agent_model but keeps the layers still runs on the
 // layer's seat; a plain box hands the runner no seat and the pipeline resolves the
 // config's agent_model. The CLI/pipeline notes (config.AgentModelShadowNote,

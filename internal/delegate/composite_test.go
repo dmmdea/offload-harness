@@ -1,6 +1,6 @@
 package delegate
 
-// The composite-tier runner (ADR 0039, 0.116.0): a LOCAL placement is decided
+// The composite-tier runner (ADR 0052, 0.116.0): a LOCAL placement is decided
 // once, over the placement table, and the decision drives the seat the local
 // runner is handed, the `placed` block on the wire, the ledger's layer column,
 // the pair-long capacity wait and the guard-named defers. Every test injects

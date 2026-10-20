@@ -789,6 +789,11 @@ var compactKeep = []compactKeepEntry{
 		Sentence: "The whole call has a deadline below the MCP client's abort (agent_call_deadline_sec, default 1,500 s, counted from arrival): at it the finished subtasks' results come back and every unfinished one is a budget defer whose reason opens `call deadline reached; N unfinished` — a result shape, not a failure; re-issue those subtasks in a smaller call.",
 		Why:      "the call deadline: the finished subtasks' results come back and every unfinished one is a budget defer whose reason opens call deadline reached, a result shape and not a failure; the caller re-issues those subtasks in a smaller call",
 	},
+	{
+		Tools:    []string{"agent_delegate"},
+		Sentence: "Set lint_only:true to preview without dispatching: the call returns each subtask's acceptance_lint and the placement the deal would give it right now, and runs no model, takes no lease and starts no job.",
+		Why:      "lint_only is the way to check acceptance and see the placement for free: without it a caller pays a full run to learn what a lint costs nothing to say",
+	},
 }
 
 // compactKeepByTool is the keep-list indexed by tool name: the set of sentences compact keeps beyond the opening ones.

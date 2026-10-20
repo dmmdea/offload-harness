@@ -27,7 +27,7 @@
 //	slow       feasibleFinal excluded it: one tool step and a minimal answer
 //	           do not fit the contract's effective wall at its rate (W-05)
 //	layer      a composite node's placement table refused or would wait
-//	           (ADR 0039); detail is the table's own Reason
+//	           (ADR 0052); detail is the table's own Reason
 //	unfit(ctx) the contract's estimate + reserve does not fit the advertised
 //	           ceiling
 //	queue      saturated(): the node's own admission ceiling says the next
