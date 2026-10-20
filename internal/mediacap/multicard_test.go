@@ -72,8 +72,8 @@ func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 			measured++
 		}
 	}
-	if measured != 5 {
-		t.Errorf("%d measured rows; the 2512 Q5_1, krea2 bf16 and qwen-image-2.1 bf16 and int8_convrot image rows and the 2511 fp8mixed edit row ran card-only", measured)
+	if measured != 6 {
+		t.Errorf("%d measured rows; the 2512 Q5_1, krea2 bf16 and qwen-image-2.1 bf16 and int8_convrot image rows and the 2511 fp8mixed and qwen-image-2.1 bf16 edit rows ran card-only", measured)
 	}
 	if blocked != 0 {
 		t.Errorf("%d held-back rows; every row has had a card-only run, so none is held back", blocked)
