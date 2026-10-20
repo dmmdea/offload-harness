@@ -15,6 +15,7 @@ call, every limit and every door. The decision is recorded in
 - What is the sidecar protocol, and what does each failure class mean?
 - What leaves the machine when a browse runs?
 - How do I verify an install without risking a real page?
+- What does a `BROWSER_UNAVAILABLE` that says the CDP handshake timed out, or a `TIMEOUT` with no browser named, mean?
 
 ## Scope
 
@@ -250,7 +251,7 @@ endpoint keeps its own spend ledger.
 | `browse_python` | The sidecar venv's interpreter (printed by the installer). |
 | `browse_script` | The installed `runner.py`. |
 | `browse_decision_url` | Loopback decision endpoint. Must be plain `http` on `127.0.0.1`, `::1` or `localhost`, or the lane stays unconfigured and the load warns. |
-| `browse_browser` | `chrome`, `edge`, `brave`, `chromium`, or empty for the first running browser with remote debugging allowed. |
+| `browse_browser` | `chrome`, `edge`, `brave`, `chromium`, or empty for the first running browser with remote debugging allowed. Both read the everyday browser's toggle, and recent Chromium builds make someone click Allow for every run. A named browser is pinned through its `DevToolsActivePort` socket, whose handshake gets about 10 s, so an unattended run ends `BROWSER_UNAVAILABLE` (the reason names the Allow prompt). Left empty, discovery has no handshake deadline: an unanswered prompt is no handshake timeout there, the run waits until `browse_timeout_sec` and ends `TIMEOUT`. See [Install](#install), step 2, and Error handling. Prefer `browse_cdp_url`. |
 | `browse_cdp_url` | Pins the lane to ONE browser endpoint, e.g. `http://127.0.0.1:9333` (resolved through `/json/version`) or a `ws://` URL. Loopback host, a real port, no credentials, query or fragment; an `http://` value is the endpoint root (no path) and a `ws://` value a `/devtools/` socket. Anything else leaves the lane unregistered. Wins over `browse_browser`. Use it for a dedicated agent profile (below). |
 | `browse_activate_tab` | Default false. Brings the lane's own tab to the front of its window once per run, so the page renders frames like a foreground tab (see [Background tab rendering](#background-tab-rendering)). Recommended for a dedicated agent browser. Honoured only together with `browse_cdp_url`: without it the setting is ignored (status says so, the load warns) and the lane runs as before, because activating the tab switches the window's active tab, which must never happen in the operator's everyday browser. |
 | `browse_timeout_sec` | One run's wall budget. Default 300. |
@@ -299,10 +300,13 @@ telemetry, and prints one JSON line with the `browse_python` and `browse_script`
    and `browse_cdp_url: "http://127.0.0.1:9333"`. Log in once, in that window, to the sites the agent
    may use. Recent Chromium builds make the operator approve EVERY new debugging connection to the
    main profile (the per-instance toggle at `<browser>://inspect/#remote-debugging` exposes only a
-   WebSocket and prompts per connection), so an unattended run against the main profile times out in
-   the handshake; a dedicated instance does not prompt, and keeps the agent out of the everyday
-   profile. The alternative is the toggle itself (`browse_browser` names which browser's
-   `DevToolsActivePort` to read), with someone present to approve each run. The harness never launches
+   WebSocket and prompts per connection), so an unattended run against the main profile cannot finish the
+   handshake. With `browse_browser` named it times out after about 10 s and ends `BROWSER_UNAVAILABLE` (whose
+   reason names the Allow prompt); with `browse_browser` left empty it waits on the popup until
+   `browse_timeout_sec` and ends `TIMEOUT`. A dedicated instance does not prompt, and keeps the agent out of the
+   everyday profile. The alternative is the toggle itself (`browse_browser` names which browser's
+   `DevToolsActivePort` to read; left empty, the lane uses the first browser that allows it), with someone
+   present to approve each run. The harness never launches
    or restarts the browser; register the dedicated port in your port inventory. On a dedicated profile that nobody
    looks at, also set `browse_activate_tab: true` (see [Background tab rendering](#background-tab-rendering)).
 3. Restart the MCP client so `offload_browse` appears in `tools/list`.
@@ -347,16 +351,43 @@ run so far as `partial`.
 | `BUSY` | Another browse run in this process holds the browser (one at a time). |
 | `BAD_INPUT` | Validation failed before any spawn (URL, goal, budgets, host, capture, route). |
 | `CLI_MISSING` | The interpreter or runner file is unreadable, or the sidecar cannot start. |
-| `BROWSER_UNAVAILABLE` | No running browser with remote debugging allowed, or it closed mid-run. |
+| `BROWSER_UNAVAILABLE` | The lane could not drive a browser: none is running with remote debugging allowed, the `browse_cdp_url` endpoint is down, it closed mid-run, or the debugging handshake did not finish (the everyday browser waiting on its Allow prompt, or a pinned endpoint that is not answering; see below the table). |
 | `DECISION_UNAVAILABLE` | The loopback endpoint refused, errored, or returned something unusable. |
 | `TEXT_UNAVAILABLE` | The local seat could not write a field value. |
 | `HOST_NOT_ALLOWED` | The page left `allow_hosts` (or `browse_hosts`). |
 | `DENIED` / `denied` | A denied control was about to be executed. |
 | `blocked` | The model reported it cannot proceed. |
 | `budget` | `max_actions` was exhausted. |
-| `TIMEOUT` | No result within `browse_timeout_sec`; the process tree was killed. |
+| `TIMEOUT` | No result within `browse_timeout_sec`; the process tree was killed. With neither `browse_browser` nor `browse_cdp_url` set, this is also how an Allow prompt nobody answers ends (see below the table). |
 | `RUNNER_FAILED` | The sidecar exited without a result, or the capture dir could not be created. |
 | busy | Another browse run in this process holds the operator's browser. |
+
+**A handshake that does not finish.** Recent Chromium builds hold every new debugging connection to the everyday
+browser's profile (the per-instance toggle at `<browser>://inspect/#remote-debugging`) until the operator clicks
+**Allow**. A run nobody is watching ends differently by how the lane reached the browser:
+
+- **`browse_browser` named.** The lane pins the browser's `DevToolsActivePort` socket, and browser-harness gives that
+  WebSocket handshake about 10 s, so the run ends `BROWSER_UNAVAILABLE`. The reason says the browser did not approve the
+  debugging connection, names the Allow prompt and the way out (the dedicated agent browser of [Install](#install),
+  step 2, which never prompts), and ends with browser-harness's own first clause: `CDP WS handshake failed: timed out
+  during opening handshake`, a 403 rejection, or `permission-blocked`. The browser is not dead.
+- **Neither `browse_browser` nor `browse_cdp_url` set (discovery).** browser-harness waits on the popup with no handshake
+  deadline, so an unanswered prompt is no handshake timeout: the run waits until `browse_timeout_sec` and ends
+  `TIMEOUT`. Only browser-harness's own `permission-blocked`, which it raises when the browser answers 403 or the
+  pending connection ends before approval, ends it sooner, as `BROWSER_UNAVAILABLE` with the reason above.
+- **`browse_cdp_url` set.** The pinned endpoint's handshake gets about 10 s too, but a dedicated agent browser never
+  prompts, so a timeout there is not evidence of a prompt: the browser may be hung or starved by a heavy local job, and
+  the way out the reason above gives is the setup this run already has. The reason is hedged. It says the browser at
+  `browse_cdp_url` did not finish the debugging handshake, to check that a dedicated browser is running and responsive,
+  and that a browser which asks per connection (a pin at the everyday browser's own endpoint) is waiting on its Allow
+  prompt. It ends with the same first-clause evidence.
+
+The reason keeps only that first clause; the sidecar writes the whole text browser-harness raised to its stderr. A
+sidecar installed before this wording passes browser-harness's own text through instead; for `browse_browser` and a
+`ws://` `browse_cdp_url` that text ends with a hint about network policy, an expired URL and a Browser Use cloud
+browser, none of which applies: the browser is up and the lane never uses a cloud browser. Rerun
+`setup/browse/install.ps1` to get the named cause. An endpoint nothing answers on (browser-harness says it is
+unreachable) or a refused connection is a different failure and keeps browser-harness's own text.
 
 ## Security and privacy notes
 
@@ -414,12 +445,18 @@ is not proof.
   unattended door alike, nothing unless the start line carries a JSON `true`, and a failure swallowed, logged
   once and not retried. `main()` runs against fake jev and browser-harness modules to pin that an activating
   run stops the lane's daemon (only its own name) before the Agent starts, that a run that does not activate
-  never does, and that a failed stop is logged and the run goes on.
-- Verify an install without touching a real page: with the browser running and remote debugging
-  ticked, call `offload_browse` with a start URL on a harmless page you own, `allow_hosts` set to its
-  host, `max_actions` 3 and a goal that only reads. Check that `status` is `done`, that `final.url`
-  is the page you named, and that `offload_status remote.browse_configured` is true. Then ask for a
-  goal that needs a "Send" control and confirm the run ends `denied` rather than clicking.
+  never does, and that a failed stop is logged and the run goes on. `_classify` is driven with fake exceptions shaped like
+  browser-harness's own: a handshake that times out or is rejected with HTTP 403, and `permission-blocked`, are named as the
+  Allow prompt (before and after the agent is built) with the network and cloud hint dropped and browser-harness's first
+  clause kept as the evidence, while an unreachable endpoint (refused, or taking the connection and never answering:
+  `unreachable after 30s: timed out` comes before any handshake), a refused handshake and a daemon that never came up keep
+  their own text. A run pinned with `browse_cdp_url` gets the hedged reason instead, and `main()` runs against the same
+  fake modules to pin that it passes the pin (a blank value is no pin) and logs the whole text browser-harness raised.
+- Verify an install without touching a real page: with the browser running (the dedicated agent browser, or the
+  everyday one with its toggle ticked and you at the screen to click Allow), call `offload_browse` with a start URL
+  on a harmless page you own, `allow_hosts` set to its host, `max_actions` 3 and a goal that only reads. Check that
+  `status` is `done`, that `final.url` is the page you named, and that `offload_status remote.browse_configured` is
+  true. Then ask for a goal that needs a "Send" control and confirm the run ends `denied` rather than clicking.
 
 ## Common pitfalls
 
@@ -429,6 +466,10 @@ is not proof.
 - Sending an agent-door browse (including `local-agent --allow-browse`) without a host list, with a
   non-local `route`, without an audit path, or to a node without `agent_allow_browse`.
 - Expecting the harness to start the browser or tick the remote-debugging box.
+- Running the lane unattended against the everyday browser's toggle (`browse_browser` named or left empty). The browser
+  holds each connection until someone clicks Allow, so every run ends `BROWSER_UNAVAILABLE` with a timed-out handshake
+  (named) or `TIMEOUT` (left empty). The browser is not dead: use the dedicated agent browser of [Install](#install),
+  step 2.
 - Writing a menu-then-confirm flow as one step of the goal. When the menu item and the confirm button of the
   dialog it opens carry the same label (an "Archive" item, then an "Archive" button in the dialog), the
   decision model reads the second click as the step it just took and chooses BLOCKED (measured: the run

@@ -124,7 +124,9 @@ every model call, every limit and every door.
   outcome.
 - The browser must already be running with "Allow remote debugging for this browser instance"
   ticked at `<browser>://inspect/#remote-debugging`. The harness never launches or restarts the
-  operator's browser.
+  operator's browser. *(amended 2026-10-03: the toggle is the attended alternative; the recommended setup is a
+  dedicated agent browser pinned with `browse_cdp_url`, which needs no tick and shows no prompt, see the amendment
+  below)*
 - The lane is as fresh as its lockfile. Bumping either pin is a lockfile change.
 - One browser at a time: a second concurrent call in the same process is refused as busy.
 
@@ -177,3 +179,27 @@ install root (`home` in the config, else `~/.local-offload`, the earlier locatio
 worktree, and the grant is refused when no audit path can be resolved. An earlier trail left at the old
 location on a node that sets `home` is not moved; see the amendment to
 [ADR 0004](0004-worktree-confinement-audit-outside.md).
+
+## Amendment 2026-10-03 (register C-93, the toggle is the attended alternative to a dedicated browser)
+
+This ADR was written around the operator's everyday browser with its per-instance toggle ticked at
+`<browser>://inspect/#remote-debugging`, and the Consequences bullet above reads as if that tick were the way to set the
+lane up. 0.142.0 (`browse_cdp_url`) already moved the recommendation: recent Chromium builds hold every new debugging
+connection to the everyday profile until the operator clicks Allow, and browser-harness gives the WebSocket handshake
+of an endpoint the lane pins (a named browser, or `browse_cdp_url`) about 10 s, so a run nobody is watching times out
+there (a lane left to discovery has no handshake deadline and waits until `browse_timeout_sec`, ending `TIMEOUT`). The
+recommended setup is a dedicated agent browser the operator starts with its own `--remote-debugging-port` and
+`--user-data-dir` and pins with `browse_cdp_url`;
+it does not prompt and keeps the agent out of the everyday profile. The toggle stays supported as the attended
+alternative, with someone at the screen to click Allow.
+
+The recorded decision is unchanged: the harness still never launches or restarts the browser, and the deny-list, the
+host allowlist, the unattended agent doors and the node opt-in are as decided. This amendment also records two
+alignments with what shipped. The sidecar names the cause: a handshake that times out or is rejected, or
+browser-harness's own `permission-blocked`, defers `BROWSER_UNAVAILABLE` (the class list in item 7 is unchanged) with a
+reason that names the Allow prompt and the dedicated browser (hedged for a run already pinned with `browse_cdp_url`,
+whose dedicated browser does not prompt: it then says the endpoint did not finish the handshake and asks whether the
+browser is running and responsive), where it used to pass on browser-harness's hint about network policy and cloud
+browsers (`setup/browse/runner.py`, `_classify`). And "the operator's own browser" in the
+title and Context covers a browser the operator runs for the agent: with a dedicated profile a run acts with the
+sessions the operator logged into that profile, which narrows the "real logged-in profile" consequence above.

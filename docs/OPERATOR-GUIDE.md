@@ -884,9 +884,20 @@ $env:LOCAL_OFFLOAD_BROWSE_BEARER = '<bearer>'
 local-agent --allow-browse --browse-hosts example.com "open the reports page and read the totals"
 ```
 
-Then, in the browser you want driven, open `<browser>://inspect/#remote-debugging` (`chrome://`,
-`edge://`, `brave://`) and tick **Allow remote debugging for this browser instance**. The harness never
-starts or restarts the browser. Restart your MCP client so `offload_browse` appears.
+Then start the browser the lane will drive. **Recommended: a dedicated agent browser**, the one `browse_cdp_url` names
+in step 2: start it yourself with its own port and profile directory, for example
+`brave.exe --remote-debugging-port=9333 --user-data-dir=<OFFLOAD_HOME>/browse/agent-profile`, and log in once, in that
+window, to the sites the agent may use. It shows no Allow prompt, so a run nobody is watching works, and the agent stays
+out of your everyday profile. The alternative is your everyday browser through its toggle (`browse_browser`, or left
+empty for the first browser that allows it): open
+`<browser>://inspect/#remote-debugging` (`chrome://`, `edge://`, `brave://`) and tick **Allow remote debugging for this
+browser instance**. Recent Chromium builds then ask you to click **Allow** on EVERY new connection, so use the toggle
+only with someone at the screen. A run started while nobody is there ends `BROWSER_UNAVAILABLE` when `browse_browser`
+is named (the sidecar waits only about 10 s for the click, and the reason says the browser is waiting on its Allow
+prompt) and `TIMEOUT` when it is left empty (nothing times out in the handshake, so the run waits until
+`browse_timeout_sec`); see [systems/browse-lane.md](systems/browse-lane.md), Error handling. The harness never starts
+or restarts the browser.
+Restart your MCP client so `offload_browse` appears.
 
 **Dedicated agent browser: turn on tab activation.** The lane opens its tab in the background, and Chromium
 draws almost no frames for a background tab, so a dialog that fades in can stay invisible to the model and the
