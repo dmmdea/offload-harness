@@ -31,7 +31,7 @@ const BF16 = "qwen_image_2.1_bf16.safetensors";
 const INT8 = "qwen_image_2.1_int8_convrot.safetensors";
 // qwen-image-2.1 has two rows, both held back (render/multicard-recipes.json "blocked"): the planner refuses them by name.
 const HELD21 = { family: "qwen-image-2.1", unet: BF16, clip: "qwen3vl_8b_bf16.safetensors" };
-// The launchable image row, and the default of plan(): the 2512 Q5_1 GGUF (3 GiB of the DiT resident on the compute card, peaks 4.9 / 12.6 GiB, 1.6 GiB of activations).
+// The launchable image row, and the default of plan(): the 2512 Q5_1 GGUF (10 GiB of the DiT resident on the compute card, measured peaks 11.9 / 8.3 GiB, 1.6 GiB of activations).
 const GGUF = { family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf", clip: undefined };
 // The measured edit row: the 2511 fp8mixed DiT through DisTorch2 (9 GiB resident), the other launchable row that splits its DiT.
 const FP8 = { route: "edit", family: "qwen-image-edit-2511", unet: "qwen_image_edit_2511_fp8mixed.safetensors", clip: undefined };
@@ -82,7 +82,7 @@ test("a plan: the lease's two non-display cards, the same pair, key and launch t
   assert.equal(p.launch.cudaVisibleDevices, w.launch.cudaVisibleDevices);
   assert.deepEqual(p.launch.env, w.launch.env);
   assert.equal(p.recipe.id, "qwen-image/gguf-q5_1");
-  assert.equal(p.residentGb, 3);
+  assert.equal(p.residentGb, 10);
   assert.equal(p.env.COMFY_INSTANCE, p.launch.key);
   assert.equal(p.env.COMFY_CARD_UUID, "");
   assert.match(p.launch.key, /^mc-/);
@@ -103,7 +103,7 @@ test("say names the recipe, the two cards and their roles, once", () => {
   const lines = [];
   plan({ say: (l) => lines.push(l) });
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 0 .*; compute cuda:1 = idx 2 .*; recipe qwen-image\/gguf-q5_1, 3 GiB of the DiT resident on the compute card; basis predicted/);
+  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 0 .*; compute cuda:1 = idx 2 .*; recipe qwen-image\/gguf-q5_1, 10 GiB of the DiT resident on the compute card; basis measured/);
 });
 
 test("--resident-gb reaches the plan; a plain-pin recipe refuses it; one the compute card cannot hold beside the activations is refused with the numbers", () => {
@@ -116,16 +116,17 @@ test("--resident-gb reaches the plan; a plain-pin recipe refuses it; one the com
 });
 
 test("a recipe whose per-card peak does not fit the leased cards (after --reserve-vram) is refused with the card and the figure", () => {
+  // 12 GiB cards: the recipe's 10 GiB share leaves the compute card too little beside the 1.6 GiB of activations and the 0.5 GiB context
   const small = W.parseCardTable([`0, ${U0}, Small A, 12288, 12000, Disabled, No`, `2, ${U2}, Small B, 12288, 12000, Disabled, No`].join("\n"));
-  assert.throws(() => plan({ cards: () => small }), /qwen-image\/gguf-q5_1.*storage card.*12\.6 GiB.*12\.0 GiB.*usable/s);
-  // a call that asks for less reserve fits where the default one does not: the 12.6 GiB storage peak against 13.0 GiB less the default 1.0 GiB reserve
+  assert.throws(() => plan({ cards: () => small }), /compute card \(idx 2, 12\.0 GiB\).*qwen-image\/gguf-q5_1.*at most 9\.9 GiB/s);
+  // 13 GiB cards hold the 11.9 GiB compute peak under the default 1.0 GiB reserve, and not under a 1.5 GiB one
   const tight = W.parseCardTable([`0, ${U0}, Tight A, 13312, 13000, Disabled, No`, `2, ${U2}, Tight B, 13312, 13000, Disabled, No`].join("\n"));
-  assert.throws(() => plan({ cards: () => tight }), /needs the storage card.*to hold 12\.6 GiB.*13\.0 GiB \(12\.0 GiB usable/s);
-  assert.ok(plan({ cards: () => tight, flags: { placement: "multicard", "reserve-vram": "0.2" } }), "a 0.2 GiB reserve leaves 12.8 GiB");
+  assert.ok(plan({ cards: () => tight }), "11.9 GiB fits 12.0 usable");
+  assert.throws(() => plan({ cards: () => tight, flags: { placement: "multicard", "reserve-vram": "1.5" } }), /needs the compute card.*to hold 11\.9 GiB.*13\.0 GiB \(11\.5 GiB usable/s);
 });
 
 test("the compute card's peak moves with the resident share, and --reserve-vram counts against both cards", () => {
-  // 2512 Q5_1 GGUF: 3 GiB resident is 4.9 GiB on the compute card. 13.2 GiB passes the activations check (at most 13.8) but is 15.1 GiB against 14.9 usable.
+  // 2512 Q5_1 GGUF: 10 GiB resident is 11.9 GiB on the compute card. 13.2 GiB passes the activations check (at most 13.8) but is 15.1 GiB against 14.9 usable.
   assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "12" } }), "13.9 GiB fits 14.9 GiB usable");
   assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "13.2" } }), /needs the compute card.*to hold 15\.1 GiB.*14\.9 GiB usable after --reserve-vram 1/s);
   assert.ok(plan({ flags: { placement: "multicard", "resident-gb": "13.2", "reserve-vram": "0.1" } }), "the same share fits when the call asks for less reserve");
@@ -146,9 +147,10 @@ test("a resident share below the recipe's moves the same bytes onto the storage 
   // --reserve-vram counts against the storage card too
   assert.ok(plan(share(5, { "reserve-vram": "0.5" })), "15.0 GiB fits 15.4 usable");
   assert.throws(() => plan(share(7, { "reserve-vram": "3.5" })), /needs the storage card.*to hold 13\.0 GiB.*12\.4 GiB usable/s, "13.0 GiB on the storage card against 15.9 - 3.5");
-  // the 2512 Q5_1 GGUF: 12.6 GiB on the storage card at the row's 3 GiB share, so a share of 0 puts all 14.3 GiB of the DiT there (15.6 GiB, the benchmark's measured peak)
-  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "0" } }), /needs the storage card.*to hold 15\.6 GiB/s);
-  assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "1" } }).residentGb, 1, "14.6 GiB on the storage card fits 14.9 usable");
+  // the 2512 Q5_1 GGUF: 8.3 GiB on the storage card at the row's 10 GiB share, so a share of 0 counts all 10 GiB more there (18.3 GiB)
+  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "0" } }), /needs the storage card.*to hold 18\.3 GiB/s);
+  assert.throws(() => plan({ flags: { placement: "multicard", "resident-gb": "3" } }), /needs the storage card.*to hold 15\.3 GiB/s, "the 3 GiB share that ran out of memory on the storage card at 928x1664");
+  assert.equal(plan({ flags: { placement: "multicard", "resident-gb": "4" } }).residentGb, 4, "14.3 GiB on the storage card fits 14.9 usable");
 });
 
 test("refused before any card table is read: no recipe, a --graph file, and no card named at all", () => {
@@ -399,8 +401,8 @@ test("WAN_COMPUTE_UUID names the compute card of the image placement too, refuse
 });
 
 test("the override is judged like any other choice: the recipe's resident and peak checks run on the card it names, not on the larger one", () => {
-  // 24 GiB beside 16 GiB: unnamed, the larger card (idx 0) computes. The GGUF recipe holds 4.9 GiB on the compute card at its 3 GiB share (+1 GiB per GiB of share)
-  // and 12.6 GiB on the storage card (which a larger share does not lower), against the 1 GiB --reserve-vram.
+  // 24 GiB beside 16 GiB: unnamed, the larger card (idx 0) computes. The GGUF recipe holds 11.9 GiB on the compute card at its 10 GiB share (+1 GiB per GiB of share)
+  // and 8.3 GiB on the storage card (which a larger share does not lower), against the 1 GiB --reserve-vram.
   const unequal = W.parseCardTable([`0, ${U0}, Test GPU Big, 24576, 24000, Disabled, No`, `2, ${U2}, Test GPU Small, 16384, 16000, Disabled, No`].join("\n"));
   const naming = { ...LEASE, WAN_COMPUTE_UUID: "2" };
   const share = (gb) => ({ cards: () => unequal, flags: { placement: "multicard", "resident-gb": String(gb) } });
@@ -420,7 +422,7 @@ test("the image placement's one line ends with the rule that chose the compute c
   const lines = [];
   plan({ cards: () => RANKED, say: (l) => lines.push(l) });
   assert.equal(lines.length, 1);
-  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 2 .*; compute cuda:1 = idx 0 .*; recipe qwen-image\/gguf-q5_1, 3 GiB of the DiT resident on the compute card; basis predicted; compute card chosen: the faster card: 300 W board power against 180 W$/);
+  assert.match(lines[0], /^placement: multicard on the GPU lease: storage cuda:0 = idx 2 .*; compute cuda:1 = idx 0 .*; recipe qwen-image\/gguf-q5_1, 10 GiB of the DiT resident on the compute card; basis measured; compute card chosen: the faster card: 300 W board power against 180 W$/);
   lines.length = 0;
   plan({ cards: () => [...RANKED, CARDS[1]], env: { ...LEASE, WAN_COMPUTE_UUID: "1" }, say: (l) => lines.push(l) });
   assert.match(lines[0], /compute card chosen: the faster card: 300 W board power against 180 W \(WAN_COMPUTE_UUID names "1", which does not name exactly one of the two cards \(idx 2, idx 0\); ranked instead\)$/);

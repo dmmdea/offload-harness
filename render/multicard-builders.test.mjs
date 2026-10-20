@@ -118,7 +118,7 @@ test("2512 GGUF multicard: the GGUF DisTorch2 loader on cuda:1, the fp8 encoder 
   assert.deepEqual(rest(g), rest(single));
   assert.deepEqual(g["1"], {
     class_type: "UnetLoaderGGUFDisTorch2MultiGPU",
-    inputs: { unet_name: Q2512.unet, compute_device: "cuda:1", virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: "cuda:1,3gb;cuda:0,*", eject_models: false },
+    inputs: { unet_name: Q2512.unet, compute_device: "cuda:1", virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: "cuda:1,10gb;cuda:0,*", eject_models: false },
   });
   assert.deepEqual(g["2"], { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: "qwen_2.5_vl_7b_fp8_scaled.safetensors", type: "qwen_image", device: "cuda:0" } });
   assert.deepEqual(g["3"], { class_type: "VAELoaderMultiGPU", inputs: { vae_name: "qwen_image_vae.safetensors", device: "cuda:0" } });

@@ -18,6 +18,19 @@ shared install. Two parts:
    read-only, so such a write would not corrupt the file: it would crash ComfyUI with a Windows access
    violation. None exists on the Wan load path read at ComfyUI 0.38.0 (under --gpu-only the weights are
    copied to the card, not assigned in place) and the runs made so far wrote none.
+   With the reader, and under the same OFFLOAD_RO_LOAD=1, a diffusion model whose every tensor is a plain
+   float (bf16, fp16, fp32) and that names no operations of its own is built with ComfyUI's mixed-precision
+   layers and an empty quantization config. Stock ComfyUI builds such a model with real weight tensors and,
+   under --gpu-only, moves it whole to the offload card (cuda:0) before DisTorch2 splits it
+   (comfy.sd.load_diffusion_model_state_dict: model.to(offload_device)), so a DiT bigger than one card runs
+   out of memory there (krea2 bf16, 24.48 GiB, on a 15.9 GiB card, 2026-10-20). The mixed-precision layers
+   create no weight until the load, and then take the file's tensor as it is (comfy/ops.py,
+   _load_quantized_module, a layer with no quantization entry), so the model is built empty, filled from the
+   read-only map without a copy, and its blocks reach the cards only through DisTorch2's allocation. That is
+   the path every unquantized layer of an fp8mixed checkpoint already takes (the 2511 edit). A GGUF or
+   quantized checkpoint (its loader passes its own operations, or the file carries a quantization marker)
+   keeps ComfyUI's own path. Here the loaded weights ARE the read-only map until DisTorch2 copies them to a
+   card, so the assumption above covers this path too.
 
 2. OffloadFreeForDecode, a pass-through LATENT node that sits between the last sampler and a plain
    VAEDecode. With --gpu-only the offload device IS the card, so ComfyUI's own "unload" frees
@@ -122,8 +135,40 @@ def _install_readonly_loader():
     _say("read-only safetensors reader installed (a safetensors file is mapped read-only, not copy-on-write)")
 
 
+def _install_lazy_diffusion_build():
+    import torch
+    import comfy.ops
+    import comfy.sd
+
+    original = comfy.sd.load_diffusion_model_state_dict
+    plain = (torch.bfloat16, torch.float16, torch.float32)
+
+    def weight_dtype(sd, metadata):
+        # the dtype holding most of the weight bytes, or None when a tensor is not a plain float or the file carries a quantization marker
+        if metadata and "_quantization_metadata" in metadata:
+            return None
+        sizes = {}
+        for name, tensor in sd.items():
+            if name.endswith((".comfy_quant", "scaled_fp8")) or tensor.dtype not in plain:
+                return None
+            sizes[tensor.dtype] = sizes.get(tensor.dtype, 0) + tensor.numel() * tensor.element_size()
+        return max(sizes, key=sizes.get) if sizes else None
+
+    def load_diffusion_model_state_dict(sd, model_options={}, metadata=None, disable_dynamic=False):
+        if model_options.get("custom_operations") is None:
+            dtype = weight_dtype(sd, metadata)
+            if dtype is not None:
+                model_options = dict(model_options, custom_operations=comfy.ops.mixed_precision_ops({}, compute_dtype=dtype))
+                _say(f"diffusion model built empty and filled from the map ({len(sd)} tensors, {dtype}), not built on the offload card")
+        return original(sd, model_options=model_options, metadata=metadata, disable_dynamic=disable_dynamic)
+
+    comfy.sd.load_diffusion_model_state_dict = load_diffusion_model_state_dict
+    _say("lazy diffusion-model build installed (an unquantized DiT is built without weights and takes the read-only map's tensors)")
+
+
 if os.environ.get("OFFLOAD_RO_LOAD") == "1":
     _install_readonly_loader()
+    _install_lazy_diffusion_build()
 
 
 # ---------------------------------------------------------------------------------------------

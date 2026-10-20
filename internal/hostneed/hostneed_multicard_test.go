@@ -61,6 +61,10 @@ func TestACardOnlyImageCallWithAMeasuredRowDeclaresTheRowOnTwoLeasedCards(t *tes
 			t.Errorf("the detail must say why (%q missing): %q", want, n.Detail)
 		}
 	}
+	// the 2512 Q5_1 image row was measured card-only too (2026-10-20, 1328x1328 and 928x1664)
+	if m := need(t, img2512Cmd, imgFacts(t, 15.9, 15.9)); m.GiB != 0 || !m.CardOnly {
+		t.Fatalf("a multicard 2512 Q5_1 call on two fitting cards: %v, want 0 and card-only", m)
+	}
 	// the flag in its --name=value form is the same call (the Go side splits it; the runner refuses it, so the call never runs single undeclared)
 	if m := need(t, strings.Replace(editFp8Cmd, "--placement multicard", "--placement=multicard", 1), imgFacts(t, 15.9, 15.9)); m.GiB != 0 {
 		t.Fatalf("--placement=multicard: %v", m)
@@ -69,7 +73,7 @@ func TestACardOnlyImageCallWithAMeasuredRowDeclaresTheRowOnTwoLeasedCards(t *tes
 
 func TestACardOnlyImageCallWithoutAMeasuredRowKeepsTheOrdinaryEstimate(t *testing.T) {
 	f := imgFacts(t, 15.9, 15.9)
-	for name, cmd := range map[string]string{"2512 GGUF": img2512Cmd, "2511 GGUF": editGgufCmd} {
+	for name, cmd := range map[string]string{"2511 GGUF": editGgufCmd} {
 		got, plain := need(t, cmd, f), need(t, without(cmd), f)
 		if got.GiB != plain.GiB || got.Source != plain.Source || got.GiB <= 0 {
 			t.Errorf("%s: %v, want the ordinary %v (a predicted row declares nothing less than the set until a run with the read-only loader has measured its host growth)", name, got, plain)
@@ -221,8 +225,8 @@ func TestTheEditRouteReadsThePlacementFromTheFacts(t *testing.T) {
 		t.Fatalf("with the binding's placement: %v %v, want 0", n, ok)
 	}
 	img := config.Config{ComfyDir: f.Cfg.ComfyDir, ImageGenFamily: "qwen-image", ImageGenCkpt: "qwen-image-2512-Q5_1.gguf"}
-	if n, ok := ForRoute(RouteImage, img, f); !ok || n.GiB <= 0 || !strings.Contains(n.Detail, "predicted") {
-		t.Fatalf("a predicted row declares the set: %v %v", n, ok)
+	if n, ok := ForRoute(RouteImage, img, f); !ok || n.GiB != 0 || !strings.Contains(n.Detail, "qwen-image/gguf-q5_1") {
+		t.Fatalf("the image binding's placement, on the measured 2512 Q5_1 row: %v %v, want 0", n, ok)
 	}
 	// the 2.1 bf16 row is held back, so the same placement is no recipe there: the ordinary estimate, with no card-only note
 	held := config.Config{ComfyDir: f.Cfg.ComfyDir, ImageGenFamily: "qwen-image-2.1", ImageGenCkpt: "qwen_image_2.1_bf16.safetensors", ImageGenCLIP: "qwen3vl_8b_bf16.safetensors"}
@@ -260,7 +264,7 @@ func TestOnlyAMeasuredCardOnlyDeclarationIsMarkedCardOnly(t *testing.T) {
 		cmd string
 		f   Facts
 	}{
-		"a predicted row":                      {img2512Cmd, two},
+		"a predicted row":                      {editGgufCmd, two},
 		"a held-back row":                      {img21Cmd, two},
 		"a row that does not fit":              {editFp8Cmd, imgFacts(t, 12, 12)},
 		"one card":                             {editFp8Cmd, imgFacts(t, 15.9)},

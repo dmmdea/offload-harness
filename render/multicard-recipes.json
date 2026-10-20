@@ -45,13 +45,13 @@
       "unet": { "loader": "gguf-distorch2", "residentGb": 10 },
       "clip": { "loader": "plain" },
       "loraLoader": "LoraLoaderModelOnly",
-      "basis": "predicted",
-      "peakGiB": { "compute": 11.9, "storage": 12.6 },
+      "basis": "measured",
+      "peakGiB": { "compute": 11.9, "storage": 8.3 },
       "activationsGiB": 1.6,
       "maxPixels": 1769472,
-      "maxPixelsNote": "the first live two-card run of this recipe, at 928x1664 (1.54 MP), ran out of memory in the sampler, and no canvas of this row has been measured: the cap is chosen, not measured",
+      "maxPixelsNote": "measured at 1328x1328 (1,763,584 pixels, the family default) and 928x1664: the cap is 1536x1152 (1,769,472), 0.3 % above the larger measured canvas",
       "packs": ["multigpu", "gguf"],
-      "evidence": "2512 bf16 (38 GiB) fits no card, so 2512 is the Q5_1 GGUF (14.3 GiB). No 2512 arm ran on two cards; the same-size 2511 Q5_1 GGUF did (edit-gguf-full on two cards: all 14.3 GiB on the storage card left 0.3 GiB free there), and the benchmark predicted a 3 GiB resident share of the DiT on the compute card (storage about 12.6 GiB, compute about 4.9 GiB) without running it. The fp8 text encoder stays whole on the storage card. Canvas cap (maxPixels 1472700, 1.47 MP): chosen, not measured. The row's first live two-card run, at 928x1664 (1.54 MP) with the 3 GiB resident share, ran out of memory in the sampler (torch OutOfMemoryError on device 0, the storage card, 56 s in), so the figures above do not hold at that canvas, and no 2512 canvas has been measured on two cards. 1.47 MP is the largest canvas the evidence shows a same-size Q5_1 GGUF running on two cards (the 2511 edit below, every weight on the storage card), and it sits below the canvas that failed; the qwen-image default canvas (1328x1328, 1.76 MP) is above it, so a call that names no size is refused too. A measured arm at a larger canvas, or a re-split that fits 928x1664, replaces the cap."
+      "evidence": "2512 bf16 (38 GiB) fits no card, so 2512 is the Q5_1 GGUF (14.3 GiB). Measured 2026-10-20 on the 5070 Ti (compute, cuda:1) and a 5060 Ti (storage, cuda:0), 10 GiB of the DiT resident on the compute card, the fp8 text encoder whole on the storage card and freed after the encode, full preset (50 steps, cfg 4): 1328x1328 in 415.2 s with peaks 11.84 GiB on the compute card and 8.26 GiB on the storage card; 928x1664 in 401.3 s with peaks 11.74 and 8.26 GiB. Host physical memory stayed within 3.5 GiB of where it started for the whole run, beyond a dip while the weights streamed to the cards. Commit grew by about the VRAM in use, which Windows charges to commit under WDDM; no weight was charged. The storage peak is the text-encode stage (encoder, VAE, context); the compute peak is the resident share plus the sampler's activations. The earlier 3 GiB resident share ran out of memory on the storage card at 928x1664, which is why 10 GiB of the DiT sits on the compute card."
     },
     {
       "id": "krea2/bf16",
@@ -62,15 +62,15 @@
       "clipMatch": "bf16",
       "defaultClip": "qwen3vl_4b_bf16.safetensors",
       "clipType": "krea2",
-      "unet": { "loader": "distorch2", "residentGb": 12 },
+      "unet": { "loader": "distorch2", "residentGb": 11 },
       "clip": { "loader": "plain" },
-      "basis": "predicted",
-      "peakGiB": { "compute": 14.3, "storage": 13.7 },
+      "basis": "measured",
+      "peakGiB": { "compute": 13.2, "storage": 13.1 },
       "activationsGiB": 2.0,
       "maxPixels": 1572864,
-      "maxPixelsNote": "chosen, not measured: 1.5 MP (1024x1536); the default 1024x1024 is inside it, the 2048x1024 bake-off canvas is not",
+      "maxPixelsNote": "measured at 1536x1024 (1,572,864 pixels): the default 1024x1024 is inside it, the 2048x1024 bake-off canvas is not",
       "packs": ["multigpu"],
-      "evidence": "The bf16 DiT (24.5 GiB) with the Qwen3-VL-4B bf16 text encoder (8.3 GiB) is 33 GiB of weights, more than one card and less than the pair. 12 GiB of the DiT stays on the compute card (12 + 2.0 activations at 1024x1024 + 0.3 context = 14.3 GiB) and the other 12.5 GiB on the storage card beside the VAE (13.7 GiB with decode headroom). The text encoder is built whole on the storage card at the text-encode stage (8.3 + VAE + context, about 9 GiB) and freed before the DiT's donor blocks land, as the fp8 Qwen2.5-VL encoder of the 2511 edit was in the 2026-10-11 two-card benchmark under --gpu-only and --cache-none. Predicted from that run and the September pooled krea2 renders, not yet run card-only."
+      "evidence": "The bf16 DiT (24.48 GiB) with the Qwen3-VL-4B bf16 text encoder (8.27 GiB) is 33 GiB of weights, more than one card and less than the pair. Measured 2026-10-20 on the 5070 Ti (compute, cuda:1) and a 5060 Ti (storage, cuda:0), turbo recipe (8 steps, cfg 1): 1536x1024 with 11 GiB of the DiT resident on the compute card in 68.5 s, peaks 13.15 GiB on the compute card and 13.10 GiB on the storage card; 1024x1024 with 12 GiB resident in 82.1 s, peaks 14.30 and 12.10 GiB. The text encoder is built whole on the storage card for the encode and freed before the DiT's blocks land (--cache-none). Host physical memory came back to within 2.5 GiB of where it started, beyond a dip while the weights streamed to the cards; no weight was charged to host commit. The run needs the harness pack's lazy diffusion-model build (render/comfyui-ext): stock ComfyUI builds an unquantized DiT whole on the storage card before DisTorch2 splits it, and the first card-only run of this row ran out of memory there, 23 s in, with 15.03 GiB allocated."
     },
     {
       "id": "qwen-image-edit-2511/fp8mixed",

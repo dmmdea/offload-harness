@@ -892,7 +892,7 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
   lease directory that will not open each answer `gpu_lease_unavailable` with the reason; the call does not fall back to the whole node or to the
   default instance, where the runner would refuse a call that names no cards, every time, after the node was held for it. A router may place such
   a call on another node.
-- *No recipe, no lease.* A binding that has no row in `render/multicard-recipes.json` (krea2, which keeps its `--pool-*` seat; 2512 bf16, 38 GiB, which
+- *No recipe, no lease.* A binding that has no row in `render/multicard-recipes.json` (krea2 in any file but the bf16 DiT with the bf16 text encoder; 2512 bf16, 38 GiB, which
   fits no card; sdxl; hidream; the 2.1 edit; an int8, int4 or nf4 text encoder, whose render moved off the bf16 one by 28.65 dB PSNR against the 30 dB
   gate; the 2.1 int8 convrot and bf16 DiTs, whose rows are held back, so the reason names the row and says why) is refused before any lease is spent, naming
   the key. The same goes for an edit binding whose

@@ -19,7 +19,7 @@ test("the devices: the storage card is cuda:0 and the compute card cuda:1, the s
   assert.equal(MULTICARD_COMPUTE, "cuda:1");
 });
 
-test("the table holds the six recipes, each with its evidence and an honest basis; only the 2511 fp8mixed row was measured with the read-only loader", () => {
+test("the table holds the six recipes, each with its evidence and an honest basis; the 2512 Q5_1 and krea2 bf16 image rows and the 2511 fp8mixed edit row were measured card-only", () => {
   assert.deepEqual(RECIPES.map((r) => r.id).sort(), [
     "krea2/bf16", "qwen-image-2.1/bf16", "qwen-image-2.1/int8_convrot", "qwen-image-edit-2511/fp8mixed", "qwen-image-edit-2511/gguf-q5_1", "qwen-image/gguf-q5_1",
   ]);
@@ -29,7 +29,7 @@ test("the table holds the six recipes, each with its evidence and an honest basi
     assert.ok(r.peakGiB.compute > 0 && r.peakGiB.storage > 0 && r.activationsGiB > 0, r.id);
     assert.ok(["image", "edit"].includes(r.route), r.id);
   }
-  assert.deepEqual(RECIPES.filter((r) => r.basis === "measured").map((r) => r.id), ["qwen-image-edit-2511/fp8mixed"]);
+  assert.deepEqual(RECIPES.filter((r) => r.basis === "measured").map((r) => r.id), ["qwen-image/gguf-q5_1", "krea2/bf16", "qwen-image-edit-2511/fp8mixed"]);
   // a row that may not launch says why, in a sentence; the two qwen-image-2.1 rows are held back, so the launchable image rows are the 2512 Q5_1 GGUF and krea2 bf16
   assert.deepEqual(RECIPES.filter((r) => "blocked" in r).map((r) => r.id).sort(), ["qwen-image-2.1/bf16", "qwen-image-2.1/int8_convrot"]);
   assert.deepEqual(RECIPES.filter((r) => r.route === "image" && !("blocked" in r)).map((r) => r.id).sort(), ["krea2/bf16", "qwen-image/gguf-q5_1"]);

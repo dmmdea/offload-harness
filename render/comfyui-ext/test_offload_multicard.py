@@ -21,7 +21,7 @@ GIB = 1024 ** 3
 
 
 def stub_comfy():
-    """Install stand-ins for the three comfy modules the pack imports; return (utils, original_loader)."""
+    """Install stand-ins for the comfy modules the pack imports; return (utils, original_loader)."""
     utils = types.ModuleType("comfy.utils")
     utils._TYPES = {"F32": torch.float32, "F16": torch.float16, "BF16": torch.bfloat16, "I64": torch.int64,
                     "F8_E4M3": torch.float8_e4m3fn, "BOOL": torch.bool}
@@ -39,9 +39,14 @@ def stub_comfy():
     storage.annotated = annotated
     mm = types.ModuleType("comfy.model_management")
     mm.cleanup_models = lambda: None
+    sd = types.ModuleType("comfy.sd")
+    sd.load_diffusion_model_state_dict = lambda sd, model_options={}, metadata=None, disable_dynamic=False: model_options
+    ops = types.ModuleType("comfy.ops")
+    ops.mixed_precision_ops = lambda quant_config={}, compute_dtype=torch.bfloat16: ("mixed", compute_dtype)
     pkg = types.ModuleType("comfy")
-    pkg.utils, pkg.storage, pkg.model_management = utils, storage, mm
-    sys.modules.update({"comfy": pkg, "comfy.utils": utils, "comfy.storage": storage, "comfy.model_management": mm})
+    pkg.utils, pkg.storage, pkg.model_management, pkg.sd, pkg.ops = utils, storage, mm, sd, ops
+    sys.modules.update({"comfy": pkg, "comfy.utils": utils, "comfy.storage": storage, "comfy.model_management": mm,
+                        "comfy.sd": sd, "comfy.ops": ops})
     return utils, original
 
 

@@ -255,7 +255,7 @@ func TestAMulticardCallIsNeverDegradedToTheWholeNode(t *testing.T) {
 }
 
 // A binding the recipe table has no row for is refused before any lease is spent, naming the key, because the runner would refuse it by name
-// after the pair had been held and the host's memory declared: krea2 (it keeps --pool-*), 2512 bf16 (38 GiB fits no card), sdxl. A row that exists and is
+// after the pair had been held and the host's memory declared: krea2 fp8 (only the bf16 DiT has a row), 2512 bf16 (38 GiB fits no card), sdxl. A row that exists and is
 // held back is refused the same way, and says which row and why: the 2.1 int8 DiT (its DiT on cuda:1 never ran) and the 2.1 bf16 DiT (ComfyUI builds its
 // whole 16.33 GiB text encoder on the 15.9 GiB storage card before the DisTorch2 split applies; a live card-only run ran out of memory 1.4 s in).
 func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
@@ -265,9 +265,8 @@ func TestAMulticardBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 		// held lists the words a held-back row's refusal must carry (empty = the binding has no row at all)
 		held []string
 	}{
-		{name: "krea2", bind: func(c *config.Config) {
-			krea2Binding(c)
-			c.ImageGenPlacement = "multicard"
+		{name: "krea2 fp8", bind: func(c *config.Config) {
+			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenPlacement = "krea2", "krea2_turbo_fp8.safetensors", "multicard"
 		}},
 		{name: "2512 bf16", bind: func(c *config.Config) {
 			c.ImageGenFamily, c.ImageGenCkpt, c.ImageGenPlacement = "qwen-image", "qwen_image_2512_bf16.safetensors", "multicard"

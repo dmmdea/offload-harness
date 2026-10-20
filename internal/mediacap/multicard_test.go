@@ -72,8 +72,8 @@ func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 			measured++
 		}
 	}
-	if measured != 1 {
-		t.Errorf("%d measured rows; only the 2511 fp8mixed edit ran with the read-only loader", measured)
+	if measured != 3 {
+		t.Errorf("%d measured rows; the 2512 Q5_1 and krea2 bf16 image rows and the 2511 fp8mixed edit row ran card-only with the read-only loader", measured)
 	}
 	if blocked != 2 {
 		t.Errorf("%d held-back rows; only the two qwen-image-2.1 ones: int8_convrot (its DiT on cuda:1 no run has made) and bf16 (its text encoder is built whole on the storage card)", blocked)

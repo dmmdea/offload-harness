@@ -1066,7 +1066,9 @@ place keeper touches it (`TouchToken`, every scan interval, about 10 s against t
 same arrival time (`LeaveToken`); the ticket drops it when it ends; and the final local run resumes it as a `waiter_token` like any
 resumed call. `core.PlaceKeeper` is the seam (the pipeline implements it, `internal/pipeline/medialane_place.go`); it wraps
 these calls and adds no admission logic. The lane question for a call that resumes a place counts only the callers that arrived
-before that place on every plan (`gpualloc.QueuedClaimsBefore`).
+before that place on every plan (`gpualloc.QueuedClaimsBefore`). The scan also marks the place when its lane reading found only
+host RAM in the way (`core.PlaceMarker`), so a place that waits on memory passes a request that declares none, as a waiter on
+memory does (the G6 rule in "Host RAM").
 
 **A kept ComfyUI instance lives no longer than its lease.** A runner that keeps the ComfyUI it launched
 (`--keep-comfy`) leaves a detached instance running after it exits, so the items of a batch under one
@@ -2153,7 +2155,16 @@ commits, and neither condition sees a process that holds no lease.
   (its `waiting_for` clears on `ErrHeld`) and is an ordinary front waiter nothing passes
   (`TestThePassedWaiterIsServedRightAfterThePasserAndNothingElsePassesItMeanwhile`): at most the lease of whoever passed.
   **Named limits.** Nothing reserves the waiter's memory against a declaring request on *disjoint* cards (disjoint backfill
-  was always allowed), and a place held for a caller who left (a token) still holds against everyone for its 30 s grace.
+  was always allowed), and a place held for a caller who left (a token) still holds against everyone for its 30 s grace,
+  unless it was last marked as waiting only on host RAM (below).
+  **A place token follows the same rule.** A token carries `waiting_for` too: the media ticket that keeps it marks it
+  `host-ram` on every scan whose lane reading found nothing in the way but host RAM (no lease on the cards, nobody ahead;
+  `core.PlaceMarker`, `Manager.MarkToken`), and clears the mark on a scan that found anything else. A marked token does not hold
+  its cards against a request that declares no host RAM, in the waiter line, in the timeout's "who is ahead", in
+  `gpualloc.QueuedClaims` and in the lane reading (`Token.HoldsItsCardsAgainst`,
+  `TestAPlaceWaitingOnHostRAMDoesNotHoldBackARequestDeclaringNone`). Before 0.196.0 it did: on 2026-10-20 two image tickets
+  short of 46.8 GiB of host RAM kept their places for three hours, and a 0 GiB two-card render behind them waited 36 minutes
+  on idle cards.
   The line `waiting for host RAM: needs 33.4 GiB, only 31.0 GiB of 127.7 GiB physical is available
   (+12.0 GiB still to load by leases already running), 8.0 GiB headroom` (or the commit sentence, above) is printed once per request,
   never per poll. `--wait 0` refuses with that text, the flag that waits, and `--ram` as the way out (`--ram-commit` too when a stated

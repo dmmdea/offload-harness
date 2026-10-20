@@ -197,7 +197,7 @@ test("the poll's watch is the placement's out-of-memory watch, in the image word
   assert.match(msg, new RegExp(`offload-comfyui-${KEY}\\.log`));
   assert.match(msg, /ComfyUI must be restarted/);
   assert.match(msg, /qwen-image\/gguf-q5_1/, "the recipe");
-  assert.match(msg, /4\.9 GiB.*compute card.*12\.6 GiB.*storage card/s, "the per-card peaks it was held to");
+  assert.match(msg, /11\.9 GiB.*compute card.*8\.3 GiB.*storage card/s, "the per-card peaks it was held to");
   assert.match(msg, /15\.9 GiB/, "and the cards it had");
   assert.ok(!/WAN/.test(msg), msg);
 });
