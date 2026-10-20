@@ -892,14 +892,20 @@ sampling. The recipe relies on the encoder leaving both cards when its last text
 The peaks are arithmetic, not measured. At encode the storage card holds 8.33 GiB of encoder + 0.24 VAE + 0.5 context + about 1.0 activations = 10.1 GiB and the compute card 8.0 + 0.5 = 8.5 GiB;
 at sample the compute card holds 8.0 DiT share + 2.5 activations at 2048x2048 + 0.5 context = 11.0 GiB and the storage card the 5.25 GiB donor blocks + 0.24 + 0.5 = 6.0 GiB plus the VAE
 decode working set (not measured). The row's canvas cap is 2048x2048, the family default, chosen and not measured. The int8 convrot row names the same loader.
-The launchable card-only IMAGE rows are therefore the 2.1 bf16 DiT, the 2512 Q5_1 GGUF and the krea2 bf16 DiT, all still predicted (the edit rows are unchanged). The load-time warning of
+The launchable card-only IMAGE rows are therefore the 2.1 bf16 DiT (predicted), the 2512 Q5_1 GGUF and the krea2 bf16 DiT (both measured, below; the edit rows are unchanged). The load-time warning of
 `imagegen_placement` agrees: a box that binds `qwen-image-2.1` to `multicard` is no longer told every render will be refused.
 
-**Measured and predicted.** A row is *measured* only when its per-card peaks were read in a run that used the read-only loader. Only the 2511
-fp8mixed edit has one (2026-10-11 benchmark, section 4.6: 1.47 MP on two RTX 5060 Ti 16 GB, 145.5 s, 9.4 s per step, peaks 11.9 GiB on the compute card and
-10.9 GiB on the storage card, 1.87 GiB of host growth; one card cannot hold the model and the merging LoRA loader ran out of memory, which is
-why the recipe uses the bypass loader). Every image arm of that benchmark ran the stock loader, which charges each weight file to host
-commit, so the other four rows keep what the arms showed (the 2.1 int8 and bf16 arms ran pixel-identical to the single-card render; the int8 row is held back) and
+**Measured and predicted.** A row is *measured* only when its per-card peaks were read in a run that used the read-only loader. Three rows have one:
+- the 2511 fp8mixed edit (2026-10-11 benchmark, section 4.6: 1.47 MP on two RTX 5060 Ti 16 GB, 145.5 s, 9.4 s per step, peaks 11.9 GiB on the compute card and
+  10.9 GiB on the storage card, 1.87 GiB of host growth; one card cannot hold the model and the merging LoRA loader ran out of memory, which is
+  why the recipe uses the bypass loader). A 2026-10-20 run of the lightning 8-step recipe at 1024x1024 on a 300 W + 180 W pair took 110.6 s, peaks 11.40 and 10.60 GiB;
+- the 2512 Q5_1 GGUF (2026-10-20, resident 10 GiB, 0 GiB host RAM declared on the lease): 1328x1328 in 415.2 s (peaks 11.84 GiB compute, 8.26 GiB storage) and
+  928x1664 in 401.3 s (11.74 and 8.26 GiB);
+- the krea2 bf16 DiT (2026-10-20, 0 GiB host RAM declared): 1024x1024 at resident 12 in 82.1 s (14.30 and 12.10 GiB) and 1536x1024 at resident 11 in 68.5 s
+  (13.15 and 13.10 GiB). The row's resident share is 11.
+
+Every image arm of the 10-11 benchmark ran the stock loader, which charges each weight file to host
+commit, so the two other rows keep what the arms showed (the 2.1 int8 and bf16 arms ran pixel-identical to the single-card render; the int8 row is held back) and
 the split shares and peaks are arithmetic from them: they are *predicted*, and the file says so per row (`basis`, `evidence`). A live run
 with the read-only loader promotes a row: flip `basis` in `render/multicard-recipes.json` and `Measured` in `internal/mediacap/multicard.go`
 (`TestTheMulticardRowsAreTheRunnersRecipes` fails until both agree).
@@ -923,11 +929,11 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
   the key. The same goes for an edit binding whose
   `gen_edit_megapixels` pins a canvas above the recipe's 2.0 MP cap, which the runner honours verbatim: the peaks are scaled to the cap, and a larger canvas
   has no measured or scaled figure. The runner refuses the same bindings by name, as a second line of defence.
-- *A canvas above the image row's cap is refused before any lease.* The 2512 Q5_1 GGUF row carries `maxPixels: 1472700` (1.47 MP, `MaxPixels` in
-  `internal/mediacap/multicard.go`, pinned to the JSON by `TestTheMulticardRowsAreTheRunnersRecipes`). The number is **chosen, not measured**: the row's first live
-  two-card run, at 928x1664 (1.54 MP), ran out of memory in the sampler, and no canvas of the row has been measured. The door judges the request's own `width` and
-  `height` (`mediaNeed.forCanvas`, `internal/pipeline/mediamulticard.go`), a side it leaves out being the qwen-image default of 1328, so **a default-size (1328x1328, 1.76 MP)
-  call is refused too**. The refusal names the cap, the asked size and the way out (a smaller width and height, or unset `imagegen_placement` for the single-card
+- *A canvas above the image row's cap is refused before any lease.* The 2512 Q5_1 GGUF row carries `maxPixels: 1769472` (1536x1152, 1.77 MP, `MaxPixels` in
+  `internal/mediacap/multicard.go`, pinned to the JSON by `TestTheMulticardRowsAreTheRunnersRecipes`), 0.3 % above the larger of its two measured canvases
+  (1328x1328 and 928x1664, both at resident 10; an earlier 928x1664 run at a larger resident share ran out of memory in the sampler). The krea2 bf16 row's cap is
+  1572864 (1536x1024, measured). The door judges the request's own `width` and `height` (`mediaNeed.forCanvas`, `internal/pipeline/mediamulticard.go`), a side it
+  leaves out being the family default (1328 for qwen-image), so the default-size 1328x1328 call fits the 2512 row. The refusal names the cap, the asked size and the way out (a smaller width and height, or unset `imagegen_placement` for the single-card
   placement), and nothing was leased. The runner holds the same cap (`canvasRefusal`, `render/multicard-recipes.mjs`) after the pair was held, as the second line. The edit
   rows have no pixel cap, only the 2.0 MP edit canvas above; the batch door does not judge its jobs' sizes, the runner refuses an over-cap job on its own.
 - *A card-only call with no placement is refused up front.* A runner started under `gpu reserve --devices <a>,<b>` without `--placement multicard`, aimed at a
@@ -1066,7 +1072,14 @@ stack (shared `qwen_image_vae`, Qwen3-VL encoder via `CLIPLoader type "krea2"`, 
 shift node, the regular `EmptyLatentImage`, and the turbo recipe **baked into the weights**
 (8 steps / cfg 1.0 / euler / simple; no LoRA branch, no `full` preset — many steps at high
 cfg burns a distilled model out). The same two-key binding rule as qwen-image applies
-(`imagegen_vae` must not be `"builtin"`; steps/cfg together or neither). **Pooling (the
+(`imagegen_vae` must not be `"builtin"`; steps/cfg together or neither). **Card-only on two
+16 GB cards (the placement to use there):** `imagegen_placement: multicard` with the bf16 DiT and the bf16
+text encoder takes the `krea2/bf16` recipe row (11 GiB of the DiT resident on the compute card, the rest on the
+storage card, nothing in host RAM; measured 2026-10-20, see "Measured and predicted" above). The bf16 DiT's file
+carries plain bf16 tensors and no quantization marker, so stock ComfyUI would build it whole on the offload card
+(the storage card under `--gpu-only`) and run out of memory there before the split applies; the harness's lazy
+build (`offload_multicard` part 1) builds it empty and fills it from the read-only map instead. The pool keys
+below are the older ratio-mode path. **Pooling (the
 32GB-pool doctrine):** `imagegen_pool_vvram_gb` > 0 loads the DiT through
 `UNETLoaderDisTorch2MultiGPU` in RATIO mode, donating that many GiB from
 `imagegen_pool_compute` (default `cuda:0`) to `imagegen_pool_donor` (default `cuda:1`); the
