@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"syscall"
 	"unsafe"
 
@@ -94,7 +95,59 @@ func available(goarch string) (bool, string) {
 			return false, "unprivileged user namespaces are disabled (unprivileged_userns_clone=0)"
 		}
 	}
+	if why := probeUserNamespaces(); why != "" {
+		return false, why
+	}
 	return true, fmt.Sprintf("Landlock ABI %d + seccomp + user namespaces", abi)
+}
+
+// userNSProbe holds probeUserNamespaces' answer. Whether the cage's namespaces can be created is a
+// property of the host and of this binary's AppArmor confinement, so one probe per process is enough.
+var userNSProbe struct {
+	once sync.Once
+	why  string
+}
+
+// probeUserNamespaces creates the namespaces the cage creates, with the same attributes as Run,
+// around a system true, and returns why that was refused ("" when it worked). The sysctls above are
+// not the whole gate: an AppArmor that restricts unprivileged user namespaces
+// (kernel.apparmor_restrict_unprivileged_userns=1, the Ubuntu 24.04 default) refuses userns_create
+// to a binary no profile allows, and every caged run then failed at fork/exec with "permission
+// denied" while the cage reported itself usable (register SF-46). With no true binary to run there
+// is nothing to probe with, and the sysctls' answer stands.
+func probeUserNamespaces() string {
+	userNSProbe.once.Do(func() {
+		for _, bin := range []string{"/usr/bin/true", "/bin/true"} {
+			if fi, err := os.Stat(bin); err != nil || !fi.Mode().IsRegular() {
+				continue
+			}
+			cmd := exec.Command(bin)
+			cmd.Env = []string{}
+			cmd.SysProcAttr = cageSysProcAttr()
+			if err := cmd.Run(); err != nil {
+				why := fmt.Sprintf("the cage's namespaces cannot be created here (%v)", err)
+				if b, e := os.ReadFile("/proc/sys/kernel/apparmor_restrict_unprivileged_userns"); e == nil && strings.TrimSpace(string(b)) == "1" {
+					why += "; kernel.apparmor_restrict_unprivileged_userns=1 refuses a user namespace to a binary no AppArmor profile allows"
+				}
+				userNSProbe.why = why
+			}
+			return
+		}
+	})
+	return userNSProbe.why
+}
+
+// cageSysProcAttr is how Run starts the worker: fresh user, network, pid, ipc, uts and mount
+// namespaces, with the invoking uid and gid mapped to 0 inside the user namespace so the worker can
+// create the others; outside, it is still the unprivileged user. probeUserNamespaces uses the same.
+func cageSysProcAttr() *syscall.SysProcAttr {
+	return &syscall.SysProcAttr{
+		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET | syscall.CLONE_NEWPID |
+			syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS | syscall.CLONE_NEWNS,
+		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
+		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+		GidMappingsEnableSetgroups: false, // write "deny" to setgroups — required for an unprivileged gid map
+	}
 }
 
 // IsWorker reports whether this process is a re-exec'd sandbox worker.
@@ -466,15 +519,7 @@ func Run(ctx context.Context, spec Spec) (Result, error) {
 	cmd.Env = []string{workerEnv + "=" + js}
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
-	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET | syscall.CLONE_NEWPID |
-			syscall.CLONE_NEWIPC | syscall.CLONE_NEWUTS | syscall.CLONE_NEWNS,
-		// Map the invoking uid/gid to 0 INSIDE the user namespace so the worker can
-		// create the other namespaces; outside, it is still the unprivileged user.
-		UidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
-		GidMappings:                []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
-		GidMappingsEnableSetgroups: false, // write "deny" to setgroups — required for an unprivileged gid map
-	}
+	cmd.SysProcAttr = cageSysProcAttr()
 
 	runErr := cmd.Run()
 	res := Result{Stdout: stdout.String(), Stderr: stderr.String()}
