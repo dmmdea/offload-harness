@@ -8,8 +8,8 @@
 //   cuda:1 = the COMPUTE card: the DiT's resident share and the sampler's activations.
 // The same two names the Wan placement uses (wf-wan22-i2v.mjs), so one launch (wan-multicard.mjs multicardLaunch) serves both.
 //
-// WHAT IT REFUSES, by name and before a lease is taken: a family or quant with no recipe (2512 bf16 fits no card, krea2 has its
-// own pool flags, SDXL and HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
+// WHAT IT REFUSES, by name and before a lease is taken: a family or quant with no recipe (2512 bf16 fits no card, SDXL and
+// HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
 // the int8_convrot DiT is a different file and a recipe of its own, held back for now: its `blocked` sentence says why); a text
 // encoder other than the one the recipe was built for.
 // A row can carry a CANVAS CAP (`maxPixels`, refused by canvasRefusal): the launchable image row is held to 1.47 MP, a number chosen and not measured, because its first
@@ -17,7 +17,8 @@
 // A row can be HELD BACK: it stays in the table (its data is the proof arm's), carries a `blocked` sentence that says why, and
 // findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. Both qwen-image-2.1 rows are held back today:
 // int8_convrot (its DiT on cuda:1 never ran) and bf16 (under --gpu-only ComfyUI builds the whole 16.33 GiB text encoder on the 15.9 GiB
-// storage card before the DisTorch2 split is applied, and ran out of memory there). The launchable image row is the 2512 Q5_1 GGUF.
+// storage card before the DisTorch2 split is applied, and ran out of memory there). The launchable image rows are the 2512 Q5_1 GGUF and
+// the krea2 bf16 DiT (its text encoder loads with the CLIP type the row names, `clipType`, "krea2"; a row without one is "qwen_image").
 // An fp8 text encoder is never placed on cuda:1 (two measured runs aborted the process there), so a recipe pins it whole to
 // cuda:0; only a bf16 encoder too big for one card is split (the two held-back 2.1 rows are the ones that do), and a test walks every
 // recipe to keep it that way.
@@ -56,7 +57,7 @@ const BANNED_TEXT_ENCODER = /int8|int4|nf4/i;
 
 const FAMILY_HINTS = Object.freeze({
   "qwen-image": "2512 bf16 fits no card (a 38 GiB DiT); bind the Q5_1 GGUF (14.3 GiB), which has a recipe",
-  krea2: "its 24.5 GiB DiT is split by the pool flags (--pool-vvram/--pool-compute/--pool-donor), which are a different placement and stay as they are",
+  krea2: "the card-only recipe is the bf16 DiT with the bf16 Qwen3-VL-4B text encoder; bind those files",
   sdxl: "it fits one card, so there is nothing to place across two",
   "hidream-o1": "it fits one card pair only with host RAM and was never measured card-only",
   "hidream-o1-dev": "it fits one card pair only with host RAM and was never measured card-only",
@@ -194,10 +195,10 @@ export function multicardLoaders(row, { unet, clip, vae, residentGb } = {}) {
   let clipNode;
   switch (row.clip.loader) {
     case "plain":
-      clipNode = { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: clip, type: "qwen_image", device: MULTICARD_STORAGE } };
+      clipNode = { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: MULTICARD_STORAGE } };
       break;
     case "distorch2":
-      clipNode = { class_type: "CLIPLoaderDisTorch2MultiGPU", inputs: { clip_name: clip, type: "qwen_image", device: MULTICARD_STORAGE, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(row.clip.residentGb), eject_models: false } };
+      clipNode = { class_type: "CLIPLoaderDisTorch2MultiGPU", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: MULTICARD_STORAGE, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(row.clip.residentGb), eject_models: false } };
       break;
     default:
       throw new Error(`multicardLoaders: recipe ${row.id} names the text-encoder loader ${JSON.stringify(row.clip.loader)}, which is none of plain|distorch2`);

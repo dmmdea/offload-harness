@@ -83,6 +83,22 @@ func (p *Pipeline) KeepMediaPlace(token string) bool {
 	return err == nil && m.TouchToken(token)
 }
 
+var _ core.PlaceMarker = (*Pipeline)(nil)
+
+// MarkMediaPlace implements core.PlaceMarker: it refreshes a place that exists, never writes one, and records whether its
+// call waits only on host RAM.
+func (p *Pipeline) MarkMediaPlace(token string, hostRAMOnly bool) bool {
+	m, err := p.scopedManager()
+	if err != nil {
+		return false
+	}
+	waitingFor := ""
+	if hostRAMOnly {
+		waitingFor = gpulease.WaitHostRAM
+	}
+	return m.MarkToken(token, waitingFor)
+}
+
 // DropMediaPlace implements core.PlaceKeeper.
 func (p *Pipeline) DropMediaPlace(token string) {
 	if m, err := p.scopedManager(); err == nil {

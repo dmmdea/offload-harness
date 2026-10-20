@@ -1940,7 +1940,8 @@ func queueTimeoutErr(m *Manager, self Waiter, waited time.Duration) error {
 	}
 	// A place held for a caller who left (tokens.go) keeps the line just as a waiter does.
 	for _, t := range m.Tokens() {
-		if t.ID != self.Token && m.tokenLive(t) && t.SinceMs < self.SinceMs && devicesConflict(t.Devices, self.Devices) {
+		if t.ID != self.Token && m.tokenLive(t) && t.SinceMs < self.SinceMs && devicesConflict(t.Devices, self.Devices) &&
+			t.HoldsItsCardsAgainst(self.HostRAMGiB > 0) {
 			return stillQueuedErr(waited, fmt.Sprintf("a place held for another caller (%s, %s, reason %q), who may still come back for it", t.ID, t.Class, t.Reason))
 		}
 	}

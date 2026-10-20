@@ -19,9 +19,9 @@ test("the devices: the storage card is cuda:0 and the compute card cuda:1, the s
   assert.equal(MULTICARD_COMPUTE, "cuda:1");
 });
 
-test("the table holds the five recipes, each with its evidence and an honest basis; only the 2511 fp8mixed row was measured with the read-only loader", () => {
+test("the table holds the six recipes, each with its evidence and an honest basis; only the 2511 fp8mixed row was measured with the read-only loader", () => {
   assert.deepEqual(RECIPES.map((r) => r.id).sort(), [
-    "qwen-image-2.1/bf16", "qwen-image-2.1/int8_convrot", "qwen-image-edit-2511/fp8mixed", "qwen-image-edit-2511/gguf-q5_1", "qwen-image/gguf-q5_1",
+    "krea2/bf16", "qwen-image-2.1/bf16", "qwen-image-2.1/int8_convrot", "qwen-image-edit-2511/fp8mixed", "qwen-image-edit-2511/gguf-q5_1", "qwen-image/gguf-q5_1",
   ]);
   for (const r of RECIPES) {
     assert.ok(["measured", "predicted"].includes(r.basis), r.id);
@@ -30,9 +30,9 @@ test("the table holds the five recipes, each with its evidence and an honest bas
     assert.ok(["image", "edit"].includes(r.route), r.id);
   }
   assert.deepEqual(RECIPES.filter((r) => r.basis === "measured").map((r) => r.id), ["qwen-image-edit-2511/fp8mixed"]);
-  // a row that may not launch says why, in a sentence; the two qwen-image-2.1 rows are held back, so the only launchable image row is the 2512 Q5_1 GGUF
+  // a row that may not launch says why, in a sentence; the two qwen-image-2.1 rows are held back, so the launchable image rows are the 2512 Q5_1 GGUF and krea2 bf16
   assert.deepEqual(RECIPES.filter((r) => "blocked" in r).map((r) => r.id).sort(), ["qwen-image-2.1/bf16", "qwen-image-2.1/int8_convrot"]);
-  assert.deepEqual(RECIPES.filter((r) => r.route === "image" && !("blocked" in r)).map((r) => r.id), ["qwen-image/gguf-q5_1"]);
+  assert.deepEqual(RECIPES.filter((r) => r.route === "image" && !("blocked" in r)).map((r) => r.id).sort(), ["krea2/bf16", "qwen-image/gguf-q5_1"]);
   for (const r of RECIPES.filter((x) => "blocked" in x)) assert.ok(typeof r.blocked === "string" && r.blocked.length > 80, `${r.id}: the reason is said`);
   assert.ok(Object.isFrozen(RECIPES) && RECIPES.every((r) => Object.isFrozen(r)), "a recipe is not edited in place");
 });
@@ -42,6 +42,10 @@ test("findRecipe: the DiT's file picks the row", () => {
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_bf16.safetensors" }), /the qwen-image-2\.1\/bf16 recipe is held back/);
   assert.match(refusal({ ...QI21, unet: "qwen_image_2.1_int8_convrot.safetensors" }), /the qwen-image-2\.1\/int8_convrot recipe is held back/);
   assert.equal(find({ route: "image", family: "qwen-image", unet: "qwen-image-2512-Q5_1.gguf" }).id, "qwen-image/gguf-q5_1");
+  // krea2's text encoder loads with its own CLIP type; a graph built with qwen_image would read the Qwen3-VL encoder as the wrong model
+  const k = find({ route: "image", family: "krea2", unet: "krea2_turbo_bf16.safetensors" });
+  assert.equal(k.id, "krea2/bf16");
+  assert.equal(multicardLoaders(k, { unet: "krea2_turbo_bf16.safetensors", clip: k.defaultClip, vae: "qwen_image_vae.safetensors" })["2"].inputs.type, "krea2");
   assert.equal(find({ route: "edit", family: "qwen-image-edit-2511", unet: "qwen_image_edit_2511_fp8mixed.safetensors" }).id, "qwen-image-edit-2511/fp8mixed");
   assert.equal(find({ route: "edit", family: "qwen-image-edit-2511", unet: "qwen-image-edit-2511-Q5_1.gguf" }).id, "qwen-image-edit-2511/gguf-q5_1");
   // the builders' own default text encoder stands in when the call names none
@@ -99,7 +103,7 @@ test("the bf16 recipe is held back: ComfyUI builds the whole 16.33 GiB text enco
 
 test("a (family, quant) with no recipe is refused by name, never guessed", () => {
   assert.match(refusal({ route: "image", family: "qwen-image", unet: "qwen_image_2512_bf16.safetensors" }), /no measured card-only recipe for qwen-image .*qwen_image_2512_bf16\.safetensors.*bf16 fits no card.*Q5_1 GGUF/s);
-  assert.match(refusal({ route: "image", family: "krea2", unet: "krea2_bf16.safetensors" }), /no measured card-only recipe for krea2.*--pool-vvram/s);
+  assert.match(refusal({ route: "image", family: "krea2", unet: "krea2_fp8.safetensors" }), /no measured card-only recipe for krea2.*bf16/s);
   assert.match(refusal({ route: "image", family: "hidream-o1", unet: "o1.safetensors" }), /no measured card-only recipe for hidream-o1/);
   assert.match(refusal({ route: "image", family: "sdxl", unet: "x.safetensors" }), /no measured card-only recipe for sdxl/);
   assert.match(refusal({ route: "image", family: "", unet: "x.safetensors" }), /no measured card-only recipe for sdxl/, "no family is the generic SDXL graph");

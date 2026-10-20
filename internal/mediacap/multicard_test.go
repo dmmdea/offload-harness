@@ -46,7 +46,7 @@ func readRecipes(t *testing.T) recipeFile {
 func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 	file := readRecipes(t)
 	rows := MulticardRows()
-	if len(rows) != len(file.Rows) || len(rows) != 5 {
+	if len(rows) != len(file.Rows) || len(rows) != 6 {
 		t.Fatalf("%d rows here, %d in render/multicard-recipes.json", len(rows), len(file.Rows))
 	}
 	measured, blocked := 0, 0
@@ -93,6 +93,8 @@ func TestFindMulticardRowPicksTheRecipeOfTheFilesAndRefusesTheRest(t *testing.T)
 		{"image", "qwen-image", "qwen-image-2512-Q5_1.gguf", "", "qwen-image/gguf-q5_1"},
 		{"image", "qwen-image", "qwen-image-2512-Q5_1.gguf", "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen-image/gguf-q5_1"},
 		{"edit", "qwen-image-edit-2511", "qwen_image_edit_2511_fp8mixed.safetensors", "", "qwen-image-edit-2511/fp8mixed"},
+		{"image", "krea2", "krea2_turbo_bf16.safetensors", "qwen3vl_4b_bf16.safetensors", "krea2/bf16"},
+		{"image", "krea2", "krea2_turbo_bf16.safetensors", "", "krea2/bf16"},
 		{"edit", "qwen-image-edit-2511", "QWEN-IMAGE-EDIT-2511-Q5_1.GGUF", "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen-image-edit-2511/gguf-q5_1"},
 		// no recipe: another family, another quant, the other route, an int8 or a wrong-kind text encoder, nothing named
 		// and the two qwen-image-2.1 DiTs, whose rows exist but are held back (int8_convrot: its DiT on cuda:1 was never run; bf16: its text encoder is built whole on
@@ -101,7 +103,7 @@ func TestFindMulticardRowPicksTheRecipeOfTheFilesAndRefusesTheRest(t *testing.T)
 		{"image", "qwen-image-2.1", "qwen_image_2.1_uc_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", ""},
 		{"image", "qwen-image-2.1", "qwen_image_2.1_int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", ""},
 		{"image", "qwen-image-2.1", "qwen-image-2.1-UC-int8_convrot.safetensors", "qwen3vl_8b_bf16.safetensors", ""},
-		{"image", "krea2", "krea2_turbo_bf16.safetensors", "qwen3vl_4b_bf16.safetensors", ""},
+		{"image", "krea2", "krea2_turbo_fp8.safetensors", "qwen3vl_4b_bf16.safetensors", ""},
 		{"image", "sdxl", "x.safetensors", "", ""},
 		{"image", "qwen-image", "qwen_image_2512_bf16.safetensors", "", ""},
 		{"image", "qwen-image", "qwen-image-2512-Q4_K_M.gguf", "", ""},
@@ -197,6 +199,7 @@ func TestARowsNodeClassesAreItsLoadersClasses(t *testing.T) {
 		"qwen-image-2.1/int8_convrot":    {"UNETLoaderMultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-2.1/bf16":            {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image/gguf-q5_1":           {"UnetLoaderGGUFDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
+		"krea2/bf16":                     {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-edit-2511/fp8mixed":  {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-edit-2511/gguf-q5_1": {"UnetLoaderGGUFDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 	}
@@ -228,7 +231,10 @@ func TestRouteNeedsListTheMultiGPUClassesForAMulticardBinding(t *testing.T) {
 	if got := img("qwen-image-2.1", "qwen_image_2.1_bf16.safetensors", "qwen3vl_8b_bf16.safetensors", false); len(got) != 0 {
 		t.Errorf("a single 2.1 binding names only core classes: %v", got)
 	}
-	if got := img("krea2", "krea2_turbo_bf16.safetensors", "", true); len(got) != 0 {
+	if got := img("krea2", "krea2_turbo_bf16.safetensors", "", true); strings.Join(got, ",") != "UNETLoaderDisTorch2MultiGPU,CLIPLoaderMultiGPU,VAELoaderMultiGPU" {
+		t.Errorf("a multicard krea2 bf16 binding: %v", got)
+	}
+	if got := img("hidream-o1", "o1.safetensors", "", true); len(got) != 0 {
 		t.Errorf("a family with no recipe is refused by the runner, and the doctor asks for nothing extra: %v", got)
 	}
 	ed := bare()

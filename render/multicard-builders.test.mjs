@@ -238,7 +238,7 @@ test("comfy-render: pool flags with --placement multicard on a 2.1 row are refus
 });
 
 test("comfy-render: --placement multicard on a family with no recipe, or on a --graph file, is refused by name", () => {
-  assert.throws(() => build(["--family", "krea2", "--ckpt", "k.safetensors", "--placement", "multicard"], { multicard: { residentGb: 3 } }), (e) => e instanceof UsageError && /no measured card-only recipe for krea2.*--pool-vvram/s.test(e.message));
+  assert.throws(() => build(["--family", "hidream-o1", "--ckpt", "o1.safetensors", "--placement", "multicard"], { multicard: { residentGb: 3 } }), (e) => e instanceof UsageError && /no measured card-only recipe for hidream-o1/.test(e.message));
   assert.throws(() => build(["--family", "qwen-image", "--ckpt", "qwen_image_2512_bf16.safetensors", "--placement", "multicard"], { multicard: { residentGb: 3 } }), (e) => e instanceof UsageError && /bf16 fits no card/.test(e.message));
   assert.throws(() => build(["--ckpt", "x.safetensors", "--placement", "multicard"], { multicard: { residentGb: 3 } }), (e) => e instanceof UsageError && /no measured card-only recipe for sdxl/.test(e.message));
   assert.throws(() => build(["--graph", "wf.json", "--placement", "multicard"], { multicard: { residentGb: 3 } }), (e) => e instanceof UsageError && /--graph/.test(e.message));

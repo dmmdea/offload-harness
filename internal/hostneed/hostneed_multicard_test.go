@@ -83,7 +83,6 @@ func TestACardOnlyImageCallWithoutAMeasuredRowKeepsTheOrdinaryEstimate(t *testin
 func TestThePlacementFlagMeansNothingToAFamilyWithoutARecipe(t *testing.T) {
 	f := imgFacts(t, 15.9, 15.9)
 	for name, cmd := range map[string]string{
-		"krea2":                 krea2McCmd,
 		"sdxl":                  "node render/comfy-generate.mjs o.png p --placement multicard",
 		"hidream":               "node render/comfy-generate.mjs o.png p --family hidream-o1 --ckpt krea2_turbo_bf16.safetensors --placement multicard",
 		"2512 bf16":             "node render/comfy-generate.mjs o.png p --family qwen-image --ckpt qwen_image_2.1_bf16.safetensors --placement multicard",

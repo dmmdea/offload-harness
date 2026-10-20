@@ -211,6 +211,7 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
       poolCompute: flags["pool-compute"] || undefined,
       poolDonor: flags["pool-donor"] || undefined,
       width, height, seed,
+      ...(placement === "multicard" ? { placement, residentGb } : {}),
     });
   } else if (flags.family === "qwen-image") {
     // Model-family-correct graph: Qwen-Image 2512 is an SD3-latent DiT whose text

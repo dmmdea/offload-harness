@@ -152,7 +152,7 @@ test("a resident share below the recipe's moves the same bytes onto the storage 
 });
 
 test("refused before any card table is read: no recipe, a --graph file, and no card named at all", () => {
-  assert.throws(() => plan({ cards: never, family: "krea2", unet: "k.safetensors" }), /no measured card-only recipe for krea2.*--pool-vvram/s);
+  assert.throws(() => plan({ cards: never, family: "hidream-o1", unet: "o1.safetensors" }), /no measured card-only recipe for hidream-o1/);
   assert.throws(() => plan({ cards: never, unet: "qwen_image_2512_bf16.safetensors", family: "qwen-image" }), /bf16 fits no card/);
   assert.throws(() => plan({ cards: never, clip: "qwen3vl_8b_int8.safetensors" }), /int8.*30 dB/s);
   assert.throws(() => plan({ cards: never, isGraph: true }), /posts a --graph file/);
@@ -337,9 +337,9 @@ test("comfy-generate, comfy-render and comfy-edit refuse a multicard call that n
 test("comfy-generate refuses a family with no recipe by name, and a batch is refused the same way", async (t) => {
   const dir = scratchDir(t, "mc-img-");
   const env = scrubbedEnv(dir);
-  const k = await run("comfy-generate.mjs", [join(dir, "o.png"), "p", "--family", "krea2", "--ckpt", "k.safetensors", "--placement", "multicard"], env);
+  const k = await run("comfy-generate.mjs", [join(dir, "o.png"), "p", "--family", "hidream-o1", "--ckpt", "o1.safetensors", "--placement", "multicard"], env);
   assert.equal(k.code, 2, k.err);
-  assert.match(k.err, /no measured card-only recipe for krea2/);
+  assert.match(k.err, /no measured card-only recipe for hidream-o1/);
   const jobs = join(dir, "jobs.jsonl");
   writeFileSync(jobs, JSON.stringify({ prompt: "p", out: join(dir, "a.png") }) + "\n");
   const b = await run("comfy-generate.mjs", ["--batch", jobs, "--family", "qwen-image", "--ckpt", "qwen_image_2512_bf16.safetensors", "--placement", "multicard"], env);

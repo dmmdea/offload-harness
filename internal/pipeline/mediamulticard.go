@@ -84,6 +84,10 @@ func multicardNeed(route hostneed.Route, cfg config.Config, token string) mediaN
 // 1328): 1328 x 1328 is 1.76 MP, above the image row's cap, so a card-only call that names no size is refused too.
 const qwenImageDefaultSide = 1328
 
+// imageDefaultSide is the side of the canvas each family with a capped card-only row renders when the request names none (the builder's own default:
+// render/comfy-render.mjs). A family missing here is left to the runner.
+var imageDefaultSide = map[string]int{"qwen-image": qwenImageDefaultSide, "krea2": 1024}
+
 // forCanvas holds a card-only image call to its row's canvas cap (mediacap.MulticardRow.MaxPixels) from the request's own width and height, before any
 // lease: the runner refuses the same canvas (render/multicard-recipes.mjs canvasRefusal) only after the pair was held and its seats drained. A side the
 // request leaves out is the family's default when this file knows it; a canvas that cannot be judged here is left to the runner. Any other need, a row
@@ -94,14 +98,15 @@ func (n mediaNeed) forCanvas(params map[string]any) mediaNeed {
 	}
 	w, h := paramIntOr(params, "width", 0), paramIntOr(params, "height", 0)
 	if w <= 0 || h <= 0 {
-		if n.Row.Family != "qwen-image" {
+		side, ok := imageDefaultSide[n.Row.Family]
+		if !ok {
 			return n
 		}
 		if w <= 0 {
-			w = qwenImageDefaultSide
+			w = side
 		}
 		if h <= 0 {
-			h = qwenImageDefaultSide
+			h = side
 		}
 	}
 	asked := int64(w) * int64(h)

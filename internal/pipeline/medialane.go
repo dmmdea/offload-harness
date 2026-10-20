@@ -329,7 +329,7 @@ func (r *laneReading) callersAhead(ids []string, since time.Time) {
 		if t.ID == r.token || !r.m.TokenLive(t) {
 			continue
 		}
-		if arrivedBefore(t.SinceMs) && conflict(t.Devices, ids) {
+		if arrivedBefore(t.SinceMs) && conflict(t.Devices, ids) && t.HoldsItsCardsAgainst(r.askRAM > 0) {
 			n++
 		}
 	}

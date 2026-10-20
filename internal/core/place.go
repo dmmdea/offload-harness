@@ -68,6 +68,27 @@ func KeepPlace(runner any, token string) bool {
 	return false
 }
 
+// PlaceMarker is implemented by a PlaceKeeper whose places can say what their call waits for (gpulease.Token.WaitingFor).
+type PlaceMarker interface {
+	// MarkMediaPlace refreshes the place token names, as KeepMediaPlace does, and records whether its call's last reading of
+	// the lane found only host RAM in the way. Such a place does not hold its cards against a request that declares no host
+	// RAM, as a waiter on host RAM does not.
+	MarkMediaPlace(token string, hostRAMOnly bool) bool
+}
+
+// MarkPlace records on runner whether the place token names waits only on host RAM; false when runner keeps no marks.
+func MarkPlace(runner any, token string, hostRAMOnly bool) bool {
+	if k, ok := runner.(PlaceMarker); ok && token != "" {
+		return k.MarkMediaPlace(token, hostRAMOnly)
+	}
+	return false
+}
+
+// HostRAMOnly says the verdict found nothing in the way but host RAM: no lease on the cards and nobody ahead in line.
+func (v LaneVerdict) HostRAMOnly() bool {
+	return !v.Free && v.HostRAM != "" && len(v.Holders) == 0 && v.Ahead == 0
+}
+
 // DropPlace forgets the place token names on runner.
 func DropPlace(runner any, token string) {
 	if k, ok := runner.(PlaceKeeper); ok && token != "" {

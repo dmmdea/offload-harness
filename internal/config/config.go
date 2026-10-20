@@ -3189,7 +3189,7 @@ func warnMulticardLaunchTo(c Config, w io.Writer, where, key, seat string) {
 // held back (a test in this package pins them to it). A family outside them, bound to a multicard placement, is refused by the runner by name on every call;
 // qwen-image-2.1 is outside them while both its rows (int8_convrot and bf16) are held back.
 var (
-	imageRecipeFamilies = map[string]bool{"qwen-image": true}
+	imageRecipeFamilies = map[string]bool{"qwen-image": true, "krea2": true}
 	editRecipeFamilies  = map[string]bool{EditFamily2511: true}
 )
 

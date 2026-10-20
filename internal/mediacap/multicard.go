@@ -14,7 +14,7 @@ import "regexp"
 //
 // A row can be held back (Blocked): it stays in the table, but it is no recipe to FindMulticardRow. Both qwen-image-2.1 rows are held back today:
 // int8_convrot (its DiT on cuda:1 never ran) and bf16 (ComfyUI builds the whole 16.33 GiB text encoder on the 15.9 GiB storage card before the split
-// applies, and a live card-only run ran out of memory there), so the only launchable image row is the 2512 Q5_1 GGUF.
+// applies, and a live card-only run ran out of memory there), so the launchable image rows are the 2512 Q5_1 GGUF and the krea2 bf16 DiT.
 
 // MulticardRow is one recipe: the identity of the call it serves, how the runner loads it and the figures that decide a declaration.
 type MulticardRow struct {
@@ -60,6 +60,8 @@ var multicardRows = []MulticardRow{
 		Blocked: "under --gpu-only ComfyUI builds the whole 16.33 GiB bf16 text encoder on the storage card (cuda:0, a 15.9 GiB card) before the DisTorch2 allocation that splits it is applied, so a live card-only run of this recipe ran out of memory 1.4 s in, with 14.10 GiB allocated, while the encoder was still being built; no resident share or peak figure in this row changes that. A loader that builds the text encoder per card, or one measured arm that fits the pair, lifts it: then clear blocked on this row in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go"},
 	{ID: "qwen-image/gguf-q5_1", Route: "image", Family: "qwen-image", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
 		UnetLoader: "gguf-distorch2", ResidentGiB: 3, ClipLoader: "plain", ComputeGiB: 4.9, StorageGiB: 12.6, MaxPixels: 1472700, LoraLoader: "LoraLoaderModelOnly", Packs: []string{"multigpu", "gguf"}},
+	{ID: "krea2/bf16", Route: "image", Family: "krea2", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16", DefaultClip: "qwen3vl_4b_bf16.safetensors",
+		UnetLoader: "distorch2", ResidentGiB: 12, ClipLoader: "plain", ComputeGiB: 14.3, StorageGiB: 13.7, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/fp8mixed", Route: "edit", Family: "qwen-image-edit-2511", Quant: "fp8mixed", UnetMatch: `fp8mixed.*\.safetensors$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
 		UnetLoader: "distorch2", ResidentGiB: 9, ClipLoader: "plain", ComputeGiB: 13.0, StorageGiB: 11.0, Measured: true, MaxMegapixels: 2.0, LoraLoader: "LoraLoaderBypassModelOnly", Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/gguf-q5_1", Route: "edit", Family: "qwen-image-edit-2511", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
