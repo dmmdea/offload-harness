@@ -52,8 +52,8 @@ func (p *Policy) validateURL(u *url.URL) error {
 	if host == "" {
 		return fmt.Errorf("empty host")
 	}
-	if d, reason := p.Decide(Action{Kind: ActFetch, Path: host}); d != Allow {
-		return fmt.Errorf("%s", reason)
+	if d, ref := p.Explain(Action{Kind: ActFetch, Path: host}); d != Allow {
+		return refusalError{ref}
 	}
 	return nil
 }
@@ -128,7 +128,7 @@ func fetchTool(pol *Policy, client *http.Client) Tool {
 			}
 			// The broker (scheme/userinfo/port/allowlist) gate — defer-not-crash on deny.
 			if err := pol.validateURL(u); err != nil {
-				return "", NotPerformed(fmt.Sprintf("NOT performed (deny): %s", err))
+				return "", notPerformedFrom(err)
 			}
 			ctx, cancel := context.WithTimeout(ctx, fetchTimeout)
 			defer cancel()

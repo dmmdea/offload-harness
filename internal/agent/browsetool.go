@@ -114,10 +114,11 @@ func BrowseTools(pol *Policy, run BrowseFunc, hosts []string, unattended bool, t
 			}
 			host := strings.ToLower(u.Hostname())
 			if !browseHostAllowed(host, hosts) {
-				return "", NotPerformed(fmt.Sprintf("NOT performed (deny): host %s is not in this run's browse allowlist (%s)", host, scope))
+				return "", NotPerformed(fmt.Sprintf("NOT performed (deny): host %s is not in this run's browse allowlist (%s)", host, scope) +
+					Refusal{Rule: "this run's browse allowlist", NextSteps: nextSteps(ActBrowse, causeRule)}.tail())
 			}
-			if d, why := pol.Decide(Action{Kind: ActBrowse, Path: host}); d != Allow {
-				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, why))
+			if d, ref := pol.Explain(Action{Kind: ActBrowse, Path: host}); d != Allow {
+				return "", NotPerformed(ref.Text())
 			}
 			out, err := run(ctx, BrowseInput{URL: u.String(), Goal: strings.TrimSpace(in.Goal), MaxActions: in.MaxActions,
 				AllowHosts: hosts, Unattended: unattended})

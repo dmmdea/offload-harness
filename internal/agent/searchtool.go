@@ -114,7 +114,7 @@ func searchTool(pol *Policy, client *http.Client) Tool {
 				return "", err
 			}
 			if err := pol.validateURL(u); err != nil {
-				return "", NotPerformed(fmt.Sprintf("NOT performed (deny): %s", err))
+				return "", notPerformedFrom(err)
 			}
 			ctx, cancel := context.WithTimeout(ctx, searchTimeout)
 			defer cancel()

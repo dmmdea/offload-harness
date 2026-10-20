@@ -97,8 +97,8 @@ func runTool(pol *Policy, worktree, scratch string, run shellRunner) Tool {
 			// Broker gate — opt-in capability + an audit record of every command
 			// (records the direct-exec command line). defer-not-crash on non-Allow.
 			auditLine := strings.TrimSpace(cmd + " " + strings.Join(in.Args, " "))
-			if d, reason := pol.Decide(Action{Kind: ActShell, Path: auditLine}); d != Allow {
-				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
+			if d, ref := pol.Explain(Action{Kind: ActShell, Path: auditLine}); d != Allow {
+				return "", NotPerformed(ref.Text())
 			}
 
 			ctx, cancel := context.WithTimeout(ctx, shellTimeout)

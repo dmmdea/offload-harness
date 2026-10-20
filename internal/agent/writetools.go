@@ -70,8 +70,8 @@ func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]T
 			// below uses O_EXCL — if the path turns out to exist (or escapes), the
 			// create fails and we re-broker / return the error. O_EXCL, not Stat, is
 			// the authoritative existence + containment guard.
-			if d, reason := pol.Decide(Action{Kind: ActWrite, Path: rel, Exists: exists}); d != Allow {
-				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
+			if d, ref := pol.Explain(Action{Kind: ActWrite, Path: rel, Exists: exists}); d != Allow {
+				return "", NotPerformed(ref.Text())
 			}
 			if why := limit.Admit(rel, len(in.Content)); why != "" {
 				return "", NotPerformed("NOT performed (write budget): " + why)
@@ -86,8 +86,8 @@ func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]T
 			// unattended runs) instead of silently truncating it.
 			f, err := r.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 			if errors.Is(err, fs.ErrExist) {
-				if d, reason := pol.Decide(Action{Kind: ActWrite, Path: rel, Exists: true}); d != Allow {
-					return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
+				if d, ref := pol.Explain(Action{Kind: ActWrite, Path: rel, Exists: true}); d != Allow {
+					return "", NotPerformed(ref.Text())
 				}
 				f, err = r.OpenFile(rel, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644) // approved overwrite (attended only)
 			}
@@ -129,8 +129,8 @@ func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]T
 			if _, e := r.Stat(rel); e == nil {
 				exists = true
 			}
-			if d, reason := pol.Decide(Action{Kind: ActDelete, Path: rel, Exists: exists}); d != Allow {
-				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
+			if d, ref := pol.Explain(Action{Kind: ActDelete, Path: rel, Exists: exists}); d != Allow {
+				return "", NotPerformed(ref.Text())
 			}
 			if err := r.Remove(rel); err != nil {
 				return "", err
@@ -206,8 +206,8 @@ func WriteToolsLimited(worktreeRoot string, pol *Policy, limit *WriteLimit) ([]T
 				}
 				return "", NotPerformed(fmt.Sprintf("NOT performed: old_string is not unique in %s — include more surrounding context", filepath.ToSlash(rel)))
 			}
-			if d, reason := pol.Decide(Action{Kind: ActWrite, Path: rel, Exists: true}); d != Allow {
-				return "", NotPerformed(fmt.Sprintf("NOT performed (%s): %s", d, reason))
+			if d, ref := pol.Explain(Action{Kind: ActWrite, Path: rel, Exists: true}); d != Allow {
+				return "", NotPerformed(ref.Text())
 			}
 			// The budget is charged the REPLACEMENT text, not the whole file: an edit
 			// rewrites the file on disk, but what the seat authored — and what a
