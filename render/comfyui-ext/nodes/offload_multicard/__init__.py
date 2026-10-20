@@ -1,8 +1,8 @@
-"""Harness-owned ComfyUI nodes for the card-only (multicard) Wan 2.2 placement.
+"""Harness-owned ComfyUI nodes for the card-only (multicard) Wan 2.2, image and edit placements.
 
 ComfyUI loads this folder through render/comfyui-ext/extra_model_paths.yaml (its `custom_nodes` key),
 which render/wan-multicard.mjs passes with --extra-model-paths-config. It is never copied into the
-shared install. Two parts:
+shared install. Three parts:
 
 1. A READ-ONLY safetensors reader, active only when the harness sets OFFLOAD_RO_LOAD=1 in the
    ComfyUI process. Stock ComfyUI (dynamic VRAM off, which --gpu-only implies) opens a safetensors file
@@ -40,6 +40,16 @@ shared install. Two parts:
    card's cached blocks to the driver, reports each card's memory, and refuses to continue when the
    decode card cannot hold a plain decode, because ComfyUI would then retry the decode tiled with its
    own temporal chunking and the clip would carry the seam the plain decode exists to avoid.
+
+3. OffloadCLIPLoaderDisTorch2, the DisTorch2 text-encoder loader for an encoder that is bigger than one card
+   (the 16.33 GiB bf16 Qwen3-VL-8B of qwen-image-2.1). ComfyUI-MultiGPU's own CLIPLoaderDisTorch2MultiGPU
+   cannot load it card-only: under --gpu-only ComfyUI builds the whole encoder on the text-encoder card
+   (comfy.sd.CLIP.__init__ asks text_encoder_initial_device, which answers the load device when the
+   load and offload devices are the same card) and only then does the DisTorch2 allocation apply, so the
+   build runs out of memory on a 15.9 GiB card. This node runs the stock loader with that one answer
+   changed to the CPU (so the encoder is built and filled off the cards, from the read-only map), then
+   places it at once through DisTorch2's own load path, block by block, onto the cards its allocation
+   string names, and checks that no weight is left in host RAM.
 """
 import gc
 import json
@@ -273,5 +283,90 @@ class OffloadFreeForDecode:
         return {"ui": ui, "result": (samples,)}
 
 
-NODE_CLASS_MAPPINGS = {"OffloadFreeForDecode": OffloadFreeForDecode}
-NODE_DISPLAY_NAME_MAPPINGS = {"OffloadFreeForDecode": "Free the cards for a plain decode (harness)"}
+# ---------------------------------------------------------------------------------------------
+# 3. a text encoder bigger than one card, built off the cards and placed block by block
+# ---------------------------------------------------------------------------------------------
+
+# Parameters and buffers that may stay on the CPU after the placement (a few small tensors DisTorch2's load list does not move); more than this
+# is a weight left in host RAM and the node refuses.
+HOST_WEIGHT_LIMIT_BYTES = 64 * 1024 ** 2
+
+
+def _stock_clip_loader():
+    # looked up when asked, never at import: ComfyUI loads the packs in no fixed order
+    import nodes
+    stock = nodes.NODE_CLASS_MAPPINGS.get("CLIPLoaderDisTorch2MultiGPU")
+    if stock is None:
+        raise RuntimeError("OFFLOAD-TE-NOPACK: ComfyUI has no CLIPLoaderDisTorch2MultiGPU (the ComfyUI-MultiGPU pack), which this node wraps")
+    return stock
+
+
+def _weight_bytes_by_device(module):
+    totals = {}
+    for tensor in list(module.parameters()) + list(module.buffers()):
+        key = str(tensor.device)
+        totals[key] = totals.get(key, 0) + tensor.numel() * tensor.element_size()
+    return totals
+
+
+def _gib_line(totals):
+    return ", ".join(f"{name} {size / GIB:.2f} GiB" for name, size in sorted(totals.items())) or "no weights"
+
+
+class OffloadCLIPLoaderDisTorch2:
+    """CLIP loader. Builds the text encoder off the cards, then places its blocks on the cards `expert_mode_allocations` names (DisTorch2)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        # the stock loader's own inputs (its `type` list follows the installed ComfyUI), without the two the allocation string makes moot
+        stock = _stock_clip_loader().INPUT_TYPES()
+        optional = {k: v for k, v in stock.get("optional", {}).items() if k not in ("virtual_vram_gb", "donor_device")}
+        return {"required": dict(stock["required"]), "optional": optional}
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load"
+    CATEGORY = "offload"
+
+    def load(self, clip_name, type, device="cuda:0", expert_mode_allocations="", eject_models=False):
+        import torch
+        import comfy.model_management as mm
+
+        if not str(expert_mode_allocations).strip():
+            raise ValueError("OFFLOAD-TE-NOSPLIT: expert_mode_allocations is empty, so this would build the whole encoder on one card, which is what this node exists to avoid")
+        stock = _stock_clip_loader()()
+        original = mm.text_encoder_initial_device
+
+        def off_card(load_device, offload_device, model_size=0):
+            _say(f"text encoder {clip_name}: {model_size / GIB:.2f} GiB built off the cards (load device {load_device}), not on {load_device} as --gpu-only would")
+            return torch.device("cpu")
+
+        mm.text_encoder_initial_device = off_card
+        try:
+            out = stock.override(clip_name=clip_name, type=type, device=device, virtual_vram_gb=0.0, donor_device="cpu",
+                                 expert_mode_allocations=expert_mode_allocations, eject_models=eject_models)
+        finally:
+            mm.text_encoder_initial_device = original
+
+        clip = out[0]
+        model = clip.patcher.model
+        built = _weight_bytes_by_device(model)
+        _say(f"text encoder {clip_name} built: {_gib_line(built)}")
+        started = time.time()
+        # the load ComfyUI makes itself when the build was on the load device (comfy.sd.CLIP.__init__), now through DisTorch2's allocation
+        mm.load_models_gpu([clip.patcher], force_full_load=True)
+        gc.collect()
+        placed = _weight_bytes_by_device(model)
+        _say(f"text encoder {clip_name} placed in {time.time() - started:.1f} s by {expert_mode_allocations!r} (compute card {device}): {_gib_line(placed)}")
+        host = sum(size for name, size in placed.items() if name.startswith("cpu"))
+        if host > HOST_WEIGHT_LIMIT_BYTES:
+            raise RuntimeError(
+                f"OFFLOAD-TE-HOSTWEIGHT: {host / GIB:.2f} GiB of the text encoder {clip_name} is still in host RAM after the placement "
+                f"({_gib_line(placed)}); a card-only run keeps no weight in host RAM, so it stops here")
+        return out
+
+
+NODE_CLASS_MAPPINGS = {"OffloadFreeForDecode": OffloadFreeForDecode, "OffloadCLIPLoaderDisTorch2": OffloadCLIPLoaderDisTorch2}
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "OffloadFreeForDecode": "Free the cards for a plain decode (harness)",
+    "OffloadCLIPLoaderDisTorch2": "Load CLIP, built off the cards and split by DisTorch2 (harness)",
+}

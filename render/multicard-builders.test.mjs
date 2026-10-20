@@ -30,23 +30,28 @@ test("2.1 int8_convrot multicard is held back: the builder refuses it by name in
   assert.equal(buildQwenImage21({ ...QI21, unet: INT8 })["1"].class_type, "UNETLoader");
 });
 
-// The bf16 row's loaders (the DiT through DisTorch2 with its resident share on cuda:1, the text encoder split over both cards, the VAE on cuda:0) are pinned as the
-// held-back row's data by multicard-recipes.test.mjs; here the builder refuses the row by name, because under --gpu-only ComfyUI builds the whole 16.33 GiB
-// text encoder on the 15.9 GiB storage card before the split applies, and a graph built from the row would run out of memory there.
-test("2.1 bf16 multicard is held back: the builder refuses it by name instead of building a graph whose text encoder is built whole on the storage card", () => {
-  assert.throws(() => buildQwenImage21({ ...QI21, placement: "multicard" }), /qwen-image-2\.1\/bf16.*held back.*16\.33 GiB bf16 text encoder/s);
-  assert.throws(() => buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 }), /qwen-image-2\.1\/bf16.*held back/s);
-  assert.throws(() => buildQwenImage21({ ...QI21, unet: "qwen_image_2.1_uc_bf16.safetensors", placement: "multicard" }), /qwen-image-2\.1\/bf16.*held back/s);
-  // the single graph of the same file is untouched: the stock loaders, and no MultiGPU class anywhere in it
+// The bf16 row's loaders: the DiT through DisTorch2 with its resident share on cuda:1, the text encoder through the harness's own loader (built off the cards, then
+// split over both: under --gpu-only the stock DisTorch2 loader would build the whole 16.33 GiB encoder on the 15.9 GiB storage card first), the VAE on cuda:0.
+test("2.1 bf16 multicard builds the row's graph: only the three loaders change, and the text encoder is the harness's own loader", () => {
   const single = buildQwenImage21({ ...QI21 });
+  const g = buildQwenImage21({ ...QI21, placement: "multicard" });
+  assert.deepEqual(rest(g), rest(single), "every node but the three loaders is the single graph's, link for link");
+  assert.deepEqual([g["1"].class_type, g["2"].class_type, g["3"].class_type], ["UNETLoaderDisTorch2MultiGPU", "OffloadCLIPLoaderDisTorch2", "VAELoaderMultiGPU"]);
+  assert.equal(g["1"].inputs.expert_mode_allocations, allocationString(8));
+  assert.equal(g["2"].inputs.expert_mode_allocations, allocationString(8), "8 GiB of the encoder is parked on the compute card");
+  assert.equal(g["2"].inputs.device, "cuda:0", "the encoder computes on the storage card");
+  assert.equal(g["2"].inputs.type, "qwen_image");
+  assert.equal(buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 })["1"].inputs.expert_mode_allocations, allocationString(6), "the override moves the DiT's share, not the encoder's");
+  assert.equal(buildQwenImage21({ ...QI21, placement: "multicard", residentGb: 6 })["2"].inputs.expert_mode_allocations, allocationString(8));
+  // the single graph of the same file is untouched: the stock loaders, and no MultiGPU class anywhere in it
   assert.deepEqual([single["1"].class_type, single["2"].class_type, single["3"].class_type], ["UNETLoader", "CLIPLoader", "VAELoader"]);
-  assert.ok(!classes(single).some((c) => /MultiGPU/.test(c)), "no MultiGPU class in the single graph");
+  assert.ok(!classes(single).some((c) => /MultiGPU|Offload/.test(c)), "no MultiGPU class in the single graph");
 });
 
-// While both 2.1 image rows are held back, the multicard branch of wf-qwen-image-21.mjs cannot return a graph: loaders() asks findRecipe, which refuses first. The graph
-// shape that branch used to be pinned by (only nodes 1-3 change, link for link; the DiT through DisTorch2 on cuda:1 with its resident share; eject_models false) is pinned
-// here against a COPY of the builder and the recipe module over a copy of the table with the holds removed, so the branch runs today and a drift in it shows the day a
-// hold is lifted. The copy is the code as it stands; nothing in the shipped modules takes a seam for it.
+// While the int8_convrot row is held back, the multicard branch of wf-qwen-image-21.mjs cannot return a graph for it: loaders() asks findRecipe, which refuses first. The graph
+// shape that branch is pinned by (only nodes 1-3 change, link for link; the DiT on cuda:1; eject_models false) is pinned for both rows here against a COPY of the builder and
+// the recipe module over a copy of the table with the holds removed, so the branch runs today for the int8 row and a drift in it shows the day its hold is lifted. The copy
+// is the code as it stands; nothing in the shipped modules takes a seam for it.
 test("2.1 multicard with the hold lifted (a copy of the builder over a table with no `blocked`): only the three loaders change, and they are the row's own", async (t) => {
   const source = (f) => readFileSync(new URL(`./${f}`, import.meta.url), "utf8");
   const builder = source("wf-qwen-image-21.mjs");
@@ -60,12 +65,12 @@ test("2.1 multicard with the hold lifted (a copy of the builder over a table wit
   const lifted = await import(pathToFileURL(join(dir, "wf-qwen-image-21.mjs")).href);
   const recipes = await import(pathToFileURL(join(dir, "multicard-recipes.mjs")).href);
   const LOADERS = {
-    bf16: ["UNETLoaderDisTorch2MultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"],
-    int8_convrot: ["UNETLoaderMultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"],
+    bf16: ["UNETLoaderDisTorch2MultiGPU", "OffloadCLIPLoaderDisTorch2", "VAELoaderMultiGPU"],
+    int8_convrot: ["UNETLoaderMultiGPU", "OffloadCLIPLoaderDisTorch2", "VAELoaderMultiGPU"],
   };
   const FILES = { bf16: BF16, int8_convrot: INT8 };
   const rows = recipes.RECIPES.filter((r) => r.route === "image" && r.family === "qwen-image-2.1");
-  assert.ok(rows.length >= 2 && rows.every((r) => !r.blocked), "both 2.1 image rows are in the copy's table, none of them held back");
+  assert.ok(rows.length >= 2 && rows.every((r) => !r.blocked), "both 2.1 image rows are in the copy's table, none of them held back (the int8_convrot row's hold is removed in the copy)");
   for (const r of rows) {
     const unet = FILES[r.quant];
     assert.ok(unet && LOADERS[r.quant], `${r.id}: name its DiT file and its three loader classes here`);
@@ -199,8 +204,11 @@ test("comfy-render: --placement multicard builds the multicard graph of the fami
   const g2 = build(["--family", "qwen-image", "--ckpt", "qwen-image-2512-Q5_1.gguf", "--placement", "multicard", "--width", "1024", "--height", "1024"], { multicard: { residentGb: 3 } }).graph;
   assert.equal(g2["1"].class_type, "UnetLoaderGGUFDisTorch2MultiGPU");
   assert.equal(g2["1"].inputs.expert_mode_allocations, allocationString(3));
-  // the 2.1 bf16 binding is held back: even handed a plan, the runner's graph entry refuses it by name instead of building the split
-  assert.throws(() => build([...QI21_ARGV, "--placement", "multicard"], { multicard: { residentGb: 8 } }), (e) => e instanceof UsageError && /qwen-image-2\.1\/bf16.*held back/s.test(e.message));
+  // the 2.1 bf16 binding builds at the family's default 2048x2048 canvas, which is exactly the row's cap; its int8_convrot sibling is held back and refused by name
+  const g21 = build([...QI21_ARGV, "--placement", "multicard"], { multicard: { residentGb: 8 } }).graph;
+  assert.equal(g21["2"].class_type, "OffloadCLIPLoaderDisTorch2");
+  assert.equal(g21["1"].inputs.expert_mode_allocations, allocationString(8));
+  assert.throws(() => build(["--family", "qwen-image-2.1", "--ckpt", INT8, "--clip", QI21.clip, "--vae", QI21.vae, "--placement", "multicard"], { multicard: { residentGb: 8 } }), (e) => e instanceof UsageError && /qwen-image-2\.1\/int8_convrot.*held back/s.test(e.message));
 });
 
 test("comfy-render: a --placement multicard that was not planned is refused, never built as the single placement", () => {

@@ -91,15 +91,10 @@ func TestImagePlacementIsAnOverlayKeyAndWarnsOnAnUnsupportedFamily(t *testing.T)
 	if out := say(Config{ImageGenPlacement: "multicard", GPUCardScopedLeases: true}); !strings.Contains(out, no) || !strings.Contains(out, "sdxl") {
 		t.Errorf("the generic SDXL graph has none: %q", out)
 	}
-	for _, fam := range []string{"qwen-image", "krea2"} {
+	for _, fam := range []string{"qwen-image", "krea2", FamilyQwenImage21} {
 		if out := say(Config{ImageGenFamily: fam, ImageGenPlacement: "multicard", ImageGenSteps: 8, ImageGenCFG: 1, GPUCardScopedLeases: true}); strings.Contains(out, no) {
 			t.Errorf("%s has a recipe: %q", fam, out)
 		}
-	}
-	// qwen-image-2.1 has rows, but both are held back (int8_convrot: its DiT on cuda:1 never ran; bf16: its text encoder is built whole on the storage card before the
-	// split applies), so a box that binds it to the card-only placement is told at load that EVERY render will be refused, and which family does have a recipe
-	if out := say(Config{ImageGenFamily: FamilyQwenImage21, ImageGenPlacement: "multicard", GPUCardScopedLeases: true}); !strings.Contains(out, "imagegen_placement") || !strings.Contains(out, no) || !strings.Contains(out, `"qwen-image-2.1"`) || !strings.Contains(out, "multicard-recipes.json: krea2 and qwen-image on the image route") {
-		t.Errorf("qwen-image-2.1 has no launchable card-only recipe while both its rows are held back, and EVERY render will be refused: %q", out)
 	}
 	if out := say(Config{GenEditFamily: FamilyQwenImage21, GenEditPlacement: "multicard", GPUCardScopedLeases: true}); !strings.Contains(out, "gen_edit_placement") || !strings.Contains(out, no) {
 		t.Errorf("the 2.1 edit graph has none: %q", out)

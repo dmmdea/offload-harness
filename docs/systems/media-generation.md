@@ -848,33 +848,41 @@ the variable names, and the plan's line ends with `compute card chosen: <the rul
 
 | Route | Binding | DiT loader / text-encoder loader | Peak per card, compute / storage (GiB) | Basis |
 |---|---|---|---|---|
-| image | `qwen-image-2.1`, int8 convrot DiT, bf16 text encoder | plain pin / DisTorch2 (5 GiB on the compute card) | 9.0 / 13.6 | predicted, **held back** (below) |
-| image | `qwen-image-2.1`, bf16 DiT, bf16 text encoder | DisTorch2 (8 GiB resident) / DisTorch2 (5 GiB) | 10.8 / 14.2 | predicted, **held back** (below) |
+| image | `qwen-image-2.1`, int8 convrot DiT, bf16 text encoder | plain pin / harness loader, built off the cards (5 GiB on the compute card) | 9.0 / 13.6 | predicted, **held back** (below) |
+| image | `qwen-image-2.1`, bf16 DiT, bf16 text encoder | DisTorch2 (8 GiB resident) / harness loader, built off the cards (8 GiB on the compute card) | 11.0 / 10.1, at the 4.19 MP (2048x2048) canvas cap | predicted |
 | image | `qwen-image` 2512, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (3 GiB resident) / plain | 4.9 / 12.6 | predicted |
 | edit | `qwen-image-edit-2511`, fp8mixed DiT, fp8 text encoder | DisTorch2 (9 GiB resident), bypass LoRA / plain | 13.0 / 11.0, at the 2.0 MP canvas cap | **measured** |
 | edit | `qwen-image-edit-2511`, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (3 GiB resident) / plain | 5.6 / 12.6, at the 2.0 MP canvas cap | predicted |
 
-**A row can be held back, and both `qwen-image-2.1` rows are.** The int8 convrot row puts a comfy_kitchen int8 DiT on `cuda:1`. ComfyUI-MultiGPU's int8 dispatch path has a recorded illegal
+**A row can be held back, and the `qwen-image-2.1` int8 convrot row is.** It puts a comfy_kitchen int8 DiT on `cuda:1`. ComfyUI-MultiGPU's int8 dispatch path has a recorded illegal
 memory access when the compute device is not `cuda:0` (upstream issue 220, unfixed; it is why the pooled LTX-2.5 seat keeps compute `cuda:0`), and the
 benchmark arms the row cites ran the int8 DiT on `cuda:0` with the bf16 text encoder on `cuda:1`, the reverse of the recipe, so the placement itself never ran.
-The bf16 row is held back for its text encoder. Under `--gpu-only` ComfyUI takes the text encoder's initial device from the text-encoder device (`cuda:0`, the
-storage card) and builds the whole 16.33 GiB bf16 encoder there, before the DisTorch2 allocation string that splits it is attached; on a 15.9 GiB card that is
-out of memory (the one live card-only run of the row failed 1.4 s in, with 14.10 GiB allocated, building the encoder's output layer), so no resident share or
-peak figure in the row can place it on any 16 GB pair. No benchmark arm ran this split on two non-display cards (the row's evidence says so), and the 13.3 GiB the
-row's evidence line called the encoder's share is the bf16 DiT file's size, not the encoder's. An fp8 encoder (8.74 GiB), as the edit rows use, is built whole on `cuda:0` and fits, which is why those rows run.
-Each held-back row therefore carries a `blocked` sentence (`render/multicard-recipes.json`, `Blocked` in `internal/mediacap/multicard.go`, pinned together): it stays in the
+A held-back row carries a `blocked` sentence (`render/multicard-recipes.json`, `Blocked` in `internal/mediacap/multicard.go`, pinned together): it stays in the
 table for the proof arm, but it is no recipe. `findRecipe` refuses it by name for every caller (the planner, the builders, the runners), `FindMulticardRow` does not
 return it, so the host-RAM estimate, the doctor and the typed doors see a binding without a recipe, and the door's refusal says which row is held back and why. One int8
-arm with the DiT on `cuda:1`, and a loader that builds the bf16 encoder per card (or one measured arm that fits the pair), lift them (clear `blocked` and `Blocked`);
-the int8 row names the same bf16 encoder, so it needs the second as well. Until then no `qwen-image-2.1` file has a card-only recipe, and the only launchable
-card-only IMAGE row is the 2512 Q5_1 GGUF, still predicted (the edit rows are unchanged). The load-time warning of `imagegen_placement` agrees: a box that binds
-`qwen-image-2.1` to `multicard` is told at load that every render will be refused.
+arm with the DiT on `cuda:1` lifts it (clear `blocked` and `Blocked`).
+
+**The 2.1 bf16 text encoder is built off the cards.** The bf16 Qwen3-VL-8B encoder is 16.33 GiB, more than the 15.9 GiB storage card. Under `--gpu-only` ComfyUI takes the
+text encoder's initial device from the text-encoder device (`cuda:0`) and builds the whole encoder there before the DisTorch2 allocation string that splits it is attached, so the stock
+`CLIPLoaderDisTorch2MultiGPU` ran out of memory 1.4 s in (14.10 GiB allocated) on the one live card-only run of this row; the 13.3 GiB the row's old evidence line called the
+encoder's share is the bf16 DiT file's size, not the encoder's. The row therefore names the `distorch2-host` text-encoder loader: the harness's own
+`OffloadCLIPLoaderDisTorch2` (`render/comfyui-ext/nodes/offload_multicard`), which runs the stock loader with ComfyUI's one answer to "where is the encoder built" changed to the CPU,
+then places it at once through DisTorch2's own load path, block by block, by the allocation `cuda:1,8gb;cuda:0,*`: 8 GiB of the encoder lands on the compute card and 8.33 GiB on the storage
+card, and the node refuses to continue if more than 64 MiB of weights are left in host RAM. The encoder computes on the storage card (`cuda:0`, which also keeps its embedding blocks);
+the share parked on the compute card is streamed across block by block at encode time, so the compute card runs no encoder activations. Host RAM is used transiently, at load time only:
+the encoder is staged whole on the CPU while it is built and filled (16.33 GiB, read through the read-only map, released when the placement ends) and no weight stays there during
+sampling. The recipe relies on the encoder leaving both cards when its last text-encode node completes (`--cache-none` drops it), before the sampler lands the DiT's share on the compute card; the live proof render has to confirm that.
+The peaks are arithmetic, not measured. At encode the storage card holds 8.33 GiB of encoder + 0.24 VAE + 0.5 context + about 1.0 activations = 10.1 GiB and the compute card 8.0 + 0.5 = 8.5 GiB;
+at sample the compute card holds 8.0 DiT share + 2.5 activations at 2048x2048 + 0.5 context = 11.0 GiB and the storage card the 5.25 GiB donor blocks + 0.24 + 0.5 = 6.0 GiB plus the VAE
+decode working set (not measured). The row's canvas cap is 2048x2048, the family default, chosen and not measured. The int8 convrot row names the same loader.
+The launchable card-only IMAGE rows are therefore the 2.1 bf16 DiT, the 2512 Q5_1 GGUF and the krea2 bf16 DiT, all still predicted (the edit rows are unchanged). The load-time warning of
+`imagegen_placement` agrees: a box that binds `qwen-image-2.1` to `multicard` is no longer told every render will be refused.
 
 **Measured and predicted.** A row is *measured* only when its per-card peaks were read in a run that used the read-only loader. Only the 2511
 fp8mixed edit has one (2026-10-11 benchmark, section 4.6: 1.47 MP on two RTX 5060 Ti 16 GB, 145.5 s, 9.4 s per step, peaks 11.9 GiB on the compute card and
 10.9 GiB on the storage card, 1.87 GiB of host growth; one card cannot hold the model and the merging LoRA loader ran out of memory, which is
 why the recipe uses the bypass loader). Every image arm of that benchmark ran the stock loader, which charges each weight file to host
-commit, so the other four rows keep what the arms showed (the 2.1 int8 and bf16 arms ran pixel-identical to the single-card render; both 2.1 rows are held back) and
+commit, so the other four rows keep what the arms showed (the 2.1 int8 and bf16 arms ran pixel-identical to the single-card render; the int8 row is held back) and
 the split shares and peaks are arithmetic from them: they are *predicted*, and the file says so per row (`basis`, `evidence`). A live run
 with the read-only loader promotes a row: flip `basis` in `render/multicard-recipes.json` and `Measured` in `internal/mediacap/multicard.go`
 (`TestTheMulticardRowsAreTheRunnersRecipes` fails until both agree).
@@ -894,7 +902,7 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
   a call on another node.
 - *No recipe, no lease.* A binding that has no row in `render/multicard-recipes.json` (krea2 in any file but the bf16 DiT with the bf16 text encoder; 2512 bf16, 38 GiB, which
   fits no card; sdxl; hidream; the 2.1 edit; an int8, int4 or nf4 text encoder, whose render moved off the bf16 one by 28.65 dB PSNR against the 30 dB
-  gate; the 2.1 int8 convrot and bf16 DiTs, whose rows are held back, so the reason names the row and says why) is refused before any lease is spent, naming
+  gate; the 2.1 int8 convrot DiT, whose row is held back, so the reason names the row and says why) is refused before any lease is spent, naming
   the key. The same goes for an edit binding whose
   `gen_edit_megapixels` pins a canvas above the recipe's 2.0 MP cap, which the runner honours verbatim: the peaks are scaled to the cap, and a larger canvas
   has no measured or scaled figure. The runner refuses the same bindings by name, as a second line of defence.
@@ -928,7 +936,7 @@ the storage card, so the DiT's total is the invariant (`recipePeaks`): a larger 
 storage card, whose room is the thinner. For the fp8mixed edit (19.1 GiB DiT, 9 GiB resident, 11.0 GiB on the storage card) `--resident-gb 5` is 15.0 GiB there
 against the 14.9 GiB a 16 GB card has left after the reserve, and the whole DiT on one card ran out of memory at load in the benchmark; the runner refuses such a
 split naming the storage card and the figure, and the Go declaration keeps the ordinary estimate (the Wan estimator already computes it this way). A larger share
-does not lower the storage figure, since no run measured that (the held-back 2.1 bf16 row, whose storage peak is its text-encoder stage, would be refused somewhat
+does not lower the storage figure, since no run measured that (the 2.1 bf16 row, whose storage peak is its text-encoder stage, would be refused somewhat
 early on a smaller share, on the conservative side).
 
 **What the runner checks, and watches.** Before it submits, `verifyImagePlacement` compares ComfyUI's device list with the pinned pair and asks `/object_info`
@@ -953,13 +961,14 @@ a *predicted* row and a binding with no recipe keep the ordinary streaming figur
 nobody has measured would admit on a guess; this errs toward waiting for the host's room. `gpu reserve` around `comfy-generate.mjs`, `comfy-render.mjs` or
 `comfy-edit.mjs` with `--placement multicard` reads the same recipe (`Facts.Placement`, `--resident-gb`, `--megapixels`).
 
-**Not measured, said once.** The int8 convrot DiT on `cuda:1` has not been run at all (the row is held back), and the bf16 row has been run once, card-only, and
-did not reach the sampler (the row is held back: the encoder is built whole on the storage card); the out-of-memory watch, the tiled-decode verdict
+**Not measured, said once.** The int8 convrot DiT on `cuda:1` has not been run at all (the row is held back), and the bf16 row has been run once, card-only, with the stock text-encoder loader, and
+did not reach the sampler (the encoder was built whole on the storage card); the harness's own loader that replaces it (`OffloadCLIPLoaderDisTorch2`) has not run yet, so where the encoder's
+bytes land, the host RAM its staging takes and the two peaks are the first things a live proof render of the row has to read; the out-of-memory watch, the tiled-decode verdict
 and the loader-input check are tested against fakes and the benchmark's log lines, not against a live wedge; the typed edit door records no footprint or host peak
 (the single-card edit route never did), so nothing yet cross-checks a measured zero against the host's real growth. The read-only reader mapped the bf16 text encoder in that one live run (750 tensors, 16.33 GiB), but nothing has run it past the
 build (the other tests use fakes of the loaders);
 the installed ComfyUI-MultiGPU is a newer commit than the one the benchmark pinned (the loader classes the recipes name are present, checked by name);
-the 2512 Q5_1 peaks are arithmetic (the held-back bf16 row's split shares are too); the port fallback for a pair instance with neither `--api` nor `COMFY_API` is untested; the lane
+the 2512 Q5_1 peaks are arithmetic (the 2.1 bf16 row's split shares are too); the port fallback for a pair instance with neither `--api` nor `COMFY_API` is untested; the lane
 probe answers for the image route, not for the edit route; and a box with three non-display cards is refused until a pair is named with `gpu reserve --devices`,
 because which two of three is a measurement nobody made.
 
