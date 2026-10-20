@@ -701,7 +701,11 @@ expert loads through `UnetLoaderGGUFDisTorch2MultiGPU` with the same compute car
 gains ComfyUI-GGUF (a run that names a `.gguf` expert and finds no such folder is refused before ComfyUI starts, and a kept instance launched without
 it is replaced, or refused when it is not the harness's own). The host-RAM declaration is the same stage rule, so a Q8_0 pair on two 15.9 GiB cards
 declares 0 GiB. Only the Q8_0 files are sized by name; any other `.gguf` is sized as the fp8 figure, and the runner refuses the builder's own
-default Q4_K files by name (they are not named, and they fit one card).
+default Q4_K files by name (they are not named, and they fit one card). **Measured 2026-10-20:** the Q8_0 pair at 1280x720, 81 frames, 2 GiB of
+each expert resident, plain decode, on a 300 W compute card and a 180 W storage card (both 15.9 GiB), with 0 GiB host RAM declared on the lease:
+3,330.6 s from execution start to success, per-card peaks 10.40 GiB (compute) and 13.01 GiB (storage), the display card untouched. Host free physical
+RAM dipped for a few seconds while each expert streamed onto the cards (transient staging) and held steady through sampling; the clip was inspected
+frame by frame (no jumps, no flicker).
 
 The typed `video` door reaches the placement from config: `videogen_placement: "multicard"` (or `placement` in a `videogen_families` entry; an
 unknown value is a config error, as for `gen_edit_placement`) with `videogen_unet_high` / `videogen_unet_low` naming the experts, and
