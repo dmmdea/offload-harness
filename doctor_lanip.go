@@ -109,10 +109,15 @@ func (k lanIPKind) phrase() string {
 }
 
 // advice is what to do about it, with the reason.
+//
+// The tailnet row also covers a node shared in from another tailnet, where the plain advice cannot be followed:
+// its dotless MagicDNS name does not resolve here, and its full name sits under the other tailnet's zone, which
+// the tailnet guard refuses unless tailnet_suffixes lists it. Renaming such a node by its full name alone drops it
+// from every fleet lane, so the row names both ways out.
 func (k lanIPKind) advice() string {
 	switch k {
 	case lanIPTailnet:
-		return ": use the MagicDNS name, because a name follows the node and a literal does not"
+		return ": use the MagicDNS name, because a name follows the node and a literal does not; a node shared in from another tailnet has no dotless name here, and its full name is refused unless tailnet_suffixes lists its zone, so list the zone and use the full name, or keep the 100.x address"
 	default:
 		return ": cross-machine reach uses a tailnet name, because a literal breaks when the box moves or when its firewall is scoped to the tailnet"
 	}

@@ -6,6 +6,14 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed - doctor's tailnet-literal advice covers a node shared in from another tailnet
+
+- **What it does.** The `lan ip:` row told the operator to use the MagicDNS name for every tailnet CGNAT literal. A node shared in
+  from another tailnet has no dotless name on this one, and its full name sits under the other tailnet's zone, which the tailnet guard
+  refuses unless `tailnet_suffixes` lists it, so following the advice dropped the node from every fleet lane (seen on a live delegator
+  config, then restored). The row now names both ways out: list that zone in `tailnet_suffixes` and use the full name, or keep the
+  100.x address. It stays informational and never changes doctor's exit code.
+
 ## [0.192.0] - 2026-10-19 - A reasoned local pin is bounded by the seat's line; offload_status publishes agent_slots
 
 ### Fixed - a reasoned local pin no longer queues without bound on the local seat
