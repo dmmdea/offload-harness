@@ -1445,16 +1445,20 @@ tree, and that the directories the launcher creates are the ones ComfyUI really 
   predates `--database-url` would reject the flag (argparse exits with status 2) and not start a
   keyed instance. The flag is in the v0.38.0 parser this was read from; that checkout is shallow, so
   older parsers were not checked.
-- *Verified without a live launch.* This was built with live ComfyUI instances off limits, so it was
-  run against ComfyUI's own code in scratch folders (CPU only: no server, port, card or model). Its
+- *Verified.* It was first run against ComfyUI's own code in scratch folders (CPU only: no server,
+  port, card or model). Its
   argument parser accepts the keyed argv `launchFlags` builds, and exits with status 2 on a
   `--user-directory` folder that does not exist while accepting a `--database-url` in folders that do
   not. Its `init_db` (v0.38.0, SQLAlchemy 2.0.54), run on Windows for two keys, the second started
   while the first held its lock, came up in about 0.5 s each on two different files (`comfyui.db`,
   `-wal`, `-shm` and `.lock`); run twice on one file, the second waited 5.05 s and failed with
-  "Could not acquire lock on database". A live keyed launch has not been done: at the next one,
-  check that `offload-comfyui-<key>.log` has no "Database is locked" line and that
-  `<comfy dir>/instances/<key>/comfyui.db` exists.
+  "Could not acquire lock on database". Then live (2026-10-20, one Windows node, `ensureComfy` with
+  `--cpu`, since the lock is taken at start-up before any device work): two keyed instances, the
+  second started while the first was up. Under the previous `launchFlags` the second logged
+  "Database lock is held; waiting up to 5s" and then "Database is locked. Another ComfyUI process is
+  already using this database."; under this one each logged "Database upgraded from None to
+  0008_drop_asset_meta", neither logged the lock, and each had its own
+  `<comfy dir>/instances/<key>/comfyui.db`.
 
 **Pin by uuid, never by index.** A card-bound instance gets `CUDA_VISIBLE_DEVICES=<GPU uuid>` in its
 child env and **no** `--cuda-device` flag (and a `--cuda-device` / `--default-device` in the extra
