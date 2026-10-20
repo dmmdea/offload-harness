@@ -55,7 +55,7 @@ const specReserve = 3072
 // cap. It is used ONLY as an upper-bound GATE — never to claim a fit — and a
 // real-tokenizer count replacing it is the recorded v2 upgrade.
 //
-// The arithmetic lives in placetable.EstimateTokens since ADR 0039 so the
+// The arithmetic lives in placetable.EstimateTokens since ADR 0052 so the
 // delegator, the placement table and the node size a contract identically;
 // this is the delegate's name for it.
 func EstimateTokens(c core.AgentContract) int { return placetable.EstimateTokens(c) }
@@ -416,7 +416,7 @@ func freeWorkerProven(v NodeView) bool {
 //   - Depth == 0: only an ORIGIN contract may travel (hop limit 1). The
 //     requester's depth is checked here at placement; the receiving node
 //     additionally derives effectiveDepth ≥ 1 for whatever arrives.
-//   - Layers (ADR 0039, council R5): a node that advertises layer rows is
+//   - Layers (ADR 0052, council R5): a node that advertises layer rows is
 //     gated by the SAME placement table the local box and the node itself
 //     use — eligibility is "the table, run over the node's rows, neither
 //     defers nor waits". The residency, roster and ceiling checks above are

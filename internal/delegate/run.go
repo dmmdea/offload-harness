@@ -69,14 +69,14 @@ import (
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	// Aliased: this file's `placement` struct (a resolved "run it HERE") predates
 	// the package and is used at every placement site; the package is the
-	// composite tier's decision TABLE (ADR 0039), so the alias names what it is.
+	// composite tier's decision TABLE (ADR 0052), so the alias names what it is.
 	placetable "github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatguard"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 )
 
 // LocalOptions is what a delegator that already DECIDED where a contract runs
-// hands the local runner (ADR 0039): the seat to run instead of the planner
+// hands the local runner (ADR 0052): the seat to run instead of the planner
 // default and the placement block to publish on the result. It exists because
 // placement is decided once, delegator-side, over the same table a node uses
 // — the runner must not re-derive (and possibly contradict) that decision, so
@@ -345,7 +345,7 @@ type PlacedResult struct {
 	// once it no longer reads busy by the reading the deal used.
 	overflow bool
 	// decided is the placement-table decision behind a waitCapacity sentinel
-	// on a composite box (ADR 0039, council R1: the pair's long seat waits for
+	// on a composite box (ADR 0052, council R1: the pair's long seat waits for
 	// the agent seat to drain). It exists so the capacity wait can tell "the
 	// local seat is reserved by a lease" from "the decided seat is waiting for
 	// an eviction to become free": the first ends in the holder-naming
@@ -354,7 +354,7 @@ type PlacedResult struct {
 	// never produce the lease text or a capacity defer. nil on every
 	// pre-composite sentinel.
 	decided *placetable.Decision
-	// Placed (ADR 0039, 0.116.0) is the placement decision this result was
+	// Placed (ADR 0052, 0.116.0) is the placement decision this result was
 	// produced under — the block published as `placed` beside the untouched
 	// `placement` reason string. Local: the delegator's own decision, replaced
 	// by the pipeline's stamp once the run answers (identical by construction).
@@ -688,7 +688,7 @@ type RunOptions struct {
 	// backlog across tenants. Empty = anonymous, arrival order on the node.
 	Tenant string
 	// LocalDecider is the placement decision a LOCAL run is made under on a
-	// composite box (ADR 0039). nil = production: placetable.Decide over the
+	// composite box (ADR 0052). nil = production: placetable.Decide over the
 	// config's layers with ONE memoised placetable.NewSnapshot per run (2 s
 	// TTL), so a 32-subtask spread deciding per subtask per tick execs
 	// nvidia-smi once, not 32 times. Tests inject readers here; a box with no
@@ -2400,7 +2400,7 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 		// when a remote had freed up in the meantime.
 		//
 		// A DECIDED sentinel (the pair's long seat waiting for a busy agent
-		// seat to drain, ADR 0039) carries no refusal: nobody declined the
+		// seat to drain, ADR 0052) carries no refusal: nobody declined the
 		// work, so the decision's reason must not be tallied as a replacement.
 		// Neither does a gate turn-away or a deal's overflow (pl.waitNote): the
 		// node was never asked, so their reason says why the subtask waits and
@@ -2699,7 +2699,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// PlacedResult parameter).
 	p2cSeed := mintP2CSeed()
 	waitStart := time.Now()
-	// decided is the composite decision behind the seed (ADR 0039, council
+	// decided is the composite decision behind the seed (ADR 0052, council
 	// R1): the decided seat exists and holds the contract, it would only evict
 	// a busy seat. Held in a local so a remote refusal inside the wait (which
 	// replaces `seed`) cannot turn the decided wait into the lease wait — the
@@ -3433,7 +3433,7 @@ func (r *runner) runDecided(ctx context.Context, i int, contract core.AgentContr
 }
 
 // decidedDefer is the result for a LOCAL placement the composite decision
-// refused (ADR 0039): a guard refused the layer, or no layer window holds the
+// refused (ADR 0052): a guard refused the layer, or no layer window holds the
 // contract. Deferred under the decision's class with its reason, the placed
 // block naming the guard or the largest window on the wire AND in the ledger
 // row — never a silent trim, never a fall-back seat (spec D4). Nothing ran:
@@ -6196,7 +6196,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 	}
 
 	if chosen.Local {
-		// The composite decision (ADR 0039): which layer and seat serve this
+		// The composite decision (ADR 0052): which layer and seat serve this
 		// contract on THIS box. A forced placement from the capacity wait
 		// carries the decision it found; otherwise decide now. The zero
 		// Decision (a plain box) runs the planner seat and publishes nothing.
@@ -7737,7 +7737,7 @@ func (r *runner) noEligibleRemoteAmong(st Subtask, views []NodeView, probeErrs [
 			}
 			return why, core.DeferClassInfrastructure
 		}
-		// Composite nodes (ADR 0039): for a remote-shaped contract (schema,
+		// Composite nodes (ADR 0052): for a remote-shaped contract (schema,
 		// origin depth) the table's own verdict per layered node is the
 		// reason — a window no layer holds (contract), a guard the node's
 		// rows refused or a busy pair the long seat would evict (capacity) —
@@ -8079,7 +8079,7 @@ type delegationLogLine struct {
 	// other end. Omitempty: pre-0.81 rows read as unknown, never as a value.
 	DelegatorVersion     string `json:"delegator_version,omitempty"`
 	DelegatorBuildSHA256 string `json:"delegator_build_sha256,omitempty"`
-	// Placed (ADR 0039) is the placement decision the row was produced under
+	// Placed (ADR 0052) is the placement decision the row was produced under
 	// (PlacedResult.Placed). Omitempty: a plain box's corpus row is unchanged,
 	// and a pre-0.116 row reads as "one implicit layer", never as unplaced.
 	Placed *core.Placed `json:"placed,omitempty"`

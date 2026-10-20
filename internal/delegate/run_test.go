@@ -170,7 +170,7 @@ type fakeNode struct {
 	dispatchRetryAfter string
 
 	// layers, when non-nil, is published as health's `layers` rows (a composite
-	// node, ADR 0039); decodeCap is the cap the node decodes a dispatched
+	// node, ADR 0052); decodeCap is the cap the node decodes a dispatched
 	// contract at (0 = the plain transport cap) — a composite node admits
 	// contracts sized for its long seats.
 	layers    []placetable.LayerRow

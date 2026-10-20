@@ -221,7 +221,7 @@ func (k fitKey) beats(other fitKey) bool {
 // scoring it — inventing a ceiling for the local seat would be a fabricated
 // capability claim, and the harness reports what a node advertised, never more.
 //
-// A node with layer rows (ADR 0039) is scored on the window of the seat the
+// A node with layer rows (ADR 0052) is scored on the window of the seat the
 // placement table DECIDES for the contract — the pair's agent seat for a
 // contract that fits it, the long seat on overflow — not on the single
 // advertised ceiling, which on a composite box is only one layer's. A

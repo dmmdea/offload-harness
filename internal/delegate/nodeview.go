@@ -195,7 +195,7 @@ type NodeView struct {
 	STTHQ          *bool
 	STTUploadMaxMB int
 	// Layers is a composite node's advertised device layers (health `layers`,
-	// ADR 0039): the spec of every layer and seat, live occupancy, and the
+	// ADR 0052): the spec of every layer and seat, live occupancy, and the
 	// node's OWN admissibility verdict per layer. The delegator rebuilds them
 	// with placetable.FromRows and runs the SAME placement table over them
 	// (remoteDecision) — council R5: one placement rule, no second fit
@@ -623,7 +623,7 @@ type healthWire struct {
 	// Additive (ADR 0072): the stt upload door's capability. Absent on an older node.
 	STTHQ          *bool `json:"stt_hq"`
 	STTUploadMaxMB int   `json:"stt_upload_max_mb"`
-	// Additive (0.116.0, ADR 0039). nil on a plain or pre-0.116 node; the ONE
+	// Additive (0.116.0, ADR 0052). nil on a plain or pre-0.116 node; the ONE
 	// row shape fleetnode publishes and offload_status echoes.
 	Layers []placetable.LayerRow `json:"layers"`
 	// Additive (0.127.0, PR-5 item 1). Absent on an older node, decoding to

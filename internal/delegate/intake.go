@@ -54,7 +54,7 @@ func PrepareContract(spec SubtaskSpec, readRoot string) (core.AgentContract, err
 
 // PrepareContractWithCap is PrepareContract validating the inline context at
 // capBytes — config.AgentContextCapBytes() for the box the surface runs on
-// (ADR 0039): 256 KiB on a plain box, the largest layer window × 3 on a
+// (ADR 0052): 256 KiB on a plain box, the largest layer window × 3 on a
 // composite one. Without it a contract sized for the long seats is refused at
 // the door before placement can ever choose them, and both long seats are dead
 // code. capBytes ≤ 0 reads as the plain cap (ValidateWithCap's rule): an unset

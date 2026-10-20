@@ -129,7 +129,7 @@ type ResultWire struct {
 	// placement above opens by saying whether it was honoured or overridden. omitempty — every other result
 	// publishes byte-identically to before.
 	PinReason string `json:"pin_reason,omitempty"`
-	// Placed (ADR 0039, 0.116.0) is the composite placement block: tier,
+	// Placed (ADR 0052, 0.116.0) is the composite placement block: tier,
 	// layer, role, seat, device pin, reason, and on a defer the guard that
 	// refused. omitempty — a plain box publishes byte-identically to before.
 	Placed             *core.Placed    `json:"placed,omitempty"`
