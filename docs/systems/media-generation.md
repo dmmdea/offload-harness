@@ -1372,14 +1372,16 @@ behaviour. A keyed instance owns:
 | thing | keyed instance | default instance |
 |---|---|---|
 | endpoint | `--api` / `COMFY_API`, else `COMFY_PORT_BASE` (default the first port after the default one) plus `COMFY_INSTANCE_INDEX`; never the default port | the default port |
-| launch flags | `--port`, `--output-directory <comfy dir>/instances/<key>/output`, `--temp-directory <comfy dir>/instances/<key>`, before the extra args | none of these |
+| launch flags | `--port`, `--output-directory <comfy dir>/instances/<key>/output`, `--temp-directory <comfy dir>/instances/<key>`, `--database-url sqlite:///<comfy dir>/instances/<key>/comfyui.db`, before the extra args | none of these |
+| database | its own sqlite file, `<comfy dir>/instances/<key>/comfyui.db`, so no two instances lock each other | ComfyUI's default: `comfyui.db` in the user directory |
 | launch marker | `.offload-launch-<key>.json`: pid, the spawning process, argv, profile, key, port and the lease epoch (`GPU_LEASE_EPOCH`) when launched under a lease | `.offload-launch.json`, unchanged |
 | console log | `offload-comfyui-<key>.log`, rotated on its own | `offload-comfyui.log` |
 | input directory | shared; runners stage under names unique across processes (clock, process id, random suffix, sequence number: `render/comfy-input.mjs`) | shared |
 
-A `--port`, `--output-directory` or `--temp-directory` in `COMFY_EXTRA_ARGS` is dropped (with a
+A `--port`, `--output-directory`, `--temp-directory` or `--database-url` in `COMFY_EXTRA_ARGS` is dropped (with a
 `COMFY-INSTANCE-WARN:` line) for a keyed instance, because the last occurrence wins and would put it
-back on a shared port or directory.
+back on a shared port, folder or database. The default instance's extra args are passed through
+untouched, `--database-url` included.
 
 **Why one folder per instance, outside `temp` and `output`.** ComfyUI appends `/temp` to the value of
 `--temp-directory` itself, so the temp directory a keyed instance really uses is
@@ -1388,6 +1390,71 @@ back on a shared port or directory.
 keyed temp directory nested under `<comfy dir>/temp` would be wiped whenever the default instance
 started. A test pins that no keyed directory is inside the default instance's `temp` or `output`
 tree, and that the directories the launcher creates are the ones ComfyUI really uses.
+
+**One database per instance (rollout finding 8).** Read from ComfyUI's own parser and startup code
+(`comfy/cli_args.py`, `app/database/db.py`, `main.py`, v0.38.0), not guessed:
+
+- *The flag.* `--database-url`, `type=str`, `default=None`: "Specify the database URL, e.g. for an
+  in-memory database you can use 'sqlite:///:memory:'. Defaults to 'comfyui.db' in the effective user
+  directory." With no flag the file is `<user directory>/comfyui.db`, so every instance on a box shares
+  it. A keyed instance gets `sqlite:///<comfy dir>/instances/<key>/comfyui.db`, in its own folder
+  beside `output` and `temp` and inside neither (a temp wipe or an output scan cannot reach it). The
+  URL has the form ComfyUI builds for its own default and splits again in `get_db_path`.
+- *The lock.* `_init_file_db` takes a file lock on `<db>.lock` before it touches the file and keeps it
+  until the process exits (the OS drops it when the process dies, so a killed instance leaves no stale
+  lock). A second process logs "Database lock is held; waiting up to 5s for it to be released", waits
+  5 s, then raises "Could not acquire lock on database", and `setup_database` logs "Database is
+  locked. Another ComfyUI process is already using this database.". With assets off (the harness
+  default: the launcher never passes `--enable-assets` and no seeded config sets it) it then returns
+  and the server starts without a database; with `--enable-assets` it exits with status 1. So the
+  shared file cost every instance after the first 5 s at start and its database, and nothing else:
+  the renders completed, with three instances up side by side. The console logs of keyed instances on
+  the 3-card box show it (2026-10-03): the two lines 5 s apart, then start-up carrying on, which also
+  proves assets were off there, since `--enable-assets` would have exited. It would have been a failed
+  launch the day assets are enabled in `COMFY_EXTRA_ARGS`.
+- *What uses the database.* Only the asset system (`app/assets`), through five tables: `assets`,
+  `asset_contents`, `tags`, `asset_tags` and `asset_system_state` (the stored hash mode). With assets
+  off (the harness default) it is touched only at start-up, which checks the stored hash mode and
+  writes it the first time or when it changes, and at shutdown, which wipes the temp rows. With
+  `--enable-assets` it is also the catalogue behind the asset routes (`/api/assets...` and
+  `/api/tags`; each answers 503 while assets are off), the background seeder and scanner over models,
+  input and output, the registration of uploaded, executed and cached outputs, and
+  `/view?filename=blake3:<hash>` (404 while assets are off). Rendering, the queue, workflows,
+  settings, the API nodes and ComfyUI-Manager do not use it: a search of the core, the API nodes and
+  the installed custom nodes found it only under `app/assets`, in the asset-manager calls of
+  `main.py`, `server.py`, `execution.py` and `comfy_execution/asset_enrichment.py`, and in one
+  ComfyUI-Manager end-to-end test, which launches ComfyUI with a database URL of its own. With assets
+  off the lock therefore disabled no feature the harness uses; the change removes the 5 s start-up
+  wait and the error, and makes `--enable-assets` usable on a keyed instance.
+- *A user directory of its own: not needed, and left shared.* (1) `--user-directory` is
+  `type=is_valid_directory`: the path must already exist or ComfyUI exits at argument parsing, while
+  `--database-url` is a plain string and `prepare_file_db_path` creates its folder. (2) The user
+  directory holds more than the database: `users.json`, the per-user settings and workflows, and
+  ComfyUI-Manager's configuration (`__manager/config.ini`: security level, network mode and the
+  like). A new directory per instance would start each one with none of that, Manager at its defaults
+  instead of the operator's, for no gain: the database is the only process-exclusive file there
+  (Manager's console log is already named by port, and the harness drives ComfyUI through the API,
+  not the front end that writes the settings). (3) With `--database-url` given, `copy_legacy_default_db`
+  returns early, so a keyed instance never touches the shared `comfyui.db` or its `.bkp`, `.lock`,
+  `-wal` and `-shm` files. Revisit only if a custom node is found that keeps process-exclusive
+  state in the user directory.
+- *Upgrade.* A running instance keeps the argv it started with, so one launched before this change
+  keeps the shared database until its next launch, and it is still reused: the database flag is not
+  part of the ownership check. The first launch of a keyed instance builds its database by running
+  the migrations (eight; about 0.5 s measured); later launches reuse the file. A ComfyUI whose parser
+  predates `--database-url` would reject the flag (argparse exits with status 2) and not start a
+  keyed instance. The flag is in the v0.38.0 parser this was read from; that checkout is shallow, so
+  older parsers were not checked.
+- *Verified without a live launch.* This was built with live ComfyUI instances off limits, so it was
+  run against ComfyUI's own code in scratch folders (CPU only: no server, port, card or model). Its
+  argument parser accepts the keyed argv `launchFlags` builds, and exits with status 2 on a
+  `--user-directory` folder that does not exist while accepting a `--database-url` in folders that do
+  not. Its `init_db` (v0.38.0, SQLAlchemy 2.0.54), run on Windows for two keys, the second started
+  while the first held its lock, came up in about 0.5 s each on two different files (`comfyui.db`,
+  `-wal`, `-shm` and `.lock`); run twice on one file, the second waited 5.05 s and failed with
+  "Could not acquire lock on database". A live keyed launch has not been done: at the next one,
+  check that `offload-comfyui-<key>.log` has no "Database is locked" line and that
+  `<comfy dir>/instances/<key>/comfyui.db` exists.
 
 **Pin by uuid, never by index.** A card-bound instance gets `CUDA_VISIBLE_DEVICES=<GPU uuid>` in its
 child env and **no** `--cuda-device` flag (and a `--cuda-device` / `--default-device` in the extra
