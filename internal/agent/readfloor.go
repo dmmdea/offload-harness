@@ -174,17 +174,28 @@ func (g *readGate) check(root, rel string) error {
 		if err := g.audit.record(a, Deny, reason, fired); err != nil {
 			g.logAuditFailure(err)
 		}
-		return NotPerformed("read refused: " + reason)
+		next := nextSteps(ActRead, causeRule)
+		if fired.Glob == "~N" {
+			next = nextReadLongName
+		}
+		return NotPerformed("read refused: " + oneLine(reason) + Refusal{Rule: ruleLabel(fired), NextSteps: next}.tail())
 	}
 	if err := g.audit.record(a, Warn, "would deny under agent_read_floor=enforce: "+reason, fired); err != nil {
 		g.logAuditFailure(err)
 		if g.strict {
-			return NotPerformed("read refused: the audit trail could not record this read of secret material (" + err.Error() + ") and the trail is enforcing")
+			return NotPerformed("read refused: the audit trail could not record this read of secret material (" + oneLine(err.Error()) + ") and the trail is enforcing" +
+				Refusal{Rule: "audit trail: the read could not be recorded", NextSteps: nextReadAuditFailed}.tail())
 		}
 	}
 	log.Printf("agent read floor (warn): read of %s allowed; enforce would refuse it: %s", a.Path, reason)
 	return nil
 }
+
+// The read floor's own next steps, beside nextSteps'; like those, they never offer an approval verb.
+const (
+	nextReadLongName    = "read the same file again by its long name"
+	nextReadAuditFailed = "continue without this file, and say in your final answer that the audit trail failed"
+)
 
 func (g *readGate) logAuditFailure(err error) {
 	g.logOnce.Do(func() {

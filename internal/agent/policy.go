@@ -2,6 +2,8 @@ package agent
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -202,6 +204,44 @@ func (p *Policy) classify(a Action) (Decision, string) {
 // ALLOW cannot be audited, it is downgraded to DENY — an unauditable mutation is
 // not performed (a mutating agent must leave a trail).
 func (p *Policy) Decide(a Action) (Decision, string) {
+	v := p.decide(a)
+	return v.eff, v.reason
+}
+
+// Explain is Decide with the structured refusal body (register SF-25): the same decision
+// and reason, and the same single audit record, plus the rule that produced it and what
+// the model can do next. Tools return Refusal.Text() for anything but Allow.
+func (p *Policy) Explain(a Action) (Decision, Refusal) {
+	v := p.decide(a)
+	ref := Refusal{Decision: v.eff, Rule: ruleLabel(v.fired), Reason: v.reason, Asked: v.asked}
+	switch {
+	case v.auditFailed:
+		ref.Rule = "audit trail: the decision could not be recorded"
+		ref.NextSteps = nextSteps(a.Kind, causeAudit)
+	case v.asked:
+		ref.NextSteps = nextSteps(a.Kind, causeAsked)
+	case v.fired.Glob != "":
+		ref.NextSteps = nextSteps(a.Kind, causeRule)
+	default:
+		ref.NextSteps = nextSteps(a.Kind, causeBuiltIn)
+	}
+	return v.eff, ref
+}
+
+// verdict is decide's result: the effective decision and its reason, the table rule that
+// fired (zero when the built-in floor decided), whether the decision was an ask before an
+// unattended run resolved it to deny, and whether an allow was refused because the audit
+// trail could not be written.
+type verdict struct {
+	eff         Decision
+	reason      string
+	fired       Rule
+	asked       bool
+	auditFailed bool
+}
+
+// decide is the body of Decide and Explain.
+func (p *Policy) decide(a Action) verdict {
 	// Structural risk table (rules.go): tighten-only, first match wins. Sits
 	// between classify's unconditional built-ins (a rule cannot resurrect what
 	// .git-deny killed — classify runs first and its Deny wins below) and the
@@ -245,6 +285,7 @@ func (p *Policy) Decide(a Action) (Decision, string) {
 			reason = "requires approval; unattended run → denied; NOT queued (no ask-queue attached or queue write failed) (" + reason + ")"
 		}
 	}
+	auditFailed := false
 	if p.audit != nil {
 		if err := p.audit.record(a, eff, reason, fired); err != nil {
 			switch {
@@ -256,6 +297,7 @@ func (p *Policy) Decide(a Action) (Decision, string) {
 				})
 			case eff == Allow:
 				eff = Deny
+				auditFailed = true
 				reason = "refusing to proceed: audit write failed (" + err.Error() + ")"
 				if p.auditByKey {
 					reason += "; " + auditEnforcedHint
@@ -264,7 +306,109 @@ func (p *Policy) Decide(a Action) (Decision, string) {
 			}
 		}
 	}
-	return eff, reason
+	return verdict{eff: eff, reason: reason, fired: fired, asked: d == Ask, auditFailed: auditFailed}
+}
+
+// Refusal is the structured body of a deny or ask (register SF-25): the decision, the rule
+// that produced it, the reason, and what the model can do next. It never offers an approval
+// verb: an unattended ask is an operator decision outside the run, not something the model
+// can request, and a refusal that invites "ask for approval" teaches the model to loop on it.
+type Refusal struct {
+	Decision  Decision
+	Rule      string
+	Reason    string
+	NextSteps string
+	// Asked: the decision was ask before an unattended run resolved it to deny.
+	Asked bool
+}
+
+// Text is the tool result the model sees. The first line is the one-line refusal tools
+// returned before SF-25; the rule and the next step follow on their own lines. Each field is
+// flattened to one line, so an operator rule's reason cannot add lines of its own.
+func (r Refusal) Text() string {
+	return fmt.Sprintf("NOT performed (%s): %s", r.Decision, oneLine(r.Reason)) + r.tail()
+}
+
+// tail is the rule and next-step lines that follow a refusal's first line. The read floor,
+// whose first line is "read refused: ...", appends the same tail.
+func (r Refusal) tail() string {
+	return "\nrule: " + oneLine(r.Rule) + "\nnext: " + oneLine(r.NextSteps)
+}
+
+// oneLine replaces line breaks with spaces.
+func oneLine(s string) string {
+	return strings.NewReplacer("\r\n", " ", "\n", " ", "\r", " ").Replace(s)
+}
+
+// refusalError carries a broker refusal through a check that returns an error (validateURL
+// runs on every redirect hop too, where only the reason reaches the transport error), so
+// the tool that called the check can still return the structured body.
+type refusalError struct{ ref Refusal }
+
+func (e refusalError) Error() string { return e.ref.Reason }
+
+// notPerformedFrom is a URL check's error as a tool result: the structured refusal when the
+// broker refused, else the one-line deny it always was.
+func notPerformedFrom(err error) error {
+	var re refusalError
+	if errors.As(err, &re) {
+		return NotPerformed(re.ref.Text())
+	}
+	return NotPerformed(fmt.Sprintf("NOT performed (deny): %s", err))
+}
+
+// ruleLabel names the table rule that fired, or the built-in floor when none did.
+func ruleLabel(fired Rule) string {
+	if fired.Glob == "" {
+		return "built-in"
+	}
+	return fmt.Sprintf("%s %s [%s]", fired.Kind, fired.Glob, fired.Severity)
+}
+
+// refusalCause is WHY an action was refused. It decides the next step before the action's
+// kind does (SF-25 review): while the audit trail is broken every change fails the same way,
+// so "write elsewhere" only sends the model through new paths that each fail, and a
+// rule-protected path is not something to reach another way.
+type refusalCause int
+
+const (
+	causeBuiltIn refusalCause = iota // classify's own floor, or a capability this run lacks
+	causeRule                        // a protection rule fired: the secret floor or the operator's table
+	causeAsked                       // an ask that an unattended run resolved to deny
+	causeAudit                       // an allow refused because the audit trail could not be written
+)
+
+// nextSteps is the concrete thing the model can do instead, by cause and then by action
+// kind. It names an operator decision for an ask and never an approval verb (approve,
+// approval, confirm, permission, authorize): the approval verb is a separate decision (S-23).
+func nextSteps(k ActionKind, c refusalCause) string {
+	switch c {
+	case causeAudit:
+		return "no action can proceed in this run: the audit trail cannot be written, and every action is refused the same way; stop retrying and say in your final answer that the audit trail failed"
+	case causeAsked:
+		return "this action needs an operator decision outside this run; continue without it and say in your final answer what you could not do and why"
+	case causeRule:
+		switch k {
+		case ActFetch, ActBrowse:
+			return "the rule above refuses this host; do not reach the same content another way, continue without it, and say in your final answer what you could not do"
+		case ActRead:
+			return "the rule above keeps this file unread; do not reach its content another way (a copy, another path, a search), continue without it, and say in your final answer what you could not do"
+		}
+		return "the rule above protects this path; leave it as it is, do not put the same content under another name or path, continue without it, and say in your final answer what you could not do"
+	}
+	switch k {
+	case ActWrite:
+		return "the file was not written; write elsewhere inside the workspace, or finish without it and say why in your final answer"
+	case ActDelete:
+		return "nothing was deleted; leave the file in place and continue, or say in your final answer why it should go"
+	case ActFetch:
+		return "the request was not sent; only hosts on this run's egress allowlist are reachable, so continue without it"
+	case ActShell:
+		return "the command was not run; use an allowlisted executable with plain arguments, or continue without it"
+	case ActBrowse:
+		return "the page was not opened; browsing is not available to this run, so continue without it"
+	}
+	return "the action was not performed; continue without it and say why in your final answer"
 }
 
 // stricter reports whether decision x is strictly more restrictive than y
