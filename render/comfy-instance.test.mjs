@@ -199,7 +199,8 @@ test("launchFlags: a keyed instance gets its own port and directories, before th
   const inst = { key: "p8189", port: 8189 };
   const f = L.launchFlags({ extraArgs: "--verbose", instance: inst, comfyDir: "/c" });
   assert.deepEqual(f, [...BASE_FLAGS, "--port", "8189", "--output-directory", join("/c", "instances", "p8189", "output"),
-    "--temp-directory", join("/c", "instances", "p8189"), "--verbose"]);
+    "--temp-directory", join("/c", "instances", "p8189"),
+    "--database-url", "sqlite:///" + join("/c", "instances", "p8189", "comfyui.db"), "--verbose"]);
 });
 
 test("instancePaths: a keyed instance's REAL temp dir is outside the default instance's temp tree", () => {
@@ -304,7 +305,8 @@ test("keyed ensureComfy: own port and directories, uuid pin in the child env, no
   const child = await L.ensureComfy(h.opts);
   assert.equal(child.pid, 9001);
   const { args, env } = h.spawns[0];
-  assert.deepEqual(args, ["main.py", ...BASE_FLAGS, "--port", "8189", "--output-directory", join(h.dir, "instances", K0, "output"), "--temp-directory", join(h.dir, "instances", K0)]);
+  assert.deepEqual(args, ["main.py", ...BASE_FLAGS, "--port", "8189", "--output-directory", join(h.dir, "instances", K0, "output"), "--temp-directory", join(h.dir, "instances", K0),
+    "--database-url", "sqlite:///" + join(h.dir, "instances", K0, "comfyui.db")]);
   assert.ok(!args.includes("--cuda-device"));
   assert.equal(env.CUDA_VISIBLE_DEVICES, U0, "the pin is the uuid, in the child env");
   assert.deepEqual(h.made, [join(h.dir, "instances", K0, "output"), join(h.dir, "instances", K0, "temp")],

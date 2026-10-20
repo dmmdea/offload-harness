@@ -387,7 +387,7 @@ test("launchFlags with a multicard launch: the base flags, the placement's, the 
   const instance = L.resolveInstance({ api: "http://127.0.0.1:18852", env: { COMFY_INSTANCE: launch.key } });
   const warned = [];
   const flags = L.launchFlags({ reserveVram: "1.0", extraArgs: "--cuda-device 1 --x 1", launch, profile: { cudaDevice: "", dynamicVram: "", multicard: { cards: launch.cards } }, instance, comfyDir: "/c", warn: (l) => warned.push(l) });
-  assert.deepEqual(flags, [...BASE, ...launch.flags, "--port", "18852", "--output-directory", join("/c", "instances", launch.key, "output"), "--temp-directory", join("/c", "instances", launch.key), "--x", "1"]);
+  assert.deepEqual(flags, [...BASE, ...launch.flags, "--port", "18852", "--output-directory", join("/c", "instances", launch.key, "output"), "--temp-directory", join("/c", "instances", launch.key), "--database-url", "sqlite:///" + join("/c", "instances", launch.key, "comfyui.db"), "--x", "1"]);
   assert.ok(!flags.includes("--cuda-device"), "a --cuda-device would make main.py rewrite the uuid pin");
   assert.equal(warned.length, 1);
   assert.match(warned[0], /--cuda-device\/--default-device.*dropped/);
@@ -416,7 +416,7 @@ test("ensureComfy with a multicard launch: the placement's argv, the two uuids s
   const child = await L.ensureComfy(h.opts);
   assert.equal(child.pid, 7001);
   const { args, env } = h.spawns[0];
-  assert.deepEqual(args, ["main.py", ...BASE, ...h.launch.flags, "--port", "18852", "--output-directory", join(h.dir, "instances", h.launch.key, "output"), "--temp-directory", join(h.dir, "instances", h.launch.key)]);
+  assert.deepEqual(args, ["main.py", ...BASE, ...h.launch.flags, "--port", "18852", "--output-directory", join(h.dir, "instances", h.launch.key, "output"), "--temp-directory", join(h.dir, "instances", h.launch.key), "--database-url", "sqlite:///" + join(h.dir, "instances", h.launch.key, "comfyui.db")]);
   assert.equal(env.CUDA_VISIBLE_DEVICES, `${U2},${U0}`);
   assert.equal(env.CUDA_DEVICE_ORDER, "PCI_BUS_ID");
   assert.equal(env.OFFLOAD_RO_LOAD, "1");

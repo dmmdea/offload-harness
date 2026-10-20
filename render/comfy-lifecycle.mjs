@@ -48,9 +48,10 @@ export const COMFY_PY = resolveComfyPy(COMFY_DIR);
 // same console log, same spawn env, no bind check. An instance is keyed ONLY by an explicit
 // COMFY_INSTANCE or by the card it is bound to (COMFY_CARD_UUID); a port on its own never
 // makes one. A keyed instance owns a port (given by --api / COMFY_API, else the base
-// COMFY_PORT_BASE + COMFY_INSTANCE_INDEX), its own output and temp directories (one folder
+// COMFY_PORT_BASE + COMFY_INSTANCE_INDEX), its own output and temp directories and its own sqlite database (one folder
 // per instance, <comfyDir>/instances/<key>, see instancePaths), its own launch marker and
-// console log, and, when bound to a card, a pin by GPU uuid.
+// console log, and, when bound to a card, a pin by GPU uuid. The user directory stays shared:
+// only the database is process-exclusive (see instancePaths).
 //
 // WHY A UUID AND NEVER AN INDEX. --cuda-device N counts in CUDA's default fastest-first
 // order, not the driver's, so on a box with a display card index 0 can be that card, and
@@ -135,10 +136,22 @@ export function comfyApi(flagApi, env = process.env) {
  * are deliberately NOT under <comfyDir>/temp or <comfyDir>/output: the default instance wipes
  * <comfyDir>/temp on every start (cleanup_temp_filesystem), which would delete the temp files
  * of a keyed instance running at the time.
+ *
+ * `dbPath` / `dbUrl` are the instance's own sqlite database, the value of ComfyUI's
+ * `--database-url` (comfy/cli_args.py: type=str, default=None). Without the flag ComfyUI uses
+ * `comfyui.db` in the effective user directory, one file for every instance on the box, and
+ * app/database/db.py holds a process-exclusive file lock on `<db>.lock` for the life of the
+ * process: a second instance waits 5 s, logs "Database is locked. Another ComfyUI process is
+ * already using this database." and runs on without a database (with --enable-assets it exits
+ * instead). The file sits in the instance's own folder, beside `output` and `temp` and inside
+ * neither, so a temp wipe or an output scan never touches it. The URL is "sqlite:///" plus the
+ * path, the form ComfyUI builds for its own default (get_database_url) and splits again with
+ * get_db_path; `comfyDir` is absolute, as everywhere else here.
  */
 export function instancePaths(comfyDir, key) {
   const root = join(comfyDir, "instances", key);
-  return { outputDir: join(root, "output"), tempBase: root, tempDir: join(root, "temp") };
+  const dbPath = join(root, "comfyui.db");
+  return { outputDir: join(root, "output"), tempBase: root, tempDir: join(root, "temp"), dbPath, dbUrl: "sqlite:///" + dbPath };
 }
 
 /**
@@ -454,14 +467,14 @@ export function launchFlags({ reserveVram = "1.0", warm = false, extraArgs = "",
     extra.push("--disable-dynamic-vram");
   }
   if (instance && instance.key) {
-    // The instance owns its port and directories: an extra arg naming one would silently
-    // put it back on a shared one (argparse keeps the last occurrence).
-    const owned = ["--port", "--output-directory", "--temp-directory"];
+    // The instance owns its port, directories and database: an extra arg naming one would
+    // silently put it back on a shared one (argparse keeps the last occurrence).
+    const owned = ["--port", "--output-directory", "--temp-directory", "--database-url"];
     const had = extra.some((f) => owned.some((o) => f === o || f.startsWith(o + "=")));
     for (const o of owned) extra = stripValued(extra, o);
-    if (had) warn(`COMFY-INSTANCE-WARN: the extra args carry ${owned.join("/")}, which would move instance '${instance.key}' off its own port and directories; dropped`);
-    const { outputDir, tempBase } = instancePaths(comfyDir, instance.key);
-    flags.push("--port", String(instance.port), "--output-directory", outputDir, "--temp-directory", tempBase);
+    if (had) warn(`COMFY-INSTANCE-WARN: the extra args carry ${owned.join("/")}, which would move instance '${instance.key}' off its own port, directories and database; dropped`);
+    const { outputDir, tempBase, dbUrl } = instancePaths(comfyDir, instance.key);
+    flags.push("--port", String(instance.port), "--output-directory", outputDir, "--temp-directory", tempBase, "--database-url", dbUrl);
   }
   // The idle bound (resolveIdleBound): only when the yaml AND the pack file exist, because ComfyUI exits at boot on an
   // --extra-model-paths-config file that does not exist and on a custom_nodes folder that does not; a render never fails for want of it.
