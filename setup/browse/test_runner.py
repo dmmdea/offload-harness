@@ -254,6 +254,17 @@ class CdpPinTests(unittest.TestCase):
             self.assertIn("DevToolsActivePort", err)
             self.assertEqual(runner.browser_env({}, "windows", env), ({}, ""))
 
+class AllowPromptHandshakeGuardTests(unittest.TestCase):
+    def test_a_hung_pinned_endpoint_is_not_classified_as_the_allow_prompt(self):
+        # browser-harness gives up on an http:// pin's /json/version probe with "timed out", before any WebSocket
+        # handshake began: that is a hung browser, not a prompt, so it keeps its own text and class.
+        text = ("fatal: BU_CDP_URL=http://localhost:51915 unreachable after 30s: timed out -- is the dedicated "
+                "automation Chrome running? Launch it with --remote-debugging-port=<port> --user-data-dir=<dir>")
+        for pinned in (False, True):
+            with self.subTest(pinned=pinned):
+                self.assertEqual(runner._classify(RuntimeError(text), False, pinned=pinned),
+                                 ("BROWSER_UNAVAILABLE", ("RuntimeError: " + text)[:500]))
+
 
 class SettleTests(unittest.TestCase):
     """The tab must not close while the page is still saving: a production editor autosaved

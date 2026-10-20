@@ -669,12 +669,54 @@ class Run:
         return is_denied(label, self.allow_labels, self.unattended)
 
 
-def _classify(exc, agent_built) -> tuple[str, str]:
+# What browser-harness (0.1.13) says when the browser has not approved a new debugging connection: a timed-out or
+# rejected (HTTP 403) WebSocket handshake, or "permission-blocked". A browser that asks the operator to approve every
+# connection holds the handshake until someone clicks Allow. An endpoint the lane pins (a named browser's
+# DevToolsActivePort socket, or browse_cdp_url) gets only about 10 s of that handshake, so a run nobody watches times
+# out. A lane left to discovery (neither is set) waits on the popup with no deadline: an unanswered prompt is no
+# handshake timeout there, the harness ends the run at browse_timeout_sec as TIMEOUT, and only browser-harness's own
+# permission-blocked (a prompt denied or dropped) comes through here. For a ws:// endpoint browser-harness appends a
+# hint about network policy, an expired URL and a Browser Use cloud browser. The browser is up and this lane never uses
+# a cloud browser, so that hint is dropped, the cause is named, and only browser-harness's first clause is kept as the
+# evidence (main() logs the whole text). A refused connection (nothing is listening) carries none of these words and
+# keeps its own text and class.
+ALLOW_PROMPT_REASON = (
+    'the browser did not approve the debugging connection: it waits for a click on its per-connection '
+    '"Allow remote debugging" prompt, which an unattended run never gives. It is not a dead browser. Point '
+    "browse_cdp_url at a dedicated agent browser (its own --remote-debugging-port and --user-data-dir), which "
+    "never prompts, or click Allow as a run starts."
+)
+# A run pinned with browse_cdp_url gets this one instead. Its endpoint is normally a dedicated browser, which never
+# prompts (browser-harness's own note on BU_CDP_URL), so a handshake that does not finish there is not evidence of a
+# prompt (the browser may be hung or starved), and the way out above is the setup the run already has. The pin can also
+# be the everyday browser's own endpoint, which does prompt, so both causes are named and neither is asserted.
+PINNED_HANDSHAKE_REASON = (
+    "the browser at browse_cdp_url did not finish the debugging handshake. A dedicated agent browser (its own "
+    "--remote-debugging-port and --user-data-dir) never prompts, so check that it is running and responsive. A "
+    'browser that asks per connection is waiting on its "Allow remote debugging" prompt, which an unattended run '
+    "never answers."
+)
+
+
+def waits_on_allow_prompt(text) -> bool:
+    """True when the text is browser-harness's own wording for a browser that has not approved the connection."""
+    lowered = str(text).lower()
+    if "permission-blocked" in lowered:
+        return True
+    return "ws handshake failed" in lowered and ("timed out" in lowered or "http 403" in lowered)
+
+
+def _classify(exc, agent_built, pinned=False) -> tuple[str, str]:
     if isinstance(exc, ProtocolError):
         return ("TEXT_UNAVAILABLE" if exc.op == "text" else "DECISION_UNAVAILABLE"), str(exc)
     text = str(exc)
     if isinstance(exc, ValueError) and text.startswith("Invalid TypeSafe response"):
         return "DECISION_UNAVAILABLE", text
+    if waits_on_allow_prompt(text):
+        # Ahead of the agent_built split: the prompt can stop a reconnect in the middle of a run as well.
+        evidence = re.split(r" -- |\. ", text, maxsplit=1)[0].removeprefix("fatal: ")[:120]
+        reason = PINNED_HANDSHAKE_REASON if pinned else ALLOW_PROMPT_REASON
+        return "BROWSER_UNAVAILABLE", f"{reason} browser-harness said: {evidence}"
     if not agent_built:
         return "BROWSER_UNAVAILABLE", f"{type(exc).__name__}: {text}"[:500]
     lowered = text.lower()
@@ -947,6 +989,7 @@ def main() -> int:
 
     run = Run(start, proto)
     agent, agent_built, helpers = None, False, None
+    pinned = bool(cdp_env_for(start.get("cdp_url")))  # read the way browser_env reads it; see PINNED_HANDSHAKE_REASON
     try:
         if not host_allowed(run.url, run.allow_hosts):
             _set(result, "error", "HOST_NOT_ALLOWED", f"start url not allowed: {run.url}")
@@ -1010,8 +1053,10 @@ def main() -> int:
     except BudgetExceeded as exc:
         _set(result, "budget", "", str(exc))
     except Exception as exc:
-        cls, reason = _classify(exc, agent_built)
+        cls, reason = _classify(exc, agent_built, pinned=pinned)
         log(f"run failed: {cls}: {reason}")
+        if cls == "BROWSER_UNAVAILABLE" and waits_on_allow_prompt(exc):
+            log(f"browser-harness raised: {type(exc).__name__}: {exc}")  # the reason keeps only its first clause
         if "action demo budget" in reason:
             # jev-ultrafast's own hard cap (MAX_STEPS) fired before ours: same meaning.
             _set(result, "budget", "", reason)
