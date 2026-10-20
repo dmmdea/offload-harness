@@ -1202,11 +1202,7 @@
         "imagegen_script": "render/comfy-generate.mjs",
         "imagegen_vae": "builtin",
         "imagegen_timeout_sec": 3600,
-        "gen_edit_script": "render/comfy-edit.mjs",
-        "videogen_family": "wan22",
-        "videogen_timeout_sec": 5400,
-        "videogen_unet_high": "wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors",
-        "videogen_unet_low": "wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors"
+        "gen_edit_script": "render/comfy-edit.mjs"
       },
       "media_seats": [
         {
