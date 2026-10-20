@@ -39,12 +39,17 @@ honestly serves text only.
 
 | key | value |
 |---|---|
+| `gen_edit_script` | `render/comfy-edit.mjs` |
 | `imagegen_ckpt` | `hidream_o1_image_bf16.safetensors` |
 | `imagegen_family` | `hidream-o1` |
 | `imagegen_script` | `render/comfy-generate.mjs` |
 | `imagegen_timeout_sec` | `3600` |
 | `imagegen_vae` | `builtin` |
 | `upscale_script` | `render/comfy-upscale.mjs` |
+| `videogen_family` | `wan22` |
+| `videogen_timeout_sec` | `5400` |
+| `videogen_unet_high` | `wan2.2_i2v_high_noise_14B_fp8_scaled.safetensors` |
+| `videogen_unet_low` | `wan2.2_i2v_low_noise_14B_fp8_scaled.safetensors` |
 
 The installer seeds this tier's media bindings (`config_seed`):
 

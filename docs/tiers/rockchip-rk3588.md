@@ -50,6 +50,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | key | value |
 |---|---|
 | `animategen_script` | `` |
+| `compose_script` | `` |
 | `musicgen_script` | `` |
 | `run_graph_script` | `` |
 | `sdcpp_script` | `` |

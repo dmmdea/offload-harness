@@ -146,6 +146,11 @@ func TestSixteenGBComfyTiersSeedTheMeasuredEditInpaintAnimateRoutes(t *testing.T
 			t.Fatalf("tier %s not found — this gate went blind", tier)
 		}
 		for k, w := range want {
+			// The three-card composite runs the fp8mixed edit unet (measured 145.5 s at 1.47 MP on
+			// two 16 GB cards; operator-approved 2026-09-24), seeded by the 2026-10 config audit.
+			if tier == "blackwell-3x16" && k == "gen_edit_unet" {
+				w = "qwen_image_edit_2511_fp8mixed.safetensors"
+			}
 			if got := seedStr(p.ConfigSeed, k); got != w {
 				t.Errorf("%s config_seed.%s = %q, want %q", tier, k, got, w)
 			}
