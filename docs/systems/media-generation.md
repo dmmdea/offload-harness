@@ -501,7 +501,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Card-only placement (opt-in, unset by default) | `imagegen_placement`, `gen_edit_placement`: `""`/`single` (the one-card lease every box has always taken) or `multicard` (the two non-display cards of the box; "Card-only image and edit"); both are family-overlay keys |
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
 | Upscale | `upscale_script` (shipped default `render/comfy-upscale.mjs`), `upscale_model` (ComfyUI `upscale_models/` filename; empty = `videogen_upscale_model`), `upscale_timeout_sec` (600) |
-| Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb`, `videogen_wan_decode` (`tiled` default; `plain`/`auto` opt-in) (Wan keys); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
+| Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb`, `videogen_wan_decode` (`tiled` default; `plain`/`auto` opt-in), `videogen_placement` (`""`/`single` or `multicard`: the card-only Wan placement, "Card-only Wan") and `videogen_wan_resident_gb` (0 = the runner's 3; at most 64) (Wan keys; `placement` / `wan_resident_gb` in a `videogen_families` entry); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
 | Audio | `voicegen_*`, `musicgen_script`; `tts_endpoint` / `tts_model` (default `tts-1`) / `tts_voice` / `tts_api_key` (0.113.25: an OpenAI-compatible speech SERVER for `generate_audio kind=voice` — `voice: endpoint`, or the default on a box with no `voicegen_script`; `internal/ttsclient` POSTs `/v1/audio/speech`, writes the WAV atomically, defers naming the server's words on any non-audio answer, takes no media lease because the server owns its GPU; e.g. VoiceStudio on `http://127.0.0.1:3900`) |
 | Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
 | Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
@@ -626,7 +626,7 @@ VRAM, which streams the experts through host RAM: the host pays the whole file, 
 
 | Flag | Meaning |
 |---|---|
-| `--wan-placement single\|multicard` | `single` (default) changes nothing. `multicard` is the placement below; `--high-unet` / `--low-unet` must name the fp8 safetensors experts. |
+| `--wan-placement single\|multicard` | `single` (default) changes nothing. `multicard` is the placement below; `--high-unet` / `--low-unet` must name the experts: the fp8 safetensors files, or the Q8_0 GGUF files (`Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf` / `-LowNoise-Q8_0.gguf`, 14.349 GiB each; "Q8_0 experts" below). |
 | `--wan-cards <a>,<b>` | The two cards, as nvidia-smi indices or UUIDs, for a call made outside a lease. Under a lease the lease's cards (`GPU_LEASE_DEVICES`, else the lease's own record) are the authority and this can only confirm them: a card the lease does not hold is refused. With neither, the UUIDs in `CUDA_VISIBLE_DEVICES`. |
 | `--wan-resident-gb N` | GiB of each expert kept on the compute card (default 3, the measured split; at most what the compute card holds beside the sampler's activations at the call's geometry, and at least what lets the storage card hold the rest of the expert beside the VAE: 3.2 GiB at most at film size on a 15.9 GiB card, from the film-size run's measured peak; under `--use-sage-attention` in `COMFY_EXTRA_ARGS` the film-size ceiling is 0.2 GiB, so pass 0: "Sage attention" below). The rest sits on the storage card. |
 | `--wan-decode plain` | Under multicard: save the sampled latent, free both cards, then the plain `VAEDecode` (below). `tiled` and `auto` keep their meaning. |
@@ -678,12 +678,12 @@ and a board whose power the driver does not report stays at 0 = unknown and rank
 exactly two, a token that names no card, a `--wan-cards` card the lease does not hold, a card that drives a display (`display_active`
 Enabled or `display_attached` Yes, the harness's own rule, so a monitor on a sleeping screen counts) and a card whose display state the
 driver does not report (never assumed screenless). It also refuses what was not measured or cannot run, in the same place, before the
-lease slot is taken, llama-swap is unloaded or ComfyUI starts: `--fast`, a GGUF expert, an expert nobody named (`--high-unet` and
-`--low-unet` are required: the builder's defaults are GGUF), another family (`--model ltx25`, a `--graph` file), a `--wan-resident-gb`
+lease slot is taken, llama-swap is unloaded or ComfyUI starts: `--fast`, an expert nobody named (`--high-unet` and
+`--low-unet` are required: the builder's defaults are the Q4_K GGUF files, which fit one card and were not measured split), another family (`--model ltx25`, a `--graph` file), a `--wan-resident-gb`
 that one of the two cards cannot hold at the call's geometry (the compute card: its size less a chosen 0.5 GiB margin for the CUDA context, less the sampler's
 activations, the benchmark's reserved allocator peaks as an envelope of 0.31 GiB per 1,000 tokens (never under 2 GiB) capped at the film-size run's
 measured 12.2 GiB beyond the resident share (above the film's size nothing was measured: a bigger clip is held at 12.2 and a `WAN-GEOMETRY-NOTE` says so before the check, with what a proportional extrapolation gives, leaving the share and `--wait-sec` to the caller; the activations read the attention mode from `COMFY_EXTRA_ARGS`: 15.2 GiB at film size under `--use-sage-attention`, the line between the two measured sage points below it, 12.2 without it), so 3.2 GiB of an expert at most at film size (0.2 under sage) and 9.1 at the default 832x480x49; the storage card: the
-rest of the 13.4 GiB expert plus 0.8 GiB for the VAE and the context inside its size less `--reserve-vram`, 1 GiB by default, so a 24 GiB card beside
+rest of the 13.4 GiB expert (14.4 GiB for a Q8_0 GGUF expert) plus 0.8 GiB for the VAE and the context inside its size less `--reserve-vram`, 1 GiB by default, so a 24 GiB card beside
 an 8 GiB one is refused with the share that would fit), a UUID prefix that names two cards, and
 the placement's own flags lost to an `=` (`--wan-placement=multicard`, or `--seed=7 --wan-placement multicard`: this runner's parser does
 not split `=`, so the flag is lost or swallowed, and the lease sizing, which does split it, would declare no host RAM for a call that then
@@ -691,6 +691,24 @@ ran single; write each flag as `--name value`). After ComfyUI is up and before t
 `/system_stats` device list with the pair (count, size to 5 percent and model name, in order; it cannot tell two cards of one model apart, because
 `/system_stats` carries no UUID, whose order is the pin's and the roles' rule above), and asks for the harness's node pack under every decode; a mismatch
 is `WAN-PLACEMENT-MISMATCH`, a missing pack `WAN-PLACEMENT-PACK`, with nothing submitted.
+
+**Q8_0 experts, and the typed video door.** Besides the fp8 safetensors experts the placement runs the Q8_0 GGUF experts
+(`Wan2.2-I2V-A14B-HighNoise-Q8_0.gguf` and `-LowNoise-Q8_0.gguf`, 14.349 GiB each, which fit no single 16 GB card beside the sampler). A `.gguf`
+expert loads through `UnetLoaderGGUFDisTorch2MultiGPU` with the same compute card and the same allocation string (`cuda:1,<resident>gb;cuda:0,*`),
+`virtual_vram_gb` 0 and `eject_models` false, and no `weight_dtype` input (the quant type is in the file). With an allocation string set and
+`virtual_vram_gb` 0 the loader ignores `donor_device`, so the donor is the storage card and never system RAM. The planner sizes a
+`*Q8_0.gguf` expert at `WAN_EXPERT_Q8_GIB` (14.4 GiB) in its resident-share check and the fp8 expert at 13.4; the launch's custom-node whitelist
+gains ComfyUI-GGUF (a run that names a `.gguf` expert and finds no such folder is refused before ComfyUI starts, and a kept instance launched without
+it is replaced, or refused when it is not the harness's own). The host-RAM declaration is the same stage rule, so a Q8_0 pair on two 15.9 GiB cards
+declares 0 GiB. Only the Q8_0 files are sized by name; any other `.gguf` is sized as the fp8 figure, and the runner refuses the builder's own
+default Q4_K files by name (they are not named, and they fit one card).
+
+The typed `video` door reaches the placement from config: `videogen_placement: "multicard"` (or `placement` in a `videogen_families` entry; an
+unknown value is a config error, as for `gen_edit_placement`) with `videogen_unet_high` / `videogen_unet_low` naming the experts, and
+`videogen_wan_resident_gb` (0 = the runner's default of 3). For the Wan 2.2 graph the door then leases the box's two non-display cards as a set
+(the same lease path as the edit door: gpu_lease_unavailable, never one card or the whole node when it cannot), declares the stage-rule host RAM
+(0 when both cards hold their stage), passes `--wan-placement multicard` and, above 0, `--wan-resident-gb N`, and launches with no single-card pin and
+no dynamic VRAM. A binding that names no expert is refused before any lease. Another family renders as before.
 
 **The launch.** The runner starts its own ComfyUI, a keyed instance `mc-<storage uuid head>-<compute uuid head>`: its own port (from
 `--api` or `COMFY_API`, which must not be the unkeyed instance's 8188; with neither it falls back to the per-card port, and a ComfyUI
@@ -764,8 +782,7 @@ card's (with it on the compute card the measured call, 3.0 + 12.2 = 15.2 GiB, wo
 33 GiB set): a `--reserve-vram` above 4.7 GiB no longer fits the donor blocks on a 15.9 GiB storage card, and that call takes the ordinary
 estimate (the lease it needs then declares the whole set, or `--ram 0` explicitly). One card, three (a whole-node lease), no card table,
 no fit, another family or no flag keep the ordinary estimate, the whole set (33 GiB). Measured host growth in the benchmark was 2.3 GiB
-over ComfyUI's idle, inside the headroom the brake keeps anyway. The typed VIDEO door has no multicard door yet (it leases one card, or its pool's), so the Wan placement
-is reached through the render helper under an explicit `gpu reserve --devices`; the typed image and edit doors have one ("Card-only image and edit", below).
+over ComfyUI's idle, inside the headroom the brake keeps anyway. The typed VIDEO door has one too (`videogen_placement: multicard`, "Q8_0 experts" below), as do the typed image and edit doors ("Card-only image and edit", below); the render helper can still be run by hand under an explicit `gpu reserve --devices`.
 A driver script that wraps the helper is not itself a recognised render helper, so a lease around the script declares the media class
 default (the largest bound family's figure) whatever the helper inside it does; the verb says so on a second line (F71), and the way out
 is `--ram 0` on that `gpu reserve`, because the card-only placement keeps its weights on the two cards. The same `--ram 0` is the way out of the sage

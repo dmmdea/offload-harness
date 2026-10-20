@@ -3,6 +3,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"reflect"
 	"regexp"
@@ -71,6 +72,8 @@ func (f FamilyInfo) NonCommercial() bool { return f.CommercialUse != nil && !*f.
 // own builder default for this family", never another family's bound value —
 // see (Config).ResolveVideoFamilyBinding for how this is resolved against a
 // request's family choice.
+// Placement and WanResidentGB mirror videogen_placement / videogen_wan_resident_gb
+// (the card-only Wan placement).
 type VideoFamilyBinding struct {
 	UnetHigh         string  `json:"unet_high,omitempty"`
 	UnetLow          string  `json:"unet_low,omitempty"`
@@ -82,6 +85,8 @@ type VideoFamilyBinding struct {
 	WanVirtualVramGB float64 `json:"wan_virtual_vram_gb,omitempty"`
 	WanLoader        string  `json:"wan_loader,omitempty"`
 	WanDecode        string  `json:"wan_decode,omitempty"`
+	Placement        string  `json:"placement,omitempty"`
+	WanResidentGB    float64 `json:"wan_resident_gb,omitempty"`
 	FPS              int     `json:"fps,omitempty"`
 	Width            int     `json:"width,omitempty"`
 	Height           int     `json:"height,omitempty"`
@@ -153,6 +158,11 @@ type VideoFamilyBinding struct {
 	Sampler   string  `json:"sampler,omitempty"`
 }
 
+// WanMulticard reports a binding that asks for the card-only Wan placement (videogen_placement / placement: multicard).
+func (b VideoFamilyBinding) WanMulticard() bool {
+	return strings.TrimSpace(b.Placement) == PlacementMulticard
+}
+
 // UsesSdcpp reports a video binding whose engine is stable-diffusion.cpp.
 func (b VideoFamilyBinding) UsesSdcpp() bool { return b.Engine == EngineSdcpp }
 
@@ -195,7 +205,7 @@ func (c Config) VideoDefaultFamilyBinding() VideoFamilyBinding {
 		UnetHigh: c.VideoGenUnetHigh, UnetLow: c.VideoGenUnetLow, TextEncoder: c.VideoGenTextEncoder,
 		Transformer: c.VideoGenTransformer, VideoVAE: c.VideoGenVideoVAE, AudioVAE: c.VideoGenAudioVAE,
 		LatentUpscaler: c.VideoGenLatentUpscaler, WanVirtualVramGB: c.VideoGenWanVirtualVramGB,
-		WanLoader: c.VideoGenWanLoader, WanDecode: c.VideoGenWanDecode, FPS: c.VideoGenFPS, Width: c.VideoGenWidth, Height: c.VideoGenHeight,
+		WanLoader: c.VideoGenWanLoader, WanDecode: c.VideoGenWanDecode, Placement: c.VideoGenPlacement, WanResidentGB: c.VideoGenWanResidentGB, FPS: c.VideoGenFPS, Width: c.VideoGenWidth, Height: c.VideoGenHeight,
 		Frames: c.VideoGenFrames, PoolVvramGB: c.VideoGenPoolVvramGB, PoolCompute: c.VideoGenPoolCompute,
 		PoolDonor: c.VideoGenPoolDonor, UpscaleModel: c.VideoGenUpscaleModel,
 		UpscaleWidth: c.VideoGenUpscaleWidth, UpscaleHeight: c.VideoGenUpscaleHeight,
@@ -423,7 +433,7 @@ var cudaDeviceRe = regexp.MustCompile(`^\d+(,\d+)*$`)
 // config door — never as a runner exit 2 on every render. where prefixes the key
 // ("" at the top level, `imagegen_families["x"].` inside an overlay).
 func validateMediaEnums(c Config, where string) error {
-	for _, kv := range [][2]string{{"imagegen_placement", c.ImageGenPlacement}, {"gen_edit_placement", c.GenEditPlacement}} {
+	for _, kv := range [][2]string{{"imagegen_placement", c.ImageGenPlacement}, {"gen_edit_placement", c.GenEditPlacement}, {"videogen_placement", c.VideoGenPlacement}} {
 		switch strings.TrimSpace(kv[1]) {
 		case "", PlacementSingle, PlacementMulticard:
 		default:
@@ -468,6 +478,9 @@ func validateMediaEnums(c Config, where string) error {
 	}
 	if !validWanDecode(c.VideoGenWanDecode) {
 		return fmt.Errorf("%svideogen_wan_decode: %q is not \"\", %s", where, c.VideoGenWanDecode, quotedList(WanDecodeModes))
+	}
+	if g := c.VideoGenWanResidentGB; math.IsNaN(g) || g < 0 || g > 64 {
+		return fmt.Errorf("%svideogen_wan_resident_gb: %g must be 0 (the runner's default) or a number of GiB up to 64", where, g)
 	}
 	return nil
 }
@@ -526,6 +539,14 @@ func validateVideoFamilies(c Config) error {
 		}
 		if !validWanDecode(b.WanDecode) {
 			return fmt.Errorf("videogen_families[%q].wan_decode: %q is not \"\", %s", name, b.WanDecode, quotedList(WanDecodeModes))
+		}
+		switch strings.TrimSpace(b.Placement) {
+		case "", PlacementSingle, PlacementMulticard:
+		default:
+			return fmt.Errorf("videogen_families[%q].placement: unknown placement %q (valid: \"\", %q, %q)", name, b.Placement, PlacementSingle, PlacementMulticard)
+		}
+		if g := b.WanResidentGB; math.IsNaN(g) || g < 0 || g > 64 {
+			return fmt.Errorf("videogen_families[%q].wan_resident_gb: %g must be 0 (the runner's default) or a number of GiB up to 64", name, g)
 		}
 		switch {
 		case strings.TrimSpace(b.License) != "" && b.CommercialUse == nil:

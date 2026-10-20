@@ -45,7 +45,8 @@
 //     encoder and the VAE load on cuda:0 (the storage card; the text encoder on cuda:1 kills the ComfyUI process); each
 //     expert loads through the DisTorch2 loader with its compute on cuda:1 and the allocation "cuda:1,<resident>gb;cuda:0,*",
 //     so <resident> GiB of it stays on the compute card and the rest sits on the storage card and streams over block by block.
-//     --wan-loader is not read (the placement IS the loader), a GGUF expert and --fast are refused (neither was measured).
+//     --wan-loader is not read (the placement IS the loader) and --fast is refused (never measured). The experts are the fp8
+//     safetensors files or the Q8_0 GGUF files (a .gguf expert loads through the GGUF flavour of the same DisTorch2 loader).
 //     With the plain decode a node (OffloadFreeForDecode, render/comfyui-ext) sits between the last sampler and the VAEDecode:
 //     it saves the sampled latent, frees both cards of the experts and checks the decode card, because a plain decode needs
 //     about 10 GiB the experts hold. Which decode node is built is still the decode mode's call (chooseWanDecode).
@@ -144,14 +145,9 @@ export function buildWan22I2V({
   void hero; // accepted, ignored: the native path is the default
   const useLora = !!fast;
   if (multicard) {
-    // Only what was measured is built: the fp8 safetensors experts on the native recipe. A GGUF expert fits one card, and the
-    // distill LoRAs were never run through the DisTorch2 split, so neither is guessed at.
+    // Only what was measured is built: the native recipe on the fp8 safetensors or the Q8_0 GGUF experts. The distill LoRAs were
+    // never run through the DisTorch2 split, so they are not guessed at.
     if (useLora) throw new Error('buildWan22I2V: placement:"multicard" was measured on the native recipe only; drop fast (or use placement:"single")');
-    for (const unet of [highUnet, lowUnet]) {
-      if (/\.gguf$/i.test(unet)) {
-        throw new Error(`buildWan22I2V: placement:"multicard" was measured with the fp8 safetensors experts, and ${unet} is a GGUF file (it fits one card: use placement:"single")`);
-      }
-    }
     if (!Number.isFinite(residentGb) || residentGb < 0) {
       throw new Error(`buildWan22I2V: residentGb must be a number of GiB, 0 or more, got ${JSON.stringify(residentGb)}`);
     }
@@ -184,7 +180,11 @@ export function buildWan22I2V({
   // expert there and the rest ("*") on the storage card. virtual_vram_gb 0 and donor "cpu" are inputs the loader requires and does
   // not use here (the string names only cards: measured, no host growth); eject_models false as measured.
   const allocation = multicard ? `${WAN_COMPUTE_DEVICE},${Number(residentGb.toFixed(2))}gb;${WAN_STORAGE_DEVICE},*` : "";
-  const multicardLoader = (unet) => ({ class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: WAN_COMPUTE_DEVICE, virtual_vram_gb: 0.0, donor_device: "cpu", expert_mode_allocations: allocation, eject_models: false } });
+  // A .gguf expert loads through the GGUF flavour of the same loader (no weight_dtype input: the quant type is in the file). With an
+  // allocation string set and virtual_vram_gb 0 the loader ignores donor_device; the donor is the storage card.
+  const multicardLoader = (unet) => /\.gguf$/i.test(unet)
+    ? { class_type: "UnetLoaderGGUFDisTorch2MultiGPU", inputs: { unet_name: unet, compute_device: WAN_COMPUTE_DEVICE, virtual_vram_gb: 0.0, donor_device: "cpu", expert_mode_allocations: allocation, eject_models: false } }
+    : { class_type: "UNETLoaderDisTorch2MultiGPU", inputs: { unet_name: unet, weight_dtype: "default", compute_device: WAN_COMPUTE_DEVICE, virtual_vram_gb: 0.0, donor_device: "cpu", expert_mode_allocations: allocation, eject_models: false } };
   const loaderFor = (unet) => {
     if (multicard) return multicardLoader(unet);
     const isGguf = /\.gguf$/i.test(unet);

@@ -141,14 +141,14 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   shows a decode close to the measured 38 s and no `Ran out of memory when regular VAE decoding` line in the ComfyUI log. Hunyuan 1.5 and
   LTX 2.5 are not touched by it. Detail: `docs/systems/media-generation.md`.
 - **Wan 2.2 on two cards and no host RAM, `--wan-placement multicard`** (default `single`, today's graph). The text encoder and VAE
-  load on `cuda:0`, each fp8 expert through DisTorch2 with compute on `cuda:1` and `cuda:1,3gb;cuda:0,*`; the two cards are the lease's
+  load on `cuda:0`, each fp8 safetensors or Q8_0 GGUF expert (the GGUF flavour of the DisTorch2 loader, no `weight_dtype`, donor = the storage card, never host RAM) with compute on `cuda:1` and `cuda:1,3gb;cuda:0,*`; the two cards are the lease's
   (`--wan-cards` only names them when no lease does), never a display card or one whose display state is unknown; the larger card computes (`cuda:1`), except that two cards within 1% of one size are ranked by board power
   (`power.default_limit`, read by a second best-effort query; the higher one computes from 1.25x, a power the driver does not report ranks nothing), and the environment variable `WAN_COMPUTE_UUID`
   (an index, a UUID or a UUID prefix of 8+ characters) names the compute card of the pair (also for the image and edit placements below; a token that names no card is refused, one outside the pair is ignored with a note);
   the plan's line contains `compute card chosen: <the rule>`, followed by the sage clause under sage attention. The runner launches its own ComfyUI on them (`--gpu-only`, a read-only safetensors
   reader and a free-then-plain-decode node from `render/comfyui-ext`, through `--extra-model-paths-config`, nothing installed into the
   shared ComfyUI). Under `--wan-decode plain` the experts are freed from both cards before the plain `VAEDecode`, and the sampled latent
-  is saved first. `--wan-loader` is not read, and a GGUF or unnamed expert and `--fast` are refused before anything starts (not measured). A driver script that wraps the helper is not a recognised render helper, so its lease declares the class default unless its `gpu reserve` passes `--ram 0` (the verb says so on a second line). Detail and numbers:
+  is saved first. `--wan-loader` is not read, and an unnamed expert (the builder's defaults are the Q4_K GGUF files) and `--fast` are refused before anything starts (not measured); a `.gguf` expert also loads ComfyUI-GGUF in the launch, and the typed `video` door reaches the placement from config (`videogen_placement: multicard`, `videogen_wan_resident_gb`). A driver script that wraps the helper is not a recognised render helper, so its lease declares the class default unless its `gpu reserve` passes `--ram 0` (the verb says so on a second line). Detail and numbers:
   `docs/systems/media-generation.md`.
 - **Qwen-Image on two cards, `--placement multicard`** (`comfy-generate.mjs`, `comfy-render.mjs`, `comfy-edit.mjs`; default `single`, today's graph, byte for byte). The text encoder and the VAE
   load on one leased non-display card and the DiT on the other, or split between them, through the MultiGPU loaders, with the
