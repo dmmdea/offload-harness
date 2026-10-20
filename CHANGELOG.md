@@ -6,6 +6,75 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.193.0] - 2026-10-19 - agent_delegate lint_only previews the acceptance lint and placement without running, and a multicard image call above the canvas cap is refused before the lease
+
+### Changed - docs record LMCache PR #4253 as merged upstream, with the overlay still required
+
+- **What it does.** `docs/systems/cache-server.md` (the overlay kit bullet, plus a new bullet on the upstream state) and `docs/OPERATOR-GUIDE.md` (the `--lmcache-overlay` flag row and the `SEAT_LMCACHE_PYTHONPATH` entry) described LMCache PR #4253, the fp8 / GDN store fix, as an open upstream change. They now state the upstream state read from the GitHub API on 2026-10-19: merged on 2026-09-28 (merge commit `1847435fa4`), contained in the v0.5.6rc5 tags (published 2026-10-12 and 2026-10-13, a release candidate, no final 0.5.6 seen), and issue #4247 closed. The overlay stays required until the seat runs an LMCache build that contains the merge, and the rules of the `--lmcache-overlay` flag are unchanged.
+- **Why.** The pages gave no sign that the fix had merged, so a reader could not tell whether the overlay was still needed or when it would retire. The seat move that retires it is tracked elsewhere; this change only brings the description up to the upstream state and dates the reading.
+- **Check.** One real run: `go run ./cmd/changelog check` prints `changelog: ok`, and the three changed places read back as written.
+
+### Changed - gpu-lease doc carries its first measured working-set swing row
+
+- **What it does.** The per-node working-set swing table in `docs/systems/gpu-lease.md` ("How the numbers get measured") had no
+  row. It now has one, `measured 2026-10-11` on the reference 3-card box with n=30, taken from the 30 existing lane timelines of
+  that day. The row is labelled lane-run swing, not interactive-use swing, and the headroom stays `8 (chosen)`.
+- **Why.** The doc promised a measured swing per node before the 8 GiB headroom is revisited, and the data was already on disk
+  but unentered. Entering it, with its limits stated, keeps the headroom claim honest: the figure bounds what a running lane
+  moves, and the interactive figure is still owed.
+- **Check.** Per run, over the lane's samples: system commit less the tree's private bytes moved a median of 9.9 GiB (0.5 to
+  44.9) and available RAM plus the tree's working set 5.4 GiB (0.3 to 35.7), across 9,227 samples in 30 runs.
+
+### Changed - the blackwell-3x16 and blackwell-2x16 tier pages state the card roles as they stand today
+
+- **What it does.** The tier notes in `setup/templates/profiles.json`, and the pages `docs/tiers/blackwell-3x16.md` and `docs/tiers/blackwell-2x16.md` generated from them, now say that on the three-card composite the two-card tensor-parallel seat is the harness agent seat (agent-pool, 163,840 window) and the default, that the three-card pipeline-parallel seat is the most powerful configuration but is opencode-only and never named by the harness, and that the display card may carry leased work up to `gpu_display_cap_pct` of its VRAM (default 60, 0 closes it). They also say that the reference box enumerates the pair as devices 1 and 2 since the 2026-10-12 display move while the seed keeps its original indices. Prose only: no seeded device index, window, utilization or seat binding changed.
+- **Why.** The pages predated the 2026-10-04 order and the display move, so a reader was told the pair was devices 0 and 2 with the display card at 1, and the display-card rule read as absolute.
+- **Check.** The pages were regenerated with `go run ./cmd/gentiers .`, and `go test -run TestTierDocsAreCurrent .` passes on the result.
+
+### Added - agent_delegate lint_only: the acceptance lint and the placement a contract would get, without running it
+
+- **What it does.** `agent_delegate` takes an optional `lint_only: true`. The call runs intake and the acceptance lint
+  as before, then returns before any dispatch, lease, queue or seat warm-up, and runs no model. Per subtask it answers
+  `acceptance_lint` and a `placement` (`route`, `where`, `node`, `reason`) read from the same readings the joint deal
+  takes before it deals (the lease file, the local seat's in-flight count, the run line and one health read per fleet
+  node, bounded at 4 s), through the new `delegate.PlanPlacement`. Routes `spread` and `queue` answer `not_computed`.
+  Documented in `docs/OPERATOR-GUIDE.md` and `docs/systems/mcp-server.md`; the tool description gains one sentence,
+  pinned in `toolsprofile_keep.go`.
+- **Why.** A caller learned that its acceptance was PARROT-PASSABLE or UNGROUNDED only by paying for the full run
+  (register D-109).
+- **Check.** The built binary as an MCP stdio server answered an `agent_delegate` call with `lint_only: true` and one
+  trivial subtask in 68 ms on 2026-10-19: both lint findings, `placement.where: local` ("local idle"), no job id, no
+  seat output.
+
+### Changed - composite-tier citations in internal/delegate and internal/mcpserver point at ADR 0052
+
+- **What it does.** 28 comments and strings that said "ADR 0039" for the composite tier now say "ADR 0052", including
+  the `agent_run` and `offload_status` description sentences (and their pins in `toolsprofile_dropped_test.go`).
+- **Why.** The composite tier was drafted as 0039 and recorded as 0052; 0039 is the held-card lease queue. The earlier
+  sweep left these two packages to the tracks editing them. Mentions that mean the lease queue (ADR 0041, `gpuactivity`,
+  `mediaremote`, `pipeline/mediamulticard.go`, the lease docs) are untouched. Comments and strings only.
+- **Check.** `grep "ADR 0039" internal/delegate internal/mcpserver` finds nothing; the description-sentence gate tests pass.
+
+### Fixed - doctor's tailnet-literal advice covers a node shared in from another tailnet
+
+- **What it does.** The `lan ip:` row told the operator to use the MagicDNS name for every tailnet CGNAT literal. The row now
+  names both ways out for a node shared in from another tailnet: list that tailnet's zone in `tailnet_suffixes` and use the
+  node's full name, or keep the 100.x address. It stays informational and never changes doctor's exit code.
+- **Why.** A node shared in from another tailnet has no dotless name on this one, and its full name sits under the other
+  tailnet's zone, which the tailnet guard refuses unless `tailnet_suffixes` lists it. Following the old advice on a live
+  delegator config dropped the node from every fleet lane (doctor printed the guard refusal and exited 1); the config was
+  restored from its backup.
+- **Check.** One real run: the patched binary's `doctor --config <live delegator config>` prints the new row and exits 0.
+
+### Fixed - a multicard image call above the row's canvas cap is refused before any lease
+
+- **What it does.** The typed generate_image door now holds a card-only (`imagegen_placement: multicard`) call to the image row's canvas cap before it takes the GPU lease. The Go copy of the row carries
+  `MaxPixels` (1472700, read from the `maxPixels` field of `render/multicard-recipes.json`, pinned by `TestTheMulticardRowsAreTheRunnersRecipes`). A request whose width times height is above it, a default-size
+  call (1328x1328, 1.76 MP) included, is answered with a refusal that names the cap, the asked size and the way out (a smaller width and height, or the single-card placement). The cap stays labelled chosen, not measured.
+  `render/README.md` and `docs/systems/media-generation.md` now state the cap and both refusals (this one and the `COMFY-PLACEMENT-MISSING` one for a call with no placement).
+- **Why.** The runner already refused such a canvas, but only after the harness had taken the lease on the pair and drained the seats, so a refused call still cost the pair a drain. The size is known at the door.
+- **Check.** Build and vet of `internal/mediacap` and `internal/pipeline`, and the existing multicard and lane tests of both; the lane probe's own output showed the refusal text for a 1328x1328 request. No render was run. The batch door does not judge its jobs' sizes; the runner still refuses an over-cap job.
+
 ## [0.192.0] - 2026-10-19 - A reasoned local pin is bounded by the seat's line; offload_status publishes agent_slots
 
 ### Fixed - a reasoned local pin no longer queues without bound on the local seat
