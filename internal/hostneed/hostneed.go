@@ -465,6 +465,20 @@ func (o VideoOverrides) apply(fb config.VideoFamilyBinding) config.VideoFamilyBi
 // ForVideoWith is ForVideo for a call that names weight files of its own: the family's binding with
 // those files put over it.
 func ForVideoWith(cfg config.Config, renderFamily string, over VideoOverrides, f Facts) (Need, bool) {
+	return forVideo(cfg, renderFamily, over, f, nil)
+}
+
+// ForVideoCardOnly is ForVideoWith for a Wan 2.2 call that asked for the card-only placement (videogen_placement: multicard, which passes
+// --wan-placement multicard): the same stage rule command.go applies to the runner's own flags (estimateWith). residentGiB is --wan-resident-gb
+// (0 = the runner's default share), extraArgs the COMFY_EXTRA_ARGS the runner will see (sage attention). Any other family is sized as ForVideoWith does.
+func ForVideoCardOnly(cfg config.Config, renderFamily string, over VideoOverrides, residentGiB float64, extraArgs string, f Facts) (Need, bool) {
+	if residentGiB <= 0 {
+		residentGiB = wanResidentDefaultGiB
+	}
+	return forVideo(cfg, renderFamily, over, f, &CardOnly{ResidentGiB: residentGiB, SageAttention: sageAttention(extraArgs)})
+}
+
+func forVideo(cfg config.Config, renderFamily string, over VideoOverrides, f Facts, co *CardOnly) (Need, bool) {
 	f.Cfg = withDir(f.Cfg, cfg)
 	fam := strings.TrimSpace(renderFamily)
 	label := fam
@@ -472,7 +486,11 @@ func ForVideoWith(cfg config.Config, renderFamily string, over VideoOverrides, f
 		label = strings.TrimSpace(cfg.VideoGenFamily)
 	}
 	runner, fb := mediacap.VideoBinding(cfg, fam)
-	return estimate(videoFamily(label), mediacap.VideoModelFilesFor(runner, over.apply(fb)), f)
+	family := videoFamily(label)
+	if family != "wan22" {
+		co = nil // only the Wan 2.2 graph has the card-only placement
+	}
+	return estimateWith(family, mediacap.VideoModelFilesFor(runner, over.apply(fb)), f, co)
 }
 
 // withDir keeps the facts' own ComfyDir when it has one, else the binding's.

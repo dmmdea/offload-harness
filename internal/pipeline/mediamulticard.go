@@ -80,6 +80,35 @@ func multicardNeed(route hostneed.Route, cfg config.Config, token string) mediaN
 	return n
 }
 
+// wanMulticardVideo reports a video call that runs the Wan 2.2 graph on the card-only placement: the binding that renders asks for it
+// (videogen_placement / videogen_families[...].placement) and the family is Wan 2.2 (renderFamily "" is the runner's own default, Wan). Any
+// other family renders as it always did.
+func wanMulticardVideo(fb config.VideoFamilyBinding, renderFamily string) bool {
+	return fb.WanMulticard() && (renderFamily == "" || renderFamily == videoFamilyWanSentinel)
+}
+
+// videoMulticardNeed is multicardNeed for the Wan 2.2 video door (videogen_placement: multicard). The video door has no recipe row: the runner
+// (render/wan-multicard.mjs) sizes the placement itself, so the door leases the pair, declares the host RAM that placement earns
+// (hostneed.ForVideoCardOnly: 0 when both cards hold their stage) and refuses, before any lease, the one thing the runner would refuse after it:
+// an expert nobody named (the builder's defaults are the Q4_K files, which fit one card and were not measured split).
+func videoMulticardNeed(cfg config.Config, token, renderFamily string, over hostneed.VideoOverrides, fb config.VideoFamilyBinding) mediaNeed {
+	n := mediaNeed{Kind: needMulticard, Token: token, PlacementKey: "videogen_placement"}
+	n.RAMPair = func(vramGiB float64, cardsGiB []float64) hostneed.Need {
+		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vramGiB, CardsGiB: cardsGiB, Placement: hostneed.PlacementMulticard}
+		if need, ok := hostneed.ForVideoCardOnly(cfg, renderFamily, over, fb.WanResidentGB, cfg.ComfyExtraArgs, f); ok {
+			return need
+		}
+		return hostneed.ClassDefault(f)
+	}
+	for _, e := range []struct{ key, name string }{{"videogen_unet_high", fb.UnetHigh}, {"videogen_unet_low", fb.UnetLow}} {
+		if strings.TrimSpace(e.name) == "" {
+			n.Refusal = fmt.Sprintf("videogen_placement is multicard, but %s names no expert: the card-only placement runs the fp8 safetensors or the Q8_0 GGUF experts and refuses the builder's default Q4_K files, so the runner would refuse it by name after the pair was held; nothing was leased. Bind %s (and the other expert), or unset videogen_placement", e.key, e.key)
+			break
+		}
+	}
+	return n
+}
+
 // qwenImageDefaultSide is the side of the canvas a qwen-image call renders when the request names none (render/comfy-render.mjs, the qwen-image builder's
 // 1328): 1328 x 1328 is 1.76 MP, above the image row's cap, so a card-only call that names no size is refused too.
 const qwenImageDefaultSide = 1328

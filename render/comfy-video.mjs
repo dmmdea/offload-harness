@@ -41,7 +41,8 @@
 //   most at 720x1280x81, 2.5 at 720x1280x65; 720x1280x61 still admits 3.1); the lease sizing holds 15.2 GiB for any clip, so --ram 0 states the real figure for a smaller one.
 //   --wan-decode plain under multicard frees both cards of the experts before the plain VAEDecode and saves the sampled latent
 //   (a LATENT line names it); a plain decode that ComfyUI retried tiled fails the run (WAN-DECODE-FALLBACK) and keeps the clip beside <out> as
-//   <name>.seamed<ext>; --wan-loader is not used. Needs --high-unet / --low-unet to name the fp8 safetensors experts. The wait is 7200 s unless
+//   <name>.seamed<ext>; --wan-loader is not used. Needs --high-unet / --low-unet to name the experts: the fp8 safetensors files, or the Q8_0 GGUF files (14.349 GiB each, loaded through the
+//   GGUF flavour of the DisTorch2 loader; the launch then also loads ComfyUI-GGUF and the donor is the storage card, never host RAM). The wait is 7200 s unless
 //   --wait-sec / COMFY_WAIT_SEC say otherwise, and the run watches the instance's console for an out-of-memory wedge (WAN-OOM).
 //
 // Before anything is submitted, every node class the graph names is checked against the

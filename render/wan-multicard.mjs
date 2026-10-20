@@ -423,19 +423,17 @@ export function checkComfyDevices(devices, pair) {
 }
 
 /**
- * refuseUnmeasuredWan: the builder (wf-wan22-i2v.mjs) refuses --fast and a GGUF expert under multicard, and its defaults for an
- * expert nobody named are GGUF files, so a call without --high-unet / --low-unet would be refused too. It does that after the
- * lease is taken, llama-swap is unloaded and ComfyUI has cold-started; the same refusals are made here, before any of it.
+ * refuseUnmeasuredWan: the builder (wf-wan22-i2v.mjs) refuses --fast under multicard, and its defaults for an expert nobody named
+ * are the Q4_K GGUF files (they fit one card, and were not measured split), so a call without --high-unet / --low-unet would be
+ * refused too. It does that after the lease is taken, llama-swap is unloaded and ComfyUI has cold-started; the same refusals are
+ * made here, before any of it. The experts it accepts are the fp8 safetensors files and the Q8_0 GGUF files.
  */
 function refuseUnmeasuredWan(flags) {
   if (flags.fast) throw new Error("--wan-placement multicard was measured on the native recipe only: drop --fast (or use --wan-placement single)");
   for (const flag of ["high-unet", "low-unet"]) {
     const name = flags[flag];
     if (typeof name !== "string" || !name.trim()) {
-      throw new Error(`--wan-placement multicard needs --${flag} to name the fp8 safetensors expert (the builder's default experts are GGUF files, which fit one card: use --wan-placement single for those)`);
-    }
-    if (/\.gguf$/i.test(name.trim())) {
-      throw new Error(`--wan-placement multicard was measured with the fp8 safetensors experts, and --${flag} ${name} is a GGUF file (it fits one card: use --wan-placement single)`);
+      throw new Error(`--wan-placement multicard needs --${flag} to name the expert, an fp8 safetensors file or a Q8_0 GGUF file (the builder's default experts are Q4_K GGUF files, which fit one card: use --wan-placement single for those)`);
     }
   }
 }
@@ -459,7 +457,8 @@ export function wanGeometry(flags) {
  *                              it a 15.9 GiB card takes 3.2 GiB of an expert resident at film size (15.9 - 12.2 - 0.5). Only a 3.0 GiB share was ever
  *                              run; 3.2 is the planner's ceiling, not a measured share;
  *   WAN_STORAGE_OVERHEAD_GIB   what the storage card holds besides the donor blocks: the VAE, the CUDA context and the allocator's slack;
- *   WAN_EXPERT_GIB             an fp8 expert (internal/hostneed's documented Wan 2.2 size, rounded up).
+ *   WAN_EXPERT_GIB             an fp8 expert (internal/hostneed's documented Wan 2.2 size, rounded up);
+ *   WAN_EXPERT_Q8_GIB          a Q8_0 GGUF expert (the 14.349 GiB file, rounded up), chosen by the expert's file name (wanExpertGib).
  */
 export const WAN_FILM_ACTIVATIONS_GIB = 12.2;
 /** The tokens of the film clip (720x1280x81, see wanGeometry): the largest size anything was measured at. Above it the planner has no figure (geometryNote). */
@@ -467,6 +466,16 @@ export const WAN_FILM_TOKENS = 75600;
 export const WAN_COMPUTE_CONTEXT_GIB = 0.5;
 export const WAN_STORAGE_OVERHEAD_GIB = 0.8;
 export const WAN_EXPERT_GIB = 13.4;
+export const WAN_EXPERT_Q8_GIB = 14.4;
+/** wanIsGguf: is either expert a GGUF file (the launch then loads ComfyUI-GGUF)? */
+export function wanIsGguf(flags) {
+  return ["high-unet", "low-unet"].some((k) => typeof flags[k] === "string" && /\.gguf$/i.test(flags[k].trim()));
+}
+/** wanExpertGib: the size one expert is planned at: a Q8_0 GGUF file is 14.4 GiB, anything else the fp8 figure; the larger of the two experts. */
+export function wanExpertGib(flags) {
+  const q8 = ["high-unet", "low-unet"].some((k) => typeof flags[k] === "string" && /Q8_0\.gguf$/i.test(flags[k].trim()));
+  return q8 ? WAN_EXPERT_Q8_GIB : WAN_EXPERT_GIB;
+}
 /** Below the film's size the activations follow the benchmark's allocator traces (RESULTS 3.5, compute-card peak RESERVED, which is what the card must hold). */
 const ACTIVATIONS_GIB_PER_1000_TOKENS = 0.31;
 /** Scaled with the tokens, never under this: even a small clip holds a context's worth of buffers. */
@@ -525,6 +534,7 @@ export function wanAttentionMode(env = process.env) {
  * with the figures internal/hostneed declares against, at this geometry (the smaller the clip, the less the activations need).
  */
 function checkResident(residentGb, pair, flags, attention = "default") {
+  const expertGib = wanExpertGib(flags);
   const reserveRaw = Number(flags["reserve-vram"]);
   const reserve = Number.isFinite(reserveRaw) && reserveRaw > 0 ? reserveRaw : DEFAULT_RESERVE_GIB;
   const computeGib = pair.compute.totalMiB / 1024, storageGib = pair.storage.totalMiB / 1024;
@@ -538,11 +548,11 @@ function checkResident(residentGb, pair, flags, attention = "default") {
     }
     throw placementError(`--wan-resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) about ${activations.toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens) and ${WAN_COMPUTE_CONTEXT_GIB} GiB for the CUDA context: at most ${most.toFixed(1)} GiB of an expert can stay resident there (the measured film-size recipe keeps ${WAN_RESIDENT_GB_DEFAULT})`);
   }
-  const donor = WAN_EXPERT_GIB - residentGb;
+  const donor = expertGib - residentGb;
   const stored = donor + WAN_STORAGE_OVERHEAD_GIB;
   const usable = storageGib - reserve;
   if (stored > usable) {
-    const least = WAN_EXPERT_GIB + WAN_STORAGE_OVERHEAD_GIB - usable;
+    const least = expertGib + WAN_STORAGE_OVERHEAD_GIB - usable;
     const way = least <= most
       ? `a --wan-resident-gb of at least ${least.toFixed(1)} (and at most ${most.toFixed(1)}) keeps enough of the expert on the compute card`
       : "no resident share fits both cards at this geometry: lease two larger cards";
@@ -589,7 +599,7 @@ export function portNote(flags, env, api, label = "wan-placement") {
  * planMulticard is the one call the runner makes before anything starts: null for the single-card path (the default, which
  * reads no card table and touches nothing), otherwise the whole plan of the card-only placement. It refuses, with the reason,
  * every request it cannot honour: the placement's own flags spelled with '=', a graph that is not the Wan 2.2 one, --fast or a
- * GGUF / unnamed expert, no cards named, not two cards, a card the lease does not hold, a display card or one whose display
+ * unnamed expert, no cards named, not two cards, a card the lease does not hold, a display card or one whose display
  * state is unknown, a resident share the compute card cannot hold, a missing pack. `cards` reads the driver's card table
  * (injectable); `isWanGraph` says whether this invocation builds the Wan 2.2 graph; `leaseDevicesFn` names the cards the lease holds.
  */
@@ -610,7 +620,10 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   if (unsized) say(unsized);
   checkResident(residentGb, pair, flags, attention);
   // `sage` rides the launch so ensureComfy records which attention this call was sized for, and a kept ComfyUI that runs sage under a call sized for the default is not reused
-  const launch = { ...launchFn(pair, { comfyDir }), sage: attention === "sage" };
+  // a GGUF expert is loaded by ComfyUI-GGUF, so that pack joins the whitelist (and a kept instance without it is not reused: gguf rides the launch)
+  const gguf = wanIsGguf(flags);
+  const launchOpts = gguf ? { comfyDir, packDirsFn: (d) => packDirs(d, undefined, [...REQUIRED_PACKS, PACK_GGUF]) } : { comfyDir };
+  const launch = { ...launchFn(pair, launchOpts), sage: attention === "sage", ...(gguf ? { gguf: true } : {}) };
   const plan = { pair, launch, residentGb, attention, env: multicardEnv(env, launch) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
   const sageClause = attention === "sage" ? `; sage attention (COMFY_EXTRA_ARGS): activations sized at ${wanActivationsGib(wanGeometry(flags).tokens, attention).toFixed(1)} GiB` : "";
