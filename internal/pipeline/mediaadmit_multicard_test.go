@@ -662,7 +662,7 @@ func TestMediaLaneFreeJudgesAMulticardImageCall(t *testing.T) {
 			for _, id := range tc.held {
 				hold(t, f, "a bench render", id)
 			}
-			v := f.p.MediaLaneFree(context.Background(), laneReq(map[string]any{}))
+			v := f.p.MediaLaneFree(context.Background(), laneReq(map[string]any{"width": 1024, "height": 1024})) // inside the row's canvas cap: the default size is refused up front
 			if v.Free != tc.free {
 				t.Fatalf("free = %v (%s), want %v", v.Free, v.Why, tc.free)
 			}

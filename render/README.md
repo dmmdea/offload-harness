@@ -159,7 +159,10 @@ node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyU
   compute card (the DiT's total is the invariant: a smaller share puts the same bytes on the storage card, and a split that card cannot hold is refused). Only the 2511
   fp8mixed edit has a *measured* row, so it alone declares 0 host RAM (and `gpu reserve` says so); the others declare the ordinary estimate until a run with the
   read-only loader promotes them. The two 2.1 rows are held back (the int8 DiT on `cuda:1` never ran; the bf16 row's 16.33 GiB text encoder is built whole on the storage card before the split applies) and refused by name; an edit canvas pinned above the recipe's
-  2.0 MP cap is refused before anything starts. The runner checks the recipe's loader classes and their inputs against `/object_info` before it submits, watches the pair's
+  2.0 MP cap is refused before anything starts. The image row (2512 Q5_1 GGUF) is held to a canvas of at most 1,472,700 pixels (1.47 MP, `maxPixels`; the number is chosen, not measured:
+  its first live two-card run, at 928x1664, ran out of memory in the sampler), so a **default-size (1328x1328, 1.76 MP) multicard call is refused**, by the typed door before any lease and by the runner
+  (`canvasRefusal`) before ComfyUI starts: name a smaller `--width` and `--height`, or use `--placement single`. A call under `gpu reserve --devices <a>,<b>` with **no placement** at an endpoint that
+  nothing answers on is refused up front too (`COMFY-PLACEMENT-MISSING`): the message names the two leased cards and `--placement multicard`, the flag that keys the pair's own instance. The runner checks the recipe's loader classes and their inputs against `/object_info` before it submits, watches the pair's
   ComfyUI console while it waits (`IMAGE-PLACEMENT-OOM` ends a wait on a worker that died of an out-of-memory error), and keeps an image whose VAE decode ComfyUI retried tiled
   beside the requested path as `<name>.tiled.<ext>` (`IMAGE-DECODE-FALLBACK`). `docs/systems/media-generation.md`, "Card-only image and edit".
 - **A kept (`--keep-comfy`) or warm (`--batch`) ComfyUI frees its own models and caches after 300 s idle.** The runner launches it with

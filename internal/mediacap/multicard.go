@@ -34,6 +34,10 @@ type MulticardRow struct {
 	// MaxMegapixels is the largest edit canvas the compute peak is scaled to (0 = the row has none). The runner refuses a pinned canvas above it
 	// (render/comfy-edit.mjs planEdit), and so does the typed door before it leases the pair (internal/pipeline multicardNeed).
 	MaxMegapixels float64
+	// MaxPixels is the largest canvas (width times height) a call on this row may ask for (0 = the row has none). It is the JSON's "maxPixels", pinned by
+	// TestTheMulticardRowsAreTheRunnersRecipes, and the number is chosen, not measured (the JSON's "maxPixelsNote"). The runner refuses a larger canvas
+	// (render/multicard-recipes.mjs canvasRefusal) only after the pair was held; the typed door refuses it first (internal/pipeline mediaNeed.forCanvas).
+	MaxPixels int64
 	// Blocked is why the row may not launch (empty = it may): the row stays in the table, but it is no recipe to FindMulticardRow, so the estimate, the
 	// doctor and the typed doors treat the binding as one without a recipe, and the runner refuses it by name (render/multicard-recipes.mjs findRecipe).
 	// The sentence is the JSON's "blocked", pinned by TestTheMulticardRowsAreTheRunnersRecipes.
@@ -55,7 +59,7 @@ var multicardRows = []MulticardRow{
 		UnetLoader: "distorch2", ResidentGiB: 8, ClipLoader: "distorch2", ClipResidentGiB: 5, ComputeGiB: 10.8, StorageGiB: 14.2, Packs: []string{"multigpu"},
 		Blocked: "under --gpu-only ComfyUI builds the whole 16.33 GiB bf16 text encoder on the storage card (cuda:0, a 15.9 GiB card) before the DisTorch2 allocation that splits it is applied, so a live card-only run of this recipe ran out of memory 1.4 s in, with 14.10 GiB allocated, while the encoder was still being built; no resident share or peak figure in this row changes that. A loader that builds the text encoder per card, or one measured arm that fits the pair, lifts it: then clear blocked on this row in render/multicard-recipes.json and Blocked in internal/mediacap/multicard.go"},
 	{ID: "qwen-image/gguf-q5_1", Route: "image", Family: "qwen-image", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
-		UnetLoader: "gguf-distorch2", ResidentGiB: 3, ClipLoader: "plain", ComputeGiB: 4.9, StorageGiB: 12.6, LoraLoader: "LoraLoaderModelOnly", Packs: []string{"multigpu", "gguf"}},
+		UnetLoader: "gguf-distorch2", ResidentGiB: 3, ClipLoader: "plain", ComputeGiB: 4.9, StorageGiB: 12.6, MaxPixels: 1472700, LoraLoader: "LoraLoaderModelOnly", Packs: []string{"multigpu", "gguf"}},
 	{ID: "qwen-image-edit-2511/fp8mixed", Route: "edit", Family: "qwen-image-edit-2511", Quant: "fp8mixed", UnetMatch: `fp8mixed.*\.safetensors$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
 		UnetLoader: "distorch2", ResidentGiB: 9, ClipLoader: "plain", ComputeGiB: 13.0, StorageGiB: 11.0, Measured: true, MaxMegapixels: 2.0, LoraLoader: "LoraLoaderBypassModelOnly", Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/gguf-q5_1", Route: "edit", Family: "qwen-image-edit-2511", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",

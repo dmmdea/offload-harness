@@ -25,6 +25,7 @@ type recipeFile struct {
 		PeakGiB        struct{ Compute, Storage float64 }
 		ActivationsGiB float64
 		MaxMegapixels  float64
+		MaxPixels      int64
 		Packs          []string
 	}
 }
@@ -55,7 +56,7 @@ func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 			t.Errorf("row %d identity: %+v vs %+v", i, r, jr)
 		}
 		if r.ComputeGiB != jr.PeakGiB.Compute || r.StorageGiB != jr.PeakGiB.Storage || r.UnetLoader != jr.Unet.Loader || r.ResidentGiB != jr.Unet.ResidentGb ||
-			r.ClipLoader != jr.Clip.Loader || r.ClipResidentGiB != jr.Clip.ResidentGb || r.MaxMegapixels != jr.MaxMegapixels || !reflect.DeepEqual(r.Packs, jr.Packs) {
+			r.ClipLoader != jr.Clip.Loader || r.ClipResidentGiB != jr.Clip.ResidentGb || r.MaxMegapixels != jr.MaxMegapixels || r.MaxPixels != jr.MaxPixels || !reflect.DeepEqual(r.Packs, jr.Packs) {
 			t.Errorf("row %s figures: %+v vs %+v", jr.ID, r, jr)
 		}
 		if r.Measured != (jr.Basis == "measured") {

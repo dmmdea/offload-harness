@@ -1710,7 +1710,7 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
 	imgFamily, imgQuant := imageFootprintKey(cfg)
-	grant, lerr := p.acquireMediaLease(ctx, "image-gen", timeout, p.gpuWait(), imageNeed(cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "image-gen", timeout, p.gpuWait(), imageNeed(cfg, paramStr(req.Params, "waiter_token")).forCanvas(req.Params).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}

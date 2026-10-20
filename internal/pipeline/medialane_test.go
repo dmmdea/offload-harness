@@ -307,6 +307,14 @@ func TestMediaLaneFreeNeverRefusesAGrant(t *testing.T) {
 				params = c.params(t, f)
 			}
 			nextMillisecond()
+			// A size inside the card-only image row's canvas cap: a request that names none renders the qwen-image default (1.76 MP), which a multicard call
+			// is refused up front (mediaNeed.forCanvas), and this table is about the lease states, not that refusal.
+			if params == nil {
+				params = map[string]any{}
+			}
+			if _, ok := params["width"]; !ok {
+				params["width"], params["height"] = 1024, 1024
+			}
 			req := laneReq(params)
 			v := f.p.MediaLaneFree(context.Background(), req)
 
