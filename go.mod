@@ -2,7 +2,7 @@ module github.com/dmmdea/offload-harness
 
 go 1.26.7
 
-toolchain go1.27.2
+toolchain go1.27.3
 
 require (
 	github.com/charmbracelet/bubbletea v1.3.10

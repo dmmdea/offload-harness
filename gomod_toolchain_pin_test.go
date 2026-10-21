@@ -25,10 +25,11 @@ import (
 )
 
 // The floors. toolchainFloor is the first release that carries the fixes for the standard-library
-// advisories open against go1.27.1 when this lane was added (the planted scan with go1.27.1 reports them
-// and the go1.27.2 scan does not). The module floors guard against a downgrade: they are the versions
-// the tree builds with today.
-const toolchainFloor = "go1.27.2"
+// advisories open against the release before it: go1.27.2 when this lane was added (the planted scan with
+// go1.27.1 reports them and the go1.27.2 scan does not), then go1.27.3 for GO-2026-6809 (crypto/x509
+// distrusts compromised intermediates; reached through cliutil.ProbeReachable). The module floors guard
+// against a downgrade: they are the versions the tree builds with today.
+const toolchainFloor = "go1.27.3"
 
 var moduleFloors = []struct{ path, version string }{
 	{"golang.org/x/sys", "v0.48.0"},
@@ -224,7 +225,7 @@ func TestGoModPinCheckReportsEachProblem(t *testing.T) {
 		}, ""},
 		{"no toolchain line", func(m *goModFile) { m.Toolchain = "" }, "no toolchain line"},
 		{"toolchain default", func(m *goModFile) { m.Toolchain = "default" }, "not a Go release name"},
-		{"toolchain below the floor", func(m *goModFile) { m.Toolchain = "go1.27.1" }, "below the floor go1.27.2"},
+		{"toolchain below the floor", func(m *goModFile) { m.Toolchain = "go1.27.1" }, "below the floor go1.27.3"},
 		{"toolchain below the go line", func(m *goModFile) { m.Go = "1.28.0"; m.Toolchain = "go1.27.9" }, "older than its go line"},
 		{"x/sys went back", func(m *goModFile) { m.Requires["golang.org/x/sys"] = "v0.9.0" }, "golang.org/x/sys v0.9.0, below the floor v0.48.0"},
 		{"x/text went back", func(m *goModFile) { m.Requires["golang.org/x/text"] = "v0.40.0" }, "golang.org/x/text v0.40.0, below the floor v0.41.0"},
