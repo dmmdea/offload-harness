@@ -58,8 +58,8 @@ What it already is in this harness, read from the installed packages and the sea
 ## The proving run
 
 One run on 2026-10-21 on `<node-b>`'s tensor-parallel pair: two 16 GB SM120 cards, vLLM 0.32.0, Humming 0.1.17,
-`RedHatAI/Qwen3.8-27B-INT4` (W4A16), a 163,840-token window, utilization 0.90, prefill chunks of 1,568 tokens, the store tier
-off. Both arms were started on scratch ports under one GPU lease by the launcher with the production seat's env. The control
+`RedHatAI/Qwen3.8-27B-INT4` (W4A16), a 163,840-token window, utilization 0.90, prefill chunks of 1,568 tokens, the L2
+cache-server tier off. Both arms were started on scratch ports under one GPU lease by the launcher with the production seat's env. The control
 served on Marlin, as the production seat does; the other arm added `--linear-backend humming`. Each ran the same probes in the
 same order: eight greedy chat completions with token logprobs, one tool call, one strict JSON schema, prompt logprobs over a
 fixed 7,038-token corpus in 24 chunks, then the needle gate's cold phase (a 23.7k-token prompt with a planted answer).
@@ -76,7 +76,10 @@ fixed 7,038-token corpus in 24 chunks, then the needle gate's cold phase (a 23.7
 | Tool call, strict schema | pass, pass | pass, pass |
 | Needle (23.7k tokens) | found | engine stopped: no step returned for 120 s, and the seat's step watchdog (`VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS=120`) ended it with `RPC call to sample_tokens timed out` and `EngineDeadError` (HTTP 500) |
 
-What the logs rule out for the stall: no worker raised an error; Humming compiled nothing during it (every cache entry dates
+It was one step that stalled, not a slower prefill. The seat's LMCache MP server logs each 1,568-token prefill chunk it stores as the engine
+finishes it: Marlin's 15 chunks arrived 1.5 to 7.1 s apart (87.9 s to the first token), while Humming's first chunks arrived
+within 6 s of the request and then nothing did for 120 s. A longer watchdog would only have held the seat longer.
+What the logs rule out: no worker raised an error; Humming compiled nothing during it (every cache entry dates
 from the first start); and the seven retried allocations the caching allocator logged before it (364 to 512 MiB, during the
 prompt-logprob probe) appear in the Marlin arm with the same count and sizes, and that arm served on. The cause is not
 established, and the run was not repeated. vLLM #62816 moves vLLM to Humming 0.1.18, which reworks its kernel heuristics and
