@@ -92,8 +92,9 @@ because vLLM computes an fp32 log-softmax over the 248k-token vocabulary for eve
 ## Consequences
 
 - Every vLLM seat started by the launchers writes Humming's kernels to its own directories, compiles at most eight at once,
-  and logs `seat_fg: Humming kernel cache <dir> (at most N parallel builds)`. A seat that never runs Humming leaves the
-  directories empty.
+  and logs `seat_fg: Humming kernel cache <dir> (at most N parallel builds)`. A seat that never runs Humming compiles
+  nothing: on the production pair after the 0.198.0 deploy (Marlin, 2026-10-21) the cache directory was never created, and
+  the tmp directory held only the empty `lock` directory Humming makes when vLLM imports it.
 - A kernel change changes the KV numerics: a seat moved to `--linear-backend humming` gets a new L2 `base_path`, as for any
   change of the engine's layout.
 - The seat pin of `internal/agent/props.go` (engine version, model root, served name, window) cannot tell a Marlin seat from a
