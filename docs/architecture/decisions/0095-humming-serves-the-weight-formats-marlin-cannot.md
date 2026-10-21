@@ -37,8 +37,8 @@ What it already is in this harness, read from the installed packages and the sea
    work directory (`humming-cache`, `humming-tmp`), beside vLLM's compile cache, and caps `HUMMING_MAX_PARALLEL_BUILD_WORKERS`
    at 8. The seat env can move them (`SEAT_HUMMING_CACHE`, `SEAT_HUMMING_TMP`) and change the cap
    (`SEAT_HUMMING_BUILD_WORKERS`). `vllm-seat-run.sh` sets the same under the stack's `cache` directory. The cache survives
-   the idle unload, is cleaned with the seat, and the generated modules (code the engine imports) stay in a directory only
-   the seat's user writes.
+   the idle unload, is cleaned with the seat, and the generated modules (code the engine imports) sit inside the same work directory as
+   the seat's venv and env file, so they gain no writer the seat did not already trust.
 2. **Marlin keeps the 4-bit seats.** `--linear-backend humming` is an opt-in, documented commented-out in the WSL seat env
    template. The proving run below found the same output and the same footprint, and the Humming arm's engine stopped during
    a 23.7k-token prefill that Marlin served. No seat moves to it, and a seat that opts in proves that prefill first. Speed is
