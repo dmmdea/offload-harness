@@ -3,7 +3,7 @@ package main
 // H-26. The jobs that build and test the root module prove, in their own log, that the go command runs the
 // compiler go.mod names.
 //
-// go.mod's `toolchain go1.27.2` line only works through a switch inside the go command: with GOTOOLCHAIN at its
+// go.mod's `toolchain go1.27.3` line only works through a switch inside the go command: with GOTOOLCHAIN at its
 // default (auto) a go command older than the line fetches the release and runs under it. That switch can stop
 // working without a word: GOTOOLCHAIN=local (exported by setup-go from v6, or set by a runner image) makes the
 // go command build with the installed compiler and ignore the line, and nothing prints. A job that then builds,

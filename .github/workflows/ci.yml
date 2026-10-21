@@ -49,7 +49,7 @@ jobs:
           fi
           bash ./scripts/check-deletions.sh 'HEAD^1' HEAD
 
-      # H-26. go.mod names the toolchain that ships (`toolchain go1.27.2`). This step only installs a
+      # H-26. go.mod names the toolchain that ships (`toolchain go1.27.3`). This step only installs a
       # go command to start from: with GOTOOLCHAIN at its default (auto) the first go command below
       # reads that line, fetches the release and runs under it, so build, vet and test judge the
       # compiler that ships. setup-go@v5 leaves GOTOOLCHAIN alone. From v6 the action exports

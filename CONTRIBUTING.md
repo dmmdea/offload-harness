@@ -16,7 +16,7 @@ go vet ./...     # static analysis — keep this clean
 Both must pass before you open a pull request. CI runs the test suite and is the gate: do not run the full
 suite by hand, and see "Testing rule" below for what a change carries instead of tests.
 
-`go.mod` names the compiler the harness ships with (`toolchain go1.27.2`; the `go` line is only the
+`go.mod` names the compiler the harness ships with (`toolchain go1.27.3`; the `go` line is only the
 oldest one allowed). With `GOTOOLCHAIN` at its default, a Go older than that downloads the release
 on the first build in this tree (from the module proxy, into the module cache) and builds with it.
 `GOTOOLCHAIN=local` builds with the installed Go instead and ignores the line without a message,
