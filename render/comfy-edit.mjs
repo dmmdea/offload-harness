@@ -19,13 +19,14 @@
 //        [--megapixels F] \
 //        [--clip name] [--vae name] [--sampler s] [--scheduler s] [--shift F] \
 //        [--seed N] [--api http://127.0.0.1:8188] [--no-lock] [--reserve-vram F]
-//        [--placement single|multicard [--resident-gb N] [--cards <a>,<b>]]   # multicard: the 2511 edit on the TWO non-display cards of a lease
+//        [--placement single|multicard [--resident-gb N] [--cards <a>,<b>]]   # multicard: the 2511 edit and the qwen-image-2.1 edit on the TWO non-display cards of a lease
 //                                      # (docs/systems/media-generation.md, "Card-only image and edit"); flags spelled `--flag value`
 //   node render/comfy-edit.mjs <out.png> <target> "<instruction>" --family qwen-image-2.1 \
 //        --unet qwen_image_2.1_bf16.safetensors --clip qwen3vl_8b_bf16.safetensors \
 //        --vae qwen_image_2.1_vae_bf16.safetensors [--ref <image2> --ref <image3> ...] \
 //        [--resolution 1024] [--cache-device auto|gpu|cpu|off] [--cache-dtype default|int8|int4] \
 //        [--transparent 1] [--steps 40 --cfg 1]
+//   (the 2.1 edit under --placement multicard: --cache-device defaults to gpu and takes gpu|off only; the canvas is the DiT sequence, see planEdit)
 //
 // The 2511-only knobs (--preset, --lora, --lora-strength, --megapixels, --shift) and
 // the 2.1-only knobs (--ref, --resolution, --cache-*, --transparent) are REFUSED on
@@ -87,7 +88,7 @@ function boolFlag(name, v) {
  * planEdit resolves the family and every knob, refusing caller mistakes BEFORE any
  * GPU work. It returns the source images (target first) and a build(stagedNames)
  * that turns the staged filenames into the graph. measure(path) returns the file's
- * {width,height} (injectable; only the 2511 canvas needs it).
+ * {width,height} (injectable; the 2511 canvas needs it, and so does the card-only 2.1 canvas at --resolution 0).
  */
 export function planEdit({ pos, flags, refs = [], env = process.env, measure = (p) => imageSize(readFileSync(p)), exists = defaultExists, random = Math.random, multicard }) {
   const [out, imagePath, prompt] = pos;
@@ -184,9 +185,12 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
   if ((flags.steps != null) !== (flags.cfg != null)) {
     throw new UsageError("error: --family qwen-image-2.1 takes --steps and --cfg together or not at all (official recipe 40 / 1.0)");
   }
-  const cacheDevice = flags["cache-device"] || "auto";
+  const cacheDevice = flags["cache-device"] || (recipe ? "gpu" : "auto");
   if (!QWEN_IMAGE_21_CACHE_DEVICES.includes(cacheDevice)) {
     throw new UsageError(`error: --cache-device must be one of ${QWEN_IMAGE_21_CACHE_DEVICES.join("|")}, got '${cacheDevice}'`);
+  }
+  if (recipe && (cacheDevice === "auto" || cacheDevice === "cpu")) {
+    throw new UsageError(`error: --cache-device ${cacheDevice} can pin the prefix cache in host RAM, which the card-only placement does not use: leave it unset (gpu, the default there) or pass gpu or off; nothing was started`);
   }
   const cacheDtype = flags["cache-dtype"] || "default";
   if (!QWEN_IMAGE_21_CACHE_DTYPES.includes(cacheDtype)) {
@@ -200,12 +204,32 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
   if (!Number.isInteger(resolution) || resolution < 0 || resolution > 4096 || resolution % 32 !== 0) {
     throw new UsageError(`error: --resolution must be 0 (keep each image's size) or a multiple of 32 up to 4096, got '${flags.resolution}'`);
   }
+  // The card-only recipe's peaks are scaled to a DiT sequence of at most recipe.maxPixels: the target's latent plus every image's, one token per 16x16 pixels, so
+  // (images + 1) grids of resolution squared (the target is counted twice, once as a reference and once as the latent). At --resolution 0 each image counts at its own
+  // size rounded to 32, and an unreadable header cannot be counted: refused by name, not guessed. Refused here, before anything is started.
+  if (recipe && recipe.maxPixels > 0) {
+    let pixels = 0;
+    if (resolution > 0) pixels = (sources.length + 1) * resolution * resolution;
+    else {
+      const areas = sources.map((s) => {
+        let size;
+        try { size = measure(s); } catch { throw new UsageError(`error: --resolution 0 keeps each image's own size and ${s} has no readable header to count it by, so the canvas of the card-only recipe ${recipe.id} cannot be judged: pass a numeric --resolution; nothing was started`); }
+        return Math.max(32, Math.round(size.width / 32) * 32) * Math.max(32, Math.round(size.height / 32) * 32);
+      });
+      pixels = areas.reduce((a, b) => a + b, 0) + areas[0];
+    }
+    if (pixels > recipe.maxPixels) {
+      const mp = (n) => (n / 1e6).toFixed(2);
+      const fits = Math.floor(Math.sqrt(recipe.maxPixels / (sources.length + 1)) / 32) * 32;
+      throw new UsageError(`error: the card-only recipe ${recipe.id} cannot take this edit: ${sources.length} image${sources.length === 1 ? "" : "s"} at --resolution ${resolution} make a ${mp(pixels)} MP DiT sequence (the target counted twice), and it is held to at most ${mp(recipe.maxPixels)} MP (${recipe.maxPixels} pixels). ${recipe.maxPixelsNote ? recipe.maxPixelsNote + ". " : ""}Pass --resolution ${fits} or less or fewer --ref, or drop --placement multicard; nothing was started`);
+    }
+  }
   const transparent = boolFlag("transparent", flags.transparent);
   const steps = flags.steps != null ? Number(flags.steps) : undefined;
   const cfg = flags.cfg != null ? Number(flags.cfg) : undefined;
   return {
     family, sources, seed,
-    describe: `family ${family} images ${sources.length} resolution ${resolution} cache ${cacheDevice}/${cacheDtype} schedule ${schedule}${transparent ? " transparent" : ""}`,
+    describe: `family ${family} images ${sources.length} resolution ${resolution} cache ${cacheDevice}/${cacheDtype} schedule ${schedule}${transparent ? " transparent" : ""}${recipe ? ` placement multicard (${recipe.id})` : ""}`,
     build: (staged) => buildQwenImage21Edit({
       images: staged, prompt,
       negative: flags.negative || "",
@@ -213,6 +237,7 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
       steps, cfg,
       sampler: flags.sampler || undefined, scheduler: flags.scheduler || undefined,
       resolution, cacheDevice, cacheDtype, schedule, transparent, seed,
+      ...(recipe ? { placement: "multicard", residentGb: multicard.residentGb ?? undefined } : {}),
     }),
   };
 }

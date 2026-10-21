@@ -14,7 +14,7 @@
 // HiDream fit one card); an int8 TEXT ENCODER (PSNR 28.65 dB against the 30 dB gate in the benchmark;
 // the int8_convrot DiT is a different file and a recipe of its own); a text encoder other than the one the recipe was built for.
 // A row can carry a CANVAS CAP (`maxPixels`, refused by canvasRefusal; its `maxPixelsNote` says whether it was measured): the 2512 Q5_1 GGUF row is held to
-// 1536x1152 (measured at 1328x1328 and 928x1664), the krea2 bf16 row to 1536x1024 (measured), the 2.1 bf16 row to the family's 2048x2048 default. The edit rows have `maxMegapixels` instead, the edit canvas their peaks were scaled to (comfy-edit.mjs refuses above it).
+// 1536x1152 (measured at 1328x1328 and 928x1664), the krea2 bf16 row to 1536x1024 (measured), the 2.1 bf16 row to the family's 2048x2048 default. The 2511 edit rows have `maxMegapixels` instead, the edit canvas their peaks were scaled to (comfy-edit.mjs refuses above it); the 2.1 edit rows have a `maxPixels` that comfy-edit.mjs judges on the DiT sequence (the target and every reference).
 // A row can be HELD BACK: it stays in the table (its data is the proof arm's), carries a `blocked` sentence that says why, and
 // findRecipe refuses it by name, so no planner, builder or door treats it as a recipe. No row is held back today (the qwen-image-2.1 int8_convrot row was, until
 // a card-only run of it was measured). The launchable image rows are the 2512 Q5_1 GGUF, the krea2 bf16 DiT (its text encoder loads with the CLIP type
@@ -86,12 +86,6 @@ const FAMILY_HINTS = Object.freeze({
   "qwen-image-2.1": "the card-only recipes are the bf16 and int8_convrot DiTs with the bf16 Qwen3-VL-8B text encoder; bind those files",
 });
 
-// The hints above describe the IMAGE route's rows. The edit route has its own, because a family can have rows on one route and none on the other:
-// qwen-image-2.1 has two image rows and no edit row, and its edit graph takes no placement argument, so the image rows would not give it one.
-const EDIT_FAMILY_HINTS = Object.freeze({
-  "qwen-image-2.1": "the 2.1 edit graph has no card-only placement (it takes no placement argument), so there is no recipe for it to hold back or lift",
-});
-
 /**
  * routeOffer: what the table offers on a route, as one sentence read from the table itself: the launchable rows, then the held-back ones. Written by hand it went
  * stale: it listed qwen-image-2.1 as having recipes after both of that family's rows were held back (a row held back is named, never offered).
@@ -114,8 +108,8 @@ export function findRecipe({ route, family, unet, clip } = {}) {
   const rows = RECIPES.filter((r) => r.route === route && r.family === fam);
   const noRecipe = (why) => new RecipeRefusal(`no measured card-only recipe for ${fam}${route === "edit" ? " edit" : ""}${unet ? ` (${unet})` : ""}: ${why}`);
   if (rows.length === 0) {
-    // an edit hint says why the family has no edit row and is followed by what the route does offer; an image hint stands alone; a family with neither gets the offer
-    if (route === "edit") throw noRecipe([EDIT_FAMILY_HINTS[fam], routeOffer(route)].filter(Boolean).join("; "));
+    // the hints describe a family's image rows, so an edit call with no row for its family gets what the edit route does offer
+    if (route === "edit") throw noRecipe(routeOffer(route));
     throw noRecipe(FAMILY_HINTS[fam] || routeOffer(route));
   }
   const unetName = String(unet || "").trim();
@@ -142,8 +136,8 @@ export function findRecipe({ route, family, unet, clip } = {}) {
 /**
  * canvasRefusal: why a row refuses a canvas of width x height pixels, or "" when it takes it. Only a row with a `maxPixels` cap refuses, and only a pair of positive
  * numbers is judged (a size not given is judged where the runner knows the default: comfy-render.mjs buildRenderGraph). The cap of the qwen-image/gguf-q5_1 row is
- * chosen, not measured; its `maxPixelsNote` says so, and the sentence repeats it. The edit rows have no pixel cap: the edit runner holds a pinned canvas to their
- * `maxMegapixels` itself (comfy-edit.mjs planEdit).
+ * chosen, not measured; its `maxPixelsNote` says so, and the sentence repeats it. The 2511 edit rows have none (the edit runner holds a pinned canvas to their
+ * `maxMegapixels`, comfy-edit.mjs planEdit); the 2.1 edit rows carry a `maxPixels` that planEdit judges on the DiT sequence, not on a width and height.
  */
 export function canvasRefusal(row, width, height) {
   const w = Number(width), h = Number(height);

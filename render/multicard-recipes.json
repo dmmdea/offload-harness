@@ -111,6 +111,42 @@
       "maxMegapixels": 2.0,
       "packs": ["multigpu", "gguf"],
       "evidence": "Benchmark 2026-10-11, section 4.6: Q5_1 GGUF at 1.47 MP on two 5060 Ti with every weight on the storage card: success in 192.3 s but only 0.3 GiB free there, 'too thin for production'; the benchmark's own prediction for a 3 GiB resident share on the compute card is storage about 12.6 GiB and compute about 4.9 GiB at that 1.47 MP canvas, not run. The compute figure here is scaled to the 2.0 MP cap this row claims, as the fp8mixed row's is: the 1.9 GiB the compute card held at 1.4727 MP grows to 2.6 GiB, so 3 + 2.6 = 5.6 GiB. The run used the read-only loader (host growth 1.50 GiB)."
+    },
+    {
+      "id": "qwen-image-2.1-edit/int8_convrot",
+      "route": "edit",
+      "family": "qwen-image-2.1",
+      "quant": "int8_convrot",
+      "cardOrder": "compute-first",
+      "unetMatch": "int8.*\\.safetensors$",
+      "clipMatch": "bf16",
+      "unet": { "loader": "plain" },
+      "clip": { "loader": "distorch2-host", "residentGb": 5 },
+      "basis": "predicted",
+      "peakGiB": { "compute": 13.9, "storage": 8.0 },
+      "activationsGiB": 2.3,
+      "packs": ["multigpu"],
+      "maxPixels": 4194304,
+      "maxPixelsNote": "chosen, not measured: the DiT sequence (the target's latent plus every reference's, one token per 16x16 pixels; planEdit counts images + 1 grids of resolution squared) at which the image route measured this row's activations, 2048x2048 (16384 tokens); no edit has been run card-only",
+      "evidence": "Predicted, not run. The loaders, resident shares and card order are the image route's measured row of the same quant (2026-10-20): the int8_convrot DiT (6.76 GiB) loaded whole on the compute card, the bf16 Qwen3-VL-8B text encoder built off the cards by OffloadCLIPLoaderDisTorch2 and freed by OffloadFreeAfterEncode before the DiT loads. The edit graph adds three things no run has measured: the Qwen3-VL vision tower running inside the DisTorch2-split encoder, the VAE encode of each reference image on the storage card beside the parked encoder share, and the prefix K/V cache (device gpu: kept on the compute card only when ComfyUI finds twice its size free there, else the prefix is recomputed each step, never host RAM). The peaks are ceilings reasoned from those pieces; a live run with the read-only loader replaces them."
+    },
+    {
+      "id": "qwen-image-2.1-edit/bf16",
+      "route": "edit",
+      "family": "qwen-image-2.1",
+      "quant": "bf16",
+      "cardOrder": "compute-first",
+      "unetMatch": "bf16.*\\.safetensors$",
+      "clipMatch": "bf16",
+      "unet": { "loader": "distorch2", "residentGb": 8 },
+      "clip": { "loader": "distorch2-host", "residentGb": 8 },
+      "basis": "measured",
+      "peakGiB": { "compute": 14.5, "storage": 11.0 },
+      "activationsGiB": 6.0,
+      "packs": ["multigpu"],
+      "maxPixels": 4194304,
+      "maxPixelsNote": "the DiT sequence (the target's latent plus every reference's, one token per 16x16 pixels; planEdit counts images + 1 grids of resolution squared) at which the image route measured the same DiT, 2048x2048 (16384 tokens), the cap; the edit ran card-only at 2,097,152 (one 1024x1024 reference, 8192 tokens), and the compute figure is its sampler scaled linearly to the cap, as the 2511 rows' are",
+      "evidence": "Measured 2026-10-20 on the 5070 Ti (compute) and a 5060 Ti (storage), launched compute-first, 0 GiB host RAM declared on the lease, with the live binding's files (the bf16 DiT, the bf16 Qwen3-VL-8B text encoder, the bf16 VAE): one 1024x1024 reference at --resolution 1024 (a DiT sequence of 2,097,152 pixels, 8192 tokens), 40 steps at 1.64 s/it, cache device gpu: 197.0 s. The encoder was built off the cards by OffloadCLIPLoaderDisTorch2 and placed by cuda:1,8gb;cuda:0,* in 6.6 s (cuda:0 8.33 GiB, cuda:1 8.00 GiB, 0 GiB on the CPU); the text encode, the vision tower and the reference VAE encode ran inside it, and OffloadFreeAfterEncode freed both cards in 0.8 s (14.48 and 14.12 GiB free) before the DiT, built empty and filled from the read-only map, landed 8 GiB on cuda:0 and 5.25 GiB on cuda:1. Per-card peaks by phase: the encoder 9.65 GiB on the compute card and 9.69 on the storage card; the sampler 11.49 GiB on the compute card (8 GiB of the DiT, 0.5 of context and 3.0 of activations and prefix cache) and 6.06 on the storage card. Host physical memory dipped to 54.1 GiB free (from 88.4) while the encoder was staged on its way to the cards and came back to 85.9; no weight stayed in host RAM. The compute figure is that sampler scaled to the maxPixels cap (3.0 GiB of activations at 8192 tokens, 6.0 at 16384: 8 + 0.5 + 6.0 = 14.5); the storage figure keeps the predicted 11.0, above the 9.69 read with one reference, for the cap's larger or extra references, whose VAE encode and vision pass run beside the parked encoder share. The output was the asked edit (the blazer's colour changed; the woman, her pose, the slide and the office kept)."
     }
   ]
 }

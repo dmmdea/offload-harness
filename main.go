@@ -3668,6 +3668,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// The host RAM a vLLM agent seat holds, against the figure the node declares for it (agent_seat_host_ram_gib): pure
 	// config, informational, and silent on a box with no vLLM seat.
 	writeSeatHostRAMSection(w, cfg)
+	// The flat comfy_cuda_device and comfy_dynamic_vram a multicard seat does not apply: pure config, informational (a NOTE never changes the exit code), and
+	// silent on a config with no multicard seat. Config load used to warn of them on every command.
+	writeMulticardNotesSection(w, cfg)
 	// Whether the GPU power limit and clock lock a box applies at boot were applied this boot, from the state record the applier
 	// writes: one file, informational (a WARN or UNKNOWN never changes the exit code), and one line where nothing is recorded.
 	writePowerProfileRow(w)
@@ -3958,6 +3961,14 @@ func writeConfigFindingsSection(w io.Writer, cfg config.Config) int {
 		fmt.Fprintf(w, "  FAIL  %s\n", f)
 	}
 	return len(findings)
+}
+
+// writeMulticardNotesSection prints a NOTE row for each flat setting the multicard seats do not apply (config.MulticardLaunchNotes): comfy_cuda_device and
+// comfy_dynamic_vram "on" still serve the single-card routes, so the row says what the config does and asks for nothing. It prints nothing without one.
+func writeMulticardNotesSection(w io.Writer, cfg config.Config) {
+	for _, n := range cfg.MulticardLaunchNotes() {
+		fmt.Fprintf(w, "multicard:  NOTE  %s\n", n)
+	}
 }
 
 // writeTailnetZonesSection prints the tailnet DNS zones this config admits hostnames under, one

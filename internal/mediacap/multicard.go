@@ -9,8 +9,8 @@ import "regexp"
 // internal/hostneed's host-RAM declaration) and what it was measured to hold. TestTheMulticardRowsAreTheRunnersRecipes fails when either side moves.
 //
 // Measured is true only for a row whose host growth was read in a run that used the read-only safetensors loader (a card-only run that charged no
-// weight file to host commit). The 2511 fp8mixed edit, the 2512 Q5_1 GGUF, the krea2 bf16 DiT and the qwen-image-2.1 bf16 and int8_convrot DiTs are
-// measured; the 2511 Q5_1 GGUF edit is predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
+// weight file to host commit). The 2511 fp8mixed edit, the 2512 Q5_1 GGUF, the krea2 bf16 DiT, the qwen-image-2.1 bf16 and int8_convrot DiTs and the
+// qwen-image-2.1 bf16 edit are measured; the 2511 Q5_1 GGUF edit and the qwen-image-2.1 int8_convrot edit rows are predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
 //
 // A row can be held back (Blocked): it stays in the table, but it is no recipe to FindMulticardRow. No row is held back today. The qwen-image-2.1 rows'
 // 16.33 GiB bf16 text encoder is bigger than a card, and under --gpu-only ComfyUI would build the whole of it on one card before a DisTorch2 split
@@ -39,6 +39,7 @@ type MulticardRow struct {
 	// MaxPixels is the largest canvas (width times height) a call on this row may ask for (0 = the row has none). It is the JSON's "maxPixels", pinned by
 	// TestTheMulticardRowsAreTheRunnersRecipes, and the number is chosen, not measured (the JSON's "maxPixelsNote"). The runner refuses a larger canvas
 	// (render/multicard-recipes.mjs canvasRefusal) only after the pair was held; the typed door refuses it first (internal/pipeline mediaNeed.forCanvas).
+	// For the two qwen-image-2.1 edit rows it is the DiT-sequence cap, judged by the runner alone (render/comfy-edit.mjs planEdit); the typed door's forCanvas is image-only.
 	MaxPixels int64
 	// Blocked is why the row may not launch (empty = it may): the row stays in the table, but it is no recipe to FindMulticardRow, so the estimate, the
 	// doctor and the typed doors treat the binding as one without a recipe, and the runner refuses it by name (render/multicard-recipes.mjs findRecipe).
@@ -66,6 +67,10 @@ var multicardRows = []MulticardRow{
 		UnetLoader: "distorch2", ResidentGiB: 9, ClipLoader: "plain", ComputeGiB: 13.0, StorageGiB: 11.0, Measured: true, MaxMegapixels: 2.0, LoraLoader: "LoraLoaderBypassModelOnly", Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/gguf-q5_1", Route: "edit", Family: "qwen-image-edit-2511", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
 		UnetLoader: "gguf-distorch2", ResidentGiB: 3, ClipLoader: "plain", ComputeGiB: 5.6, StorageGiB: 12.6, MaxMegapixels: 2.0, LoraLoader: "LoraLoaderModelOnly", Packs: []string{"multigpu", "gguf"}},
+	{ID: "qwen-image-2.1-edit/int8_convrot", Route: "edit", Family: "qwen-image-2.1", Quant: "int8_convrot", UnetMatch: `int8.*\.safetensors$`, ClipMatch: "bf16",
+		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 5, ComputeGiB: 13.9, StorageGiB: 8.0, MaxPixels: 4194304, Packs: []string{"multigpu"}},
+	{ID: "qwen-image-2.1-edit/bf16", Route: "edit", Family: "qwen-image-2.1", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16",
+		UnetLoader: "distorch2", ResidentGiB: 8, ClipLoader: "distorch2-host", ClipResidentGiB: 8, ComputeGiB: 14.5, StorageGiB: 11.0, Measured: true, MaxPixels: 4194304, Packs: []string{"multigpu"}},
 }
 
 // multicardMatchers are the rows' regular expressions, compiled once, in the rows' order.

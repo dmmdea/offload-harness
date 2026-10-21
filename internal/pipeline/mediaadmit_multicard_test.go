@@ -505,7 +505,7 @@ func TestAnEditBindingWithoutThePlacementIsTheSingleCardLeaseItAlwaysWas(t *test
 	wantAnswerNamesNoCards(t, "a plain edit", f.await(ch))
 }
 
-// An edit binding with no recipe (the 2.1 edit family has none) is refused before a lease.
+// An edit binding with no recipe (a 2.1 edit with no text encoder bound has none) is refused before a lease.
 func TestAnEditBindingWithNoRecipeIsRefusedBeforeAnyLease(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: both(multicardEditBinding, func(c *config.Config) {
 		c.GenEditFamily, c.GenEditUnet = config.FamilyQwenImage21, "qwen_image_2.1_bf16.safetensors"

@@ -932,6 +932,8 @@ through host RAM (`[MultiGPU DLPack] CPU-staging tensor from cuda:1 to cuda:0 (P
 | image | `krea2`, bf16 DiT, bf16 text encoder | DisTorch2 (11 GiB resident), built empty from the read-only map / plain | 13.2 / 13.1, at the 1.57 MP canvas cap | **measured** |
 | edit | `qwen-image-edit-2511`, fp8mixed DiT, fp8 text encoder | DisTorch2 (9 GiB resident), bypass LoRA / plain | 13.0 / 11.0, at the 2.0 MP canvas cap | **measured** |
 | edit | `qwen-image-edit-2511`, Q5_1 GGUF, fp8 text encoder | GGUF DisTorch2 (3 GiB resident) / plain | 5.6 / 12.6, at the 2.0 MP canvas cap | predicted |
+| edit | `qwen-image-2.1`, int8 convrot DiT, bf16 text encoder | plain pin (whole on `cuda:0`) / harness loader, built off the cards (5 GiB on the storage card), compute-first | 13.9 / 8.0, at the 4.19 MP DiT sequence cap | predicted |
+| edit | `qwen-image-2.1`, bf16 DiT, bf16 text encoder | DisTorch2 (8 GiB resident) / harness loader, built off the cards (8 GiB on the storage card), compute-first | 14.4 / 11.0, at the 4.19 MP DiT sequence cap | predicted |
 
 **A row can be held back, and no row is today.** The `qwen-image-2.1` int8 convrot row was until a card-only run of it was made on the two non-display cards (2026-10-20, below). The mechanism stays:
 a held-back row carries a `blocked` sentence (`render/multicard-recipes.json`, `Blocked` in `internal/mediacap/multicard.go`, pinned together): it stays in the
@@ -953,10 +955,10 @@ Measured 2026-10-20 at 2048x2048 (the family default and the row's cap), 40 step
 cards in 0.8 s (14.48 and 14.80 GiB free after it), the DiT built empty and landed 8 GiB on `cuda:0` and 5.25 GiB on `cuda:1`, and the sampler ran 5.57 s per step: 280.0 s, peaks
 10.90 GiB on the compute card and 8.12 GiB on the storage card. Host free memory dipped only while the weights streamed to the cards (64.6 GiB free at the encoder load, 75.0 at the DiT
 load, from 83.9) and held at 81 GiB through sampling. The int8 convrot row names the same loader.
-The launchable card-only IMAGE rows are therefore the 2.1 bf16 and int8 convrot DiTs, the 2512 Q5_1 GGUF and the krea2 bf16 DiT, all measured (below; the edit rows are unchanged). The load-time warning of
-`imagegen_placement` agrees: a box that binds `qwen-image-2.1` to `multicard` is no longer told every render will be refused.
+The launchable card-only IMAGE rows are therefore the 2.1 bf16 and int8 convrot DiTs, the 2512 Q5_1 GGUF and the krea2 bf16 DiT, all measured (below). The launchable card-only EDIT rows are the 2511 fp8mixed DiT (measured), the 2511 Q5_1 GGUF and the 2.1 bf16 and int8 convrot DiTs (predicted). The load-time warnings of
+`imagegen_placement` and `gen_edit_placement` agree: a box that binds `qwen-image-2.1` to `multicard` is no longer told every render or edit will be refused.
 
-**Measured and predicted.** A row is *measured* only when its per-card peaks were read in a run that used the read-only loader. Five rows have one:
+**Measured and predicted.** A row is *measured* only when its per-card peaks were read in a run that used the read-only loader. Six rows have one:
 - the 2511 fp8mixed edit (2026-10-11 benchmark, section 4.6: 1.47 MP on two RTX 5060 Ti 16 GB, 145.5 s, 9.4 s per step, peaks 11.9 GiB on the compute card and
   10.9 GiB on the storage card, 1.87 GiB of host growth; one card cannot hold the model and the merging LoRA loader ran out of memory, which is
   why the recipe uses the bypass loader). A 2026-10-20 run of the lightning 8-step recipe at 1024x1024 on a 300 W + 180 W pair took 110.6 s, peaks 11.40 and 10.60 GiB;
@@ -967,13 +969,19 @@ The launchable card-only IMAGE rows are therefore the 2.1 bf16 and int8 convrot 
 - the 2.1 bf16 DiT (2026-10-20, compute-first, 0 GiB host RAM declared): 2048x2048 in 280.0 s (10.90 and 8.12 GiB), above;
 - the 2.1 int8 convrot DiT (2026-10-20, compute-first, 0 GiB host RAM declared): 2048x2048, 40 steps at 2.57 s per step, in 179.9 s. The encoder was placed `cuda:1,5gb;cuda:0,*` (`cuda:0` 11.36 GiB, `cuda:1` 4.97 GiB) and freed by
   `OffloadFreeAfterEncode` before the 6.76 GiB int8 DiT loaded whole on `cuda:0`. Peaks by phase: 12.27 GiB on the compute card during the encoder phase, 9.04 GiB while sampling, 5.84 GiB on the storage card at the VAE decode; the row's figures are 12.3 and 5.9.
-  Host RAM dipped only while the encoder was staged and held through sampling. No larger canvas has been run on it.
+  Host RAM dipped only while the encoder was staged and held through sampling. No larger canvas has been run on it;
+- the 2.1 bf16 edit (2026-10-20, compute-first, 0 GiB host RAM declared): one 1024x1024 reference at `--resolution 1024`, 40 steps at 1.64 s per step, cache device `gpu`, in 197.0 s.
+  The encoder (the text encode, the vision tower and the reference VAE encode) peaked at 9.65 GiB on the compute card and 9.69 GiB on the storage card and was freed before the DiT;
+  the sampler peaked at 11.49 GiB on the compute card and 6.06 GiB on the storage card. The row's compute figure, 14.5 GiB, is that sampler with its 3.0 GiB of activations and
+  prefix cache scaled to the 16,384-token cap; its storage figure keeps the predicted 11.0. Host RAM dipped only while the encoder was staged.
 
 Every image arm of the 10-11 benchmark ran the stock loader, which charges each weight file to host
-commit, so the one other row (the 2511 Q5_1 GGUF edit row) keeps what the arms showed and
-its split share and peaks are arithmetic from them: it is *predicted*, and the file says so per row (`basis`, `evidence`). A live run
+commit, so the 2511 Q5_1 GGUF edit row keeps what the arms showed and
+its split share and peaks are arithmetic from them, and the 2.1 int8 convrot edit row takes the loaders, share and card order of the measured int8 image row and adds peaks reasoned from the edit's extra pieces (below): the two are *predicted*, and the file says so per row (`basis`, `evidence`). A live run
 with the read-only loader promotes a row: flip `basis` in `render/multicard-recipes.json` and `Measured` in `internal/mediacap/multicard.go`
 (`TestTheMulticardRowsAreTheRunnersRecipes` fails until both agree).
+
+**The 2.1 edit rows.** The `qwen-image-2.1` edit graph takes the placement too (`--placement multicard` on `render/comfy-edit.mjs`; `gen_edit_placement` on the typed door). Its loaders are the recipe's, as on the image route, and node 14, `OffloadFreeAfterEncode`, reads the encoder's conditioning between node 5 (the text encode, the vision tower and the reference VAE encode all run inside it) and the sampler, so the 16.33 GiB text encoder leaves both cards before the DiT lands; the sampler reads its latent from node 5 directly. The bf16 row is measured (above); the int8 convrot row is predicted, and three things in it are unmeasured: the vision tower running inside the split encoder, the reference VAE encode on the storage card beside the parked encoder share, and the prefix cache. The cache device of that graph (`--cache-device`, `gen_edit_cache_device`) defaults to `gpu` under the placement and takes `gpu` or `off` only: `gpu` keeps the prefix K/V cache on the compute card when ComfyUI finds twice its size free there and recomputes the prefix each step when it does not, and `auto` and `cpu` can pin the cache in host RAM, which the placement does not use, so the runner refuses them by name (and the load-time warning of a bound one says so). The canvas is judged on the DiT sequence, not on `gen_edit_megapixels` (a 2.1 edit binding refuses that key): the target counted twice plus every reference, each `--resolution` squared, must be at most the row's `maxPixels` of 4,194,304 (the image route's measured 2048x2048 sequence; the bf16 edit ran at half of it and its compute figure is scaled to it; the default 1024 takes up to three images, and `--resolution 0` counts each image at its own size and needs a readable header). The runner refuses a larger edit after the pair was leased, naming the largest `--resolution` that fits. A first render of the int8 convrot row the same way (`--ram 0` under a reservation of the two cards, the per-card peaks by phase and the host free memory read) promotes it as above.
 
 **What the typed door does.** A binding that asks for the placement takes its own need kind in the media admission (`needMulticard`):
 
@@ -989,7 +997,7 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
   default instance, where the runner would refuse a call that names no cards, every time, after the node was held for it. A router may place such
   a call on another node.
 - *No recipe, no lease.* A binding that has no row in `render/multicard-recipes.json` (krea2 in any file but the bf16 DiT with the bf16 text encoder; 2512 bf16, 38 GiB, which
-  fits no card; sdxl; hidream; the 2.1 edit; an int8, int4 or nf4 text encoder, whose render moved off the bf16 one by 28.65 dB PSNR against the 30 dB
+  fits no card; sdxl; hidream; a 2.1 edit with no bf16 text encoder bound; an int8, int4 or nf4 text encoder, whose render moved off the bf16 one by 28.65 dB PSNR against the 30 dB
   gate; a 2.1 DiT file that is neither the bf16 nor the int8 convrot one) is refused before any lease is spent, naming
   the key. The same goes for an edit binding whose
   `gen_edit_megapixels` pins a canvas above the recipe's 2.0 MP cap, which the runner honours verbatim: the peaks are scaled to the cap, and a larger canvas

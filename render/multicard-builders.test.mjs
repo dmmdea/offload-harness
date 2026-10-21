@@ -107,9 +107,16 @@ test("2.1 multicard refuses what has no recipe, before it builds a graph", () =>
   assert.throws(() => buildQwenImage21({ ...QI21, placement: "bogus" }), /placement must be single\|multicard/);
 });
 
-test("the 2.1 edit graph has no card-only placement: it takes no placement argument and builds as it did", () => {
+test("the 2.1 edit graph under multicard changes the three loaders and routes the conditioning through node 14; the cache device defaults to gpu and never pins host RAM", () => {
   const e = { images: ["a.png"], prompt: "p", unet: BF16, clip: QI21.clip, vae: QI21.vae, seed: 1 };
-  assert.deepEqual(buildQwenImage21Edit({ ...e, placement: "multicard" }), buildQwenImage21Edit(e), "an unknown argument is not read");
+  const g = buildQwenImage21Edit({ ...e, placement: "multicard" });
+  const single = buildQwenImage21Edit({ ...e, cacheDevice: "gpu" });
+  const back = JSON.parse(JSON.stringify(rest(g)), (k, v) => (Array.isArray(v) && v.length === 2 && v[0] === "14" ? ["5", v[1]] : v));
+  delete back["14"];
+  assert.deepEqual(back, rest(single), "every node but the three loaders and the release is the single graph's, link for link");
+  assert.deepEqual(g["14"], { class_type: "OffloadFreeAfterEncode", inputs: { positive: ["5", 0], negative: ["5", 1], clip: ["2", 0] } });
+  assert.equal(g["4"].inputs.device, "gpu");
+  assert.throws(() => buildQwenImage21Edit({ ...e, placement: "multicard", cacheDevice: "cpu" }), /host RAM/);
 });
 
 // ---- qwen-image 2512 --------------------------------------------------------------------------------------------
@@ -283,9 +290,9 @@ test("comfy-edit: --placement multicard plans the 2511 recipe from the --unet th
   assert.equal(gg["1"].class_type, "UnetLoaderGGUFDisTorch2MultiGPU");
   // not planned: refused
   assert.throws(() => plan({ unet: FP8, placement: "multicard" }), (e) => e instanceof EditUsageError && /--placement multicard.*plan/.test(e.message));
-  // no recipe: refused by name, as are the 2.1 edit family and a K-quant
+  // no recipe: refused by name, as are an unmatched 2.1 file and a K-quant
   assert.throws(() => plan({ unet: "qwen-image-edit-2511-Q4_K_M.gguf", placement: "multicard" }, { multicard: { residentGb: 3 } }), (e) => e instanceof EditUsageError && /no measured card-only recipe/.test(e.message));
-  assert.throws(() => plan({ unet: BF16, family: "qwen-image-2.1", clip: QI21.clip, vae: QI21.vae, placement: "multicard" }, { multicard: { residentGb: 3 } }), (e) => e instanceof EditUsageError && /no measured card-only recipe for qwen-image-2\.1 edit/.test(e.message));
+  assert.throws(() => plan({ unet: "qwen_image_2.1_fp8.safetensors", family: "qwen-image-2.1", clip: QI21.clip, vae: QI21.vae, placement: "multicard" }, { multicard: { residentGb: 3 } }), (e) => e instanceof EditUsageError && /no measured card-only recipe for qwen-image-2\.1 edit/.test(e.message));
   // single placement is the graph that was built before
   assert.deepEqual(plan({ unet: FP8, placement: "single" }).build(["staged.png"]), plan({ unet: FP8 }).build(["staged.png"]));
   assert.throws(() => plan({ unet: FP8, placement: "both" }), (e) => e instanceof EditUsageError && /--placement must be single\|multicard/.test(e.message));
