@@ -6,6 +6,21 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.198.0] - 2026-10-21 - vLLM seats keep Humming's JIT kernels in their own directories; the harness ships with go1.27.3 for GO-2026-6809
+
+### Added - vLLM seats keep Humming's JIT kernels in their own directories, and ADR 0095 records where Humming serves
+
+- **What it does.** `seat_fg.sh` exports `HUMMING_CACHE_DIR` and `HUMMING_TMP_DIR` under the seat's work directory (`humming-cache`, `humming-tmp`) and caps `HUMMING_MAX_PARALLEL_BUILD_WORKERS` at 8; `SEAT_HUMMING_CACHE`, `SEAT_HUMMING_TMP` and `SEAT_HUMMING_BUILD_WORKERS` override them, and each start logs `seat_fg: Humming kernel cache <dir> (at most N parallel builds)`. `linux-systemd/vllm-seat-run.sh` sets the same under the stack's `cache` directory. The WSL seat env template documents the `--linear-backend humming` opt-in, commented out, with the measured warning below.
+- **Why.** vLLM 0.32 installs Humming 0.1.17 as a pinned dependency and serves every 2, 3, 5, 6 and 7-bit checkpoint on it. Left at its defaults it kept compiled kernels and the modules the engine imports in root's home, keyed to the venv path so nothing reused or cleaned them, and compiled with one process per CPU on a first forward.
+- **Not changed.** 4-bit seats stay on Marlin. In the proving run (two 16 GB SM120 cards, 27B INT4, utilization 0.90) `--linear-backend humming` gave the same output and footprint, and its engine stopped during a 23.7k-token prefill that Marlin served, ended by the 120 s step watchdog. Cause not established; ADR 0095 has the table.
+- **Check.** Both arms of that run started through the changed launcher and logged the cache line; the Humming arm compiled 94 kernels (51 MB) into `humming-cache` on its first start (291 s) and reused them on the next (175 s). The security doc admits Humming 0.1.17 (Apache-2.0, no network code).
+
+### Security - the harness ships with go1.27.3, which carries the crypto/x509 fix for GO-2026-6809
+
+- **What it does.** `go.mod`'s toolchain line names go1.27.3 (was go1.27.2), so every build, the release binaries and the govulncheck job run under it; the pin test's floor moves to go1.27.3, so a downgrade fails the test.
+- **Why.** GO-2026-6809 (crypto/x509 distrusts compromised intermediate certificates) was published on 2026-10-21 against go1.27.2 and is fixed in go1.27.3. govulncheck found the harness reaches it through `cliutil.ProbeReachable` (an HTTPS probe), in the root module and in `tools/llamaswap`, and failed CI on every branch.
+- **Not changed.** No module requirement moves: the two module advisories the scan also lists are not called.
+
 ## [0.197.0] - 2026-10-20 - The qwen-image-2.1 edit runs pooled on the two non-display cards, measured; the multicard launch notes move to doctor
 
 ### Added - the qwen-image-2.1 edit takes the card-only two-card placement, and the multicard launch notes move from every command to `doctor`

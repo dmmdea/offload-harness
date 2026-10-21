@@ -1857,6 +1857,19 @@ knob. A non-number is a warning and is ignored. The knob only acts while the pin
 figures, so the template seat env lists them commented out. Proven by `setup/templates/vllm-seat/seat_fg.kv-and-store.tests.sh`,
 which runs the whole launcher against stand-ins and reads the argument list vllm was started with.
 
+**Humming kernels (2026-10-21, [ADR 0095](architecture/decisions/0095-humming-serves-the-weight-formats-marlin-cannot.md)):**
+vLLM installs Humming, a JIT-compiled GEMM library for quantized weights, as a pinned dependency, and serves on it every
+checkpoint whose weights Marlin cannot (2, 3, 5, 6 or 7 bits); 4-bit and 8-bit seats stay on Marlin. Humming compiles a layer's
+kernels on its first forward. The launchers keep those kernels beside vLLM's compile cache (`humming-cache` and `humming-tmp`
+under `seat_fg.sh`'s work directory, `cache/humming` under the systemd stack) and build at most eight at once, where
+Humming's own default is one build per CPU. The first start of a new model or vLLM version pays the compile (291 s against 175 s
+with the kernels cached, 94 kernels for the 27B INT4); every later start and every start after the idle unload reuses it.
+`SEAT_HUMMING_CACHE`, `SEAT_HUMMING_TMP` and `SEAT_HUMMING_BUILD_WORKERS` move the directories and change the cap. Each start
+logs `seat_fg: Humming kernel cache <dir> (at most N parallel builds)`, and the engine names its kernel in `Using
+<Name>LinearKernel for CompressedTensorsWNA16`. `--linear-backend humming` moves a 4-bit seat onto Humming. Its proving run gave
+the same output and footprint as Marlin, but its engine stopped during a 23.7k-token prefill that Marlin served, so no seat runs
+it and a seat that opts in proves that prefill first.
+
 **Pipeline seats and the store (measured 2026-09-03, served since 2026-09-22):** stock LMCache sizes L2
 reads from one layout per model, but the stages of a pipeline-parallel seat hold different numbers of
 full-attention layers — the 3-card seat's 28,13,23 split (opencode's seat since 2026-10-04, the agent seat before) of a 64-layer model with full attention every

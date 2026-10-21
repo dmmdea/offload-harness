@@ -19,6 +19,9 @@ set -u
 S=__STACK_DIR__
 export HF_HOME=__HF_HOME__ HF_HUB_OFFLINE=1 CUDA_VISIBLE_DEVICES=__DEVICE__
 export VLLM_CACHE_ROOT=$S/cache/vllm
+# Humming (ADR 0095) keeps its JIT-compiled kernels beside vLLM's compile cache and compiles at most eight at once
+# (its default is one per CPU).
+export HUMMING_CACHE_DIR=$S/cache/humming HUMMING_TMP_DIR=$S/cache/humming-tmp HUMMING_MAX_PARALLEL_BUILD_WORKERS=8
 export VLLM_USE_FLASHINFER_SAMPLER=0
 export PATH=__VENV_DIR__/bin:/usr/local/cuda/bin:/usr/local/bin:/usr/bin:/bin
 # Boot: tailscaled being active does not mean the address is assigned yet — wait (up to 180 s) instead of failing into the

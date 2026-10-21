@@ -638,6 +638,13 @@ fi
 
 export CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES="${SEAT_DEVICES:-0,1}" NCCL_CUMEM_ENABLE=0 NCCL_P2P_DISABLE=1 HF_HUB_OFFLINE=1
 export HOME=/root HF_HOME="${SEAT_HF_HOME:-$WORK/hf}" VLLM_CACHE_ROOT="${SEAT_VLLM_CACHE:-$WORK/vllm-cache}" LMCACHE_LOG_LEVEL=INFO
+# Humming (ADR 0095), the JIT-compiled GEMM library vLLM ships for quantized weights, compiles a layer's kernels on its first
+# forward and keys each one on the venv path. Its cache sits beside vLLM's compile cache, so it survives the five-minute idle
+# unload and is cleaned with the seat, not left in root's home. A layer shape's tile variants compile together (eight on the
+# 3-bit seat), so eight build workers add no wait, where Humming's default of one per CPU loads every core of a desktop box.
+export HUMMING_CACHE_DIR="${SEAT_HUMMING_CACHE:-$WORK/humming-cache}" HUMMING_TMP_DIR="${SEAT_HUMMING_TMP:-$WORK/humming-tmp}"
+export HUMMING_MAX_PARALLEL_BUILD_WORKERS="${SEAT_HUMMING_BUILD_WORKERS:-8}"
+echo "seat_fg: Humming kernel cache $HUMMING_CACHE_DIR (at most $HUMMING_MAX_PARALLEL_BUILD_WORKERS parallel builds)"
 export PATH="$VENV/bin:/usr/local/bin:/usr/bin:/bin"
 # WSL2 + vLLM >= 0.29: 0.29 selects its V2 GPU model runner by default and that runner needs UVA (pinned host memory),
 # which vLLM reports unavailable under WSL2; with VLLM_WSL2_ENABLE_PIN_MEMORY=1 it starts and then dies in kernel warm-up
