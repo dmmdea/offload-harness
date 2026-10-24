@@ -915,7 +915,7 @@ func runGenerateImage(args []string) error {
 	out := fs.String("out", "", "output PNG path (default under the media dir)")
 	width := fs.Int("width", 0, "image width px (default 1024)")
 	height := fs.Int("height", 0, "image height px (default 1024)")
-	steps := fs.Int("steps", 0, "sampler steps (default 30)")
+	steps := fs.Int("steps", 0, "sampler steps (default: machine binding)")
 	seed := fs.Int("seed", 0, "RNG seed (default random)")
 	refine := fs.Bool("refine", true, "set --refine=false (the =form is required) to render the prompt verbatim, skipping this machine's opt-in prompt refiner; on --batch it applies to every job without its own \"refine\" value (no-op unless imagegen_refiner_model is configured)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")

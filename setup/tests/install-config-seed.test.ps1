@@ -853,7 +853,7 @@ Assert ($zf.sdcpp_model -ceq 'D:/oh/models/z_image_turbo-Q8_0.gguf')         'z-
 Assert ($zf.sdcpp_vae -ceq 'D:/oh/models/zimage_ae.safetensors')             'z-image-turbo family carries its own VAE path'
 Assert ($zf.sdcpp_llm -ceq 'D:/oh/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf') 'z-image-turbo family carries its own text-encoder path'
 Assert ($zf.license -ceq 'Apache-2.0' -and $zf.commercial_use -is [bool] -and $zf.commercial_use -eq $true) 'z-image-turbo family records its license pair (Apache-2.0, commercial)'
-Assert ((@($zf.sdcpp_extra_args) -join ' ') -ceq '--vae-tiling --offload-to-cpu --diffusion-fa --max-vram 6.5 --stream-layers') 'z-image-turbo family carries the measured 6.5 GB graph-cut arm'
+Assert ((@($zf.sdcpp_extra_args) -join ' ') -ceq '--vae-tiling --offload-to-cpu --flash-attn off,diffusion=on --max-vram 6.5') 'z-image-turbo family carries the measured 6.5 GB arm (sd.cpp master-1000 flags)'
 Assert (($zf.imagegen_steps -is [int] -or $zf.imagegen_steps -is [long]) -and $zf.imagegen_steps -eq 8 -and $zf.imagegen_cfg -eq 1) 'z-image-turbo family keeps its turbo recipe (8 steps, cfg 1)'
 Assert (($b8text | ConvertFrom-Json).imagegen_family -ceq 'hidream-o1-dev') 'the default image family is unchanged (z-image-turbo is a per-request opt-in)'
 # The overlay gate (Go: TestEveryShippedOverlayLoadsAndValidates), on the installer's side: no seed

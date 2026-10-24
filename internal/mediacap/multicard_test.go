@@ -46,7 +46,7 @@ func readRecipes(t *testing.T) recipeFile {
 func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 	file := readRecipes(t)
 	rows := MulticardRows()
-	if len(rows) != len(file.Rows) || len(rows) != 8 {
+	if len(rows) != len(file.Rows) || len(rows) != 10 {
 		t.Fatalf("%d rows here, %d in render/multicard-recipes.json", len(rows), len(file.Rows))
 	}
 	measured, blocked := 0, 0
@@ -142,6 +142,8 @@ func TestARowsNodeClassesAreItsLoadersClasses(t *testing.T) {
 		"qwen-image-2.1-edit/bf16":         {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image/gguf-q5_1":             {"UnetLoaderGGUFDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 		"krea2/bf16":                       {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
+		"flux3-klein/bf16":                 {"UNETLoaderMultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"},
+		"flux3-klein/nvfp4":                {"UNETLoaderMultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-edit-2511/fp8mixed":    {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-edit-2511/gguf-q5_1":   {"UnetLoaderGGUFDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 	}

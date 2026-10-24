@@ -229,6 +229,37 @@ is larger than one 16 GB card, so a single-card bf16 binding needs ComfyUI's dyn
 text_encoders/qwen3vl_8b_bf16.safetensors vae/qwen_image_2.1_vae_bf16.safetensors --revision
 5dc5850eb514a3685f6a03a2641728a8f7549c69 --local-dir <model_root>` (it leaves a
 `.cache/huggingface/` beside the files; remove it). No GGUF loader is wired for this family.
+
+**FLUX 3 Image Klein — the named family `flux3-klein` (FLUX Kommunity License v1.0, bound `commercial_use: true` by
+operator ruling 2026-10-24).** The installer never downloads its weights. `ampere-6` and `amd-gcn` seed it on sd.cpp
+(base `config_seed`) and `blackwell-8` on ComfyUI (`config_seed_ram_mid_high`); any other node binds it by hand
+(`docs/OPERATOR-GUIDE.md` §3, graph and traps: `docs/systems/media-generation.md`). The ComfyUI files come from BFL's
+gated `black-forest-labs/flux-3-image-klein-comfy` (accept the license on its page once; revision
+`feef60b0aaf63a4773ace96636ebbcf43b881312`), the VAE from the Apache-2.0 `Comfy-Org/Flux-2-Klein-4B`
+(`533c4cbc3d3b89af1743d9466c434e89810391c0`, `split_files/vae/`), into `<model_root>/<folder>/`:
+
+| use | file | bytes | sha256 |
+|---|---|---|---|
+| 16 GB+ (bf16) | `diffusion_models/flux3-image-klein-bf16.safetensors` | 11,097,404,512 | `c3e9813cdd049c831c836b2e9db61150e49a93fc1a4c63b256494642fee0bd7c` |
+| 8 GB (int8) | `diffusion_models/flux3-image-klein-int8-convrot.safetensors` | 5,827,874,779 | `847d8933548afd93df4af2cac2498e70891bf28d9dae06d695f536992e168fe2` |
+| Blackwell opt-in | `diffusion_models/flux3-image-klein-nvfp4.safetensors` | 5,277,685,632 | `15d421e2558443fcf83ba46f3cd884d9d181c2c7a0a7bdcd2974af234a2d4f5c` |
+| 16 GB+ | `text_encoders/qwen3vl_4b_bf16.safetensors` | 8,875,719,408 | `f0b24fc5c8d7c0ea6ca909da14c20af5cac53f22506be942c6c956f838b9630f` |
+| 8 GB | `text_encoders/qwen3vl_4b_int8_convrot.safetensors` | 4,858,559,240 | `32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c` |
+| upsampler, 16 GB+ | `text_encoders/qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors` | 9,748,113,996 | `cb8cb9b9dcd2569509de755dca54d96fd93a16a7aabfd2f4051f0a144230620f` |
+| upsampler, 8 GB | `text_encoders/qwen3.5_9b_flux3_prompt_upsampler_w4a8.safetensors` | 6,724,090,780 | `e5d85a7421d197bf5a12474511936ecabce19a833252f16e9310a983194a4458` |
+| all | `vae/flux2-vae.safetensors` | 336,211,292 | `868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3` |
+
+The sd.cpp files go to `<OFFLOAD_HOME>/models/flux3-klein/` (the seeds' paths): the DiT from `leejet/flux-3-image-klein-GGUF`
+(`1c2ad2f9b9247ccca6506a23bdb033fdb0873321`; `flux3-image-klein-Q4_K.gguf` 3,514,023,104 B
+`19ddbfbed61da4bb16ebf169aaf48e9e5db43aba557be1ee537e9f00f586092e` for ampere-6, `flux3-image-klein-Q8_0.gguf`
+6,151,716,032 B `8b71ffd749bcacbd50cc0acca4f2d31a044c94412743e1e780db99bf13f89752` for amd-gcn), the text encoder from
+`Qwen/Qwen3-VL-4B-Instruct-GGUF` (`1cd86afb9a95c410a6038ab3b40d8b578c892266`; `Qwen3VL-4B-Instruct-Q4_K_M.gguf`
+2,497,281,664 B `66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a`, `Qwen3VL-4B-Instruct-Q8_0.gguf`
+4,280,406,144 B `054721f478bc5fa6beffb7f38eae575d45298f88cbb8d2f83ef675a727863eb1`) and the same `flux2-vae.safetensors`.
+sd.cpp must be master-968 or later (the Windows installer pins master-1000; `amd-gcn`'s seed names its own
+`sdcpp-m1000` build). The fast upsampler seat for a ComfyUI node is BFL's PUP as a GGUF,
+`unsloth/flux-3-image-klein-pup-GGUF` (`cf6eff4e20c0cb14e9b2b7b6d2eaa04358411fcd`), served by llama-swap (hand-wired: no
+tier renders it yet).
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on fresh installs** —
 `ampere-8`/`blackwell-8` carry a `config_seed_ram_mid_high` layer that install.ps1 merges only when

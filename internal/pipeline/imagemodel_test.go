@@ -22,7 +22,7 @@ func TestImageModelFromConfig(t *testing.T) {
 		ImageGenSampler:      "euler",
 		ImageGenScheduler:    "simple",
 		ImageGenReserveVRAM:  0.6,
-		ImageGenFamily:       "qwen-image",
+		ImageGenFamily:       "flux3-klein", // the one graph that reads imagegen_upsampler (its file form maps to Model.Upsampler)
 		ImageGenPreset:       "lightning4",
 		ImageGenCLIP:         "te.safetensors",
 		ImageGenLoRA:         "l.safetensors",
@@ -32,6 +32,7 @@ func TestImageModelFromConfig(t *testing.T) {
 		ImageGenPoolCompute:  "cuda:0",
 		ImageGenPoolDonor:    "cuda:1",
 		ImageGenSchedule:     "official",
+		ImageGenUpsampler:    "pup.safetensors",
 		ImageGenPlacement:    "single", // not "multicard": that drops the pool keys this test maps (TestTheImageModelOfAMulticardBindingDropsThePoolAndTheSingleCardLaunch)
 		ComfyCudaDevice:      "2",
 		ComfyDynamicVRAM:     "off",

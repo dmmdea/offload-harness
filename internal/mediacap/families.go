@@ -43,9 +43,11 @@ var (
 	// builderCompanions: the text encoder and VAE each graph loads when the binding
 	// leaves them unset.
 	builderCompanions = map[string]struct{ clip, vae string }{
-		"qwen-image":          {"qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors"},
-		"krea2":               {"qwen3vl_4b_bf16.safetensors", "qwen_image_vae.safetensors"},
-		config.EditFamily2511: {"qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors"},
+		"qwen-image": {"qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors"},
+		"krea2":      {"qwen3vl_4b_bf16.safetensors", "qwen_image_vae.safetensors"},
+		// flux3-klein has no default text encoder (bf16 vs int8_convrot is a per-node choice, required by requiredImageKeys)
+		config.FamilyFlux3Klein: {"", "flux2-vae.safetensors"},
+		config.EditFamily2511:   {"qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors"},
 	}
 )
 
@@ -61,7 +63,7 @@ const (
 func impliedImageFiles(cfg config.Config) [][3]string {
 	var out [][3]string
 	if c, ok := builderCompanions[cfg.ImageGenFamily]; ok {
-		if cfg.ImageGenCLIP == "" {
+		if cfg.ImageGenCLIP == "" && c.clip != "" {
 			out = append(out, [3]string{"imagegen_clip (" + cfg.ImageGenFamily + " default)", "imagegen_clip", c.clip})
 		}
 		if cfg.ImageGenVAE == "" {
@@ -108,7 +110,7 @@ func impliedEditFiles(cfg config.Config) [][3]string {
 
 // imageFamilyModelKeys / editFamilyModelKeys are the model-file keys a family binds.
 var (
-	imageFamilyModelKeys = []string{"imagegen_ckpt", "imagegen_vae", "imagegen_clip", "imagegen_lora"}
+	imageFamilyModelKeys = []string{"imagegen_ckpt", "imagegen_vae", "imagegen_clip", "imagegen_upsampler", "imagegen_lora"}
 	editFamilyModelKeys  = []string{"gen_edit_unet", "gen_edit_vae", "gen_edit_clip", "gen_edit_lora"}
 )
 
@@ -120,6 +122,8 @@ func imageKeyValue(cfg config.Config, key string) string {
 		return cfg.ImageGenVAE
 	case "imagegen_clip":
 		return cfg.ImageGenCLIP
+	case "imagegen_upsampler":
+		return comfyUpsamplerFile(cfg)
 	case "imagegen_lora":
 		return cfg.ImageGenLoRA
 	case "gen_edit_unet":
@@ -156,6 +160,9 @@ func familyModelBindings(roots []ModelRoot, cfg config.Config, prefix string, ke
 func requiredImageKeys(cfg config.Config) []string {
 	if cfg.ImageGenFamily == config.FamilyQwenImage21 {
 		return []string{"imagegen_ckpt", "imagegen_clip", "imagegen_vae"}
+	}
+	if cfg.ImageGenFamily == config.FamilyFlux3Klein {
+		return []string{"imagegen_ckpt", "imagegen_clip"}
 	}
 	return []string{"imagegen_ckpt"}
 }
@@ -389,3 +396,7 @@ func filepathBase(p string) string {
 	}
 	return filepath.Base(p)
 }
+
+// comfyUpsamplerFile is the prompt-upsampler file a ComfyUI flux3-klein binding loads in-graph (imagegen_upsampler), "" for any other
+// binding: on the sd.cpp engine the key names a llama-swap model, never a file under a models root.
+func comfyUpsamplerFile(cfg config.Config) string { return cfg.UpsamplerFile() }

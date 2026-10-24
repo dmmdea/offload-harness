@@ -794,6 +794,15 @@ type Config struct {
 	// shift, KSampler), "turbo" (the Qwen-Image-2.1-Turbo checkpoint's saved 8-step
 	// sigmas; steps must be 8) or "" (the builder default, official). Other families ignore it.
 	ImageGenSchedule string `json:"imagegen_schedule,omitempty"`
+	// ImageGenUpsampler is the binding's PROMPT UPSAMPLER, the step FLUX 3 Image Klein requires before every render (BFL: the model takes full scene
+	// captions; a short prompt sent as typed gives generic output). Two forms (Config.UpsamplerFile / Config.UpsamplerModel): a value ending in
+	// .safetensors is BFL's upsampler file in text_encoders (e.g. qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors), which the ComfyUI
+	// flux3-klein graph runs in-graph (TextGenerate, BFL's t2i system prompt); any other value names a llama-swap model this node serves, which the
+	// harness calls with the same system prompt before the media lease, on either engine (the sd.cpp engine takes only this form). The model form is
+	// the fast one: BFL's upsampler as a GGUF on llama.cpp captions at 86 tok/s on a 5070 Ti where the in-graph file runs 5 to 8 (2026-10-24), and
+	// it keeps the 9 GiB upsampler out of the render's cards and host commit. A request with refine:false renders its prompt verbatim. Only the
+	// flux3-klein graph reads it. A binding key of the named-family overlays; "" = none.
+	ImageGenUpsampler string `json:"imagegen_upsampler,omitempty"`
 	// ImageGenLicense / ImageGenCommercialUse declare the license of THIS box's default
 	// image binding (ADR 0058). When set, every generate_image result from the default
 	// binding carries them. Both or
@@ -3148,6 +3157,18 @@ func warnImageBindingTo(c Config, w io.Writer, where string) {
 		fmt.Fprintf(w, "warning: %simagegen_schedule %q is set but imagegen_family is %q — only the qwen-image-2.1 graph reads a schedule; the flag is parsed and never consulted\n",
 			where, c.ImageGenSchedule, c.ImageGenFamily)
 	}
+	if c.ImageGenUpsampler != "" && c.ImageGenFamily != FamilyFlux3Klein {
+		fmt.Fprintf(w, "warning: %simagegen_upsampler %q is set but imagegen_family is %q — only the flux3-klein binding runs a prompt upsampler; the key is parsed and never consulted\n",
+			where, c.ImageGenUpsampler, c.ImageGenFamily)
+	}
+	if c.ImageGenFamily == FamilyFlux3Klein && c.ImageGenEngine == "sdcpp" && upsamplerIsFile(strings.TrimSpace(c.ImageGenUpsampler)) {
+		fmt.Fprintf(w, "warning: %simagegen_upsampler %q names a file on the sd.cpp engine, which has no graph to run it in — name a llama-swap model this node serves; every render goes out without an upsampler until then\n",
+			where, c.ImageGenUpsampler)
+	}
+	if c.ImageGenFamily == FamilyFlux3Klein && c.ImageGenEngine != "sdcpp" && (c.ImageGenSteps > 0) != (c.ImageGenCFG > 0) {
+		fmt.Fprintf(w, "warning: %simagegen_steps/imagegen_cfg are half-bound (%d / %g) on the flux3-klein binding — the render route rejects the half-pair and EVERY render will defer; bind both (distilled: 16 / 1.0, Base: 50 / 3.5) or neither\n",
+			where, c.ImageGenSteps, c.ImageGenCFG)
+	}
 	if c.GenEditSchedule != "" && c.GenEditFamily != FamilyQwenImage21 {
 		fmt.Fprintf(w, "warning: %sgen_edit_schedule %q is set but gen_edit_family is %q — only the qwen-image-2.1 edit graph reads a schedule; the flag is parsed and never consulted\n",
 			where, c.GenEditSchedule, c.GenEditFamily)
@@ -3244,7 +3265,7 @@ func (c Config) MulticardLaunchNotes() []string {
 // held back (a test in this package pins them to it). A family outside them, bound to a multicard placement, is refused by the runner by name on every call;
 // qwen-image-2.1 is inside them through its bf16 and int8_convrot rows on both routes (no row is held back today).
 var (
-	imageRecipeFamilies = map[string]bool{"qwen-image": true, "krea2": true, "qwen-image-2.1": true}
+	imageRecipeFamilies = map[string]bool{"qwen-image": true, "krea2": true, "qwen-image-2.1": true, FamilyFlux3Klein: true}
 	editRecipeFamilies  = map[string]bool{EditFamily2511: true, FamilyQwenImage21: true}
 )
 

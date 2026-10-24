@@ -208,6 +208,7 @@ var familySizes = map[string]map[mediacap.ModelRole][]float64{
 	"krea2":                {mediacap.RoleDiffusion: {24.5}, mediacap.RoleTextEncoder: {8.3}},
 	"qwen-image":           {mediacap.RoleDiffusion: {38.0}, mediacap.RoleTextEncoder: {8.8}},
 	"qwen-image-2.1":       {mediacap.RoleDiffusion: {13.3}, mediacap.RoleTextEncoder: {16.4}},
+	"flux3-klein":          {mediacap.RoleDiffusion: {10.4}, mediacap.RoleTextEncoder: {8.3}}, // the upsampler counts only as the file a binding names: the model form loads none in the graph
 	"qwen-image-edit-2511": {mediacap.RoleDiffusion: {19.2}, mediacap.RoleTextEncoder: {8.8}},
 	"qwen-inpaint":         {mediacap.RoleDiffusion: {19.2}, mediacap.RoleTextEncoder: {8.8}},
 	"wan22":                {mediacap.RoleDiffusion: {13.4, 13.4}, mediacap.RoleTextEncoder: {6.3}},

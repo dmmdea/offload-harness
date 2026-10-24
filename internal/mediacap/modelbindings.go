@@ -69,6 +69,7 @@ var expectedClasses = map[string][]string{
 	"imagegen_refiner_model":   {"checkpoints"},
 	"imagegen_vae":             {"vae"},
 	"imagegen_clip":            {"text_encoders", "clip"},
+	"imagegen_upsampler":       {"text_encoders", "clip"},
 	"imagegen_lora":            {"loras"},
 	"inpaint_ckpt":             {"checkpoints", "diffusion_models", "unet"},
 	"inpaint_vae":              {"vae"},
@@ -93,7 +94,7 @@ var expectedClasses = map[string][]string{
 
 // bindingKeys is the report order: image, inpaint, edit, upscale, video, animate.
 var bindingKeys = []string{
-	"imagegen_ckpt", "imagegen_refiner_model", "imagegen_vae", "imagegen_clip", "imagegen_lora",
+	"imagegen_ckpt", "imagegen_refiner_model", "imagegen_vae", "imagegen_clip", "imagegen_upsampler", "imagegen_lora",
 	"inpaint_ckpt", "inpaint_vae",
 	"gen_edit_unet", "gen_edit_clip", "gen_edit_vae", "gen_edit_lora",
 	"upscale_model",
@@ -108,6 +109,7 @@ func bindingValues(cfg config.Config) map[string]string {
 		"imagegen_refiner_model":   cfg.ImageGenRefinerModel,
 		"imagegen_vae":             cfg.ImageGenVAE,
 		"imagegen_clip":            cfg.ImageGenCLIP,
+		"imagegen_upsampler":       comfyUpsamplerFile(cfg),
 		"imagegen_lora":            cfg.ImageGenLoRA,
 		"inpaint_ckpt":             cfg.InpaintCkpt,
 		"inpaint_vae":              cfg.InpaintVAE,

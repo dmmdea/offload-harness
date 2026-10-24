@@ -97,6 +97,7 @@
   "imagegen_pool_donor": "",
   "imagegen_placement": "",
   "imagegen_schedule": "",
+  "imagegen_upsampler": "",
   "imagegen_license": "",
   "imagegen_commercial_use": null,
   "imagegen_families": null,

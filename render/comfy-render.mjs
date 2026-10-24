@@ -34,6 +34,9 @@
 //   node comfy-render.mjs <out.png> "<prompt>" --family qwen-image-2.1 --ckpt qwen_image_2.1_bf16.safetensors \
 //        --clip qwen3vl_8b_bf16.safetensors --vae qwen_image_2.1_vae_bf16.safetensors \
 //        [--schedule official|comfy|turbo] [--transparent 1] [--steps 40 --cfg 1]
+//   node comfy-render.mjs <out.png> "<prompt>" --family flux3-klein --ckpt flux3-image-klein-bf16.safetensors \
+//        --clip qwen3vl_4b_bf16.safetensors [--vae flux2-vae.safetensors] \
+//        [--upsampler qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors] [--steps 16 --cfg 1]
 //   node comfy-render.mjs <out.png> "<prompt>" --family qwen-image ... --placement multicard [--resident-gb N] [--cards <a>,<b>]
 //        (the card-only placement; recipes: render/multicard-recipes.json, whose rows are all launchable; flags spelled `--flag value`)
 //
@@ -62,6 +65,7 @@ import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
 import { buildQwenImage21, snapDim, QWEN_IMAGE_21_DEFAULT_SIZE, QWEN_IMAGE_21_SCHEDULES } from "./wf-qwen-image-21.mjs";
+import { buildFlux3Klein } from "./wf-flux3-klein.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, serverUnusableError, comfyUnusableClassLine } from "./comfy-submit.mjs";
 import { RENDER_EXIT_SERVER_UNUSABLE } from "./batch-jobs.mjs";
 
@@ -86,7 +90,7 @@ export const BOOL_FLAGS = Object.freeze(["no-lock", "keep-comfy", "no-lifecycle"
  * Every --family this runner builds a graph for. "sdxl" (and an absent flag) is the
  * generic CheckpointLoaderSimple graph.
  */
-export const KNOWN_FAMILIES = Object.freeze(["sdxl", "hidream-o1", "hidream-o1-dev", "krea2", "qwen-image", "qwen-image-2.1"]);
+export const KNOWN_FAMILIES = Object.freeze(["sdxl", "hidream-o1", "hidream-o1-dev", "krea2", "qwen-image", "qwen-image-2.1", "flux3-klein"]);
 
 /** Boolean flag values this runner accepts (every --flag carries a value in this parser). */
 export function parseBoolFlag(name, v) {
@@ -313,6 +317,46 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
       width, height, seed,
       ...(placement === "multicard" ? { placement, residentGb } : {}),
     });
+  } else if (flags.family === "flux3-klein") {
+    // FLUX 3 Image Klein (wf-flux3-klein.mjs): Qwen3-VL-4B encoder (CLIP type "flux3"), FLUX.2 VAE, 16 steps / cfg 1 on the
+    // distilled file and 50 / 3.5 on a Base file. The DiT and the encoder each come in several precisions (bf16, int8_convrot,
+    // nvfp4), a per-node binding choice, so --ckpt and --clip are both required. --upsampler names BFL's prompt upsampler file
+    // (the graph expands the prompt into a full scene caption first, as BFL requires); without it the prompt renders verbatim.
+    const positive = pos[1] || flags.prompt || "";
+    if (!positive) throw new UsageError("error: a prompt is required (positional or --prompt), unless you pass --graph");
+    if (!flags.ckpt && !env.COMFY_CKPT) throw new UsageError("error: --family flux3-klein requires --ckpt (the FLUX 3 Klein DiT, e.g. flux3-image-klein-bf16.safetensors)");
+    if (!flags.clip) throw new UsageError("error: --family flux3-klein requires --clip (the Qwen3-VL-4B text encoder, e.g. qwen3vl_4b_bf16.safetensors; bind imagegen_clip)");
+    const vaeFlag = flags.vae || env.COMFY_VAE || "";
+    if (["builtin", "none", "checkpoint"].includes(String(vaeFlag).toLowerCase())) {
+      throw new UsageError("error: --family flux3-klein has no built-in VAE (the DiT file carries no VAE weights); unset imagegen_vae/--vae or name flux2-vae.safetensors");
+    }
+    for (const k of ["pool-vvram", "pool-compute", "pool-donor"]) {
+      if (flags[k] != null && flags[k] !== "" && !(k === "pool-vvram" && Number(flags[k]) === 0)) {
+        throw new UsageError(`error: --family flux3-klein has no pooled loader wired (--${k}) — it renders on one card, or on two with --placement multicard`);
+      }
+    }
+    if ((flags.steps != null) !== (flags.cfg != null)) {
+      throw new UsageError("error: --family flux3-klein takes --steps and --cfg together or not at all — the checkpoint's own recipe (16 / 1.0 distilled, 50 / 3.5 Base) is the default; a half-override is a silently different render");
+    }
+    width = Math.max(64, Math.floor(Number(pos[3] || flags.width || 1024) / 16) * 16);
+    height = Math.max(64, Math.floor(Number(pos[4] || flags.height || 1024) / 16) * 16);
+    try {
+      graph = buildFlux3Klein({
+        prompt: positive, negative: flags.negative || "",
+        unet: flags.ckpt || env.COMFY_CKPT,
+        clip: flags.clip,
+        vae: vaeFlag || undefined,
+        upsampler: flags.upsampler || "",
+        steps: flags.steps != null ? Number(flags.steps) : undefined,
+        cfg: flags.cfg != null ? Number(flags.cfg) : undefined,
+        sampler: flags.sampler || undefined, scheduler: flags.scheduler || undefined,
+        width, height, seed,
+        ...(placement === "multicard" ? { placement, residentGb } : {}),
+      });
+    } catch (e) {
+      // a recipe refusal or a builder guard (a GGUF DiT, a bad size) is the caller's binding, refused before any ComfyUI work
+      throw new UsageError("error: " + e.message);
+    }
   } else {
     const positive = pos[1] || flags.prompt || "";
     if (!positive) throw new UsageError("error: a prompt is required (positional or --prompt), unless you pass --graph");
@@ -405,6 +449,17 @@ const firstImage = (outputs) => {
   return null;
 };
 
+// firstText: the first text preview (PreviewAny's ui {text: [..]}) among the outputs, "" when there is none.
+const firstText = (outputs) => {
+  for (const node of Object.values(outputs || {})) {
+    if (Array.isArray(node.text) && typeof node.text[0] === "string" && node.text[0].trim()) return node.text[0].trim();
+  }
+  return "";
+};
+
+/** Where a render's in-graph caption is kept: beside the picture, <name>.caption.txt. */
+export const captionPath = (out) => String(out).replace(/\.[^./\\]+$/, "") + ".caption.txt";
+
 // generate: submission + polling + retrieval, once ComfyUI is confirmed up (either
 // by this run's own withGpuSlot/ensureComfy, or — --no-lifecycle — by whatever
 // spawned this process). Lives in comfy-submit.mjs (shared by every runner):
@@ -454,6 +509,14 @@ export async function generate(out, API, built, flags, placement, io = {}) {
   // whole image is, and a previous good file survives a failed write (atomic-out.mjs).
   await settlePlacedRun({ watch, plan: placement, out, bytes: buf, write: x.write, finalize: () => x.finalize({ api: API, promptId, cli }), stderr: x.stderr });
   x.stdout("WROTE", out, buf.length, "bytes");
+  // A graph that rewrites its prompt in-graph (the flux3-klein upsampler's PreviewAny) shows the caption it rendered; it is kept beside the
+  // picture as <name>.caption.txt. Warn-only: the picture is already safe, and a caption that cannot be written never fails the render.
+  const caption = firstText(h.outputs);
+  if (caption) {
+    x.stdout("CAPTION", JSON.stringify(caption));
+    try { await x.write(captionPath(out), Buffer.from(caption + "\n", "utf8")); }
+    catch (e) { x.stderr("caption not written:", e.message); }
+  }
   // Bookkeeping AFTER the artifact is safe on disk: records authoritative timing
   // (execution_start -> execution_success) and releases the CLI's submission lease.
   // Warn-only inside — a finished render is never re-opened by bookkeeping.

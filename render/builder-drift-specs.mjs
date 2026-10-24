@@ -45,6 +45,7 @@
 import { buildAceStep } from "./wf-acestep.mjs";
 import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildHiDreamO1 } from "./wf-hidream-o1.mjs";
+import { buildFlux3Klein } from "./wf-flux3-klein.mjs";
 import { buildKrea2 } from "./wf-krea2.mjs";
 import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildQwenImage, QWEN_IMAGE_PRESETS } from "./wf-qwen-image.mjs";
@@ -188,6 +189,61 @@ const krea2 = {
     items: [
       ...ksampler(KREA_SG, 3, "9"),
       item("clip_loader.type", W(KREA_SG, 11, "CLIPLoader", 1, "type"), B("2", "CLIPLoader", "type")),
+    ],
+  }],
+};
+
+// ---------------------------------------------------------------------------------------------
+// FLUX 3 Image Klein (text to image), distilled and Base. The KSampler's steps, sampler and scheduler are promoted on the
+// root instance; the upsampler (TextGenerate on BFL's prompt-upsampler file) is pinned widget by widget.
+// ---------------------------------------------------------------------------------------------
+const FLUX3_SG = "Text to Image (FLUX 3 Image Klein SD)";
+const FLUX3_BASE_SG = "Text to Image (FLUX 3 Image Klein)";
+const FLUX3_REP = "BFL's reference upsampler (src/flux3/pup.py SAMPLING) applies no repetition penalty; the distilled template's 1.05 is its own (the Base template's is 1.0)";
+const flux3Upsampler = (sg, { repDelta = false } = {}) => [
+  item("upsampler_loader.type", W(sg, 12, "CLIPLoader", 1, "type"), B("20", "CLIPLoader", "type")),
+  item("upsampler.max_length", W(sg, 11, "TextGenerate", 1, "max_length"), B("21", "TextGenerate", "max_length")),
+  item("upsampler.sampling_mode", W(sg, 11, "TextGenerate", 2, "sampling_mode"), B("21", "TextGenerate", "sampling_mode")),
+  item("upsampler.temperature", W(sg, 11, "TextGenerate", 3, "sampling_mode.temperature"), B("21", "TextGenerate", "sampling_mode.temperature")),
+  item("upsampler.top_k", W(sg, 11, "TextGenerate", 4, "sampling_mode.top_k"), B("21", "TextGenerate", "sampling_mode.top_k")),
+  item("upsampler.top_p", W(sg, 11, "TextGenerate", 5, "sampling_mode.top_p"), B("21", "TextGenerate", "sampling_mode.top_p")),
+  item("upsampler.min_p", W(sg, 11, "TextGenerate", 6, "sampling_mode.min_p"), B("21", "TextGenerate", "sampling_mode.min_p")),
+  item("upsampler.repetition_penalty", W(sg, 11, "TextGenerate", 7, "sampling_mode.repetition_penalty"), B("21", "TextGenerate", "sampling_mode.repetition_penalty"),
+    repDelta ? { kind: "deliberate", reason: FLUX3_REP } : undefined),
+  item("upsampler.presence_penalty", W(sg, 11, "TextGenerate", 9, "sampling_mode.presence_penalty"), B("21", "TextGenerate", "sampling_mode.presence_penalty")),
+  item("upsampler.thinking", W(sg, 11, "TextGenerate", 10, "thinking"), B("21", "TextGenerate", "thinking")),
+  item("upsampler.mtp", W(sg, 11, "TextGenerate", 12, "mtp"), B("21", "TextGenerate", "mtp")),
+  item("upsampler.system_prompt", W(sg, 14, "PrimitiveStringMultiline", 0, "value"), B("21", "TextGenerate", "system_prompt"),
+    { kind: "deliberate", reason: "BFL's system_prompts.json t2i prompt verbatim (render/flux3-klein-system-prompts.json); the template's copy adds a trailing newline" }),
+];
+const flux3Klein = {
+  builder: "wf-flux3-klein",
+  build: buildFlux3Klein,
+  views: [{
+    name: "distilled",
+    template: "image_flux3_klein_distilled_t2i",
+    args: { prompt: "p", unet: "u.safetensors", clip: "c.safetensors", upsampler: "pup.safetensors", seed: SEED },
+    items: [
+      item("ksampler.steps", I(18, FLUX3_SG, "steps"), B("9", "KSampler", "steps")),
+      item("ksampler.cfg", W(FLUX3_SG, 7, "KSampler", 3, "cfg"), B("9", "KSampler", "cfg")),
+      item("ksampler.sampler_name", I(18, FLUX3_SG, "sampler_name"), B("9", "KSampler", "sampler_name")),
+      item("ksampler.scheduler", I(18, FLUX3_SG, "scheduler"), B("9", "KSampler", "scheduler")),
+      item("ksampler.denoise", W(FLUX3_SG, 7, "KSampler", 6, "denoise"), B("9", "KSampler", "denoise")),
+      item("clip_loader.type", W(FLUX3_SG, 2, "CLIPLoader", 1, "type"), B("2", "CLIPLoader", "type")),
+      ...flux3Upsampler(FLUX3_SG, { repDelta: true }),
+    ],
+  }, {
+    name: "base",
+    template: "image_flux3_klein_t2i",
+    args: { prompt: "p", unet: "u-base-bf16.safetensors", clip: "c.safetensors", upsampler: "pup.safetensors", seed: SEED },
+    items: [
+      item("ksampler.steps", I(18, FLUX3_BASE_SG, "steps"), B("9", "KSampler", "steps")),
+      item("ksampler.cfg", I(18, FLUX3_BASE_SG, "cfg"), B("9", "KSampler", "cfg")),
+      item("ksampler.sampler_name", I(18, FLUX3_BASE_SG, "sampler_name"), B("9", "KSampler", "sampler_name")),
+      item("ksampler.scheduler", I(18, FLUX3_BASE_SG, "scheduler"), B("9", "KSampler", "scheduler")),
+      item("ksampler.denoise", W(FLUX3_BASE_SG, 7, "KSampler", 6, "denoise"), B("9", "KSampler", "denoise")),
+      item("clip_loader.type", W(FLUX3_BASE_SG, 2, "CLIPLoader", 1, "type"), B("2", "CLIPLoader", "type")),
+      ...flux3Upsampler(FLUX3_BASE_SG),
     ],
   }],
 };
@@ -442,7 +498,7 @@ const wan22 = {
 };
 
 // Builders copied from a workflow template, in file-name order.
-export const BUILDER_SPECS = [acestep, h3, hidream, krea2, ltx25, qwenImage, qwen21, qwenEdit, qwenInpaint, wanAnimate2, wan22]
+export const BUILDER_SPECS = [acestep, flux3Klein, h3, hidream, krea2, ltx25, qwenImage, qwen21, qwenEdit, qwenInpaint, wanAnimate2, wan22]
   .sort((a, b) => (a.builder < b.builder ? -1 : 1));
 
 // Builders that carry no widget copied from a workflow template; builder-drift.mjs fails when a `wf-*.mjs`
