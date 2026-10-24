@@ -328,7 +328,12 @@ func AttributeEvents(evs []DriverEvent, table map[string]BusCard) []DriverEvent 
 // winEventScript is the one command the Windows reader runs: read-only Get-WinEvent over the System log's nvlddmkm
 // provider for the last 24 h, newest first, capped, each record as XML. A log with no matching event is an empty
 // answer (exit 0); any other failure exits 2 with its message on stderr.
-var winEventScript = fmt.Sprintf(`$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; try { Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='nvlddmkm'; StartTime=(Get-Date).AddHours(-%d)} -MaxEvents %d | ForEach-Object { $_.ToXml() } } catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { exit 0 }; [Console]::Error.WriteLine($_.Exception.Message); exit 2 }`, int(driverEventWindow/time.Hour), maxWinEvents)
+var winEventScript = winEventScriptFor(int(driverEventWindow/time.Hour), maxWinEvents)
+
+// winEventScriptFor is the same read over the last hours, capped at max records (`gpu faults` reads days).
+func winEventScriptFor(hours, max int) string {
+	return fmt.Sprintf(`$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; try { Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='nvlddmkm'; StartTime=(Get-Date).AddHours(-%d)} -MaxEvents %d | ForEach-Object { $_.ToXml() } } catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { exit 0 }; [Console]::Error.WriteLine($_.Exception.Message); exit 2 }`, hours, max)
+}
 
 // powershellPath is the System32 Windows PowerShell, by full path: the reader must not find a different one on PATH.
 func powershellPath() string {
@@ -342,8 +347,8 @@ func powershellPath() string {
 	return filepath.Join(root, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
 }
 
-func readWindowsEvents(ctx context.Context) ([]DriverEvent, error) {
-	out, err := runChild(ctx, powershellPath(), "-NoProfile", "-NonInteractive", "-Command", winEventScript)
+func readWindowsEvents(ctx context.Context, script string) ([]DriverEvent, error) {
+	out, err := runChild(ctx, powershellPath(), "-NoProfile", "-NonInteractive", "-Command", script)
 	if err != nil {
 		return nil, fmt.Errorf("reading the System log: %w", err)
 	}
@@ -364,8 +369,8 @@ func readWindowsEvents(ctx context.Context) ([]DriverEvent, error) {
 // that fell off the bus) often ends in a reboot, so a fault before the reboot would be invisible under a "last 24 h"
 // label (measured on a Linux host with four boots in its journal: seven days read 2528 lines with -k and 4226 across
 // every boot). The dmesg fallback is the current boot's ring buffer only, and says so.
-func readKernelEvents(ctx context.Context) ([]DriverEvent, error) {
-	out, jerr := runChild(ctx, "journalctl", "--no-pager", "-o", "short-unix", "--since", "24 hours ago", "_TRANSPORT=kernel")
+func readKernelEvents(ctx context.Context, hours int) ([]DriverEvent, error) {
+	out, jerr := runChild(ctx, "journalctl", "--no-pager", "-o", "short-unix", "--since", fmt.Sprintf("%d hours ago", hours), "_TRANSPORT=kernel")
 	if jerr != nil {
 		dout, derr := runChild(ctx, "dmesg", "--time-format", "iso")
 		if derr != nil {
@@ -382,17 +387,20 @@ type readIssue struct{ msg string }
 
 func (e *readIssue) Error() string { return e.msg }
 
-// readDriverEvents is one uncached read: the OS's log, the window, then the card for each event's bus.
-func readDriverEvents(ctx context.Context, now time.Time) ([]DriverEvent, error) {
-	logCtx, cancel := context.WithTimeout(ctx, driverEventTimeout)
+// readLogWindow reads the OS's driver log for the window, capped at max records on Windows (the newest), bounded
+// by timeout. An event whose time could not be read is kept: an unknown time must not read as "long ago". A
+// readIssue comes back with the events it left usable; any other error with none.
+func readLogWindow(ctx context.Context, now time.Time, window time.Duration, max int, timeout time.Duration) ([]DriverEvent, error) {
+	logCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	hours := int((window + time.Hour - 1) / time.Hour)
 	var evs []DriverEvent
 	var err error
 	switch driverEventsGOOS {
 	case "windows":
-		evs, err = readWindowsEvents(logCtx)
+		evs, err = readWindowsEvents(logCtx, winEventScriptFor(hours, max))
 	case "linux":
-		evs, err = readKernelEvents(logCtx)
+		evs, err = readKernelEvents(logCtx, hours)
 	default:
 		return nil, ErrNoDriverEventSource
 	}
@@ -402,14 +410,19 @@ func readDriverEvents(ctx context.Context, now time.Time) ([]DriverEvent, error)
 	if err != nil && !errors.As(err, &issue) {
 		return nil, err
 	}
-	// Inside the window; an event whose time could not be read is kept (an unknown time must not read as "long ago").
-	cutoff := now.Add(-driverEventWindow)
+	cutoff := now.Add(-window)
 	kept := evs[:0:0]
 	for _, e := range evs {
 		if e.At.IsZero() || !e.At.Before(cutoff) {
 			kept = append(kept, e)
 		}
 	}
+	return kept, err
+}
+
+// readDriverEvents is one uncached read: the OS's log, the window, then the card for each event's bus.
+func readDriverEvents(ctx context.Context, now time.Time) ([]DriverEvent, error) {
+	kept, err := readLogWindow(ctx, now, driverEventWindow, maxWinEvents, driverEventTimeout)
 	if len(kept) == 0 {
 		return nil, err
 	}

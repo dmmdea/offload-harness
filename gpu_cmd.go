@@ -54,7 +54,7 @@ import (
 
 // gpuVerbs are the subcommands runGPU dispatches, in the order the usage lists them. `hold` is the hidden
 // holder a --detach reserve spawns and is not documented.
-var gpuVerbs = []string{"status", "cards", "reserve", "release", "doctor", "owner-flags", "hold"}
+var gpuVerbs = []string{"status", "cards", "faults", "reserve", "release", "doctor", "owner-flags", "hold"}
 
 func runGPU(args []string) error {
 	if len(args) == 0 {
@@ -81,17 +81,19 @@ func runGPU(args []string) error {
 		return runGPUHold(rest)
 	case "cards":
 		return runGPUCards(rest)
+	case "faults":
+		return runGPUFaults(rest)
 	case "doctor":
 		return runGPUDoctor(rest)
 	case "owner-flags":
 		return runGPUOwnerFlags(rest)
 	default:
-		return fmt.Errorf("unknown gpu subcommand %q (want status, cards, reserve, release, doctor or owner-flags; `local-offload gpu --help` lists them)", sub)
+		return fmt.Errorf("unknown gpu subcommand %q (want status, cards, faults, reserve, release, doctor or owner-flags; `local-offload gpu --help` lists them)", sub)
 	}
 }
 
 // gpuUsageLine is the one-line usage a bare `gpu` (or a `gpu --config x` with no subcommand) is refused with.
-const gpuUsageLine = "usage: local-offload gpu [--config <path>] <status|cards|reserve|release|doctor|owner-flags> [flags] (local-offload gpu --help lists them)"
+const gpuUsageLine = "usage: local-offload gpu [--config <path>] <status|cards|faults|reserve|release|doctor|owner-flags> [flags] (local-offload gpu --help lists them)"
 
 // gpuUsage is what `gpu --help` prints on stdout: every documented subcommand once, and where the flags of
 // each are (the sub-verbs' own flag sets print them on --help).
@@ -104,6 +106,9 @@ Usage:
 Subcommands:
   gpu status [--json]                    who holds the cards, the queue behind them, and what the holder is doing (verdict and note)
   gpu cards [--json]                     the card table, with each card's holder
+  gpu faults [--days N] [--jobs] [--json]
+                                         the driver's fault history (up to 30 days, every card) as incidents, with known-error
+                                         classes and NVIDIA's action; --jobs adds the ledger rows that ran here during each
   gpu reserve [flags] -- <command...>    hold the cards for exactly as long as <command> runs, queueing behind a current holder
   gpu reserve --detach [flags]           hold the cards in a background process until it is released (needs an explicit --for)
   gpu release [--epoch N] [--warm-seat]  release the lease held (or only epoch N, if it is still current); --warm-seat loads the agent seat back

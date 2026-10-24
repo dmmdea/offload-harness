@@ -70,3 +70,17 @@ under the Apache License, Version 2.0. internal/agent/rung_logs.go is a clean-ro
 implementation of that documented idea: the line-matching rule, the folding of runs,
 the kept windows, the markers and the footer are this repository's own design, and no
 Headroom source code was read or copied.
+
+NVIDIA Xid catalog data (internal/gpuactivity/xidcatalog.go):
+The Xid codes, mnemonics, descriptions and resolution buckets in xidcatalog.go, and the
+meaning of each bucket, are taken from NVIDIA's Xid catalog (Xid-Catalog.xlsx, published
+with "Analyzing the Xid Catalog" at https://docs.nvidia.com/deploy/xid-errors/),
+Copyright (c) NVIDIA CORPORATION, as embedded in NVIDIA NVSentinel
+(https://github.com/NVIDIA/NVSentinel), licensed under the Apache License, Version 2.0,
+at release v1.28.0, file health-monitors/syslog-health-monitor/pkg/common/Xid-Catalog.xlsx
+(sha256 7f70ce9684be0c9d98a367770341ccc1d8bca4465cebe42dab7e23d57df5d5a5). Only the used
+rows of the Xids sheet and the bucket texts those rows name are carried, as Go data; the
+workbook itself is not committed. The burst window (3 minutes) and the repeat rule (the
+same Xid in 5 or more bursts on one GPU within 24 hours, Xid 31 and 45 excepted) applied
+in internal/gpuactivity/faults.go are taken from NVSentinel's health-events-analyzer
+rules; the Go code is written for this repository and no NVSentinel source code was copied.
