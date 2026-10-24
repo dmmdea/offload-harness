@@ -1345,7 +1345,10 @@ full scene captions, and a short prompt sent as typed gives generic output. `ima
   on `<node-b>`'s 5070 Ti, where the same model in-graph ran 4.3-7.6 tok/s (37-65 s, most of a render's wall). End to end
   through this form a `<node-b>` BF16 render took 63-70 s warm instead of 132-151 s in-graph (2026-10-24). It pays only where the
   seat loads fast: `<node-e>`'s 9B stand-in cost ~37 s to cold-load on a Gen3 x4 link, so that box keeps the in-graph
-  file. BFL's card allows any LLM given their prompt; the sd.cpp nodes use `qwen3.5-4b-agent`.
+  file. On an 8 GB Ampere card with dynamic VRAM off (`<node-a>`, the `ampere-8` seed) it is the other way round: the
+  in-graph file's generation buffer took the card ("0.00 MB loaded, 6411.81 MB offloaded, 5869.94 MB buffer reserved"),
+  its weights streamed for every token and a render took 304-488 s; the tier's `qwen3.5-9b-agent` seat in the model form
+  took it to 64-78 s, the same image quality with plainer captions. BFL's card allows any LLM given their prompt; the sd.cpp nodes use `qwen3.5-4b-agent`.
 - `refine: false` (per request) renders the prompt verbatim on both engines: a caller that sends a finished caption.
 
 **ComfyUI graph:** `UNETLoader` + `CLIPLoader(type "flux3")` + `VAELoader` → `CLIPTextEncode` ×2 →
