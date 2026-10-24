@@ -3201,6 +3201,10 @@ func runFleetServe(args []string) error {
 	// advertised lease is the same one every acquirer contends on.
 	leaseRead := fleetLeaseReader(cfg)
 	nodePair := pairworkloads.New(pairworkloads.FromConfig(cfg))
+	// The driver fault summary (gpu_faults on health): read in the background every 10 minutes; this first call starts
+	// the first read now rather than at the first health request.
+	gpuFaults := gpuFaultsHealthReporter(cfg.StateDir)
+	gpuFaults()
 	srv := fleetnode.New(p, jobs, fleetnode.Options{
 		NodeID:  nodeID,
 		Version: version,
@@ -3223,6 +3227,7 @@ func runFleetServe(args []string) error {
 		// read from the state file LOCAL_OFFLOAD_POWER_PROFILE_STATE names. "unknown" with a reason, never an error,
 		// on a node that applies no profile.
 		PowerProfile: powerProfileHealthReporter(),
+		GpuFaults:    gpuFaults,
 		Footprints: func() []fleetnode.FootprintEntry {
 			if st := p.FootprintStore(); st != nil {
 				// Pick up records written by OTHER processes (fleet-measure while

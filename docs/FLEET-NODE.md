@@ -10,7 +10,7 @@ every failure a non-2xx.
 
 | Endpoint | What it returns |
 |---|---|
-| `GET /fleet/health` | node id, live global VRAM (total/free GiB), supported task types + model families **derived from this box's actual config**, measured per-family VRAM footprints, queue depth, whether the boot-time GPU power profile took ([`power_profile`](#boot-time-gpu-power-profile-power_profile)). Never blocks on a render. `503` when the VRAM snapshot is unavailable **or older than 30s** (nvidia-smi failing, e.g. a driver reset) — a stale 200 would mislead routing. |
+| `GET /fleet/health` | node id, live global VRAM (total/free GiB), supported task types + model families **derived from this box's actual config**, measured per-family VRAM footprints, queue depth, whether the boot-time GPU power profile took ([`power_profile`](#boot-time-gpu-power-profile-power_profile)), the driver's fault summary per card ([`gpu_faults`](#driver-fault-summary-gpu_faults)). Never blocks on a render. `503` when the VRAM snapshot is unavailable **or older than 30s** (nvidia-smi failing, e.g. a driver reset) — a stale 200 would mislead routing. |
 | `POST /fleet/dispatch` | immediate `202 {"job_id": <exact echo>, "status": "accepted"}`; the render runs async through the pipeline. Duplicate `job_id` → 202 re-ack (accepted/running/**done** — poll `/fleet/jobs/{id}` for the state), never a second render; a job that previously **failed** here answers `409` (an explicit refusal, so the dispatcher may try another node). |
 | `GET /fleet/jobs/{id}` | `{"state": "accepted\|running\|done\|error", ...}` with `data` on done / `error` on error, plus `err_class` (the class the failed run's lane filed its deferral under, only when it filed one) beside `error`; terminal results retained ~1h; 404 for unknown/evicted ids. |
 | `DELETE /fleet/jobs/{id}` | Takes back an **agent** job that has not started ([ADR 0064](architecture/decisions/0064-a-delegator-takes-back-what-it-has-not-started.md)): `200 {"state":"withdrawn","withdrawn":true}` when it had not (it never will; a job the node itself already took back answers the same), `409 {"state":"running"\|"done"\|"error","withdrawn":false}` when it had (the node does not touch it), `404` unknown id, `401` without the agent bearer, `405` for a non-agent job. See [Taking a job back](#taking-a-job-back-withdraw-and-the-poll-lease). |
@@ -389,6 +389,39 @@ A node that applies no profile (a Linux node with no boot-apply tool, any box wi
 **It reads the record, not the card.** The record says what the tool did, so a limit changed after the apply still reads `ok` until the harness has a reader of the live limit and clock lock. The node reads the file at most once every 30 seconds.
 
 `offload_status` shows one short token per node in the `fleet` block, and the `brief` form carries it because it carries the whole block: `power_profile` is `ok`, `skipped` or `unknown`, and `power_profile_reason` follows when it is news (not for an `ok` node and not for `no_state`). The key is absent for a node one release behind. The local node's own state is the `power:` row of `doctor`.
+
+## Driver fault summary: `gpu_faults`
+
+What `local-offload gpu faults` reads on a node (the NVIDIA driver's fault records over 30 days, grouped into incidents, the
+ones at a restart or sleep transition labelled, NVSentinel's repeat rule applied; see
+[gpu-lease.md](systems/gpu-lease.md#gpu-faults-the-fault-history-as-incidents-with-known-errors)), reduced per card and
+published so the fleet sees which card has been faulting without a login to each box.
+
+```json
+"gpu_faults": {
+  "window_days": 30, "read_at": "2026-10-24T08:54:35Z",
+  "cards": [
+    {"index": 1, "uuid": "GPU-...", "bus": "65:00", "events": 21, "incidents": 11, "incidents_24h": 0, "last_incident": "2026-10-20T14:33:58Z"},
+    {"index": 2, "uuid": "GPU-...", "bus": "b5:00", "events": 19, "incidents": 15, "in_context": 2, "incidents_24h": 0, "last_incident": "2026-10-19T04:06:20Z"}
+  ],
+  "repeats": [{"uuid": "GPU-...", "bus": "65:00", "class": "nvlddmkm 153", "bursts": 5, "from": "2026-10-11T08:43:01Z", "to": "2026-10-11T10:05:04Z"}]
+}
+```
+
+| field | means |
+|---|---|
+| `window_days`, `read_at` | the window read and when (UTC). A reading is refreshed every 10 minutes and published for at most 40, so `read_at` is the age a reader judges. |
+| `cards[]` | every NVIDIA card in today's table: `index` (nvidia-smi), `uuid`, `bus`; `events` and `incidents` count every record and burst naming the card, `in_context` the bursts among them at a restart or sleep transition; `incidents_24h` counts the bursts outside one that started in the last 24 h, and `last_incident` is when the newest of those ended. |
+| `repeats[]` | NVSentinel's RepeatedXIDErrorOnSameGPU met on a card: one class (`nvlddmkm 153`, `Xid 79`, ...) in `bursts` (5 or more) bursts within 24 h, `from` and `to` being the first and last of them. Bursts at a restart or sleep transition are left out. A repeat is LIVE while `to` is within the last 24 h. |
+| `note` | why the reading may be short: a log read that stopped part way, a card table that could not be read, a retention file that could not be read or written. |
+
+**Facts, served from memory.** The read takes seconds (3.4 s on the reference box), so health never runs it: fleet-serve
+reads in the background, starts the first read at startup, and keeps the last good reading when a read fails. The key is
+absent until the first read lands, on a node with no NVIDIA card, and on a node one release behind; a reader takes absent
+as unknown, never as "no faults". The block carries card uuids and buses (already on this payload as `gpu_devices[]`) and
+counts, no path, host name or text, so a caller without the bearer reads it too. Each refresh also appends the incidents
+that ended to `<state root>/gpu/faults.jsonl` and rewrites `<state root>/gpu/faults-summary.json`
+([gpu-lease.md](systems/gpu-lease.md#retention-and-the-fleet-nodes-summary)).
 
 ## Config keys
 
