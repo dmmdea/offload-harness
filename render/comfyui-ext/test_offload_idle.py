@@ -440,7 +440,9 @@ class Route(PackTest):
         self.assertIn("/offload/idle", self.registered)
 
         payload = asyncio.run(self.registered["/offload/idle"](None))
-        self.assertEqual(sorted(payload), ["armed", "error", "freed", "idle_sec", "last_free_unix", "limit_sec"])
+        self.assertEqual(sorted(payload), ["armed", "error", "exit_idle_sec", "exit_limit_sec", "freed", "holds", "idle_sec",
+                                           "last_free_unix", "limit_sec"])
+        self.assertEqual((payload["exit_limit_sec"], payload["holds"]), (0, 0))
         self.assertEqual((payload["limit_sec"], payload["armed"], payload["freed"]), (300, False, 0))
         self.assertIsNone(payload["idle_sec"])
         self.assertIsNone(payload["last_free_unix"])

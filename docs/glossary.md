@@ -455,6 +455,6 @@ live outside it.
 
 ## Zero-Warm
 
-The default GPU posture: nothing GPU-resident persists between media jobs, except the memory stack (the mem0 embedder and reranker stay resident). The card is cleared before
-a render and returned afterward, so text inference remains usable. See
+The default GPU posture: no model stays GPU-resident between media jobs, except the memory stack (the mem0 embedder and reranker stay resident). The card is cleared before
+a render and returned afterward, so text inference remains usable. Since ADR 0097 the bare ComfyUI process (about 240 MiB of the card) is kept after a good job and ends itself after 300 s idle. See
 [flows/zero-warm-generation.md](flows/zero-warm-generation.md).

@@ -102,6 +102,9 @@ test("empty key: resolveInstance keeps the api string verbatim and the unset def
   assert.equal(L.comfyApi("http://localhost:8188", { COMFY_API: "http://localhost:9999" }), "http://localhost:8188", "a flag beats the env, as before");
 });
 
+// The kept default (ADR 0097) adds keep/idleExit/report to every ensureComfy call; these tests are about the endpoint.
+const endpointOpts = (o) => { const { keep, idleExit, report, ...rest } = o || {}; return rest; };
+
 test("withGpuSlot with no instance asks for today's calls: ensureComfy without api, freeComfy without arguments", async () => {
   let ensureOpts = null; let freeArgs = null; let tailArgs = null;
   const lease = { dir: "X", epoch: 7, class: "media" };
@@ -112,7 +115,7 @@ test("withGpuSlot with no instance asks for today's calls: ensureComfy without a
     freeComfy: async (...a) => { freeArgs = a; },
     tailLog: (...a) => { tailArgs = a; return "tail"; },
   }, async () => { throw new Error("boom"); }), /boom/);
-  assert.deepEqual(ensureOpts, {});
+  assert.deepEqual(endpointOpts(ensureOpts), {});
   assert.deepEqual(freeArgs, []);
   assert.deepEqual(tailArgs, []);
 });
@@ -559,7 +562,7 @@ test("withGpuSlot: an explicit api on the default port frees that api and leaves
     ensureComfy: async (o) => { ensureOpts = o; return null; },
     freeComfy: async (...a) => { freeArgs = a; },
   }, async () => {});
-  assert.deepEqual(ensureOpts, {});
+  assert.deepEqual(endpointOpts(ensureOpts), {});
   assert.deepEqual(freeArgs, ["http://localhost:8188"]);
 });
 
@@ -738,6 +741,6 @@ test("withGpuSlot: an unkeyed instance on another port is ensured on THAT endpoi
     ensureComfy: async (o) => { ensureOpts = o; return null; },
     freeComfy: async (...a) => { freeArgs = a; },
   }, async () => {});
-  assert.deepEqual(ensureOpts, { api: "http://localhost:8190" }, "ensureComfy is told the endpoint: an unkeyed launch has no --port, so left to itself it ensures 8188");
+  assert.deepEqual(endpointOpts(ensureOpts), { api: "http://localhost:8190" }, "ensureComfy is told the endpoint: an unkeyed launch has no --port, so left to itself it ensures 8188");
   assert.deepEqual(freeArgs, ["http://localhost:8190"], "the post-run free goes to the endpoint the runner talked to");
 });

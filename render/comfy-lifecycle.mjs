@@ -322,17 +322,17 @@ function stripValued(args, flag) {
 // --- the engine-resident idle bound -----------------------------------------------------------------
 //
 // The house rule is that no idle model stays loaded. llama-swap keeps it with its own ttl; ComfyUI has no idle timer. The harness
-// frees an instance at the end of every job (gpu-lock.mjs POSTs /free) and the holder of the GPU lease stops a kept instance at
-// release (internal/comfyinst). Under the harness's own launch (--disable-smart-memory, always the first flag) ComfyUI also unloads
+// frees an instance at the end of every job (gpu-lock.mjs POSTs /free); the process itself is bounded by the pack's process bound
+// (ADR 0097, the section after this one), or by the lease holder for a keyed instance kept without one. Under the harness's own launch (--disable-smart-memory, always the first flag) ComfyUI also unloads
 // every model itself when a prompt ends, success or failure (execution.py, `if DISABLE_SMART_MEMORY: unload_all_models()`, ComfyUI
 // 0.38.0), so a kept single-prompt instance (--cache-none) is already bare between jobs and the pack below finds nothing to free.
 // What survives is the warm (--batch) session's executor cache, which keeps the loader outputs (the unloaded weights, in host RAM)
 // until a free resets the executor, and a hand-started instance run without --disable-smart-memory, which keeps its models in VRAM.
 // For those the bound lives INSIDE the engine, the llama-swap ttl analogue: the pack render/comfyui-ext/idle-nodes/offload_idle asks
 // ComfyUI's own worker to unload the models and reset the executor cache after COMFY_IDLE_FREE_SEC (default 300) with an empty queue.
-// Read from ComfyUI's code, not yet measured on a card (docs/systems/media-generation.md has the live check). The harness runs no
-// watcher and never acts on another process. It bounds models and caches, not the process: the Python process and its CUDA context
-// stay until the lease holder stops the instance (and an instance whose holder died stays until an operator does).
+// Run live on 2026-10-14 (a keyed single-card instance on the 16 GB reference box: 230 MiB of the card at idle); docs/systems/
+// media-generation.md has the record. The harness runs no watcher and never acts on another process. The same pack carries the
+// process bound (COMFY_IDLE_EXIT_SEC, below), which ends the Python process and its CUDA context once nothing holds the instance.
 //
 // The names are defined here, not in wan-multicard.mjs, which imports this file (through gpu-lock.mjs too: a cycle); wan-multicard.mjs
 // re-exports the yaml and the pack name next to EXT_YAML / EXT_NODE_PACK.
@@ -360,6 +360,140 @@ export function resolveIdleBound(env = process.env, log = () => {}) {
   if (whole !== null && Number.isSafeInteger(whole) && whole >= IDLE_FREE_MIN_SEC) return whole;
   log(`COMFY-IDLE-WARN: COMFY_IDLE_FREE_SEC=${raw} is not off, 0 or a whole number of seconds of ${IDLE_FREE_MIN_SEC} or more; using ${IDLE_FREE_DEFAULT_SEC}`);
   return IDLE_FREE_DEFAULT_SEC;
+}
+
+// --- the process bound (ADR 0097, 2026-10-24) -------------------------------------------------------
+//
+// The ComfyUI the harness launches is KEPT between jobs, not killed after each one: on an 8 GB laptop card the launch was 31-89 s of a
+// 66-135 s render, while the bare process holds about 240 MiB of the card once its models are gone (--disable-smart-memory unloads them
+// when a prompt ends, and the end-of-job /free follows). The process is bounded the way llama-swap bounds a seat, by the engine itself:
+// the idle pack exits it after COMFY_IDLE_EXIT_SEC (default 300) with no prompt queued or running and no runner holding it. A runner
+// holds the instance for its whole job (GET /offload/hold, openComfyHold below), so a long step that is not ComfyUI's does not look
+// abandoned. A job that fails stops the instance it used (gpu-lock.mjs), so a sticky CUDA error is still cured by the next launch.
+export const IDLE_EXIT_DEFAULT_SEC = 300;
+
+/**
+ * resolveIdleExit: the process bound in seconds a harness launch asks for, from COMFY_IDLE_EXIT_SEC: unset = 300, `0` or `off` = none
+ * (said, once: COMFY-KEEP-OFF; the runner then kills the instance it launched after its job, the zero-warm lifecycle of ADR 0009), a
+ * whole number of seconds of 5 or more = that, anything else = 300 and a COMFY-IDLE-WARN that names the value.
+ */
+export function resolveIdleExit(env = process.env, log = () => {}) {
+  const raw = String(env.COMFY_IDLE_EXIT_SEC ?? "").trim();
+  if (raw === "") return IDLE_EXIT_DEFAULT_SEC;
+  const whole = /^\d+$/.test(raw) ? Number(raw) : null;
+  if (/^off$/i.test(raw) || whole === 0) {
+    log(`COMFY-KEEP-OFF: COMFY_IDLE_EXIT_SEC=${raw}: the ComfyUI this run launches has no process bound, so it is stopped after the job (a relaunch per job)`);
+    return 0;
+  }
+  if (whole !== null && Number.isSafeInteger(whole) && whole >= IDLE_FREE_MIN_SEC) return whole;
+  log(`COMFY-IDLE-WARN: COMFY_IDLE_EXIT_SEC=${raw} is not off, 0 or a whole number of seconds of ${IDLE_FREE_MIN_SEC} or more; using ${IDLE_EXIT_DEFAULT_SEC}`);
+  return IDLE_EXIT_DEFAULT_SEC;
+}
+
+/**
+ * openComfyHold: hold a running instance for this runner's job (GET /offload/hold on the idle pack, a response that stays open and
+ * carries a byte every 2 s; its body is read here so the stream never backs up). Returns { state, release }:
+ *   "held" — the pack holds the instance until release() (or this process's death closes the connection);
+ *   "none" — the instance answered without a hold (no pack, or an older one): it has no process bound, so there is nothing to hold off;
+ *   "gone" — nothing answered: the instance exited between the caller's check and this request (its bound fired), and the caller
+ *            launches again.
+ * release() is idempotent and never throws.
+ */
+export async function openComfyHold(api, { fetchImpl = fetch, timeoutMs = 5000 } = {}) {
+  const ac = new AbortController();
+  const release = () => { try { ac.abort(); } catch {} };
+  let timer;
+  let res;
+  try {
+    res = await Promise.race([
+      fetchImpl(api + "/offload/hold", { signal: ac.signal }),
+      new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error("hold timeout"), { holdTimeout: true })), timeoutMs); }),
+    ]);
+  } catch (e) {
+    release();
+    // A slow answer is not a dead instance: carry on unheld rather than launch a second one onto the same port.
+    return { state: e && e.holdTimeout ? "none" : "gone", release };
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res || !res.ok || !res.body) {
+    try { await res?.body?.cancel?.(); } catch {}
+    release();
+    return { state: "none", release };
+  }
+  const reader = res.body.getReader();
+  (async () => { try { for (;;) { const { done } = await reader.read(); if (done) break; } } catch {} })();
+  return { state: "held", release };
+}
+
+/**
+ * launchShapeGap: why a self-bounded instance this harness kept was launched for another shape than this call needs ("" = the same).
+ * Only what a later call can ask differently for: --cache-none (single renders) against a warm session (none), and --reserve-vram. A
+ * kept instance outlives the job it was launched for, so a call that needs another shape restarts it rather than run on the old one.
+ */
+export function launchShapeGap(args, { warm = false, reserveVram = "1.0" } = {}) {
+  if (!Array.isArray(args)) return "";
+  const cacheNone = args.map(String).includes("--cache-none");
+  if (cacheNone && warm) return "it was launched for single renders (--cache-none) and this call is a warm session";
+  if (!cacheNone && !warm) return "it was launched as a warm session (no --cache-none) and this call renders with --cache-none";
+  const had = argvFlagValue(args.map(String), "--reserve-vram");
+  const want = String(reserveVram || "1.0");
+  if (had !== null && Number(had) !== Number(want)) return `it was launched with --reserve-vram ${had} and this call needs ${want}`;
+  return "";
+}
+
+/**
+ * instanceInUse: why another client is using the instance on `api` right now ("" = nobody seen): a runner's hold beyond the caller's
+ * own `ownHolds`, or, with `queue`, any prompt queued or running. A kept instance is outlived by the jobs of every runner that reuses
+ * it, so a runner kills or restarts one only when this is "". An instance that does not answer is not in use. Never throws.
+ */
+export async function instanceInUse(api, { ownHolds = 0, queue = false, probe = fetchIdleProbe, fetchImpl = fetch } = {}) {
+  const st = await probe(api);
+  const holds = st && Number.isFinite(Number(st.holds)) ? Number(st.holds) : 0;
+  if (holds > ownHolds) return `${holds - ownHolds} other runner(s) hold it`;
+  if (!queue) return "";
+  try {
+    const r = await fetchImpl(api + "/queue", { signal: AbortSignal.timeout(3000) });
+    if (!r.ok) return "";
+    const q = await r.json();
+    const n = (Array.isArray(q?.queue_running) ? q.queue_running.length : 0) + (Array.isArray(q?.queue_pending) ? q.queue_pending.length : 0);
+    return n > 0 ? `${n} prompt(s) queued or running on it` : "";
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * stopHarnessInstance: stop the instance on `api` after a job on it FAILED, when it is one this harness launched (its launch marker's
+ * pid is alive and the server reports exactly the recorded argv). A kept instance used to be cured of a sticky CUDA error by the kill
+ * every job ended with; now that it outlives its jobs, the failed job ends it instead, and the next one launches clean. Anything that
+ * is not shown to be ours is left alone, and so is one another runner holds (`ownHolds` is the caller's own hold, still open): that
+ * runner's job is live, and the job that ends it stops it too if it fails. Its queue is not asked: a prompt of the failed job's own
+ * that hangs looks like anyone's, and a hung instance never reaches its process bound. Never throws.
+ */
+export async function stopHarnessInstance({ api, comfyDir = COMFY_DIR, key = "", reason = "the job on it failed", ownHolds = 0, inUse = instanceInUse, readLaunch = readLaunchOwner, systemArgv = fetchSystemArgv, alive = defaultPidAlive, killPid = (pid) => process.kill(pid), clearLaunch = clearLaunchOwner, up = comfyUp, log = (line) => console.error(line), pollMs = 1000, stopPolls = 15 } = {}) {
+  try {
+    const marker = key ? readLaunch(comfyDir, key) : readLaunch(comfyDir);
+    // Only a self-bounded instance (one a default runner kept): an operator's explicit --keep-comfy session is theirs to end.
+    if (!marker || !(Number(marker.idleExitSec) > 0)) return false;
+    const argv = await systemArgv(api);
+    if (!harnessLaunched(marker, argv, alive)) return false;
+    const busy = await inUse(api, { ownHolds });
+    if (busy) {
+      log(`COMFY-KEEP-WARN: left harness-launched ComfyUI pid ${marker.pid} on ${api} running after a failed job: ${busy}`);
+      return false;
+    }
+    log(`COMFY-KEEP: stopping harness-launched ComfyUI pid ${marker.pid} on ${api} (${reason}); the next job launches a fresh one`);
+    try { killPid(marker.pid); } catch {}
+    for (let i = 0; i < stopPolls; i++) {
+      await new Promise((r) => setTimeout(r, pollMs));
+      if (!(await up(api))) { try { if (key) clearLaunch(comfyDir, key); else clearLaunch(comfyDir); } catch {} return true; }
+    }
+    log(`COMFY-KEEP-WARN: ComfyUI pid ${marker.pid} on ${api} still answers after a kill; its process bound ends it once it is idle`);
+  } catch (e) {
+    log(`COMFY-KEEP-WARN: could not stop the ComfyUI on ${api} after a failed job (${e && e.message}); its process bound ends it once it is idle`);
+  }
+  return false;
 }
 
 /** fetchIdleProbe: what GET /offload/idle on a running instance answers (the pack's status object), or null. */
@@ -901,7 +1035,7 @@ async function warnWithoutIdleBound({ api, key, systemArgv, log }) {
  * One COMFY-IDLE line when the pack is live at the bound that was asked for (a pack that reports no bound is taken at its word);
  * a COMFY-IDLE-WARN when it did not answer, reports it cannot run, or reports another bound than `secs` (it never read the variable).
  */
-async function verifyIdleBound({ api, key, secs, probeIdle, log }) {
+async function verifyIdleBound({ api, key, secs, exitSecs = 0, probeIdle, log }) {
   const who = `instance '${key || "default"}' on ${api}`;
   let answer = null;
   try { answer = await probeIdle(api); } catch {}
@@ -912,9 +1046,13 @@ async function verifyIdleBound({ api, key, secs, probeIdle, log }) {
   } else if (typeof answer.limit_sec === "number" && answer.limit_sec !== secs) {
     // OFFLOAD_IDLE_FREE_SEC went to the child, so a pack that answers another bound did not read it: the operator asked for secs, not for this.
     log(`COMFY-IDLE-WARN: ${who} reports an idle bound of ${answer.limit_sec} s, not the ${secs} s asked for (OFFLOAD_IDLE_FREE_SEC did not reach the pack); it frees after ${answer.limit_sec} s with an empty queue`);
+  } else if (exitSecs > 0 && answer.exit_limit_sec !== exitSecs) {
+    log(`COMFY-IDLE-WARN: ${who} reports a process bound of ${answer.exit_limit_sec ?? "none"}, not the ${exitSecs} s asked for (OFFLOAD_IDLE_EXIT_SEC did not reach the pack, or the pack predates it); a later job's failure or an operator stops it`);
   } else {
-    log(`COMFY-IDLE: ${who} frees its models and caches after ${secs} s with an empty queue`);
+    log(`COMFY-IDLE: ${who} frees its models and caches after ${secs} s with an empty queue${exitSecs > 0 ? `, and exits after ${exitSecs} s with no prompt and no runner holding it` : ""}`);
   }
+  // Whether the process bound is shown to be live: only then may the caller leave the instance running after a good job.
+  return exitSecs > 0 && !!answer && typeof answer === "object" && !answer.error && answer.exit_limit_sec === exitSecs;
 }
 
 // ensureComfy: if ComfyUI is already up, reuse it — unless this binding carries a launch
@@ -944,6 +1082,8 @@ export async function ensureComfy(opts = {}) {
     systemArgv = fetchSystemArgv,
     // probeIdle: asks a freshly launched instance whether its idle bound is live (GET /offload/idle); null = no answer.
     probeIdle = fetchIdleProbe,
+    // inUse: whether another client is using a running instance (instanceInUse), asked before a kept one is restarted.
+    inUse = instanceInUse,
     // idleExt: where the idle bound's yaml and pack are (a test points it elsewhere).
     idleExt = { yaml: EXT_IDLE_YAML, pack: EXT_IDLE_PACK, packFile: EXT_IDLE_PACK_FILE },
     readLaunch = readLaunchOwner,
@@ -958,6 +1098,12 @@ export async function ensureComfy(opts = {}) {
     // console going to its own log FILE and unref'd (see the spawn below); openLogFd/closeFd are
     // the file seams for tests.
     keep = false,
+    // idleExit: the process bound (seconds) a KEPT launch carries (resolveIdleExit; withGpuSlot passes it): the idle pack exits the
+    // process after that long with no prompt and no holder. 0 = none, the instance's lifetime is then its keeper's business.
+    idleExit = 0,
+    // report: an object the caller passes to learn what it got; ensureComfy sets report.selfBounded = true when the instance it
+    // returns (launched, or reused: null) ends itself once idle, shown by its own pack or by its marker and argv.
+    report = null,
     openLogFd = (p) => openSync(p, "a"),
     closeFd = closeSync,
     mkdirs = (d) => mkdirSync(d, { recursive: true }),
@@ -974,9 +1120,12 @@ export async function ensureComfy(opts = {}) {
   const instance = resolveInstance({ api: apiOpt || process.env.COMFY_API, env });
   const { api, key } = instance;
   const profile = resolveLaunchProfile(env);
-  // The idle bound is for the instances that outlive their runner: a kept one, or a warm session that holds its cache. The default single
-  // render is killed by its own runner, so it asks for nothing and its launch stays byte for byte what it was.
+  // The idle bound is for the instances that outlive their runner: a kept one, or a warm session that holds its cache. A launch that is
+  // neither (COMFY_IDLE_EXIT_SEC=0: its runner kills it after the job) asks for nothing and its launch stays byte for byte what it was.
   const idleSecs = (keep || warm) ? resolveIdleBound(env, log) : 0;
+  // The process bound rides on the same pack, so the pack goes in when either bound is on.
+  const exitSecs = keep ? Math.max(0, Math.floor(Number(idleExit) || 0)) : 0;
+  const wantPack = idleSecs > 0 || exitSecs > 0;
   // `sage` says which attention the call was sized for (wan-multicard.mjs planMulticard sets it); a launch that does not say keeps the old shape, { cards } alone
   if (launch) profile.multicard = { cards: [...launch.cards], ...(typeof launch.sage === "boolean" ? { sage: launch.sage } : {}), ...(launch.gguf === true ? { gguf: true } : {}) };
   // Can this call launch an instance on `api` at all? A keyed instance owns its --port; the
@@ -1005,8 +1154,26 @@ export async function ensureComfy(opts = {}) {
   let argvAsked;
   const askArgv = (a) => (argvAsked ??= systemArgv(a));
   if (await up(api)) {
-    const v = await reuseVerdict({ api, comfyDir, profile, key, port: instance.port, systemArgv: askArgv, readLaunch, alive });
+    let v = await reuseVerdict({ api, comfyDir, profile, key, port: instance.port, systemArgv: askArgv, readLaunch, alive });
+    // A self-bounded instance this harness kept for an earlier job: its marker names the bound and it runs exactly the recorded argv.
+    let keptOurs = null;
+    if (v.reuse && comfyDir) {
+      const kept = key ? readLaunch(comfyDir, key) : readLaunch(comfyDir);
+      if (kept && Number(kept.idleExitSec) > 0 && harnessLaunched(kept, await askArgv(api), alive)) keptOurs = kept;
+    }
+    if (keptOurs) {
+      // Launched for an earlier job whose shape was another (a warm session against single renders, another --reserve-vram):
+      // restart it rather than run on the old shape, unless the process that launched it, or any other client, is still at work on it.
+      const gap = launchShapeGap(keptOurs.args, { warm, reserveVram });
+      const ownerBusy = typeof keptOurs.ownerPid === "number" && keptOurs.ownerPid !== process.pid && alive(keptOurs.ownerPid);
+      if (gap && !ownerBusy) {
+        const busy = await inUse(api, { queue: true });
+        if (busy) log(`COMFY-KEEP-WARN: ComfyUI on ${api} was launched for another shape (${gap}), but ${busy}, so this call runs on it as it is`);
+        else v = { restart: true, pid: keptOurs.pid, reason: gap };
+      }
+    }
     if (v.reuse) {
+      if (report && keptOurs) report.selfBounded = true;
       // A kept instance outlives a lease whose holder died or was fenced out, and the next lease on
       // its card finds it running. Reusing it makes it that lease's: re-stamp the marker, or the
       // new holder's release (which stops by epoch) stops nothing and the instance outlives every
@@ -1069,9 +1236,11 @@ export async function ensureComfy(opts = {}) {
     const { outputDir, tempDir } = instancePaths(comfyDir, key);
     for (const d of [outputDir, tempDir]) { try { mkdirs(d); } catch {} }
   }
-  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log, launch, idle: idleSecs > 0 ? idleExt : null });
+  const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log, launch, idle: wantPack ? idleExt : null });
   // Applied only if launchFlags found the files: the child's env and the probe below follow what it really launched.
-  const idleApplied = idleSecs > 0 && flags.some(idleYamlToken);
+  const idleApplied = wantPack && flags.some(idleYamlToken);
+  // The process bound holds only if the pack is really in: without it, nothing would ever end a kept instance (the caller kills it).
+  const exitApplied = idleApplied && exitSecs > 0 ? exitSecs : 0;
   // A --cuda-device launch has already scoped the cards (main.py rewrites
   // CUDA_VISIBLE_DEVICES to it), so the multi-GPU visibility restore below does not
   // apply — and neither does its --disable-pinned-memory: one visible card is not the
@@ -1100,7 +1269,9 @@ export async function ensureComfy(opts = {}) {
   }
   // The pack reads its bound from the child's env. A COPY, made after the identity check above (which asks whether the placement's env is
   // process.env itself) so neither that decision nor the parent's env changes; a launch that asked for nothing passes spawnEnv as it was.
-  const childEnv = idleApplied ? { ...spawnEnv, OFFLOAD_IDLE_FREE_SEC: String(idleSecs) } : spawnEnv;
+  const childEnv = idleApplied
+    ? { ...spawnEnv, OFFLOAD_IDLE_FREE_SEC: String(idleSecs), ...(exitApplied ? { OFFLOAD_IDLE_EXIT_SEC: String(exitApplied) } : {}) }
+    : spawnEnv;
   let child;
   if (keep) {
     // A KEPT instance must not be a piped child of a runner that is about to exit. As one it held
@@ -1112,13 +1283,14 @@ export async function ensureComfy(opts = {}) {
     // window is hidden (a detached console process opens one on Windows). The log is bounded by
     // rotation at each launch, not by a capture that stops at 5 MB (see trimRotatedLog).
     //
-    // WHO STOPS IT: the instance lives no longer than the GPU lease it was launched under (the
-    // marker records that epoch). The holder of the lease stops it on release: `gpu reserve`
-    // when its wrapped command ends, and the pipeline when its media lease is released
-    // (internal/comfyinst). A kept default instance (no key) has no lease epoch in its marker and
-    // is stopped by its operator, as before. Within the lease, the idle pack this launch carries
-    // (resolveIdleBound) frees the instance's models and caches after COMFY_IDLE_FREE_SEC with an
-    // empty queue; the process and its CUDA context live until the holder stops it.
+    // WHO STOPS IT: the instance itself, when the launch carries a process bound (exitApplied, the
+    // harness's default since ADR 0097): the idle pack exits it after COMFY_IDLE_EXIT_SEC with no prompt
+    // and no runner holding it, and the pipeline's routine release of a media lease leaves it for the
+    // next job (internal/comfyinst). A job that fails stops it (gpu-lock.mjs). `gpu reserve`, its
+    // detached holder and `gpu release` still stop the keyed instances of their lease when they end
+    // it. A kept instance WITHOUT a process bound (an explicit --keep-comfy with COMFY_IDLE_EXIT_SEC=0)
+    // lives as before: a keyed one until its lease's holder stops it, the default one until its
+    // operator does. Either way the idle pack frees models and caches after COMFY_IDLE_FREE_SEC.
     rotateComfyLog(comfyDir, key);
     trimRotatedLog(comfyDir, key);
     let fd = null;
@@ -1141,6 +1313,8 @@ export async function ensureComfy(opts = {}) {
   // also names its key, its port and the lease epoch it was launched under.
   if (child && typeof child.pid === "number") {
     const rec = { pid: child.pid, ownerPid: process.pid, args: ["main.py", ...flags], profile };
+    // A self-bounded instance says so: the pipeline's release leaves it running, and a later job may reuse it across leases.
+    if (exitApplied) rec.idleExitSec = exitApplied;
     if (key) {
       rec.key = key;
       rec.port = instance.port;
@@ -1177,7 +1351,11 @@ export async function ensureComfy(opts = {}) {
     if (await up(api)) {
       // Ask the instance it launched whether the pack is alive: a pack that did not load (an upstream rename, a folder ComfyUI skipped) frees
       // nothing and would otherwise be silent. Said, never fatal: no render fails for want of the bound.
-      if (idleApplied) await verifyIdleBound({ api, key, secs: idleSecs, probeIdle, log });
+      const exitLive = idleApplied ? await verifyIdleBound({ api, key, secs: idleSecs, exitSecs: exitApplied, probeIdle, log }) : false;
+      // The caller reads this to know whether the instance ends itself (then it may be left running after a good job): only a bound
+      // the pack itself reported. An instance whose pack did not answer is killed by its runner after the job, as before.
+      try { if (child) child.offloadIdleExitSec = exitLive ? exitApplied : 0; } catch {}
+      if (report && exitLive) report.selfBounded = true;
       return child;
     }
     if (earlyExit) {

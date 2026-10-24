@@ -170,7 +170,7 @@ Input is a **file path** or `-` for stdin. Add `--json` for the full result obje
 <details>
 <summary><b>Example: warm-batch image generation</b></summary>
 
-`generate-image --batch jobs.jsonl` renders every job through **one warm ComfyUI session** — the checkpoint loads once instead of once per image, and the zero-always-warm teardown (free VRAM, kill the spawned ComfyUI, release the GPU lock) runs at the **batch boundary**. One JSON object per line; `prompt` is required, everything else optional (`out`, `negative`, `width`, `height`, `steps`, `seed`, `refine` — a missing seed is minted, a missing out defaults under the media dir, and `"refine": false` opts one job out of a configured prompt refiner; `--refine=false` on the command opts out every job without its own value):
+`generate-image --batch jobs.jsonl` renders every job through **one warm ComfyUI session** — the checkpoint loads once instead of once per image, and the teardown (free VRAM, release the GPU lock; the spawned ComfyUI is left to end itself once idle, ADR 0097) runs at the **batch boundary**. One JSON object per line; `prompt` is required, everything else optional (`out`, `negative`, `width`, `height`, `steps`, `seed`, `refine` — a missing seed is minted, a missing out defaults under the media dir, and `"refine": false` opts one job out of a configured prompt refiner; `--refine=false` on the command opts out every job without its own value):
 
 ```jsonl
 {"prompt":"a red vintage bicycle against a white brick wall","seed":4242,"out":"C:/renders/bike.png"}

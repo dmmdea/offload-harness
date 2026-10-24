@@ -34,15 +34,24 @@ script.
    that memory stack on every job for no benefit. Under a lease on SOME cards the helper also leaves the models positively placed on the other cards (by `layers`
    or by the serving config's device pin) resident; it unloads the list the lease hands it, which includes a model nothing places.
 
-3. **Cold-start ComfyUI** with `--disable-smart-memory`, `--cache-none`, and a VRAM reservation.
+3. **Start ComfyUI** (cold-start it) with `--disable-smart-memory`, `--cache-none`, and a VRAM reservation.
    If an instance is already running, the harness uses it and does **not** take ownership — it will
-   not kill a server it did not start.
+   not kill a server it did not start. Since ADR 0097 (2026-10-24) the instance a harness runner launches
+   carries the idle pack with a process bound, so a second job inside the bound finds it running, **reuses**
+   it and skips the launch (31 to 89 s on the 8 GB laptop card). A reused instance launched for another
+   shape (warm versus `--cache-none`, another `--reserve-vram`) is restarted. The runner then holds the
+   instance for the whole job (`GET /offload/hold`) so the bound cannot fire under it.
 
 4. **Run the job.**
 
-5. **Tear down**, guarded and idempotent: `POST /free` with `unload_models` and `free_memory`, kill
-   the ComfyUI process (if we started it), release the lock. SIGINT, SIGTERM, and SIGBREAK run the
-   same cleanup and then exit, so an interrupt does not leak the slot.
+5. **Tear down**, guarded and idempotent: `POST /free` with `unload_models` and `free_memory`, release
+   the hold, then settle the ComfyUI process (if we started it), and release the lock. After a **good**
+   job the process is left running: it holds about 240 MiB of the card and ends itself after
+   `COMFY_IDLE_EXIT_SEC` (300 s unless set) with no prompt and no holder. After a **failed** job the
+   runner stops the instance it used, so a sticky CUDA error is cured by the next launch.
+   `COMFY_IDLE_EXIT_SEC=0` (or `off`) restores the old lifecycle: kill the process after every job.
+   SIGINT, SIGTERM, and SIGBREAK run the same cleanup and then exit, so an interrupt does not leak
+   the slot.
 
 ## The warm batch variant
 
@@ -51,7 +60,7 @@ difference is that `--cache-none` is omitted, so the checkpoint loads once inste
 Teardown is not special-cased — it is the same single teardown, now at the batch boundary. Zero-warm
 moves from per-render to per-batch rather than being abandoned. When this machine's lane is held and a
 roster node renders the recipe, the batch is instead one ticket per job (ADR 0083, decision 13): each job
-is a node's own zero-warm render, a ComfyUI cold start apiece, and the warm session exists only here.
+is a node's own render, which reuses the node's kept ComfyUI inside the idle bound (ADR 0097) and cold-starts one otherwise, and the warm session exists only here.
 
 A failed render inside a batch is recorded and the loop continues (unless ComfyUI itself became unusable, or the output disk filled: the batch then stops at that job, the later jobs get `not run:` rows and the batch exits non-zero, register C-83, 0.158.1; the full disk 0.178.0); one JSONL result line is written
 per job. A batch that ran every job and had a failed one exits 4 (`render/comfy-generate.mjs`, `render/comfy-inpaint.mjs` and `local-offload generate-image --batch`; 0 is every job rendered, 1 a stop, 2 usage), and the Go caller reads the runner's 4 as a finished batch and takes the per-job rows. **The default single-render path is byte-identical to its pre-batch behavior.**
@@ -65,8 +74,9 @@ Successful renders record a VRAM footprint observation used by fleet advertiseme
 
 ## Success behavior
 
-The job's outputs exist, the GPU is free, ComfyUI is stopped (if the harness started it), the lock is
-released, and the memory stack is still resident.
+The job's outputs exist, no model is resident, the lock is released, and the memory stack is still resident.
+ComfyUI is stopped if `COMFY_IDLE_EXIT_SEC=0`; otherwise a bare process (about 240 MiB of the card) is left
+for the next job and ends itself after the idle bound (ADR 0097).
 
 ## Failure behavior
 
@@ -79,10 +89,11 @@ A local ComfyUI installation, the llama-swap serving endpoint, and the bound mod
 
 ## Invariants and assumptions
 
-1. **Nothing GPU-resident persists between jobs** (batch: between batches).
+1. **No model stays GPU-resident between jobs** (batch: between batches). A bare ComfyUI process, about 240 MiB, may
+   persist for at most the idle bound (ADR 0097).
 2. **The memory stack is never unloaded** — not by the free step and not by `gpu reserve --unload-seat` (register C-87); it is an exception to item 1.
 3. One GPU-heavy job at a time, per machine.
-4. ComfyUI is only killed if the harness started it.
+4. ComfyUI is only killed or left to end itself if the harness started it.
 5. Teardown is idempotent and runs on signals.
 
 ## Security and privacy notes
@@ -97,6 +108,9 @@ reclaim-on-dead-process possible.
 
 A cold start taking unusually long is the ComfyUI startup budget at work; it is generous and
 environment-tunable, because a first start after a plugin change legitimately takes minutes.
+
+A ComfyUI process still running after a job is the kept instance of ADR 0097, not a leak. `GET /offload/idle` on its port
+says how long it has been idle against its bound (`exit_idle_sec`, `exit_limit_sec`) and how many runners hold it (`holds`).
 
 ## Testing notes
 

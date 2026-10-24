@@ -253,3 +253,34 @@ test("withGpuSlot hands keepComfy to ensureComfy as keep, and only then", async 
   assert.equal(seen[0].keep, true);
   assert.equal("keep" in seen[1], false, "a runner that tears its own ComfyUI down must call ensureComfy exactly as before");
 });
+
+// ---- ADR 0097: the per-render relaunch (2026-10-24) ------------------------------------------
+// Every generate-image call killed the ComfyUI its runner launched, so the next call paid the launch again (31-89 s of a 66-135 s
+// render on the 8 GB laptop card). A launch whose pack reports the process bound is now left running after a good job, held for the
+// job; a failed job still ends it, so a sticky CUDA error is cured by the next launch.
+test("withGpuSlot: a good job leaves the self-bounded ComfyUI it launched for the next job and lets go of its hold; a failed job ends it", async () => {
+  const run = (fn) => {
+    const child = { killed: 0, kill() { this.killed++; }, offloadIdleExitSec: 300 };
+    const holds = [];
+    let opts = null;
+    const p = withGpuSlot({
+      lease: { dir: "X", epoch: 7, class: "media" }, checkLease: () => true, claimUnload: () => true, freeLlamaSwap: async () => {},
+      instanceEnv: {}, resolveExit: () => 300, tailLog: () => "", beat: () => {},
+      ensureComfy: async (o) => { opts = o; o.report.selfBounded = true; return child; },
+      freeComfy: async () => {},
+      holdComfy: async (api) => { const h = { api, state: "held", released: 0, release() { this.released++; } }; holds.push(h); return h; },
+    }, fn);
+    return { p, child, holds, opts: () => opts };
+  };
+  const good = run(async () => "rendered");
+  assert.equal(await good.p, "rendered");
+  assert.equal(good.opts().keep, true);
+  assert.equal(good.opts().idleExit, 300, "the launch carries the process bound");
+  assert.equal(good.child.killed, 0, "a good job leaves the instance running for the next one");
+  assert.equal(good.holds.length, 1);
+  assert.equal(good.holds[0].released, 1, "the hold ends with the job, so the bound's clock starts");
+  const bad = run(async () => { throw new Error("boom"); });
+  await assert.rejects(bad.p, /boom/);
+  assert.equal(bad.child.killed, 1, "a failed job ends the instance it launched");
+  assert.equal(bad.holds[0].released, 1);
+});
