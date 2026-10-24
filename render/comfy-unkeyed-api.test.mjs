@@ -23,6 +23,8 @@ import { scratchDir } from "./test-scratch.mjs";
 
 const boom = (what) => () => { throw new Error("must not be reached: " + what); };
 const OTHER = "http://127.0.0.1:8189";
+// What ensureComfy is told about the endpoint; keep/idleExit/report are the keep decision's (ADR 0097), not the endpoint's.
+const endpointOpts = (o) => { const { keep, idleExit, report, ...rest } = o || {}; return rest; };
 
 // ---- withGpuSlot hands the endpoint down ---------------------------------------------------
 
@@ -38,20 +40,20 @@ const slot = (api, instanceEnv = {}) => {
 
 test("withGpuSlot: an unkeyed runner given another endpoint passes it to ensureComfy", async () => {
   const seen = await slot(OTHER);
-  assert.deepEqual(seen.ensure, { api: OTHER }, "ensureComfy must be told which endpoint this run drives, or it ensures 8188");
+  assert.deepEqual(endpointOpts(seen.ensure), { api: OTHER }, "ensureComfy must be told which endpoint this run drives, or it ensures 8188");
   assert.deepEqual(seen.free, [OTHER], "and the post-run free goes to the same endpoint");
 });
 
 test("withGpuSlot: the default endpoint, however it is spelled, is ensured exactly as before", async () => {
   for (const api of [undefined, "http://127.0.0.1:8188", "http://localhost:8188"]) {
     const seen = await slot(api);
-    assert.deepEqual(seen.ensure, {}, `api ${api}: ensureComfy gets no api for the default endpoint`);
+    assert.deepEqual(endpointOpts(seen.ensure), {}, `api ${api}: ensureComfy gets no api for the default endpoint`);
   }
 });
 
 test("withGpuSlot: a keyed instance is unchanged", async () => {
   const seen = await slot(OTHER, { COMFY_INSTANCE: "side" });
-  assert.deepEqual(seen.ensure, { api: OTHER });
+  assert.deepEqual(endpointOpts(seen.ensure), { api: OTHER });
 });
 
 // ---- ensureComfy never launches 8188 for another endpoint ------------------------------------

@@ -33,15 +33,31 @@ then the executor's reset, then a gc pass). The empty-queue check and the two se
 RLock; set_flag takes it too), so a prompt cannot be queued between them. A prompt that lands in the microsecond after is run
 first and the flags are drained after it: the cost is one avoidable reload, never a corrupted run.
 
-WHAT IT DOES NOT DO. It frees models and caches; it does not stop the process. The Python process and its CUDA context stay until
-the lease holder stops the instance at release (internal/comfyinst), and an instance whose holder died stays until an operator
-stops it. A self-exit is deliberately not built: from inside ComfyUI a runner that is mid-job in a long non-ComfyUI step (ffmpeg,
-a QA pass, an LLM call) looks the same as an abandoned instance, and a /free is always safe where an exit would break the next
-prompt with ECONNREFUSED. Nothing it does can fail a render: it never raises, and a failure is logged once as NOT ACTIVE.
+THE PROCESS BOUND (OFFLOAD_IDLE_EXIT_SEC, 2026-10-24, ADR 0097). The harness keeps the ComfyUI it launches between jobs instead of
+killing it after each one: a relaunch cost 31-89 s of a 66-135 s render on an 8 GB laptop card, while the bare process holds about
+240 MiB of the card once its models are gone. The process is then bounded the way llama-swap bounds a seat: after
+OFFLOAD_IDLE_EXIT_SEC seconds in which no prompt was queued or running AND no runner held the instance, it exits. The clock runs
+from the moment the pack loads, so an instance whose runner died before submitting anything still goes.
 
-GET /offload/idle answers {limit_sec, idle_sec, armed, freed, last_free_unix, error}. It is read-only, and it is how the launcher
-checks that the pack is alive (a pack that loaded but cannot find the queue says so in `error`). The bound does not depend on it.
+A runner HOLDS the instance for the whole of its job with GET /offload/hold, a response that stays open and carries one byte every
+HOLD_BEAT_SEC. That answers the objection that kept this exit out before: a runner mid-job in a long step that is not ComfyUI's
+(ffmpeg, a QA pass, an LLM call) holds the instance, so it does not look abandoned. A hold ends when the runner closes it or its
+process dies: the next heartbeat write fails or the transport reports closing (ComfyUI runs aiohttp without handler cancellation,
+so the handler is never cancelled on a disconnect and must find out by writing). The hold blocks the exit only; the model free
+above runs on its own clock as before. Before it exits the pack waits EXIT_GRACE_SEC and checks again, under the queue's mutex,
+that nothing was queued and nobody took a hold; then it says why and leaves with os._exit(0) (nothing is running, so there is
+nothing to wind down, and an interpreter shutdown from a daemon thread can hang on ComfyUI's own threads).
+
+Unset or 0 means no process bound: a hand-started instance that loads the pack for its model free is never stopped by it. Only
+the harness's own launch sets the variable (render/comfy-lifecycle.mjs ensureComfy).
+
+Nothing it does can fail a render: it never raises, and a failure is logged once as NOT ACTIVE.
+
+GET /offload/idle answers {limit_sec, idle_sec, armed, freed, last_free_unix, error, exit_limit_sec, exit_idle_sec, holds}. It is
+read-only, and it is how the launcher checks that the pack is alive (a pack that loaded but cannot find the queue says so in
+`error`). The bounds do not depend on it.
 """
+import asyncio
 import logging
 import os
 import sys
@@ -56,6 +72,9 @@ DEFAULT_POLL_SEC = 5
 MIN_POLL_SEC = 1
 MAX_POLL_SEC = 30
 ROUTE = "/offload/idle"
+HOLD_ROUTE = "/offload/hold"
+HOLD_BEAT_SEC = 2
+EXIT_GRACE_SEC = 2
 
 
 def _say(message):
@@ -79,6 +98,33 @@ def resolve_limit(raw, say=None):
     (say or _say)("ignoring OFFLOAD_IDLE_FREE_SEC=%r (0 turns the bound off, otherwise a whole number of seconds, %d or more); using %d"
                   % (raw, MIN_LIMIT_SEC, DEFAULT_LIMIT_SEC))
     return DEFAULT_LIMIT_SEC  # a value it cannot use
+
+
+def resolve_exit(raw, say=None):
+    """OFFLOAD_IDLE_EXIT_SEC: unset, empty or 0 = no process bound, a whole number of seconds >= 5 = that, else none and one line."""
+    if raw is None or str(raw).strip() == "":
+        return 0
+    value = _whole_seconds(raw)
+    if value is not None and (value == 0 or value >= MIN_LIMIT_SEC):
+        return value
+    (say or _say)("ignoring OFFLOAD_IDLE_EXIT_SEC=%r (0 turns the process bound off, otherwise a whole number of seconds, %d or "
+                  "more); the process is not bounded" % (raw, MIN_LIMIT_SEC))
+    return 0  # never exit on a value nobody can read
+
+
+def _exit_now(code):
+    """Leave the process: flush what was said first, then os._exit (see THE PROCESS BOUND above)."""
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code)
 
 
 def resolve_poll(raw, say=None):
@@ -118,7 +164,7 @@ def server_queue():
 
 class IdleBound:
     def __init__(self, get_queue, loaded_fn, cache_on_fn, limit, poll=DEFAULT_POLL_SEC, clock=time.monotonic,
-                 wait=None, say=None):
+                 wait=None, say=None, exit_limit=0, exit_fn=None, grace=EXIT_GRACE_SEC):
         self.get_queue = get_queue
         self.loaded_fn = loaded_fn
         self.cache_on_fn = cache_on_fn
@@ -137,6 +183,23 @@ class IdleBound:
         self.error = None
         self._reported = None
         self._said = set()
+        # The process bound: 0 = none. Its clock starts now, not at the first prompt, so an instance nobody ever used still goes.
+        self.exit_limit = exit_limit
+        self.exit_fn = exit_fn or _exit_now
+        self.grace = grace
+        self.last_activity = clock()
+        self.holds = 0
+        self._holds_lock = threading.Lock()
+
+    def hold_open(self):
+        with self._holds_lock:
+            self.holds += 1
+        self.last_activity = self.clock()
+
+    def hold_close(self):
+        with self._holds_lock:
+            self.holds = max(0, self.holds - 1)
+        self.last_activity = self.clock()  # the clock restarts when the last runner lets go
 
     def _once(self, message):
         if message not in self._said:
@@ -174,11 +237,16 @@ class IdleBound:
             counter = queue.task_counter
         busy = remaining > 0 or counter != self.last_counter
         self.last_counter = counter
+        if busy or self.holds > 0:
+            self.last_activity = now
         if busy:
             self.last_busy = now
             self.armed = True
             return False
-        if not self.armed or now - self.last_busy < self.limit:
+        if self.exit_limit and now - self.last_activity >= self.exit_limit:
+            self._leave(queue, counter)  # it returns only when the instance was woken during the grace
+            return False
+        if not self.limit or not self.armed or now - self.last_busy < self.limit:
             return False
         if not self._holds_something():
             return False
@@ -194,6 +262,20 @@ class IdleBound:
         self.say("idle bound reached with an empty queue: asked the worker to unload models and free memory")
         return True
 
+    def _leave(self, queue, counter):
+        """The process bound: wait the grace, check again under the queue's mutex that nothing was queued and nobody took a hold,
+        then exit. A prompt or a hold that arrived in the grace restarts the clock instead."""
+        self.wait(self.grace)
+        if self._stop.is_set():
+            return
+        with queue.mutex:
+            if queue.get_tasks_remaining() != 0 or queue.task_counter != counter or self.holds > 0:
+                self.last_activity = self.clock()
+                return
+            self.say("process bound reached: %d s with no prompt queued or running and no runner holding the instance; exiting"
+                     % int(self.clock() - self.last_activity))
+            self.exit_fn(0)
+
     def tick(self):
         """One poll. True when it asked the worker to free. It never raises: a failure is said once and the next poll retries."""
         try:
@@ -207,7 +289,8 @@ class IdleBound:
     def status(self):
         idle = None if self.last_busy is None else max(0.0, self.clock() - self.last_busy)
         return {"limit_sec": self.limit, "idle_sec": idle, "armed": self.armed, "freed": self.freed,
-                "last_free_unix": self.last_free_unix, "error": self.error}
+                "last_free_unix": self.last_free_unix, "error": self.error, "exit_limit_sec": self.exit_limit,
+                "exit_idle_sec": max(0.0, self.clock() - self.last_activity), "holds": self.holds}
 
     def run(self):
         while not self._stop.is_set():
@@ -224,7 +307,8 @@ class IdleBound:
 
 
 def register_status_route(bound):
-    """GET /offload/idle on ComfyUI's route table. Custom nodes import before add_routes (main.py), so the route is served."""
+    """GET /offload/idle and GET /offload/hold on ComfyUI's route table. Custom nodes import before add_routes (main.py), so both
+    are served."""
     module = sys.modules.get("server")
     instance = getattr(getattr(module, "PromptServer", None), "instance", None)
     routes = getattr(instance, "routes", None)
@@ -236,22 +320,46 @@ def register_status_route(bound):
     async def idle_status(request):
         return web.json_response(bound.status())
 
+    @routes.get(HOLD_ROUTE)
+    async def hold(request):
+        # Open for as long as the runner keeps it: one byte every HOLD_BEAT_SEC, and the hold ends at the first write that fails
+        # or the first look that finds the transport closing (the handler is not cancelled on a disconnect; see THE PROCESS BOUND).
+        response = web.StreamResponse(headers={"Content-Type": "text/plain; charset=utf-8", "Cache-Control": "no-store"})
+        await response.prepare(request)
+        bound.hold_open()
+        try:
+            while True:
+                transport = request.transport
+                if transport is None or transport.is_closing():
+                    break
+                try:
+                    await response.write(b".")
+                except Exception:
+                    break
+                await asyncio.sleep(HOLD_BEAT_SEC)
+        finally:
+            bound.hold_close()
+        return response
+
 
 def boot(environ=None, get_queue=None, register_route=None, autostart=True, say=None):
     """Read the settings and start the bound; None when it is switched off. Every argument is a test seam."""
     environ = os.environ if environ is None else environ
     say = say or _say
     limit = resolve_limit(environ.get("OFFLOAD_IDLE_FREE_SEC"), say)
-    if limit == 0:
+    exit_limit = resolve_exit(environ.get("OFFLOAD_IDLE_EXIT_SEC"), say)
+    if limit == 0 and exit_limit == 0:
         say("idle bound disabled (OFFLOAD_IDLE_FREE_SEC=0)")
         return None
     poll = resolve_poll(environ.get("OFFLOAD_IDLE_POLL_SEC"), say)
-    bound = IdleBound(get_queue or server_queue, models_loaded, cache_on, limit, poll=poll, say=say)
+    bound = IdleBound(get_queue or server_queue, models_loaded, cache_on, limit, poll=poll, say=say, exit_limit=exit_limit)
     try:
         (register_route or register_status_route)(bound)
     except Exception as err:  # the route is optional
         say("GET %s not registered (%s); the bound itself does not depend on it" % (ROUTE, err))
-    say("idle bound %d s" % limit)
+    say("idle bound %d s" % limit if limit else "model free disabled (OFFLOAD_IDLE_FREE_SEC=0)")
+    if exit_limit:
+        say("process bound %d s: the process exits after that long with no prompt and no runner holding it" % exit_limit)
     if autostart:
         bound.start()
     return bound

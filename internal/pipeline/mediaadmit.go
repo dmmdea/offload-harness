@@ -634,13 +634,13 @@ func defaultInstanceAPI(c gpuprobe.Card) string {
 }
 
 // stopKeptInstances stops the ComfyUI instances kept under a lease epoch (internal/comfyinst),
-// before the lease is released: they live no longer than it does. A failure is logged and never
-// blocks the release.
+// before the lease is released, except those that bound their own process (ADR 0097): those stay
+// for the next job and end themselves once idle. A failure is logged and never blocks the release.
 func (p *Pipeline) stopKeptInstances(epoch uint64) {
 	stop := p.stopKept
 	if stop == nil {
 		stop = func(ctx context.Context, dir string, epoch uint64) []comfyinst.Outcome {
-			return comfyinst.StopForLease(ctx, dir, epoch, comfyinst.RealDeps())
+			return comfyinst.StopForRelease(ctx, dir, epoch, comfyinst.RealDeps())
 		}
 	}
 	if strings.TrimSpace(p.cfg.ComfyDir) == "" {
@@ -651,6 +651,8 @@ func (p *Pipeline) stopKeptInstances(epoch uint64) {
 	for _, o := range stop(ctx, p.cfg.ComfyDir, epoch) {
 		if o.Stopped {
 			log.Printf("media admission: stopped the ComfyUI instance %s (pid %d) kept under lease epoch %d", o.Key, o.PID, epoch)
+		} else if o.Spared {
+			log.Printf("media admission: left the ComfyUI instance %s (pid %d) of lease epoch %d running: %s", o.Key, o.PID, epoch, o.Why)
 		} else if o.Why != "" {
 			log.Printf("media admission: the ComfyUI instance %s (pid %d) kept under lease epoch %d was not stopped: %s", o.Key, o.PID, epoch, o.Why)
 		}
@@ -1311,7 +1313,9 @@ func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *g
 		once.Do(func() {
 			stopHB()
 			// The instances kept under this lease go BEFORE it is released, so the next holder never
-			// finds one on its card, and only while the lease is still this call's: a call whose lease
+			// finds one on its card, except an instance that ends itself (ADR 0097: bare between jobs,
+			// about 240 MiB of the card, gone after 300 s idle), which stays for the next job on these
+			// cards to reuse; and only while the lease is still this call's: a call whose lease
 			// was taken away (released from outside, reclaimed after a suspend) is a straggler, and
 			// the instance may already be the next lease's job. It leaves them, as Release leaves
 			// the claim.

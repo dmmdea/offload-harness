@@ -40,7 +40,7 @@ other on a single shared card.
 | `internal/gpulease/tree.go` | **a dead wrapper with a live tree keeps its claim (plan P10, ADR 0084)**: the recorded tree (`Meta.Tree`, `Lease.RecordTree`), `judge` (the one place a reader decides what a record's tree is), the launch-marker and process-table evidence, and the armed ComfyUI directory (`SetComfyDir`, called from `modelaffinity.SetComfyDir`) |
 | `internal/proctree` | **process-tree containment and the stop primitives (plan P10)**: `Start` runs a command in a job object (Windows) or its own session and process group (Unix), `PIDs`, `Terminate`, `TerminateExcept`; `Job` is the job object the agent shell's cage (`internal/sandbox`) is built on too; `PlanStop` and `Stop` stop only a recorded tree or a launch marker's process and report anything else on a card as not ours |
 | `gpu_tree.go` | the wrapper's side: `treeRecorder` (writes the tree into the lease record when the set changes), `stopWrappedTree` (the whole tree, sparing an instance another lease took over) |
-| `internal/comfyinst` | stops the ComfyUI instances a lease kept (`StopForLease`), and the primitives an explicit takeover will use (`StopMarker`: interrupt, free, kill after the launch fingerprint is verified; `PIDsOfOtherLeases`) |
+| `internal/comfyinst` | stops the ComfyUI instances a lease kept (`StopForLease`; `StopForRelease` spares one that ends itself, ADR 0097), and the primitives an explicit takeover will use (`StopMarker`: interrupt, free, kill after the launch fingerprint is verified; `PIDsOfOtherLeases`) |
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
 | `gpu_faults.go` | `gpu faults`: the fault history report, its text and JSON, and the `--jobs` join of the ledger |
@@ -1073,13 +1073,20 @@ before that place on every plan (`gpualloc.QueuedClaimsBefore`). The scan also m
 host RAM in the way (`core.PlaceMarker`), so a place that waits on memory passes a request that declares none, as a waiter on
 memory does (the G6 rule in "Host RAM").
 
-**A kept ComfyUI instance lives no longer than its lease.** A runner that keeps the ComfyUI it launched
-(`--keep-comfy`) leaves a detached instance running after it exits, so the items of a batch under one
-lease load their models once; its launch marker (`.offload-launch-<key>.json`) records the lease epoch.
+**A kept ComfyUI instance is stopped by its lease's holder, unless it ends itself (ADR 0097, 2026-10-24).** A runner that
+keeps the ComfyUI it launched leaves a detached instance running after it exits. An explicit `--keep-comfy` always keeps it, so
+the items of a batch under one lease load their models once. Since 2026-10-24 every harness runner also keeps it after a GOOD
+job by default, with a process bound that ends it after `COMFY_IDLE_EXIT_SEC` (300 s unless set) with no prompt and no holder
+(below); `COMFY_IDLE_EXIT_SEC=0` restores the old kill after every job. The launch marker (`.offload-launch-<key>.json`) records
+the lease epoch, and `idleExitSec` when the instance carries the process bound.
 The **holder** of that lease stops the instance when it lets go, before the release and before any seat
 warm-back (both want the VRAM): `gpu reserve` when its wrapped command ends, the detached holder when it
 exits, `gpu release` when an operator ends a lease from outside, and the pipeline when a media lease is
-released. `gpu release` settles WHICH lease it is ending first, by the release's own rule (`Manager.ReleaseTarget`:
+released. The pipeline's routine release is the exception: it uses `comfyinst.StopForRelease`, which spares an instance whose
+marker records `idleExitSec` (the outcome says `Spared`), because that instance ends itself and the next job on those cards reuses
+it. It still stops every other instance of the epoch. A survivor holds about 240 MiB of the card and, on the 16 GB reference box
+(keyed single-card instance, ComfyUI 0.38.0, measured on 2026-10-14), about 5.0 to 5.2 GiB of host private bytes, for at most
+the bound. Under an outer `gpu reserve`, the wrapper's job object still ends an instance launched inside it when its command ends. `gpu release` settles WHICH lease it is ending first, by the release's own rule (`Manager.ReleaseTarget`:
 the epoch named, else the only lease held), so a refusal (several card leases held and no `--epoch`) ends the
 command before the instances are stopped or the seat is warmed; if the release itself then fails, the error says
 the instances were already stopped. `internal/comfyinst` does it, and only for a keyed marker that names exactly that epoch: the pid
@@ -1099,15 +1106,18 @@ how many attempts were made and that the next runner on that card frees the inst
 that card REUSES it, it does not launch over it: a live keyed instance whose marker proves it is ours is reused, and
 reusing an instance that was a lease's takes it over (`restampLaunchOwner`: only the marker's `leaseEpoch` changes,
 to the reusing lease's), so that lease's release stops it. An instance that was never a lease's (a marker with no
-epoch) is not claimed by a lease that happens to reuse it. An instance nobody reuses stays up until an operator stops
-it: the harness runs no timer or watcher over it (plan I5), and whether the next acquirer or `gpu doctor` should sweep
-markers whose epoch is dead is an operator decision (I5 forbids a watcher, not an explicit sweep). What the harness does
-carry is the engine's own idle clock, the llama-swap `ttl` analogue: a kept or warm instance is launched with the idle pack
-(`render/comfyui-ext/idle-nodes`), which frees its models and executor cache after 300 s with an empty queue. The harness's own
-launch already has ComfyUI unload every model when a prompt ends (`--disable-smart-memory`), so what the clock bounds is what
-survives that: a warm session's executor cache in host RAM, and a hand-started instance's models when it runs with smart memory. It
-acts on its own ComfyUI only. It bounds models and caches, not the process: the Python process and its CUDA context live until a
-holder or an operator stops them. Built and tested against a fake queue, not yet run in a live ComfyUI. See
+epoch) is not claimed by a lease that happens to reuse it. An instance nobody reuses ends itself when it carries the process
+bound (below). One without it (an explicit `--keep-comfy` with `COMFY_IDLE_EXIT_SEC=0`, a hand-started instance) stays up until
+an operator stops it: the harness runs no timer or watcher over it (plan I5), and whether the next acquirer or `gpu doctor`
+should sweep markers whose epoch is dead is an operator decision (I5 forbids a watcher, not an explicit sweep). What the
+harness does carry is the engine's own idle clock, the llama-swap `ttl` analogue: a kept or warm instance is launched with the
+idle pack (`render/comfyui-ext/idle-nodes`), which frees its models and executor cache after 300 s with an empty queue (run in
+a live ComfyUI on 2026-10-14). The harness's own launch already has ComfyUI unload every model when a prompt ends
+(`--disable-smart-memory`), so what that clock bounds is what survives that: a warm session's executor cache in host RAM, and a
+hand-started instance's models when it runs with smart memory. The process bound (ADR 0097) is a second clock in the same pack: a
+launch that carries `OFFLOAD_IDLE_EXIT_SEC` exits its own process (`os._exit(0)`, after a 2 s grace and a re-check under the
+queue mutex) once no prompt is queued or running and no runner holds it (`GET /offload/hold`, a stream the runner keeps open for
+its whole job), so the Python process and its CUDA context end too. Both clocks act on their own ComfyUI only. See
 [media generation](media-generation.md). A kept launch
 whose marker cannot be written logs `COMFY-KEEP-WARN`, because nothing can then stop it by its lease.
 
@@ -2716,6 +2726,8 @@ a wait; the holder stops twice, before the warm-back for the VRAM and in its def
 first stop took, so it is redundant and harmless) or by an epoch the caller resolved or checked (`stopKeptInstances`: the release
 verb for the target `ReleaseTarget` named, the detached reserve's release for the epoch `HoldsEpoch` confirmed, which never holds the
 lease itself; an epoch is never reused and each marker names its lease, so a stop by epoch leaves an instance a later lease took over).
+These callers stop with `StopForLease`. The media pipeline's routine release of its own lease (`internal/pipeline/mediaadmit.go`,
+`stopKeptInstances`) uses `StopForRelease` and spares an instance that ends itself (ADR 0097).
 
 **A failed unload is not "freed nothing".** `unloadOthers` logs an unload that failed and goes on; the outcome counts them, and the
 waiting line and the bound's failure then say `N unloads of other resident models failed (see above), so what the unload freed is not

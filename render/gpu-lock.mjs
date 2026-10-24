@@ -22,7 +22,7 @@
 // No npm dependencies.
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance, DEFAULT_COMFY_PORT, COMFY_DIR } from "./comfy-lifecycle.mjs";
+import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance, DEFAULT_COMFY_PORT, COMFY_DIR, resolveIdleExit, openComfyHold, stopHarnessInstance } from "./comfy-lifecycle.mjs";
 import { settleInstanceFamily, releaseInstanceFamily } from "./comfy-family.mjs";
 import { leaseBeat } from "./lease-progress.mjs";
 import { readSharedJson, readSharedSync } from "./lease-read.mjs";
@@ -529,9 +529,15 @@ export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1
 //      destroys exactly the run it was taken to protect. A lease on SOME cards that
 //      was handed an unload list also re-reads that list against /running before each
 //      later job, so a seat that came back onto the leased cards leaves again,
-//   3. optionally ensureComfy(); warm:true is the BATCH-SESSION mode,
+//   3. optionally ensureComfy(); warm:true is the BATCH-SESSION mode; then HOLD the instance for the job
+//      (GET /offload/hold) so its process bound does not fire under a long step that is not ComfyUI's,
 //   4. await fn(),
-//   5. run ONE guarded teardown: freeComfy() + kill a ComfyUI we spawned.
+//   5. run ONE guarded teardown: freeComfy(), then the instance's fate. Since ADR 0097 the ComfyUI a
+//      runner launches is KEPT after a good job and ends itself after COMFY_IDLE_EXIT_SEC (default 300) with
+//      no prompt and no holder, so the next job reuses it instead of paying the launch again (31-89 s of a
+//      66-135 s render on an 8 GB laptop card). A job that FAILED stops the instance it used, kept or reused,
+//      so a sticky CUDA error is still cured by a fresh launch. COMFY_IDLE_EXIT_SEC=0 restores the old
+//      lifecycle (kill a ComfyUI we spawned after every job); an explicit --keep-comfy keeps what it always did.
 // `api` is the ComfyUI endpoint the runner talks to. Together with COMFY_INSTANCE /
 // COMFY_CARD_UUID it names the ComfyUI instance (comfy-lifecycle.mjs resolveInstance):
 // a keyed per-card instance is launched, freed and log-tailed on ITS endpoint and files. An
@@ -545,7 +551,9 @@ export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1
 export async function withGpuSlot(opts, fn) {
   const {
     noLock = false,
-    keepComfy = false,
+    // keepComfy: true = the caller's explicit --keep-comfy (kept whatever happens, as always); false = never keep; absent = the
+    // default since ADR 0097, keep after a good job when the instance carries a process bound (resolveIdleExit).
+    keepComfy,
     comfyManaged = true,
     warm = false,
     reserveVram,
@@ -564,6 +572,9 @@ export async function withGpuSlot(opts, fn) {
     reclear = defaultReclear,
     checkLease = checkInheritedLease,
     tailLog = tailComfyLog,
+    resolveExit = resolveIdleExit,
+    holdComfy = openComfyHold,
+    stopFailed = stopHarnessInstance,
     // family: the weights signature of this runner's job (comfy-family.mjs familySignature). When given,
     // the launch marker of the instance remembers it, and a kept instance whose marker names ANOTHER
     // family is freed before the first job, so it does not carry the previous family's weights into this
@@ -591,8 +602,14 @@ export async function withGpuSlot(opts, fn) {
   // A lane with no ComfyUI (voice) never resolves an instance.
   const instance = comfyManaged ? resolveInstance({ api, env: instanceEnv }) : null;
   const instanceKey = instance ? instance.key : "";
+  // Keep after a good job: asked explicitly (--keep-comfy), or the default whenever the launch can carry a process bound (ADR 0097).
+  const exitSecs = comfyManaged && keepComfy !== true && keepComfy !== false ? resolveExit(process.env, (line) => console.error(line)) : 0;
+  const keep = comfyManaged && (keepComfy === true || exitSecs > 0);
 
   let comfyChild = null;
+  let held = null;
+  let report = null;
+  let failed = false;
   let cleaning = false;
   const cleanup = async () => {
     if (cleaning) return; cleaning = true;
@@ -604,9 +621,19 @@ export async function withGpuSlot(opts, fn) {
       try { freed = await (instanceKey || api ? freeCfy(instance.api) : freeCfy()); } catch { freed = false; }
       if (freed !== false && family) releaseFamily({ comfyDir, key: instanceKey });
     }
-    if (comfyChild && !keepComfy) { try { comfyChild.kill(); } catch {} }
+    if (comfyChild) {
+      // Left running only when it ends itself (its pack reported the process bound) and the job went well, or when the caller
+      // asked for it explicitly. Otherwise it goes, as every launch did before ADR 0097.
+      const leave = keepComfy === true || (keep && !failed && Number(comfyChild.offloadIdleExitSec) > 0);
+      if (!leave) { try { comfyChild.kill(); } catch {} }
+    } else if (comfyManaged && failed && keep && keepComfy !== true && report && report.selfBounded) {
+      // A job that failed on a self-bounded instance an earlier job kept: stop it (stopHarnessInstance proves it ours again first,
+      // and leaves it to another runner that holds it; this runner's own hold is still open here).
+      await stopFailed({ api: instance.api, comfyDir, key: instanceKey, ownHolds: held && held.state === "held" ? 1 : 0 });
+    }
+    try { held?.release(); } catch {}
   };
-  const onSig = async () => { await cleanup(); process.exit(130); };
+  const onSig = async () => { failed = true; await cleanup(); process.exit(130); };
   for (const sig of ["SIGINT", "SIGTERM", "SIGBREAK"]) process.on(sig, onSig);
   try {
     // THE FENCE COMES FIRST, AND IT IS UNCONDITIONAL. It used to sit inside the
@@ -637,16 +664,29 @@ export async function withGpuSlot(opts, fn) {
       }
     }
     if (comfyManaged) {
-      comfyChild = await ensureComfy({
+      const ensureOpts = {
         ...(instanceKey || instance.port !== DEFAULT_COMFY_PORT ? { api: instance.api } : {}),
         ...(reserveVram != null ? { reserveVram } : {}),
         ...(warm ? { warm: true } : {}),
         // A kept instance is spawned detached and unref'd (comfy-lifecycle.mjs): it must not hold
-        // this runner's event loop, and its lease's holder stops it. Absent unless asked, so the
-        // call is unchanged for a runner that tears its own ComfyUI down.
-        ...(keepComfy ? { keep: true } : {}),
+        // this runner's event loop. It carries the process bound that ends it once it is idle, when
+        // there is one. Absent for a runner that tears its own ComfyUI down (COMFY_IDLE_EXIT_SEC=0).
+        ...(keep ? { keep: true, ...(exitSecs > 0 ? { idleExit: exitSecs } : {}) } : {}),
         ...(launch ? { launch, env: instanceEnv } : {}),
-      });
+      };
+      report = {};
+      comfyChild = await ensureComfy({ ...ensureOpts, report });
+      if (keep && report.selfBounded) {
+        // Hold it for the whole job, so its process bound does not fire under a long step that is not ComfyUI's. "gone" on a
+        // REUSED instance = it ended itself (idle) between ensureComfy's check and the hold: launch again, once.
+        held = await holdComfy(instance.api);
+        if (held.state === "gone" && comfyChild === null) {
+          console.error(`COMFY-KEEP: the ComfyUI on ${instance.api} ended itself (idle) as this job reached it; launching a fresh one`);
+          report = {};
+          comfyChild = await ensureComfy({ ...ensureOpts, report });
+          held = report.selfBounded ? await holdComfy(instance.api) : null;
+        }
+      }
     }
     if (comfyManaged && family) {
       // The instance may be one a previous lease kept, still holding that lease's family. Free it
@@ -663,6 +703,7 @@ export async function withGpuSlot(opts, fn) {
       beat("GPU work starting: the slot is ready and ComfyUI is up", { force: true });
       return await fn({ comfyChild, lease });
     } catch (err) {
+      failed = true;
       // F-38 audit: ComfyUI's own console output used to be discarded entirely
       // (`stdio: "ignore"`), so a render failure carried no diagnostic beyond a
       // terse execution_error JSON — finding the real cause (once, a plain disk-
@@ -670,8 +711,10 @@ export async function withGpuSlot(opts, fn) {
       // stdout. comfyChild is only non-null when THIS run launched ComfyUI itself
       // (never on a reused foreign instance — comfy-lifecycle.mjs's reuse branch
       // returns null), so the tail is always this render's own console, never
-      // another job's leftover output.
-      if (comfyManaged && comfyChild) {
+      // another job's leftover output. A KEPT instance (ADR 0097) writes its console
+      // to the same log file for every job it serves, so a reused kept instance's tail
+      // is the end of this job's output too.
+      if (comfyManaged && (comfyChild || keep)) {
         const tail = instanceKey ? tailLog(undefined, undefined, instanceKey) : tailLog();
         if (tail) {
           const enriched = new Error(

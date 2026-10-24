@@ -432,9 +432,31 @@ it is before rendering: a flagless instance can keep the port while a correctly-
 fails to bind, and nothing reports it (its argv carries no `ComfyUI` substring, so a naive
 kill-filter misses it).
 
+**A ComfyUI a harness runner launched stays up after a good job and ends itself once idle (ADR 0097, 2026-10-24).** Before that
+every render relaunched ComfyUI and killed it at the end: on the 8 GB laptop card the launch took 31 to 89 s of a 66.5 to 135 s
+render. Now the runner leaves the process running after a good job (it holds about 240 MiB of the card; on the 16 GB reference
+box a kept keyed instance held about 5.0 to 5.2 GiB of host RAM), the next render inside the bound reuses it, and the idle pack
+exits the process after `COMFY_IDLE_EXIT_SEC` seconds with nothing queued or running and no runner holding it. Set
+`COMFY_IDLE_EXIT_SEC` in the runner's environment: unset is 300, `0` or `off` restores the old behaviour (kill the ComfyUI after
+every job), a whole number of seconds from 5 up is that bound, anything else is 300 with a `COMFY-IDLE-WARN` line. It is fixed when
+the instance is launched. A render that fails stops the instance it used, so a stuck CUDA error does not outlive the job. A render
+that needs another shape (warm against single, another `--reserve-vram`) restarts the instance once. An explicit `--keep-comfy`
+keeps its old meaning: the instance is kept whatever happens and has no process bound; its lease's holder (or you) stops it.
+A runner holds the instance for its whole job through `GET /offload/hold`, a response that sends one byte every 2 s and ends when
+the runner exits, so a long step that is not ComfyUI's (ffmpeg, a QA pass) does not let the bound fire. `curl
+http://127.0.0.1:8188/offload/idle` shows it: `exit_limit_sec` (the bound, 0 when there is none), `exit_idle_sec` (seconds
+idle now) and `holds` (runners holding it now), beside the model free's `limit_sec` and `idle_sec`.
+
+To stop a kept instance by hand, for example to hand the whole card to something else: find the process that listens on its port
+(`Get-NetTCPConnection -LocalPort 8188 -State Listen` gives `OwningProcess`; a keyed instance has its own port, printed in its
+launch marker `.offload-launch-<key>.json` in the ComfyUI folder) and stop it (`Stop-Process -Id <pid>`, or `kill <pid>` on
+Linux). For a keyed instance under a lease, `local-offload gpu release --epoch N` stops the instances of that lease; the media
+pipeline's own routine release leaves a self-bounded one running on purpose. Or just wait for the bound.
+
 **A hand-started ComfyUI is not bounded by the harness's idle free unless you opt in.** The ComfyUI the harness keeps
 (`--keep-comfy`) or runs warm (`--batch`) is launched with an idle pack that frees its models and caches after 300 s with
-nothing queued or running (`COMFY_IDLE_FREE_SEC` on the runner changes it, `0` or `off` disables it). The harness's own launch
+nothing queued or running (`COMFY_IDLE_FREE_SEC` on the runner changes it, `0` or `off` disables it; do not confuse it with
+`COMFY_IDLE_EXIT_SEC`, above, which ends the process). The harness's own launch
 passes `--disable-smart-memory`, so ComfyUI already unloads its models after each prompt; the pack matters for a warm session's
 cache and for an instance that runs with smart memory (ComfyUI's default), which keeps its models loaded between prompts. The harness injects
 nothing into an instance it did not start: a runner that finds one without the pack prints one `COMFY-IDLE-WARN` and uses it as
@@ -447,8 +469,10 @@ python main.py ... --extra-model-paths-config <repo>/render/comfyui-ext/extra_mo
 and, if you start it with `--disable-all-custom-nodes`, add `offload_idle` to its one `--whitelist-custom-nodes` list (that flag
 takes a single list and the last occurrence wins). `OFFLOAD_IDLE_FREE_SEC=<seconds>` in its environment changes the bound
 (default 300, `0` off). Confirm it with `curl http://127.0.0.1:8188/offload/idle`. It frees models and caches only: the process stays
-until you stop it. It has been tested against a fake queue and not yet run in a live ComfyUI; the live check is in
-[media generation](systems/media-generation.md).
+until you stop it. `OFFLOAD_IDLE_EXIT_SEC=<seconds>` in the same environment would also end the process after that many idle
+seconds with no hold; leave it unset (the default is no process bound) unless you want your own instance to exit, because a
+client that does not hold the instance through `GET /offload/hold` is not protected from the exit. The pack ran in a live ComfyUI on
+2026-10-14; the live check is in [media generation](systems/media-generation.md).
 
 ### Run an arbitrary ComfyUI graph (run-graph) ✅
 

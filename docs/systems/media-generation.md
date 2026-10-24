@@ -70,7 +70,7 @@ CPU-class composition lane (HyperFrames).
 ## Key concepts
 
 **GPU Lock** — a single-slot, cross-process lock; only one GPU-heavy job runs at a time per machine.
-**Zero-Warm** — no GPU residency persists between jobs, except the memory stack (the mem0 embedder and reranker stay resident, register C-87). **Warm Batch** — an opt-in session where the
+**Zero-Warm** — no model stays GPU-resident between jobs, except the memory stack (the mem0 embedder and reranker stay resident, register C-87); a bare ComfyUI process (about 240 MiB) may outlive a job for at most `COMFY_IDLE_EXIT_SEC` (ADR 0097). **Warm Batch** — an opt-in session where the
 checkpoint loads once for N renders. **Op** — one image-editing operation inside `edit-image`.
 **Named family** — an opt-in image or edit binding beside the node's default one, selected per
 request by `family` and carrying its own license (ADR 0058). **Launch profile** — the ComfyUI launch
@@ -80,8 +80,10 @@ flags a binding needs (`comfy_cuda_device`, `comfy_dynamic_vram`, `comfy_extra_a
 
 Every GPU-heavy job runs inside `withGpuSlot`, which owns the render-side lifecycle: **fence**
 against the lease it was handed, free the llama-swap tiers (once per lease, after draining),
-cold-start ComfyUI, run the job, then tear down — `/free` and kill the ComfyUI process. Teardown is
-idempotent and also runs on SIGINT/SIGTERM, so an interrupt does not leak ComfyUI.
+start ComfyUI (or reuse the one a job within the last `COMFY_IDLE_EXIT_SEC` seconds kept), hold it for the job, run the job,
+then tear down — `/free`, then stop the ComfyUI process if the job failed or `COMFY_IDLE_EXIT_SEC=0`; after a good job the process is
+left bare (about 240 MiB of the card) and ends itself once idle (ADR 0097, 2026-10-24; before that it was killed after every job).
+Teardown is idempotent and also runs on SIGINT/SIGTERM, so an interrupt does not leak ComfyUI.
 
 `withGpuSlot` does **not** acquire or release. The harness takes the machine-wide lease in Go and
 threads `GPU_LEASE_DIR` / `GPU_LEASE_EPOCH` / `GPU_LEASE_CLASS` down; a GPU job started with no
@@ -475,7 +477,7 @@ the output envelope shape.
 
 ## Invariants and assumptions
 
-1. **Zero-warm by default.** Nothing GPU-resident survives a job.
+1. **Zero-warm by default.** No model stays GPU-resident after a job. The bare ComfyUI process may survive it for at most `COMFY_IDLE_EXIT_SEC` (300 s unless set; `0` kills it after every job, ADR 0097).
 2. **The memory stack is never unloaded** by the free step or by `gpu reserve --unload-seat` (register C-87, 2026-10-01). It is an exception to item 1: mem0 never yields to a lease, and the stack is small and, on the reference box, off the render card.
 3. Only one GPU-heavy job at a time, per machine.
    **Corollary — never post a graph straight to ComfyUI (`:8188`).** Every render enters
@@ -1566,7 +1568,8 @@ untouched, `--database-url` included.
 **Why one folder per instance, outside `temp` and `output`.** ComfyUI appends `/temp` to the value of
 `--temp-directory` itself, so the temp directory a keyed instance really uses is
 `<comfy dir>/instances/<key>/temp`. The default instance deletes `<comfy dir>/temp` on every start
-(assets disabled, the harness default), and the harness launches the default instance per job, so a
+(assets disabled, the harness default), and the harness launches the default instance for a job that finds none
+running (since ADR 0097 an instance kept by an earlier job is reused, so the wipe happens per launch, not per job), so a
 keyed temp directory nested under `<comfy dir>/temp` would be wiped whenever the default instance
 started. A test pins that no keyed directory is inside the default instance's `temp` or `output`
 tree, and that the directories the launcher creates are the ones ComfyUI really uses.
@@ -1728,14 +1731,16 @@ spawned **detached** (its own process group), with its console going to **its ow
 there is no pipe for a runner's exit to close under it: a process still printing into a closed pipe dies with
 `EPIPE`), **unref'd** (the runner's loop no longer waits for it) and with its window hidden (a detached console
 process opens one on Windows). The non-kept path is byte-for-byte what it was: piped, attached, killed with its
-runner. A kept instance that never answers is still killed, since a half-started instance is nobody's.
+runner. Since 2026-10-24 (ADR 0097) a runner keeps the instance it launched BY DEFAULT after a good job, not only
+under `--keep-comfy`, and the non-kept path is what `COMFY_IDLE_EXIT_SEC=0` selects (see "Who stops it"). A kept instance
+that never answers is still killed, since a half-started instance is nobody's.
 
 - **The log is bounded by rotation, not by a capture that stops at 5 MB.** A piped child can be capped as it
   is written; a descriptor handed to another process cannot be truncated under it without a helper process
   to pump the stream, and this harness does not add a long-lived helper for a log. Each launch rotates the
   log (`.1` to `.3`, as before) and cuts the archived copy to its last 5 MB (`trimRotatedLog`), so the disk
   holds at most three 5 MB archives plus the run in progress. The live file of a run is not truncated: the
-  instance lives no longer than its lease, which bounds it, and the idle pack below writes one line into it per free. `tailComfyLog` (the lines a failure message
+  instance is ended by its own process bound or by its lease's holder (below), and the idle pack writes one line into it per free. `tailComfyLog` (the lines a failure message
   carries) reads only the last 256 KB of the file, so a long-lived instance's log is never read whole.
 - **It is freed when its family changes (2026-10-09, `render/comfy-family.mjs`).** ComfyUI keeps the models it loaded in
   host memory between prompts ("Using RAM pressure cache"; "Model Krea2 prepared for dynamic VRAM loading. 24449MB Staged" in
@@ -1760,13 +1765,27 @@ runner. A kept instance that never answers is still killed, since a half-started
   ran on only when the harness launched it (live pid, the marker's exact argv); the holder's proof is asked three times of
   eight seconds; `gpugen`'s post-run `/free` waits five seconds and says a failure that reached an instance. Tests run
   against a fake ComfyUI that records the order of `/free` and the job (`render/comfy-hoard.test.mjs`).
-- **Who stops it.** A kept instance lives no longer than the GPU lease it was launched under; its marker
-  records that lease epoch (`leaseEpoch`). The **holder of the lease stops it on release**: `gpu reserve`
-  when its wrapped command ends, and the pipeline when its media lease is released
-  (`internal/comfyinst`: the marker is matched to the epoch, the instance is shown to be the harness's by pid
-  and exact argv on its own endpoint, freed with `POST /free`, then stopped). A kept **default** instance
-  (no key) records no lease epoch and is stopped by whoever kept it, as it always was. That bounds the
-  process. What it keeps in models and caches is bounded sooner, by the instance itself (next bullet).
+- **Who stops it.** Since 2026-10-24 (ADR 0097) the instance a harness runner launches **ends itself**: it carries the
+  idle pack with a process bound, and the pack exits the process after `COMFY_IDLE_EXIT_SEC` (default 300) with no prompt
+  queued or running and no runner holding it (the process bound, below). The runner keeps it after a GOOD job, so the next
+  job inside the bound reuses it and skips the launch. A job that FAILED stops the instance it used, launched or reused, so a
+  sticky CUDA error is still cured by the next launch. `COMFY_IDLE_EXIT_SEC=0` (or `off`) restores the old lifecycle: no
+  process bound, the runner kills what it launched after every job. A kept instance with no process bound (an explicit
+  `--keep-comfy` with `COMFY_IDLE_EXIT_SEC=0`, or a hand-started instance) is bounded as before: a keyed one by the GPU lease
+  it was launched under, a default one (no key) by whoever kept it.
+  A kept instance's marker records that lease epoch (`leaseEpoch`) and, when it bounds itself, `idleExitSec`. The **holder of
+  the lease stops it on release**: `gpu reserve` when its wrapped command ends, its detached holder, and `gpu release`
+  (`internal/comfyinst.StopForLease`: the marker is matched to the epoch, the instance is shown to be the harness's by pid and
+  exact argv on its own endpoint, freed with `POST /free`, then stopped). The pipeline's routine release of its media lease
+  uses `StopForRelease` instead, which spares an instance with `idleExitSec` (reported as `Spared`) so the next job on those
+  cards reuses it; keyed per-card and multicard instances are covered. Under an outer `gpu reserve`, the wrapper's job object
+  still ends an instance launched inside it when the command ends. What the instance keeps in models and caches is bounded
+  sooner, by the model free (next bullet).
+  A survivor holds about 240 MiB of the card (measured on the 8 GB laptop card, 2026-10-24, after the end-of-job `/free`) and,
+  measured live on 2026-10-14 on the 16 GB reference box (keyed single-card instance, ComfyUI 0.38.0), about 5.0 to 5.2 GiB of
+  host private bytes, for at most the bound. Another `--reserve-vram`, or a switch between warm and single (`--cache-none`),
+  restarts a self-bounded instance (`launchShapeGap`) unless the runner that launched it is still working on it, so that call
+  pays one launch. A family change frees the weights as before (see "It is freed when its family changes", above).
 - **A kept or warm instance frees its own models and caches after 300 s idle (0.186, `render/comfyui-ext/idle-nodes/offload_idle`).**
   The rule is that no idle model stays loaded. llama-swap keeps it with its own `ttl`; ComfyUI has no idle timer (its parser takes no
   idle or timeout argument). The runner's end-of-job `POST /free` and the holder's stop at release cover the ordinary path. The harness
@@ -1779,9 +1798,10 @@ runner. A kept instance that never answers is still killed, since a half-started
   `render/comfy-family.mjs`, was an instance with the cache on: "Using RAM pressure cache" in its log, 57 GiB private); and (b) a hand-started
   instance launched without `--disable-smart-memory`, which keeps its models loaded in VRAM after a prompt. That is the gap, and the
   bound for it lives inside the engine, the way llama-swap's `ttl` does: the harness runs no timer or watcher and acts on no other
-  process (plan I5), and the pack only ever acts on its own ComfyUI. This is read from ComfyUI's code and checked against a fake queue;
-  **it has not been run inside a live ComfyUI** (the live check below is the way to do it).
-  - *Where it is loaded.* A launch with `keep` or `warm` (`--keep-comfy`, `--batch`) adds
+  process (plan I5), and the pack only ever acts on its own ComfyUI. This was read from ComfyUI's code and checked against a fake queue,
+  and the pack was run inside a live ComfyUI on 2026-10-14 (the live check below is how to repeat it). Since 2026-10-24 (ADR 0097) the
+  same pack also carries a process bound that ends the Python process (see "The process bound" below).
+  - *Where it is loaded.* A launch with `keep` or `warm` (a default kept launch since ADR 0097, `--keep-comfy`, `--batch`) adds
     `--extra-model-paths-config render/comfyui-ext/extra_model_paths_idle.yaml` once, before the operator's own args, and puts the pack
     `offload_idle` INTO the custom-node whitelist ComfyUI will read (`--whitelist-custom-nodes` is `nargs='+'` with no append, so a
     second flag would replace the multicard packs, and `--whitelist-custom-nodes=a b` reads `b` as a stray argument: that spelling is
@@ -1801,12 +1821,27 @@ runner. A kept instance that never answers is still killed, since a half-started
     not a regression. Under `--cache-none` an instance that holds no model (ComfyUI's own end-of-prompt unload ran, as did the runner's
     `/free`) does not fire at all; with the cache on (a warm session) it fires once after the last prompt, whatever the models are
     doing, and logs `idle bound reached` even when the runner's `/free` already reset the cache and the free has little left to release.
+    A hold (below) does not block the model free.
+  - *The process bound (ADR 0097, 2026-10-24).* After `OFFLOAD_IDLE_EXIT_SEC` seconds with no prompt queued or running and no runner
+    holding the instance, the pack waits a 2 s grace, checks again under the queue's mutex, says why in the log and exits the process
+    with `os._exit(0)`. The clock starts when the pack loads, so an instance nobody ever used ends too. Unset, empty or `0` means no
+    process bound: a hand-started instance that loads the pack for its model free never exits. A runner **holds** the instance for
+    its whole job with `GET /offload/hold`, a streamed response with one byte every 2 s; a hold ends when the runner closes it, when a
+    heartbeat write fails, or when the transport closes, so a runner that dies releases the instance without a word. That is what
+    lets a runner sit in a long step that is not ComfyUI's (ffmpeg, a QA pass, an LLM call) without the instance ending under it.
+    The harness runs no timer for this; the clock is the engine's own.
   - *Settings.* `COMFY_IDLE_FREE_SEC` on the runner: unset is 300, `0` or `off` is none (one `COMFY-IDLE-OFF` line), a whole number of
     seconds from 5 up is that; anything else is 300 with a `COMFY-IDLE-WARN`. It reaches the pack as `OFFLOAD_IDLE_FREE_SEC` and is
     fixed when an instance is launched: a runner that reuses a running instance cannot change it. `OFFLOAD_IDLE_POLL_SEC` (1 to 30,
-    default 5) is the test seam.
-  - *Knowing it is live.* The pack serves `GET /offload/idle` (`limit_sec`, `idle_sec`, `armed`, `freed`, `last_free_unix`, `error`),
-    read-only. After a launch with the pack the runner asks once: an answer that reports the bound that was asked for is one
+    default 5) is the test seam. `COMFY_IDLE_EXIT_SEC` on the runner sets the process bound: unset is 300, `0` or `off` is none (one
+    `COMFY-KEEP-OFF` line, and the runner then kills what it launched after every job, as before ADR 0097), a whole number of
+    seconds from 5 up is that; anything else is 300 with a `COMFY-IDLE-WARN`. It reaches the pack as `OFFLOAD_IDLE_EXIT_SEC`, is
+    recorded in the launch marker as `idleExitSec`, and is fixed at launch like the other. An explicit `--keep-comfy` keeps its old
+    meaning and asks for no process bound.
+  - *Knowing it is live.* The pack serves `GET /offload/idle` (`limit_sec`, `idle_sec`, `armed`, `freed`, `last_free_unix`, `error`,
+    and since ADR 0097 `exit_limit_sec`, `exit_idle_sec`, `holds`), read-only. `holds` is the number of runners holding the instance
+    now; `exit_idle_sec` counts toward `exit_limit_sec`, and a launch that asked for a process bound it did not get is one
+    `COMFY-IDLE-WARN`. After a launch with the pack the runner asks once: an answer that reports the bound that was asked for is one
     `COMFY-IDLE` line; no answer, an `error` (the pack could not find ComfyUI's queue after an upstream change), or a `limit_sec`
     other than the one asked for (the pack never read `OFFLOAD_IDLE_FREE_SEC`) is one `COMFY-IDLE-WARN` and the render goes on. The bound itself
     does not depend on the route, and a failure inside the pack is logged once as `[offload_idle] NOT ACTIVE` and never fails a job.
@@ -1816,16 +1851,20 @@ runner. A kept instance that never answers is still killed, since a half-started
     proof of a keyed instance, never asked twice); an argv ComfyUI does not report is unknown and says nothing. The harness does not inject into an instance it does not own (ADR 0009): to bound one, add
     `--extra-model-paths-config <repo>/render/comfyui-ext/extra_model_paths_idle.yaml` to its launch, and the pack name to its
     `--whitelist-custom-nodes` if it disables custom nodes ([operator guide](../OPERATOR-GUIDE.md)).
-  - *What it does not bound.* The models and the executor cache only. The Python process and its CUDA context (it idles at 2.9 GiB
-    private, above) live until the holder stops the instance at release, and an instance whose holder died lives until an operator
-    stops it. A self-exit from inside ComfyUI is deliberately not built: a runner in a long step that is not ComfyUI's (ffmpeg, a QA
-    pass, an LLM call) looks the same as an abandoned instance, and a stopped instance breaks that runner's next prompt with a refused
-    connection where a `/free` only costs a reload. A pack-side check of the lease epoch is unsafe as well: reusing an instance
-    re-stamps its marker to the new epoch (`restampLaunchOwner`) while the child's environment keeps the epoch it was launched under.
-    A sweep of markers whose epoch is dead, if one is wanted, is a separate slice (an explicit `gpu doctor` action, which plan I5
-    allows where it forbids a watcher). So the register rows that say a kept instance lives to the end of its lease stay `partly`:
-    models and caches are bounded, the process is lease-bounded.
-  - *Live check, not yet run on a card (the tests use a fake queue).* On a node with ComfyUI installed, as the operator, one lease per
+  - *What it does not bound.* The model free bounds the models and the executor cache only. The process bound (ADR 0097) ends the
+    Python process and its CUDA context (it idles at 2.9 GiB private, above) only on an instance launched with `OFFLOAD_IDLE_EXIT_SEC`.
+    An explicit `--keep-comfy` instance, a launch under `COMFY_IDLE_EXIT_SEC=0`, an instance kept by an older build and a hand-started
+    one carry none: a keyed one lives until its lease's holder stops it, and one whose holder died, or a default one, until an operator
+    stops it. Until 2026-10-24 no self-exit existed, on purpose: a runner in a long step that is not ComfyUI's (ffmpeg, a QA pass, an
+    LLM call) looks the same as an abandoned instance, and a stopped instance breaks that runner's next prompt with a refused
+    connection where a `/free` only costs a reload. The hold (`GET /offload/hold`) is what tells the two apart, so the exit is
+    now built. A pack-side check of the lease epoch stays unsafe: reusing an instance re-stamps its marker to the new epoch
+    (`restampLaunchOwner`) while the child's environment keeps the epoch it was launched under. A sweep of markers whose epoch is
+    dead, if one is wanted, is a separate slice (an explicit `gpu doctor` action, which plan I5 allows where it forbids a watcher).
+    So the register rows that say a kept instance lives to the end of its lease stay `partly` for those instances; for a default
+    kept instance, models, caches and the process are all bounded by the instance itself.
+  - *Live check.* The model free ran live on 2026-10-14 (ComfyUI 0.38.0, the 16 GB reference box, a keyed single-card instance); the
+    process bound's tests use a fake queue, and case E below reads it on a card. On a node with ComfyUI installed, as the operator, one lease per
     case so the wrapped command does not end between steps (`local-offload gpu reserve --class media -- sh -c '<the sequence>'`),
     with `COMFY_INSTANCE=idlecheck` in the environment so the instance is keyed and its holder stops it at release (a kept default
     instance is stopped by hand). Two instruments, because the cases show in different places: per-card memory
@@ -1857,6 +1896,13 @@ runner. A kept instance that never answers is still killed, since a half-started
       (the executor reset in `free_memory` should drop the cached ones; unverified). Release each lease: the holder still stops the
       instance (marker cleared, no ComfyUI process left). Record the node, the ComfyUI version, the times and the readings on the
       register row.
+    - *E. The process bound (ADR 0097).* With `COMFY_IDLE_EXIT_SEC=60` and `COMFY_INSTANCE=idlecheck`, run
+      `node render/comfy-render.mjs o1.png "a red cube"` twice, 20 s apart, in one lease. The second run logs no launch (it reused the
+      kept instance), `GET /offload/idle` answers `exit_limit_sec` 60, and the port still listens. Then wait 90 s with no job: the port
+      no longer listens, the instance's log ends with the pack's exit line, and the process is gone. While a render runs, `GET
+      /offload/idle` reads `holds` 1; kill the runner (not the instance) mid-render and read `holds` fall to 0 within a few
+      seconds. A render that fails (for example `node render/comfy-generate.mjs o3.png "x" --ckpt missing.safetensors`) leaves no
+      instance behind. Record the node, the ComfyUI version, the times and the readings on the register row.
 
 **Verifying a pin on Windows.** The driver reports no per-process rows for graphics-mode (WDDM)
 cards, so confirm that an instance is on its card by per-card memory deltas, not process ids.
@@ -2441,7 +2487,8 @@ recorded as known offenders with their reason rather than silently skipped — a
 - [`render/comfyui-ext/extra_model_paths_idle.yaml`](../../render/comfyui-ext/extra_model_paths_idle.yaml) and
   [`render/comfyui-ext/idle-nodes/offload_idle/__init__.py`](../../render/comfyui-ext/idle-nodes/offload_idle/__init__.py) — the idle bound a
   kept or warm ComfyUI is launched with: it frees what the instance keeps (a loaded model, the executor cache) after 300 s with an empty
-  queue, not yet run in a live ComfyUI ([tests](../../render/comfyui-ext/test_offload_idle.py), run by [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs));
+  queue (run in a live ComfyUI on 2026-10-14), and since ADR 0097 ends the process after `COMFY_IDLE_EXIT_SEC` with no prompt and no
+  hold (`GET /offload/hold`) ([tests](../../render/comfyui-ext/test_offload_idle.py), run by [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs));
   the launcher side (`resolveIdleBound`, the yaml and whitelist splice in `launchFlags`, the child env, the probe) is in
   [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs), pinned by [`render/comfy-idle.test.mjs`](../../render/comfy-idle.test.mjs)
 - [`internal/hostneed/hostneed.go`](../../internal/hostneed/hostneed.go) — `estimateWith`: a card-only Wan call declares 0 host RAM
@@ -3029,7 +3076,7 @@ image job or a whole-node graph ([Graphs on the fleet](#graphs-on-the-fleet-adr-
 audio carry no per-family identity yet. A call that carries a `waiter_token` is not exempt any more: an image call or a graph joins
 the ticket queue and brings its place (ADR 0083, and Amendment 1 for the graph).
 
-**Named limits of overflow.** Every remote job pays ComfyUI's cold start (zero-warm). The same recipe and seed on a different GPU
+**Named limits of overflow.** A remote job pays ComfyUI's cold start unless the node still runs an instance an earlier job kept (ADR 0097: reused inside the 300 s idle bound). The same recipe and seed on a different GPU
 architecture is the same composition, not bit-identical pixels. A mis-predicted placement costs one bounce per node per pause: up
 to the node's `gpu_wait_ms` parked on the node and one deferred row there before the placer sees it. The ticket queue below closes
 the two limits the first cut named (a call resumed with its token was not moved, and a call that went to the fleet first queued
@@ -3419,7 +3466,7 @@ the results file.
    `queued` with exit 0 to be re-run from the back of the line (`TestBatchWithNoRemoteMatchRunsWarmOnThisMachineAndSaysWhy`,
    `TestRunImageBatchWaitingKeepsItsPlaceUntilTheCardFrees`), and Ctrl-C ends the wait at once with the rows `queued`
    (`TestRunImageBatchWaitingEndsOnInterruptAndLeavesNoLease`). The line it prints names each node and why it does not match (`not-capable`, the
-   key that differs), which is also in the JSON as `cluster`. Per-job tickets would be one cold start per picture on the same lane, which is
+   key that differs), which is also in the JSON as `cluster`. Per-job tickets would be one cold start per picture on the same lane (less where the node's kept ComfyUI is reused, ADR 0097), which is
    slower than waiting for it once. Every other warm case (a free lane, `--route local`, no fleet, an inherited lease, no queue) waits
    the pipeline's own `gpu_wait_ms` window and defers as before; a node that gains the weights later matches by recipe and the batch then splits.
 2. **One ticket per job** when the lane is not free (busy, or the pipeline could not read it) and at least one roster node renders the recipe.
@@ -3428,7 +3475,7 @@ the results file.
    single-job node at once** (`TestBatchNeverDispatchesTwoJobsToOneSingleJobNodeAtOnce`). The job reaches the node as it was written:
    `refine=false` only when the job says so, the seed, the negative, `width`, `height` and `steps` exactly, the family under the node's own name
    (`TestBatchJobsPlacedThroughTickets`). The output is fetched, checked against the sha256 the node published, to the exact `out`. A node renders
-   under its own zero-warm lifecycle (ADR 0009): one ComfyUI cold start per job. There is no mixed local/remote work stealing and no batch task on
+   under its own zero-warm lifecycle (ADR 0009, changed in part by ADR 0097): one ComfyUI cold start per job unless the node's kept instance is still up. There is no mixed local/remote work stealing and no batch task on
    the fleet in v1: a node renders one job per ticket and the warm session exists only here. **A ticket that ends without a place is not a failed job
    and is not sent again**: the queue's own ceiling (a ticket that waited 8 h without a lane anywhere) and a ticket it could not take over carry the held
    class like a lost race does, but they come from a ticket that is over, so the job is `queued` with the queue's reason and `--resume` renders it; a new
@@ -3530,7 +3577,7 @@ its rows when its session ends**: the render script runs to the end before the b
 the results file (`<results>.partial`) together at that point, and a kill, crash or power loss mid-render leaves, for those jobs, only the render
 script's own `batch-<stamp>.results.jsonl` in the media dir. A pre-flight failure or a skipped job is written as soon as the mode is chosen (a lane
 and roster read, before any job runs), and the ticket path writes each row as its job ends. The batch moves a rejected file onto `<out>.unverified` over
-any earlier file of that name. A node job costs a ComfyUI cold start, so for the 2.1 families the ticket path pays off when the lane is held
+any earlier file of that name. A node job costs a ComfyUI cold start unless the node's kept instance is still up (ADR 0097), so for the 2.1 families the ticket path pays off when the lane is held
 by a long job and a node is idle, not when the lane is free (that is the warm session's case). The ticket path inherits the queue's named limits:
 one line per delegating machine, a CLI ticket dies with the CLI, a late-binding gap of up to a scan interval.
 

@@ -51,8 +51,11 @@ export function clearOwner(dir) {
 const LAUNCH_MARKER = ".offload-launch.json";
 const lp = (dir, key = "") => join(dir, key ? `.offload-launch-${key}.json` : LAUNCH_MARKER);
 
-export function writeLaunchOwner(dir, { pid, ownerPid = process.pid, args, profile = {}, key = "", port, leaseEpoch }) {
+export function writeLaunchOwner(dir, { pid, ownerPid = process.pid, args, profile = {}, key = "", port, leaseEpoch, idleExitSec }) {
   const rec = { startedAt: Date.now(), pid, ownerPid, args, profile };
+  // idleExitSec: the instance ends itself after that long idle (the idle pack's process bound, ADR 0097), so a lease's routine
+  // release leaves it running for the next job (internal/comfyinst reads it).
+  if (typeof idleExitSec === "number" && idleExitSec > 0) rec.idleExitSec = idleExitSec;
   if (key) {
     rec.key = key;
     if (typeof port === "number") rec.port = port;

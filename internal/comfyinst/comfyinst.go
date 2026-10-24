@@ -10,8 +10,15 @@
 // prompt ends under --disable-smart-memory, so that is a warm session's executor cache, or the
 // models of a hand-started instance run with smart memory) is bounded sooner by the instance
 // itself, without a watcher here: a kept or warm launch carries the idle pack
-// (render/comfyui-ext/idle-nodes), which frees it after 300 s with an empty queue; not yet run in
-// a live ComfyUI.
+// (render/comfyui-ext/idle-nodes), which frees it after 300 s with an empty queue (run live on
+// 2026-10-14).
+//
+// AN INSTANCE THAT BOUNDS ITSELF (ADR 0097, 2026-10-24). Since then the runners keep the ComfyUI they
+// launch after every good job, and the same pack ends the process after 300 s with no prompt and
+// no runner holding it; the marker says so (idleExitSec). The pipeline's routine release of a
+// media lease (StopForRelease) leaves such an instance running, so the next job on its cards
+// reuses it instead of paying the launch again. Every explicit end of a lease (`gpu reserve` when
+// its command ends, its detached holder, `gpu release`) still stops it with StopForLease.
 //
 // WHAT IT WILL AND WILL NOT STOP. Only a keyed instance whose marker names exactly this lease
 // epoch. A marker with no epoch (the default instance, an instance launched outside a lease) is
@@ -57,6 +64,9 @@ type Marker struct {
 	Key        string   `json:"key"`
 	Port       int      `json:"port"`
 	LeaseEpoch *uint64  `json:"leaseEpoch"`
+	// IdleExitSec is the process bound the instance carries (its idle pack exits it after that many seconds with no prompt and no
+	// runner holding it); 0 = none, the lease's holder ends it.
+	IdleExitSec int `json:"idleExitSec"`
 }
 
 // Deps are the process and network seams.
@@ -105,6 +115,8 @@ type Outcome struct {
 	PID     int    `json:"pid"`
 	Port    int    `json:"port"`
 	Stopped bool   `json:"stopped"`
+	// Spared is true when a routine release left an instance that bounds its own process (StopForRelease).
+	Spared bool `json:"spared,omitempty"`
 	// Why is empty when the instance was stopped; otherwise it says why it was left, or why its
 	// marker was only cleared.
 	Why string `json:"why,omitempty"`
@@ -114,6 +126,17 @@ type Outcome struct {
 // `epoch`, and reports one Outcome per such instance, in key order. An empty comfyDir, an
 // epoch of 0 and a directory that cannot be read are no-ops.
 func StopForLease(ctx context.Context, comfyDir string, epoch uint64, d Deps) []Outcome {
+	return stopMarked(ctx, comfyDir, epoch, d, false)
+}
+
+// StopForRelease is StopForLease for the pipeline's routine release of a media lease after its job: an instance that bounds its
+// own process (IdleExitSec > 0) is left running for the next job and reported, unsignalled, with why; every other instance of the
+// lease is stopped exactly as StopForLease stops it.
+func StopForRelease(ctx context.Context, comfyDir string, epoch uint64, d Deps) []Outcome {
+	return stopMarked(ctx, comfyDir, epoch, d, true)
+}
+
+func stopMarked(ctx context.Context, comfyDir string, epoch uint64, d Deps, spareSelfBounded bool) []Outcome {
 	if strings.TrimSpace(comfyDir) == "" || epoch == 0 {
 		return nil
 	}
@@ -139,6 +162,11 @@ func StopForLease(ctx context.Context, comfyDir string, epoch uint64, d Deps) []
 		// A complete keyed marker for THIS lease, in the file its key names, or not ours at all.
 		if m.Key == "" || m.Port <= 0 || m.PID <= 0 || m.LeaseEpoch == nil || *m.LeaseEpoch != epoch ||
 			name != markerPrefix+m.Key+markerSuffix {
+			continue
+		}
+		if spareSelfBounded && m.IdleExitSec > 0 {
+			out = append(out, Outcome{Key: m.Key, PID: m.PID, Port: m.Port, Spared: true, Why: fmt.Sprintf(
+				"it ends itself after %d s with no prompt and no runner holding it (its process bound), so the release leaves it running for the next job", m.IdleExitSec)})
 			continue
 		}
 		out = append(out, stopOne(ctx, path, m, epoch, d))
