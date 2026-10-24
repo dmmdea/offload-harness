@@ -215,6 +215,12 @@ func betterRemote(seed string, st *Subtask, priorTokS float64, candidate, incumb
 	if c, i := saturated(candidate), saturated(incumbent); c != i {
 		return i // candidate wins only when the incumbent is the saturated one
 	}
+	// A node whose every seat for this contract sits on a card with a live driver-fault repeat (ADR 0096) ranks
+	// below one with a seat off such cards; it is demoted, never excluded.
+	fnow := faultNow()
+	if c, i := faultDemoted(candidate, st, fnow), faultDemoted(incumbent, st, fnow); c != i {
+		return i
+	}
 	if c, i := provablyStartsNow(candidate), provablyStartsNow(incumbent); c != i {
 		return c
 	}

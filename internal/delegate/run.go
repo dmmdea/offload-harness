@@ -983,6 +983,12 @@ func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks
 			r.spreadLocalBusy = busyReading{note: "agent_spread_local_slot=always"}
 		} else {
 			r.spreadLocalBusy = r.probeLocalBusy(ctx)
+			// A live driver-fault repeat on the seat's cards (ADR 0096) deals the local slots away like a busy seat;
+			// the capacity wait reads the seat afresh, so the seat is demoted, not excluded.
+			if faulted, why := r.localFaulted(subtasks); faulted {
+				r.spreadLocalBusy.busy = true
+				r.spreadLocalBusy.note += "; " + why
+			}
 		}
 		// One line per run says which rule dealt the local slot and from what
 		// reading — the placement reasons only mention it when it fired.
@@ -4195,6 +4201,12 @@ func (r *runner) readAutoLocalSlot(ctx context.Context, leaseInfo gpulease.Info,
 	localBusy := r.probeLocalBusy(ctx)
 	// occupiedBy: another vLLM seat holds the cards and loading this one would evict it.
 	busy = r.anyLeaseHeld(leaseInfo, subtasks) || r.atRunCap(localBusy.inflight) || localBusy.loading || localBusy.occupiedBy != ""
+	// A live driver-fault repeat on the seat's cards (ADR 0096): the deal sends the work to a remote first. Not part
+	// of autoDealReadBusy (the seat's LOAD), so the capacity wait can still give an overflow subtask the seat.
+	if faulted, why := r.localFaulted(subtasks); faulted {
+		busy = true
+		localBusy.note += "; " + why
+	}
 	r.autoDealBusy = localBusy
 	// The seat's LOAD only: a lease is the wait's own business (Reserved, fencedLocal),
 	// and a lease this process holds must not keep its own subtasks off the seat.
@@ -5778,13 +5790,15 @@ func fitPick(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[s
 func fitPickWith(st Subtask, nodes []NodeView, bases []string, slot int, dealt map[string]bool, counts map[string]int, prior float64) int {
 	k, bestTier := -1, 0
 	var best fitKey
-	bestLease, bestSat := 0, false
+	bestLease, bestSat, bestFault := 0, false, false
+	now := faultNow()
 	for c := 0; c < len(nodes); c++ {
 		j := (slot + c) % len(nodes)
 		if nodes[j].Local || dealt[bases[j]] {
 			continue
 		}
 		lease, sat := leaseDemotionRank(nodes[j], &st), saturated(nodes[j])
+		fault := faultDemoted(nodes[j], &st, now)
 		tier := cardTier(nodes[j].withCardsDealt(counts[bases[j]]), st.Contract.Layer)
 		s := scoreFitWith(st, nodes[j], prior)
 		better := false
@@ -5797,13 +5811,15 @@ func fitPickWith(st Subtask, nodes []NodeView, bases []string, slot int, dealt m
 			better = lease < bestLease
 		case sat != bestSat:
 			better = !sat
+		case fault != bestFault:
+			better = !fault
 		case tier != bestTier:
 			better = tier > bestTier
 		default:
 			better = s.beats(best)
 		}
 		if better {
-			k, best, bestTier, bestLease, bestSat = j, s, tier, lease, sat
+			k, best, bestTier, bestLease, bestSat, bestFault = j, s, tier, lease, sat, fault
 		}
 	}
 	return k

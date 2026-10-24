@@ -2840,7 +2840,9 @@ is, and what NVIDIA would do about it.
 
 - It is lease-independent: every card, whether a lease is held or not.
 - It reads up to 30 days (`--days`, default 7, 1 to 30).
-- It is **facts only**: nothing it reads moves a verdict, a gate or a placement (C-83-B holds).
+- It is **facts only** for the lease: nothing it reads moves a verdict, a gate, a drain or a release (C-83-B holds). The one
+  use beyond reading is placement: a LIVE repeat (last burst within 24 h) demotes the cards it names, never excludes them
+  ([ADR 0096](../architecture/decisions/0096-a-live-driver-fault-repeat-demotes-a-cards-placement.md)).
 
 The idea comes from two NVIDIA products: the "supervised log errors" and job-centric incident view of the AIOps product,
 and the incident rules of NVSentinel. Neither runs on this fleet (one is sales-gated, the other needs Kubernetes), so their

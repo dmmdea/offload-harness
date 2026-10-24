@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	placetable "github.com/dmmdea/offload-harness/internal/placement"
@@ -253,6 +254,10 @@ type NodeView struct {
 	// nil on a node too old to publish it, which is unknown, never "no profile". Shown by offload_status; placement
 	// never reads it.
 	PowerProfile *PowerProfileView
+	// GpuFaults is the node's driver fault summary (health `gpu_faults`, 0.200.0): each card's incidents and
+	// NVSentinel's repeat rule where it is met. A live repeat on every seat's cards demotes the node (ADR 0096,
+	// faultdemotion.go). nil = a node one release behind, no reading yet or no NVIDIA card: never demoted.
+	GpuFaults *gpuactivity.FaultSummary
 }
 
 // LeaseView is one live lease of a node, as its health leases[] publishes it.
@@ -638,7 +643,8 @@ type healthWire struct {
 	QueueWaitEstimateSec *float64 `json:"queue_wait_estimate_sec"`
 	NewJobWaitSec        *float64 `json:"new_job_wait_sec"`
 	// Additive (register A-103). nil on a node that does not publish whether its boot-time power profile took.
-	PowerProfile *PowerProfileView `json:"power_profile"`
+	PowerProfile *PowerProfileView         `json:"power_profile"`
+	GpuFaults    *gpuactivity.FaultSummary `json:"gpu_faults"`
 }
 
 // FetchNodeView reads one node's /fleet/health into a NodeView (Local=false —
@@ -729,6 +735,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		QueueWaitEstimateSec: w.QueueWaitEstimateSec,
 		NewJobWaitSec:        w.NewJobWaitSec,
 		PowerProfile:         w.PowerProfile,
+		GpuFaults:            w.GpuFaults,
 	}
 	if w.MediaRoutes != nil {
 		v.MediaRoutes, v.MediaRoutesKnown = *w.MediaRoutes, true
