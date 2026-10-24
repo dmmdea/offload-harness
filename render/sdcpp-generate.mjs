@@ -239,11 +239,14 @@ export function sdFailureCause(lines) {
   return warn.slice(0, 300);
 }
 
-// runSdCli: sd-cli with its output passed through as before, and the [W]/[E] lines kept for sdFailureCause.
+// runSdCli: sd-cli with its output passed through as before, and the [W]/[E] lines kept for sdFailureCause. stdin
+// stays inherited: libuv hides a child in a console of its own only when none of its stdio is inherited, so the one
+// inherited entry keeps sd-cli on this process's console, where the operator's Ctrl-C reaches it and a dying parent
+// does not leave it holding the card (render/console-share.test.mjs; measured for this shape 2026-10-24).
 function runSdCli(bin, args) {
   return new Promise((res) => {
     const kept = [];
-    const c = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const c = spawn(bin, args, { stdio: ["inherit", "pipe", "pipe"], windowsHide: true });
     for (const [from, to] of [[c.stdout, process.stdout], [c.stderr, process.stderr]]) {
       let rest = "";
       from.on("data", (b) => {
