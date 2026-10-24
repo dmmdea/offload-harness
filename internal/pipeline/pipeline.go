@@ -83,6 +83,11 @@ type Pipeline struct {
 	instanceAPI func(gpuprobe.Card) string
 	stopKept    func(ctx context.Context, comfyDir string, epoch uint64) []comfyinst.Outcome
 
+	// clearReads caches, for a few seconds, what the lane probe read of llama-swap's roster and /running to decide whether a
+	// render defers its host RAM until its own unload has run (mediahostram.go). The grant never reads it.
+	clearMu    sync.Mutex
+	clearReads map[string]mediaClearRead
+
 	// afterClaimsRead is a test seam, nil in production. A media call that NAMED its cards (a pin, a
 	// pool, a declared device) runs it once it has read what is claimed and before it makes its gated
 	// claim (acquireCards). That call reads no card table, so the allocator's input never runs for it
@@ -3841,7 +3846,9 @@ func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wai
 
 // acquireWholeNodeWith is acquireWholeNode for a call that declares hostRAMGiB of host RAM: the grant
 // admits it against the available memory and the commit charge against physical RAM (the one figure, no commit stated;
-// gpulease/hostram.go) and keeps the call in the queue while the host is short.
+// gpulease/hostram.go) and keeps the call in the queue while the host is short. When the host is short and a model its own
+// unload takes is resident, the call is compared to the host AFTER the pipeline has unloaded it, under the lease (the F82 order;
+// mediahostram.go): the memory the render frees is not counted as held against it.
 func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl, wait time.Duration, resume string, hostRAMGiB float64) ([]string, func(), error) {
 	noop := func() {}
 	start := time.Now()
@@ -3885,6 +3892,10 @@ func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl,
 		// text tier down. The message names the fix (state_dir).
 		return nil, noop, err
 	}
+	// A render whose own unload frees the host memory it declares is not compared to the host in the grant (the F82 order,
+	// mediahostram.go): it takes the node declaring nothing, clears, and only then asks the host. Decided before the wait is
+	// measured, because it reads llama-swap.
+	d := p.hostRAMDeferral(ctx, m, hostRAMGiB, nil, nil, 0)
 	// Spend only what is LEFT of the window on the machine-wide lease, so the two waits
 	// compose into the one budget the caller asked for rather than doubling it.
 	remaining := wait - time.Since(start)
@@ -3894,7 +3905,7 @@ func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl,
 	// resume is a place-keeping token (gpulease/tokens.go): only a host that leases cards ever
 	// leaves one, so on any other host it names nothing and the call is what it always was.
 	lease, err := m.Acquire(gpulease.ClassMedia, gpulease.Options{
-		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: remaining, ResumeToken: resume, HostRAMGiB: hostRAMGiB,
+		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: remaining, ResumeToken: resume, HostRAMGiB: d.gate(), HostRAMWaitGiB: d.later(),
 	})
 	if err != nil {
 		var held *gpulease.ErrHeld
@@ -3946,6 +3957,18 @@ func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl,
 		})
 	}
 	slotHeld = false
+	if d.defers {
+		// The unload the runner would do after launch is done here, under the lease, and only then is the host asked. The wait is
+		// bounded (hostRAMWaitEnd); past it the lease is released and the call is refused with the words the grant always used.
+		if aerr := p.clearThenAdmitHostRAM(ctx, lease, d, start); aerr != nil {
+			release()
+			var short *gpulease.ErrHostRAM
+			if errors.As(aerr, &short) && !short.Impossible {
+				return nil, noop, &errGPUBusy{detail: aerr.Error(), hostRAM: short}
+			}
+			return nil, noop, aerr
+		}
+	}
 	// The card is ours from here: the call's PAIR card turns running.
 	core.MarkWorking(ctx)
 	env := []string{

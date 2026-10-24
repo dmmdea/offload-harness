@@ -30,6 +30,7 @@ other on a single shared card.
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmitsLoad` (the ONE admission rule, over the working set a job touches and the commit it is charged, apart), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
 | `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB` and `Options.HostRAMCommitGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases, per quantity (the working set less what the processes below the holder hold RESIDENT; the commit less what they hold PRIVATELY), `Manager.HostRAMPendingLoad`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
+| `internal/pipeline/mediahostram.go` | **F82 for the media path**: whether a render defers its host RAM until its own unload has run (`hostRAMDeferral`, shared by the grant and the lane probe), the Go-side clear under the lease (`clearForHostRAM`), the bound of the wait after it (`hostRAMWaitEnd`, `mediaHostRAMFloor`) and the step that runs both (`clearThenAdmitHostRAM`); [the media order](#a-render-lease-follows-the-same-order-the-media-path-the-incident-of-2026-10-24) |
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card (for its own `--graph`, the files that graph's loaders name), else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
@@ -2417,6 +2418,42 @@ seat for a wait it cannot shorten would only cost the seat's callers (`TestALeas
 A signal during the wait ends it at once (`stageHostRAM`, "while waiting for host RAM"): the wrapper is released, and the warm
 stays owed with the same sentence as a signal during the drain. A lease lost during the wait is taken again on the same cards and
 the drain starts over under the new lease, as for a lease lost during the drain.
+
+#### A render lease follows the same order (the media path, the incident of 2026-10-24)
+
+**What happened.** On a 6 GB node a 4B llama-swap seat held 8 GiB of commit. An sd.cpp render declared 6.5 GiB and was told
+`waiting for host RAM: needs 6.5 GiB, committed 18.4 of 31.2 GiB physical, 8.0 GiB headroom`; it never ran. Every media lease
+(image, video, audio, through `acquireMediaLease`) was compared to the host **inside `Acquire`**, and the llama-swap models its own
+runner unloads were unloaded only afterwards, by the node runner (`render/gpu-lock.mjs`: `claimUnload`, `freeLlamaSwap`), so the
+admission counted memory the render was about to free as held. It is the F82 defect on the other door.
+
+**The order now** (`internal/pipeline/mediahostram.go`; the CLI path above is untouched, and so are the runner and `internal/gpulease`):
+
+1. **Whether the render defers is decided before the grant** (`hostRAMDeferral`), and the grant and the lane probe ask the same
+   function. It defers only when the render declares host RAM, a llama-swap endpoint is configured, the host is short for the figure
+   now (not impossibly: a need no state of the box admits is refused by the grant at once, before anything is taken or unloaded; and
+   not unreadably: a host whose memory cannot be read keeps the grant's comparison), and at least one model of the render's own
+   unload set is **resident** in llama-swap's `/running`. The unload set is the card-scoped `GPU_LEASE_UNLOAD_MODELS` list, or, for the
+   whole node (and a list that could not be made), every resident model off the memory stack: the runner's rule. Unlike the CLI,
+   residency IS asked, because the wait here is seconds and the media path must not hold every card for a shortage the clear cannot
+   cure; when `/running` cannot be read the rule of doubt defers, unless the list is the none sentinel, and a configuration without
+   an endpoint never defers. Everything else keeps the old order exactly (the grant compares).
+2. **The grant takes the cards declaring nothing**: `Options.HostRAMGiB` is 0 and the figure travels as `Options.HostRAMWaitGiB`
+   (`host_ram_wait_gib` on the record). The card allocator's pre-filter and the queue's pass rule see a call that declares nothing
+   (`askRAMGate`); the place in line a deferred call leaves keeps the DECLARED figure.
+3. **The pipeline unloads, under the lease and its heartbeat** (`clearForHostRAM`): each resident model of the unload set, through
+   llama-swap's per-model unload with a drain (30 s per model). A failure is logged and never fatal. No `unloaded.<epoch>` marker is
+   written and nothing is owed back: the runner's own unload still runs afterwards as the backstop.
+4. **Then the host is asked** (`Lease.AwaitHostRAM`), still holding the cards, with the same rule and the same words as the grant.
+   The wait ends at `min(max(start + gpu_wait_ms, clear end + 30 s), clear end + gpu_hostram_hold_max_sec)` (`hostRAMWaitEnd`;
+   `0` = no hold bound). The 30 s floor (`mediaHostRAMFloor`) exists because memory freed by a llama-swap unload returns when the
+   process exits, in seconds, so a caller that asked to fail fast still gives it that long; a miss holds the cards for the floor and
+   no longer. Past the end the lease is released first and the call is refused exactly as before: a whole-node call with the busy
+   answer (`gpu busy: waiting for host RAM: ...`), a card call with the host-RAM place in line (`gpu queued`), the same words and
+   tokens.
+5. **The lane probe follows the same figure** (`MediaLaneFree`, `wholeNode`, `hostRAMFor`, the allocator input), reading roster and
+   residency through a 5 s cache because the probe runs on every scan tick, so a ticket the grant would admit is not reported as held
+   by host RAM (`ram`).
 
 #### The hold bound (`gpu_hostram_hold_max_sec`, the incident of 2026-10-14)
 

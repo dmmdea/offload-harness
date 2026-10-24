@@ -8,15 +8,21 @@ package pipeline
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 )
@@ -170,6 +176,89 @@ func TestAnSdcppOnlyLaneIsHeldByTheHostRAMBrake(t *testing.T) {
 		t.Fatalf("control: the old declaration (0) is admitted whatever the host reads: %v", err)
 	}
 	g.Release()
+}
+
+// THE INCIDENT (2026-10-24, a 6 GB node): a resident 4B seat held 8 GiB of commit and the sd.cpp render declared its parked bytes
+// against the host WITH the seat counted as held, so it was told to wait for memory its own unload frees, and never ran. The
+// render now takes the node declaring nothing, the pipeline unloads what the runner would unload (the seat, with a drain; the
+// memory stack stays), and only then is the figure put to the host: the record shows it as the lease's declared need and the
+// wait fields are cleared.
+func TestAnSdcppRenderIsNotHeldByTheHostRAMOfTheSeatItsOwnUnloadFrees(t *testing.T) {
+	withSdcppSizes(t, zImageSizes)
+	t.Setenv("LLAMASWAP_YAML", filepath.Join(t.TempDir(), "absent.yaml")) // no keep-set from the serving config of the machine
+	t.Setenv("LLAMASWAP_KEEP_SET", "")
+	t.Setenv("LLAMASWAP_CONFIG", "")
+	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder})
+	stack := gpualloc.EffectiveMemoryStack(f.p.cfg)[0]
+
+	var seatFreed atomic.Bool
+	var mu sync.Mutex
+	var unloaded []string
+	var atUnload []gpulease.Info
+	swap := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v1/models":
+			_, _ = w.Write([]byte(`{"data":[{"id":"seat-4b"},{"id":"` + stack + `"}]}`))
+		case r.URL.Path == "/running":
+			if seatFreed.Load() {
+				_, _ = w.Write([]byte(`{"running":[{"model":"` + stack + `","state":"ready"}]}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"running":[{"model":"seat-4b","state":"ready"},{"model":"` + stack + `","state":"ready"}]}`))
+		case strings.HasSuffix(r.URL.Path, "/slots"):
+			_, _ = w.Write([]byte(`[{"id":0,"n_ctx":4096,"is_processing":false}]`))
+		case strings.HasPrefix(r.URL.Path, "/api/models/unload/"):
+			mu.Lock()
+			unloaded = append(unloaded, strings.TrimPrefix(r.URL.Path, "/api/models/unload/"))
+			atUnload = append(atUnload, f.m.Leases()...)
+			mu.Unlock()
+			seatFreed.Store(true) // the seat's process exits and the host gets its commit back
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(swap.Close)
+	f.p.cfg.Endpoint = swap.URL
+
+	cfg := sdcppOnlyCfg("--offload-to-cpu")
+	need := f.p.sdcppImageNeed(cfg, "z-image", "q8_0", "")
+	declared := f.p.declaredRAM(context.Background(), need, nil, nil)
+	if declared < 9 {
+		t.Fatalf("control: the lane declares a real figure, got %.1f GiB", declared)
+	}
+	// 88 committed of 100 with the seat resident: the declared figure does not fit under the 92 line. Once the seat's process
+	// has exited (its commit is back) 40 are committed and it does.
+	restore := gpuprobe.UseHostMemoryReader(func() (gpuprobe.HostMemory, bool) {
+		if seatFreed.Load() {
+			return shortHost(40), true
+		}
+		return shortHost(88), true
+	})
+	t.Cleanup(restore)
+
+	g, err := f.p.acquireMediaLease(context.Background(), "image-gen (sdcpp)", time.Hour, 0, need)
+	if err != nil {
+		t.Fatalf("the render must not wait for memory its own unload frees: %v", err)
+	}
+	defer g.Release()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if len(unloaded) != 1 || unloaded[0] != "seat-4b" {
+		t.Fatalf("the pipeline unloads the resident seat and nothing else (the memory stack %q stays): %v", stack, unloaded)
+	}
+	if len(atUnload) != 1 || atUnload[0].HostRAMGiB != 0 || atUnload[0].HostRAMWaitGiB != declared {
+		t.Errorf("at the unload the lease holds the node declaring nothing and asking for its %.1f GiB: %+v", declared, atUnload)
+	}
+	var held []gpulease.Info
+	for _, l := range f.m.Leases() {
+		if l.Epoch != 0 {
+			held = append(held, l)
+		}
+	}
+	if len(held) != 1 || held[0].HostRAMGiB != declared || held[0].HostRAMWaitGiB != 0 || held[0].HostRAMWaitCommitGiB != 0 {
+		t.Errorf("once admitted the record carries the declared %.1f GiB and the wait fields are cleared: %+v", declared, held)
+	}
 }
 
 // The video and animate lanes read their own bindings.

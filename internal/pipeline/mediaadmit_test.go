@@ -165,6 +165,12 @@ func newAdmitFixtureWith(t *testing.T, spec admitSpec) *admitFixture {
 	t.Cleanup(f.frees.srv.Close)
 
 	f.roster = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/running" {
+			// Nothing is resident: a render that finds no model of its own unload set loaded keeps the order it always had
+			// (the grant compares its host RAM), and a roster that cannot say what is loaded would defer it (mediahostram.go).
+			_, _ = w.Write([]byte(`{"running":[]}`))
+			return
+		}
 		if r.URL.Path != "/v1/models" {
 			http.NotFound(w, r)
 			return
