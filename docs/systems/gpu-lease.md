@@ -42,6 +42,7 @@ other on a single shared card.
 | `internal/comfyinst` | stops the ComfyUI instances a lease kept (`StopForLease`), and the primitives an explicit takeover will use (`StopMarker`: interrupt, free, kill after the launch fingerprint is verified; `PIDsOfOtherLeases`) |
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
+| `gpu_faults.go` | `gpu faults`: the fault history report, its text and JSON, and the `--jobs` join of the ledger |
 | `internal/gpulease/yield.go`, `gpu_yield*.go` | **the yield request (plan P11, ADR 0086)**: the policy (`ParseOnOverdue`, `SetDefaultOnOverdue`), the asker, the `yield.<epoch>` sidecar, the holder's ticker, the read-only `YieldViewOf` every surface words from; the root files hold the shell runner (`sh -c`, `cmd.exe /d /s /c`, hidden) and the `--detach` report |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
 | `gpu_progress.go`, `internal/gpulease/progressdir.go`, `render/lease-progress.mjs` | the progress contract of a wrapped render helper (F8): the helpers the wrapper declares one for, the minted file and its sweep, `GPU_LEASE_PROGRESS_FILE`, and the helper-side heartbeat |
@@ -51,7 +52,7 @@ other on a single shared card.
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
 | `gpu_ownership.go` | the ownership flags (`--owner-*`, `--unattended`, `--progress-file`, `--stall`, `--yield-grace`, `--on-yield`), the `gpu owner-flags` verb, and the ownership lines of `gpu status` |
 | `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; unload / warm-back |
-| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease, `snapshot.go` (`View.Map`, `splitProcesses`) the one JSON shape both surfaces read, with a display card's unsized processes folded into one count per card; `driverevents.go` the **driver's fault events** for the leased cards (C-83-B, [below](#the-drivers-own-fault-events-for-the-leased-cards-c-83-b)) |
+| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease, `snapshot.go` (`View.Map`, `splitProcesses`) the one JSON shape both surfaces read, with a display card's unsized processes folded into one count per card; `driverevents.go` the **driver's fault events** for the leased cards (C-83-B, [below](#the-drivers-own-fault-events-for-the-leased-cards-c-83-b)); `faults.go`, `knownerrors.go` and the generated `xidcatalog.go` the fault history behind `gpu faults` ([below](#gpu-faults-the-fault-history-as-incidents-with-known-errors)) |
 | `internal/seatload` | the seat's in-flight reading: llama-swap's `/running` (and the roster, for an alias), then the loaded seat's own `/metrics` or `/slots` at the `proxy` `/running` reports — never through `/upstream`, which resets the idle unload timer; a `starting` seat is reported without touching the seat |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold): it always gets a hidden console of its own, whatever terminal launched it (`winexec.HideWindowDetached`); the flags live in `internal/winexec`, the one place every hidden child is built |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
@@ -2829,6 +2830,99 @@ Linux gate host has an NVIDIA card); the Windows shape was read from two boxes' 
 `ReadDriverEvents` caps the Windows read at the newest 1000 records: a storm of id-13 records older than that pushes older
 id-153 ones out of the window. A read costs one PowerShell start (0.56 to 0.65 s over three runs on an empty 24 h window): paid
 once a minute by the MCP server and on every `gpu status` call.
+
+### `gpu faults`: the fault history as incidents, with known errors
+
+The lease view above answers "did the cards I hold fault in the last day". `local-offload gpu faults [--days N] [--jobs]
+[--json]` answers the operator's question: what has the driver logged on this machine, on which card, how often, what it
+is, and what NVIDIA would do about it.
+
+- It is lease-independent: every card, whether a lease is held or not.
+- It reads up to 30 days (`--days`, default 7, 1 to 30).
+- It is **facts only**: nothing it reads moves a verdict, a gate or a placement (C-83-B holds).
+
+The idea comes from two NVIDIA products: the "supervised log errors" and job-centric incident view of the AIOps product,
+and the incident rules of NVSentinel. Neither runs on this fleet (one is sales-gated, the other needs Kubernetes), so their
+data and rules are carried and the reading is local.
+
+**What it reads.** Every read is read-only, starts its child through `internal/winexec`, is bounded at 20 s and takes at most
+5000 records per log. A read that hits the cap or stops part way says so in `notes`.
+
+- **The driver log for the window.** These are the same readers as above, with the window and the cap as parameters.
+  Windows reads `nvlddmkm` in the System log; Linux reads the journal's kernel transport with `--since "<hours> hours ago"`.
+- **The card table**, with names and `gpu_recovery_action`, from
+  `nvidia-smi --query-gpu=index,uuid,pci.bus_id,name,gpu_recovery_action`. A driver that does not know the field refuses the
+  whole query, which is then made without it. GeForce Blackwell under WDDM reports `None` on the reference box.
+- **On Windows, the live kernel dumps Windows Error Reporting filed.** These come from the Application log: provider
+  `Windows Error Reporting`, id 1001, event name `LiveKernelEvent`, selected with an XPath so other applications' reports are
+  not read. Dumps name no card.
+  - WER files one report many times. On the reference box, 2464 records in 30 days were 59 reports of 25 dump files, so a
+    dump is counted once per dump file.
+  - The record time is when the report was queued, not when the fault happened (dumps of 2026-09-22 were first queued on
+    09-25). The fault time is read from the dump's file name instead (`WATCHDOG-20261013-1921.dmp`, local time to the minute).
+  - A report with no dump file keeps its queue time and is labelled `report-queue`.
+
+**Known errors** (`internal/gpuactivity/knownerrors.go`). Each event gets a class, a name, a domain (app, card, driver,
+display, link, system), a severity (info, warn, fault) and its basis:
+
+| source | basis | what is carried |
+|---|---|---|
+| Linux `Xid N` | `nvidia-catalog` | NVIDIA's row from the Xid catalog (`xidcatalog.go`, generated, 109 used codes, see NOTICE): mnemonic, description, the immediate and investigatory resolution buckets, and the immediate bucket's meaning. Domain and severity follow the immediate bucket (`RESTART_APP` app/warn, `RESET_GPU` card/fault, `RESTART_BM` system/fault, `IGNORE` info) |
+| Windows `nvlddmkm 13` | `observed`, read as Xid 13 | the same "Graphics Exception" / "Graphics SM Warp Exception" text Linux prints for Xid 13, so Xid 13's row and buckets (`RESTART_APP`, `WORKFLOW_XID_13`) |
+| Windows `nvlddmkm 153`, `14` | `observed` | the engine reset (`Error occurred on GPUID`) and the microcode reset after a fault or a timeout (TDR): driver/fault, with no NVIDIA bucket (NVIDIA publishes no Windows table, and none is invented) |
+| `LiveKernelEvent 117`, `141`, `193` | `microsoft-bugcheck` | `VIDEO_TDR_TIMEOUT_DETECTED`, `VIDEO_ENGINE_TIMEOUT_DETECTED`, `VIDEO_DXGKRNL_LIVEDUMP` |
+| `LiveKernelEvent 1a8`, `1b8` | `user-reports` | the black-screen live-dump names that forum reports give; Microsoft does not document them |
+
+The buckets are **NVIDIA's guidance for datacenter parts** (the catalog's applicability columns name A100, H100, B100 and
+GB200), and they are printed as such. A wrong class costs a mislabelled line, never a changed verdict. An unmapped id is
+`unknown`, not guessed.
+
+**Incidents.** Records less than 3 minutes apart are one burst (NVSentinel's burst window). Each burst lists:
+
+- the cards its GPUID-bearing records name, by bus as above (a bus not in today's table is printed as such);
+- its classes, and how many of its records name no card (Windows id 13 names none);
+- the live dumps whose time falls between a minute before it and two minutes after.
+
+Two readings are carried from NVIDIA. They are labelled readings, never actions:
+
+- **NVIDIA's Xid 13 workflow**, over the GPC/TPC units the graphics exceptions name (`(GPC 1, TPC 0, SM 1)`). One unit, or one
+  unit holding four records in five, is the repeat NVIDIA sends to diagnostics as a possible hardware fault. Records spread
+  over many units it reads as the application's fault (`CHECK_APP/CUDA`). On the reference box both id-13 bursts of the 30
+  days were spread (280 unit-naming records over 35 GPC/TPC units, and 10 over 3), so both got the application reading.
+- **NVSentinel's RepeatedXIDErrorOnSameGPU**: the same class in 5 or more bursts on one card within 24 h. Xid 31 and 45 are
+  left out, as NVSentinel leaves them out. NVSentinel answers this rule with `CONTACT_SUPPORT`, which is printed beside it.
+
+**`--jobs`** adds the ledger rows whose work **ran on this node** during each burst, 2 minutes either side. It reads
+production rows only (`ledger.ReadProduction`), and a row ran from `ts - latency` to `ts`. A row counts as run here by these
+rules:
+
+- An inner row is skipped; its outer row stands for the job.
+- A row that took no time did no work.
+- A delegate row names its node in its tier (`<node>:<seat>`), compared with `fleet_node_id`, else the host name.
+- A row that names a remote node ran there.
+- Any other row ran here unless its route was remote.
+
+A deferral that ran for a while is kept and marked `deferred`, because a job a fault ended is recorded that way. A burst with
+no matching row says `no ledger row ran here in this window`. That is common: callers that reach the seats directly
+(llama-swap clients, ComfyUI) write no ledger row.
+
+**The real run** was on the reference box, with three Blackwell GeForce cards on buses `17`, `65` and `b5`, over 30 days,
+taking 5.9 s:
+
+- 479 driver records (435 id 13, 44 id 153) in 19 incidents. Card `65` was in 11 of them and card `b5` in 15.
+- The repeat rule fired on card `65`: 5 bursts of `nvlddmkm 153` in 82 minutes.
+- 11 live dumps fell in the window.
+- One burst (98 s, cards `65` and `b5`, with `141`, `117` and `141` live dumps) coincided with ten agent-pool jobs on those
+  cards' seat, all of which ended deferred.
+
+`--json` carries the same report (`cards`, `incidents[].jobs`, `repeats`, `known_errors`, `live_kernel_events`, `notes`).
+
+**Limits.**
+
+- The card table is today's. A card moved to another slot since an event would be named by its new position.
+- The Linux path shares the lease view's limit: the `Xid` shape is the documented one, not captured from a live Linux driver.
+  Linux also has no live-dump source here.
+- Nothing is retained between runs. Each call reads the logs again, so the window is only as long as the OS logs still hold.
 
 ### A kept instance is freed when its family changes
 
