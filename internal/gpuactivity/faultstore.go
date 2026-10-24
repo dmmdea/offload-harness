@@ -143,7 +143,7 @@ type FaultSummaryCard struct {
 	Incidents    int       `json:"incidents"`
 	InContext    int       `json:"in_context,omitempty"`
 	Incidents24h int       `json:"incidents_24h"`
-	LastIncident time.Time `json:"last_incident,omitempty"`
+	LastIncident time.Time `json:"last_incident,omitzero"`
 }
 
 // FaultSummaryRepeat is NVSentinel's repeat rule met on one card: one class in 5 or more bursts within 24 h, From

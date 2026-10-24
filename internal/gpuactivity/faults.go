@@ -66,7 +66,7 @@ type FaultCard struct {
 	Incidents int          `json:"incidents"`
 	// InContext counts the incidents naming it that fell at a restart or a sleep transition (faultcontext.go).
 	InContext int       `json:"in_context,omitempty"`
-	Last      time.Time `json:"last,omitempty"`
+	Last      time.Time `json:"last,omitzero"`
 }
 
 // ClassCount is how many records of one class.
