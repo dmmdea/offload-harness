@@ -187,6 +187,11 @@ type Options struct {
 	// power_profile health field; a func that returns nil does too. It must answer from memory or one small local
 	// file read, because health never blocks.
 	PowerProfile func() *PowerProfileHealth
+	// GpuFaults is this node's driver fault summary (gpuactivity.FaultSummary): each card's incidents over 30 days and
+	// NVSentinel's repeat rule where it is met. A func for the same reason as PowerProfile: the command owns the
+	// reader, its background refresh and the retention file. nil, or a func that returns nil (no reading yet, or no
+	// NVIDIA card), omits gpu_faults. It answers from memory, because health never blocks.
+	GpuFaults func() *gpuactivity.FaultSummary
 }
 
 // Server is the fleet-node HTTP server: three handlers over a Runner + Jobs
@@ -1408,6 +1413,11 @@ type healthPayload struct {
 	// carries no path, host or card id, so a caller without the bearer reads it too. Additive and omitempty: a
 	// node one release behind omits the key, which a reader takes as unknown, never as "no profile".
 	PowerProfile *PowerProfileHealth `json:"power_profile,omitempty"`
+	// GpuFaults is the driver's fault summary per card (gpu faults, read every 10 minutes in the background): facts,
+	// which ADR 0096 lets placement weigh. It carries card uuids and buses (already on this payload) and counts, no
+	// path, host or text, so a caller without the bearer reads it too. Additive and omitempty: absent means unknown
+	// (a node one release behind, no reading yet, no NVIDIA card), never "no faults".
+	GpuFaults *gpuactivity.FaultSummary `json:"gpu_faults,omitempty"`
 	// Lease is this node's machine-wide GPU lease as gpulease reads it
 	// (0.113.16). Published only when a lease is HELD; absent = the card is
 	// unreserved (or the node predates the field — a delegator treats both as
@@ -1749,6 +1759,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.opts.PowerProfile != nil {
 		payload.PowerProfile = s.opts.PowerProfile()
+	}
+	if s.opts.GpuFaults != nil {
+		payload.GpuFaults = s.opts.GpuFaults()
 	}
 	// Which engine answers for each lane and seat: a cached read, one background refresh per TTL.
 	payload.LaneBackends, payload.SeatBackends = s.activeBackends()

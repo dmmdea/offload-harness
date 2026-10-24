@@ -43,6 +43,7 @@ other on a single shared card.
 | `internal/pipeline/pipeline.go` | takes the `media` lease around **every** generation call site (image ComfyUI + sdcpp, inpaint, image batch, run-graph, video, audio) and threads `GPU_LEASE_*` to the runner; inherits an ambient lease instead of re-acquiring; owns the in-process slot (`mediaSlot`) that arbitrates jobs sharing one inherited lease |
 | `gpu_cmd.go` | the `gpu status\|reserve\|release\|hold` verbs, wrapper and `--detach` forms |
 | `gpu_faults.go` | `gpu faults`: the fault history report, its text and JSON, and the `--jobs` join of the ledger |
+| `gpu_faults_health.go` | fleet-serve's fault summary: the background read behind `/fleet/health`'s `gpu_faults`, the retention appends and the summary file ([below](#retention-and-the-fleet-nodes-summary)) |
 | `internal/gpulease/yield.go`, `gpu_yield*.go` | **the yield request (plan P11, ADR 0086)**: the policy (`ParseOnOverdue`, `SetDefaultOnOverdue`), the asker, the `yield.<epoch>` sidecar, the holder's ticker, the read-only `YieldViewOf` every surface words from; the root files hold the shell runner (`sh -c`, `cmd.exe /d /s /c`, hidden) and the `--detach` report |
 | `gpu_terms.go` | the holders' side of terms: the tick the wrapper form and the detached holder run at the end of a term, the over-cap warning, and the argv of the hidden holder (`--release-at-expiry`) |
 | `gpu_progress.go`, `internal/gpulease/progressdir.go`, `render/lease-progress.mjs` | the progress contract of a wrapped render helper (F8): the helpers the wrapper declares one for, the minted file and its sweep, `GPU_LEASE_PROGRESS_FILE`, and the helper-side heartbeat |
@@ -52,7 +53,7 @@ other on a single shared card.
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
 | `gpu_ownership.go` | the ownership flags (`--owner-*`, `--unattended`, `--progress-file`, `--stall`, `--yield-grace`, `--on-yield`), the `gpu owner-flags` verb, and the ownership lines of `gpu status` |
 | `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; unload / warm-back |
-| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease, `snapshot.go` (`View.Map`, `splitProcesses`) the one JSON shape both surfaces read, with a display card's unsized processes folded into one count per card; `driverevents.go` the **driver's fault events** for the leased cards (C-83-B, [below](#the-drivers-own-fault-events-for-the-leased-cards-c-83-b)); `faults.go`, `knownerrors.go` and the generated `xidcatalog.go` the fault history behind `gpu faults` ([below](#gpu-faults-the-fault-history-as-incidents-with-known-errors)) |
+| `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease, `snapshot.go` (`View.Map`, `splitProcesses`) the one JSON shape both surfaces read, with a display card's unsized processes folded into one count per card; `driverevents.go` the **driver's fault events** for the leased cards (C-83-B, [below](#the-drivers-own-fault-events-for-the-leased-cards-c-83-b)); `faults.go`, `knownerrors.go` and the generated `xidcatalog.go` the fault history behind `gpu faults` ([below](#gpu-faults-the-fault-history-as-incidents-with-known-errors)), `faultcontext.go` the restart and sleep context, `faultstore.go` the retention file and the per-card summary |
 | `internal/seatload` | the seat's in-flight reading: llama-swap's `/running` (and the roster, for an alias), then the loaded seat's own `/metrics` or `/slots` at the `proxy` `/running` reports — never through `/upstream`, which resets the idle unload timer; a `starting` seat is reported without touching the seat |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold): it always gets a hidden console of its own, whatever terminal launched it (`winexec.HideWindowDetached`); the flags live in `internal/winexec`, the one place every hidden child is built |
 | `render/gpu-lock.mjs` | READ-ONLY participant: honours + fences an inherited lease, elects one unloader, drains, ComfyUI lifecycle. **Does not acquire.** |
@@ -2890,7 +2891,58 @@ Two readings are carried from NVIDIA. They are labelled readings, never actions:
   over many units it reads as the application's fault (`CHECK_APP/CUDA`). On the reference box both id-13 bursts of the 30
   days were spread (280 unit-naming records over 35 GPC/TPC units, and 10 over 3), so both got the application reading.
 - **NVSentinel's RepeatedXIDErrorOnSameGPU**: the same class in 5 or more bursts on one card within 24 h. Xid 31 and 45 are
-  left out, as NVSentinel leaves them out. NVSentinel answers this rule with `CONTACT_SUPPORT`, which is printed beside it.
+  left out, as NVSentinel leaves them out, and so is a burst at a restart or sleep transition (next section). NVSentinel
+  answers this rule with `CONTACT_SUPPORT`, which is printed beside it. The rule counts per card and class, so each burst
+  keeps its classes per card (`cards[].classes`), which is what lets a retained burst count too.
+
+**Restart and sleep context** (`internal/gpuactivity/faultcontext.go`). A driver logs faults while the machine shuts down,
+boots, sleeps or wakes. Such a burst is still listed, labelled `context: restart` or `sleep-wake` with the OS records that
+placed it there (source, id and time only: a restart record names the machine and the user who asked for it, so no text is
+kept), and it does not count towards a repeat. Five restarts in a day are not a card failing five times.
+
+- **Windows** (System log, one more read of the same shape): a restart opens at User32 1074 (a process asked for it),
+  EventLog 6006 (clean stop) or Kernel-General 13 (OS shutdown) and closes at the next EventLog 6005 or Kernel-General 12
+  (the boot). EventLog 6008 and Kernel-Power 41 are logged at boot after an unexpected shutdown, so they are points. A sleep
+  opens at Kernel-Power 42 and closes at Kernel-Power 107 or Power-Troubleshooter 1.
+- **Kernel-Power 566 is not read.** It is a session transition (unlock, input, display on): 244 of them in the reference
+  box's 30 days, beside 87 records of every kind above, and it would label unrelated faults.
+- **Linux** (journal): each boot's first entry is a point (`journalctl --list-boots -o json`), and a suspend or hibernation
+  opens at the kernel's `PM: suspend entry` and closes at `PM: suspend exit` (`--grep`, which exits 1 with
+  `-- No entries --` when nothing matches: that is an empty answer). The end of a boot is not read as a shutdown, because
+  the journal does not tell a clean stop from a crash, and a fault just before a crash is the one to keep.
+- A burst is in context when it overlaps a span widened by a minute on each side. Opening records less than 10 minutes
+  apart are one opening, so a restart asked for an hour ahead (1074 with a timer) does not cover that hour.
+- A context read that fails or stops part way is a note ("an incident at one may count towards a repeat").
+
+On the reference box this labels 2 of the 19 incidents as restarts: 2026-10-15 22:02 (cards `17` and `b5`, 3 s after
+User32 1074) and 2026-10-21 08:43 (card `b5`, 1 s after User32 1074). Neither was part of the repeat on card `65`, which
+still fires.
+
+### Retention and the fleet node's summary
+
+The OS log is not a record: the Windows System log rolls over at its size cap and a Linux journal is vacuumed. fleet-serve
+keeps the incidents, and publishes a per-card summary.
+
+- **Retention** (`<state root>/gpu/faults.jsonl`, `internal/gpuactivity/faultstore.go`). Each fleet-serve refresh appends the
+  incidents that have ended (no record for a burst gap and a minute, so a running burst is not cut in two) and overlap no
+  retained one. One JSON line per incident, append-only, never pruned: the reference box made 19 incidents in 30 days.
+  fleet-serve is the one writer.
+- **`gpu faults` merges it.** A retained incident that overlaps none read from the log is added, marked `retained`, and
+  counts like the others: on its card's counts, and towards the repeat rule. A store that cannot be read is a note; the
+  report from the log stands. On a machine with no fleet-serve the file does not exist and nothing changes.
+- **The summary** (`gpuactivity.FaultSummary`) is what `/fleet/health` publishes as `gpu_faults`
+  ([FLEET-NODE.md](../FLEET-NODE.md#driver-fault-summary-gpu_faults)) and what fleet-serve writes whole (temp file, then
+  rename) to `<state root>/gpu/faults-summary.json`, for this machine's short-lived processes that must not pay a 30-day
+  read per call.
+- **The refresh** runs in the background (`gpu_faults_health.go`), as the lane backends do: a reading is fresh for 10
+  minutes and published for 40, nothing waits on it, and fleet-serve starts the first one at startup. A read that fails
+  keeps the last good reading until it ages out. A node with no NVIDIA card publishes no `gpu_faults`. One read took
+  3.4 s on the reference box (three log reads and the card table, all hidden children).
+
+The real run of the retention path, on the reference box with a fresh state root: the first refresh appended the 19
+incidents and the second appended none. Five bursts written by hand for a day the log does not cover (2026-10-06, card
+`b5`) were then listed as `[retained]`, raised card `b5`'s counts from 19 records and 15 incidents to 29 and 20, and fired
+the repeat rule on `b5`; the 19 incidents the log still holds were not counted twice.
 
 **`--jobs`** adds the ledger rows whose work **ran on this node** during each burst, 2 minutes either side. It reads
 production rows only (`ledger.ReadProduction`), and a row ran from `ts - latency` to `ts`. A row counts as run here by these
@@ -2906,8 +2958,8 @@ A deferral that ran for a while is kept and marked `deferred`, because a job a f
 no matching row says `no ledger row ran here in this window`. That is common: callers that reach the seats directly
 (llama-swap clients, ComfyUI) write no ledger row.
 
-**The real run** was on the reference box, with three Blackwell GeForce cards on buses `17`, `65` and `b5`, over 30 days,
-taking 5.9 s:
+**The real run** (0.199.0) was on the reference box, with three Blackwell GeForce cards on buses `17`, `65` and `b5`, over 30
+days, taking 5.9 s:
 
 - 479 driver records (435 id 13, 44 id 153) in 19 incidents. Card `65` was in 11 of them and card `b5` in 15.
 - The repeat rule fired on card `65`: 5 bursts of `nvlddmkm 153` in 82 minutes.
@@ -2915,14 +2967,16 @@ taking 5.9 s:
 - One burst (98 s, cards `65` and `b5`, with `141`, `117` and `141` live dumps) coincided with ten agent-pool jobs on those
   cards' seat, all of which ended deferred.
 
-`--json` carries the same report (`cards`, `incidents[].jobs`, `repeats`, `known_errors`, `live_kernel_events`, `notes`).
+`--json` carries the same report (`cards`, `incidents[].jobs`, `incidents[].context`, `repeats`, `known_errors`,
+`live_kernel_events`, `retained`, `notes`).
 
 **Limits.**
 
 - The card table is today's. A card moved to another slot since an event would be named by its new position.
 - The Linux path shares the lease view's limit: the `Xid` shape is the documented one, not captured from a live Linux driver.
   Linux also has no live-dump source here.
-- Nothing is retained between runs. Each call reads the logs again, so the window is only as long as the OS logs still hold.
+- Retention starts when a fleet-serve of 0.200.0 first runs: what the OS log had already lost by then is not recovered.
+- A retained incident keeps the card by bus. A card moved since is named by today's table, like a live one.
 
 ### A kept instance is freed when its family changes
 

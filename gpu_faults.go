@@ -1,9 +1,10 @@
 package main
 
 // `gpu faults`: the NVIDIA driver's fault history on this machine, read as incidents with their known-error class
-// and NVIDIA's recommended action (internal/gpuactivity/faults.go), and with --jobs the ledger rows that ran here
-// during each incident. Lease-independent: every card, up to 30 days. Facts only, never a lease verdict input
-// (C-83-B); a read that is short says so.
+// and NVIDIA's recommended action (internal/gpuactivity/faults.go), labelled when they fell at a restart or sleep
+// transition (faultcontext.go), with the incidents fleet-serve retained merged in (faultstore.go), and with --jobs
+// the ledger rows that ran here during each incident. Lease-independent: every card, up to 30 days. Facts only,
+// never a lease verdict input (C-83-B); a read that is short says so.
 
 import (
 	"context"
@@ -25,7 +26,7 @@ import (
 const faultJobSlack = 2 * time.Minute
 
 // readFaultsFn is the report reader, a variable so a test prints a synthetic history.
-var readFaultsFn = gpuactivity.ReadFaults
+var readFaultsFn = gpuactivity.ReadFaultsRetained
 
 // faultJob is one ledger row that ran on this node during an incident.
 type faultJob struct {
@@ -57,17 +58,31 @@ func runGPUFaults(args []string) error {
 	if *days < 1 || *days > 30 {
 		return fmt.Errorf("gpu faults: --days must be 1 to 30 (got %d)", *days)
 	}
-	rep, err := readFaultsFn(context.Background(), time.Duration(*days)*24*time.Hour)
+	// The incidents fleet-serve retained (read only here: fleet-serve is the one writer). A store that cannot be read
+	// is a note: the report from the log stands.
+	cfg := loadCfg(fs)
+	var retained []gpuactivity.Incident
+	var storeNote string
+	if store, serr := gpuactivity.FaultStorePath(cfg.StateDir); serr != nil {
+		storeNote = "retained incidents not read: " + serr.Error()
+	} else if r, _, lerr := gpuactivity.LoadRetained(store); lerr != nil {
+		storeNote = "retained incidents not read: " + lerr.Error()
+	} else {
+		retained = r
+	}
+	rep, err := readFaultsFn(context.Background(), time.Duration(*days)*24*time.Hour, retained)
 	if errors.Is(err, gpuactivity.ErrNoDriverEventSource) {
 		return errors.New("gpu faults: this OS has no NVIDIA driver log to read (Windows System log or Linux kernel log)")
 	}
 	if err != nil {
 		return fmt.Errorf("gpu faults: %w", err)
 	}
+	if storeNote != "" {
+		rep.Notes = append(rep.Notes, storeNote)
+	}
 	var jobRows []ledger.Entry
 	jobsNote, self := "", ""
 	if *jobs {
-		cfg := loadCfg(fs)
 		self = faultSelfNode(cfg)
 		rows, _, lerr := ledger.ReadProduction(cfg.LedgerPath)
 		if lerr != nil {
@@ -86,7 +101,7 @@ func runGPUFaults(args []string) error {
 		out := map[string]any{
 			"since": rep.Since, "until": rep.Until, "window_days": rep.WindowDays, "events": rep.Events,
 			"cards": rep.Cards, "incidents": incs, "repeats": rep.Repeats, "known_errors": rep.Known,
-			"live_kernel_events": rep.LiveKernel, "notes": rep.Notes, "untimed": rep.Untimed,
+			"live_kernel_events": rep.LiveKernel, "notes": rep.Notes, "untimed": rep.Untimed, "retained": rep.Retained,
 			"facts_only": "driver events are facts, never a lease verdict input (C-83-B)",
 		}
 		if *jobs {
@@ -153,6 +168,9 @@ func printFaults(rep gpuactivity.FaultReport, incs []faultIncidentOut, jobs bool
 	ts := func(t time.Time) string { return t.Local().Format("2006-01-02 15:04:05") }
 	fmt.Printf("GPU driver faults on this machine, last %d day(s) (since %s): %d driver record(s) in %d incident(s), %d live kernel dump(s)\n",
 		rep.WindowDays, rep.Since.Local().Format("2006-01-02 15:04 MST"), rep.Events, len(rep.Incidents), len(rep.LiveKernel))
+	if rep.Retained > 0 {
+		fmt.Printf("%d incident(s) come from the retention file: the OS log no longer holds them\n", rep.Retained)
+	}
 	fmt.Println("Facts, never a lease verdict input. Actions are NVIDIA's datacenter guidance; Windows ids are read as the Xid they match (see known errors).")
 
 	fmt.Println("\ncards:")
@@ -169,12 +187,15 @@ func printFaults(rep gpuactivity.FaultReport, incs []faultIncidentOut, jobs bool
 			line += "no records placed on it"
 		} else {
 			line += fmt.Sprintf("%d record(s) (%s), %d incident(s), last %s", c.Events, classList(c.ByClass), c.Incidents, ts(c.Last))
+			if c.InContext > 0 {
+				line += fmt.Sprintf(" (%d at a restart or sleep transition)", c.InContext)
+			}
 		}
 		fmt.Println(line)
 	}
 
 	if len(rep.Repeats) > 0 {
-		fmt.Println("\nrepeats (NVSentinel's RepeatedXIDErrorOnSameGPU: one class in 5 or more bursts on one card within 24 h; its action is CONTACT_SUPPORT):")
+		fmt.Println("\nrepeats (NVSentinel's RepeatedXIDErrorOnSameGPU: one class in 5 or more bursts on one card within 24 h, bursts at a restart or sleep transition left out; its action is CONTACT_SUPPORT):")
 		for _, r := range rep.Repeats {
 			fmt.Printf("  %s %s: %d bursts from %s to %s\n", cardLabel(r.Card, r.Bus), r.Class, r.Bursts, ts(r.From), ts(r.To))
 		}
@@ -197,7 +218,17 @@ func printFaults(rep gpuactivity.FaultReport, incs []faultIncidentOut, jobs bool
 		if in.Unplaced > 0 && len(in.Cards) > 0 {
 			line += fmt.Sprintf("  (%d record(s) name no card)", in.Unplaced)
 		}
+		if in.Retained {
+			line += "  [retained]"
+		}
 		fmt.Println(line)
+		if in.Context != "" {
+			var evs []string
+			for _, e := range in.ContextEvents {
+				evs = append(evs, fmt.Sprintf("%s %d at %s", e.Source, e.ID, e.At.Local().Format("15:04:05")))
+			}
+			fmt.Printf("      at a %s (not counted towards a repeat): %s\n", in.Context, strings.Join(evs, ", "))
+		}
 		if in.Reading != "" {
 			fmt.Println("      xid 13 reading: " + in.Reading)
 		}

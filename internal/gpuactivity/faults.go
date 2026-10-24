@@ -64,7 +64,9 @@ type FaultCard struct {
 	Events    int          `json:"events"`
 	ByClass   []ClassCount `json:"by_class,omitempty"`
 	Incidents int          `json:"incidents"`
-	Last      time.Time    `json:"last,omitempty"`
+	// InContext counts the incidents naming it that fell at a restart or a sleep transition (faultcontext.go).
+	InContext int       `json:"in_context,omitempty"`
+	Last      time.Time `json:"last,omitempty"`
 }
 
 // ClassCount is how many records of one class.
@@ -80,6 +82,9 @@ type IncidentCard struct {
 	UUID   string `json:"uuid,omitempty"`
 	Bus    string `json:"bus"`
 	Events int    `json:"events"`
+	// Classes splits the card's records in the burst: the repeat rule counts per card and class, and a retained
+	// incident keeps no records.
+	Classes []ClassCount `json:"classes,omitempty"`
 }
 
 // Incident is one burst of driver records.
@@ -97,6 +102,12 @@ type Incident struct {
 	Reading string `json:"reading,omitempty"`
 	// LiveKernel are the live kernel dumps whose time falls in the burst (a minute before it to two after).
 	LiveKernel []LiveKernelEvent `json:"live_kernel,omitempty"`
+	// Context is "restart" or "sleep-wake" when the burst fell at one (faultcontext.go): listed, but not counted
+	// towards a repeat. ContextEvents are the OS records that placed it there.
+	Context       string         `json:"context,omitempty"`
+	ContextEvents []ContextEvent `json:"context_events,omitempty"`
+	// Retained marks an incident read from the retention file (faultstore.go) because the OS log no longer holds it.
+	Retained bool `json:"retained,omitempty"`
 }
 
 // LiveKernelEvent is one live kernel dump Windows Error Reporting filed.
@@ -136,7 +147,9 @@ type FaultReport struct {
 	Repeats    []Repeat          `json:"repeats,omitempty"`
 	Known      []KnownError      `json:"known_errors"`
 	LiveKernel []LiveKernelEvent `json:"live_kernel_events,omitempty"`
-	Notes      []string          `json:"notes,omitempty"`
+	// Retained counts the incidents added from the retention file.
+	Retained int      `json:"retained,omitempty"`
+	Notes    []string `json:"notes,omitempty"`
 }
 
 // Seam: the WER read, so a test reads canned records on any OS.
@@ -145,6 +158,12 @@ var readLiveKernelFn = readLiveKernelEvents
 // ReadFaults reads this machine's driver fault history for the window (capped at FaultWindowMax). Uncached: each
 // call reads the logs. ErrNoDriverEventSource means this OS has no source; a read that is short says so in Notes.
 func ReadFaults(ctx context.Context, window time.Duration) (FaultReport, error) {
+	return ReadFaultsRetained(ctx, window, nil)
+}
+
+// ReadFaultsRetained is ReadFaults with the retained incidents (FaultStore.Load) merged in: one that overlaps no
+// incident read from the OS log is added, marked Retained, and counts like the others.
+func ReadFaultsRetained(ctx context.Context, window time.Duration, retained []Incident) (FaultReport, error) {
 	if window <= 0 || window > FaultWindowMax {
 		window = FaultWindowMax
 	}
@@ -176,12 +195,22 @@ func ReadFaults(ctx context.Context, window time.Duration) (FaultReport, error) 
 			rep.Notes = append(rep.Notes, "live kernel dumps: "+lerr.Error())
 		}
 	}
-	buildFaultReport(&rep, evs, cards, lke)
+	cevs, cerr := readContextFn(ctx, now, window)
+	if cerr != nil && !errors.Is(cerr, ErrNoDriverEventSource) {
+		rep.Notes = append(rep.Notes, "restart and sleep context incomplete (an incident at one may count towards a repeat): "+cerr.Error())
+	}
+	var kept []Incident
+	for _, in := range retained {
+		if !in.End.Before(rep.Since) && !in.Start.After(rep.Until) {
+			kept = append(kept, in)
+		}
+	}
+	buildFaultReport(&rep, evs, cards, lke, contextSpans(cevs), kept)
 	return rep, nil
 }
 
 // buildFaultReport fills the report from what was read: placement, incidents, repeats, the known errors seen.
-func buildFaultReport(rep *FaultReport, evs []DriverEvent, cards []FaultCard, lke []LiveKernelEvent) {
+func buildFaultReport(rep *FaultReport, evs []DriverEvent, cards []FaultCard, lke []LiveKernelEvent, spans []contextSpan, retained []Incident) {
 	byBus := map[string]int{}
 	for i, c := range cards {
 		byBus[c.Bus] = i
@@ -223,7 +252,7 @@ func buildFaultReport(rep *FaultReport, evs []DriverEvent, cards []FaultCard, lk
 		if e.Bus == "" {
 			in.Unplaced++
 		} else {
-			in.Cards = addIncidentCard(in.Cards, e.Bus, cards, byBus)
+			in.Cards = addIncidentCard(in.Cards, e.Bus, ClassOf(e), cards, byBus)
 		}
 		if g, t, ok := smUnit(e.Text); ok {
 			if units[n] == nil {
@@ -235,9 +264,16 @@ func buildFaultReport(rep *FaultReport, evs []DriverEvent, cards []FaultCard, lk
 	for n := range incs {
 		incs[n].Units = len(units[n])
 		incs[n].Reading = xid13Reading(units[n])
+	}
+	markContext(incs, spans)
+	incs = mergeRetained(incs, retained, cards, byBus, rep)
+	for n := range incs {
 		for _, c := range incs[n].Cards {
 			if i, ok := byBus[c.Bus]; ok {
 				cards[i].Incidents++
+				if incs[n].Context != "" {
+					cards[i].InContext++
+				}
 			}
 		}
 	}
@@ -256,7 +292,7 @@ func buildFaultReport(rep *FaultReport, evs []DriverEvent, cards []FaultCard, lk
 			}
 		}
 	}
-	rep.Repeats = repeatsOf(incs, timed, cards, byBus)
+	rep.Repeats = repeatsOf(incs, cards, byBus)
 	// Newest first for the reader.
 	for i, j := 0, len(incs)-1; i < j; i, j = i+1, j-1 {
 		incs[i], incs[j] = incs[j], incs[i]
@@ -288,38 +324,40 @@ func addClass(cs []ClassCount, class string) []ClassCount {
 	return append(cs, ClassCount{Class: class, Count: 1})
 }
 
-func addIncidentCard(ics []IncidentCard, bus string, cards []FaultCard, byBus map[string]int) []IncidentCard {
+func addIncidentCard(ics []IncidentCard, bus, class string, cards []FaultCard, byBus map[string]int) []IncidentCard {
 	for i := range ics {
 		if ics[i].Bus == bus {
 			ics[i].Events++
+			ics[i].Classes = addClass(ics[i].Classes, class)
 			return ics
 		}
 	}
-	ic := IncidentCard{Index: -1, Bus: bus, Events: 1}
+	ic := IncidentCard{Index: -1, Bus: bus, Events: 1, Classes: []ClassCount{{Class: class, Count: 1}}}
 	if i, ok := byBus[bus]; ok {
 		ic.Index, ic.UUID = cards[i].Index, cards[i].UUID
 	}
 	return append(ics, ic)
 }
 
-// repeatsOf applies NVSentinel's RepeatedXIDErrorOnSameGPU rule: per card and class, the bursts that carry a
-// record of that class placed on that card; 5 or more inside 24 h is a repeat. Xid 31 and 45 are left out, as
-// NVSentinel leaves them out. One line per card and class: the 24 h stretch with the most bursts.
-func repeatsOf(incs []Incident, timed []DriverEvent, cards []FaultCard, byBus map[string]int) []Repeat {
+// repeatsOf applies NVSentinel's RepeatedXIDErrorOnSameGPU rule: per card and class, the bursts whose records of
+// that class name that card; 5 or more inside 24 h is a repeat. Xid 31 and 45 are left out, as NVSentinel leaves
+// them out, and so is a burst at a restart or sleep transition (faultcontext.go). One line per card and class: the
+// 24 h stretch with the most bursts. incs are oldest first.
+func repeatsOf(incs []Incident, cards []FaultCard, byBus map[string]int) []Repeat {
 	type key struct{ bus, class string }
 	starts := map[key][]time.Time{}
-	n := 0
-	for _, e := range timed {
-		for n < len(incs)-1 && e.At.After(incs[n].End) {
-			n++
-		}
-		if e.Bus == "" || (e.Source == "Xid" && (e.ID == 31 || e.ID == 45)) {
+	for _, in := range incs {
+		if in.Context != "" {
 			continue
 		}
-		k := key{e.Bus, ClassOf(e)}
-		s := starts[k]
-		if len(s) == 0 || !s[len(s)-1].Equal(incs[n].Start) {
-			starts[k] = append(s, incs[n].Start)
+		for _, c := range in.Cards {
+			for _, cc := range c.Classes {
+				if cc.Class == "Xid 31" || cc.Class == "Xid 45" {
+					continue
+				}
+				k := key{c.Bus, cc.Class}
+				starts[k] = append(starts[k], in.Start)
+			}
 		}
 	}
 	var out []Repeat
@@ -350,6 +388,60 @@ func repeatsOf(incs []Incident, timed []DriverEvent, cards []FaultCard, byBus ma
 		return out[i].Class < out[j].Class
 	})
 	return out
+}
+
+// mergeRetained adds each retained incident that overlaps none read from the log, marked Retained, with its records
+// counted on today's cards (placed by bus: the card index it was recorded with is re-read from today's table).
+// Oldest first in, oldest first out.
+func mergeRetained(incs, retained []Incident, cards []FaultCard, byBus map[string]int, rep *FaultReport) []Incident {
+	if len(retained) == 0 {
+		return incs
+	}
+	live := len(incs)
+	for _, r := range retained {
+		overlaps := false
+		for _, in := range incs[:live] {
+			if !r.Start.After(in.End) && !r.End.Before(in.Start) {
+				overlaps = true
+				break
+			}
+		}
+		if overlaps {
+			continue
+		}
+		r.Retained = true
+		r.Cards = append([]IncidentCard(nil), r.Cards...)
+		for ci := range r.Cards {
+			c := &r.Cards[ci]
+			c.Index, c.UUID = -1, ""
+			if i, ok := byBus[c.Bus]; ok {
+				c.Index, c.UUID = cards[i].Index, cards[i].UUID
+				fc := &cards[i]
+				fc.Events += c.Events
+				for _, cc := range c.Classes {
+					fc.ByClass = addClassN(fc.ByClass, cc.Class, cc.Count)
+				}
+				if r.End.After(fc.Last) {
+					fc.Last = r.End
+				}
+			}
+		}
+		rep.Events += r.Events
+		rep.Retained++
+		incs = append(incs, r)
+	}
+	sort.SliceStable(incs, func(i, j int) bool { return incs[i].Start.Before(incs[j].Start) })
+	return incs
+}
+
+func addClassN(cs []ClassCount, class string, n int) []ClassCount {
+	for i := range cs {
+		if cs[i].Class == class {
+			cs[i].Count += n
+			return cs
+		}
+	}
+	return append(cs, ClassCount{Class: class, Count: n})
 }
 
 // --- the card table, with names and the recovery action ---
