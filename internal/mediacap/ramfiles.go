@@ -74,6 +74,10 @@ func ImageModelFiles(cfg config.Config) []ModelFile {
 	if clip != "" {
 		out = append(out, ModelFile{Label: label, Name: clip, Classes: expectedClasses["imagegen_clip"], Role: RoleTextEncoder})
 	}
+	// The flux3-klein upsampler is a second text-encoder-class file the graph loads; it comes after the text encoder, which a multicard row matches first.
+	if u := comfyUpsamplerFile(cfg); u != "" {
+		out = append(out, ModelFile{Label: "imagegen_upsampler", Name: u, Classes: expectedClasses["imagegen_upsampler"], Role: RoleTextEncoder})
+	}
 	return out
 }
 

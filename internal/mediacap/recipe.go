@@ -74,6 +74,9 @@ const (
 	RecipeRoleClip = "clip"
 	RecipeRoleVAE  = "vae"
 	RecipeRoleLoRA = "lora"
+	// RecipeRoleUpsampler is the prompt upsampler a flux3-klein graph runs before it renders (imagegen_upsampler): it writes the
+	// caption the DiT renders, so another upsampler file is another picture.
+	RecipeRoleUpsampler = "upsampler"
 )
 
 // RecipeFile is one weight file the graph loads: its role, its ComfyUI-relative name, its size on this machine (-1 when
@@ -96,15 +99,18 @@ type Recipe struct {
 	// The sampling the render uses. For a graph family in builderSampling a key the binding leaves unset is the
 	// builder's default (Explicit says which keys the binding actually set); for any other graph family an unset
 	// key stays unset, which is stricter, never looser.
-	Steps         int     `json:"steps,omitempty"`
-	CFG           float64 `json:"cfg,omitempty"`
-	Sampler       string  `json:"sampler,omitempty"`
-	Scheduler     string  `json:"scheduler,omitempty"`
-	Schedule      string  `json:"schedule,omitempty"`
-	Shift         float64 `json:"shift,omitempty"`
-	LoRAStrength  float64 `json:"lora_strength,omitempty"`
-	License       string  `json:"license,omitempty"`
-	CommercialUse *bool   `json:"commercial_use,omitempty"`
+	Steps        int     `json:"steps,omitempty"`
+	CFG          float64 `json:"cfg,omitempty"`
+	Sampler      string  `json:"sampler,omitempty"`
+	Scheduler    string  `json:"scheduler,omitempty"`
+	Schedule     string  `json:"schedule,omitempty"`
+	Shift        float64 `json:"shift,omitempty"`
+	LoRAStrength float64 `json:"lora_strength,omitempty"`
+	// UpsamplerModel is a flux3-klein binding's llama-swap upsampler (imagegen_upsampler in its model form): another model writes another
+	// caption, so it is part of what renders alike. By NAME only: the model's weights live in llama-swap, not in the ComfyUI roots.
+	UpsamplerModel string `json:"upsampler_model,omitempty"`
+	License        string `json:"license,omitempty"`
+	CommercialUse  *bool  `json:"commercial_use,omitempty"`
 	// Explicit lists the sampling keys (steps, cfg, sampler, scheduler, schedule) the binding SET, as opposed to
 	// taking the builder's default. It is NOT in the digest. It exists for the one place the two spellings render
 	// differently: a request that carries its own `steps` is only valid on a graph that takes steps and cfg
@@ -129,8 +135,8 @@ var builderSampling = map[string]samplingDefaults{
 }
 
 // stepsAndCFGTogether are the graph families whose runner refuses a `steps` without a `cfg` (or the reverse):
-// render/comfy-render.mjs throws a usage error for exactly these three.
-var stepsAndCFGTogether = map[string]bool{"krea2": true, "qwen-image": true, config.FamilyQwenImage21: true}
+// render/comfy-render.mjs throws a usage error for exactly these four.
+var stepsAndCFGTogether = map[string]bool{"krea2": true, "qwen-image": true, config.FamilyQwenImage21: true, config.FamilyFlux3Klein: true}
 
 // PairsStepsAndCFG reports whether this recipe's graph takes steps and cfg together, so that a per-request `steps`
 // renders only when the binding also set cfg. A node whose binding leaves cfg to the builder's default is a
@@ -162,11 +168,18 @@ type roledFile struct {
 func imageRecipeFiles(cfg config.Config) []roledFile {
 	var out []roledFile
 	for _, f := range ImageModelFiles(cfg) {
+		if f.Label == "imagegen_upsampler" {
+			continue // its own role, below
+		}
 		role := RecipeRoleCkpt
 		if f.Role == RoleTextEncoder {
 			role = RecipeRoleClip
 		}
 		out = append(out, roledFile{role, f})
+	}
+	// Digested whenever a ComfyUI flux3-klein binding names an upsampler FILE (the model form is Recipe.UpsamplerModel).
+	if u := cfg.UpsamplerFile(); u != "" {
+		out = append(out, roledFile{RecipeRoleUpsampler, ModelFile{Label: "imagegen_upsampler", Name: u, Classes: expectedClasses["imagegen_upsampler"], Role: RoleTextEncoder}})
 	}
 	vae, label := strings.TrimSpace(cfg.ImageGenVAE), "imagegen_vae"
 	if vae == "" {
@@ -222,7 +235,8 @@ func ImageRecipeWith(cfg config.Config, fi config.FamilyInfo, roots []ModelRoot,
 		Sampler: strings.TrimSpace(cfg.ImageGenSampler), Scheduler: strings.TrimSpace(cfg.ImageGenScheduler),
 		Schedule: strings.TrimSpace(cfg.ImageGenSchedule),
 		Shift:    cfg.ImageGenShift, LoRAStrength: cfg.ImageGenLoRAStrength,
-		License: strings.TrimSpace(fi.License), CommercialUse: fi.CommercialUse,
+		UpsamplerModel: cfg.UpsamplerModel(),
+		License:        strings.TrimSpace(fi.License), CommercialUse: fi.CommercialUse,
 	}
 	for _, k := range []struct {
 		name string
@@ -313,20 +327,22 @@ func fingerprintState(fp string) string {
 
 // digestForm is the canonical shape that is hashed: fixed field order, no omitted zero, files in role order.
 type digestForm struct {
-	V             int          `json:"v"`
-	Engine        string       `json:"engine"`
-	Graph         string       `json:"graph"`
-	Files         []RecipeFile `json:"files"`
-	Preset        string       `json:"preset"`
-	Steps         int          `json:"steps"`
-	CFG           float64      `json:"cfg"`
-	Sampler       string       `json:"sampler"`
-	Scheduler     string       `json:"scheduler"`
-	Schedule      string       `json:"schedule"`
-	Shift         float64      `json:"shift"`
-	LoRAStrength  float64      `json:"lora_strength"`
-	License       string       `json:"license"`
-	CommercialUse *bool        `json:"commercial_use"`
+	V            int          `json:"v"`
+	Engine       string       `json:"engine"`
+	Graph        string       `json:"graph"`
+	Files        []RecipeFile `json:"files"`
+	Preset       string       `json:"preset"`
+	Steps        int          `json:"steps"`
+	CFG          float64      `json:"cfg"`
+	Sampler      string       `json:"sampler"`
+	Scheduler    string       `json:"scheduler"`
+	Schedule     string       `json:"schedule"`
+	Shift        float64      `json:"shift"`
+	LoRAStrength float64      `json:"lora_strength"`
+	// omitempty keeps every digest that has no model-form upsampler byte for byte what it was
+	UpsamplerModel string `json:"upsampler_model,omitempty"`
+	License        string `json:"license"`
+	CommercialUse  *bool  `json:"commercial_use"`
 }
 
 // Digest is the sha256 of the canonical JSON of the resolved recipe (hex). Explicit is not in it.
@@ -338,7 +354,7 @@ func (r Recipe) Digest() string {
 	}
 	b, _ := json.Marshal(digestForm{V: RecipeVersion, Engine: r.Engine, Graph: r.Graph, Files: files, Preset: r.Preset,
 		Steps: r.Steps, CFG: r.CFG, Sampler: r.Sampler, Scheduler: r.Scheduler, Schedule: r.Schedule, Shift: r.Shift,
-		LoRAStrength: r.LoRAStrength, License: r.License, CommercialUse: r.CommercialUse})
+		LoRAStrength: r.LoRAStrength, UpsamplerModel: r.UpsamplerModel, License: r.License, CommercialUse: r.CommercialUse})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -368,7 +384,7 @@ func (r Recipe) Diff(o Recipe) []string {
 		return m
 	}
 	a, b := byRole(r.Files), byRole(o.Files)
-	for _, role := range []string{RecipeRoleCkpt, RecipeRoleClip, RecipeRoleVAE, RecipeRoleLoRA} {
+	for _, role := range []string{RecipeRoleCkpt, RecipeRoleClip, RecipeRoleVAE, RecipeRoleLoRA, RecipeRoleUpsampler} {
 		key := "imagegen_" + role
 		fa, fb := a[role], b[role]
 		if fa.Name != fb.Name {
@@ -387,6 +403,7 @@ func (r Recipe) Diff(o Recipe) []string {
 	str("imagegen_schedule", r.Schedule, o.Schedule)
 	num("imagegen_shift", r.Shift, o.Shift)
 	num("imagegen_lora_strength", r.LoRAStrength, o.LoRAStrength)
+	str("imagegen_upsampler", r.UpsamplerModel, o.UpsamplerModel)
 	str("license", r.License, o.License)
 	switch {
 	case (r.CommercialUse == nil) != (o.CommercialUse == nil):

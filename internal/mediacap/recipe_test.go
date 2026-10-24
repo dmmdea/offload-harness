@@ -302,6 +302,7 @@ var (
 		"imagegen_preset": "lightning4", "imagegen_clip": "other_clip.safetensors", "imagegen_lora": "l.safetensors",
 		"imagegen_lora_strength": 0.7, "imagegen_shift": 3.1, "imagegen_schedule": "comfy",
 		"imagegen_license": "Another License", "imagegen_commercial_use": true,
+		"imagegen_upsampler": "other_upsampler.safetensors",
 	}
 	localKeys = map[string]any{
 		"imagegen_pool_vvram_gb": 12.0, "imagegen_pool_compute": "cuda:0", "imagegen_pool_donor": "cuda:1", "imagegen_placement": "multicard",
@@ -395,9 +396,20 @@ func TestRecipeChangesOnEveryRenderKey(t *testing.T) {
 	}
 	sort.Strings(keys)
 	for _, k := range keys {
+		if k == "imagegen_upsampler" {
+			continue // only the flux3-klein graph reads it: below
+		}
 		changed := recipeOf(t, withKey(t, base, k, renderKeys[k]))
 		if changed.Digest() == want {
 			t.Errorf("changing %s did not change the recipe", k)
+		}
+	}
+	// imagegen_upsampler, on the one graph that reads it, in both forms: a file the graph loads and a llama-swap model the harness calls.
+	flux := withKey(t, base, "imagegen_family", config.FamilyFlux3Klein)
+	plain := recipeOf(t, flux).Digest()
+	for _, v := range []string{"other_upsampler.safetensors", "other-upsampler-model"} {
+		if recipeOf(t, withKey(t, flux, "imagegen_upsampler", v)).Digest() == plain {
+			t.Errorf("changing imagegen_upsampler to %q did not change the flux3-klein recipe", v)
 		}
 	}
 }

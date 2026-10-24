@@ -20,7 +20,7 @@ export const JOB_PARAM_FLAGS = ["negative", "width", "height", "steps", "seed"];
 // harness sends and comfy-render never sees.
 // placement/resident-gb/cards (render/multicard-image.mjs) are the card-only placement: where a machine puts the model is its config, never a
 // prompt's, and the child render needs them to build the graph and to verify the pair before it submits.
-export const SHARED_BINDING_FLAGS = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift", "pool-vvram", "pool-compute", "pool-donor", "schedule", "transparent", "placement", "resident-gb", "cards"];
+export const SHARED_BINDING_FLAGS = ["ckpt", "vae", "cfg", "sampler", "scheduler", "family", "preset", "clip", "lora", "lora-strength", "shift", "pool-vvram", "pool-compute", "pool-donor", "schedule", "transparent", "placement", "resident-gb", "cards", "upsampler"];
 const JOB_PARAMS = JOB_PARAM_FLAGS;
 const SHARED_ONLY = SHARED_BINDING_FLAGS;
 

@@ -6,8 +6,8 @@
       "views": {
         "default": {
           "template": "audio_ace_step1_5_xl_turbo",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "04bf9d5acb46ebec2c4f9464a9e367f57237f87cf62335471277f1a2721fc793",
           "builderSha256": "04bf9d5acb46ebec2c4f9464a9e367f57237f87cf62335471277f1a2721fc793",
           "items": {
@@ -29,13 +29,72 @@
         }
       }
     },
+    "wf-flux3-klein": {
+      "module": "render/wf-flux3-klein.mjs",
+      "views": {
+        "distilled": {
+          "template": "image_flux3_klein_distilled_t2i",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
+          "templateSha256": "76dfd4c7d6a62749de48c4cb73fdef1f966395aa480b2762f7a85cfe9941b6f8",
+          "builderSha256": "32f17e7bd03ded05a7b98617edc7e08806602c016231d5cb0f673c4b3a744768",
+          "items": {
+            "ksampler.steps": { "template": "b17ef6d19c7a5b1e", "builder": "b17ef6d19c7a5b1e", "status": "same" },
+            "ksampler.cfg": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "clip_loader.type": { "template": "81b212ed430da72e", "builder": "81b212ed430da72e", "status": "same" },
+            "upsampler_loader.type": { "template": "81b212ed430da72e", "builder": "81b212ed430da72e", "status": "same" },
+            "upsampler.max_length": { "template": "9955f4a562efd60e", "builder": "9955f4a562efd60e", "status": "same" },
+            "upsampler.sampling_mode": { "template": "990c23868b965814", "builder": "990c23868b965814", "status": "same" },
+            "upsampler.temperature": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "upsampler.top_k": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "upsampler.top_p": { "template": "22fa3ce4995af8d9", "builder": "22fa3ce4995af8d9", "status": "same" },
+            "upsampler.min_p": { "template": "5feceb66ffc86f38", "builder": "5feceb66ffc86f38", "status": "same" },
+            "upsampler.repetition_penalty": { "template": "00fef940a6aaf1e0", "builder": "6b86b273ff34fce1", "status": "deliberate" },
+            "upsampler.presence_penalty": { "template": "9f29a130438b8117", "builder": "9f29a130438b8117", "status": "same" },
+            "upsampler.thinking": { "template": "fcbcf165908dd18a", "builder": "fcbcf165908dd18a", "status": "same" },
+            "upsampler.mtp": { "template": "9f3becba6e4b1583", "builder": "9f3becba6e4b1583", "status": "same" },
+            "upsampler.system_prompt": { "template": "c3c8f951ef38892e", "builder": "839aeb083c9c128d", "status": "deliberate" }
+          }
+        },
+        "base": {
+          "template": "image_flux3_klein_t2i",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
+          "templateSha256": "4d3615550df780294e0106b7e9d9acdd92d352eeda3e819d5affe15dcdc6661a",
+          "builderSha256": "94f28e19fd7a21b11af2a170d2e2a94ef5017d8193c648de41163f56de859ced",
+          "items": {
+            "ksampler.steps": { "template": "1a6562590ef19d10", "builder": "1a6562590ef19d10", "status": "same" },
+            "ksampler.cfg": { "template": "8a199b120cf400d6", "builder": "8a199b120cf400d6", "status": "same" },
+            "ksampler.sampler_name": { "template": "4d60ecd334f3c87d", "builder": "4d60ecd334f3c87d", "status": "same" },
+            "ksampler.scheduler": { "template": "202edac05ccc3ac7", "builder": "202edac05ccc3ac7", "status": "same" },
+            "ksampler.denoise": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "clip_loader.type": { "template": "81b212ed430da72e", "builder": "81b212ed430da72e", "status": "same" },
+            "upsampler_loader.type": { "template": "81b212ed430da72e", "builder": "81b212ed430da72e", "status": "same" },
+            "upsampler.max_length": { "template": "9955f4a562efd60e", "builder": "9955f4a562efd60e", "status": "same" },
+            "upsampler.sampling_mode": { "template": "990c23868b965814", "builder": "990c23868b965814", "status": "same" },
+            "upsampler.temperature": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "upsampler.top_k": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "upsampler.top_p": { "template": "22fa3ce4995af8d9", "builder": "22fa3ce4995af8d9", "status": "same" },
+            "upsampler.min_p": { "template": "5feceb66ffc86f38", "builder": "5feceb66ffc86f38", "status": "same" },
+            "upsampler.repetition_penalty": { "template": "6b86b273ff34fce1", "builder": "6b86b273ff34fce1", "status": "same" },
+            "upsampler.presence_penalty": { "template": "9f29a130438b8117", "builder": "9f29a130438b8117", "status": "same" },
+            "upsampler.thinking": { "template": "fcbcf165908dd18a", "builder": "fcbcf165908dd18a", "status": "same" },
+            "upsampler.mtp": { "template": "9f3becba6e4b1583", "builder": "9f3becba6e4b1583", "status": "same" },
+            "upsampler.system_prompt": { "template": "c3c8f951ef38892e", "builder": "839aeb083c9c128d", "status": "deliberate" }
+          }
+        }
+      }
+    },
     "wf-h3-av": {
       "module": "render/wf-h3-av.mjs",
       "views": {
         "t2v-turbo": {
           "template": "video_minimax_h3_t2v",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
           "builderSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
           "items": {
@@ -49,8 +108,8 @@
         },
         "t2v-hero": {
           "template": "video_minimax_h3_t2v",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "bc6013d98d5c76513e2fb4f5bb8903ae7080597c33058e974cd40a1b7ccd7427",
           "builderSha256": "bc6013d98d5c76513e2fb4f5bb8903ae7080597c33058e974cd40a1b7ccd7427",
           "items": {
@@ -62,8 +121,8 @@
         },
         "i2v-turbo": {
           "template": "video_minimax_h3_i2v",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
           "builderSha256": "9d9fc9e4d2c18faaa29a38fdd11086f558f04de63ab0afcbdf639e429f79c454",
           "items": {
@@ -77,8 +136,8 @@
         },
         "i2v-hero": {
           "template": "video_minimax_h3_i2v",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "bc6013d98d5c76513e2fb4f5bb8903ae7080597c33058e974cd40a1b7ccd7427",
           "builderSha256": "bc6013d98d5c76513e2fb4f5bb8903ae7080597c33058e974cd40a1b7ccd7427",
           "items": {
@@ -95,8 +154,8 @@
       "views": {
         "base": {
           "template": "image_hidream_o1",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "05a40166f38b6590cc5e57a53a5b0a1f7002580b18598c48fc634bea59f63b26",
           "builderSha256": "05a40166f38b6590cc5e57a53a5b0a1f7002580b18598c48fc634bea59f63b26",
           "items": {
@@ -117,8 +176,8 @@
         },
         "dev": {
           "template": "image_hidream_o1_dev",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "00571e67bb4785e9482822a24ab0a3d93c9e0ff53f56bb7b4444992825bfe043",
           "builderSha256": "00571e67bb4785e9482822a24ab0a3d93c9e0ff53f56bb7b4444992825bfe043",
           "items": {
@@ -140,8 +199,8 @@
       "views": {
         "default": {
           "template": "image_krea2_turbo_t2i",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "cdb6702e8d6e25e654521f31477781812a71ffa297a52f9d143f308ba1790598",
           "builderSha256": "cdb6702e8d6e25e654521f31477781812a71ffa297a52f9d143f308ba1790598",
           "items": {
@@ -160,8 +219,8 @@
       "views": {
         "default": {
           "template": "video_ltx2_5_i2v",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "b25f2b772eacf28d9c2a2a118a911529c8290afcdd969d12cf04c85cbdef1467",
           "builderSha256": "67dfdd28a7422693f04c02fad015250ecb84ebd8f4ebe9e9d7008548514b5288",
           "items": {
@@ -198,8 +257,8 @@
       "views": {
         "full": {
           "template": "image_qwen_Image_2512",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "fac9a55c6450af1d4c16913dc8c25ba67618466ac52f8889bf509d7a1b50739f",
           "builderSha256": "fac9a55c6450af1d4c16913dc8c25ba67618466ac52f8889bf509d7a1b50739f",
           "items": {
@@ -213,8 +272,8 @@
         },
         "lightning4": {
           "template": "image_qwen_Image_2512",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "4b0ece52d6ad66e37c6826560bd985aff69b7017240f4297c882b571f114c18e",
           "builderSha256": "4b0ece52d6ad66e37c6826560bd985aff69b7017240f4297c882b571f114c18e",
           "items": {
@@ -235,8 +294,8 @@
       "views": {
         "t2i": {
           "template": "image_qwen_image_2_1_t2i",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "0728e4af6c2e617eaac856fae3a559b7c51f1e7ba76953cadad8fcbb4cd23668",
           "builderSha256": "beb788fa035cfbfbb856d5f2aa37a8c721dcce70342fce81b8590800d32ad51b",
           "items": {
@@ -250,8 +309,8 @@
         },
         "edit": {
           "template": "image_qwen_image_2_1_image_edit",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "ab782b2908f9cf392c9767bc5885a792f2d2d8e82560cbd6529732643fd38ffb",
           "builderSha256": "2a647ae25601b5bed1a263e3f3106d52d6dd1a345128e976b372c72e73496649",
           "items": {
@@ -272,8 +331,8 @@
       "views": {
         "full": {
           "template": "image_qwen_image_edit_2511",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "0e7fd1ba721e724ffc49d444bd326fe3057a24b94595c6b14b9f493ae5512c2b",
           "builderSha256": "6c47f5b79d92b8406271290731b13f651c6a4ed6b6ab5c63870364a07135a00f",
           "items": {
@@ -287,8 +346,8 @@
         },
         "lightning4": {
           "template": "image_qwen_image_edit_2511",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "b5056947b731cf469e7e81884c0367ac6cdda4f8b28d22dc756f02575e0bb479",
           "builderSha256": "b5056947b731cf469e7e81884c0367ac6cdda4f8b28d22dc756f02575e0bb479",
           "items": {
@@ -309,8 +368,8 @@
       "views": {
         "full": {
           "template": "image_qwen_image_controlnet_patch",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "fc62d13ec27ed51445f1a321febc8476e356ed25ef46a7f6dd98920e4452c3d1",
           "builderSha256": "fc62d13ec27ed51445f1a321febc8476e356ed25ef46a7f6dd98920e4452c3d1",
           "items": {
@@ -330,8 +389,8 @@
       "views": {
         "default": {
           "template": "video_wan_animate2_distilled",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "ca801fef41548aea2f3da56ebbe13f9f0640c350802ea0916461aaeece63091a",
           "builderSha256": "bed887b710bd7ff7d9df099b6c766af96d95bc3c12db0d11ac85cc8a5bda24bf",
           "items": {
@@ -368,8 +427,8 @@
       "views": {
         "native": {
           "template": "video_wan2_2_14B_i2v",
-          "json_version": "0.1.96",
-          "meta_version": "0.11.70",
+          "json_version": "0.1.122",
+          "meta_version": "0.11.96",
           "templateSha256": "2e583b0071ceedc085e33b6239ceb7cd3d9c8edb4b22548eae316601c8a75d0e",
           "builderSha256": "2e583b0071ceedc085e33b6239ceb7cd3d9c8edb4b22548eae316601c8a75d0e",
           "items": {

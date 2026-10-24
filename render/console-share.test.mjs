@@ -74,7 +74,7 @@ test("a child with inherited stdio stays on its parent's console, a piped one le
 // stdio entry it never leaves the console, so it needs no reaping on SIGINT
 const ATTACHED = [
   ["tts.mjs", /spawn\(TTS_PY, args, \{[^}]*stdio: "inherit"[^}]*windowsHide: true/],
-  ["sdcpp-generate.mjs", /spawn\(bin, args, \{[^}]*stdio: "inherit"[^}]*windowsHide: true/],
+  ["sdcpp-generate.mjs", /spawn\(bin, args, \{[^}]*stdio: \["inherit", "pipe", "pipe"\][^}]*windowsHide: true/],
   ["comfy-generate.mjs", /spawn\("node", args, \{[^}]*stdio: \["inherit", "inherit", "pipe"\][^}]*windowsHide: true/],
 ];
 

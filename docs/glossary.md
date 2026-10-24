@@ -334,7 +334,7 @@ reference box" with a tier id, or use the node letter ([STYLE.md](STYLE.md#priva
 |---|---|
 | `ampere-8` | `<node-a>`, the RTX 3070 laptop (8 GB) |
 | `blackwell-16`, `blackwell-2x16`, `blackwell-3x16` | `<node-b>`, the workstation, in three eras: one RTX 5060 Ti until 2026-08-02 (`blackwell-16`, now historical), two cards until 2026-08-31 (`blackwell-2x16`), three cards since (`blackwell-3x16`) |
-| `ampere-6`, `ampere-16` | `<node-c>`, the Linux edge node: an RTX 3050 6 GB until 2026-09-04 (`ampere-6`, now historical), an NVIDIA A2 16 GB since (`ampere-16`) |
+| `ampere-6`, `ampere-16` | `<node-c>`, the Linux edge node: an RTX 3050 6 GB until 2026-09-04 and again since 2026-10-06 (`ampere-6`), an NVIDIA A2 16 GB from 2026-09-04 to 2026-10-06 (`ampere-16`, now historical) |
 | `blackwell-8` | `<node-e>`, the compact desktop (RTX 5060 8 GB), since 2026-08-19 |
 | `rockchip-rk3588` | `<node-d>`, the RK3588 board |
 | `amd-gcn` | `<node-f>`, the AMD APU mini-PC (Ryzen 5 5625U, Vega 7) |

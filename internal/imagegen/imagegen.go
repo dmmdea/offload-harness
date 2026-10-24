@@ -67,6 +67,9 @@ type Model struct {
 	// Schedule is the qwen-image-2.1 sigma schedule ("official" | "comfy"; "" = the
 	// builder default). Other families never read it.
 	Schedule string
+	// Upsampler is imagegen_upsampler on the ComfyUI engine: BFL's prompt-upsampler file, which the flux3-klein graph runs in-graph before
+	// the render (--upsampler). "" emits nothing: the prompt renders verbatim. Other families never read it.
+	Upsampler string
 	// Placement is imagegen_placement: "multicard" asks the runner for the card-only recipe on the two cards of the lease (--placement multicard,
 	// render/multicard-image.mjs); "" and "single" emit nothing, so a box that binds none renders exactly what it rendered.
 	Placement string
@@ -246,6 +249,9 @@ func bindingArgs(m Model) []string {
 	}
 	if m.Schedule != "" {
 		args = append(args, "--schedule", m.Schedule)
+	}
+	if m.Upsampler != "" {
+		args = append(args, "--upsampler", m.Upsampler)
 	}
 	if multicard(m.Placement) {
 		args = append(args, "--placement", "multicard")

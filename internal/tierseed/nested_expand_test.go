@@ -98,7 +98,7 @@ func TestBlackwell8SeedsTheZImageSdcppFamily(t *testing.T) {
 			"sdcpp_model_kind": "diffusion",
 			"sdcpp_vae":        c.home + "/models/zimage_ae.safetensors",
 			"sdcpp_llm":        c.home + "/models/Qwen3-4B-Instruct-2507-Q4_K_M.gguf",
-			"sdcpp_extra_args": []any{"--vae-tiling", "--offload-to-cpu", "--diffusion-fa", "--max-vram", "6.5", "--stream-layers"},
+			"sdcpp_extra_args": []any{"--vae-tiling", "--offload-to-cpu", "--flash-attn", "off,diffusion=on", "--max-vram", "6.5"},
 			"imagegen_steps":   float64(8), "imagegen_cfg": float64(1),
 		}
 		if !reflect.DeepEqual(z, want) {

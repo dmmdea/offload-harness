@@ -1700,13 +1700,27 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// the raw prompt. `out` above deliberately derives from the RAW prompt, so an
 	// identical request keeps reusing one file across runs (the refined text is
 	// sampled at temperature and would fragment the output path).
-	renderPrompt, refined, refineNote, _ := p.maybeRefinePrompt(ctx, prompt, refineExplicitlyOff(req.Params))
+	// A flux3-klein binding with an upsampler expands the prompt in-graph (upsampler.go), so the node refiner stays off for it:
+	// one caption, written by the model BFL trained for it, never a refined prompt upsampled again.
+	refineOff := refineExplicitlyOff(req.Params)
+	ups := llmUpsampler(cfg)
+	renderPrompt, refined, refineNote, _ := p.maybeRefinePrompt(ctx, prompt, refineOff || comfyUpsampler(cfg) != "" || ups != "")
+	// The model form of the upsampler (a llama-swap model) writes the caption here, before the lease; the file form runs in the graph.
+	var upsampled bool
+	var upsampleNote string
+	if ups != "" && !refineOff {
+		renderPrompt, upsampled, upsampleNote = p.harnessUpsample(ctx, ups, prompt)
+	}
 
 	timeout := time.Duration(cfg.ImageGenTimeoutSec) * time.Second
 	// This machine's image-model binding (per-machine config; never hardcoded here —
 	// an 8GB box runs SDXL, a 16GB box may run an all-in-one DiT). All fields are
 	// optional: a zero Model passes no flags and the renderer keeps its own defaults.
 	model := imageModelFromConfig(cfg)
+	// refine:false is "render my prompt verbatim": the caller's caption is already the full scene, so the graph skips its upsampler.
+	if refineOff {
+		model.Upsampler = ""
+	}
 	// Passive fleet footprint: key this render by the machine's image binding
 	// (family + the O1 bf16 quant) so measured peaks accumulate during normal use.
 	imgFamily, imgQuant := imageFootprintKey(cfg)
@@ -1728,6 +1742,14 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := imageResultPayload(outPath, req.Params, seed, fam)
 	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
+	switch {
+	case refineOff:
+	case comfyUpsampler(cfg) != "":
+		// the runner keeps the in-graph caption beside the picture (render/comfy-render.mjs captionPath)
+		addUpsampleData(payload, model.Upsampler, true, readCaption(outPath), "")
+	case ups != "":
+		addUpsampleData(payload, ups, upsampled, renderPrompt, upsampleNote)
+	}
 	grant.name(payload) // a card-only call says which two cards it ran on; any other answer is unchanged
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
@@ -1845,7 +1867,16 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	}
 	// Opt-in prompt refiner — same shared decision point as the ComfyUI path
 	// (refiner.go), same raw-prompt-derived, refine-knob-stripped `out` rationale.
-	renderPrompt, refined, refineNote, _ := p.maybeRefinePrompt(ctx, prompt, refineExplicitlyOff(req.Params))
+	// A flux3-klein binding's upsampler (upsampler.go) takes the refiner's place: BFL's system prompt on the bound model,
+	// before the lease, falling back to the raw prompt on any problem.
+	refineOff := refineExplicitlyOff(req.Params)
+	ups := llmUpsampler(cfg)
+	renderPrompt, refined, refineNote, _ := p.maybeRefinePrompt(ctx, prompt, refineOff || ups != "")
+	var upsampled bool
+	var upsampleNote string
+	if ups != "" && !refineOff {
+		renderPrompt, upsampled, upsampleNote = p.harnessUpsample(ctx, ups, prompt)
+	}
 	timeout := time.Duration(cfg.ImageGenTimeoutSec) * time.Second
 	m := imagegen.SdcppModel{
 		Bin:       cfg.SdcppBin,
@@ -1878,6 +1909,9 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := imageResultPayload(outPath, req.Params, seed, fam)
 	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
+	if ups != "" && !refineOff {
+		addUpsampleData(payload, ups, upsampled, renderPrompt, upsampleNote)
+	}
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
@@ -4066,6 +4100,7 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 		PoolCompute:  cfg.ImageGenPoolCompute,
 		PoolDonor:    cfg.ImageGenPoolDonor,
 		Schedule:     cfg.ImageGenSchedule,
+		Upsampler:    cfg.UpsamplerFile(),
 		Placement:    cfg.ImageGenPlacement,
 		// A pooled seat is placed by its pool keys; the device pin is for the
 		// single-card shape only (see comfyLaunch).

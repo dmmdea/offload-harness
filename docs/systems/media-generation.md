@@ -496,7 +496,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 
 | Concern | Keys |
 |---|---|
-| Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs), `imagegen_pool_vvram_gb/pool_compute/pool_donor` (krea2 pooled loading), `imagegen_refiner_model/refiner_timeout_sec` (opt-in prompt refiner) |
+| Image | `imagegen_family`, `imagegen_ckpt`, `imagegen_vae`, `imagegen_steps/cfg/sampler/scheduler`, `imagegen_preset/clip/lora/lora_strength/shift` (qwen-image knobs), `imagegen_pool_vvram_gb/pool_compute/pool_donor` (krea2 pooled loading), `imagegen_refiner_model/refiner_timeout_sec` (opt-in prompt refiner), `imagegen_upsampler` (flux3-klein only: BFL's prompt upsampler, a `text_encoders` file run in-graph on ComfyUI or a llama-swap model id on sd.cpp) |
 | Inpaint | `inpaint_ckpt`, `inpaint_vae`, `inpaint_steps/cfg/sampler/scheduler` |
 | Card-only placement (opt-in, unset by default) | `imagegen_placement`, `gen_edit_placement`: `""`/`single` (the one-card lease every box has always taken) or `multicard` (the two non-display cards of the box; "Card-only image and edit"); both are family-overlay keys |
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
@@ -1316,6 +1316,77 @@ Qwen-Image 2512, whose graph cannot drive it. Needs **ComfyUI ≥ v0.37.0** (the
   (`bf16`, `int8`, `nvfp4`, …) — the peaks differ about 2×.
 - **Known open upstream defects (2026-09-22):** #16435 (grid-dependent noise on some edit grids) and
   #16443 (dynamic-VRAM edit abort, fix PR #16450 open). Both are why 2511 stays the default edit seat.
+
+### FLUX 3 Image Klein (`render/wf-flux3-klein.mjs`, sd.cpp)
+
+BFL's 5.6B DiT (2026-10-15) with a Qwen3-VL-4B text encoder and the FLUX.2 VAE (128-channel latent at /16). Two
+checkpoints: the distilled one (16 steps, cfg 1, euler/simple; a flow map, so no shift node and no off-schedule
+sampler) and Base (50 steps, cfg 3.5). License: FLUX Kommunity License v1.0, bound `commercial_use: true` by the
+operator's ruling (2026-10-24: the revenue threshold is not in reach). ComfyUI ≥ 0.41 (the flux3 CLIP type, TextGenerate
+with dotted `sampling_mode.*` inputs), and for the NVFP4 file torch cu130 with comfy-kitchen ≥ 0.2.37 (real FP4 GEMM on
+sm_120). sd.cpp ≥ master-968 (PR #2143).
+
+**The prompt upsampler is part of the model.** BFL: "Do not use the model without a prompt upsampler"; it was trained on
+full scene captions, and a short prompt sent as typed gives generic output. `imagegen_upsampler` binds it:
+- *ComfyUI:* a file in `text_encoders` (BFL's Qwen3.5-9B finetune, `qwen3.5_9b_flux3_prompt_upsampler_{bf16,int8_convrot,w4a8}`),
+  run in-graph: `CLIPLoader(type "flux3")` → `TextGenerate` with BFL's t2i system prompt verbatim
+  (`render/flux3-klein-system-prompts.json`, Apache-2.0) → the positive `CLIPTextEncode`; `PreviewAny` hands the caption
+  back, the runner prints `CAPTION` and writes `<out>.caption.txt`, and the result carries `upsampled_prompt`. The sampling
+  is the official template's (greedy: temperature 1 with top_k 1, top_p 0.95, presence penalty 1.5, 3584 tokens, thinking
+  off) except repetition penalty 1.0, which is BFL's reference (`pup.py`) where the distilled template says 1.05 (pinned as
+  a deliberate drift entry, `render/builder-drift-specs.mjs`). The node refiner never runs on top of it.
+- *A llama-swap model id (either engine; the only form sd.cpp has):* the harness calls it with the same system prompt
+  before the media lease (`internal/pipeline/upsampler.go`; the refiner's fail-safe: a transport error, empty or truncated
+  answer or a dropped quoted span renders the raw prompt and says why in `upsample_fallback`) and sends ComfyUI the
+  finished caption, so the graph has no `TextGenerate`. The model is unloaded once the caption is in: ahead of the lease's
+  host-RAM admission, which would otherwise count it as resident (`<node-c>`'s 4B seat holds 8 GiB of commit with
+  `--cache-ram 8192`), and off a card the render may then lease (a render inside an inherited `gpu reserve` lease gets no
+  second unload pass). It is the fast form: BFL's PUP as a Q6_K GGUF on llama.cpp wrote a caption at 86-87 tok/s (3.1-3.8 s)
+  on `<node-b>`'s 5070 Ti, where the same model in-graph ran 4.3-7.6 tok/s (37-65 s, most of a render's wall). End to end
+  through this form a `<node-b>` BF16 render took 63-70 s warm instead of 132-151 s in-graph (2026-10-24). It pays only where the
+  seat loads fast: `<node-e>`'s 9B stand-in cost ~37 s to cold-load on a Gen3 x4 link, so that box keeps the in-graph
+  file. On an 8 GB Ampere card with dynamic VRAM off (`<node-a>`, the `ampere-8` seed) it is the other way round: the
+  in-graph file's generation buffer took the card ("0.00 MB loaded, 6411.81 MB offloaded, 5869.94 MB buffer reserved"),
+  its weights streamed for every token and a render took 304-488 s; the tier's `qwen3.5-9b-agent` seat in the model form
+  took it to 64-78 s, the same image quality with plainer captions. BFL's card allows any LLM given their prompt; the sd.cpp nodes use `qwen3.5-4b-agent`.
+- `refine: false` (per request) renders the prompt verbatim on both engines: a caller that sends a finished caption.
+
+**ComfyUI graph:** `UNETLoader` + `CLIPLoader(type "flux3")` + `VAELoader` → `CLIPTextEncode` ×2 →
+`EmptyFlux2LatentImage` (sizes snap down to /16) → `KSampler(denoise 1)` → `VAEDecode` → `SaveImage`. `--ckpt` and `--clip`
+are required; a `.gguf` DiT (no flux3 GGUF loader in ComfyUI), a builtin VAE and pool flags are refused; a basename with a
+`base` token picks the Base recipe (50/3.5). The family is in the steps-and-cfg pairing rule: a binding sets both, a call
+overrides both or neither.
+
+**Card-only placement (multicard, compute-first):** the DiT whole on cuda:0 (comfy-kitchen's fused kernels run there), the
+text encoder through `OffloadCLIPLoaderDisTorch2` with 6 GiB parked on cuda:1 and the rest on cuda:0, the upsampler on
+cuda:0, the VAE on cuda:1. Under `--gpu-only` nothing leaves a card by itself, so two `OffloadFreeAfterEncode` nodes take
+the upsampler (23) and then the encoder (24) off the cards once the prompt is encoded; the sampler reads the conditioning
+through them, so both releases land before the DiT loads. Rows `flux3-klein/bf16` and `flux3-klein/nvfp4`
+(`render/multicard-recipes.json`, Go mirror `internal/mediacap/multicard.go`).
+
+**sd.cpp bindings:** `sdcpp_model_kind: "diffusion"`, the leejet GGUF (`leejet/flux-3-image-klein-GGUF`), `sdcpp_llm` the
+Qwen3-VL-4B-Instruct GGUF (`Qwen/Qwen3-VL-4B-Instruct-GGUF`), `sdcpp_vae` the FLUX.2 VAE. The Apache-2.0 copy in
+`Comfy-Org/Flux-2-Klein-4B` (`split_files/vae/flux2-vae.safetensors`, 336,211,292 bytes) is the one BFL's gated comfy repo
+ships under the same name and size. Two traps, measured on `<node-c>` (2026-10-24):
+- `--offload-to-cpu` parks every bound file in host RAM and the lane declares it (F60); on a host whose commit is already
+  high that render waits at the admission. `--params-backend disk` keeps the weights file-backed (page cache, no commit),
+  and the lane then declares only the class default.
+- An explicit `--params-backend` turns sd.cpp's auto-fit off, and with it the graph segmentation: the whole DiT pass must
+  fit the card's free memory in one piece ("cannot make enough memory available on CUDA0: need 4775.55 MB device,
+  available 4530.94 MB" for Q5_K beside the memory stack's 1.2 GiB embedding seat; `--max-vram` does not split it). Q4_K
+  fits. The runner now puts sd-cli's first `[E]` line and the `[W]` line before it in its `SDCPP FAILED` line, because
+  the harness keeps 400 bytes of a runner's output and the cause was the part that fell off.
+- On a Vulkan iGPU (`<node-f>`, RADV Renoir) the VAE runs with `--conv-direct auto,vae=off --vae-tiling`; 1024² rendered
+  clean.
+
+**DiT format, measured (2026-10-24, three prompts at fixed seeds, identical captions per pair):**
+- *16 GB Blackwell (`<node-b>`, multicard):* NVFP4 runs the 16 steps at 3.1-3.3 it/s against BF16's 1.9 (5 s vs 8 s), but
+  that is 3 s of a 110-155 s render the in-graph upsampler dominates. Against BF16 it is a different sample, not a
+  degraded one (LPIPS 0.07-0.14, more than a GGUF Q4_K_M's 0.06), and small lettering suffers (a doormat's "OPEN LATE"
+  came out garbled). BF16 stays the binding; NVFP4 is not better here.
+- *8 GB Blackwell (`<node-e>`, weights streamed with dynamic VRAM):* INT8 beats NVFP4 outright: 1.7 it/s vs 1.3-1.4
+  (FP4 dequantization costs more than it saves when the weights stream), equal walls (67-71 s), the same image (LPIPS
+  0.07-0.10 between them, text correct in both). INT8 is the binding, and the same file serves Ampere, which has no FP4.
 
 ### ACE-Step 1.5 music (`render/wf-acestep.mjs`, `render/comfy-music.mjs`, `render/audio-qa.mjs`)
 

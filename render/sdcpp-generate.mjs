@@ -223,6 +223,44 @@ export function interpretListDevicesResult(r) {
   return (r.stdout || "") + "\n" + (r.stderr || "");
 }
 
+// sdFailureCause: the lines of sd-cli's output that say WHY it failed, for the SDCPP FAILED line. The harness keeps
+// only the last 400 bytes of a runner's output (internal/gpugen tailDetail), and sd.cpp ends a failure with a stack of
+// generic [E] lines ("diffusion model compute failed", "generate failed") under the one [W] line that names the cause
+// ("cannot make enough memory available on CUDA0: need 4775.55 MB device ..."), so the cause was the part cut off
+// (2026-10-24, three runs to read one flag). The first [E] line and the last [W] line before it are kept, at most 300
+// characters each; "" when sd-cli printed neither.
+export function sdFailureCause(lines) {
+  let warn = "";
+  for (const raw of lines) {
+    const line = String(raw).trim();
+    if (line.startsWith("[W]")) warn = line;
+    else if (line.startsWith("[E]")) return [line, warn].filter(Boolean).map((s) => s.slice(0, 300)).join(" | ");
+  }
+  return warn.slice(0, 300);
+}
+
+// runSdCli: sd-cli with its output passed through as before, and the [W]/[E] lines kept for sdFailureCause. stdin
+// stays inherited: libuv hides a child in a console of its own only when none of its stdio is inherited, so the one
+// inherited entry keeps sd-cli on this process's console, where the operator's Ctrl-C reaches it and a dying parent
+// does not leave it holding the card (render/console-share.test.mjs; measured for this shape 2026-10-24).
+function runSdCli(bin, args) {
+  return new Promise((res) => {
+    const kept = [];
+    const c = spawn(bin, args, { stdio: ["inherit", "pipe", "pipe"], windowsHide: true });
+    for (const [from, to] of [[c.stdout, process.stdout], [c.stderr, process.stderr]]) {
+      let rest = "";
+      from.on("data", (b) => {
+        to.write(b);
+        const parts = (rest + b.toString("utf8")).split(/\r?\n/);
+        rest = parts.pop();
+        for (const p of parts) if (/^\s*\[(W|E)\]/.test(p) && kept.length < 400) kept.push(p);
+      });
+    }
+    c.on("error", (e) => res({ code: -1, cause: e.message }));
+    c.on("close", (code) => res({ code, cause: sdFailureCause(kept) }));
+  });
+}
+
 // defaultListDevices: the real probe, `<bin> --list-devices`, combined
 // stdout+stderr (sd.cpp release builds have printed device enumeration to either
 // stream across versions). Synchronous — this runs once, before the GPU slot is
@@ -261,8 +299,8 @@ async function main() {
   const args = buildSdArgs(staged, prompt, flags, extra);
   await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {
     try {
-      const code = await new Promise((res) => spawn(bin, args, { stdio: "inherit", windowsHide: true }).on("close", res));
-      if (code !== 0) throw new Error("sd-cli exited " + code);
+      const { code, cause } = await runSdCli(bin, args);
+      if (code !== 0) throw new Error("sd-cli exited " + code + (cause ? ": " + cause : ""));
       const made = statSync(staged, { throwIfNoEntry: false });
       if (!made || made.size === 0) throw new Error(`sd-cli exited 0 but produced ${made ? "an empty file" : "no output"} at ${out}`);
       postprocessOutput(staged, flags.transparent);

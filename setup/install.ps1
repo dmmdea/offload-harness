@@ -264,10 +264,10 @@ $PINNED = @{
   # canaries, never let it rot). SHA256 = the GitHub release asset digest; binary
   # inside is sd-cli.exe (+ sd-server.exe, the recorded warm-swap upgrade path).
   'sdcpp-vulkan' = @{
-    url  = 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-789-5114672/sd-master-5114672-bin-win-vulkan-x64.zip'
-    sha  = 'cb5fb173430147d83fa3439040be1e1d97906c2e8fb3a06cc8afb761ea98ba17'
-    size = 37813364
-    version = 'master-789-5114672'
+    url  = 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-1000-95ff762/sd-master-95ff762-bin-win-vulkan-x64.zip'
+    sha  = '589bae4e3db130fc1aa3e2fe3663fdb95c47354a277ae24703c56780767f54db'
+    size = 29612427
+    version = 'master-1000-95ff762'
   }
   # Lead image model: Z-Image-Turbo (Apache-2.0 end-to-end; 8-step few-step DiT).
   # jayn7's GGUF build, NOT leejet's: leejet's mixed-rule low-bit quants produce

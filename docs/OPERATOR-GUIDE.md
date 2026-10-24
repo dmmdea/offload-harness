@@ -583,6 +583,59 @@ local-offload generate-image "a glass perfume bottle" --family qwen-image-2.1 --
 
 The result carries `family`, `license` and `commercial_use: false`, and the ledger row the
 license. A bare `generate-image` (no `--family`) still renders the default binding unchanged.
+
+**FLUX 3 Image Klein** binds the same way, with its prompt upsampler (`imagegen_upsampler`; BFL's card says not to run
+the model without one) and steps and cfg set together (the family is in the pairing rule). Every node names the family
+`flux3-klein`; what it binds depends on the node. A ComfyUI node runs BFL's upsampler file in-graph:
+
+```json
+"imagegen_families": {
+  "flux3-klein": {
+    "license": "FLUX Kommunity License v1.0",
+    "commercial_use": true,
+    "imagegen_engine": "",
+    "imagegen_family": "flux3-klein",
+    "imagegen_ckpt": "flux3-image-klein-bf16.safetensors",
+    "imagegen_clip": "qwen3vl_4b_bf16.safetensors",
+    "imagegen_vae": "flux2-vae.safetensors",
+    "imagegen_upsampler": "qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors",
+    "imagegen_steps": 16,
+    "imagegen_cfg": 1,
+    "imagegen_sampler": "euler",
+    "imagegen_scheduler": "simple"
+  }
+}
+```
+
+or, faster, names a llama-swap seat serving BFL's PUP as a GGUF (`"imagegen_upsampler": "flux3-pup"`): the harness writes
+the caption before the lease at llama.cpp speed (86 tok/s on a 5070 Ti, against 4-8 tok/s in-graph) and unloads the
+seat before the render. An sd.cpp node has only the model form:
+
+```json
+"imagegen_families": {
+  "flux3-klein": {
+    "license": "FLUX Kommunity License v1.0",
+    "commercial_use": true,
+    "imagegen_engine": "sdcpp",
+    "imagegen_family": "flux3-klein",
+    "imagegen_steps": 16,
+    "imagegen_cfg": 1,
+    "imagegen_sampler": "euler",
+    "sdcpp_model": "/models/flux3-klein/flux3-image-klein-Q4_K.gguf",
+    "sdcpp_model_kind": "diffusion",
+    "sdcpp_llm": "/models/flux3-klein/Qwen3VL-4B-Instruct-Q4_K_M.gguf",
+    "sdcpp_vae": "/models/flux3-klein/flux2-vae.safetensors",
+    "sdcpp_extra_args": ["--params-backend", "disk", "--flash-attn", "on", "--vae-tiling"],
+    "imagegen_upsampler": "qwen3.5-4b-agent"
+  }
+}
+```
+
+The `ampere-6`, `amd-gcn` and `blackwell-8` seeds carry their measured bindings (`docs/tiers/`); the files are listed in
+`setup/SETUP-AGENT.md`. `commercial_use: true` is the operator's ruling for this license (2026-10-24); read the FLUX Kommunity License before
+copying it to another deployment. The result carries `upsampled` and `upsampled_prompt` (the caption the model rendered),
+or `upsample_fallback` with the reason the raw prompt was rendered; `--refine=false` renders the prompt verbatim. Model
+files, the card-only rows and the sd.cpp memory traps: [systems/media-generation.md](systems/media-generation.md).
 To tag the default binding too, set `imagegen_license` + `imagegen_commercial_use` (both or
 neither; edit: `gen_edit_license` + `gen_edit_commercial_use`).
 

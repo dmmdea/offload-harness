@@ -42,6 +42,33 @@ type FamilyOverlay map[string]json.RawMessage
 // the only family with an RGBA VAE, so the only one transparent output applies to.
 const FamilyQwenImage21 = "qwen-image-2.1"
 
+// FamilyFlux3Klein is the FLUX 3 Image Klein graph family (render/wf-flux3-klein.mjs on ComfyUI; sd.cpp's flux3 support on
+// the sd.cpp engine): the only family that reads imagegen_upsampler.
+const FamilyFlux3Klein = "flux3-klein"
+
+// UpsamplerFile is the upsampler file the ComfyUI flux3-klein graph runs in-graph (imagegen_upsampler ending in .safetensors), "" for any
+// other binding, for the model form and on the sd.cpp engine (which has no graph to run a file in).
+func (c Config) UpsamplerFile() string {
+	u := strings.TrimSpace(c.ImageGenUpsampler)
+	if c.ImageGenFamily != FamilyFlux3Klein || c.ImageGenEngine == "sdcpp" || !upsamplerIsFile(u) {
+		return ""
+	}
+	return u
+}
+
+// UpsamplerModel is the llama-swap model the harness calls for a flux3-klein binding's caption before the media lease: imagegen_upsampler in
+// its model form on either engine, "" for any other binding, for the file form on ComfyUI and for a file named on the sd.cpp engine (a
+// misbinding the config warns about).
+func (c Config) UpsamplerModel() string {
+	u := strings.TrimSpace(c.ImageGenUpsampler)
+	if c.ImageGenFamily != FamilyFlux3Klein || u == "" || upsamplerIsFile(u) {
+		return ""
+	}
+	return u
+}
+
+func upsamplerIsFile(u string) bool { return strings.HasSuffix(strings.ToLower(u), ".safetensors") }
+
 // EditFamily2511 names the default edit graph (Qwen-Image-Edit 2511), which an empty
 // gen_edit_family selects.
 const EditFamily2511 = "qwen-image-edit-2511"
@@ -282,6 +309,7 @@ var imageOverlay = overlayKind{
 		"imagegen_sampler", "imagegen_scheduler", "imagegen_preset", "imagegen_clip", "imagegen_lora",
 		"imagegen_lora_strength", "imagegen_shift", "imagegen_pool_vvram_gb", "imagegen_pool_compute",
 		"imagegen_pool_donor", "imagegen_placement", "imagegen_schedule", "imagegen_license", "imagegen_commercial_use",
+		"imagegen_upsampler",
 		"sdcpp_model", "sdcpp_model_kind", "sdcpp_vae", "sdcpp_clip_l", "sdcpp_clip_g", "sdcpp_t5xxl",
 		"sdcpp_llm", "sdcpp_extra_args",
 	},

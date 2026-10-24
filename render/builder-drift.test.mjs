@@ -1019,7 +1019,7 @@ test("check --strict fails on unreviewed entries and only on those", async () =>
     if (it.status === "deliberate") deliberate.push(`${b} [${v}] ${k}`);
   }
   assert.deepEqual(unreviewed.sort(), ["wf-qwen-image-21 [edit] encoder.resolution", "wf-qwen-image-edit [full] ksampler.cfg"]);
-  assert.equal(deliberate.length, 4);
+  assert.equal(deliberate.length, 7);
 });
 
 test("a single-dash argument and an extra positional are refused with exit 2, never ignored", async (t) => {
