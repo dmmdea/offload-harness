@@ -150,7 +150,7 @@ func ReadFaults(ctx context.Context, window time.Duration) (FaultReport, error) 
 	}
 	now := driverNow()
 	rep := FaultReport{Since: now.Add(-window).UTC(), Until: now.UTC(), WindowDays: int((window + 24*time.Hour - 1) / (24 * time.Hour))}
-	evs, err := readLogWindow(ctx, now, window, maxFaultRecords, faultReadTimeout)
+	evs, err := readLogWindow(ctx, now, window, winEventScriptFor(int((window+time.Hour-1)/time.Hour), maxFaultRecords), faultReadTimeout)
 	if errors.Is(err, ErrNoDriverEventSource) {
 		return rep, err
 	}

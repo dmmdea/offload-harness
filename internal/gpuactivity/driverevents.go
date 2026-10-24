@@ -387,10 +387,11 @@ type readIssue struct{ msg string }
 
 func (e *readIssue) Error() string { return e.msg }
 
-// readLogWindow reads the OS's driver log for the window, capped at max records on Windows (the newest), bounded
-// by timeout. An event whose time could not be read is kept: an unknown time must not read as "long ago". A
+// readLogWindow reads the OS's driver log for the window, bounded by timeout: on Windows by running winScript (the
+// lease view passes winEventScript itself, `gpu faults` its own window and cap), on Linux the journal since the
+// window's hours. An event whose time could not be read is kept: an unknown time must not read as "long ago". A
 // readIssue comes back with the events it left usable; any other error with none.
-func readLogWindow(ctx context.Context, now time.Time, window time.Duration, max int, timeout time.Duration) ([]DriverEvent, error) {
+func readLogWindow(ctx context.Context, now time.Time, window time.Duration, winScript string, timeout time.Duration) ([]DriverEvent, error) {
 	logCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	hours := int((window + time.Hour - 1) / time.Hour)
@@ -398,7 +399,7 @@ func readLogWindow(ctx context.Context, now time.Time, window time.Duration, max
 	var err error
 	switch driverEventsGOOS {
 	case "windows":
-		evs, err = readWindowsEvents(logCtx, winEventScriptFor(hours, max))
+		evs, err = readWindowsEvents(logCtx, winScript)
 	case "linux":
 		evs, err = readKernelEvents(logCtx, hours)
 	default:
@@ -422,7 +423,7 @@ func readLogWindow(ctx context.Context, now time.Time, window time.Duration, max
 
 // readDriverEvents is one uncached read: the OS's log, the window, then the card for each event's bus.
 func readDriverEvents(ctx context.Context, now time.Time) ([]DriverEvent, error) {
-	kept, err := readLogWindow(ctx, now, driverEventWindow, maxWinEvents, driverEventTimeout)
+	kept, err := readLogWindow(ctx, now, driverEventWindow, winEventScript, driverEventTimeout)
 	if len(kept) == 0 {
 		return nil, err
 	}
