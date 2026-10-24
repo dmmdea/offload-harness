@@ -415,6 +415,16 @@ published so the fleet sees which card has been faulting without a login to each
 | `repeats[]` | NVSentinel's RepeatedXIDErrorOnSameGPU met on a card: one class (`nvlddmkm 153`, `Xid 79`, ...) in `bursts` (5 or more) bursts within 24 h, `from` and `to` being the first and last of them. Bursts at a restart or sleep transition are left out. A repeat is LIVE while `to` is within the last 24 h. |
 | `note` | why the reading may be short: a log read that stopped part way, a card table that could not be read, a retention file that could not be read or written. |
 
+**What placement does with it** ([ADR 0096](architecture/decisions/0096-a-live-driver-fault-repeat-demotes-a-cards-placement.md)).
+A repeat is LIVE while its `to` is within 24 h of the delegator's clock. A node whose every agent seat for the contract sits
+on a card with a live repeat (the seats from its layer rows, as for a lease; any live repeat where nothing narrows) ranks
+right after saturation, below every node with a seat off such cards, in the auto placement (`betterRemote`) and the spread
+deal (`fitPickWith`). It is demoted, never excluded, and a node that lost on it is narrated as
+`faulted (nvlddmkm 153 x5 on 65:00, last burst 10-11 10:05Z)`. The delegator's own box reads its summary file: a live
+repeat under every local seat of a subtask reads the seat busy for the deal (route=auto's joint reading, route=spread's
+local slot) when a remote could take the work, never for route=local; the capacity wait reads the seat afresh, so an
+overflow subtask may still come back to it. A node with no `gpu_faults` is never demoted.
+
 **Facts, served from memory.** The read takes seconds (3.4 s on the reference box), so health never runs it: fleet-serve
 reads in the background, starts the first read at startup, and keeps the last good reading when a read fails. The key is
 absent until the first read lands, on a node with no NVIDIA card, and on a node one release behind; a reader takes absent
@@ -1434,7 +1444,8 @@ vLLM seat; ADR 0078 decision 9), is a node considered, ranked by `delegate.Place
 task (`NodeView.ServesVisionTask`: no `vision_tasks` in health = all three, so an older node stays
 eligible for every task; a published list serves only what it names) and its
 card is not leased (`lease.class: text` or `lease.busy`), ordered by the agent lane's
-`betterRemote` (lease rung: clean, then a long lease, then an overdue one → not saturated → provably
+`betterRemote` (lease rung: clean, then a long lease, then an overdue one → not saturated → no live driver-fault
+repeat under every seat ([ADR 0096](architecture/decisions/0096-a-live-driver-fault-repeat-demotes-a-cards-placement.md)) → provably
 free slot → a free card → queue depth → GPU utilization → roster order) — and with no eligible node the work still runs local. `remote`: force a node; none
 eligible ⇒ `deferred: true, defer_class: capacity` (or `config` with no `delegate_remotes`),
 never a local run. `meta.node` / `meta.placement` on the result say where it ran.

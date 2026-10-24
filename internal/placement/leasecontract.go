@@ -60,6 +60,29 @@ func LeasesAgainstContract(cfg config.Config, info gpulease.Info, c core.AgentCo
 	return first
 }
 
+// LocalSeatCards is RemoteSeatCards for this box: the chain of local agent seats c could run on, each as the lease
+// ids of its cards, its pin resolved against cards (nil when the pin cannot be placed: unknown is every card). ok is
+// false when there is no chain to read: a box that declares no layers, a long-context contract, a layer nobody
+// declares, a contract no agent seat's window can hold.
+func LocalSeatCards(cfg config.Config, cards []gpuprobe.Card, c core.AgentContract) (seats [][]string, ok bool) {
+	if !cfg.Composite() || c.ContextClass == core.ContextClassLong {
+		return nil, false
+	}
+	need := RequestForContract(c, EstimateTokens(c), cfg.AgentMaxTokens).Need()
+	chain := AgentChain(cfg.Layers, c.Layer, need)
+	if len(chain) == 0 {
+		return nil, false
+	}
+	for _, link := range chain {
+		ids, ok := gpulease.ResolvePins(link.Seat.DeviceList(), cards)
+		if !ok {
+			ids = nil
+		}
+		seats = append(seats, ids)
+	}
+	return seats, true
+}
+
 // WithDeviceIDs stamps each seat row with the lease ids of the cards its pin names, resolved
 // against cards (the card table of the box that owns the rows). A node publishes them so a
 // delegator never has to guess which index space a bare pin is in. A pin the table cannot

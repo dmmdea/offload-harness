@@ -39,6 +39,11 @@
 //	           as slow (feasibleFinal), never a preference for a faster seat: the
 //	           capacity wait re-reads the node every tick and asks it the moment
 //	           its backlog fits
+//	faulted    ADR 0096: every seat of the node this contract could run on sits on
+//	           a card with a live driver-fault repeat (gpu_faults) - printed as
+//	           "faulted (nvlddmkm 153 x5 on 65:00, last burst 10-11 10:05Z)".
+//	           A demotion, never an exclusion: the node ran it when nothing
+//	           better was left
 //	cap        W-06: this DEAL has already committed as many subtasks to the
 //	           node as its headroom (max_concurrent_jobs − jobs_running)
 //	           allows — printed as "cap (running/max running, headroom N,
@@ -106,6 +111,9 @@ func oneWordVerdictWith(st Subtask, v NodeView, base, chosenBase string, dealtSo
 			return fmt.Sprintf("queue (%d/%d queue_depth)", v.QueueDepth, v.MaxQueueDepth)
 		}
 		return "queue (saturation.high)"
+	}
+	if now := faultNow(); faultDemoted(v, &st, now) {
+		return "faulted (" + faultDetail(v, now) + ")"
 	}
 	p, clamp := patience(st.Contract, v)
 	if ok, why := startsWithinPatience(v, p); !ok {
