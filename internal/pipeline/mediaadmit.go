@@ -982,10 +982,11 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 	}
 	reads := &tableReads{cards: cards, at: start}
 	defer func() { err = withTableNote(err, reads.note()) }()
-	// askRAM is the host RAM the call declares: against the cards its plan names, else against the largest card
-	// (askRAMFor, the smallest answer). What the allocator's pre-filter reads, and whether the call declares any at all,
-	// which decides whether a waiter that waits only on host RAM holds its cards against it (gpualloc.QueuedClaims).
-	askRAM := p.askRAMFor(ctx, need, plan, cards)
+	// askRAM is the host RAM the call declares IN THE GRANT: against the cards its plan names, else against the largest card
+	// (askRAMFor, the smallest answer), and 0 for a call that defers its figure until its own unload has run (askRAMGate). What
+	// the allocator's pre-filter reads, and whether the call declares any at all, which decides whether a waiter that waits
+	// only on host RAM holds its cards against it (gpualloc.QueuedClaims).
+	askRAM := p.askRAMGate(ctx, m, need, plan, cards, 0)
 	// A call that resumes a place keeps the arrival time it left with, and keeps the place itself
 	// held while it waits (keepPlace). The keeper is stopped before the call spends the place
 	// (grantCards), consumes it (the lease wait registers a waiter) or leaves it again.
@@ -996,10 +997,42 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		stopKeep = keepPlace(m, tok.ID)
 	}
 	defer stopKeep()
+	// deferrals holds, per card set, whether the call is compared to the host in the grant or after its own unload
+	// (hostRAMDeferral). One reading per set for the whole call: the grant and the answers it leaves must agree on it.
+	deferrals := map[string]hostRAMDeferral{}
+	deferralFor := func(ids []string) hostRAMDeferral {
+		key := strings.Join(ids, ",")
+		if d, ok := deferrals[key]; ok {
+			return d
+		}
+		d := p.hostRAMDeferral(ctx, m, p.declaredRAM(ctx, need, cards, ids), ids, cards, 0)
+		deferrals[key] = d
+		return d
+	}
 	optsFor := func(ids []string) gpulease.Options {
-		// The host RAM this call declares on THESE cards: whether its weights fit decides it.
+		// The host RAM this call declares on THESE cards: whether its weights fit decides it. A call that defers declares
+		// nothing in the grant; the figure travels as HostRAMWaitGiB and is admitted after the clear.
+		d := deferralFor(ids)
 		return gpulease.Options{Reason: reason, Origin: "pipeline", TTL: ttl, Devices: ids, ResumeToken: tokenID,
-			HostRAMGiB: p.declaredRAM(ctx, need, cards, ids)}
+			HostRAMGiB: d.gate(), HostRAMWaitGiB: d.later()}
+	}
+	// tokenOptsFor is optsFor for an answer that leaves a place in line: the place keeps the DECLARED figure, so it still reads
+	// as waiting only on host RAM for the callers behind it.
+	tokenOptsFor := func(ids []string) gpulease.Options {
+		o := optsFor(ids)
+		o.HostRAMGiB, o.HostRAMWaitGiB = deferralFor(ids).declared, 0
+		return o
+	}
+	// refuseFor turns the end of the wait after the clear into the answer the grant gave for a host that stayed short: the
+	// same words, the same defer class, the same place in line.
+	refuseFor := func(ids []string) func(error) error {
+		return func(err error) error {
+			var short *gpulease.ErrHostRAM
+			if errors.As(err, &short) && !short.Impossible {
+				return p.hostRAMAnswer(m, ids, since, tokenID, tokenOptsFor(ids), reason, short, need.Resumable)
+			}
+			return err
+		}
 	}
 	// claimedNow is what is taken that the lease directory cannot show: the in-process slots, and the
 	// cards callers in line are promised.
@@ -1034,7 +1067,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 				if err != nil {
 					var none *gpulease.NoCardsError
 					if errors.As(err, &none) {
-						return mediaGrant{}, p.noCardsAnswer(m, none, since, tokenID, optsFor, reason, need.Resumable)
+						return mediaGrant{}, p.noCardsAnswer(m, none, since, tokenID, tokenOptsFor, reason, need.Resumable)
 					}
 					return mediaGrant{}, err
 				}
@@ -1083,7 +1116,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 					lease, err := m.Acquire(gpulease.ClassMedia, try)
 					if err == nil {
 						stopKeep()
-						return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
+						return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID, deferralFor(ids), start, refuseFor(ids))
 					}
 					mediaSlots.release(ids)
 					var held *gpulease.ErrHeld
@@ -1117,9 +1150,9 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		// not the line's "promised to callers ahead", which named nobody (G2 of the P0 plan).
 		noTime := func() error {
 			if hostShort != nil {
-				return p.hostRAMAnswer(m, ids, since, tokenID, optsFor(ids), reason, hostShort, need.Resumable)
+				return p.hostRAMAnswer(m, ids, since, tokenID, tokenOptsFor(ids), reason, hostShort, need.Resumable)
 			}
-			return p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, nil, need.Resumable)
+			return p.queuedAnswer(m, ids, since, tokenID, tokenOptsFor(ids), reason, nil, need.Resumable)
 		}
 		if !mediaSlots.take(ids, remaining()) {
 			return mediaGrant{}, noTime()
@@ -1145,15 +1178,15 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 			}
 			var held *gpulease.ErrHeld
 			if errors.As(err, &held) || errors.Is(err, gpulease.ErrStillQueued) {
-				return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, optsFor(ids), reason, held, need.Resumable)
+				return mediaGrant{}, p.queuedAnswer(m, ids, since, tokenID, tokenOptsFor(ids), reason, held, need.Resumable)
 			}
 			var short *gpulease.ErrHostRAM
 			if errors.As(err, &short) && !short.Impossible {
-				return mediaGrant{}, p.hostRAMAnswer(m, ids, since, tokenID, optsFor(ids), reason, short, need.Resumable)
+				return mediaGrant{}, p.hostRAMAnswer(m, ids, since, tokenID, tokenOptsFor(ids), reason, short, need.Resumable)
 			}
 			return mediaGrant{}, err
 		}
-		return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID), nil
+		return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID, deferralFor(ids), start, refuseFor(ids))
 	}
 }
 
@@ -1264,8 +1297,11 @@ func intersects(a, b []string) bool {
 	return false
 }
 
-// grantCards builds the grant for a lease just taken (the slots for ids are already held).
-func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *gpulease.Lease, ids []string, plan mediaPlan, cards []gpuprobe.Card, tokenID string) mediaGrant {
+// grantCards builds the grant for a lease just taken (the slots for ids are already held). A lease that deferred its host RAM
+// (d.defers) clears the models its own unload takes now, under the heartbeat, and asks the host afterwards; when the host never
+// has the room the lease is released and refuse gives the answer (grantCards then returns no grant).
+func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *gpulease.Lease, ids []string, plan mediaPlan, cards []gpuprobe.Card, tokenID string,
+	d hostRAMDeferral, start time.Time, refuse func(error) error) (mediaGrant, error) {
 	if tokenID != "" {
 		m.DropToken(tokenID) // the call is served: its place is spent
 	}
@@ -1288,9 +1324,18 @@ func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *g
 			mediaSlots.release(ids)
 		})
 	}
+	unload := d.unload
+	if d.defers {
+		if err := p.clearThenAdmitHostRAM(ctx, lease, d, start); err != nil {
+			release()
+			return mediaGrant{}, refuse(err)
+		}
+	} else {
+		unload = p.unloadEnv(ctx, ids, cards)
+	}
 	// The card is ours from here: the call's PAIR card turns running.
 	core.MarkWorking(ctx)
-	g := mediaGrant{Env: p.mediaGrantEnv(lease, ids, p.unloadEnv(ctx, ids, cards)), Release: release}
+	g := mediaGrant{Env: p.mediaGrantEnv(lease, ids, unload), Release: release}
 	if plan.pair {
 		g.Devices = append([]string(nil), ids...)
 	}
@@ -1299,7 +1344,7 @@ func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *g
 			g.Card, g.API = &c, p.instanceEndpoint(c)
 		}
 	}
-	return g
+	return g, nil
 }
 
 // startHeartbeat renews a lease every 15 s while a render runs: at most ONE timer for the

@@ -47,7 +47,7 @@ func (p *Pipeline) LeaveMediaPlace(ctx context.Context, req core.Request, since 
 	case ln.plan.auto:
 		r := &laneReading{p: p, m: m.ReadOnly(), cards: ln.table, token: ln.token}
 		r.since = r.placeSince()
-		r.askRAM = p.declaredRAM(ctx, ln.need, ln.table, nil)
+		r.askRAM = p.hostRAMDeferral(ctx, r.m, p.declaredRAM(ctx, ln.need, ln.table, nil), nil, ln.table, mediaClearReadTTL).gate()
 		picked, _, err := r.pickAuto(ctx)
 		if err != nil {
 			// The cards the call may wait for are the ones that would qualify but for what is short (the allocator

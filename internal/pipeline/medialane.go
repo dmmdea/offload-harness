@@ -214,8 +214,10 @@ func (p *Pipeline) MediaLaneFree(ctx context.Context, req core.Request) core.Lan
 	r := &laneReading{p: p, m: m, cards: ln.table, token: ln.token}
 	r.since = r.placeSince()
 	// The declaration the call makes on the cards its plan names, else the smallest it can make (its largest card): if that is
-	// refused, every card's would be. The admission sizes it the same way (askRAMFor).
-	r.askRAM = p.askRAMFor(ctx, need, plan, ln.table)
+	// refused, every card's would be. The admission sizes it the same way (askRAMFor), and a call that defers its figure until
+	// its own unload has run declares nothing in the grant, so the probe reads nothing for it either (askRAMGate: one decision,
+	// cached for a few seconds because the probe runs on every scan tick).
+	r.askRAM = p.askRAMGate(ctx, m, need, plan, ln.table, mediaClearReadTTL)
 	switch {
 	case plan.whole:
 		r.wholeNode()
@@ -363,7 +365,9 @@ func anyHeld(held map[string]bool, ids []string) bool {
 
 // hostRAMFor puts the call's declared need, for the cards it would run on, to the node's host-RAM verdict.
 func (r *laneReading) hostRAMFor(ctx context.Context, need mediaNeed, ids []string) {
-	if chk := r.m.HostRAMCheck(r.p.declaredRAM(ctx, need, r.cards, ids)); !chk.OK {
+	// The figure the grant compares: 0 when the call defers it until its own unload has run (hostRAMDeferral).
+	gate := r.p.hostRAMDeferral(ctx, r.m, r.p.declaredRAM(ctx, need, r.cards, ids), ids, r.cards, mediaClearReadTTL).gate()
+	if chk := r.m.HostRAMCheck(gate); !chk.OK {
 		r.hostRAM = chk.Why
 		r.block(chk.Why)
 	}
