@@ -41,6 +41,7 @@ var staleOtherDoorArgs = map[string]string{
 	"offload_video_describe":        `{"video":[],"question":"q"}`,
 	"offload_video_watch":           `{"video":1,"question":"q"}`,
 	"offload_transcribe":            `{"audio":{},"hq":"yes"}`,
+	"offload_forecast":              `{"series":{},"prediction_length":"x"}`,
 	"offload_extract_image":         `{"image":"x","schema":[1,2]}`,
 	"offload_assess_image":          `{"image":9}`,
 	"offload_ocr":                   `{"image":{}}`,

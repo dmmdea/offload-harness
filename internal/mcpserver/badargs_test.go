@@ -52,6 +52,7 @@ func TestAllHandlersSurfaceBadArguments(t *testing.T) {
 		{"vqa", s.handleVQA, `{"image":1,"question":"q"}`},
 		{"video_describe", s.handleVideoDescribe, `{"video":[],"question":"q"}`},
 		{"transcribe", s.handleTranscribe, `{"audio":{},"hq":"yes"}`},
+		{"forecast", s.handleForecast, `{"series":{},"prediction_length":"x"}`},
 		{"extract_image", s.handleExtractImage, `{"image":"x","schema":[1,2]}`},
 		{"assess_image", s.handleAssessImage, `{"image":9}`},
 		{"ocr", s.handleOCR, `{"image":{}}`},

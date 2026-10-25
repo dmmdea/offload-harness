@@ -425,6 +425,20 @@ implications.
     reachability rule holds), strictly decoded and capped at 64 KiB, rate limited per asker (`429`), capped on the cards it leaves open (128 per asker, 512 overall, `429` past them; a terminal
     frame always goes through), and needs `X-Offload-Asker`. Not a job: nothing reaches the job store. Details: [pair-workloads.md](pair-workloads.md#the-card-relay-a-box-that-is-not-a-pair-member-d26).
 
+14. The forecast lane (`POST /fleet/forecast`, ADR 0098) runs ONE Timestral time-series forecast on this node's own forecast seat
+    (config `forecast_model`, written by the tier's `forecast` media seat). `forecast` is in `supported_task_types` and
+    `forecast_model` in health (additive, omitempty) exactly when `ForecastLaneAdmissible` holds: a bound `forecast_model` and
+    the agent lane's reachability rule. It has a route of its own because a long multi-series request outgrows dispatch's
+    1 MiB: the body cap is `ForecastBodyCap` (32 MiB), the bearer is checked BEFORE the body is read, and the job id
+    (`forecast-<16 hex>`) rides inside the payload `{job_id, request}`. It joins the shared `admit` path, stores the node's FULL
+    `core.Result` (a defer is a `done` job saying `deferred: true`) and is EXEMPT from `fleet_max_concurrent_jobs`: the call
+    drives its own seat, not the text endpoint the cap protects, and must not queue behind a four-minute agent contract. A
+    text-class lease still turns new forecast work away with the re-placeable `503`. A delegator places it only on a node
+    whose health lists `forecast` and whose card is not leased (`delegate.PlaceForecast`); a node that predates the lane is never
+    picked. Unlike the stt, vision and text lanes, an asker's `auto` route forwards from a box that binds no forecast model.
+    Details: [FLEET-NODE.md](../FLEET-NODE.md#the-forecast-task-post-fleetforecast),
+    [ADR 0098](../architecture/decisions/0098-a-forecaster-is-a-llama-swap-media-seat-and-a-box-with-no-forecast-model-forwards.md).
+
 ## Security and privacy notes
 
 **Ingress guard (register SF-16, `fleet_ingress_guard`).** Every route of the node, and the `fleet-ui` page,
@@ -1847,14 +1861,14 @@ above) re-packed it, in which case it is a success and is not counted.
 ### Auth (every lane needs the fleet bearer)
 
 `fleet_auth_token`, when set, bearer-gates every lane: a dispatch of any task type (the vision and text
-lanes' `POST /fleet/vision` and `POST /fleet/text`, the stt upload door's `POST /fleet/stt`, the legacy path-taking `stt`
+lanes' `POST /fleet/vision` and `POST /fleet/text`, the forecast lane's `POST /fleet/forecast`, the stt upload door's `POST /fleet/stt`, the legacy path-taking `stt`
 task and the media tasks all ride the same rule as an agent dispatch, through `tokenGated`, which is true for every task
 type), and the `/fleet/jobs/{id}` poll and withdraw of any job (the job record carries an agent
 marker — or, for every other task type, the `Gated` marker — written atomically at creation and evicted
 with the record). The comparison hashes both
 sides with SHA-256 before a constant-time compare, making it length-independent. Wrong or
 missing credential → `401` with the standard error envelope (`"error": "unauthorized"`),
-checked **before** the request body is read (on the dispatch, vision and text routes: nothing of it is
+checked **before** the request body is read (on the dispatch, vision, text and forecast routes: nothing of it is
 buffered or decoded, and a malformed body, a wrong content type or an oversized one is `401`, not `400`) and so
 before the job_id validation and the re-ack lookup. A caller without the credential gets the auth verdict and nothing
 else: no validation answer, no job existence.
@@ -2256,6 +2270,10 @@ died is still on the node under its job id; the next identical call from that ma
 - [`internal/fleetnode/pair_relay.go`](../../internal/fleetnode/pair_relay.go) — the PAIR card relay door
 - [`internal/fleetnode/vision_task.go`](../../internal/fleetnode/vision_task.go) — `tokenGated` / `gatedJob` (the bearer
   rule every task type rides, and which jobs are masked from a poller without it), the vision lane
+- [`internal/fleetnode/forecast_task.go`](../../internal/fleetnode/forecast_task.go) — the forecast lane: `ForecastLaneAdmissible`,
+  the 32 MiB door, `buildForecast`, the full-`core.Result` job data; the exemption lives in `concurrencyCapped` (`server.go`)
+- [`internal/forecastremote/forecastremote.go`](../../internal/forecastremote/forecastremote.go) — the asker of the forecast lane:
+  route, placement (`delegate.PlaceForecast`), wait and the post-check
 - [`internal/sttremote/sttremote.go`](../../internal/sttremote/sttremote.go) — the asker of the upload door: routes,
   Opus conversion, placement, wait, validation and the asker's own output files
 - [`internal/fleetnode/media_job.go`](../../internal/fleetnode/media_job.go) — the media-job door: the body, the

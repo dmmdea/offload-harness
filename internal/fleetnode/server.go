@@ -260,6 +260,10 @@ type Server struct {
 	// one-predicate discipline: health publishes text_tasks (and SupportedTasksFor lists
 	// "text") exactly when POST /fleet/text will admit.
 	textLane bool
+	// forecastLane is ForecastLaneAdmissible over the RESOLVED listener, the same one-predicate
+	// discipline: health publishes forecast_model (and SupportedTasksFor lists "forecast") exactly
+	// when POST /fleet/forecast will admit.
+	forecastLane bool
 	// sttUploadLane is STTUploadAdmissible over the RESOLVED listener (ADR 0072), the same
 	// one-predicate discipline: health lists "stt-upload" and publishes stt_hq and
 	// stt_upload_max_mb exactly when POST /fleet/stt will admit.
@@ -524,6 +528,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		visionLane:         VisionLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		textLane:           TextLaneAdmissible(opts.Cfg, opts.LoopbackListener),
+		forecastLane:       ForecastLaneAdmissible(opts.Cfg, opts.LoopbackListener),
 		sttUploadLane:      STTUploadAdmissible(opts.Cfg, opts.LoopbackListener),
 		relayLimiter:       pairworkloads.DefaultRelayLimiter(),
 		sttGate:            newSTTGate(opts.Cfg.EffectiveSTTMaxConcurrent()),
@@ -1056,6 +1061,10 @@ func (s *Server) registerRoutes(mux routeRegistrar) {
 	// The text lane (0.154.0): classify / extract on this node's own pipeline. A route of
 	// its own so the payload is typed; dispatch's 1 MiB body cap, then the same admit path.
 	mux.HandleFunc("POST /fleet/text", s.handleText)
+	// The forecast lane: one time-series forecast on this node's own forecast seat. A route of its
+	// own for the 32 MiB body cap (a long multi-series request outgrows dispatch's 1 MiB); the job
+	// id rides inside the payload, then the same admit path.
+	mux.HandleFunc("POST /fleet/forecast", s.handleForecast)
 	// The stt upload door (ADR 0072): audio BYTES in the body, so a box whose own whisper is held
 	// can have this node transcribe. Its own route for the body cap and the longer delivery window;
 	// the bearer is checked before the body is read, then the same admit path as every job.
@@ -1591,6 +1600,11 @@ type healthPayload struct {
 	// lane, and every node that predates it, emits a byte-identical payload, and a
 	// delegator never places a text task on a node that does not list it.
 	TextTasks []string `json:"text_tasks,omitempty"`
+	// ForecastModel is the alias of this node's bound forecast seat (config forecast_model),
+	// published only when the lane is admissible (the same moment "forecast" appears in
+	// supported_task_types). Additive and omitempty: a node without the lane, and every node that
+	// predates it, emits a byte-identical payload.
+	ForecastModel string `json:"forecast_model,omitempty"`
 	// STTHQ says whether this node has an hq whisper model (stt_model_hq), and STTUploadMaxMB is
 	// the largest audio upload POST /fleet/stt takes, MiB decoded (fleet_stt_upload_max_mb). Both
 	// are published only when the upload door is admissible (the same moment "stt-upload" appears
@@ -1853,6 +1867,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.textLane {
 		payload.TextTasks = append([]string(nil), s.opts.Cfg.TextTasks...)
+	}
+	if s.forecastLane {
+		payload.ForecastModel = s.opts.Cfg.ForecastModel
 	}
 	if s.pairRelayOpen() {
 		payload.PairRelay = true
@@ -2271,6 +2288,11 @@ func (s *Server) concurrencyCapped(taskType string) bool {
 	// hold a fleet execution slot while parked in the capacity-1 media slot —
 	// verbatim the failure the rule above says the exemption exists to prevent.
 	case "image-gen", "video-gen", "animate", "audio-gen", "run-graph", "stt", STTUploadTask:
+		return false
+	// forecast drives the node's own forecast seat (a 0.2-0.7 s call once loaded), never the shared
+	// text endpoint the cap protects; queued behind a four-minute agent contract it would wait out the
+	// contract for no reason. Its seat is a separate llama-swap entry with the lease fence on the call.
+	case ForecastTask:
 		return false
 	// accel (0.115.0) drives a loopback accelerator sidecar — Coral or RKNPU;
 	// the Hailo-8L is local-only and never served here (register E-08) — and never
@@ -2851,6 +2873,10 @@ func (s *Server) admit(w http.ResponseWriter, r *http.Request, env dispatchEnvel
 		if taskType == TextTask {
 			// The same for the text lane — see textJobData.
 			return textJobData(res)
+		}
+		if taskType == ForecastTask {
+			// And the forecast lane — see forecastJobData.
+			return forecastJobData(res)
 		}
 		if taskType == STTUploadTask {
 			// And for the stt upload door — see sttJobData: defer_class and err_class must survive.

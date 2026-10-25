@@ -30,6 +30,7 @@ binding can never name a seat that was not rendered:
 | `qwen3.5-9b-vl` | vision | `vision_model` | `Qwen3.5-9B-UD-Q4_K_XL.gguf` | swappable |
 | `paddleocr-vl` | ocr | `ocr_model` | `PaddleOCR-VL-1.6.gguf` | swappable |
 | `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+| `timestral-209m` | forecast | `forecast_model` | `timestral-209m` | swappable |
 | `lfm2.5-vl` | vision | — (extra) | `LFM2.5-VL-3B-Q8_0.gguf` | swappable |
 | `gemma4-e4b-vision` | vision | — (extra) | `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` | swappable |
 

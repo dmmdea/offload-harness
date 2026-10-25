@@ -705,6 +705,10 @@ const (
 	tokenHome      = "__OFFLOAD_HOME__"
 	tokenRknpuHome = "__RKNPU_HOME__"
 	tokenExe       = "__EXE__"
+	// tokenHarnessBin is the harness binary where each installer lays it down: the
+	// Windows installer under <home>/harness, the Linux one under <prefix>/bin (and
+	// <prefix> is the install home there). One token, so a forecast row renders on both.
+	tokenHarnessBin = "__HARNESS_BIN__"
 )
 
 // seatsNeedHome scans exactly the fields seatExpand resolves. Scanning more would
@@ -714,6 +718,9 @@ const (
 // instead of as the refusal that names the missing home.
 func seatsNeedHome(seats []mediaseat.Seat, rknpuHome string) bool {
 	for _, s := range seats {
+		if s.Kind == mediaseat.KindForecast {
+			return true // its --forecast-dir is always under the install home
+		}
 		paths := s.EffectiveBin() + s.LibDir
 		if strings.Contains(paths, tokenHome) || (rknpuHome == "" && strings.Contains(paths, tokenRknpuHome)) {
 			return true
@@ -731,6 +738,11 @@ func (p Params) seatExpand(s string) string {
 	s = strings.ReplaceAll(s, tokenExe, exe)
 	home := strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/")
 	if p.Home != "" {
+		bin := home + "/bin/local-offload"
+		if p.GOOS == "windows" {
+			bin = home + "/harness/local-offload.exe"
+		}
+		s = strings.ReplaceAll(s, tokenHarnessBin, bin)
 		s = strings.ReplaceAll(s, tokenHome, home)
 	}
 	rknpu := strings.TrimRight(strings.ReplaceAll(p.RknpuHome, `\`, "/"), "/")
@@ -966,7 +978,7 @@ func matrixJoin(role string) string {
 // be alphanumeric and 1-8 characters (verified against the binary: a key of
 // "embeddinggemma" is rejected outright), so the seat's own name — which carries
 // hyphens and is usually longer — can never be the key. The kind picks the base id
-// (vis, stt, ocr, rkllm), which keeps it stable. It is not unique on its own: a tier
+// (vis, stt, ocr, rkllm, fc), which keeps it stable. It is not unique on its own: a tier
 // may declare more than one seat of a kind, because a registered extra (Seat.Extra)
 // and a text-only rkllm seat write no binding key. The first seat of a kind takes the
 // base id; the second and later ones, in declaration order, take the numbered ids
@@ -974,6 +986,7 @@ func matrixJoin(role string) string {
 func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
 	base := map[string]string{
 		mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr", mediaseat.KindRKLLM: "rkllm",
+		mediaseat.KindForecast: "fc",
 	}[s.Kind]
 	if base == "" {
 		return "", fmt.Errorf("seat %q: no matrix var id for kind %q", s.Name, s.Kind)
@@ -1166,6 +1179,17 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 			"      %s --model __MODELS__/%s%s\n"+
 			"      --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1\n",
 			p.seatExpand(s.Bin), s.Model, vad)
+	case mediaseat.KindForecast:
+		// The harness binary runs the embedded Python server (`forecast-serve`), which
+		// holds the venv python as a child that dies with it, so llama-swap's stop never
+		// orphans a process on the card. Only the per-seat device pin rides env: the venv,
+		// the server file and the weights are all found from the two paths on the line.
+		if envEntries := flowItems(s.GPUEnv); len(envEntries) > 0 {
+			fmt.Fprintf(&b, "    env: [%s]\n", strings.Join(envEntries, ", "))
+		}
+		fmt.Fprintf(&b, "    cmd: >-\n"+
+			"      %s forecast-serve --forecast-dir %s --model __MODELS__/%s --port ${PORT}\n",
+			p.seatExpand(s.Bin), p.seatExpand(tokenHome+"/forecast"), s.Model)
 	case mediaseat.KindRKLLM:
 		// No env line and no GPU flags, on purpose: `env` is the llama.cpp loader path and
 		// -ngl/--flash-attn are llama-server flags, while the NPU is neither — the launcher

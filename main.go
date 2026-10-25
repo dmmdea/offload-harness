@@ -103,6 +103,8 @@ func main() {
 		err = runVideoWatch(args)
 	case "transcribe":
 		err = runTranscribe(args)
+	case "forecast":
+		err = runForecastCLI(args)
 	case "generate-image":
 		err = runGenerateImage(args)
 	case "inpaint-image":
@@ -141,6 +143,8 @@ func main() {
 		err = runResearch(args)
 	case "fleet-serve":
 		err = runFleetServe(args)
+	case "forecast-serve":
+		err = runForecastServe(args)
 	case "fleet-measure":
 		err = runFleetMeasure(args)
 	case "fleet-ui":
@@ -304,6 +308,7 @@ Usage:
   local-offload video-watch <video-path> --question "..." [--window-sec 8] [--fps 1] [--max-frames N] [--frame-width N] [--start S] [--end S] [--no-synthesize] [--json]
                                          watch the WHOLE file window by window (video-describe sees only its first frames)
   local-offload transcribe <audio-path> [--language es] [--hq] [--json]
+  local-offload forecast  (--series JSON | --series-path FILE.csv|.json) --prediction-length N [--target-columns A,B] [--past-covariate-columns ..] [--known-covariate-columns ..] [--quantiles 0.1,0.5,0.9] [--out-path F] [--route local|auto|remote] [--select a,b] [--compact]
   local-offload ocr       <image-path> [--json]
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
@@ -337,6 +342,8 @@ Usage:
   local-offload mcp                      run as an MCP server (stdio)
   local-offload delegate --contract file.json [--route auto|spread|local|remote] [--read-root DIR] [--remote http://node:18811]...   place delegation-contract subtasks on this box or tailnet fleet nodes (needs agent_delegation_enabled; remotes default to delegate_remotes)
   local-offload fleet-serve [--listen ADDR] [--listen-trusted-network] [--node-id NAME]   join the fleet-dispatcher fleet (health/dispatch/jobs on :18811; docs/FLEET-NODE.md)
+  local-offload forecast-serve --forecast-dir DIR --model DIR --port N [--host 127.0.0.1] [--device cuda] [--max-row-patches N]   run the Timestral forecast server a forecast seat of llama-swap launches (python child bound to this process; loopback only)
+  local-offload install forecast [--home DIR] [--models DIR] [--ref SHA] [--torch-backend auto] [--json]   build the forecast lane: venv, torch, the pinned timestral package, the hash-verified weights and the server file (uv required; never loads the model)
   local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
   local-offload fleet-ui [--listen 127.0.0.1:18813] [--listen-trusted-network] [--interval 5s] [--remote URL]...   live overview page: node cards (GPU/VRAM/CPU/RAM graphs, seat, served models), cluster jobs + errors feed (docs/systems/fleet-overview.md)
   local-offload fleet-smoke [--remote URL]... [--timeout 120] [--json]   send one grounded one-step contract to EVERY node and print where each landed (node, seat, placement, wall, verdict); non-zero unless all PASS
@@ -775,6 +782,76 @@ func runTranscribe(args []string) error {
 		Params: params,
 	}, *route)
 	emitResult(res, *asJSON, *selectFlag, *compactFlag)
+	return nil
+}
+
+// runForecastCLI handles `local-offload forecast (--series JSON | --series-path FILE.csv|.json)
+// --prediction-length N [--target-columns A,B] [--past-covariate-columns ..] [--known-covariate-columns ..]
+// [--quantiles 0.1,0.5,0.9] [--out-path F] [--route local|auto|remote] [--select a,b] [--compact]`. It is the
+// offload_forecast door on the command line: the arguments mean what the MCP tool's mean, the answer is the
+// result JSON. A path may also be the one positional argument.
+func runForecastCLI(args []string) error {
+	fs := flag.NewFlagSet("forecast", flag.ExitOnError)
+	fs.String("config", "", "config file path")
+	series := fs.String("series", "", "the series inline as JSON: [1,2,3], [[..],[..]] or [[[..]]]; null marks a missing value")
+	seriesPath := fs.String("series-path", "", "a LOCAL .csv or .json series file (or give it as the one positional argument)")
+	targets := fs.String("target-columns", "", "CSV: comma-separated header names to forecast (default: every numeric column that is not a covariate)")
+	pastCols := fs.String("past-covariate-columns", "", "CSV: comma-separated header names known over the history only")
+	knownCols := fs.String("known-covariate-columns", "", "CSV: comma-separated header names known over the history and the horizon")
+	horizon := fs.Int("prediction-length", 0, "steps to forecast ahead (required; a CSV's trailing all-empty-target rows must number this)")
+	quantiles := fs.String("quantiles", "", "comma-separated quantile levels among the model's 21 (default 0.1,0.5,0.9)")
+	past := fs.String("past-covariates", "", "inline past covariates as JSON, (C,T) or (B,C,T)")
+	known := fs.String("known-covariates", "", "inline known covariates as JSON, (C,T+prediction-length) or (B,C,T+prediction-length)")
+	outPath := fs.String("out-path", "", "where to write a result of more than 2,000 numbers (default <media_dir>/forecast-<sha8>.json)")
+	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep (e.g. shape,result_path)")
+	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
+	route := fs.String("route", "", "where the forecast runs: auto (default; this box's model, else a fleet node), local, remote (force a fleet node)")
+	positional, flagArgs := splitArgs(args, map[string]bool{
+		"config": true, "series": true, "series-path": true, "target-columns": true, "past-covariate-columns": true,
+		"known-covariate-columns": true, "prediction-length": true, "quantiles": true, "past-covariates": true,
+		"known-covariates": true, "out-path": true, "select": true, "route": true,
+	})
+	_ = fs.Parse(flagArgs)
+
+	in := mcpserver.ForecastArgs{
+		SeriesPath:            *seriesPath,
+		TargetColumns:         splitCSV(*targets),
+		PastCovariateColumns:  splitCSV(*pastCols),
+		KnownCovariateColumns: splitCSV(*knownCols),
+		PredictionLength:      *horizon,
+		OutPath:               *outPath,
+		Route:                 *route,
+		Select:                core.SelectKeys(*selectFlag),
+	}
+	if in.SeriesPath == "" {
+		in.SeriesPath = positional
+	}
+	if *series != "" {
+		in.Series = json.RawMessage(*series)
+	}
+	if *past != "" {
+		in.PastCovariates = json.RawMessage(*past)
+	}
+	if *known != "" {
+		in.KnownCovariates = json.RawMessage(*known)
+	}
+	for _, q := range splitCSV(*quantiles) {
+		v, err := strconv.ParseFloat(q, 64)
+		if err != nil {
+			return fmt.Errorf("forecast: --quantiles %q: %q is not a number", *quantiles, q)
+		}
+		in.Quantiles = append(in.Quantiles, v)
+	}
+
+	cfg := loadCfg(fs)
+	p, cleanup, err := openPipeline(cfg)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	res := mcpserver.RunForecast(context.Background(), cfg, p, nil, in, "cli:forecast")
+	emitResult(res, true, "", *compactFlag)
 	return nil
 }
 

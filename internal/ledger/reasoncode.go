@@ -186,7 +186,7 @@ var reasonPrefixCodes = []struct{ prefix, code string }{
 	{"unknown audio kind ", ReasonContract}, {"unknown voice ", ReasonContract},
 	{"empty transcript", ReasonAbstention}, {"empty vision output", ReasonAbstention}, {"vision output truncated", ReasonAbstention},
 	{"non-JSON output", ReasonAbstention},
-	{"transcribe call failed:", ReasonInfrastructure}, {"image generation failed:", ReasonInfrastructure},
+	{"transcribe call failed:", ReasonInfrastructure}, {"forecast call failed:", ReasonInfrastructure}, {"image generation failed:", ReasonInfrastructure},
 	{"audio generation failed:", ReasonInfrastructure}, {"video generation failed:", ReasonInfrastructure},
 	{"character animation failed:", ReasonInfrastructure}, {"run-graph failed:", ReasonInfrastructure},
 	{"batch job failed:", ReasonInfrastructure}, {"cannot create out_dir:", ReasonInfrastructure},

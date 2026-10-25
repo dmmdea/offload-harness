@@ -118,6 +118,15 @@ from observed peaks with a 1.2 padding factor and kept at the maximum observatio
 averaged. See
 [architecture/decisions/0008-pdh-primary-vram-sampling.md](architecture/decisions/0008-pdh-primary-vram-sampling.md).
 
+## Forecast lane
+
+The path that forecasts time series on Timestral-209M (`offload_forecast`). The model is a llama-swap media seat of kind
+`forecast` bound by the config key `forecast_model`, never an accelerator, resident or swappable by tier. Its route `auto`
+forwards to a fleet node when the box binds no forecast model or its card is lease-blocked, where the stt, vision and text
+routes defer; the node side is `POST /fleet/forecast`, exempt from `fleet_max_concurrent_jobs`. See
+[systems/offload-pipeline.md](systems/offload-pipeline.md#the-forecast-lane-timestral-209m) and
+[architecture/decisions/0098-a-forecaster-is-a-llama-swap-media-seat-and-a-box-with-no-forecast-model-forwards.md](architecture/decisions/0098-a-forecaster-is-a-llama-swap-media-seat-and-a-box-with-no-forecast-model-forwards.md).
+
 ## GPU Lock
 
 A single-slot, cross-process lock ensuring only one GPU-heavy job runs per machine. Implemented as a

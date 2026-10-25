@@ -26,7 +26,7 @@ func TestOnlyTheFourTextTasksMayTakeTheSingleTierPath(t *testing.T) {
 	// Every visual/media task, and anything new, must go through Run.
 	for _, task := range []core.TaskType{
 		core.TaskVQA, core.TaskOCR, core.TaskAssessImage, core.TaskVideoDescribe,
-		core.TaskTranscribe, core.TaskGenerateImage, core.TaskInpaintImage,
+		core.TaskTranscribe, core.TaskForecast, core.TaskGenerateImage, core.TaskInpaintImage,
 		core.TaskGenerateVideo, core.TaskGenerateAudio, core.TaskRunGraph,
 		core.TaskEditImage, core.TaskMedia, core.TaskExtractImage, core.TaskGenerateSVG, core.TaskComposeVideo,
 		core.TaskType("some_future_task"),

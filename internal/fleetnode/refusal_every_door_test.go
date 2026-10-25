@@ -29,6 +29,7 @@ func allDoorsCfg(t *testing.T, key string) config.Config {
 	c.FleetComposeProjects, c.ComposeCacheDir = true, p.ComposeCacheDir
 	c.VisionModel = "gemma4-e4b-vision"
 	c.TextTasks = []string{"classify", "extract"}
+	c.ForecastModel = "forecast"
 	c.FleetAuthToken = key
 	return c
 }
@@ -65,6 +66,11 @@ func dispatchedJob(t *testing.T, s *Server) {
 	}
 }
 
+// forecastBody is a well-formed POST /fleet/forecast body: one short series and a horizon.
+func forecastBody(jobID string) string {
+	return `{"job_id":"` + jobID + `","request":{"series":[[1,2,3,4]],"prediction_length":2}}`
+}
+
 var refusalDoors = []refusalDoor{
 	{name: "dispatch", label: "dispatch", method: http.MethodPost, path: "/fleet/dispatch",
 		body: `{"job_id":"d1","task_type":"image-gen","payload":{}}`, noKeyStatus: 403, noKeyError: fleetTokenRequired},
@@ -72,6 +78,8 @@ var refusalDoors = []refusalDoor{
 		body: visionBody("v1", "vqa", tinyPNG(), nil), noKeyStatus: 403, noKeyError: fleetTokenRequired},
 	{name: "text", label: "text", method: http.MethodPost, path: "/fleet/text",
 		body: textBody("t1", "classify", "x", classifyParams()), noKeyStatus: 403, noKeyError: fleetTokenRequired},
+	{name: "forecast", label: "forecast", method: http.MethodPost, path: "/fleet/forecast",
+		body: forecastBody("f1"), noKeyStatus: 403, noKeyError: fleetTokenRequired},
 	{name: "stt upload", label: "stt-upload", method: http.MethodPost, path: "/fleet/stt",
 		body: `{}`, noKeyStatus: 403, noKeyError: fleetTokenRequired},
 	{name: "media file", label: "media-file", method: http.MethodGet, path: "/fleet/media/out.png",

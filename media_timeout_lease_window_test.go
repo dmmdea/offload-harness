@@ -46,6 +46,7 @@ var mediaTimeoutKeys = map[string]func(config.Config) int{
 var notMediaLeaseTimeouts = map[string]string{
 	"agent_timeout_sec":            "the text agent loop's wall",
 	"stt_request_timeout_sec":      "one speech-to-text request",
+	"forecast_request_timeout_sec": "one forecast request",
 	"imagegen_refiner_timeout_sec": "the prompt refiner's text call",
 	"edit_timeout_sec":             "CPU edit ops: no GPU lease",
 	"compose_timeout_sec":          "composition renders in software: no GPU lease",

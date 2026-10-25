@@ -35,6 +35,8 @@ const (
 	EngineRKLLM    = "rkllm"
 	// EngineWhisperCpp is the speech-to-text server.
 	EngineWhisperCpp = "whisper.cpp"
+	// EngineForecast is the time-series forecast server (`forecast-serve`, a Python server).
+	EngineForecast = "forecast"
 	// EngineNone is active_backend when no backend of the chain can serve.
 	EngineNone = "none"
 	// EngineUnknown is the kind of a seat that can serve but whose engine the config does not say (an

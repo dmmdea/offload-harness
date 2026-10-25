@@ -488,6 +488,36 @@ func offloadTools(offload OffloadFunc, npu NPUFunc) []Tool {
 				}
 				return "", p, nil
 			}),
+		// The forecast payload (series, horizon, levels) is the request's Input: the server takes one JSON
+		// object and nothing here is a file, so no param needs lifting onto a Request field.
+		mk("offload_forecast", "forecast",
+			"Forecast time series on a free local forecasting model (probabilistic, zero-shot). series holds the numbers inline. Returns {shape, quantile_levels, median, quantiles{level:[...]}} with one forecast per series, or a defer (a box with no forecast model defers).",
+			`{"type":"object","properties":{"series":{"type":"array","items":{},"description":"the numbers to forecast: [1,2,3] is one series, [[...],[...]] several; null marks a missing value"},"prediction_length":{"type":"integer","minimum":1,"description":"steps to forecast ahead"},"quantiles":{"type":"array","items":{"type":"number"},"description":"quantile levels to return, each one of 0.01 to 0.99 in the model's 21 levels; default [0.1,0.5,0.9]"}},"required":["series","prediction_length"]}`,
+			func(a json.RawMessage) (string, map[string]any, error) {
+				var in struct {
+					Series           json.RawMessage `json:"series"`
+					PredictionLength int             `json:"prediction_length"`
+					Quantiles        []float64       `json:"quantiles"`
+				}
+				if err := json.Unmarshal(a, &in); err != nil {
+					return "", nil, err
+				}
+				if len(in.Series) == 0 || string(in.Series) == "null" {
+					return "", nil, fmt.Errorf("series is required")
+				}
+				if in.PredictionLength < 1 {
+					return "", nil, fmt.Errorf("prediction_length is required and must be at least 1")
+				}
+				payload := map[string]any{"series": in.Series, "prediction_length": in.PredictionLength}
+				if len(in.Quantiles) > 0 {
+					payload["quantiles"] = in.Quantiles
+				}
+				b, err := json.Marshal(payload)
+				if err != nil {
+					return "", nil, err
+				}
+				return string(b), nil, nil
+			}),
 	}
 }
 

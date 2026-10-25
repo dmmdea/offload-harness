@@ -33,6 +33,7 @@ var engineRules = []struct {
 	{EngineLlamaCpp, cmdNames("llama-server")},
 	{EngineRKLLM, cmdNames("rkllm")},
 	{EngineWhisperCpp, cmdNames("whisper-server")},
+	{EngineForecast, cmdNames("forecast-serve")},
 }
 
 // ClassifyEngine names the engine kind that serves a seat: the table's first row that matches what the

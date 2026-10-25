@@ -24,7 +24,7 @@
     "backend": "the llama-swap.<os>-<backend> template this profile renders from (cuda|vulkan|cpu|dual-cuda; rk3588 is the Rockchip RK3588 SoC, Linux only: llama.cpp on Vulkan for the tier's GPU entry plus rkllm NPU seats, from a template that lists only models that fit its shared-RAM budget).",
     "dual_resident": "dual-gpu only: render two models resident (no shared exclusive swap group).",
     "gpu_env": "env vars added to EVERY model in the rendered serving config, appended after whatever the template already declares. Was an `if ($profileId -match '^blackwell-')` branch inside install.ps1, so a Linux install of the same tier silently did not get it. CUDA_VISIBLE_DEVICES pins the device (hybrid-graphics can resolve the default to -1); CUDA_MODULE_LOADING=LAZY is llama.cpp #22696.",
-    "media_seats": "ALIAS-backed media capabilities this tier serves, rendered into BOTH the llama-swap models map and the harness config binding that routes to them (internal/mediaseat). Each seat: kind (vision|stt|ocr|rkllm), name (the llama-swap model id AND the binding value), aliases, model/mmproj/vad_model (relative to the models dir), bin + lib_dir for a seat that is not llama-server (may carry __OFFLOAD_HOME__/__EXE__), ctx_size (vision runs its own smaller window), residency (swappable|resident - a ROLE, since group names are per-template), ttl, and extra (true = a registered extra: rendered into llama-swap and reachable by name and aliases, but bound to NO config key and not counted by the one-writer check, so a tier can serve a second vision/ocr/stt model beside the bound one; not on rkllm, no tasks). An rkllm seat is an NPU LLM/VLM served by the Rockchip RKLLM runtime, not llama-server: it takes model (a .rkllm), an optional vision_encoder (a .rknn under the models dir; with one the seat is a VLM and writes vision_model, without one it is a chat model and writes nothing), ctx_size and cpu_mask (hex, default 0x0f = the A55 cluster; at least 3 bits, the runtime refuses fewer than the SoC has NPU cores), and bin defaults to the launcher the rknpu accelerator ships. A tier declaring NO seat leaves vision_model/stt_model empty and the route honestly defers. FILE-backed media (image/video/music) is NOT here - those are spawn-per-job subprocesses under the GPU lease, seeded via config_seed and derived by internal/mediacap.",
+    "media_seats": "ALIAS-backed media capabilities this tier serves, rendered into BOTH the llama-swap models map and the harness config binding that routes to them (internal/mediaseat). Each seat: kind (vision|stt|ocr|rkllm|forecast), name (the llama-swap model id AND the binding value), aliases, model/mmproj/vad_model (relative to the models dir), bin + lib_dir for a seat that is not llama-server (may carry __OFFLOAD_HOME__/__EXE__), ctx_size (vision runs its own smaller window), residency (swappable|resident - a ROLE, since group names are per-template), ttl, and extra (true = a registered extra: rendered into llama-swap and reachable by name and aliases, but bound to NO config key and not counted by the one-writer check, so a tier can serve a second vision/ocr/stt model beside the bound one; not on rkllm, no tasks). An rkllm seat is an NPU LLM/VLM served by the Rockchip RKLLM runtime, not llama-server: it takes model (a .rkllm), an optional vision_encoder (a .rknn under the models dir; with one the seat is a VLM and writes vision_model, without one it is a chat model and writes nothing), ctx_size and cpu_mask (hex, default 0x0f = the A55 cluster; at least 3 bits, the runtime refuses fewer than the SoC has NPU cores), and bin defaults to the launcher the rknpu accelerator ships. A forecast seat is the Timestral time-series forecaster: a Python server the harness binary launches (`<bin> forecast-serve --forecast-dir <home>/forecast --model <models>/<model> --port ${PORT}`), so its bin is the harness binary (__HARNESS_BIN__: <home>/harness/local-offload.exe on Windows, <home>/bin/local-offload on Linux, where each installer lays it down), its model is the weights directory under the models dir, and it writes forecast_model; it refuses every llama-server, whisper-server and task field, and a per-seat gpu_env pins it to the card that holds the tier's whisper seat. A tier declaring NO seat leaves vision_model/stt_model/forecast_model empty and the route honestly defers. FILE-backed media (image/video/music) is NOT here - those are spawn-per-job subprocesses under the GPU lease, seeded via config_seed and derived by internal/mediacap.",
     "vllm_seat": "optional: the tier's persistent vLLM AGENT-LANE seat (ADR 0035, 0048, 0049) - one declaration renders the llama-swap entry, the start/stop wrappers and unit, and the harness config bindings (agent_model, vllm_seats, the kv_cache_server binding). It renders only when the box has the hand-built venv and the weights, else the tier falls back to fallback_agent_model with the reason printed. storeless_reason is the MEASURED reason the seat has no cache server; it is carried verbatim into its kv_cache_server binding and is refused beside a cache_server.",
     "extra_vllm_seats": "optional, needs vllm_seat: the tier's further vLLM seats (ADR 0048 Amendment 2). KEYS ARE STRICT: a key that is not a vllm_seat field is refused by tier and JSON path at parse, never silently dropped (a misspelt storeless_reason would otherwise seed the generic reason). on-demand seats served beside the lane seat on the SAME card, never the agent lane (agent_model, the fallback and every bound-lane field are refused on one). Each is validated like the lane seat minus the fallback, must share its card, and must not repeat any id, alias or unit. Each renders only when the box has the venv, ITS weights and the wrapper scripts its entry runs; an active one joins the box's vllm_seats roster with its own kv_cache_server binding, and the layer that names it (by id or alias) is seeded only while it is - a layer whose vLLM seat is absent is dropped, and a layer set that loses `single` seeds none. The renderer emits every vLLM seat of a tier as an ALTERNATIVE of the others in the residents set (two seats at util 0.90 cannot share a card). A layer seat naming a vLLM seat must equal its max_model_len as ctx_tokens (and its max_num_seqs as max_inflight, when set). The installer renders the seat's llama-swap entry; its systemd unit, its wrapper scripts (named after the unit: <unit>-run.sh, <unit>-cmd.sh, <unit>-cmdstop.sh) and its polkit rule are the operator's, which is also why the two wrapper scripts (<unit>-cmd.sh, <unit>-cmdstop.sh) are its prerequisite: a box advertises the seat only once they are in the seat directory.",
     "composes": "COMPOSITE TIERS (ADR 0052, 0.116.0): the tier ids this tier is a COMPLETE instance of at the same time (blackwell-3x16 composes blackwell-16 and blackwell-2x16). Every id must be a tier in this table, none may be composite itself, and a tier never composes itself. Seeded into config as tiers = composes + this id and tier_profile = this id (internal/tierseed.Resolve); health and offload_status advertise them. Requires layers - composes without layers seeds nothing and is refused at parse.",
@@ -201,6 +201,19 @@
           "no_flash_attn": true,
           "residency": "swappable",
           "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Resident beside the agent seat on a card of 16 GB or more, on the card that holds this tier's whisper and embedder residents. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
+          "residency": "resident",
+          "ttl": 300
         }
       ],
       "vllm_seat": {
@@ -321,6 +334,19 @@
           "no_flash_attn": true,
           "residency": "resident",
           "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Resident beside the agent seat on a card of 16 GB or more, on the card that holds this tier's whisper and embedder residents. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
+          "residency": "resident",
+          "ttl": 300
         }
       ]
     },
@@ -414,6 +440,22 @@
           "gpu_env": [
             "CUDA_VISIBLE_DEVICES=0"
           ],
+          "residency": "resident",
+          "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "gpu_env": [
+            "CUDA_VISIBLE_DEVICES=0"
+          ],
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Resident beside the agent seat on a card of 16 GB or more, on the card that holds this tier's whisper and embedder residents. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
           "residency": "resident",
           "ttl": 300
         }
@@ -689,6 +731,22 @@
           "measured": "Gate 6 of the 48 GB bake-off, 13 rebuilt 16 kHz fixtures through the harness's own transcribe route: whisper large-v3-TURBO wins or ties every group against large-v3 (es-long WER 0.0652 vs 0.0838) at about twice the speed, so the proposed `stt_hq` high-quality lane FAILED its own promotion bar and stays empty - there is no second STT model to route to. Card 2 by the 2026-08-31 G1 singles rebalance (whisper, vl-8b/OCR and the embed/rerank alternates onto the second 5060 Ti; cascade and memory-stack residents keep card 0).",
           "residency": "resident",
           "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "gpu_env": [
+            "CUDA_VISIBLE_DEVICES=2"
+          ],
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Resident beside the agent seat on a card of 16 GB or more, on the card that holds this tier's whisper and embedder residents. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
+          "residency": "resident",
+          "ttl": 300
         }
       ],
       "vllm_seat": {
@@ -822,6 +880,19 @@
           "no_flash_attn": true,
           "residency": "resident",
           "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Resident beside the agent seat on a card of 16 GB or more, on the card that holds this tier's whisper and embedder residents. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
+          "residency": "resident",
+          "ttl": 300
         }
       ]
     },
@@ -907,6 +978,19 @@
           "model": "ggml-large-v3-turbo.bin",
           "vad_model": "ggml-silero-v6.2.0.bin",
           "no_flash_attn": true,
+          "residency": "resident",
+          "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Resident beside the agent seat on a card of 16 GB or more, on the card that holds this tier's whisper and embedder residents. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
           "residency": "resident",
           "ttl": 300
         }
@@ -1085,6 +1169,19 @@
           "no_flash_attn": true,
           "residency": "swappable",
           "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Resident beside the agent seat on a card of 16 GB or more, on the card that holds this tier's whisper and embedder residents. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
+          "residency": "resident",
+          "ttl": 300
         }
       ]
     },
@@ -1258,6 +1355,19 @@
           "model": "ggml-large-v3-turbo.bin",
           "vad_model": "ggml-silero-v6.2.0.bin",
           "no_flash_attn": true,
+          "residency": "swappable",
+          "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Swappable on this card, like the whisper seat: loading it evicts the agent seat, so a small card pays a reload for a forecast (ttl 300). The harness binary launches the server (forecast-serve) and holds its python child.",
           "residency": "swappable",
           "ttl": 300
         }
@@ -1452,6 +1562,19 @@
           "ttl": 300
         },
         {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Swappable on this card, like the whisper seat: loading it evicts the agent seat, so a small card pays a reload for a forecast (ttl 300). The harness binary launches the server (forecast-serve) and holds its python child.",
+          "residency": "swappable",
+          "ttl": 300
+        },
+        {
           "kind": "vision",
           "name": "lfm2.5-vl",
           "extra": true,
@@ -1573,6 +1696,19 @@
           "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
           "model": "ggml-large-v3-turbo-q5_0.bin",
           "vad_model": "ggml-silero-v5.1.2.bin",
+          "residency": "swappable",
+          "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Swappable on this card, like the whisper seat: loading it evicts the agent seat, so a small card pays a reload for a forecast (ttl 300). The harness binary launches the server (forecast-serve) and holds its python child.",
           "residency": "swappable",
           "ttl": 300
         }
@@ -1929,6 +2065,22 @@
           "gpu_env": [
             "CUDA_VISIBLE_DEVICES=1"
           ],
+          "residency": "resident",
+          "ttl": 300
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "gpu_env": [
+            "CUDA_VISIBLE_DEVICES=1"
+          ],
+          "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Resident beside the agent seat on a card of 16 GB or more, on the card that holds this tier's whisper and embedder residents. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
           "residency": "resident",
           "ttl": 300
         }

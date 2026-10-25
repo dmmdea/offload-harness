@@ -587,6 +587,7 @@ is missing what): a bound script or engine over a missing weight drops the task,
 | `agent` | `agent` | `fleet_agent_enabled` **and** a resolvable agent seat **and** (loopback listener **or** `fleet_auth_token` set) | none — llama-swap-resident text work, no render footprint |
 | `vision` (own route `POST /fleet/vision`) | `vqa` / `ocr` / `assess_image` (narrowed by the node's `vision_tasks`) | `vision_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The vision task](#the-vision-task-post-fleetvision) | none — llama-swap-resident VLM, no render footprint |
 | `text` (own route `POST /fleet/text`, 0.154.0, dark) | `classify` / `extract` (never summarize or triage), as the node's `text_tasks` names them | `text_tasks` non-empty **and** (loopback listener **or** `fleet_auth_token` set) — see [The text task](#the-text-task-post-fleettext) | none — the node's own cascade seat, no render footprint |
+| `forecast` (own route `POST /fleet/forecast`, 32 MiB body) | `forecast` (one time-series request; the node's full `core.Result` is the job data) | `forecast_model` set **and** (loopback listener **or** `fleet_auth_token` set) — see [The forecast task](#the-forecast-task-post-fleetforecast) | none — the node's own forecast seat (about 0.9 to 2.5 GiB while loaded), exempt from `fleet_max_concurrent_jobs` |
 | *(config-driven)* | `pipeline-job` | a valid `pipelines.<task_type>` entry (see below) | none — sizing rides on the task-scoped `Record("", "", task_type, peak)` entry |
 
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
@@ -1496,6 +1497,73 @@ older node and a node whose tier declares nothing are never picked, and its card
 schema) and turns a failure into a deferred result naming the node and the reason. A node declares a text task
 meaningfully only when its cascade for that task (`model`, `triage_model`, per-task rungs) routes to the unconstrained
 seat; measure through that same path.
+
+## The forecast task (`POST /fleet/forecast`)
+
+A node that binds a forecast seat (config `forecast_model`, written by the tier's `forecast` media seat) runs ONE time-series
+forecast on that seat for a caller whose box binds no forecast model, or whose own card is held. The model is Timestral-209M,
+served as a llama-swap seat (`forecast-serve`; see
+[offload-pipeline.md](systems/offload-pipeline.md#the-forecast-lane-timestral-209m)); the node runs the call through its OWN
+pipeline (`runForecast`), so the seat, the GPU-lease fence and the request timeout (`forecast_request_timeout_sec`) all live on
+the node. Decision and alternatives:
+[ADR 0098](architecture/decisions/0098-a-forecaster-is-a-llama-swap-media-seat-and-a-box-with-no-forecast-model-forwards.md)
+(Proposed).
+
+### Payload
+
+```
+POST /fleet/forecast   Content-Type: application/json   (the agent lane's bearer rule, see below)
+{"job_id": "forecast-<16 hex>", "request": {"series": [[…]], "prediction_length": 96, "quantiles": [0.1, 0.5, 0.9]}}
+```
+
+`request` is the forecast server's payload object, passed to the pipeline as is: `series`, `prediction_length`, `quantiles`,
+`past_covariates`, `known_covariates`, `categorical_past_covariates`, `categorical_known_covariates`, `symmetric_averaging`,
+`clip_nonnegative`. The job id rides INSIDE the payload (the lane has its own route for the body size, not an envelope).
+Unknown fields beside `job_id` and `request`, a `request` that is not a JSON object, and a node with no `forecast_model` are `400`s at ack time. The
+body cap is `ForecastBodyCap`, 32 MiB: `/fleet/dispatch` caps at 1 MiB, below one long multi-series request with covariates. The
+server's own limits (64 MiB body, 4,000,000 input values) are the binding ones; shapes, values and the horizon are checked by
+the pipeline and the server, and their refusals come back inside the job result as a defer, not as a `400`. The route joins the
+same `Server.admit` path as every job: known-id re-ack, drain, lease, band, queue cap, the job store.
+
+### Result
+
+The done job's `data` is the node's **full `core.Result`**, defers included, as the text lane stores it: `ok`, `deferred`,
+`reason`, `defer_class`, `result` (the server's object: `model`, `prediction_length`, `context_length_used`, `shape`,
+`quantile_levels`, `median`, `quantiles`, `wall_ms`, `chunks`, `device`), `meta`. A bad series is a `done` job saying
+`deferred: true` with `defer_class: contract` and `err_class: bad_input`; a held card is `capacity` (`gpu busy`); an empty-body
+5xx from the seat is `infrastructure`. The asker writes any result file of more than 2,000 numbers on its OWN box, so the node
+ships the whole answer in the job.
+
+### Auth and advertisement
+
+The lane rides the agent lane's bearer rule verbatim (`tokenGated`): with `fleet_auth_token` set, the dispatch AND the job polls
+require the bearer (`401` otherwise, checked BEFORE the body is read, so a malformed, mistyped or oversized body is `401`, not
+`400`); with no token, a non-loopback listener refuses `403` and withholds the lane. `ForecastLaneAdmissible` (a bound
+`forecast_model` and safe reachability) is the ONE predicate behind both the advertisement and the ack-time admission: `forecast`
+in `supported_task_types` and the additive, omitempty health field `forecast_model` (the bound alias). A node without the lane,
+and every node that predates it, emits a byte-identical health payload. Forecast jobs are token-gated on poll (`JobView.Gated`)
+and never listed as agent runs in `/fleet/jobs`.
+
+### Placement (delegator side)
+
+The caller is `internal/forecastremote`, the `route` parameter of `offload_forecast` (`local`, `auto` default, `remote`). It
+differs from every other lane in one rule: `auto` FORWARDS from a box that binds no forecast model, or whose card is
+lease-blocked and a node is eligible, where the stt, vision and text lanes defer on a model-less box. `delegate.PlaceForecast`
+ranks the eligible nodes with the agent lane's `betterRemote`; a node is eligible when its health lists `forecast`
+(`NodeView.ServesForecast`, so an older node is never picked) and its card is not leased (`lease.class: text` or `lease.busy`).
+Budget 300 s, a 32 MiB client payload cap, the text lane's poll behaviour, and the node's answer comes back stamped with
+`meta.node` and `meta.placement`. The delegator post-checks an OK answer: one JSON object with a non-empty `median` and, when
+both sides name it, the same `prediction_length`; a failure is an infrastructure defer naming the node. A box with no model and
+no eligible node defers with the placement reason (`capacity`, or `config` with no `delegate_remotes`).
+
+### The concurrency exemption
+
+`forecast` is EXEMPT from `fleet_max_concurrent_jobs`, as `stt` and `stt-upload` are: it drives the node's own forecast seat
+(0.2 to 0.7 s once loaded), never the shared text endpoint the cap protects, and queued behind a four-minute agent contract it
+would wait that contract out for nothing. A text-class GPU lease (`textLeaseAgainst`) still turns new forecast work away with the
+re-placeable `503`, as it does every task. On a swappable tier (`ampere-8`, `blackwell-8`, `ampere-6`) the exemption means a
+forecast can load its seat between two contract steps and evict the agent seat for a moment; that is the whisper behaviour on
+those cards.
 
 ## The stt upload door (`POST /fleet/stt`)
 

@@ -29,6 +29,7 @@ The `--serve` endpoint is **unauthenticated** and drives write/GitHub tools → 
 | `embeddinggemma` | (memory stack) | Embeddings. |
 | `embeddinggemma2` | (memory stack) | EmbeddingGemma-2; opt-in per tier (`include_embeddinggemma2`), with its multimodal projector on the memory authority's tier and text-only (`embeddinggemma2_projector: false`, no `--mmproj`) on replicas; no aliases, beside `embeddinggemma`. |
 | `qwen3vl-4b`, `whisper-stt`, `whisper-stt-hq` | `vision_model` / `stt_model[_hq]` | Vision + speech. All opt-in and DERIVED: a tier declares a `media_seats` entry, which renders the llama-swap seat and writes the binding together. No seat, no binding, route defers. |
+| `timestral-209m` (aliases `forecast`, `timestral`) | `forecast_model` | Time-series forecasting (`offload_forecast`; Timestral-209M, torch, fp32). A llama-swap media seat of kind `forecast`, DERIVED like the vision and speech seats: resident on tiers with cards of 16 GB or more, swappable on `ampere-8`/`blackwell-8`/`ampere-6`, unseated elsewhere (those boxes forward to a fleet node). Runtime placed by `local-offload install forecast`. |
 
 On a COMPOSITE box (ADR 0052) these aliases are not the whole story: the box declares device
 LAYERS, and placement picks the layer and seat per task, recording it on every result as
@@ -106,10 +107,10 @@ prompt/exemplars; can only narrow — UNSET resolves to config `agent_profile`, 
    sets are the valid CONCURRENT COMBINATIONS and the memory stack appears in every set, so no
    request can be satisfied by evicting it — `groups:`+`persistent:true` was measured failing to
    guarantee that. A var key must be alphanumeric and 1-8 chars, and a set may name only var ids.
-   **Media seats** (vision / STT / OCR, and the `rkllm` NPU seat of the rockchip-rk3588 tier) are NOT baked into the templates: a tier declares them in
+   **Media seats** (vision / STT / OCR / forecast, and the `rkllm` NPU seat of the rockchip-rk3588 tier) are NOT baked into the templates: a tier declares them in
    `media_seats` and `internal/servingtmpl` renders each into the models map, a matrix var, and
    the set its residency ROLE marks (`__SEATS_SWAPPABLE__` joins with `|`, `__SEATS_RESIDENT__`
-   with `&`). The same declaration writes `vision_model`/`stt_model`/`ocr_model` (an `rkllm` seat writes
+   with `&`). The same declaration writes `vision_model`/`stt_model`/`ocr_model`/`forecast_model` (an `rkllm` seat writes
    `vision_model` only when it has a vision encoder), so a binding can never name
    a seat that was not rendered. A seat flagged `extra: true` renders and answers to its aliases but
    writes no key and is not counted by the one-writer check (`BindingKey()` is empty; install.ps1

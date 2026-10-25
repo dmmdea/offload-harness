@@ -779,6 +779,25 @@ func PlaceText(remotes []NodeView, task string) (int, bool) {
 	return best, best >= 0
 }
 
+// PlaceForecast picks the fleet node that runs ONE forecast when the caller has decided the work
+// leaves the box (route remote, or route auto on a box with no forecast model or a blocked card). It
+// is PlaceText with the forecast lane's gate: the node must ADVERTISE the lane (ServesForecast; an
+// older node is never a target) and its card must not be spoken for. Ranking is betterRemote; the
+// return is the INDEX into remotes.
+func PlaceForecast(remotes []NodeView) (int, bool) {
+	seed := mintP2CSeed()
+	best := -1
+	for i, r := range remotes {
+		if !forecastEligible(r) {
+			continue
+		}
+		if best < 0 || betterRemote(seed, nil, 0, r, remotes[best]) {
+			best = i
+		}
+	}
+	return best, best >= 0
+}
+
 // PlaceSTT picks the fleet node that transcribes ONE uploaded audio file (the stt upload door, ADR
 // 0072) when the caller has decided the work leaves the box (route remote, or route auto while the
 // local whisper admission would block). It is PlaceVision with the door's own gate: the node must
@@ -805,6 +824,11 @@ func PlaceSTT(remotes []NodeView, hq bool, size int64) (int, bool) {
 // reserved.
 func sttEligible(r NodeView, hq bool, size int64) bool {
 	return r.ServesSTTUploadOf(hq, size) && !r.LeasedText && !r.LeaseBusy
+}
+
+// forecastEligible is PlaceForecast's hard gate: the lane advertised, the card not reserved.
+func forecastEligible(r NodeView) bool {
+	return r.ServesForecast() && !r.LeasedText && !r.LeaseBusy
 }
 
 // textEligible is PlaceText's hard gate: the lane advertised and the task served, the card not

@@ -34,7 +34,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask}
+var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask, ForecastTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -117,6 +117,10 @@ func taskConfiguredIn(v *mediaView, taskType string, loopbackListener bool) bool
 		// text task (config text_tasks; none ships until measured) and the vision lane's
 		// reachability rule.
 		return TextLaneAdmissible(cfg, loopbackListener)
+	case ForecastTask:
+		// One time-series forecast on this node's bound forecast_model seat: advertised
+		// exactly when POST /fleet/forecast would admit it.
+		return ForecastLaneAdmissible(cfg, loopbackListener)
 	}
 	// Anything else is only "configured" when it is a VALID cfg.Pipelines key
 	// (Task 6): 100% config-driven, so a new pipeline needs no new case here.
@@ -508,6 +512,8 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 		return buildVision(cfg, payload)
 	case TextTask:
 		return buildText(cfg, payload)
+	case ForecastTask:
+		return buildForecast(cfg, payload)
 	}
 	// Any other taskType that reaches here (taskConfigured already gated
 	// membership) must be a configured cfg.Pipelines key (Task 6) — 100%

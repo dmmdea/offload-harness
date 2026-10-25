@@ -188,6 +188,10 @@ type NodeView struct {
 	// NONE: the lane is dark unless declared, and an older node never lists "text"
 	// either. Read it through ServesTextTask, never directly.
 	TextTasks []string
+	// ForecastModel decodes health's `forecast_model`: the alias of the node's bound forecast seat,
+	// published only by a node that advertises "forecast". Empty on an older node and on one
+	// without the lane; read the lane through ServesForecast, never this.
+	ForecastModel string
 	// STTHQ / STTUploadMaxMB decode health's `stt_hq` and `stt_upload_max_mb` (ADR 0072): whether the
 	// node has an hq whisper model and the largest audio upload its door takes, MiB decoded. Both
 	// are published only by a node that advertises "stt-upload", so an older node decodes to nil
@@ -303,6 +307,11 @@ const defaultSTTUploadMaxMB = 48
 // lane is safely reachable (fleetnode.taskConfiguredFor).
 const TextTask = "text"
 
+// ForecastTask is the fleet task_type of the forecast lane: a node lists it in
+// supported_task_types only when it binds a forecast_model and the lane is safely reachable
+// (fleetnode.ForecastLaneAdmissible).
+const ForecastTask = "forecast"
+
 // ServesSTTUpload reports whether v advertises the stt upload door.
 func (v NodeView) ServesSTTUpload() bool {
 	for _, t := range v.Tasks {
@@ -351,6 +360,17 @@ func (v NodeView) ServesTextTask(task string) bool {
 	}
 	for _, t := range v.TextTasks {
 		if t == task {
+			return true
+		}
+	}
+	return false
+}
+
+// ServesForecast reports whether v advertises the forecast lane. The lane has one task, so the
+// advertisement is the whole answer: an older node never lists it and is never picked.
+func (v NodeView) ServesForecast() bool {
+	for _, t := range v.Tasks {
+		if t == ForecastTask {
 			return true
 		}
 	}
@@ -617,6 +637,9 @@ type healthWire struct {
 	// Additive (0.154.0): the classify / extract tasks the node's text lane serves.
 	// Absent on an older node and on any node whose tier declares none (the lane is dark).
 	TextTasks []string `json:"text_tasks"`
+	// Additive: the alias of the node's bound forecast seat. Absent on an older node and on any
+	// node without the lane.
+	ForecastModel string `json:"forecast_model"`
 	// Additive (ADR 0077): the node's media route verdicts. A pointer so an absent key (an older
 	// node) stays distinguishable from a published list.
 	MediaRoutes *[]MediaRouteView `json:"media_routes"`
@@ -707,16 +730,17 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		// it read free), but for the delegator that busy is the OVERDUE flag's
 		// to carry: LeaseBusy means a genuinely long lease and is a hard
 		// exclusion for a non-text one, which an abandoned lease must not become.
-		LeaseBusy:    w.Lease != nil && w.Lease.Held && w.Lease.Busy && !w.Lease.Overdue,
-		LeaseOverdue: w.Lease != nil && w.Lease.Held && w.Lease.Overdue,
-		LeaseHeld:    w.Lease != nil && w.Lease.Held,
-		Leases:       leaseViews(w),
-		Devices:      w.GpuDevices,
-		Tasks:        w.SupportedTaskTypes,
-		VisionModel:  w.VisionModel,
-		VisionTasks:  w.VisionTasks,
-		TextTasks:    w.TextTasks,
-		Layers:       w.Layers,
+		LeaseBusy:     w.Lease != nil && w.Lease.Held && w.Lease.Busy && !w.Lease.Overdue,
+		LeaseOverdue:  w.Lease != nil && w.Lease.Held && w.Lease.Overdue,
+		LeaseHeld:     w.Lease != nil && w.Lease.Held,
+		Leases:        leaseViews(w),
+		Devices:       w.GpuDevices,
+		Tasks:         w.SupportedTaskTypes,
+		VisionModel:   w.VisionModel,
+		VisionTasks:   w.VisionTasks,
+		TextTasks:     w.TextTasks,
+		ForecastModel: w.ForecastModel,
+		Layers:        w.Layers,
 
 		ImageRecipes:   w.ImageRecipes,
 		MediaRecipes:   w.MediaRecipes,

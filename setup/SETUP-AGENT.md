@@ -731,6 +731,28 @@ E-08: no node advertises it or accepts a fleet job for it, whatever either file 
 see the `accelerators.hailo-8l.config_seed` block in `setup/templates/profiles.json` (back the
 config up first).
 
+### Forecast lane (Timestral-209M; `offload_forecast`, ADR 0098)
+
+Optional runtime: a python venv with torch, the `timestral` package and the model weights, served by the tier's `forecast`
+media seat. Tiers with a seat: the 16 GB-and-up cards, `dual-gpu` and `ampere-16` (resident) and `ampere-8`, `blackwell-8`,
+`ampere-6` (swappable); the other tiers reach the model through the fleet and need none of this. It is NOT part of the
+installer's default steps and uses no card while installing (it never loads the model). It needs `uv` on PATH
+(`winget install astral-sh.uv`, or `curl -LsSf https://astral.sh/uv/install.sh | sh`) and about 3 GB of disk (the torch
+wheels, the venv and the 837 MB checkpoint).
+
+```powershell
+local-offload install forecast            # --home / --models to relocate; --json prints one final result line
+```
+
+It builds `<OFFLOAD_HOME>/forecast/venv` (python 3.13), installs torch with `--torch-backend=auto`, installs `timestral` at the
+pinned commit, fetches the weights at the pinned revision into `<models>/timestral-209m` (sha256-verified) and writes the
+server file. A second run changes nothing. The weights are Modified MIT: keep the attribution "2026 - Mistral AI" and note that
+there are no rights for a company whose global consolidated monthly revenue exceeds USD 20M (the install prints this line
+and nothing gates on it). The seat's command runs the harness binary where the installer laid it down
+(`<OFFLOAD_HOME>/harness/local-offload.exe` on Windows, `<prefix>/bin/local-offload` on Linux) with `forecast-serve`; re-render the serving config for the tier so llama-swap serves the `timestral-209m` entry and
+`forecast_model` is bound. First proof: `local-offload forecast --series "[1,2,3,4,5,6,7,8]" --prediction-length 4` (a cold
+load takes about 20 s). A box that cannot run it needs none of this: `offload_forecast` in `auto` forwards to a fleet node.
+
 ### Composition lane (HyperFrames; `offload_compose_video`, ADR 0059)
 
 The installer step `hyperframes (compose lane)` (Step 7b in `install.ps1`, 3b in `install.sh`)
