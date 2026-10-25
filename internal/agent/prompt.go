@@ -15,7 +15,8 @@ func SystemPrompt(allowWrite, allowOverwrite, allowFetch, allowShell, runGranted
 - summarize_file(path, max_points?): digest a big workspace file on a free local model WITHOUT its bytes entering your context.
 - offload_summarize / offload_classify / offload_triage / offload_extract: delegate bulk text work to a free local model
 - offload_vqa(path, question) / offload_ocr(path): look at an IMAGE file — ask about it, or transcribe its text — without the image entering your context.
-- offload_transcribe(path, language?): transcribe an AUDIO file without the audio entering your context.`
+- offload_transcribe(path, language?): transcribe an AUDIO file without the audio entering your context.
+- offload_forecast(series, prediction_length, quantiles?): forecast numeric time series (probabilistic, zero-shot) on a free local model when this box serves it; series is passed inline.`
 	if allowWrite {
 		if allowOverwrite {
 			s += `

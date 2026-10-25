@@ -402,6 +402,11 @@ func localVerdictLine(ctx context.Context, cfg config.Config, seat map[string]an
 	var gaps []string
 	for _, r := range cfg.ModelRoutes() {
 		if r.Effective == "" {
+			// A box with no forecast model but fleet nodes to forward to is not left without it:
+			// offload_forecast in auto sends the work to a node, so it does not defer here.
+			if r.StatusKey == "forecast" && len(cfg.DelegateRemotes) > 0 {
+				continue
+			}
 			gaps = append(gaps, r.StatusKey)
 		}
 	}

@@ -141,6 +141,7 @@ type droppedEnumValue struct {
 // The kept sentences say what a caller needs from the blocks: trust the live roster over a written figure, read verdict before concluding
 // anything from held, and what idle_agent_nodes above zero means.
 var droppedEnumValues = []droppedEnumValue{
+	{Tool: "offload_forecast", Path: "#/properties/route", Value: "local", Reason: "the kept tool-level route sentence says local pins the work to this box, which is all the parameter's own local line adds"},
 	{Tool: "offload_transcribe", Path: "#/properties/route", Value: "auto", Reason: "the kept tool-level route sentence says route (default auto) places the work, on this box's whisper when it is free and on a fleet node's otherwise, and that the audio is sent as 16 kHz mono Opus"},
 	{Tool: "offload_transcribe", Path: "#/properties/route", Value: "local", Reason: "the kept tool-level route sentence says local pins the work to this box, which is all the parameter's own local line adds"},
 	{Tool: "offload_status", Path: "#/properties/section", Value: "local", Reason: "section local returns the local block, whose contents (the roster of seats and the model ids served now) are a result shape the dropped Returns sentence lists; the section value is the block's name"},

@@ -18,6 +18,7 @@
       "offload_video_describe",
       "offload_video_watch",
       "offload_transcribe",
+      "offload_forecast",
       "offload_extract_image",
       "offload_assess_image",
       "offload_ocr",

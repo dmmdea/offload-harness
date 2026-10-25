@@ -451,6 +451,26 @@ var compactKeep = []compactKeepEntry{
 		Why:      "the default route (auto) sends the audio, as 16 kHz mono Opus, to a fleet node when this box's whisper is held: the one default that moves the caller's bytes, and how to pin it (local)",
 	},
 	{
+		Tools:    []string{"offload_forecast"},
+		Sentence: "If the forecast can't be run it returns deferred:true with a reason (a bad input names what to fix) and you should handle the series yourself.",
+		Why:      "the lane defers (deferred:true) when it cannot run the forecast, and the caller handles the series itself",
+	},
+	{
+		Tools:    []string{"offload_forecast"},
+		Sentence: "A result of more than 2,000 numbers is written as JSON to out_path (default <media_dir>/forecast-<sha8>.json) and the answer keeps shape, quantile_levels, result_path and the first and last 8 median steps of each series.",
+		Why:      "a large answer carries no median or quantiles inline: the full numbers are only in the file at result_path, and a caller that reads the inline answer as complete would forecast from 16 steps",
+	},
+	{
+		Tools:    []string{"offload_forecast"},
+		Sentence: "route (default auto) runs it on this box's forecast model when it has one and its card is free, and on a fleet node's otherwise (every node serves the same model, so that costs no quality; the series travels with the job and the result file is written HERE, on this box); local pins it to this box, remote forces a fleet node.",
+		Why:      "the default route (auto) sends the series to a fleet node when this box has no forecast model or its card is held: the one default that moves the caller's data, and how to pin it (local)",
+	},
+	{
+		Tools:    []string{"offload_forecast"},
+		Sentence: "remote: force a fleet node; with none eligible it defers with defer_class capacity (config when no delegate_remotes are configured) and never touches the local GPU.",
+		Why:      "route value remote: with no eligible node the lane defers and never touches the local GPU",
+	},
+	{
 		Tools:    []string{"offload_triage"},
 		Sentence: "THE FIRST DOOR for one text + one yes/no question (register A-102): seconds on the entry rung, automatic climb on a low decision margin; never write an agent_delegate contract for a single check.",
 		Why:      "door choice: never write an agent_delegate contract for a single check",
