@@ -525,10 +525,11 @@ func (s *state) answersTo(seat, want string) bool {
 // hasChatRoute reports whether a chat completion can be asked of the seat. A seat that serves speech to
 // text, embeddings or reranking has no chat route: llama-swap answers a chat request for it with a 404,
 // which says nothing about whether the seat is up. The roles come from what the box states, never from a
-// guessed name: the seat is the configured embedder or speech-to-text seat, or its own command carries
-// the flag that makes it one (the way the serving config's author wrote it), or it is a whisper server.
+// guessed name: the seat is the configured embedder, speech-to-text or forecast seat, or its own command
+// carries the flag that makes it one (the way the serving config's author wrote it), or it is a whisper
+// or forecast server.
 func (s *state) hasChatRoute(seat string) bool {
-	for _, role := range []string{s.cfg.EmbedModel(), s.cfg.STTModel, s.cfg.STTModelHQ} {
+	for _, role := range []string{s.cfg.EmbedModel(), s.cfg.STTModel, s.cfg.STTModelHQ, s.cfg.ForecastModel} {
 		if s.answersTo(seat, role) {
 			return false
 		}
@@ -536,7 +537,8 @@ func (s *state) hasChatRoute(seat string) bool {
 	if e, ok := s.entryFor(seat); ok && cmdHasNonChatFlag(e.Cmd) {
 		return false
 	}
-	return s.engineOf(seat) != EngineWhisperCpp
+	engine := s.engineOf(seat)
+	return engine != EngineWhisperCpp && engine != EngineForecast
 }
 
 // completionVerdict runs the explicit 1-token completion probe on a seat the cheap probe passed.

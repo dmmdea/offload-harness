@@ -728,6 +728,7 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
     if ($kinds -contains 'vision') { Assert ($null -ne $bt.vision_model -and $bt.vision_model -ne '') "$t vision seat binds vision_model" }
     if ($kinds -contains 'stt')    { Assert ($null -ne $bt.stt_model -and $bt.stt_model -ne '')       "$t stt seat binds stt_model" }
     if ($kinds -contains 'ocr')    { Assert ($null -ne $bt.ocr_model -and $bt.ocr_model -ne '')       "$t ocr seat binds ocr_model" }
+    if ($kinds -contains 'forecast') { Assert ($null -ne $bt.forecast_model -and $bt.forecast_model -ne '') "$t forecast seat binds forecast_model" }
   }
 }
 Assert ($null -eq (Get-MediaSeatBindings -ProfileRow $null))                'null profile row -> no bindings'

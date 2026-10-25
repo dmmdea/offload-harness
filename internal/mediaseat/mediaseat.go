@@ -52,6 +52,11 @@ const (
 	// CHAT seat first; with a vision_encoder it also answers image questions and binds
 	// vision_model. See Seat.VisionEncoder / Seat.CPUMask.
 	KindRKLLM = "rkllm"
+	// KindForecast is the Timestral time-series forecaster: a Python server the harness
+	// binary itself launches (`<bin> forecast-serve ...`) behind llama-swap, bound to
+	// `forecast_model`. It runs on the GPU, so it is a media seat and not an accelerator
+	// (ADR 0024). It is not a chat model and answers only POST /v1/forecast.
+	KindForecast = "forecast"
 )
 
 // The task names a seat may declare in Seat.Tasks. The first three are the fleet vision
@@ -264,6 +269,8 @@ func (s Seat) BindingKey() string {
 		return "stt_model"
 	case KindOCR:
 		return "ocr_model"
+	case KindForecast:
+		return "forecast_model"
 	case KindRKLLM:
 		if s.VisionEncoder != "" {
 			return "vision_model"
@@ -375,7 +382,7 @@ func Bindings(seats []Seat) map[string]any {
 
 // BoundKeys is every config key seats may write, for the seed validator.
 func BoundKeys() []string {
-	return []string{"ocr_model", "stt_model", "text_tasks", "unconstrained_seats", "vision_model", "vision_tasks"}
+	return []string{"forecast_model", "ocr_model", "stt_model", "text_tasks", "unconstrained_seats", "vision_model", "vision_tasks"}
 }
 
 // Validate rejects a seat set at AUTHORING time — in a test over the committed
@@ -398,7 +405,7 @@ func Validate(seats []Seat, tier string) error {
 				"unconstrained_seats and text_tasks, so the seat would not be the bind-free extra it claims to be")
 		}
 		switch s.Kind {
-		case KindVision, KindSTT, KindOCR, KindRKLLM:
+		case KindVision, KindSTT, KindOCR, KindRKLLM, KindForecast:
 			if k := s.BindingKey(); k != "" {
 				writers[k] = append(writers[k], where)
 			}
@@ -408,9 +415,9 @@ func Validate(seats []Seat, tier string) error {
 				writers["text_tasks"] = append(writers["text_tasks"], where)
 			}
 		case "":
-			problems = append(problems, where+": no kind (want "+KindVision+", "+KindSTT+", "+KindOCR+" or "+KindRKLLM+")")
+			problems = append(problems, where+": no kind (want "+KindVision+", "+KindSTT+", "+KindOCR+", "+KindRKLLM+" or "+KindForecast+")")
 		default:
-			problems = append(problems, fmt.Sprintf("%s: unknown kind %q (want %s, %s, %s or %s)", where, s.Kind, KindVision, KindSTT, KindOCR, KindRKLLM))
+			problems = append(problems, fmt.Sprintf("%s: unknown kind %q (want %s, %s, %s, %s or %s)", where, s.Kind, KindVision, KindSTT, KindOCR, KindRKLLM, KindForecast))
 		}
 		switch {
 		case s.Name == "":
@@ -502,6 +509,22 @@ func Validate(seats []Seat, tier string) error {
 			if s.ChatTemplate != "" || s.Temp != nil {
 				problems = append(problems, where+": chat_template/temp are llama-server flags (vision/ocr only) and are "+
 					"ignored on an stt seat")
+			}
+		}
+		if s.Kind == KindForecast {
+			if s.Bin == "" {
+				problems = append(problems, where+": a forecast seat needs a bin — the harness binary that runs `forecast-serve`")
+			}
+			if s.Model == "" {
+				problems = append(problems, where+": a forecast seat needs a model — the weights directory under the models dir")
+			}
+			// The forecast server takes a model directory and a port; every llama-server
+			// and whisper-server knob is one the renderer would silently drop.
+			if s.MMProj != "" || s.VADModel != "" || s.LibDir != "" || s.CtxSize > 0 || s.ImageMaxTokens > 0 || s.ImageMinTokens > 0 ||
+				s.NoContextShift || s.NoMmprojOffload || s.NoFlashAttn || s.ChatTemplate != "" || s.Temp != nil ||
+				s.TopP != nil || s.TopK != nil || s.SplitMode != "" || s.TensorSplit != "" {
+				problems = append(problems, where+": mmproj/vad_model/lib_dir/ctx_size/image_*_tokens/no_*/chat_template/temp/top_p/top_k/"+
+					"split_mode/tensor_split are llama-server or whisper-server settings and are ignored on a forecast seat")
 			}
 		}
 		if s.Kind == KindRKLLM {
@@ -602,7 +625,7 @@ func checkTasks(s Seat, where string) []string {
 		}
 	}
 	switch {
-	case s.Kind == KindSTT || s.Kind == KindOCR:
+	case s.Kind == KindSTT || s.Kind == KindOCR || s.Kind == KindForecast:
 		problems = append(problems, where+": tasks are read only for a vision or rkllm seat and are ignored on a "+s.Kind+" seat")
 	case hasText && s.Kind != KindRKLLM:
 		problems = append(problems, where+": a text task (classify/extract) is served by the node's own cascade on an unconstrained seat, "+

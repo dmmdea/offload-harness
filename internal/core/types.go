@@ -39,6 +39,11 @@ const (
 	// Gemma cascade; it is dispatched directly in pipeline.Run (no prompt, no
 	// grammar), like extract_image. Returns {gist, segments[]} + writes SRT.
 	TaskTranscribe TaskType = "transcribe"
+	// TaskForecast forecasts numeric time series on a local Timestral model served by a
+	// llama-swap forecast seat. Input is the canonical JSON payload the forecast server
+	// takes; the series NEVER passes through the text cascade (dispatched directly in
+	// pipeline.Run, no prompt, no grammar). Returns the server's quantile forecast object.
+	TaskForecast TaskType = "forecast"
 	// TaskGenerateImage renders a text prompt to a PNG on the LOCAL ComfyUI (SDXL/
 	// RealVisXL) for free. Its own branch in pipeline.Run (no prompt cascade, no
 	// grammar) — it shells out to render/comfy-generate.mjs, which takes the shared
@@ -157,7 +162,7 @@ const AccelImageCap = 8 << 20
 // Valid reports whether t is a known task type.
 func (t TaskType) Valid() bool {
 	switch t {
-	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskAnimateCharacter, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskComposeVideo, TaskBrowse, TaskRunGraph, TaskPipelineJob, TaskAgentRun, TaskAccel:
+	case TaskSummarize, TaskClassify, TaskExtract, TaskTriage, TaskVQA, TaskOCR, TaskExtractImage, TaskAssessImage, TaskVideoDescribe, TaskVideoWatch, TaskTranscribe, TaskForecast, TaskGenerateImage, TaskInpaintImage, TaskEditImageGenerative, TaskUpscaleImage, TaskGenerateSVG, TaskGenerateVideo, TaskAnimateCharacter, TaskGenerateAudio, TaskEditImage, TaskMedia, TaskComposeVideo, TaskBrowse, TaskRunGraph, TaskPipelineJob, TaskAgentRun, TaskAccel:
 		return true
 	}
 	return false

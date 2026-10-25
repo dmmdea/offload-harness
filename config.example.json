@@ -70,6 +70,8 @@
   "stt_max_inline_segments": 120,
   "stt_unload_after": true,
   "stt_request_timeout_sec": 1800,
+  "forecast_model": "",
+  "forecast_request_timeout_sec": 300,
   "media_dir": "~/.local-offload/media",
   "svg_dir": "~/.local-offload/svg",
   "imagegen_script": "",

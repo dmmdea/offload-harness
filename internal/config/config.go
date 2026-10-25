@@ -677,6 +677,15 @@ type Config struct {
 	// It used to BE that wait, which is the limit at which the MCP client aborts an
 	// idle call.
 	STTRequestTimeoutSec int `json:"stt_request_timeout_sec,omitempty"`
+	// --- Forecast (Timestral) ---
+	// ForecastModel is the llama-swap alias of the forecast seat. It is bound by a tier's
+	// `forecast` media seat, never hand-seeded. Empty = no forecast route (a forecast defers
+	// locally, or forwards to a fleet node that serves one).
+	ForecastModel string `json:"forecast_model,omitempty"`
+	// ForecastRequestTimeoutSec bounds one forecast HTTP call, cold model load included
+	// (cold 19 s, warm batch under a second on the reference card). Default 300. Like
+	// stt_request_timeout_sec it only caps the GPU-lease fence wait, which is gpu_wait_ms.
+	ForecastRequestTimeoutSec int `json:"forecast_request_timeout_sec,omitempty"`
 	// MediaDir is where transcribe writes .srt/.txt/.segments.json. Default
 	// <base>/media.
 	MediaDir string `json:"media_dir,omitempty"`
@@ -2310,6 +2319,7 @@ func (c Config) ModelRoutes() []ModelRoute {
 		{Key: "ocr_model", StatusKey: "ocr", Configured: c.OCRModel, Effective: ocr, Diffed: true},
 		{Key: "stt_model", StatusKey: "stt", Configured: c.STTModel, Effective: c.STTModel, Diffed: true},
 		{Key: "stt_model_hq", StatusKey: "stt_hq", Configured: c.STTModelHQ, Effective: c.STTModelHQ, Diffed: true},
+		{Key: "forecast_model", StatusKey: "forecast", Configured: c.ForecastModel, Effective: c.ForecastModel, Diffed: true},
 		{Key: "embed_model", StatusKey: "embed", Configured: c.EmbedModelName, Effective: c.EmbedModel()},
 	}
 }
@@ -2370,6 +2380,7 @@ func Default() Config {
 		STTMaxInlineSegments:        120,
 		STTUnloadAfter:              true,
 		STTRequestTimeoutSec:        1800,
+		ForecastRequestTimeoutSec:   300,
 		MediaDir:                    filepath.Join(base, "media"),
 		SVGDir:                      filepath.Join(base, "svg"),
 		ImageGenScript:              "",

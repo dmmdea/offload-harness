@@ -1075,7 +1075,7 @@ function Get-MediaSeatBindings {
   param($ProfileRow)
   if (-not $ProfileRow -or -not $ProfileRow.PSObject.Properties['media_seats']) { return $null }
   # Mirror of mediaseat.configKey: seat kind -> the config field it binds.
-  $keyByKind = @{ vision = 'vision_model'; stt = 'stt_model'; ocr = 'ocr_model' }
+  $keyByKind = @{ vision = 'vision_model'; stt = 'stt_model'; ocr = 'ocr_model'; forecast = 'forecast_model' }
   $out = [ordered]@{}
   foreach ($s in @($ProfileRow.media_seats)) {
     if ($null -eq $s) { continue }

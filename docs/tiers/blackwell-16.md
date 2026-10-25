@@ -60,6 +60,7 @@ binding can never name a seat that was not rendered:
 |---|---|---|---|---|
 | `qwen3-vl-8b` | vision | `vision_model` | `Qwen3VL-8B-Instruct-Q8_0.gguf` | swappable |
 | `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | swappable |
+| `timestral-209m` | forecast | `forecast_model` | `timestral-209m` | resident |
 
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
 every seed.

@@ -36,6 +36,7 @@ binding can never name a seat that was not rendered:
 |---|---|---|---|---|
 | `gemma4-e4b-vision` | vision | `vision_model` | `gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf` | swappable |
 | `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo-q5_0.bin` | swappable |
+| `timestral-209m` | forecast | `forecast_model` | `timestral-209m` | swappable |
 
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
 every seed.

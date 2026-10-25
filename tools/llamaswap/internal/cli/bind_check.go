@@ -35,6 +35,7 @@ var harnessModelKeys = []string{
 	"ocr_model",
 	"stt_model",
 	"stt_model_hq",
+	"forecast_model",
 	"embed_model",
 	"embedding_model",
 	"rerank_model",

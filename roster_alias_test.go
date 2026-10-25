@@ -122,8 +122,8 @@ func TestReportMatchesAliasOnlySeats(t *testing.T) {
 // was what gated).
 func TestModelRoutesAreOneTable(t *testing.T) {
 	routes := config.Default().ModelRoutes()
-	if len(routes) != 10 {
-		t.Fatalf("ModelRoutes returned %d routes, want the 10-key superset", len(routes))
+	if len(routes) != 11 {
+		t.Fatalf("ModelRoutes returned %d routes, want the 11-key superset", len(routes))
 	}
 	seenKey, seenStatus := map[string]bool{}, map[string]bool{}
 	var diffed []string
@@ -140,7 +140,7 @@ func TestModelRoutesAreOneTable(t *testing.T) {
 		}
 	}
 	want := []string{"model", "agent_model", "triage_model", "escalation_model",
-		"reasoning_model", "vision_model", "ocr_model", "stt_model", "stt_model_hq"}
+		"reasoning_model", "vision_model", "ocr_model", "stt_model", "stt_model_hq", "forecast_model"}
 	if strings.Join(diffed, ",") != strings.Join(want, ",") {
 		t.Errorf("diffed set = %v, want %v", diffed, want)
 	}
@@ -200,7 +200,7 @@ func TestModelRouteStatusKeysAreStable(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, key := range []string{"workhorse", "agent", "triage", "escalation", "reasoning",
-		"vision", "ocr", "stt", "stt_hq", "embed"} {
+		"vision", "ocr", "stt", "stt_hq", "forecast", "embed"} {
 		if !strings.Contains(string(b), `"`+key+`"`) {
 			t.Errorf("offload_status roster lost the %q key: %s", key, b)
 		}

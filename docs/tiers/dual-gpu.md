@@ -30,6 +30,7 @@ binding can never name a seat that was not rendered:
 |---|---|---|---|---|
 | `qwen3vl-4b` | vision | `vision_model` | `Qwen3VL-4B-Instruct-Q4_K_M.gguf` | resident |
 | `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | resident |
+| `timestral-209m` | forecast | `forecast_model` | `timestral-209m` | resident |
 
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
 every seed.
