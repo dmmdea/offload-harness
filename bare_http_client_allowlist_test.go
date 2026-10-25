@@ -35,6 +35,7 @@ var bareClientAllowlist = map[string]struct {
 	"internal/fleetnode/ingress.go:newIngressClient":             {1, "guarded: every ref is checked against the IP-literal allowlist before any dial, redirects refused, no proxy (ingress.go)"},
 	"internal/fleetnode/kvslots.go:<file-scope>":                 {1, "configured: the node's own llama-swap (kv-slot lane)"},
 	"internal/fleetnode/server.go:<file-scope>":                  {1, "configured: the node's own local services"},
+	"internal/forecastclient/forecastclient.go:New":              {1, "configured: the forecast seat on the local llama-swap, reached only through the lease fence"},
 	"internal/fleetview/poller.go:NewPoller":                     {1, "configured: fleet nodes from delegate_remotes (overview page)"},
 	"internal/fleetview/topmodel.go:NewTop":                      {1, "configured: fleet nodes from delegate_remotes (top view)"},
 	"internal/gpuactivity/snapshot.go:Snapshot":                  {1, "configured: the local llama-swap /running"},

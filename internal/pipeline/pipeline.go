@@ -38,6 +38,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/exemplars"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
+	"github.com/dmmdea/offload-harness/internal/forecastclient"
 	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -100,6 +101,7 @@ type Pipeline struct {
 	cfg           config.Config
 	client        *llamaclient.Client
 	stt           *sttclient.Client      // whisper-server transcribe client (audio never hits the text cascade)
+	forecast      *forecastclient.Client // Timestral forecast client (a JSON payload never hits the text cascade)
 	cache         *cache.Cache           // may be nil
 	led           *ledger.Ledger         // may be nil
 	tracker       CallTracker            // nil = no PAIR running cards
@@ -303,6 +305,7 @@ func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Le
 	// only caps that: the lease wait used to BE stt_request_timeout_sec (1,800 s), which is
 	// where the MCP client aborts an idle call (register C-89).
 	p.stt = sttclient.New(cfg.Endpoint, time.Duration(cfg.STTRequestTimeoutSec)*time.Second).WithFenceWait(p.gpuWait())
+	p.forecast = forecastclient.New(cfg.Endpoint, time.Duration(cfg.ForecastRequestTimeoutSec)*time.Second).WithFenceWait(p.gpuWait())
 	// LO-1: resolve the shared GPU lock path ONCE, the same way the Node render
 	// runners do, so the vision gate watches the exact lock the gen jobs hold.
 	p.gpuLockPath = gpulock.Path(cfg.GPULockPath, cfg.StateDir)
@@ -476,6 +479,12 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	// own branch (audio in, no prompt/grammar, never the text cascade).
 	if req.Task == core.TaskTranscribe {
 		return p.runTranscribe(ctx, req, meta, start)
+	}
+
+	// forecast posts req.Input (the forecast server's JSON payload) to the Timestral seat. Its own
+	// branch: numbers in, numbers out, never the text cascade.
+	if req.Task == core.TaskForecast {
+		return p.runForecast(ctx, req, meta, start)
 	}
 
 	// generate_image renders req.Input (the prompt) to a PNG on the local ComfyUI by

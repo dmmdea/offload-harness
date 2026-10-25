@@ -141,6 +141,8 @@ func main() {
 		err = runResearch(args)
 	case "fleet-serve":
 		err = runFleetServe(args)
+	case "forecast-serve":
+		err = runForecastServe(args)
 	case "fleet-measure":
 		err = runFleetMeasure(args)
 	case "fleet-ui":
@@ -337,6 +339,8 @@ Usage:
   local-offload mcp                      run as an MCP server (stdio)
   local-offload delegate --contract file.json [--route auto|spread|local|remote] [--read-root DIR] [--remote http://node:18811]...   place delegation-contract subtasks on this box or tailnet fleet nodes (needs agent_delegation_enabled; remotes default to delegate_remotes)
   local-offload fleet-serve [--listen ADDR] [--listen-trusted-network] [--node-id NAME]   join the fleet-dispatcher fleet (health/dispatch/jobs on :18811; docs/FLEET-NODE.md)
+  local-offload forecast-serve --forecast-dir DIR --model DIR --port N [--host 127.0.0.1] [--device cuda] [--max-row-patches N]   run the Timestral forecast server a forecast seat of llama-swap launches (python child bound to this process; loopback only)
+  local-offload install forecast [--home DIR] [--models DIR] [--ref SHA] [--torch-backend auto] [--json]   build the forecast lane: venv, torch, the pinned timestral package, the hash-verified weights and the server file (uv required; never loads the model)
   local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
   local-offload fleet-ui [--listen 127.0.0.1:18813] [--listen-trusted-network] [--interval 5s] [--remote URL]...   live overview page: node cards (GPU/VRAM/CPU/RAM graphs, seat, served models), cluster jobs + errors feed (docs/systems/fleet-overview.md)
   local-offload fleet-smoke [--remote URL]... [--timeout 120] [--json]   send one grounded one-step contract to EVERY node and print where each landed (node, seat, placement, wall, verdict); non-zero unless all PASS
