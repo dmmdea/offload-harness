@@ -75,17 +75,18 @@ func TestEveryFleetClientRequestSetsTheBearer(t *testing.T) {
 
 // fleetClientDirs are the packages whose HTTP requests go to a fleet node.
 var fleetClientDirs = map[string]bool{
-	"internal/mediaremote":   true,
-	"internal/composeremote": true,
-	"internal/sttremote":     true,
-	"internal/textremote":    true,
-	"internal/visionremote":  true,
-	"internal/accelremote":   true,
-	"internal/delegate":      true,
-	"internal/fleetview":     true,
-	"internal/pairworkloads": true,
-	"internal/rosterprobe":   true,
-	"internal/llamaclient":   true,
+	"internal/mediaremote":    true,
+	"internal/composeremote":  true,
+	"internal/sttremote":      true,
+	"internal/textremote":     true,
+	"internal/forecastremote": true,
+	"internal/visionremote":   true,
+	"internal/accelremote":    true,
+	"internal/delegate":       true,
+	"internal/fleetview":      true,
+	"internal/pairworkloads":  true,
+	"internal/rosterprobe":    true,
+	"internal/llamaclient":    true,
 }
 
 // fleetBearerAllowlist: requests that go without the bearer, and why.

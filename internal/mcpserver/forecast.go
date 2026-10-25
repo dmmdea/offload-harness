@@ -17,6 +17,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/forecastremote"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -30,18 +31,11 @@ type forecastRunner interface {
 // injects a fake so the handler is exercisable without a seat or a fleet node.
 type forecastRunFunc func(ctx context.Context, cfg config.Config, runner forecastRunner, req core.Request, route string) core.Result
 
-// forecastPlace is the production placement: local and auto run the request on this box's pipeline,
-// remote is refused because no fleet caller is wired. The fleet caller replaces this one function.
-func forecastPlace(ctx context.Context, _ config.Config, runner forecastRunner, req core.Request, route string) core.Result {
-	switch strings.ToLower(strings.TrimSpace(route)) {
-	case "", "local", "auto":
-		return runner.Run(ctx, req)
-	case "remote":
-		res := core.Deferf("route remote needs a fleet node serving forecast and none is reachable from this build", "", core.Meta{})
-		res.DeferClass = core.DeferClassConfig
-		return res
-	}
-	return forecastBadInputResult(fmt.Sprintf("unrecognized route %q; use local, auto or remote", route))
+// forecastPlace is the production placement: the fleet caller (forecastremote.Run) applies the route
+// rule - local on this box's pipeline, auto on this box when it binds the forecast model and its card
+// is free and otherwise on a fleet node, remote on a fleet node only.
+func forecastPlace(ctx context.Context, cfg config.Config, runner forecastRunner, req core.Request, route string) core.Result {
+	return forecastremote.Run(ctx, cfg, runner, req, route)
 }
 
 // forecastRouteSchema is the `route` property of offload_forecast. The default is auto: a box that

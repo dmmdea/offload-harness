@@ -20,7 +20,7 @@ import (
 
 func TestEveryTaskTypeButAnAgentRunIsMaskedFromAReaderWithoutTheBearer(t *testing.T) {
 	agent := string(core.TaskAgentRun)
-	types := append([]string{agent, VisionTask, TextTask, STTUploadTask, ComposeProjectTask, MediaJobTask}, everyTaskType...)
+	types := append([]string{agent, VisionTask, TextTask, ForecastTask, STTUploadTask, ComposeProjectTask, MediaJobTask}, everyTaskType...)
 	for _, token := range []string{"", "s3cret"} {
 		for _, tt := range types {
 			want := tt != agent
