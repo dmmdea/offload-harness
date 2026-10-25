@@ -16,7 +16,7 @@ renders ran back to back, and each one relaunched ComfyUI:
 
 | Render | Wall | Launch to first card allocation | ComfyUI's own prompt |
 |---|---|---|---|
-| First (cold file cache) | 135 s | 89 s (66 percent of the wall) | 22.78 s |
+| First (cold file cache) | 135 s | 89 s (66 percent of the wall) | 21.89 s |
 | Second (warm file cache) | 66.5 s | 31 s (47 percent of the wall) | 22.78 s |
 
 ComfyUI-Manager's prestartup took 5.2 to 11.5 s of each launch. After the end-of-job `/free`, the bare process held 239 MiB of
