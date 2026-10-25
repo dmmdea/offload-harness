@@ -91,6 +91,17 @@ def _as_array(value, name):
         n = max(len(r) for r in rows)
         return np.stack([np.concatenate([np.full(n - len(r), math.nan), r]) for r in rows])
 
+    # Padding a ragged axis multiplies the input: one long row among many short ones is a few
+    # MB of JSON and hundreds of GB once padded. Size the padded array from the raw lists and
+    # refuse it before anything is built; the batch-wide cap in forecast() runs after this.
+    if d > 1:
+        mats = value if d == 3 else [value]
+        if not all(isinstance(m, list) and all(isinstance(r, list) for r in m) for m in mats):
+            raise BadRequest(f"{name} mixes arrays and numbers at one level")
+        padded = len(mats) * max(len(m) for m in mats) * max(len(r) for m in mats for r in m)
+        if padded > MAX_POINTS:
+            raise TooLarge(f"{name} pads to {padded} values; the cap is {MAX_POINTS}")
+
     if d == 1:
         return row(value)
     if d == 2:
