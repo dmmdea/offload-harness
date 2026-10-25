@@ -44,5 +44,10 @@
   copies, and there are no rights for a company whose global consolidated monthly revenue exceeds USD 20M (derivatives
   included). The harness surfaces this and does not gate on it.
 - **Check.** The evaluation above, run on the real weights on a leased card, and the embedded server's every route hit once
-  (`/health`, univariate, ragged batch, covariates, joint variates, and the 400 refusals). That run did not include a live
-  seat under llama-swap or a forecast through the fleet door.
+  (`/health`, univariate, ragged batch, covariates, joint variates, and the 400 refusals). Then the built binary on a leased
+  RTX 5060 Ti, with the seat served by llama-swap exactly as the tier renders it (ttl 300, card pin, `checkEndpoint /health`):
+  `local-offload forecast` on the last 4,096 ETTh1 OT steps before a held-out 96 answered ok in 41.3 s cold (llama-swap start,
+  load and warm-up) and 0.17 s warm, MAE 0.716 against the held-out steps, 0.97 of them inside the 10-90 band; the seat took
+  1.25 GiB on the card; a box with no forecast model forwarded the same call through `POST /fleet/forecast` to a node serving
+  the seat (job `forecast-<16 hex>`, placement `remote: no local forecast model`) and got the same answer; and llama-swap's
+  `/running` was empty 330 s after the last call.
