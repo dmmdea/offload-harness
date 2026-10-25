@@ -302,8 +302,8 @@ the GPU, and this model runs on the GPU). A tier declares it in `media_seats`; t
 `forecast`) in the same step, as `stt_model` is bound. The seat requires `bin` and `model` and refuses the vision and stt
 fields (`mmproj`, `vad_model`, `ctx_size`, `tasks`). Its command is
 `<bin> forecast-serve --forecast-dir <home>/forecast --model <models>/timestral-209m --port ${PORT}`, where `bin` is the
-harness binary the installer lays down at `<home>/harness/local-offload[.exe]` (the `__OFFLOAD_HOME__` and `__EXE__` tokens
-render one string on both operating systems). `doctor` fails a bound alias llama-swap does not serve.
+harness binary where each installer lays it down: the `__HARNESS_BIN__` token renders `<home>/harness/local-offload.exe`
+on Windows and `<home>/bin/local-offload` on Linux. `doctor` fails a bound alias llama-swap does not serve.
 
 **Residency per tier** (the tier pages under [../tiers/](../tiers/README.md) list the seat by kind):
 

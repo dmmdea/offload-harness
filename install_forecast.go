@@ -184,6 +184,7 @@ func installForecast(ctx context.Context, dir, models, ref, backend string, log 
 	if sum != forecastWeightsSHA256 {
 		return res, fmt.Errorf("install forecast: %s hashes to %s, not the pinned %s (revision %s): the checkpoint is not the one this build serves; delete it and run the install again", weights, sum, forecastWeightsSHA256, forecastHFRevision)
 	}
+	say("weights licence: Modified MIT (keep the \"2026 - Mistral AI\" notice; no rights for a company whose monthly revenue exceeds USD 20M)")
 
 	// 5. The embedded server file.
 	script, wrote, err := forecastserve.EnsureScript(dir)

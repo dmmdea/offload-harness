@@ -705,6 +705,10 @@ const (
 	tokenHome      = "__OFFLOAD_HOME__"
 	tokenRknpuHome = "__RKNPU_HOME__"
 	tokenExe       = "__EXE__"
+	// tokenHarnessBin is the harness binary where each installer lays it down: the
+	// Windows installer under <home>/harness, the Linux one under <prefix>/bin (and
+	// <prefix> is the install home there). One token, so a forecast row renders on both.
+	tokenHarnessBin = "__HARNESS_BIN__"
 )
 
 // seatsNeedHome scans exactly the fields seatExpand resolves. Scanning more would
@@ -734,6 +738,11 @@ func (p Params) seatExpand(s string) string {
 	s = strings.ReplaceAll(s, tokenExe, exe)
 	home := strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/")
 	if p.Home != "" {
+		bin := home + "/bin/local-offload"
+		if p.GOOS == "windows" {
+			bin = home + "/harness/local-offload.exe"
+		}
+		s = strings.ReplaceAll(s, tokenHarnessBin, bin)
 		s = strings.ReplaceAll(s, tokenHome, home)
 	}
 	rknpu := strings.TrimRight(strings.ReplaceAll(p.RknpuHome, `\`, "/"), "/")
