@@ -287,6 +287,97 @@ by a build older than the check, or a node older than the check), never `true`. 
 and an asker of different builds keep working. The `.segments.json` file stays a bare segment array and carries no
 verdict: a reader that takes only the file path out of the payload has to read `words_reliable` from the payload.
 
+### The forecast lane (Timestral-209M)
+
+`offload_forecast` forecasts time series on Mistral AI's Timestral-209M: zero-shot, probabilistic, 21 quantile levels
+(0.01 to 0.99), no text. It is the one task here that is numbers in and numbers out, so it has its own branch of `Run`
+(`runForecast`, [`internal/pipeline/forecast.go`](../../internal/pipeline/forecast.go)) and never touches the text cascade.
+Decision and alternatives: [ADR 0098](../architecture/decisions/0098-a-forecaster-is-a-llama-swap-media-seat-and-a-box-with-no-forecast-model-forwards.md)
+(Proposed).
+
+**The seat.** The model is a llama-swap media seat of kind `forecast` (`internal/mediaseat`), never an accelerator
+([ADR 0024](../architecture/decisions/0024-accelerators-are-additive-to-the-gpu-tier.md): an accelerator is a device beside
+the GPU, and this model runs on the GPU). A tier declares it in `media_seats`; the declaration renders the llama-swap entry
+(`ttl: 300`, `checkEndpoint: /health`, the tier's card pin in `env`) and binds the config key `forecast_model` (roster route
+`forecast`) in the same step, as `stt_model` is bound. The seat requires `bin` and `model` and refuses the vision and stt
+fields (`mmproj`, `vad_model`, `ctx_size`, `tasks`). Its command is
+`<bin> forecast-serve --forecast-dir <home>/forecast --model <models>/timestral-209m --port ${PORT}`, where `bin` is the
+harness binary the installer lays down at `<home>/harness/local-offload[.exe]` (the `__OFFLOAD_HOME__` and `__EXE__` tokens
+render one string on both operating systems). `doctor` fails a bound alias llama-swap does not serve.
+
+**Residency per tier** (the tier pages under [../tiers/](../tiers/README.md) list the seat by kind):
+
+| Tiers | Forecast seat |
+|---|---|
+| `blackwell-16`, `blackwell-32`, `blackwell-2x16`, `blackwell-3x16`, `blackwell-48`, `blackwell-72`, `ampere-16`, `dual-gpu` | resident, pinned to the card that holds the whisper seat when the tier pins one |
+| `ampere-8`, `blackwell-8`, `ampere-6` | swappable (a forecast can evict the agent seat for its length; the whisper precedent on those cards) |
+| `volta-16` (CUDA 13 wheels dropped sm_70, nothing measured), `amd-rdna3`, `amd-rdna3-dgpu`, `amd-gcn` (no torch GPU path), `cpu` (no model runs on the CPU), `rockchip-rk3588` (NPU only) | not seated; these boxes reach the model through the fleet |
+
+**The server.** `forecast-serve` ([`internal/forecastserve`](../../internal/forecastserve/forecastserve.go)) refreshes the
+embedded `timestral_server.py` under the forecast directory when it differs from the binary's copy, then runs it under the
+venv python (`-I`, `HF_HUB_OFFLINE=1`, loopback only, device `cuda` unless the seat's env pins a card). The python child is
+held by a kill-on-close job object (Windows) or `Pdeathsig` (Linux), so llama-swap's stop never orphans a process that holds
+the card. The server loads the model and runs one warm-up forecast before it opens its port, so the health check passes only
+on a server that can answer. Wire contract:
+
+- `GET /health` answers `200` with the model facts.
+- `POST /v1/forecast` takes one JSON object: `series` (`(T)`, `(B,T)` or `(B,V,T)` numbers, `null` is a missing value,
+  ragged rows are left-padded), `prediction_length` (up to 4,096; longer horizons decode block by block), `quantiles` (default
+  `[0.1,0.5,0.9]`, each one of the 21), `past_covariates`, `known_covariates`, `categorical_past_covariates`,
+  `categorical_known_covariates`, `symmetric_averaging` and `clip_nonnegative` (both default on). The output keeps the input's
+  rank and returns `{model, prediction_length, context_length_used, shape, quantile_levels, median, quantiles{"0.1":...}, wall_ms,
+  chunks, device}`.
+- Refusals carry `{"error","detail"}`: `400 bad_request` (a shape, level or horizon the model refuses), `413 too_large` (body
+  over 64 MiB or over 4,000,000 input values), `500 forecast_failed`.
+- A request runs in chunks of whole series whose rows times context patches stay under `--max-row-patches` (16,384, about
+  2.4 GiB on the card), so the peak is bounded and the answer equals one pass.
+
+**The client and the pipeline.** `internal/forecastclient` posts the payload to the seat's llama-swap path
+`/upstream/<forecast_model>/v1/forecast`, built only through `modelaffinity.AwaitUpstream` (the GPU-lease fence,
+[ADR 0018](../architecture/decisions/0018-machine-wide-fenced-gpu-lease.md)), with the request timeout
+`forecast_request_timeout_sec` (default 300, one call, cold load included) and the fence wait `gpu_wait`. A `400` or `413` is
+bad input (a contract defer with `err_class: bad_input` and the server's detail in the reason), an empty-body 5xx is the
+vanished upstream (an infrastructure defer, `forecast call failed:`), and a lease refusal is `gpu_busy` (a capacity defer).
+`runForecast` with no `forecast_model` defers as config (`no forecast model configured`). The result is
+`core.Result{OK:true, Data:<the server's object>}` with `Meta.Model` the alias and one ledger row. There is no result cache: the
+payload is the identity and can be megabytes of numbers, a hash would cost about what a warm call does (0.2 to 0.7 s), and
+the seat's `ttl` frees the card, so there is no unload after a burst.
+
+**Installing it.** `local-offload install forecast [--home H] [--models M] [--ref <sha|branch>] [--torch-backend auto] [--json]`
+needs `uv` on PATH and builds `<home>/forecast/venv` (python 3.13), installs torch with `uv pip install torch
+--torch-backend=auto`, installs the `timestral` package at its pinned commit, fetches the weights by
+`snapshot_download` at the pinned Hugging Face revision into `<models>/timestral-209m` and verifies the sha256, and writes the
+embedded server file. Every step verifies what is there and skips when it is right, so a second run changes nothing. It never
+loads the model: the card is the seat's. `--json` prints one final result line (`ok`, `forecast_dir`, `venv_python`, `torch`,
+`cuda_available`, `timestral`, `model_dir`, `sha256`). The weights licence is Modified MIT: the attribution "2026 - Mistral AI"
+stays in copies, and there are no rights for a company whose global consolidated monthly revenue exceeds USD 20M; the code
+is Apache-2.0. The install does not print the licence and nothing in the harness gates on it.
+
+**The tool.** `offload_forecast` ([`internal/mcpserver/forecast.go`](../../internal/mcpserver/forecast.go), documented in
+[mcp-server.md](mcp-server.md)) is registered on every box and is also the `local-offload forecast` verb and, local only with
+inline series, an agent-loop tool (not in the research profile). It builds the payload from `series` or `series_path` (a
+`.csv` read on this box: a header row, then one row per step; target columns default to every numeric column that is not a
+covariate; trailing rows whose target cells are all empty are the horizon and must number `prediction_length`; a non-numeric
+column such as a date is ignored; or a `.json` array or object of payload keys). A payload that cannot be built (a missing
+column, a horizon mismatch) is a contract defer with `err_class: bad_input`, never an MCP error. An answer of more than 2,000
+numbers is written as JSON to `out_path` or `<media_dir>/forecast-<sha8>.json`, and the inline result keeps the other server
+fields plus `result_path` and `median_head` and `median_tail` (the first and last 8 steps of each series); a result file that
+cannot be written is a capacity defer.
+
+**Auto forwards from a model-less box.** The route is `local`, `auto` (the default) or `remote`
+(`internal/forecastremote`). `auto` runs on this box when it binds `forecast_model` and its card is not lease-blocked. It
+forwards to a fleet node whose health lists `forecast` when the box binds no forecast model or its card is blocked. This
+differs from the stt, vision and text tools, which defer on a model-less box in `auto`: a forecast needs a torch card, and a
+box that cannot run one reaches the model only through the fleet. A model-less box with no eligible node defers with the
+placement reason; a box that has the model but a held card and no eligible node still runs local. `remote` forces a node and,
+with none eligible, defers (`capacity`, or `config` with no `delegate_remotes`), never running locally. The series travels
+inside the job and the large result file is written on the asking box; `Meta.Node` and `Meta.Placement` say where it ran.
+Node side and wire: [FLEET-NODE.md](../FLEET-NODE.md#the-forecast-task-post-fleetforecast).
+
+**Measured** (2026-10-24, 16 GB RTX 5060 Ti, sm_120, torch 2.14.1 with CUDA 13.2): cold load 19 s; 804 MiB of fp32 weights; a
+warm batch of 8 to 20 windows 0.2 to 0.7 s at a 0.87 to 1.08 GiB peak; 2.46 GiB with six covariate rows on 20 series of 4,096
+steps. The changelog fragment carries the accuracy table.
+
 ## Important flows
 
 - [../flows/cascade-escalation-and-defer.md](../flows/cascade-escalation-and-defer.md) — the walk in
@@ -761,6 +852,12 @@ routing solver and the guard's reading and staleness rules. `internal/grounding/
   base decision the gate consumes and never re-decides
 - [`internal/sttclient/sttclient.go`](../../internal/sttclient/sttclient.go) — the whisper client: the
   single-slot mutex, the in-line count, `UnloadIfIdle`, and where the no-speech verdict is produced
+- [`internal/pipeline/forecast.go`](../../internal/pipeline/forecast.go) — `runForecast`, the forecast branch of `Run`
+- [`internal/forecastclient/forecastclient.go`](../../internal/forecastclient/forecastclient.go) — the fenced client of
+  the forecast seat and its typed errors
+- [`internal/forecastserve/`](../../internal/forecastserve/forecastserve.go) — the launcher and the embedded
+  [`timestral_server.py`](../../internal/forecastserve/timestral_server.py)
+- [`install_forecast.go`](../../install_forecast.go) — `install forecast`, with the pinned revisions and hashes
 
 ## Related docs
 

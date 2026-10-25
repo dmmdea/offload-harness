@@ -35,7 +35,7 @@ The server runs over **stdio** and registers its tools at startup. A calling age
 calls them with JSON arguments, and receives JSON results — including Defers, which are successful
 results, not errors.
 
-**Thirty tools** are registered on every box, in families. `.printing-press.json` lists all 33
+**Thirty-one tools** are registered on every box, in families. `.printing-press.json` lists all 34
 the code can register, and a drift test holds the two together. The advertised set is per-box:
 `agent_delegate` and `offload_research` are gated on `agent_delegation_enabled`, and a box listing
 an accelerator registers its own — 11 for the Hailo-8L, 4 for the Coral, 3 for the RKNPU (see [accelerators.md](accelerators.md)). Read `tools/list` rather
@@ -46,6 +46,7 @@ than any number written down:
 | Text offload | `offload_summarize`, `offload_classify`, `offload_extract`, `offload_triage` |
 | Vision | `offload_vqa`, `offload_assess_image`, `offload_extract_image`, `offload_video_describe`, `offload_video_watch` |
 | Speech / OCR | `offload_transcribe`, `offload_ocr` |
+| Forecast (any box; a model-less one forwards to a fleet node; ADR 0098) | `offload_forecast` |
 | Media generation | `offload_generate_image`, `offload_generate_video`, `offload_animate_character`, `offload_generate_audio`, `offload_generate_svg` |
 | Media editing | `offload_edit_image`, `offload_inpaint_image`, `offload_edit_image_generative`, `offload_upscale_image`, `offload_media` |
 | Composition (CPU-class, no GPU lock; ADR 0059) | `offload_compose_video` |
@@ -137,6 +138,30 @@ first word of some segment starts 0.5 s or more away from its segment (issue #16
 travels: a route named there other than `local` is refused (an omitted route is not a request to travel). The CLI
 `local-offload transcribe --route` carries the same vocabulary and defaults to `local`. See
 [FLEET-NODE.md](../FLEET-NODE.md#the-stt-upload-door-post-fleetstt).
+
+`offload_forecast` forecasts time series on the box's forecast seat (Timestral-209M, the `forecast_model` binding; see
+[offload-pipeline.md](offload-pipeline.md#the-forecast-lane-timestral-209m) and
+[ADR 0098](../architecture/decisions/0098-a-forecaster-is-a-llama-swap-media-seat-and-a-box-with-no-forecast-model-forwards.md),
+Proposed). It is registered on every box, whether or not the box serves the model, and it also exists as the
+`local-offload forecast` verb and as a local-only agent-loop tool with inline series (not in the research profile).
+Arguments: `series` (inline numbers, `null` for a missing value) or `series_path` (a `.csv` or `.json` file on THIS box;
+for a CSV `target_columns`, `past_covariate_columns` and `known_covariate_columns` pick the columns, and trailing rows
+whose target cells are all empty are the horizon and must number `prediction_length`), `prediction_length` (required),
+`quantiles` (default `[0.1,0.5,0.9]`, each one of 21 levels from 0.01 to 0.99), inline `past_covariates` and
+`known_covariates`, `out_path`, `route` and `select`. The result is the server's object (`shape`, `quantile_levels`,
+`median`, `quantiles`, `wall_ms`, `device`). **An answer of more than 2,000 numbers is written as JSON** to `out_path`, or
+to `<media_dir>/forecast-<sha8>.json`, and the inline result keeps the other fields plus `result_path`, `median_head` and
+`median_tail` (the first and last 8 steps of each series); a write that fails is a capacity defer. A payload the tool cannot
+build (a missing column, a horizon mismatch) is a contract defer with `err_class: bad_input`, never a tool error.
+
+Its `route` default is `auto` and `auto` **forwards where the other media tools defer**: it runs on this box when the box binds
+`forecast_model` and its card is not lease-blocked, and sends the call to a fleet node that advertises `forecast` when the box
+binds no forecast model (an NPU, AMD or CPU-only machine) or its card is blocked. `local` pins the call to this box (a
+model-less box then defers as config); `remote` forces a node and, with none eligible, returns `deferred: true` with
+`defer_class: capacity` (or `config` with no `delegate_remotes`) without touching the local GPU. The series is read on this
+box and travels with the job, and the result file is always written here; `meta.node` / `meta.placement` say where the call
+ran. `offload_status` lists a missing forecast model as a gap only when the box has no `delegate_remotes` to forward to. See
+[FLEET-NODE.md](../FLEET-NODE.md#the-forecast-task-post-fleetforecast).
 
 `agent_run` drives the coding agent loop. Its default planner is the **agent seat** (config
 `agent_model`, else the workhorse `model`; a per-call `model` argument overrides both — and on a
@@ -1508,6 +1533,8 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
   alias-aware llama-swap roster reader, over `tools/llamaswap`'s `pkg/llamaswap`
   ([systems/printed-clis.md](printed-clis.md#the-one-exception-the-harness-consumes-pkgllamaswap))
 - [`internal/config`](../../internal/config/config.go) — `Config.ModelRoutes`, the one roster table
+- [`internal/mcpserver/forecast.go`](../../internal/mcpserver/forecast.go) — `offload_forecast`: payload builder (inline, CSV, JSON), route seam, result spill to a file
+- [`internal/forecastremote`](../../internal/forecastremote/forecastremote.go) — the route (`local`, `auto`, `remote`) and the fleet caller
 - [`.printing-press.json`](../../.printing-press.json) — the declared manifest
 - [`main_test.go`](../../main_test.go) — `TestPrintingPressManifestListsEveryTool` (the drift test)
 - [`main.go`](../../main.go) — subcommand dispatch and MCP entry
