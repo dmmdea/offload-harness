@@ -5,7 +5,7 @@
   stable-diffusion.cpp, the models) from its publisher at run time, take the newest complete build, and verify the
   publisher's own digest: the GitHub release `assets[].digest` (and `gh attestation verify` where a project publishes
   attestations), the Hugging Face `lfs.oid` and size, the npm `dist.integrity`. A mismatch deletes the partial file and
-  retries once; a recurrence stops and is surfaced. A fresh install lands on the newest build, a re-run over a newer
+  retries (three attempts); a verified file is swapped in once, outside the retry loop, the old one kept as `.prev`. A fresh install lands on the newest build, a re-run over a newer
   build changes nothing, and a newer hand-placed build is kept, never downgraded.
 - **Floors, not pins.** The minimum build a seat needs (llama.cpp b11452 for `gemma-embedding2`, stable-diffusion.cpp
   master-968 for FLUX 3) lives in exactly one file, `setup/floors.json`. A floor only rises; a ceiling or an exact
@@ -14,8 +14,11 @@
 - **Generations with rollback.** Per component a node keeps the current and the previous generation. The live path
   (`<home>/llama`, `<home>/sdcpp`, ...) becomes a junction or symlink to a write-once `<component>-versions/<id>`
   directory, so no rendered config, task or probe changes; a candidate is staged, verified and switched atomically, and
-  a failed gate or first load points the live path back at the previous generation. `installed.json` records
-  `current`, `previous`, `rejected[]`, the ETag and the check time.
+  a failed gate or first load points the live path back at the previous generation. An engine whose live directory
+  a running process holds is staged, reported and recorded as `staged`, never swapped out from under it. `installed.json`
+  (schema 2) records per component the version, the publisher's digest, the size, the source and the install time, `dest`
+  for a model file and `staged` for a generation waiting for a restart, each written the moment its component is live;
+  the update verb (its own change) adds `current`, `previous`, `rejected[]`, the ETag and the check time.
 - **The lint.** `no_version_pins_test.go` fails when an installer, a render script, a dependency manifest or an
   accelerator recipe carries a release tag, a build number, a 40- or 64-hex digest or an exact dependency version, naming
   file and line; `setup/floors.json` is the one place a build number may appear. The repository `AGENTS.md` and
