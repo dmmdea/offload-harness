@@ -99,7 +99,18 @@ const (
 	PhaseRepack  = "repack"
 )
 
-// Run is one registered agent run on a seat: the harness's unit of work.
+// KindVision is Run.Kind for ONE single-shot vision call (vqa, ocr, assess_image, a
+// video_describe window) while it is on its seat, whatever door it came through. Those
+// calls hold no lease, so before they registered a script that looped one CLI call per
+// image kept a vision seat busy for hours while every status surface read the box as idle
+// (2026-10-28). A vision record carries no Devices: the run-cap line of a seat pinned to
+// one card counts every record pinned to that card as holding a slot, and a vision call
+// must not take an agent contract's slot. Readers that need its cards resolve them from
+// the seat (gpualloc.LeaseScope.TouchesRun). internal/fleetnode counts it for health's
+// `vision_calls_running`, so the name lives here.
+const KindVision = "vision"
+
+// Run is one registered run on a seat: the harness's unit of work.
 type Run struct {
 	// ID is unique per run within a process whatever the clock does (see runID) and is the record's
 	// file name. Readers compare it for equality ("is this my own record") and, in one place, as a
@@ -110,7 +121,7 @@ type Run struct {
 	Seat        string `json:"seat"`
 	// Kind names the door the run came through: "agent_run" (the MCP tool),
 	// "contract" (a delegation contract run by this node — a local spread leg or
-	// a fleet job), "lab" (the CLI replay gate).
+	// a fleet job), "lab" (the CLI replay gate), KindVision (one vision call).
 	Kind        string `json:"kind"`
 	Origin      string `json:"origin,omitempty"` // who asked: node id, job id, host
 	Goal        string `json:"goal,omitempty"`   // the first goalClip characters

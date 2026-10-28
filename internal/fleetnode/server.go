@@ -343,6 +343,10 @@ type Server struct {
 	admittingN  int
 	admittingMu sync.Mutex
 	activityReg *gpuactivity.Registry
+	// visionCalls counts the vision calls other processes on this box have on a seat right now
+	// (see visionCallsRunning); visionN is its reading from the same registry walk as admittingN.
+	visionCalls func() int
+	visionN     int
 	// admittingLoggedOpen / admittingLoggedList keep the two registry failures
 	// to ONE line per process: health is polled every few seconds by every
 	// delegator, so a per-cycle line would be a log flood, and the failure is
@@ -543,6 +547,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		setReadDeadline:    controllerReadDeadline,
 	}
 	s.admitting = s.admittingRuns
+	s.visionCalls = s.visionCallsRunning
 	// The config cannot change under a running server, so its cache key is computed once: the health
 	// and admission paths then never encode the config again to look a verdict up.
 	s.mediaKey, s.mediaKeyOK = mediacap.KeyOf(opts.Cfg)
@@ -595,13 +600,32 @@ const admittingTTL = 2 * time.Second
 // same seat, but it is not part of this node's queue accounting and must not
 // subtract from this node's saturation.
 func (s *Server) admittingRuns() int {
+	admitting, _ := s.registryCounts()
+	return admitting
+}
+
+// visionCallsRunning counts the single-shot vision calls (gpuactivity.KindVision) that OTHER
+// processes on this box have on a seat right now: a CLI `vqa` / `ocr` loop, an MCP server's
+// offload_vqa. They hold no lease and are no job of this node, so jobs_running never counted
+// them, and a script that looped one CLI call per image kept a vision seat busy for hours while
+// every delegator read the node as idle (2026-10-28). This process's own vision records are its
+// /fleet/vision jobs, already in jobs_running, so they are not counted twice. Published as health's
+// `vision_calls_running`; a display signal like jobs_admitting, read by no placement rule.
+func (s *Server) visionCallsRunning() int {
+	_, vision := s.registryCounts()
+	return vision
+}
+
+// registryCounts is ONE walk of the activity registry per admittingTTL window, feeding both
+// admittingRuns and visionCallsRunning.
+func (s *Server) registryCounts() (admitting, vision int) {
 	s.admittingMu.Lock()
 	defer s.admittingMu.Unlock()
 	if !s.admittingAt.IsZero() && time.Since(s.admittingAt) < admittingTTL {
-		return s.admittingN
+		return s.admittingN, s.visionN
 	}
 	s.admittingAt = time.Now()
-	s.admittingN = 0
+	s.admittingN, s.visionN = 0, 0
 	if s.activityReg == nil {
 		reg, err := gpuactivity.Open(s.opts.Cfg.GPULockPath, s.opts.Cfg.StateDir)
 		if err != nil {
@@ -612,10 +636,10 @@ func (s *Server) admittingRuns() int {
 			// is indistinguishable from a node with nothing in admission.
 			if !s.admittingLoggedOpen {
 				s.admittingLoggedOpen = true
-				log.Printf("fleet: activity registry unreadable under state dir %q; jobs_admitting reads 0 until it resolves (reported once per process, retried every %s): %v",
+				log.Printf("fleet: activity registry unreadable under state dir %q; jobs_admitting and vision_calls_running read 0 until it resolves (reported once per process, retried every %s): %v",
 					s.opts.Cfg.StateDir, admittingTTL, err)
 			}
-			return 0
+			return 0, 0
 		}
 		s.activityReg = reg
 	}
@@ -627,7 +651,7 @@ func (s *Server) admittingRuns() int {
 		// that does not exist yet is the normal cold state and says nothing.
 		if _, rerr := os.ReadDir(s.activityReg.Dir()); rerr != nil && !errors.Is(rerr, fs.ErrNotExist) && !s.admittingLoggedList {
 			s.admittingLoggedList = true
-			log.Printf("fleet: activity registry directory %q cannot be listed; jobs_admitting reads 0 (reported once per process): %v",
+			log.Printf("fleet: activity registry directory %q cannot be listed; jobs_admitting and vision_calls_running read 0 (reported once per process): %v",
 				s.activityReg.Dir(), rerr)
 		}
 	}
@@ -639,8 +663,11 @@ func (s *Server) admittingRuns() int {
 		if run.PID == pid && run.Phase == gpuactivity.PhaseAdmission {
 			s.admittingN++
 		}
+		if run.PID != pid && run.Kind == gpuactivity.KindVision {
+			s.visionN++
+		}
 	}
-	return s.admittingN
+	return s.admittingN, s.visionN
 }
 
 // swapRosterServes is the production residency probe: one GET /v1/models via
@@ -1372,6 +1399,12 @@ type healthPayload struct {
 	// waiting for. Absent = none (or a node that cannot resolve its registry),
 	// which decodes to 0: the pre-0.127 reading.
 	JobsAdmitting int `json:"jobs_admitting,omitempty"`
+	// VisionCallsRunning is how many single-shot vision calls OTHER processes on this box have on a
+	// seat right now (visionCallsRunning): work outside this node's job store, which the node shares
+	// its cards with. Not part of jobs_running and read by no placement rule; the delegator's status
+	// adds it to the node's in_flight. Absent = none, a node that predates the field, or a registry it
+	// cannot read.
+	VisionCallsRunning int `json:"vision_calls_running,omitempty"`
 	// JobsWithdrawn / JobsReaped (ADR 0064) count the jobs this node took out of its
 	// backlog without running them since the process started: a delegator withdrew
 	// one, or the poll-lease reaper took one nobody was polling. Additive and
@@ -1726,6 +1759,10 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if s.agentLane && s.admitting != nil {
 		admitting = s.admitting()
 	}
+	visionCalls := 0
+	if s.visionCalls != nil && (s.opts.Cfg.VisionModel != "" || s.opts.Cfg.OCRModel != "") {
+		visionCalls = s.visionCalls()
+	}
 	// recentWall backs BOTH recent_agent_wall_sec (agent-lane only, below) and
 	// queue_wait_estimate_sec (published regardless of lane): one walk of the
 	// job store's finished rows feeds both fields, so they can never disagree
@@ -1760,6 +1797,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		JobsRunning:           running,
 		JobsWithdrawn:         withdrawn,
 		JobsReaped:            reaped,
+		VisionCallsRunning:    visionCalls,
 		MaxConcurrentJobs:     maxConcurrentJobs,
 		MaxQueueDepth:         s.opts.Cfg.FleetQueueLimit(),
 		HarnessVersion:        s.opts.Version,
