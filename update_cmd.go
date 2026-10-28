@@ -146,6 +146,11 @@ func summarize(reports []update.Report) string {
 
 func runUpdateRepoint(env *update.Env, yamlPath string, from []string, opts update.Options) error {
 	livePath := env.LivePath(update.Llama, opts)
+	// The live build decides whether a bin segment stays: a yaml repointed at a path that is not there would name
+	// programs that do not exist, and a llama-swap watching its config would reload into it.
+	if _, err := os.Stat(livePath); err != nil {
+		return &exitCodeError{code: 2, msg: "update: repoint: the live llama path " + livePath + " is not there; install or copy the build there first (nothing was changed)"}
+	}
 	res, err := update.Repoint(yamlPath, livePath, from, time.Now())
 	if err != nil {
 		return &exitCodeError{code: 2, msg: "update: repoint: " + err.Error()}
@@ -178,6 +183,9 @@ func updateRoot(flagHome, cfgHome string) (string, string, error) {
 		return v, "$OFFLOAD_HOME", nil
 	}
 	if v := strings.TrimSpace(cfgHome); v != "" {
+		if !filepath.IsAbs(v) {
+			return "", "", fmt.Errorf("update.home in config.json is %q, not an absolute path; nothing was changed", v)
+		}
 		return v, "update.home in config.json", nil
 	}
 	holdsManifest := func(dir string) bool {

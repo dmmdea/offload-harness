@@ -220,7 +220,7 @@ renames and prunes, so the verb reads its config only from `--config`, `$LOCAL_O
 | `update.paths.<component>` | `<home>/<component>`; llama-swap `<home>/llama-swap/llama-swap[.exe]` | a component's live path (`llama`, `llama-swap`, `whisper`, `sdcpp`, `hyperframes`) |
 | `update.restart.llama-swap` | the box's own mechanism | `{"task": "<scheduled task>"}`, `{"command": "<shell command>"}` or `{"none": true}` (no daemon stop, drain or restart; the swap is proven by hash and `-version` alone) |
 | `update.llama_swap_yaml` | `<home>/llama-swap.yaml` | the rendered llama-swap config the llama flag check and the gate read |
-| `update.home` | none | the install root when neither `--home` nor `$OFFLOAD_HOME` names one, for a node whose binary does not sit under its root |
+| `update.home` | none | the install root (an absolute path) when neither `--home` nor `$OFFLOAD_HOME` names one, for a node whose binary does not sit under its root |
 | `update.variant.<component>` | the live build's family, else the node's backend | the build family a component resolves in: `cuda13`, `cuda12`, `vulkan` or `cpu` |
 | `update.gate.*` | see below | the smoke gate and the post-flip watch |
 
@@ -246,7 +246,8 @@ segment right after it when the live build has no `bin` folder (the publisher's 
 keeps its programs in `build/bin`, so `llamacpp-b11669/bin/llama-server` becomes `<live>/llama-server`). On Linux it
 sets any other `LD_LIBRARY_PATH=` in a repointed block to the live path's `bin` directory (the live path itself when
 it has none); a line it already rewrote keeps the rest of its list (`:${LD_LIBRARY_PATH:-}`). It prints a diff
-summary and never re-renders. Comment lines are left alone. Run it after the live path exists (install first), on a
+summary and never re-renders. Comment lines are left alone. It refuses (exit 2, nothing written) while the live path
+is not there: install or copy the build first. Run it on a
 copy when llama-swap runs with `-watch-config` (it reloads on every write), and swap the copy in at a quiet moment.
 
 ## ADR 0085 notice
