@@ -1,20 +1,20 @@
 #!/usr/bin/env bash
-# openspec-install.sh -- install the pinned OpenSpec CLI into a prefix you name (docs/systems/openspec.md).
+# openspec-install.sh -- install the newest OpenSpec CLI into a prefix you name (docs/systems/openspec.md).
 #
 # Usage:  scripts/openspec-install.sh <prefix>          (or OPENSPEC_PREFIX=<prefix> scripts/openspec-install.sh)
 #
 # What it does, in this order:
-#   1. fetches the package tarball into a scratch directory under <prefix> with
-#      `npm pack @fission-ai/openspec@<version> --ignore-scripts` (the scoped name; the unscoped npm package
-#      `openspec` belongs to another publisher);
-#   2. computes the tarball's sha256 and REFUSES, installing nothing, when it is not the pinned one;
-#   3. stages a copy of scripts/openspec/ (package.json and package-lock.json) in the scratch directory, next to
-#      that verified tarball, and runs `npm ci --ignore-scripts` there. The CLI comes from the verified file and
-#      every dependency is the exact version in the committed lockfile, checked against its sha512 integrity value;
-#      npm ci never resolves a range and refuses a lockfile that disagrees with package.json. No lifecycle script of
-#      the package or of its dependencies runs;
-#   4. checks that the staged CLI reports the pinned version;
-#   5. moves the staged node_modules into <prefix> (replacing an earlier install of this CLI there, refusing a
+#   1. stages a copy of scripts/openspec/package.json (one dependency, @fission-ai/openspec at the `latest` dist-tag:
+#      the scoped name; the unscoped npm package `openspec` belongs to another publisher) in a scratch directory
+#      under <prefix> and runs `npm install --ignore-scripts` there. npm resolves the registry's newest release and
+#      checks every tarball against the sha512 integrity value the registry publishes for it; the lockfile that run
+#      writes is a by-product of the install, not an input, and is discarded with the scratch directory. No lifecycle
+#      script of the package or of its dependencies runs;
+#   2. verifies what was installed: the package's own package.json names a version, the CLI reports that version,
+#      the integrity npm recorded for the package equals the registry's `dist.integrity` for that exact version
+#      (a second, separate registry query), and `npm audit signatures` passes for the whole installed tree
+#      (registry signatures, and provenance attestations where a package has them);
+#   3. moves the staged node_modules into <prefix> (replacing an earlier install of this CLI there, refusing a
 #      node_modules that is something else's), removes the scratch directory and prints the four environment
 #      exports to use with the CLI.
 #
@@ -23,8 +23,8 @@
 # folders and the CLI's config home itself, so a system drive stays untouched. Use a prefix that is a directory
 # of its own, on a data drive. There is no default prefix.
 #
-# What the pins cover. OPENSPEC_SHA256 pins the openspec tarball. The lockfile (regenerate it only with a new
-# admission, see docs/systems/openspec.md) pins the other packages by exact version and sha512.
+# What the integrity covers. Nothing is pinned here: the version is whatever the registry calls newest when the
+# script runs, and the integrity comes from the registry at that moment. Re-run the script to update.
 #
 # Telemetry. The CLI sends usage telemetry unless OPENSPEC_TELEMETRY=0 or DO_NOT_TRACK=1, and checks the registry
 # for a newer version unless OPENSPEC_NO_UPDATE_CHECK=1. This script sets all three for its own runs and prints
@@ -36,8 +36,6 @@ set -euo pipefail
 # remember to.
 unset CDPATH
 
-readonly OPENSPEC_VERSION="1.14.1"
-readonly OPENSPEC_SHA256="4a88e334938316db6916fd4f3aaf2213e6fc23b4fe327efd2afe7754c2d3b0bf"
 readonly OPENSPEC_PACKAGE="@fission-ai/openspec"
 
 die() { echo "openspec-install: $*" >&2; exit 1; }
@@ -46,28 +44,18 @@ prefix="${1:-${OPENSPEC_PREFIX:-}}"
 [ -n "$prefix" ] || die "usage: scripts/openspec-install.sh <prefix>   (or set OPENSPEC_PREFIX); the prefix is the directory the CLI is installed into, on a data drive"
 command -v npm >/dev/null 2>&1 || die "npm is not on PATH"
 
-# The lockfile project sits beside this script.
+# The install project sits beside this script.
 project="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/openspec"
-for f in package.json package-lock.json; do
-  [ -f "$project/$f" ] || die "$project/$f is missing: the install needs the committed lockfile project (scripts/openspec/)"
-done
+[ -f "$project/package.json" ] || die "$project/package.json is missing: the install needs the install project (scripts/openspec/)"
 
 export OPENSPEC_TELEMETRY=0 DO_NOT_TRACK=1 OPENSPEC_NO_UPDATE_CHECK=1
-
-sha256_of() {
-  if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
-  elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
-  elif command -v openssl >/dev/null 2>&1; then openssl dgst -sha256 "$1" | sed 's/^.*= *//'
-  else die "no sha256 tool (sha256sum, shasum or openssl) on PATH"
-  fi
-}
 
 mkdir -p "$prefix"
 # The absolute prefix is spelled one way everywhere: a Windows path from `pwd -W`, else the physical path from `pwd -P`
 # (a symlinked temp folder such as macOS /var is resolved, so the paths this script logs and prints are the real ones).
 abs="$(cd "$prefix" && { pwd -W 2>/dev/null || pwd -P; })"
 
-# The install replaces <prefix>/node_modules wholesale (as npm ci does), so refuse a node_modules that is not an
+# The install replaces <prefix>/node_modules wholesale, so refuse a node_modules that is not an
 # earlier install of this CLI, before anything runs.
 if [ -n "$(ls -A "$abs/node_modules" 2>/dev/null)" ] && [ ! -f "$abs/node_modules/$OPENSPEC_PACKAGE/package.json" ]; then
   die "REFUSED: $abs/node_modules exists and holds no $OPENSPEC_PACKAGE install, so it is not this script's to replace. Use a prefix directory of its own."
@@ -77,35 +65,36 @@ fi
 work="$(mktemp -d "$abs/.openspec-pack.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
 export npm_config_cache="$abs/.npm-cache"
-export npm_config_update_notifier=false npm_config_fund=false npm_config_audit=false
+export npm_config_update_notifier=false npm_config_fund=false
 export TMPDIR="$work" TMP="$work" TEMP="$work"
 export XDG_CONFIG_HOME="$abs/config"
 
-( cd "$work" && npm pack "${OPENSPEC_PACKAGE}@${OPENSPEC_VERSION}" --ignore-scripts --loglevel=warn >/dev/null ) \
-  || die "npm pack ${OPENSPEC_PACKAGE}@${OPENSPEC_VERSION} failed"
-tarballs=("$work"/*.tgz)
-[ "${#tarballs[@]}" -eq 1 ] && [ -f "${tarballs[0]}" ] || die "expected exactly one tarball from npm pack in $work"
-tarball="${tarballs[0]}"
-
-actual="$(sha256_of "$tarball")"
-if [ "$actual" != "$OPENSPEC_SHA256" ]; then
-  die "REFUSED: sha256 mismatch for ${OPENSPEC_PACKAGE}@${OPENSPEC_VERSION}: expected $OPENSPEC_SHA256, got $actual. Nothing was installed."
-fi
-echo "openspec-install: tarball sha256 verified ($OPENSPEC_SHA256)" >&2
-
-# The verified file goes into a staged copy of the lockfile project under the name package.json refers to.
+# A staged copy of the install project; the install happens there, never in <prefix>.
 stage="$work/project"
 mkdir "$stage"
-cp "$project/package.json" "$project/package-lock.json" "$stage/"
-mv "$tarball" "$stage/fission-ai-openspec-${OPENSPEC_VERSION}.tgz"
+cp "$project/package.json" "$stage/"
 
-( cd "$stage" && npm ci --ignore-scripts --loglevel=warn >&2 ) \
-  || die "npm ci from the committed lockfile failed; nothing was installed"
+( cd "$stage" && npm install --ignore-scripts --no-audit --no-fund --loglevel=warn >&2 )   || die "npm install of ${OPENSPEC_PACKAGE}@latest failed; nothing was installed"
 
 staged_bin="$stage/node_modules/.bin/openspec"
-[ -e "$staged_bin" ] || die "npm ci finished but $staged_bin does not exist"
+[ -e "$staged_bin" ] || die "npm install finished but $staged_bin does not exist"
+
+# The version npm installed, read from the installed package itself (node is npm's own runtime, so it is here).
+pkgdir="$stage/node_modules/$OPENSPEC_PACKAGE"
+version="$(node -p "require(process.argv[1]).version" "$pkgdir/package.json" 2>/dev/null | tr -d '[:space:]')" || version=""
+[ -n "$version" ] || die "the installed $OPENSPEC_PACKAGE has no readable version; nothing was installed"
 got="$("$staged_bin" --version 2>/dev/null | tr -d '[:space:]')" || got="(it did not run)"
-[ "$got" = "$OPENSPEC_VERSION" ] || die "the installed CLI reports version '$got', expected $OPENSPEC_VERSION; nothing was installed"
+[ "$got" = "$version" ] || die "the installed CLI reports version '$got', its package.json says $version; nothing was installed"
+
+# Integrity: what npm recorded for the package while installing must be what the registry publishes for that exact
+# version, asked a second time and separately.
+recorded="$(node -p "const l=require(process.argv[1]); l.packages['node_modules/'+process.argv[2]].integrity" "$stage/package-lock.json" "$OPENSPEC_PACKAGE" 2>/dev/null | tr -d '[:space:]')" || recorded=""
+published="$(cd "$stage" && npm view "${OPENSPEC_PACKAGE}@${version}" dist.integrity 2>/dev/null | tr -d '[:space:]')" || published=""
+[ -n "$recorded" ] && [ -n "$published" ] || die "could not read the integrity of ${OPENSPEC_PACKAGE}@${version} (installed: '${recorded}', registry: '${published}'); nothing was installed"
+[ "$recorded" = "$published" ] || die "REFUSED: integrity mismatch for ${OPENSPEC_PACKAGE}@${version}: installed $recorded, registry $published. Nothing was installed."
+echo "openspec-install: ${OPENSPEC_PACKAGE}@${version} integrity matches the registry ($published)" >&2
+
+( cd "$stage" && npm audit signatures --loglevel=warn >&2 )   || die "REFUSED: npm audit signatures failed for the installed tree of ${OPENSPEC_PACKAGE}@${version}. Nothing was installed."
 
 rm -rf "$abs/node_modules"
 mv "$stage/node_modules" "$abs/node_modules"
@@ -113,7 +102,7 @@ mv "$stage/node_modules" "$abs/node_modules"
 bin="$abs/node_modules/.bin/openspec"
 [ -e "$bin" ] || die "the install finished but $bin does not exist"
 
-echo "# openspec $OPENSPEC_VERSION installed in $abs; use these in the shell that runs it:"
+echo "# openspec $version installed in $abs; use these in the shell that runs it:"
 echo "export OPENSPEC_TELEMETRY=0"
 echo "export DO_NOT_TRACK=1"
 echo "export OPENSPEC_NO_UPDATE_CHECK=1"

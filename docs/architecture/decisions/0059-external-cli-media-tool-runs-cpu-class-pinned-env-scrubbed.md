@@ -5,6 +5,8 @@ date: "2026-09-22"
 
 # ADR 0059 — An external-CLI media tool runs CPU-class, pinned, env-scrubbed, and never via its cloud paths
 
+> Status: Superseded by ADR 0099 for the pinning mechanism (2026-10-28): the committed lockfile and the exact HyperFrames version are gone: the install is the newest npm release at or above the floor in `setup/floors.json`, verified against the registry's integrity field and signatures, and its version is recorded in `installed.json`. The rest of this decision stands, and the text below is kept as written.
+
 ## Context
 
 HyperFrames (npm `hyperframes`, HeyGen, Apache-2.0) turns an HTML/CSS composition into

@@ -5,6 +5,8 @@ date: "2026-10-14"
 
 # 0090 — Capability review 2026-10: dispositions and reopen triggers
 
+> Status: Superseded by ADR 0099 for the pinning mechanism (2026-10-28): an INSTALLED disposition is no longer "pinned to an exact version": software is installed from its publisher's current release with the integrity the publisher gives, checked at install time; the version and hash named for OpenSpec are a record of the admission, not a pin. The rest of this decision stands, and the text below is kept as written.
+
 ## Context
 
 In October 2026 the operator named eight outside links for "mandatory installation or adoption", and a research pass

@@ -5,7 +5,7 @@ description: Use when the user wants designed motion graphics rendered to video 
 
 # HyperFrames compose lane (offload_compose_video)
 
-The harness renders designed, text-exact motion graphics from HTML and CSS with a **pinned, environment-scrubbed
+The harness renders designed, text-exact motion graphics from HTML and CSS with an **environment-scrubbed
 HyperFrames** (ADR 0059). It is CPU-class: software GL and CPU encode, no GPU lease, so it runs beside every
 render and every text seat. Same inputs give the same frames. This file only routes and states the rules;
 the template contract and the measured numbers are in `render/compose-templates/README.md`, and the lane's
@@ -14,7 +14,7 @@ design is in `docs/systems/media-generation.md` (Composition).
 ## Hard bans
 
 - **Never run `npx hyperframes`, and never run the `hyperframes` CLI by hand, on any machine.** The harness
-  runner is the only door. It pins the version, scrubs the environment, forces `--json` (the one switch that
+  runner is the only door. It requires the installed version to be at or above the floor in `setup/floors.json`, scrubs the environment, forces `--json` (the one switch that
   skips the CLI's network checks) and refuses everything except `lint`, `check`, `render`, `snapshot`,
   `browser ensure|path` and `--version`.
 - **Never `init`, `skills`, `upgrade`, `add`, `capture`, `preview`, `tts`, `transcribe`, `publish`, `cloud`,
@@ -25,7 +25,7 @@ design is in `docs/systems/media-generation.md` (Composition).
 - **Never `npx skills add` (or any skill installer, `claude plugin install` included) for HyperFrames,
   its registry, or a teaching kit for it.** Those installers track upstream `main` and write into every
   agent's skills folder. The house skill is this one. When an operator wants a teaching kit's or
-  upstream's skills, they live in a private copy the operator keeps: pinned to the CLI tag this lane pins,
+  upstream's skills, they live in a private copy the operator keeps: kept at the CLI release this lane runs,
   wired to this lane, with every paid or cloud step removed, and opened as a workspace rather than
   installed by an installer.
 - **`html` and `project_dir` are trusted code only.** HyperFrames' Chrome runs without a sandbox. Never
@@ -163,7 +163,7 @@ full text and `render/compose-hyperframes.test.mjs` enforces the part a machine 
 | You see | It means | Do |
 |---|---|---|
 | `BAD_INPUT` naming a variable | not declared, wrong type, or over `maxLength` | read the template README's table and fix the value |
-| `LINT_ERRORS` or `CHECK_FAILED` | the composition failed its own gates (runtime error, layout, contrast; since 0.8.108 also text spilling out of its box, `layout/text_box_overflow`) | read `check.findings`; shorten the text, fix the page you edited, or pass `strict: false` to accept a clipped render |
+| `LINT_ERRORS` or `CHECK_FAILED` | the composition failed its own gates (runtime error, layout, contrast; also text spilling out of its box, `layout/text_box_overflow`) | read `check.findings`; shorten the text, fix the page you edited, or pass `strict: false` to accept a clipped render |
 | `RENDER_FAILED` after a good `check` | the output failed the ffprobe gate | read the detail; wrong size or missing alpha is a template or format bug |
 | `DISK_HEADROOM` | not enough free space for the frames (above one worker every frame is stored, 8.3 MB at 1080p) | render the clip with `workers: 1`, which streams the frames; else point `compose_cache_dir` at a larger drive |
 | `TIMEOUT` | `compose_timeout_sec` elapsed | shorten the clip, or split it (captions: a smaller `--chunk-sec` than the 300 s default), then retry |

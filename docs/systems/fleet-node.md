@@ -1894,7 +1894,7 @@ their private fields withheld (`healthPayload.withoutPrivateFields`: the lease's
 the weight-file rows of the image, video, animation and audio recipes; the jobs feed's `error` text); a request to either
 that presents a bearer which is not the node's is answered the same way and writes the usual journal line (`holdsBearer`,
 door `health` or `jobs-feed`, pinned by `refusal_public_routes_test.go`), while one with no bearer writes nothing. A run-graph manifest may
-name a node pack only from an admitted repository (`render/node-packs.json`, the commit recorded at install; its copy `internal/mediacap/nodepacks.go`
+name a node pack only from a listed repository (`render/node-packs.json`, no commit column; the node installs the default branch's head and records the commit it got; its copy `internal/mediacap/nodepacks.go`
 and `mediacap.CheckManifestNodePacks`, called by `buildRunGraph` before anything is written; the runner's satisfier refuses on
 the same table before its first git command). The rollout order is delegators first, then nodes: every client already sends the
 bearer when it has a token, and a per-package test plus a source test (`TestEveryFleetClientRequestSetsTheBearer`) keep it so.

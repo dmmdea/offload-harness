@@ -26,8 +26,8 @@ A full-frame opaque title card at 1920×1080 and 30 fps:
 
 The card is opaque, so render it as `mp4` (the default). `webm` and `mov` work too.
 
-Since HyperFrames 0.8.108 the `check` gate refuses text that spills out of its box (`layout/text_box_overflow`, an
-error), where 0.8.61 rendered it clipped by the frame. Very wide text near a variable's `maxLength` can therefore
+The `check` gate refuses text that spills out of its box (`layout/text_box_overflow`, an
+error), where older releases rendered it clipped by the frame. Very wide text near a variable's `maxLength` can therefore
 defer `CHECK_FAILED`; shorten it, or pass `strict: false` to accept the clipped render.
 
 ## Measured

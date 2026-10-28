@@ -1671,24 +1671,43 @@ function Get-HyperframesSeed {
   return [pscustomobject]@{ compose_script = '' }
 }
 
-# Install-Hyperframes: the pinned, project-local HyperFrames install. Copies the
-# committed package.json + package-lock.json (setup/hyperframes) to $Dest, then
-#   npm ci --ignore-scripts   (the lockfile's exact tree; no install script runs)
-#   npm audit signatures      (registry signatures + SLSA provenance; a failure is FATAL)
-#   npm rebuild esbuild       (the one postinstall the CLI needs, run deliberately)
-# and resolves the pinned chrome-headless-shell through the harness runner's
-# `browser` op, so `browser ensure` runs under the scrubbed env and HyperFrames'
-# state lands in $Dest/home. Never `npm install -g` (a global HyperFrames
-# self-upgrades in a detached process). Returns @{ dir; browser; version }.
+# Install-Hyperframes: the project-local HyperFrames install of the NEWEST npm release.
+# setup/hyperframes/package.json says "latest"; npm resolves dist-tags.latest and verifies
+# each tarball against the registry's integrity field. No lockfile, no exact version: the one
+# number is the floor in setup/floors.json, and an install at or above the newest is kept,
+# never downgraded. The new tree is built in a staging dir
+#   npm install --ignore-scripts   (no install script runs)
+#   npm audit signatures           (registry signatures + SLSA provenance; a failure is FATAL)
+# then swapped in (the old tree kept as node_modules.prev); then
+#   npm rebuild esbuild            (the one postinstall the CLI needs, run deliberately)
+# and the harness runner's `browser` op reports HyperFrames' own browser path, under the
+# scrubbed env, with HyperFrames' state in $Dest/home. Never `npm install -g` (a global
+# HyperFrames self-upgrades in a detached process). Returns @{ dir; browser; version }.
 function Install-Hyperframes {
   param([string]$RepoRoot, [string]$Dest, [string]$NodeExe)
   $src = Join-Path (Join-Path $RepoRoot 'setup') 'hyperframes'
   New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-  foreach ($f in @('package.json', 'package-lock.json')) {
-    Copy-Item -Force (Join-Path $src $f) (Join-Path $Dest $f)
+  $floor = ''
+  $floorsFile = Join-Path (Join-Path $RepoRoot 'setup') 'floors.json'
+  if (Test-Path $floorsFile) {
+    $fj = Get-Content -Raw $floorsFile | ConvertFrom-Json
+    if ($fj.hyperframes -and $fj.hyperframes.harness) { $floor = [string]$fj.hyperframes.harness }
+  }
+  # AtLeast: the numeric dotted part of A is B's or newer ('' B is always met)
+  $atLeast = {
+    param([string]$A, [string]$B)
+    if (-not $B) { return $true }
+    $ca = [regex]::Match($A, '^v?(\d+(\.\d+)*)'); $cb = [regex]::Match($B, '^v?(\d+(\.\d+)*)')
+    if (-not $ca.Success) { return $false }
+    if (-not $cb.Success) { return $true }
+    $pa = @($ca.Groups[1].Value.Split('.') | ForEach-Object { [int]$_ }); $pb = @($cb.Groups[1].Value.Split('.') | ForEach-Object { [int]$_ })
+    for ($i = 0; $i -lt [Math]::Max($pa.Count, $pb.Count); $i++) {
+      $x = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }; $y = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
+      if ($x -ne $y) { return ($x -gt $y) }
+    }
+    return $true
   }
   $entry = Join-Path $Dest 'node_modules/hyperframes/bin/hyperframes.mjs'
-  $pinned = (Get-Content -Raw (Join-Path $src 'package.json') | ConvertFrom-Json).dependencies.hyperframes
   $have = ''
   $pkg = Join-Path $Dest 'node_modules/hyperframes/package.json'
   if (Test-Path $pkg) { $have = (Get-Content -Raw $pkg | ConvertFrom-Json).version }
@@ -1698,12 +1717,36 @@ function Install-Hyperframes {
   $ErrorActionPreference = 'Continue'
   Push-Location $Dest
   try {
-    if (-not (Test-Path $entry) -or $have -ne $pinned) {
-      & npm ci --ignore-scripts --no-audit --no-fund
-      if ($LASTEXITCODE -ne 0) { throw "npm ci (hyperframes $pinned) failed (exit $LASTEXITCODE)" }
+    $latest = ''
+    $lv = & npm view hyperframes dist-tags.latest 2>$null
+    if ($LASTEXITCODE -eq 0 -and $lv) { $latest = ("$lv").Trim() }
+    $keep = ($have -and (Test-Path $entry) -and (& $atLeast $have $floor) -and ((-not $latest) -or (& $atLeast $have $latest)))
+    if ($keep) {
+      & npm audit signatures
+      if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
+    } else {
+      $stage = Join-Path $Dest '.install-staging'
+      if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+      New-Item -ItemType Directory -Force -Path $stage | Out-Null
+      Copy-Item -Force (Join-Path $src 'package.json') (Join-Path $stage 'package.json')
+      Push-Location $stage
+      try {
+        & npm install --ignore-scripts --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw "npm install (newest hyperframes) failed (exit $LASTEXITCODE); the live install is unchanged" }
+        $stagedPkg = Join-Path $stage 'node_modules/hyperframes/package.json'
+        if (-not (Test-Path $stagedPkg)) { throw "npm install produced no node_modules/hyperframes/package.json; the live install is unchanged" }
+        $newVer = (Get-Content -Raw $stagedPkg | ConvertFrom-Json).version
+        if (-not (& $atLeast $newVer $floor)) { throw "npm resolved hyperframes $newVer, below the floor $floor in setup/floors.json; the live install is unchanged" }
+        & npm audit signatures
+        if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
+      } finally { Pop-Location }
+      $live = Join-Path $Dest 'node_modules'; $prev = Join-Path $Dest 'node_modules.prev'
+      if (Test-Path $prev) { Remove-Item -Recurse -Force $prev }
+      if (Test-Path $live) { Move-Item -Force $live $prev }
+      Move-Item -Force (Join-Path $stage 'node_modules') $live
+      Copy-Item -Force (Join-Path $src 'package.json') (Join-Path $Dest 'package.json')
+      Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
     }
-    & npm audit signatures
-    if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
     & npm rebuild esbuild
     if ($LASTEXITCODE -ne 0) { throw "npm rebuild esbuild failed (exit $LASTEXITCODE)" }
   } finally {
@@ -1716,7 +1759,7 @@ function Install-Hyperframes {
   if (-not $line) { throw "hyperframes browser ensure produced no result: $($out -join ' ')" }
   $res = $line | ConvertFrom-Json
   if (-not $res.ok) { throw "hyperframes browser ensure failed: $($res.class): $($res.detail)" }
-  return @{ dir = $Dest; browser = $res.browser_path; version = $pinned; chrome = $res.chrome_version }
+  return @{ dir = $Dest; browser = $res.browser_path; version = (Get-Content -Raw $pkg | ConvertFrom-Json).version; chrome = $res.chrome_version }
 }
 
 # Locate a gimp-console executable: newest GIMP major first ("GIMP 3" sorts

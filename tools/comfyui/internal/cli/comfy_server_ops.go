@@ -182,11 +182,12 @@ func comfyFreeEmit(cmd *cobra.Command, flags *rootFlags, result comfyFreeResult)
 // features
 // ---------------------------------------------------------------------------
 
-// comfyPinnedAPIVersion is the ComfyUI version this CLI was generated and
+// comfyKnownAPIVersion is the ComfyUI version whose capability map this CLI last recorded; it is an
+// informational drift reporter, not a gate or a ceiling. It is the version the CLI was generated and
 // verified against. `features` compares the live capability map to the
 // expectations below and reports drift instead of failing, because a newer
-// server adding a flag is normal and must not break a pinned client.
-const comfyPinnedAPIVersion = "0.32.0"
+// server adding a flag is normal and must not break this client.
+const comfyKnownAPIVersion = "0.32.0"
 
 // comfyExpectedFeatures are the capability keys ComfyUI 0.32.0 serves from
 // GET /features. Read from the server source (comfy_api/feature_flags.py,
@@ -207,7 +208,7 @@ var comfyExpectedFeatures = []string{
 }
 
 type comfyFeaturesResult struct {
-	PinnedAPIVersion string         `json:"pinned_api_version"`
+	KnownAPIVersion string         `json:"known_api_version"`
 	Features         map[string]any `json:"features"`
 	Known            []string       `json:"known"`
 	Added            []string       `json:"added"`
@@ -220,11 +221,11 @@ type comfyFeaturesResult struct {
 func newComfyFeaturesCmd(flags *rootFlags) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "features",
-		Short: "Report the server's capability flags and any drift from the pinned ComfyUI version",
+		Short: "Report the server's capability flags and any drift from the known ComfyUI surface",
 		Long: `Read GET /features — ComfyUI's capability negotiation map — and compare it to
-the version this CLI was built against (` + comfyPinnedAPIVersion + `).
+the version this CLI was built against (` + comfyKnownAPIVersion + `).
 
-WHY THIS EXISTS. "This CLI is pinned to ComfyUI ` + comfyPinnedAPIVersion + `" is
+WHY THIS EXISTS. "This CLI knows the ComfyUI surface of ` + comfyKnownAPIVersion + `" is
 otherwise an invisible assumption. This turns it into an asserted, reported
 fact: a capability the server no longer serves is exactly the shape of a
 breaking upgrade, and it is far cheaper to learn that here than from a
@@ -235,9 +236,9 @@ treated as a contract. The VALUES are deployment state: max_upload_size follows
 the server's --max-upload-size, and assets follows --enable-assets. Asserting
 those would report a local configuration choice as API drift.
 
-added   keys this server serves that ` + comfyPinnedAPIVersion + ` did not.
+added   keys this server serves that ` + comfyKnownAPIVersion + ` did not.
         Informational: a newer server is allowed to grow.
-missing keys ` + comfyPinnedAPIVersion + ` served that this server does not.
+missing keys ` + comfyKnownAPIVersion + ` served that this server does not.
         This is the one that matters — something this CLI may rely on is gone.
 
 Drift is reported, never treated as a failure: exit stays 0 so this is safe in
@@ -283,7 +284,7 @@ Exit codes:
 // testable without a server.
 func comfyBuildFeaturesResult(data json.RawMessage) (comfyFeaturesResult, error) {
 	result := comfyFeaturesResult{
-		PinnedAPIVersion: comfyPinnedAPIVersion,
+		KnownAPIVersion: comfyKnownAPIVersion,
 		Features:         map[string]any{},
 		Known:            append([]string(nil), comfyExpectedFeatures...),
 		Added:            []string{},
@@ -319,12 +320,12 @@ func comfyBuildFeaturesResult(data json.RawMessage) (comfyFeaturesResult, error)
 		result.Verdict = "DRIFT"
 		result.Note = fmt.Sprintf(
 			"this server does not serve %d capability key(s) that ComfyUI %s did. Anything in this CLI relying on them may fail.",
-			len(result.Missing), comfyPinnedAPIVersion)
+			len(result.Missing), comfyKnownAPIVersion)
 	case len(result.Added) > 0:
 		result.Verdict = "NEWER"
 		result.Note = fmt.Sprintf(
 			"this server serves %d capability key(s) ComfyUI %s did not. Additive; nothing to do.",
-			len(result.Added), comfyPinnedAPIVersion)
+			len(result.Added), comfyKnownAPIVersion)
 	default:
 		result.Verdict = "MATCH"
 	}
@@ -336,7 +337,7 @@ func comfyFeaturesEmit(cmd *cobra.Command, flags *rootFlags, result comfyFeature
 		return flags.printJSON(cmd, result)
 	}
 	w := cmd.OutOrStdout()
-	fmt.Fprintf(w, "%s  (pinned to ComfyUI %s)\n", result.Verdict, result.PinnedAPIVersion)
+	fmt.Fprintf(w, "%s  (known surface: ComfyUI %s)\n", result.Verdict, result.KnownAPIVersion)
 	keys := make([]string, 0, len(result.Features))
 	for k := range result.Features {
 		keys = append(keys, k)
@@ -375,12 +376,12 @@ func comfyFeatureDriftFinding(ctx context.Context, flags *rootFlags) string {
 	}
 	switch result.Verdict {
 	case "DRIFT":
-		return fmt.Sprintf("error: server does not serve %s — expected by the pinned ComfyUI %s",
-			strings.Join(result.Missing, ", "), comfyPinnedAPIVersion)
+		return fmt.Sprintf("error: server does not serve %s — expected by the known ComfyUI %s",
+			strings.Join(result.Missing, ", "), comfyKnownAPIVersion)
 	case "NEWER":
-		return fmt.Sprintf("ok (newer than the pinned %s; adds %s)",
-			comfyPinnedAPIVersion, strings.Join(result.Added, ", "))
+		return fmt.Sprintf("ok (newer than the known %s; adds %s)",
+			comfyKnownAPIVersion, strings.Join(result.Added, ", "))
 	default:
-		return fmt.Sprintf("ok (matches the pinned ComfyUI %s)", comfyPinnedAPIVersion)
+		return fmt.Sprintf("ok (matches the known ComfyUI %s)", comfyKnownAPIVersion)
 	}
 }

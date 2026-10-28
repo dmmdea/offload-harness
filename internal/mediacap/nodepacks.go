@@ -8,38 +8,35 @@ import (
 
 // The node packs a run-graph manifest may name.
 //
-// A manifest's node_packs makes the node `git clone` each repository, check out each commit and pip-install the
+// A manifest's node_packs makes the node `git clone` each repository (or fast-forward it) and pip-install the
 // pack's requirements into its ComfyUI venv: the caller's code, running on the node. The fleet bearer lets a caller
-// run renders, not code, so a manifest is taken only when every pack it names is a pinned pair: the repository AND the
-// commit of a row below, under the row's directory name. render/node-packs.json is the runner's copy of the same
-// table and the file a reviewer edits (the runner refuses on it too, before its first git command);
-// TestNodePackPinsMatchTheRunnersFile holds the two together.
+// run renders, not code, so a manifest is taken only when every pack it names is a row below, by repository, under
+// the row's directory name. The node installs the head of the repository's default branch and records the commit it
+// got (render/manifest-satisfy.mjs); a commit a manifest names is not read. render/node-packs.json is the runner's
+// copy of the same table and the file a reviewer edits (the runner refuses on it too, before its first git command);
+// TestNodePackRowsMatchTheRunnersFile holds the two together.
 //
-// The match is exact (see render/node-packs.mjs): the strings compared are the ones `git clone` and `git checkout`
-// would be given.
+// The match is exact (see render/node-packs.mjs): the string compared is the one `git clone` would be given.
 
-// NodePackPin is one pack a manifest may name: the directory it installs under, the repository to clone and the one
-// commit to check out.
+// NodePackPin is one pack a manifest may name: the directory it installs under and the repository to clone.
 type NodePackPin struct {
-	Name   string
-	Repo   string
-	Commit string
+	Name string
+	Repo string
 }
 
-// nodePackPins mirrors render/node-packs.json, row for row. MultiGPU is pinned at its documented archival commit
-// (routeneeds.go), upstream and mirror; the other two commits are the ones one reference node's checkout was at, not
-// a documented pin (the file's "pin" field says "unverified").
+// nodePackPins mirrors render/node-packs.json, row for row. MultiGPU is listed twice, upstream (archived) and the
+// private mirror (routeneeds.go).
 var nodePackPins = []NodePackPin{
-	{"ComfyUI-VideoHelperSuite", "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite", "4d907bee61e92c2e65af3bd6383a4e4d356126d1"},
-	{"ComfyUI-MultiGPU", "https://github.com/pollockjj/ComfyUI-MultiGPU", multiGPUPinnedCommit},
-	{"ComfyUI-MultiGPU", multiGPUMirrorURL, multiGPUPinnedCommit},
-	{"ComfyUI-GGUF", "https://github.com/city96/ComfyUI-GGUF", "6ea2651e7df66d7585f6ffee804b20e92fb38b8a"},
+	{"ComfyUI-VideoHelperSuite", "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"},
+	{"ComfyUI-MultiGPU", "https://github.com/pollockjj/ComfyUI-MultiGPU"},
+	{"ComfyUI-MultiGPU", multiGPUMirrorURL},
+	{"ComfyUI-GGUF", "https://github.com/city96/ComfyUI-GGUF"},
 }
 
-// NodePackPins returns the pinned packs.
+// NodePackPins returns the allowlisted packs.
 func NodePackPins() []NodePackPin { return append([]NodePackPin(nil), nodePackPins...) }
 
-// NodePackRefusedError is a manifest's refusal: it names a pack this node does not hold a pin for.
+// NodePackRefusedError is a manifest's refusal: it names a pack whose repository this node does not allowlist.
 type NodePackRefusedError struct {
 	// Pack is the pack as the manifest named it (its name, else the name its repository gives it, else its place in the list).
 	Pack string
@@ -48,7 +45,7 @@ type NodePackRefusedError struct {
 }
 
 func (e *NodePackRefusedError) Error() string {
-	return fmt.Sprintf("run-graph manifest: node pack %q is not allowed (%s); a manifest may name only the node packs this node pins, each at its pinned commit (render/node-packs.json)", clipPack(e.Pack), e.Reason)
+	return fmt.Sprintf("run-graph manifest: node pack %q is not allowed (%s); a manifest may name only the allowlisted node packs, by repository (render/node-packs.json)", clipPack(e.Pack), e.Reason)
 }
 
 // clipPack bounds what a refusal echoes of a caller's text.
@@ -83,7 +80,7 @@ func packNameFromRepo(repo string) string {
 	return "pack"
 }
 
-// CheckManifestNodePacks refuses a run-graph manifest whose node_packs names anything but a pinned pack, with a
+// CheckManifestNodePacks refuses a run-graph manifest whose node_packs names anything but an allowlisted pack, with a
 // *NodePackRefusedError naming the first one that is not. A manifest with no node_packs is fine. The keys are read
 // exactly as the runner reads them (case-sensitively), so a spelling the runner would ignore cannot carry a value
 // this check read.
@@ -130,7 +127,6 @@ func checkNodePack(i int, raw json.RawMessage) error {
 	}
 	name, nameOK := str("name")
 	repo, repoOK := str("repo")
-	commit, commitOK := str("commit")
 	label := slot
 	switch {
 	case name != "":
@@ -139,28 +135,21 @@ func checkNodePack(i int, raw json.RawMessage) error {
 		label = packNameFromRepo(repo)
 	}
 	refuse := func(why string) error { return &NodePackRefusedError{Pack: label, Reason: why} }
-	if !nameOK || !repoOK || !commitOK {
-		return refuse("name, repo and commit must be strings")
+	if !nameOK || !repoOK {
+		return refuse("name and repo must be strings")
 	}
-	if repo == "" || commit == "" {
-		return refuse("the pack names no repository or no commit")
+	if repo == "" {
+		return refuse("the pack names no repository")
 	}
 	var row *NodePackPin
-	repoKnown := false
 	for k := range nodePackPins {
 		if nodePackPins[k].Repo == repo {
-			repoKnown = true
-			if nodePackPins[k].Commit == commit {
-				row = &nodePackPins[k]
-				break
-			}
+			row = &nodePackPins[k]
+			break
 		}
 	}
 	if row == nil {
-		if repoKnown {
-			return refuse(fmt.Sprintf("%q is a pinned repository, but not at commit %q", clipPack(repo), clipPack(commit)))
-		}
-		return refuse(fmt.Sprintf("%q is not a pinned repository", clipPack(repo)))
+		return refuse(fmt.Sprintf("%q is not an allowlisted repository", clipPack(repo)))
 	}
 	if name != "" && name != row.Name && name != packNameFromRepo(row.Repo) {
 		return refuse(fmt.Sprintf("the directory name %q is not %q", clipPack(name), row.Name))

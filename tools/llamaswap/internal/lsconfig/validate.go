@@ -14,9 +14,9 @@ import (
 )
 
 // embeddedSchema is the upstream llama-swap draft-07 config schema, vendored
-// at schema/config-schema.json. Provenance (retrieval date, llama-swap
-// version, sha256) is recorded in schema/README.md. Embedded so validation
-// works offline and a given build always validates against a known document.
+// at schema/config-schema.json, a refreshable snapshot (scripts/refresh-llamaswap-schema.sh).
+// Provenance (retrieval date, llama-swap version) is recorded in schema/snapshot.json.
+// Embedded so validation works offline and a given build validates against a known document.
 //
 //go:embed schema/config-schema.json
 var embeddedSchema []byte
@@ -31,13 +31,28 @@ func SchemaBytes() []byte {
 // SchemaSourceURL is where the embedded schema came from.
 const SchemaSourceURL = "https://raw.githubusercontent.com/mostlygeek/llama-swap/main/config-schema.json"
 
-// SchemaRetrievedDate and SchemaLlamaSwapVersion mirror schema/README.md so
+//go:embed schema/snapshot.json
+var embeddedSnapshot []byte
+
+// SchemaRetrievedDate and SchemaLlamaSwapVersion come from schema/snapshot.json so
 // `config validate --json` can report which schema it judged against without
-// the caller reading a markdown file.
-const (
-	SchemaRetrievedDate    = "2026-08-13"
-	SchemaLlamaSwapVersion = "v249"
+// the caller reading a file. The version is the floor `version drift` compares a
+// live server with: only a server older than the snapshot is drift.
+var (
+	SchemaRetrievedDate    string
+	SchemaLlamaSwapVersion string
 )
+
+func init() {
+	var s struct {
+		Version   string `json:"llama_swap_version"`
+		Retrieved string `json:"retrieved"`
+	}
+	if err := json.Unmarshal(embeddedSnapshot, &s); err != nil {
+		panic("lsconfig: schema/snapshot.json is unreadable: " + err.Error())
+	}
+	SchemaLlamaSwapVersion, SchemaRetrievedDate = s.Version, s.Retrieved
+}
 
 // ValidationIssue is one schema violation or unknown-key finding.
 type ValidationIssue struct {

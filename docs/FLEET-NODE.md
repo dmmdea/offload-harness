@@ -944,13 +944,13 @@ The rule is one rule for every route that does work or returns a result. Three c
   lanes and model names, and withholds the lease's free-text `reason`, the store steward's status (its `root` is a path on the
   node's disk) and the weight-file rows (`image_recipes`, `media_recipes`). A holder of the bearer, and any caller of a loopback
   node with no token, reads the whole answer.
-- **A run-graph manifest names only pinned node packs.** The bearer lets a caller run renders, not code. A manifest's
-  `node_packs` makes the node `git clone` each repository, check out each commit and pip-install the pack's requirements, so
-  a pack is taken only when its `repo` AND `commit` are a row of `render/node-packs.json` (exact strings, a full 40-digit
-  commit, the row's directory name or the one the repository gives it). Anything else is refused `400`, naming the pack,
+- **A run-graph manifest names only allowlisted node packs.** The bearer lets a caller run renders, not code. A manifest's
+  `node_packs` makes the node `git clone` each repository, update it to the head of its default branch and pip-install the pack's requirements, so
+  a pack is taken only when its `repo` is a row of `render/node-packs.json` (exact string, and the row's directory name or the one
+  the repository gives it; a `commit` a manifest names is not read, and the node records the one it got). Anything else is refused `400`, naming the pack,
   before a job, a temp file or a lease exists (`buildRunGraph`), and again by the runner's satisfier before its first git
-  command. The table holds the packs the shipped graph builders need: VideoHelperSuite, ComfyUI-MultiGPU at its documented
-  archival commit (upstream and mirror) and ComfyUI-GGUF; adding a pack is a reviewed change to that file and to its copy in
+  command. The table holds the packs the shipped graph builders need: VideoHelperSuite, ComfyUI-MultiGPU (upstream and its
+  archival mirror) and ComfyUI-GGUF; adding a pack is a reviewed change to that file and to its copy in
   `internal/mediacap/nodepacks.go`, which a test pins.
 - **A run-graph manifest's models land under `models/` and come from a listed host.** A manifest's `models[]` makes the node
   download each `source_url` to `path` inside the ComfyUI tree before ComfyUI starts, so a path that leaves `models/<class>/`

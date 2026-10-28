@@ -5,11 +5,11 @@
 // comfyManaged:false frees llama-swap's slot semantics only.
 //
 // The Go side (internal/imagegen.sdcppArgs) speaks OUR generic flag surface; THIS
-// file owns the mapping to sd.cpp's real CLI (verified against the pinned release
-// master-789-5114672: --diffusion-model vs -m, --clip_l/--clip_g underscores,
+// file owns the mapping to sd.cpp's real CLI (verified against the sd.cpp build the installer resolved from the
+// newest release, floor in setup/floors.json: --diffusion-model vs -m, --clip_l/--clip_g underscores,
 // -p/-n prompts, -W/-H, -s seed, --cfg-scale, --sampling-method, -o output,
 // --llm for LLM-class text encoders (Z-Image's Qwen3), --vae-on-cpu etc. arrive
-// verbatim through repeated --extra tokens). sd.cpp flag drift on a pin bump is
+// verbatim through repeated --extra tokens). sd.cpp flag drift on a newer release is
 // fixed HERE, never in Go.
 //
 // Usage: node render/sdcpp-generate.mjs <out.png> "<prompt>" [--negative S]

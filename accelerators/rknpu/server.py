@@ -3,7 +3,7 @@
 
 Wire contract — the Coral sidecar's, verbatim, so the harness's accelclient speaks to both:
 
-    GET  /health                -> 200 {enabled, device, runtime, temp_c, npu_load, loaded, models_missing, tools, ...}
+    GET  /health                -> 200 {enabled, device, runtime, temp_c, npu_load, loaded, models_missing, models_unverified, tools, ...}
     POST /v1/<tool>  (JSON)     -> 200 result dict          | 200 {"error": ...} structured failure
                                    404 {"error":"unknown_tool"} | 400 {"error":"bad_request", ...}
                                    500 {"error":"internal", ...}
@@ -16,7 +16,7 @@ embed {image_path}.
 Runtime facts this file encodes (measured on an RK3588S board, under the mainline 7.0 kernel with the
 rknpu 0.9.8 out-of-tree driver; the vendor 6.1 kernel's built-in driver runs the same runtime library, and
 every sysfs/debugfs read below degrades to null where a node is absent):
-  * RKNN-Toolkit-Lite2 2.3.2's RKNNLite over librknnrt.so 2.3.2, models compiled for rk3588, core mask
+  * RKNN-Toolkit-Lite2's RKNNLite over librknnrt.so, models compiled for rk3588, core mask
     NPU_CORE_0_1_2 (all three cores). RKNNLite reports failure by return value, never by raising:
     load_rknn / init_runtime return non-zero and inference returns None, so every call is checked.
   * Inputs are ALWAYS 4-D NHWC uint8 (a 3-D array is refused by the runtime); normalisation is compiled
@@ -41,8 +41,9 @@ every sysfs/debugfs read below degrades to null where a node is absent):
     and reported as null when unreadable); it never writes either.
 
 Refusals: binds loopback only (a non-loopback RKNPU_BIND is refused at startup); serves only files
-listed in models.json whose sha256 matches — model files and their label files alike (an unlisted or
-mismatched file is a structured error, never a load); exits itself after RKNPU_IDLE_SEC (the launcher's --idle-sec)
+listed in models.json, model files and their label files alike; a file whose bytes differ from the digest
+fetch-models.sh recorded in models.installed.json is a structured error, never a load (no record: served, and
+listed under models_unverified in /health); exits itself after RKNPU_IDLE_SEC (the launcher's --idle-sec)
 without a tool call, clamped to 1..300: 0, a negative value and anything above 300 all mean 300, because a model
 that idles longer than five minutes is a violation. /health never counts as a call, so a poller cannot keep a model resident. The process also asks the
 kernel's OOM killer to take it before the host's own stack (oom_score_adj 500), because they share the RAM.
@@ -82,6 +83,9 @@ IDLE_SEC = _clamp_idle(int(os.environ.get("RKNPU_IDLE_SEC", "300")))
 HOME = os.environ.get("RKNPU_HOME", HERE)
 MODELS_DIR = os.environ.get("RKNPU_MODELS_DIR", os.path.join(HOME, "models"))
 MANIFEST = os.environ.get("RKNPU_MANIFEST", os.path.join(HERE, "models.json"))
+# What fetch-models.sh verified against the publisher (or built) and recorded beside the weights:
+# {"installed": [{file, digest, publisher_digest, size, source, fetched_at}]}.
+INSTALLED = os.environ.get("RKNPU_INSTALLED", os.path.join(MODELS_DIR, "models.installed.json"))
 ENABLED = os.environ.get("RKNPU_ENABLED", "1") != "0"
 RUNTIME_LIB = os.environ.get("RKNPU_RUNTIME_LIB", "")
 SYSFS = os.environ.get("RKNPU_SYSFS", "/sys")  # a test hook: a fake tree stands in for the board's /sys
@@ -101,8 +105,8 @@ if BIND not in LOOPBACK:
 
 with open(MANIFEST, encoding="utf-8") as fh:
     _MAN = json.load(fh)
-MODELS: dict[str, dict] = _MAN["models"]  # key -> {file, sha256, task, input, labels?, convert?}
-LABELS: dict[str, dict] = _MAN.get("labels", {})  # file -> {sha256, url}
+MODELS: dict[str, dict] = _MAN["models"]  # key -> {file, task, input, labels?, convert?}
+LABELS: dict[str, dict] = _MAN.get("labels", {})  # file -> {source, path}
 
 
 class Refusal(Exception):
@@ -151,14 +155,32 @@ def _hint(key: str, name: str) -> str:
     return "run fetch-models.sh"
 
 
-def _artifact_path(key: str, name: str, sha256: str) -> str:
-    """Resolve a manifest artifact to a verified file; raise Refusal with a structured reason."""
+def _recorded_digest(name: str) -> str | None:
+    """The sha256 fetch-models.sh recorded for `name`, or None when there is no record (a hand-placed file, or a
+    box that never ran the fetch): an absent record means "unverified", never a refusal to start."""
+    try:
+        with open(INSTALLED, encoding="utf-8") as fh:
+            records = json.load(fh).get("installed", [])
+    except (OSError, ValueError, AttributeError):
+        return None
+    for rec in records:
+        if isinstance(rec, dict) and rec.get("file") == name:
+            digest = rec.get("digest")
+            if isinstance(digest, str) and digest.startswith("sha256:"):
+                return digest[len("sha256:"):]
+    return None
+
+
+def _artifact_path(key: str, name: str) -> str:
+    """Resolve a manifest artifact to a file checked against its recorded digest; raise Refusal with a structured reason."""
     path = os.path.join(MODELS_DIR, name)
     if not os.path.isfile(path):
         raise Refusal({"error": "model_missing", "model": key, "file": name, "hint": _hint(key, name)})
-    digest = _sha256(path)
-    if digest != sha256:
-        raise Refusal({"error": "model_sha_mismatch", "model": key, "file": name, "expected": sha256, "got": digest})
+    want = _recorded_digest(name)
+    if want is not None:
+        digest = _sha256(path)
+        if digest != want:
+            raise Refusal({"error": "model_sha_mismatch", "model": key, "file": name, "expected": want, "got": digest})
     return path
 
 
@@ -166,7 +188,7 @@ def _model_path(key: str) -> str:
     spec = MODELS.get(key)
     if spec is None:
         raise Refusal({"error": "unknown_model", "model": key, "known": sorted(MODELS)})
-    return _artifact_path(key, spec["file"], spec["sha256"])
+    return _artifact_path(key, spec["file"])
 
 
 _WNID = re.compile(r"^n\d{8}\s+")
@@ -178,7 +200,7 @@ def _load_labels(key: str) -> list[str]:
     out: list[str] = []
     name = MODELS[key].get("labels")
     if name:
-        with open(_artifact_path(key, name, LABELS[name]["sha256"]), encoding="utf-8") as fh:
+        with open(_artifact_path(key, name), encoding="utf-8") as fh:
             for line in fh:
                 line = line.rstrip("\r\n")
                 if line:
@@ -554,16 +576,19 @@ def _runtime_info() -> dict:
 
 
 def _health() -> dict:
-    missing = set()
+    missing, unverified = set(), set()  # unverified: on disk with no digest recorded by fetch-models.sh
     for spec in MODELS.values():
         for name in (spec["file"], spec.get("labels")):
             if name and not os.path.isfile(os.path.join(MODELS_DIR, name)):
                 missing.add(name)
+            elif name and _recorded_digest(name) is None:
+                unverified.add(name)
     resident = _resident
     return {"enabled": ENABLED, "device": DEVICE, "runtime": _runtime_info(), "core_mask": "0_1_2",
             "temp_c": _npu_temp(), "npu_load": _npu_load(),
             "cpu_affinity": sorted(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None,
-            "loaded": [resident[0]] if resident else [], "models_missing": sorted(missing), "tools": sorted(TOOLS),
+            "loaded": [resident[0]] if resident else [], "models_missing": sorted(missing),
+            "models_unverified": sorted(unverified), "tools": sorted(TOOLS),
             "uptime_sec": int(time.time() - _started), "idle_sec": IDLE_SEC}
 
 

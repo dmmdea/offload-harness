@@ -16,8 +16,8 @@ export function parseManifest(input) {
   if (!m || typeof m !== "object") throw new Error("manifest: not an object");
   const node_packs = (m.node_packs || []).map((p, i) => {
     if (!p.repo) throw new Error(`node_pack #${i} missing repo`);
-    if (!p.commit) throw new Error(`node_pack ${p.name || i} missing commit`);
-    return { name: p.name || packNameFromRepo(p.repo), repo: p.repo, commit: p.commit };
+    // A commit a manifest names is not read: the node installs the head of the repository's default branch.
+    return { name: p.name || packNameFromRepo(p.repo), repo: p.repo };
   });
   const models = (m.models || []).map((x, i) => {
     if (!x.path) throw new Error(`model #${i} missing path`);
@@ -34,11 +34,11 @@ export function parseManifest(input) {
 }
 
 // manifestHash: identifies a provisioned ENVIRONMENT. Sorted so pack/model order never
-// changes the hash; only repo@commit + model path/sha matter (source_url is irrelevant
-// to what's on disk).
+// changes the hash; only the pack repos + model path/sha matter (source_url is irrelevant
+// to what's on disk). A pack is identified by its repository: the commit is whatever the node recorded at install.
 export function manifestHash(manifest) {
   const m = manifest.schema_version ? manifest : parseManifest(manifest);
-  const packs = m.node_packs.map((p) => `${p.repo}@${p.commit}`).sort();
+  const packs = m.node_packs.map((p) => p.repo).sort();
   const models = m.models.map((x) => `${x.path}#${x.sha256 || ""}`).sort();
   return createHash("sha256").update(JSON.stringify({ packs, models })).digest("hex").slice(0, 16);
 }

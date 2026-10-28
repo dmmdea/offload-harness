@@ -206,7 +206,7 @@ function withTimeout(ms) {
 
 // quiesceLlamaSwap: wait for in-flight work on `ids` to finish before unloading them.
 //
-// MEASURED, not defensive: on llama-swap v242 an unload issued during a generation
+// MEASURED, not defensive: on a newer llama-swap an unload issued during a generation
 // returned in 1,265ms without draining and the in-flight request died at 4,107ms with
 // 502 Bad Gateway. The unload route does not honour in-flight work, so a caller that
 // wants to avoid killing someone's request must drain first.
@@ -300,7 +300,7 @@ export async function quiesceLlamaSwap(ids, {
     } catch { return null; }
   };
 
-  // /running GATES every probe. On llama-swap v208 (live-found on an ampere-6 node),
+  // /running GATES every probe. On an older llama-swap (live-found on an ampere-6 node),
   // `/upstream/<id>/slots` is `Any /upstream/*` -> proxyToUpstream: requesting it
   // for a model that is NOT loaded swaps the model IN — the drain was loading ~3GB
   // into VRAM immediately before the render it existed to protect. So:
@@ -411,7 +411,7 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   if (ids.length === 0) return;
 
   // /running decides what actually holds VRAM. Unloading a model that is not
-  // loaded is not merely pointless: on llama-swap v208 the per-model unload
+  // loaded is not merely pointless: on an older llama-swap the per-model unload
   // route does not even exist, so each such request was a full requestTimeoutMs
   // of dead wait per configured model, on every render. And if /running cannot
   // be read, unloading blind is how a shared card gets a load-bearing tier torn
@@ -454,7 +454,7 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   }
 
   // Per-model unload first (llama-swap >= v24x). Any failure falls back ONCE to
-  // GET /unload — v208's ONLY unload route, and still present-and-total on v242,
+  // GET /unload — the older builds' ONLY unload route, and still present-and-total on newer ones,
   // which is why the gate below applies on every version — and that
   // fallback is gated on the memory stack not being resident: tearing down the
   // always-on tier to free VRAM the render may not be able to use would trade a render for
@@ -481,7 +481,7 @@ export async function freeLlamaSwap(api = process.env.LLAMA_SWAP_API || "http://
   }
   try {
     const r = await fetch(api + "/unload", { signal: withTimeout(requestTimeoutMs) });
-    if (r.ok) log(`freeLlamaSwap: per-model unload unavailable (${failures.join(",")}); GET /unload (unload-all, llama-swap v208 route) succeeded`);
+    if (r.ok) log(`freeLlamaSwap: per-model unload unavailable (${failures.join(",")}); GET /unload (unload-all, older llama-swap route) succeeded`);
     else log(`freeLlamaSwap: unload-all fallback returned ${r.status}; the render runs against whatever VRAM remains`);
   } catch (e) {
     log(`freeLlamaSwap: unload-all fallback failed: ${e && e.message}`);

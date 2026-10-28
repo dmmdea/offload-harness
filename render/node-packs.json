@@ -1,32 +1,30 @@
 {
   "schema_version": 1,
-  "note": "The custom-node packs a run-graph manifest may name, each at the one commit it may be checked out at. A manifest that names a pack whose repository AND commit are not a row here is refused before any clone (render/node-packs.mjs, internal/mediacap/nodepacks.go). A change to this file is a change to what any holder of the fleet bearer can make a node run or fetch: a reviewed edit, with the Go copy in internal/mediacap/nodepacks.go changed with it (a test pins the two). pin says where the commit comes from: documented (docs/systems/media-generation.md) or unverified (the commit one reference node's checkout was at; confirm it against the fleet before relying on it).",
-  "model_hosts": ["huggingface.co", "hf.co", "civitai.com", "github.com", "githubusercontent.com"],
+  "note": "The custom-node packs a run-graph manifest may name, by repository. A manifest that names a pack whose repository is not a row here is refused before any clone (render/node-packs.mjs, internal/mediacap/nodepacks.go). The node installs the head of the repository's default branch and records the commit it got (custom_nodes/<pack>.installed.json: repo, commit, installed_at); no commit is written here. A change to this file is a change to what any holder of the fleet bearer can make a node run or fetch: a reviewed edit, with the Go copy in internal/mediacap/nodepacks.go changed with it (a test holds the two together).",
+  "model_hosts": [
+    "huggingface.co",
+    "hf.co",
+    "civitai.com",
+    "github.com",
+    "githubusercontent.com"
+  ],
   "model_hosts_note": "The hosts a run-graph manifest's models[] source_url may name: https only, and the host is one of these or a subdomain of one. A model also lands only under models/<class>/ (render/node-packs.mjs checkModelEntry, internal/mediacap/manifestmodels.go). Adding a host lets any holder of the fleet bearer make a node fetch from it: a reviewed edit, with the Go copy changed with it.",
   "packs": [
     {
       "name": "ComfyUI-VideoHelperSuite",
-      "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite",
-      "commit": "4d907bee61e92c2e65af3bd6383a4e4d356126d1",
-      "pin": "unverified"
+      "repo": "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"
     },
     {
       "name": "ComfyUI-MultiGPU",
-      "repo": "https://github.com/pollockjj/ComfyUI-MultiGPU",
-      "commit": "ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83",
-      "pin": "documented"
+      "repo": "https://github.com/pollockjj/ComfyUI-MultiGPU"
     },
     {
       "name": "ComfyUI-MultiGPU",
-      "repo": "https://github.com/dmmdea/ComfyUI-MultiGPU-mirror",
-      "commit": "ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83",
-      "pin": "documented"
+      "repo": "https://github.com/dmmdea/ComfyUI-MultiGPU-mirror"
     },
     {
       "name": "ComfyUI-GGUF",
-      "repo": "https://github.com/city96/ComfyUI-GGUF",
-      "commit": "6ea2651e7df66d7585f6ffee804b20e92fb38b8a",
-      "pin": "unverified"
+      "repo": "https://github.com/city96/ComfyUI-GGUF"
     }
   ]
 }

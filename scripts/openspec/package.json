@@ -1,9 +1,9 @@
 {
-  "name": "openspec-pin",
+  "name": "openspec-install-project",
   "version": "0.0.0",
   "private": true,
-  "description": "The install project of scripts/openspec-install.sh: the admitted OpenSpec CLI tarball and, in package-lock.json, the exact version and sha512 integrity of every package it depends on.",
+  "description": "The install project of scripts/openspec-install.sh: the OpenSpec CLI at the registry's newest release. The install checks the registry's own integrity values; no lockfile is kept.",
   "dependencies": {
-    "@fission-ai/openspec": "file:fission-ai-openspec-1.14.1.tgz"
+    "@fission-ai/openspec": "latest"
   }
 }

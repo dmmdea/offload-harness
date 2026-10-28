@@ -8,12 +8,12 @@
 # (the profiles.json seed: __RKNPU_HOME__/rknpu-http.sh) or as a checkout of accelerators/rknpu/ beneath it
 # ($RKNPU_HOME/accelerators/rknpu/rknpu-http.sh). Both shapes resolve: the home is wherever venv/ is found
 # walking up from here. Pins the venv's python explicitly: a transient unit or a sandboxed service has no
-# PATH worth trusting. Build it once (the wheel is cp312 aarch64; fetch-models.sh downloads the pinned wheel
-# and librknnrt.so, verified by sha256, into $RKNPU_HOME/wheels and $RKNPU_HOME/lib):
+# PATH worth trusting. Build it once (fetch-models.sh downloads the newest release's aarch64 wheel for the
+# venv's python and its librknnrt.so, verified against the publisher's digest, into $RKNPU_HOME/wheels and $RKNPU_HOME/lib):
 #     uv venv --python 3.12 "$RKNPU_HOME/venv"
 #     uv pip install --python "$RKNPU_HOME/venv/bin/python" "$RKNPU_HOME"/wheels/rknn_toolkit_lite2-*.whl numpy pillow
 #
-# The runtime library: RKNN-Toolkit-Lite2 2.3.2 looks for librknnrt.so at /usr/lib only, and LD_LIBRARY_PATH
+# The runtime library: RKNN-Toolkit-Lite2 looks for librknnrt.so at /usr/lib only, and LD_LIBRARY_PATH
 # does not change that (server.py explains the probe). The launcher exports RKNPU_RUNTIME_LIB (default
 # $RKNPU_HOME/lib/librknnrt.so when that file exists) so the sidecar can load its private copy, and also puts
 # $RKNPU_HOME/lib on LD_LIBRARY_PATH for anything that resolves the library by name.

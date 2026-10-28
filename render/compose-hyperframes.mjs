@@ -4,11 +4,12 @@
 //
 // HyperFrames (npm `hyperframes`, HeyGen, Apache-2.0) renders an HTML/CSS composition to video
 // with headless Chrome + FFmpeg. Its defaults do not fit this harness, and every guard below is
-// tied to a behaviour read in the 0.8.61 source and re-checked on 0.8.108 and on the pinned 0.8.114 package:
+// tied to a behaviour read in the HyperFrames source and re-checked as the releases moved (the run is gated on a
+// floor in setup/floors.json, never on an exact version):
 //
 //   - it phones home (PostHog telemetry on by default)            -> HYPERFRAMES_NO_TELEMETRY=1, DO_NOT_TRACK=1
 //   - every command without --json pings the npm registry and GitHub (update + skills checks),
-//     and a GLOBAL install self-upgrades in a detached process    -> --json on EVERY invocation, a pinned
+//     and a GLOBAL install self-upgrades in a detached process    -> --json on EVERY invocation, a
 //                                                                    project-local install, NO_UPDATE_CHECK/
 //                                                                    NO_AUTO_INSTALL=1 (value must be exactly "1")
 //   - `init` / `skills update` install agent skills into ~/.claude and every other agent dir
@@ -42,7 +43,11 @@ import { copyAtomic } from "./atomic-out.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
-export const PINNED_VERSION = "0.8.114";
+// The installed HyperFrames is a record with a floor, never an exact version: the harness installs the newest
+// npm release and the runner refuses only a CLI that is absent or older than the floor in setup/floors.json
+// ("hyperframes".harness). The floor is read from that file beside this runner's repo root (render/../setup);
+// a tree that does not carry it (a bare binary drop) enforces presence only.
+export const FLOORS_FILE = join(__dirname, "..", "setup", "floors.json");
 export const CLI_ENTRY = join("node_modules", "hyperframes", "bin", "hyperframes.mjs");
 export const DEFAULT_TEMPLATES_DIR = join(__dirname, "compose-templates");
 
@@ -64,6 +69,9 @@ export const FORCED_ENV = Object.freeze({
   HYPERFRAMES_NO_AUTO_INSTALL: "1",
   HYPERFRAMES_SKIP_SKILLS: "1",
   PRODUCER_BROWSER_GPU_MODE: "software",
+  // Recent releases serve `check` from a detached warm-check daemon (idle for minutes) unless CI is set; the
+  // daemon keeps the job's work dir as its cwd, so the dir cannot be removed when the render ends.
+  CI: "1",
 });
 
 // buildChildEnv builds the COMPLETE environment of a HyperFrames child. Windows env names are
@@ -71,7 +79,7 @@ export const FORCED_ENV = Object.freeze({
 // canonical upper-case name once; POSIX names are case-sensitive and match exactly.
 //   opts.ffmpeg / opts.ffprobe  absolute binaries (HYPERFRAMES_FFMPEG_PATH / _FFPROBE_PATH) — pinned so
 //                               an ffmpeg.exe planted in the cwd can never win (ffBinaries.ts scans cwd first)
-//   opts.browser                pinned chrome-headless-shell (HYPERFRAMES_BROWSER_PATH)
+//   opts.browser                the chrome-headless-shell HyperFrames fetched (HYPERFRAMES_BROWSER_PATH)
 //   opts.extractCacheDir        HYPERFRAMES_EXTRACT_CACHE_DIR (#4060: frames cache off the system drive)
 //   opts.tempDir                TEMP/TMP override (Windows renders stage every frame under os.tmpdir())
 //   opts.home                   harness-owned HOME: HyperFrames' own state (~/.hyperframes, ~/.cache/hyperframes)
@@ -139,7 +147,10 @@ export function assertAllowedInvocation(args) {
   if (sub === "browser" && !ALLOWED_BROWSER_SUBCOMMANDS.includes(args[1])) {
     throw new ComposeError("BAD_INPUT", `HyperFrames "browser ${args[1] ?? ""}" is not allowlisted (allowed: ensure, path)`);
   }
-  if (!args.includes("--json")) {
+  // `browser` is the one subcommand that may run without --json: recent releases answer it with
+  // "hyperframes browser has no JSON output" (json_unsupported), and the env gates (NO_UPDATE_CHECK,
+  // NO_AUTO_INSTALL) still hold there; browserCli tries --json first and falls back only on that answer.
+  if (sub !== "browser" && !args.includes("--json")) {
     throw new ComposeError("BAD_INPUT", `HyperFrames "${sub}" without --json refused (--json is what skips the npm/GitHub update checks)`);
   }
   for (const a of args) {
@@ -157,12 +168,10 @@ export function assertAllowedInvocation(args) {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Argument builders — one per step, each verified against the 0.8.61 source (render.ts:130-409,
-// check.ts CHECK_COMMAND_ARGS, lint.ts, snapshot.ts:656-724, browser.ts; the line numbers are 0.8.61's) and
-// re-checked on 0.8.108, whose --help for lint, check, render, snapshot and browser is identical to
-// 0.8.61's apart from one description (--page-side-compositing), and on the pinned 0.8.114, whose --help
-// for the same five commands is identical to 0.8.108's apart from one description (snapshot --at now
-// captures each timestamp at that exact instant instead of snapping it to a frame).
+// Argument builders — one per step, each verified against the HyperFrames source (render.ts, check.ts
+// CHECK_COMMAND_ARGS, lint.ts, snapshot.ts, browser.ts) and re-checked against the --help of lint, check,
+// render, snapshot and browser as the releases moved. A release that changes a flag is absorbed here, in the
+// builder, never by holding the install back.
 // ---------------------------------------------------------------------------------------------
 export const FORMATS = Object.freeze(["mp4", "webm", "mov", "png-sequence", "gif"]);
 export const QUALITIES = Object.freeze(["draft", "standard", "high"]);
@@ -187,8 +196,8 @@ export function buildVersionArgs() {
   return ["--version", "--json"];
 }
 
-export function buildBrowserArgs(sub) {
-  return ["browser", sub, "--json"];
+export function buildBrowserArgs(sub, json = true) {
+  return json ? ["browser", sub, "--json"] : ["browser", sub];
 }
 
 // buildRenderArgs: one batch row renders exactly one output; --json only produces the manifest
@@ -630,14 +639,49 @@ export function installedVersion(hfDir) {
   }
 }
 
-// assertPinnedInstall refuses an install that is not the version every guard in this file was
-// verified against: the env gates, the --json network skip and the flag set are read from the
-// PINNED source, and a drifted install (a hand `npm install`, a half-applied bump) may not keep
-// them. The fix is the installer's hyperframes step, which installs from the committed lockfile.
-export function assertPinnedInstall(hfDir) {
+// versionCore parses the leading numeric dotted part of a version ("0.8.212", "9.9.9-rc.1" -> [9, 9, 9]).
+// null = not a version.
+function versionCore(v) {
+  const m = /^v?(\d+(?:\.\d+)*)/.exec(String(v || "").trim());
+  return m ? m[1].split(".").map(Number) : null;
+}
+
+// versionAtLeast: true when `have` is the floor or newer, comparing the numeric parts (a pre-release tag
+// on an equal or newer core does not lower it). An unreadable `have` is below any floor.
+export function versionAtLeast(have, floor) {
+  const h = versionCore(have);
+  const f = versionCore(floor);
+  if (!f) return true;
+  if (!h) return false;
+  for (let i = 0; i < Math.max(h.length, f.length); i++) {
+    const d = (h[i] || 0) - (f[i] || 0);
+    if (d !== 0) return d > 0;
+  }
+  return true;
+}
+
+// readFloor reads the HyperFrames floor from setup/floors.json. "" = no floor known (the file is absent or
+// unreadable): the runner then enforces presence only, because a floor it cannot read is not a reason to
+// refuse a working CLI.
+export function readFloor(file = FLOORS_FILE) {
+  try {
+    const v = JSON.parse(readFileSync(file, "utf8")).hyperframes?.harness;
+    return typeof v === "string" ? v : "";
+  } catch {
+    return "";
+  }
+}
+
+// assertInstalled refuses only an install whose CLI is absent or whose version is below the floor. Any
+// newer release passes: the env gates, the --json network skip and the flag set this file relies on are
+// re-checked against each release, and a release that moves one is fixed here, not pinned away.
+export function assertInstalled(hfDir, floor = readFloor()) {
   const have = installedVersion(hfDir);
-  if (have !== PINNED_VERSION) {
-    throw new ComposeError("CLI_MISSING", `the install at ${hfDir} holds hyperframes ${have || "(unreadable)"}, not the runner's pin ${PINNED_VERSION} — re-run the installer's hyperframes step (npm ci from setup/hyperframes)`);
+  if (!have) {
+    throw new ComposeError("CLI_MISSING", `the install at ${hfDir} holds no readable hyperframes package — re-run the installer's hyperframes step (local-offload install hyperframes)`);
+  }
+  if (!versionAtLeast(have, floor)) {
+    throw new ComposeError("CLI_MISSING", `the install at ${hfDir} holds hyperframes ${have}, below the floor ${floor} in setup/floors.json — re-run the installer's hyperframes step (local-offload install hyperframes)`);
   }
   return have;
 }
@@ -661,6 +705,16 @@ async function invokeCli(ctx, args, { cwd, env, deadline, log, nodeArgs = [] }) 
     }
     return { ...r, text, attempts: attempt };
   }
+}
+
+// browserCli runs `browser <sub>` with --json (what older releases answer in) and, when the release says
+// it has no JSON output for browser, once more without it. Any other failure is returned as it is.
+async function browserCli(ctx, sub, opts) {
+  const r = await invokeCli(ctx, buildBrowserArgs(sub), opts);
+  if (r.code !== 0 && !r.timedOut && /json_unsupported|no JSON output/i.test(r.text)) {
+    return invokeCli(ctx, buildBrowserArgs(sub, false), opts);
+  }
+  return r;
 }
 
 function tailText(s, n = 600) {
@@ -735,9 +789,9 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
   }
   if (!ctx.hfDir) throw new ComposeError("BAD_INPUT", "--hyperframes-dir is required");
   if (!existsSync(ctx.entry)) {
-    throw new ComposeError("CLI_MISSING", `HyperFrames CLI not found at ${ctx.entry} (run the installer's hyperframes step: npm ci in hyperframes_dir)`);
+    throw new ComposeError("CLI_MISSING", `HyperFrames CLI not found at ${ctx.entry} (run the installer's hyperframes step: local-offload install hyperframes)`);
   }
-  const installed = assertPinnedInstall(ctx.hfDir);
+  const installed = assertInstalled(ctx.hfDir);
   mkdirSync(ctx.home, { recursive: true });
 
   if (op === "version") {
@@ -747,10 +801,10 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
       const r = await invokeCli(ctx, buildVersionArgs(), { cwd, env, deadline: Date.now() + 30000, log });
       if (r.code !== 0) throw failFrom("version", r);
       const version = String(r.stdout).trim().split(/\r?\n/).pop();
-      if (version !== PINNED_VERSION) {
-        throw new ComposeError("CLI_MISSING", `the CLI reports ${version}, not the runner's pin ${PINNED_VERSION} (package.json says ${installed})`);
+      if (!versionAtLeast(version, readFloor())) {
+        throw new ComposeError("CLI_MISSING", `the CLI reports ${version}, below the floor ${readFloor()} in setup/floors.json (package.json says ${installed})`);
       }
-      return { ok: true, op, version, pinned: PINNED_VERSION, matches_pin: true, cli: ctx.entry };
+      return { ok: true, op, version, floor: readFloor(), at_floor: true, cli: ctx.entry };
     } finally {
       rmSync(cwd, { recursive: true, force: true });
     }
@@ -769,12 +823,12 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
       // session 5d227d30 §5a: curl's happy-eyeballs recovered in ~3s; the bare
       // download hung 7+ minutes). "ensure" only — path/lint/check/render/snapshot
       // touch no network.
-      const ens = await invokeCli(ctx, buildBrowserArgs("ensure"), { cwd, env, deadline, log, nodeArgs: ["--dns-result-order=ipv4first"] });
+      const ens = await browserCli(ctx, "ensure", { cwd, env, deadline, log, nodeArgs: ["--dns-result-order=ipv4first"] });
       if (ens.code !== 0) {
         const e = failFrom("browser ensure", ens);
         throw new ComposeError(e.cls === "TIMEOUT" ? "TIMEOUT" : "BROWSER_MISSING", e.detail);
       }
-      const pth = await invokeCli(ctx, buildBrowserArgs("path"), { cwd, env, deadline, log });
+      const pth = await browserCli(ctx, "path", { cwd, env, deadline, log });
       if (pth.code !== 0) throw new ComposeError("BROWSER_MISSING", `browser path exit ${pth.code}: ${tailText(pth.text)}`);
       const browserPath = String(pth.stdout).trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop() || "";
       if (!browserPath || !existsSync(browserPath)) {
@@ -798,7 +852,7 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
   if (!ffprobe) throw new ComposeError("FFMPEG_MISSING", `ffprobe "${f.ffprobe || "ffprobe (next to ffmpeg)"}" not found`);
   const browser = f.browser || "";
   if (!browser || !existsSync(browser)) {
-    throw new ComposeError("BROWSER_MISSING", `pinned chrome-headless-shell not found at "${browser}" (hyperframes_browser_path; run the installer's \`browser ensure\` step)`);
+    throw new ComposeError("BROWSER_MISSING", `chrome-headless-shell not found at "${browser}" (hyperframes_browser_path; run the installer's \`browser ensure\` step)`);
   }
   const variables = readVariables(f["variables-file"]);
 
@@ -965,7 +1019,15 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
     };
     return result;
   } finally {
-    if (!keep) rmSync(work, { recursive: true, force: true });
+    // A work dir that cannot be removed (a handle held a moment longer than the CLI) is not a failed render:
+    // the output already passed its gate, so say so and leave the dir for the next sweep.
+    if (!keep) {
+      try {
+        rmSync(work, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+      } catch (e) {
+        log(`compose: could not remove the work dir ${work} (${e.code || e.message}); leaving it`);
+      }
+    }
   }
 }
 

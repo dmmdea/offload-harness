@@ -20,12 +20,11 @@
 // the same table for `doctor` (internal/mediacap/routeneeds.go); a class missing here is
 // still reported, just without the pack hint.
 // ComfyUI-MultiGPU archives upstream 2026-09-30 (issue #223, no successor endorsed).
-// Pinned commit ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83 (upstream v2.6.4's last code
-// commit b51c99a5 + one local Windows P2P/cudart fix already carried by the fleet),
-// mirrored privately at dmmdea/ComfyUI-MultiGPU-mirror. See
+// The mirror's head is upstream v2.6.4's last code commit + one local Windows P2P/cudart
+// fix already carried by the fleet; mirrored privately at dmmdea/ComfyUI-MultiGPU-mirror. See
 // docs/systems/media-generation.md "Archival".
 const MULTIGPU_ARCHIVAL_NOTE =
-  " — ARCHIVED upstream 2026-09-30 (no successor); pinned ed1ffaef7cec1a6, mirror https://github.com/dmmdea/ComfyUI-MultiGPU-mirror";
+  " — ARCHIVED upstream 2026-09-30 (no successor); install from the mirror https://github.com/dmmdea/ComfyUI-MultiGPU-mirror";
 
 export const NODE_PACKS = Object.freeze({
   VHS_VideoCombine: "ComfyUI-VideoHelperSuite (https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)",

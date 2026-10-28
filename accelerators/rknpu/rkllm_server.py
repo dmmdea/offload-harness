@@ -319,7 +319,7 @@ class RKLLMCallback(ctypes.Structure):
     ]
 
 
-# ---------------------------------------------------------------- RKNN C API (librknnrt.so 2.3.2, rknn_api.h)
+# ---------------------------------------------------------------- RKNN C API (librknnrt.so, rknn_api.h)
 #
 # Only what the vision encoder needs: rknn_init/query/set_core_mask/inputs_set/run/outputs_get/
 # outputs_release/destroy and the four structs they take. Same rule as above: header order, header widths.

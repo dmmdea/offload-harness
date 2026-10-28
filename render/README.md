@@ -335,12 +335,13 @@ node render/compose-hyperframes.mjs render --hyperframes-dir <dir> --browser <ch
 node render/compose-hyperframes.mjs render ... --template lower-third --format webm \
   --variables-file vars.json --snapshots 1,2.5 --out lt.webm
 node render/captions-groups.mjs clip.segments.json --out chunks.json   # words_json for captions-bar
-node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>   # the CLI's own Chrome (installer step)
+node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>   # HyperFrames' own Chrome (installer step)
 node render/compose-hyperframes.mjs version --hyperframes-dir <dir>   # acceptance check
 ```
 
-This is the only door to the installed HyperFrames CLI (npm `hyperframes`, the newest release, installed from the
-package manifest in `setup/hyperframes/`; versions are never pinned, ADR 0099). It is **CPU-class**: software GL and CPU encode, with no
+This is the only door to the HyperFrames CLI (npm `hyperframes`; the installers put in the newest
+release from the package manifest in `setup/hyperframes/`, verified by the registry's integrity field, and the
+runner requires only the floor in `setup/floors.json`; ADR 0099). It is **CPU-class**: software GL and CPU encode, with no
 `withGpuSlot` and no GPU lease (ADR 0059).
 
 Every call goes through the same guards:
@@ -366,7 +367,7 @@ Templates, and the contract each one keeps, are in
 # Workflow templates catalog (read-only, `templates-catalog.mjs`)
 
 Lists and classifies the ComfyUI workflow templates a node already carries: the
-`comfyui-workflow-templates` package ComfyUI pins, a checkout of the upstream repository, or a
+`comfyui-workflow-templates` package ComfyUI requires, a checkout of the upstream repository, or a
 `pip download` extract of a candidate version. Dependency-free (`node:` builtins), read-only, no
 network. It never runs a template, downloads a model, installs a package or changes a config; the
 only file it writes is the one named by `--out`. Every count names the package it was computed on.
@@ -375,6 +376,7 @@ only file it writes is the one named by `--out`. Every count names the package i
 node render/templates-catalog.mjs summary   --comfy-dir <comfyui-tree>          # counts, each with its basis
 node render/templates-catalog.mjs list      --comfy-dir <comfyui-tree> --tag "Text to Image"
 node render/templates-catalog.mjs snapshot  --comfy-dir <comfyui-tree> --label nodeA --out nodeA.json
+node render/templates-catalog.mjs record-rules --comfy-dir <comfyui-tree>       # writes .offload-rule-files.json there
 node render/templates-catalog.mjs readiness --comfy-dir <comfyui-tree> --snapshot nodeA=nodeA.json --mode both
 node render/templates-catalog.mjs diff      --comfy-dir <comfyui-tree> --snapshot nodeA=nodeA.json \
     --candidate-dir <extract>/comfyui_workflow_templates_json/templates
@@ -385,7 +387,9 @@ node render/templates-catalog.mjs diff      --comfy-dir <comfyui-tree> --snapsho
 node, then compare on one machine. The whole file can be piped to `node --input-type=module - snapshot
 --comfy-dir <tree>` on a node with nothing deployed (a piped file has no licence map beside it, so its other
 verbs need `--license-map FILE`). `readiness` is directory-aware: a file counts only if ComfyUI would offer it
-to the loader that reads it. `list` hides paid API templates and FLUX-family ones unless `--include-hidden`
+to the loader that reads it; it compares the two ComfyUI rule files (`folder_paths.py`, `utils/extra_config.py`) with the
+record `record-rules` wrote in the ComfyUI folder when the checkout was registered or refreshed, and says "not recorded"
+(never a refusal) when there is none. `list` hides paid API templates and FLUX-family ones unless `--include-hidden`
 (naming `--kind api` lists the paid ones without it). The licence map
 is `render/templates-license-map.json`. Rules, fields and gaps:
 [`docs/systems/media-generation.md`](../docs/systems/media-generation.md#comfy-workflow-templates-catalog-phase-a).

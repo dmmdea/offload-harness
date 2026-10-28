@@ -6,6 +6,8 @@ superseded_by: 0099-frontier-updates-floors-never-pins.md
 
 # The embeddinggemma2 entry may run from a second llama.cpp build
 
+> Status: Superseded by ADR 0099 for the pinning mechanism (2026-10-28): the installer no longer carries one pinned llama.cpp tag: it installs the newest complete build and `setup/floors.json` holds the floor. The rest of this decision stands, and the text below is kept as written.
+
 ## Context
 
 0.175.0 added the `embeddinggemma2` entry (EmbeddingGemma-2, a second memory-stack embedder) to ten of the eleven serving

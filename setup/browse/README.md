@@ -11,12 +11,13 @@ Safety built into the sidecar: a deny-list removes publish/send/delete/pay-style
 sees them and rechecks them, including the live element, at execution; a host allowlist ends the run when
 the page leaves it; captured traffic has cookies, authorization and token-like headers redacted.
 
-## Pins
+## Dependencies
 
-- `browser-harness==0.1.13`
-- `jev-ultrafast` at commit `1231850a0bf1a0c0341fe408ef1668dbbfdfac46`
+- `browser-harness>=0.1.13` (a floor: the newest release at install time)
+- `jev-ultrafast` from the head of its git default branch (no commit is named)
 
-Both are locked in `uv.lock`; install uses `uv sync --frozen`.
+There is no lockfile: install runs `uv sync`, which resolves the newest versions and verifies each download
+against the registry's own hashes.
 
 ## Install
 
@@ -25,7 +26,7 @@ pwsh setup/browse/install.ps1              # into ~/.local-offload/browse
 pwsh setup/browse/install.ps1 -OffloadHome <OFFLOAD_HOME>
 ```
 
-The script copies the sidecar, syncs the pinned environment, runs the unit tests with the venv python and
+The script copies the sidecar, syncs the environment, runs the unit tests with the venv python and
 prints one JSON line with `browse_python` and `browse_script` (the values for the `browse_*` config keys).
 
 ## Tests
@@ -36,7 +37,7 @@ python -m unittest -v test_runner
 ```
 
 The tests cover the pure helpers and, through fake `Browser` classes, the observe and act wrappers. They need
-neither the pinned packages, a browser nor a network. The animation-script and mutation-counter tests run
+neither the dependency packages, a browser nor a network. The animation-script and mutation-counter tests run
 their scripts under `node` and are skipped when `node` is not on the PATH.
 
 ## Protocol

@@ -5,6 +5,8 @@ date: "2026-10-24"
 
 # A forecaster is a llama-swap media seat, and a box with no forecast model forwards
 
+> Status: Superseded by ADR 0099 for the pinning mechanism (2026-10-28): the timestral package commit and the Hugging Face revision are no longer pinned: `install forecast` resolves both from the publisher at install time and checks the weights against the digest and size the publisher gives. The rest of this decision stands, and the text below is kept as written.
+
 ## Context
 
 The operator asked on 2026-10-24 for a new model type on the harness, Mistral AI's Timestral-209M, tested and wired across

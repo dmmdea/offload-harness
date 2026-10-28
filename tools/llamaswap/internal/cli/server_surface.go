@@ -5,7 +5,7 @@
 // Two questions this CLI could previously only answer by assumption:
 //
 //  1. Is the server actually the version this CLI was written against? The
-//     pinned surface (v249) was an invisible assumption baked into the
+//     schema-snapshot surface was an invisible assumption baked into the
 //     capability map, the User-Agent, and the config schema. `version drift`
 //     turns it into an asserted, reported fact.
 //  2. Is the thing on the other end llama-swap at all? llama.cpp's own
@@ -179,9 +179,9 @@ func routerModeWarning() string {
 // version drift
 // ---------------------------------------------------------------------------
 
-// pinnedSurfaceVersion is the llama-swap build this CLI's surface knowledge was
-// written and verified against. It is read from the config-schema constant so
-// there is ONE pin in the tree rather than a copy that can rot separately.
+// pinnedSurfaceVersion is the llama-swap release the vendored config-schema snapshot carries
+// (schema/snapshot.json, refreshed by scripts/refresh-llamaswap-schema.sh). It is a FLOOR: a
+// server older than it is drift, a newer one is fine. One source, so no copy can rot separately.
 func pinnedSurfaceVersion() string { return lsconfig.SchemaLlamaSwapVersion }
 
 // surfaceVersionPattern extracts the numeric part of a version like "v249".
@@ -219,10 +219,11 @@ func newVersionDriftCmd(flags *rootFlags) *cobra.Command {
 		Long: `Reports whether the server this CLI is pointed at is the build its surface
 knowledge was written against.
 
-The pin is otherwise invisible: the capability map, the config schema
-validator, and the User-Agent all assume ` + lsconfig.SchemaLlamaSwapVersion + `. This command turns
-that assumption into an asserted fact, and names the commands whose behaviour
-depends on the difference when there is one.
+The snapshot is otherwise invisible: the capability map and the config schema
+validator assume at least ` + lsconfig.SchemaLlamaSwapVersion + `. This command turns that assumption into
+an asserted fact (a floor: only a server OLDER than the snapshot is drift; a newer
+server is fine), and names the commands whose behaviour depends on the difference
+when there is one.
 
 It also reports WHICH BACKEND answered. llama.cpp's own llama-server has
 shipped a native model-swapping router mode since Dec 2025 that serves a
@@ -313,7 +314,7 @@ func surfaceVersionNumber(v string) (int, bool) {
 func surfaceDriftPrint(w io.Writer, r *surfaceDriftReport) {
 	fmt.Fprintf(w, "%s\n", bold("version drift"))
 	fmt.Fprintf(w, "  backend         %s (%s)\n", r.Backend.Kind, r.Backend.Confidence)
-	fmt.Fprintf(w, "  CLI pinned      %s\n", r.Pinned)
+	fmt.Fprintf(w, "  schema snapshot %s\n", r.Pinned)
 	fmt.Fprintf(w, "  live server     %s %s\n", r.Live, r.Commit)
 	fmt.Fprintf(w, "  relation        %s\n", r.Relation)
 	fmt.Fprintf(w, "  verdict         %s\n", r.Verdict)
@@ -416,7 +417,7 @@ func doctorCheckSurfaceDrift(ctx context.Context, flags *rootFlags) doctorFindin
 	switch {
 	case !okP || !okL:
 		f.Severity = doctorInfo
-		f.Detail = fmt.Sprintf("could not compare pinned %s with live %q", pinnedSurfaceVersion(), ver.Version)
+		f.Detail = fmt.Sprintf("could not compare the schema snapshot %s with live %q", pinnedSurfaceVersion(), ver.Version)
 	case live == pinned:
 		f.Detail = fmt.Sprintf("live server %s matches the %s surface this CLI was verified against", ver.Version, pinnedSurfaceVersion())
 	case live > pinned:

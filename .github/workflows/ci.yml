@@ -49,43 +49,15 @@ jobs:
           fi
           bash ./scripts/check-deletions.sh 'HEAD^1' HEAD
 
-      # H-26. go.mod names the toolchain that ships (`toolchain go1.27.3`). This step only installs a
-      # go command to start from: with GOTOOLCHAIN at its default (auto) the first go command below
-      # reads that line, fetches the release and runs under it, so build, vet and test judge the
-      # compiler that ships. setup-go@v5 leaves GOTOOLCHAIN alone. From v6 the action exports
-      # GOTOOLCHAIN=local, and under it the go command ignores a toolchain line without a word, so a
-      # bump to v6 must read go.mod (`go-version-file: go.mod`, and no `go-version`, which would win)
-      # instead of naming 1.26.x; TestCISetupGoLeavesTheToolchainSwitchAlone fails until it does, and
-      # accepts exactly that.
+      # go.mod's `go` line is the floor. With GOTOOLCHAIN at its default (auto) the go command downloads a newer
+      # toolchain when the module needs one, and check-latest makes the action take the newest release of the
+      # line's minor, so build, vet and test judge the compiler a contributor gets today. No version is named
+      # here: the action reads the floor from go.mod and nothing else.
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
-
-      # H-26. The switch described above can stop working without a message, and then the job is green on a
-      # compiler that does not ship: GOTOOLCHAIN=local (setup-go from v6 exports it; a runner image can set it)
-      # makes the go command ignore the toolchain line. This step asks the go command itself, before anything else
-      # uses it, and fails unless it runs exactly the release the line names; its log line names both.
-      # Exactly, because the govulncheck job scans under that release and the jobs must not disagree about
-      # which compiler ships; raise `go-version` past the pin only together with the pin.
-      - name: The go command runs the toolchain go.mod names (H-26)
-        shell: bash
-        run: |
-          set -euo pipefail
-          want=$(awk '$1 == "toolchain" { sub(/\r$/, "", $2); print $2; exit }' go.mod)
-          if ! [[ "$want" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+|rc[0-9]+)?$ ]]; then
-            echo "::error file=go.mod::go.mod has no usable toolchain line (found '$want'); H-26 pins one"
-            exit 1
-          fi
-          if ! have=$(go env GOVERSION | tr -d '\r'); then
-            echo "::error::'go env GOVERSION' failed, so the compiler this job runs is unknown (go.mod's toolchain line names '$want')"
-            exit 1
-          fi
-          echo "go.mod names $want; the go command runs $have"
-          if [ "$have" != "$want" ]; then
-            echo "::error::the go command runs '$have' and go.mod's toolchain line names '$want': the line was not applied (GOTOOLCHAIN=local?), so this job does not judge the compiler that ships"
-            exit 1
-          fi
+          go-version-file: go.mod
+          check-latest: true
 
       - name: Build
         run: go build ./...
@@ -121,7 +93,7 @@ jobs:
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
-          node-version: '24.x'
+          node-version: current
 
       - name: Test render runners
         run: node --test render/*.test.mjs
@@ -139,32 +111,12 @@ jobs:
       - name: Check out code
         uses: actions/checkout@v4
 
-      # H-26: go.mod's toolchain line applies here as in the build job (see the comment there).
+      # The Go floor comes from go.mod here as in the build job (see the comment there).
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
-
-      # H-26: the same proof as in the build job, here on the Windows runner (bash, whose go.exe answers the
-      # same question).
-      - name: The go command runs the toolchain go.mod names (H-26)
-        shell: bash
-        run: |
-          set -euo pipefail
-          want=$(awk '$1 == "toolchain" { sub(/\r$/, "", $2); print $2; exit }' go.mod)
-          if ! [[ "$want" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+|rc[0-9]+)?$ ]]; then
-            echo "::error file=go.mod::go.mod has no usable toolchain line (found '$want'); H-26 pins one"
-            exit 1
-          fi
-          if ! have=$(go env GOVERSION | tr -d '\r'); then
-            echo "::error::'go env GOVERSION' failed, so the compiler this job runs is unknown (go.mod's toolchain line names '$want')"
-            exit 1
-          fi
-          echo "go.mod names $want; the go command runs $have"
-          if [ "$have" != "$want" ]; then
-            echo "::error::the go command runs '$have' and go.mod's toolchain line names '$want': the line was not applied (GOTOOLCHAIN=local?), so this job does not judge the compiler that ships"
-            exit 1
-          fi
+          go-version-file: go.mod
+          check-latest: true
 
       # D-98. The Windows cage's environment proof runs here, on a Windows runner, on every change. Its
       # two tests are SKIP stubs on every other OS, so `go test ./...` in the build job proves nothing
@@ -248,7 +200,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version-file: go.mod
+          check-latest: true
           cache-dependency-path: tools/comfyui/go.sum
 
       - name: Build
@@ -285,7 +238,8 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version-file: go.mod
+          check-latest: true
           cache-dependency-path: tools/llamaswap/go.sum
 
       - name: Build
@@ -325,20 +279,14 @@ jobs:
         run: bun test
 
   # H-26 (supply-chain lane). Every pull request and push is scanned for known vulnerabilities with
-  # the compiler that ships. The root module and both printed CLIs under tools/ (separate modules,
-  # which the root's `./...` never reaches) are scanned for linux AND windows, because some advisories
-  # name one OS.
+  # the newest compiler the floor in go.mod allows. The root module and both printed CLIs under tools/
+  # (separate modules, which the root's `./...` never reaches) are scanned for linux AND windows, because
+  # some advisories name one OS.
   #
-  # The scanner is pinned to a release tag, so a new release of it cannot change what a change is
-  # judged by; raising it is a one-line edit. The advisory data is not pinned, on purpose: a new
-  # advisory turns this job red between releases, and the fix is a bump of the pin in go.mod or of
-  # the dependency.
-  #
-  # GOTOOLCHAIN comes from go.mod's toolchain line. That runs the printed CLIs (no toolchain line of
-  # their own) under the same compiler and builds govulncheck with it, because `go install
-  # pkg@version` ignores the current module's toolchain line. A go.mod without the line fails the
-  # step: an empty GOTOOLCHAIN means "default", and the job would carry on with the runner's own
-  # compiler and call it pinned.
+  # Nothing here is pinned: the scanner is `govulncheck@latest` and the advisory data is the database's
+  # newest, so a new release of either, or a new advisory, can turn this job red between releases, and the
+  # fix is a bump of the dependency. The Go release comes from go.mod's `go` line as a floor, taken at its
+  # newest by check-latest.
   #
   # govulncheck exits 3 when the code calls a vulnerable function and 1 when the scan could not run
   # (the vulnerability database is unreachable, a package does not load). All six scans always run,
@@ -355,24 +303,14 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
+          go-version-file: go.mod
+          check-latest: true
           cache: false
-
-      - name: Use the toolchain go.mod names
-        run: |
-          set -euo pipefail
-          toolchain=$(awk '$1 == "toolchain" { sub(/\r$/, "", $2); print $2; exit }' go.mod)
-          if ! [[ "$toolchain" =~ ^go[0-9]+\.[0-9]+(\.[0-9]+|rc[0-9]+)?$ ]]; then
-            echo "::error file=go.mod::go.mod has no usable toolchain line (found '$toolchain'); H-26 pins one"
-            exit 1
-          fi
-          echo "GOTOOLCHAIN=$toolchain" >> "$GITHUB_ENV"
-          echo "govulncheck runs under $toolchain"
 
       - name: Install govulncheck
         run: |
           set -euo pipefail
-          go install golang.org/x/vuln/cmd/govulncheck@v1.8.0
+          go install golang.org/x/vuln/cmd/govulncheck@latest
           gopath=$(go env GOPATH)
           echo "$gopath/bin" >> "$GITHUB_PATH"
 

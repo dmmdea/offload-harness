@@ -5,6 +5,8 @@ date: "2026-07-18"
 
 # Pinned-additive provisioning that never moves host torch
 
+> Status: Superseded by ADR 0099 for the pinning mechanism (2026-10-28): the node packs are no longer pinned to exact commits: a pack is installed at the head of its default branch and the commit it got is recorded beside it. The host-torch constraint is derived from the installed environment and stands. The rest of this decision stands, and the text below is kept as written.
+
 ## Context
 
 The run-graph primitive accepts a Node Manifest naming the ComfyUI custom node packs a graph needs,

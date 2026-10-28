@@ -7,7 +7,11 @@ it, the venv's own package is never edited, and removing the overlay is one env 
 The renderer (`local-offload install vllm-seat`) refuses to render an fp8-KV seat without an overlay, because stock
 LMCache restores fp8 pages corrupt on hybrid models and reports success while doing it (patch 01).
 
-## Patches (base: LMCache 0.5.5)
+## Patches (written against LMCache 0.5.5)
+
+These patches target the LMCache version they were written against; that is the version they are known to apply to,
+not a pin. They carry a re-base duty: the update path re-applies them on the newest LMCache and fails loud when they do
+not apply, keeping the previous generation serving, and a patch that no longer applies is re-ported or dropped.
 
 | Patch | What it fixes | Needed by |
 |---|---|---|

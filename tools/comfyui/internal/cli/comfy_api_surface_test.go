@@ -49,7 +49,7 @@ func TestComfyBuildFeaturesResult(t *testing.T) {
 		wantMissing []string
 	}{
 		{
-			name:        "pinned server matches",
+			name:        "known server matches",
 			payload:     comfyFeaturesPayload,
 			wantVerdict: "MATCH",
 		},
@@ -92,8 +92,8 @@ func TestComfyBuildFeaturesResult(t *testing.T) {
 			if !equalStrings(got.Missing, tc.wantMissing) {
 				t.Errorf("missing = %v, want %v", got.Missing, tc.wantMissing)
 			}
-			if got.PinnedAPIVersion != comfyPinnedAPIVersion {
-				t.Errorf("pinned_api_version = %q, want %q", got.PinnedAPIVersion, comfyPinnedAPIVersion)
+			if got.KnownAPIVersion != comfyKnownAPIVersion {
+				t.Errorf("known_api_version = %q, want %q", got.KnownAPIVersion, comfyKnownAPIVersion)
 			}
 		})
 	}

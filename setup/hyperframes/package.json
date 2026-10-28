@@ -2,15 +2,12 @@
   "name": "offload-harness-hyperframes",
   "version": "0.0.0",
   "private": true,
-  "description": "Pinned, project-local HyperFrames install for the offload_compose_video lane (ADR 0059). Installed with `npm ci --ignore-scripts` from the committed lockfile; never installed globally.",
+  "description": "Project-local HyperFrames install for the offload_compose_video lane (ADR 0059). The harness installs the newest npm release with `npm install --ignore-scripts` (no lockfile, no exact version: floors live in setup/floors.json, ADR 0099); never installed globally.",
   "license": "Apache-2.0",
   "engines": {
     "node": ">=22"
   },
   "dependencies": {
-    "hyperframes": "0.8.114"
-  },
-  "allowScripts": {
-    "esbuild@0.25.12": true
+    "hyperframes": "latest"
   }
 }

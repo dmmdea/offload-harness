@@ -5,6 +5,8 @@ date: "2026-08-16"
 
 # The agent lane is tailnet-only, bearer-gated, quality-first-placed, and hop-limited
 
+> Status: Superseded by ADR 0099 for the pinning mechanism (2026-10-28): `render/node-packs.json` holds repositories, not commits: a pack is admitted by repository and the node records the commit it installed. The rest of this decision stands, and the text below is kept as written.
+
 Decision provenance: made by the operator-approved multi-node delegation plan (2026-08-16,
 five-persona council reshape applied); this ADR records those already-made decisions per the
 ownership rule in the index README.

@@ -7,6 +7,7 @@ non-loopback bind, and the manifest-mismatch refusal. Run: python3 test_server.p
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -102,10 +103,14 @@ def main() -> int:
             p.kill()
             p.wait()
 
-        # Manifest mismatch: a file present under the right name but the wrong bytes must be REFUSED
-        # (structured model_sha_mismatch), never loaded. Needs ENABLED=1 to reach the manifest check.
+        # Recorded-digest mismatch: a file whose bytes differ from the digest fetch-models.sh recorded in
+        # models.installed.json must be REFUSED (structured model_sha_mismatch), never loaded. Needs ENABLED=1
+        # to reach the check. A file with no record is not refused (unverified).
         with open(os.path.join(models_dir, "efficientnet-edgetpu-S_quant_edgetpu.tflite"), "wb") as fh:
             fh.write(b"not a model")
+        with open(os.path.join(models_dir, "models.installed.json"), "w", encoding="utf-8") as fh:
+            json.dump({"installed": [{"file": "efficientnet-edgetpu-S_quant_edgetpu.tflite",
+                                      "digest": "sha256:" + hashlib.sha256(b"the model that was fetched").hexdigest()}]}, fh)
         p, port = _start({"CORAL_ENABLED": "1"}, models_dir)
         try:
             code, r = _req(port, "POST", "/v1/classify", {"image_path": "/x.jpg"})

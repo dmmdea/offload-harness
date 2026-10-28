@@ -328,7 +328,7 @@ both. Field-measured traps (<node-e>, 2026-08-22):
 ### run-graph satisfier prerequisite (`offload_run_graph`)
 
 `offload_run_graph` self-provisions a workflow's node manifest against the ComfyUI install.
-Packs are cloned/checked out from their admitted repositories (the commit recorded) via **git**, then ALL packs' deps are
+Packs are cloned (the head of the repository's default branch; the commit it got is recorded in `custom_nodes/<name>.installed.json`) via **git**, then ALL packs' deps are
 resolved in **one `uv pip compile`** (under the host-torch constraints) and installed as one
 lock — so **`uv` in the ComfyUI venv is the REQUIRED satisfier tool** (live finding
 2026-07-17: the installed cm-cli has no `--uv` flag, so uv is driven directly).
@@ -752,7 +752,7 @@ local-offload install forecast            # --home / --models to relocate; --jso
 ```
 
 It builds `<OFFLOAD_HOME>/forecast/venv` (python 3.13), installs torch with `--torch-backend=auto`, installs `timestral` from the
-head of its default branch (the commit recorded), fetches the weights at the newest revision into `<models>/timestral-209m` (verified against the published oid) and writes the
+head of its default branch, fetches the weights at the revision `main` names on Hugging Face at install time into `<models>/timestral-209m` (checked against the digest and size the Hub publishes) and writes the
 server file. A second run changes nothing. The weights are Modified MIT: keep the attribution "2026 - Mistral AI" and note that
 there are no rights for a company whose global consolidated monthly revenue exceeds USD 20M (the install prints this line
 and nothing gates on it). The seat's command runs the harness binary where the installer laid it down
@@ -769,43 +769,45 @@ installs HyperFrames, which renders HTML/CSS motion graphics to video on the CPU
 route unbound (`compose_script: ""`, NOT CONFIGURED). A skipped lane is a legitimate state, not a
 failure. What the step does:
 
-1. Resolves the newest published `hyperframes` from the npm registry (`install.sh`: version, SRI integrity and
-   tarball from the registry document; a generation under `<OFFLOAD_HOME>/hyperframes-versions/<version>` with
-   `hyperframes` a symlink to it). `install.ps1` still installs from `setup/hyperframes/package.json` with the
-   committed lockfile until the runtime-refusals change that follows this one moves it to the same resolver.
-2. `npm install --ignore-scripts`, which installs the newest tree, each package verified by npm against the registry's
-   integrity value, with no install script; the top-level package must match the integrity the registry states, and
-   the packages whose versions moved against the previous generation are listed.
+1. Resolves the newest published `hyperframes` from the npm registry. `install.sh` reads the version, SRI integrity and
+   tarball from the registry document and builds a generation under `<OFFLOAD_HOME>/hyperframes-versions/<version>` with
+   `hyperframes` a symlink to it. `install.ps1` copies `setup/hyperframes/package.json` (npm `hyperframes`, `latest`;
+   no lockfile, no exact version) into a staging directory under `<OFFLOAD_HOME>/hyperframes`.
+2. `npm install --ignore-scripts`, which resolves the newest release and verifies each tarball against the registry's
+   integrity field, with no install script. The staged version must be at or above the floor in `setup/floors.json`
+   (`install.sh` also checks that the top-level package matches the integrity the registry states and lists the packages
+   whose versions moved against the previous generation); the new tree is then swapped in (`install.ps1` keeps the old
+   one as `node_modules.prev`), and an install already at the newest is kept, never downgraded.
 3. `npm audit signatures`, which checks the registry signatures and SLSA provenance. **A failure is
    fatal and the installer stops.** Do not work around it. Surface it to the human, because the
-   package or the registry answer is not what the registry's own signatures promise.
+   package or the registry answer is not what the registry's signatures promise.
 4. `npm rebuild esbuild`, the one postinstall the CLI needs, run on purpose after verification.
 5. `node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>`, which runs `browser ensure`
    through the harness runner. The env is scrubbed and HyperFrames' state lands in
-   `<dir>/home`. It downloads the CLI's own chrome-headless-shell from Chrome for Testing
-   (the build HyperFrames names; 152.0.7977.30 for 0.8.114 when measured on 2026-10-09; about 270 MB on disk on win64) and prints its path.
+   `<dir>/home`. It downloads HyperFrames' own chrome-headless-shell from Chrome for Testing
+   (about 270 MB on disk on win64; the harness does not compare its build) and prints its path.
 6. Seeds `compose_script`, `hyperframes_dir` and `hyperframes_browser_path` into a **fresh**
    config. An existing config is never rewritten; the installer prints the three keys to add by
    hand.
 
 On a node that is already installed, `local-offload install hyperframes` runs steps 1-5 on their own,
-from the `package.json` the binary carries, so a node with no repository checkout can do it.
+from the `package.json` (`latest`) and the floors file the binary carries, so a node with no repository checkout can do it.
 It works in the config's `hyperframes_dir` (or `--dir`) and never leaves the node worse off:
 
 - it refuses before touching anything when the directory holds something other than a harness install;
-- a healthy install (the package file, a version at or above the floor and a tree `npm ls` accepts) at the
-  newest published release is kept and only re-verified; an older one is replaced by the newest;
-- anything else is built in `<dir>/.install-staging`, where `npm install` and `npm audit signatures` run, so
+- a healthy install (the package file, a version at or above the floor and the registry's newest, and a
+  tree `npm ls` accepts) is kept and only re-verified;
+- anything else is built in `<dir>/.install-staging`, where `npm install --ignore-scripts` and `npm audit signatures` run, so
   a failure there leaves the live install exactly as it was; only a verified tree is swapped in, and the
-  replaced one is kept as `<dir>/node_modules.prev` (with `package.json.prev`)
-  for a rollback to an older release;
+  replaced one is kept as `<dir>/node_modules.prev` (with `package.json.prev`, and `package-lock.json.prev` when the
+  old tree had one) for a rollback to an older release;
 - `npm rebuild esbuild` and the runner's `browser` and `version` ops then run on the new tree, and if one
   fails the previous install is put back.
 
-It fails when the config binds another Chrome build than the one the installed HyperFrames resolves (it names the
-value to set), and gives up after `--timeout` (45 minutes by default). A node whose install is below the floor in
-`setup/floors.json` reads `compose_video` BOUND-BUT-MISSING in `doctor` and every composition defers `CLI_MISSING`
-until the command runs.
+It prints a note when the config binds another directory or another Chrome build than the one it installed (it
+names the value to set), and gives up after `--timeout` (45 minutes by default). A runner whose floor in
+`setup/floors.json` rises above a node's install needs it on that node: until it runs, `doctor` reads
+`compose_video` BOUND-BUT-MISSING ("holds hyperframes X, below the floor Y") and every composition defers `CLI_MISSING`.
 
 Rules for the installing agent:
 
@@ -813,7 +815,7 @@ Rules for the installing agent:
   `npx skills add heygen-com/hyperframes`. A global install self-upgrades in a detached process.
   `init` and `skills` write agent skills into `~/.claude` and every other agent's skills dir.
 - Do not substitute a lookalike package (`dsh-hyperframes`, `hyfrme`, `framevox`, `framepack`). The
-  install names `hyperframes` and `@hyperframes/*` only.
+  installed tree holds `hyperframes` and `@hyperframes/*` only.
 - Verify with `local-offload doctor` (expect `compose_video CONFIGURED … templates=callout-label,captions-bar,checklist-card,lower-third,section-title,stat-card,title-card`)
   and `local-offload acceptance` (a `hyperframes (compose runner)` row, which runs the installed CLI's
   `--version` as this identity).
@@ -822,7 +824,7 @@ Rules for the installing agent:
   detail carries the launch error, which names the library. This is expected from Puppeteer's
   launch error. Two x86-64 Linux nodes have rendered through the lane with the libraries they already
   had: one on 0.8.61, and on 2026-10-02 another ran `local-offload install hyperframes` into an empty
-  directory and rendered `title-card` (mp4) and `lower-third` (webm, alpha present) on 0.8.114, both
+  directory and rendered `title-card` (mp4) and `lower-third` (webm, alpha present) on the release current that day, both
   with `lint` 0/0 and `check` passing.
 
 ---

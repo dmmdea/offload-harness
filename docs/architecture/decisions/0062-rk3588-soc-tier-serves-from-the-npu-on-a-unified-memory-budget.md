@@ -5,6 +5,8 @@ date: "2026-09-30"
 
 # ADR 0062 — An RK3588 SoC board is its own tier: it serves from the NPU on a unified-memory budget, never from the CPU, and a GPU entry waits for a clean measurement
 
+> Status: Superseded by ADR 0099 for the pinning mechanism (2026-10-28): the sha256 rows and the runtime versions this decision names are replaced by resolve-at-fetch: the fetch scripts take the newest release, verify the publisher's digest and record what was installed in `models.installed.json`; the versions named below are measurement records. The rest of this decision stands, and the text below is kept as written.
+
 ## Context
 
 The operator added a Rockchip RK3588 board (reference: `<node-d>`, RK3588S) to the fleet. It has no

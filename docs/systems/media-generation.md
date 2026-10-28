@@ -14,7 +14,7 @@ the memory is gone; no `/free`, no Python). The sdcpp path exists for the AMD/Vu
 (`amd-rdna3*` profiles seed it with the Apache-2.0 Z-Image-Turbo GGUF set — see
 `setup/SETUP-AGENT.md`, Media tier) but runs on any Vulkan GPU. Go-side, the runner is a thin
 `gpugen.Spec` with `SkipFreeComfy:true` — the shape the TTS path proved; the runner owns the
-mapping from the harness's generic flags to sd.cpp's CLI, so an engine update fixes flag drift in one
+mapping from the harness's generic flags to sd.cpp's CLI, so a new sd.cpp release fixes flag drift in one
 `.mjs` file, never in Go. `sd-server` (OpenAI/A1111-compatible, ships in the same release zip) is
 the recorded warm-swap upgrade path — deliberately not wired yet.
 
@@ -466,7 +466,7 @@ reaches the worker as one `--flag=value` token, so a text, a path or a negative 
 
 A local ComfyUI installation (`comfy_dir`), the model files named by the bindings below, GIMP for the
 design ops, and the Node renderer scripts under `render/`. The composition lane needs Node >= 22,
-the HyperFrames install (`setup/hyperframes/`, the newest npm release), its chrome-headless-shell (HyperFrames' own build),
+the HyperFrames install (`setup/hyperframes/`, the newest npm release), the chrome-headless-shell HyperFrames fetches for itself,
 and ffmpeg + ffprobe.
 
 ## Downstream effects
@@ -508,7 +508,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
 | Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
 | ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec`; launch profile `comfy_cuda_device`, `comfy_dynamic_vram` (`on`/`off`/`""`), `comfy_extra_args` |
-| Composition (HyperFrames) | `compose_script` (`render/compose-hyperframes.mjs`), `hyperframes_dir` (the installed HyperFrames), `hyperframes_browser_path` (the chrome-headless-shell HyperFrames fetched), `compose_timeout_sec` (1800), `compose_workers` (`""`/`auto` or 1-24), `compose_cache_dir` (`""` = `<media_dir>/.compose-cache`), `compose_quality` (`high`); `ffmpeg_path` (ffprobe beside it). All three route keys empty = NOT CONFIGURED; the installer binds them |
+| Composition (HyperFrames) | `compose_script` (`render/compose-hyperframes.mjs`), `hyperframes_dir` (the install), `hyperframes_browser_path` (HyperFrames' own chrome-headless-shell), `compose_timeout_sec` (1800), `compose_workers` (`""`/`auto` or 1-24), `compose_cache_dir` (`""` = `<media_dir>/.compose-cache`), `compose_quality` (`high`); `ffmpeg_path` (ffprobe beside it). All three route keys empty = NOT CONFIGURED; the installer binds them |
 
 Hardware profiles seed these. The single-card 16 GB tiers (`blackwell-16`, `ampere-16`, `volta-16`)
 and the 8 GB tiers' RAM layer bind **HiDream-O1** via `imagegen_family` — the official graph for that
@@ -1062,7 +1062,7 @@ nobody has measured would admit on a guess; this errs toward waiting for the hos
 **Not measured, said once.** Neither 2.1 row has been run card-only above 2048x2048 (the family default and the cap of both); the out-of-memory watch, the tiled-decode verdict
 and the loader-input check are tested against fakes and the benchmark's log lines, not against a live wedge; the typed edit door records no footprint or host peak
 (the single-card edit route never did), so nothing yet cross-checks a measured zero against the host's real growth;
-the installed ComfyUI-MultiGPU is a newer commit than the one the benchmark pinned (the loader classes the recipes name are present, checked by name);
+the installed ComfyUI-MultiGPU is a newer commit than the one the benchmark ran on (the loader classes the recipes name are present, checked by name);
 the 2511 Q5_1 GGUF edit row's peaks are arithmetic; the port fallback for a pair instance with neither `--api` nor `COMFY_API` is untested; the lane
 probe answers for the image route, not for the edit route; and a box with three non-display cards is refused until a pair is named with `gpu reserve --devices`,
 because which two of three is a measurement nobody made.
@@ -1094,7 +1094,7 @@ in `Ecosystem/Benchmarks and Optimizations/2026-09-22-qwen-image-21-hyperframes/
 Neither native Dynamic VRAM nor `SelectModelDevice`/"MultiGPU Work Units" reproduce this pack's
 donor+compute `virtual_vram_gb` weight-sharding (needed by the Wan GGUF lane and the pooled
 krea2/LTX-2.5 seats), so the harness stays on MultiGPU for those rather than migrating
-blind. **Source: the mirror's default branch** — upstream v2.6.4's last
+blind. **Source: the private mirror's default branch** — its head is upstream v2.6.4's last
 code commit plus one already-deployed local fix
 (`fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM`, operator, 2026-09-01 —
 the first-stage fix for upstream issue #220's `libcudart.so`-on-Windows crash; the second-stage
@@ -1103,12 +1103,12 @@ the first-stage fix for upstream issue #220's `libcudart.so`-on-Windows crash; t
 seat keeps `compute cuda:0`). **Fallback source once upstream goes read-only:** private mirror
 `https://github.com/dmmdea/ComfyUI-MultiGPU-mirror` (full `git clone --mirror`, all branches/tags,
 plus the local fix). `render/comfy-nodes.mjs` (`NODE_PACKS`) and
-`internal/mediacap/routeneeds.go` (`nodePacks`/`packHint`) both carry the mirror note in the
-operator-facing `MISSING_NODE` hint, so a box missing the pack is told where to get the patched
-code, not just the (soon read-only) upstream URL. Upstream and the mirror are rows of
-`render/node-packs.json`, the table a run-graph manifest's `node_packs` is checked against (a pack is taken only from an
-admitted repository, the commit recorded at install; see the [manifest flow](../flows/run-graph-manifest-satisfaction.md)). All four fleet Windows/Linux ComfyUI
-installs (<node-b>, <node-e>, <node-a>, <node-c>) were aligned to the mirror's code (2026-09-24) — see the
+`internal/mediacap/routeneeds.go` (`nodePacks`/`packHint`) both carry the archival note in the
+operator-facing `MISSING_NODE` hint, so a box missing the pack is told where to get the
+patched code, not just the (soon read-only) upstream URL. Upstream and the mirror are each a row of
+`render/node-packs.json`, the table a run-graph manifest's `node_packs` is checked against (a pack is taken only from a
+listed repository, at the head of its default branch, and the commit it got is recorded; see the [manifest flow](../flows/run-graph-manifest-satisfaction.md)). All four fleet Windows/Linux ComfyUI
+installs (<node-b>, <node-e>, <node-a>, <node-c>) were aligned to the mirror's head on 2026-09-24 — see the
 per-node rev table and the A/B seat-switch decision in
 `Ecosystem/Benchmarks and Optimizations/2026-09-22-qwen-image-21-hyperframes/infra/multigpu-archival-actions-2026-09-24.md`
 (operator's Drive, not this repo). Re-check the archive-coordination thread (#223)
@@ -2506,7 +2506,7 @@ recorded as known offenders with their reason rather than silently skipped — a
   [`render/wf-qwen-image-edit.mjs`](../../render/wf-qwen-image-edit.mjs) — the generative edit
   lifecycle and its graph builder
 - [`render/sdcpp-generate.mjs`](../../render/sdcpp-generate.mjs) — the sdcpp engine (flag mapping
-  to the installed sd.cpp CLI lives here)
+  to the sd.cpp CLI lives here)
 - [`render/igpu-engine.mjs`](../../render/igpu-engine.mjs) — the iGPU runners' shared plumbing: the
   backend refusal, `detectCpuPlacement`, `runEngine` (kill on the first CPU-placement line), the 4k+1
   and /32 normalization; [`render/sdcpp-video.mjs`](../../render/sdcpp-video.mjs),
@@ -2567,7 +2567,8 @@ recorded as known offenders with their reason rather than silently skipped — a
   the compose slot, the runner env allowlist (`gpugen.Spec.EnvExact`), typed defers
 - [`internal/fleetnode/compose_task.go`](../../internal/fleetnode/compose_task.go) — the
   template-only `compose-video` fleet task
-- [`setup/hyperframes/`](../../setup/hyperframes/package.json) — the installer's HyperFrames package manifest (the newest release, no lockfile)
+- [`setup/hyperframes/`](../../setup/hyperframes/package.json) — the package.json the installers
+  install from (`hyperframes: latest`, no lockfile)
 - [`render/templates-catalog.mjs`](../../render/templates-catalog.mjs) — the read-only workflow
   templates catalog: active-node walk, model files, API flag, licence class and gate, directory-aware
   readiness, node snapshots, candidate diff
@@ -2657,9 +2658,9 @@ and writes it into its result file.
 | class | cause |
 |---|---|
 | `BAD_INPUT` | the request broke a rule (inputs, enums, template name, variables), decided before any spawn |
-| `LINT_ERRORS` / `CHECK_FAILED` | the composition failed its own gates (since HyperFrames 0.8.108 this includes text that spills out of its box, `layout/text_box_overflow`, which 0.8.61 rendered clipped; `strict: false` accepts it) |
+| `LINT_ERRORS` / `CHECK_FAILED` | the composition failed its own gates (this includes text that spills out of its box, `layout/text_box_overflow`, which older releases rendered clipped; `strict: false` accepts it) |
 | `RENDER_FAILED` | a failed row, or an output that failed the ffprobe gate |
-| `BROWSER_MISSING` / `FFMPEG_MISSING` / `CLI_MISSING` | Chrome, ffmpeg/ffprobe or the HyperFrames CLI is absent |
+| `BROWSER_MISSING` / `FFMPEG_MISSING` / `CLI_MISSING` | the Chrome, ffmpeg/ffprobe or the HyperFrames CLI the installer put in place is absent |
 | `SPAWN_EBUSY` | an antivirus lock on ffmpeg ([hyperframes#4058](https://github.com/heygen-com/hyperframes/issues/4058)); retried once, then this class |
 | `DISK_HEADROOM` | the frame-storage gate ([#4060](https://github.com/heygen-com/hyperframes/issues/4060)): above one worker every frame is stored (8.3 MB at 1080p, refused past 90 % of the free space), so render a long clip with `workers` 1, which streams; else move `compose_cache_dir` to a larger drive |
 | `TIMEOUT` | `compose_timeout_sec` elapsed; the process tree is killed |
@@ -2756,7 +2757,9 @@ an editor; the overlay itself is silent.
 - **Allowlisted environment, twice.** The CLI gets PATH, the Windows system variables, temp, home and
   the app-data dirs. The runner sets `HYPERFRAMES_NO_TELEMETRY=1`, `DO_NOT_TRACK=1`,
   `HYPERFRAMES_NO_UPDATE_CHECK=1`, `HYPERFRAMES_NO_AUTO_INSTALL=1`, `HYPERFRAMES_SKIP_SKILLS=1`,
-  `PRODUCER_BROWSER_GPU_MODE=software` and the pinned ffmpeg, ffprobe, browser and cache paths.
+  `PRODUCER_BROWSER_GPU_MODE=software`, `CI=1` (recent releases otherwise serve `check` from a detached
+  warm-check daemon that holds the job's work dir open for minutes) and the ffmpeg, ffprobe, browser
+  and cache paths the installer recorded.
   Nothing else passes: no `*_API_KEY` or token (`capture` would prefer `OPENROUTER_API_KEY`),
   `NODE_OPTIONS` or `GPU_LEASE_*`. The Go side applies the same allowlist to the runner itself
   (`gpugen.Spec.EnvExact`).
@@ -2766,8 +2769,10 @@ an editor; the overlay itself is silent.
   nothing and an `ffmpeg.exe` planted in a cwd can never win the binary scan. HOME is
   `<hyperframes_dir>/home`, so HyperFrames' own state (`~/.hyperframes` and the managed Chrome cache)
   stays harness-owned and nothing it writes reaches the operator's `~/.claude`.
-- **Newest and verified.** The install is `npm install --ignore-scripts` of the newest release
-  (`setup/hyperframes/package.json`, no lockfile, no exact version), each package verified by npm against the registry. `npm audit signatures` is fatal on failure.
+- **Newest and verified.** The harness installs the newest HyperFrames release from npm
+  (`npm install --ignore-scripts` in a staging copy, then swapped in with the old tree kept as
+  `node_modules.prev`), verified by the registry's integrity field; the runner requires only the
+  floor in `setup/floors.json`. `npm audit signatures` is fatal on failure.
   `npm rebuild esbuild` runs the one postinstall the CLI needs. `browser ensure` fetches the CLI's
   own chrome-headless-shell from `storage.googleapis.com`, and `hyperframes_browser_path` binds it
   explicitly, because the CLI's own lookup prefers a newer build in `~/.cache/puppeteer`. That
@@ -2776,9 +2781,11 @@ an editor; the overlay itself is silent.
   first with no fast failover, hanging the download on a box with a dead IPv6 route to that host even
   though a plain `curl` recovers in seconds; the existing per-op deadline (`--timeout-sec`, default
   900s) still bounds the call and fails it typed `TIMEOUT`/`BROWSER_MISSING` either way. The installer never runs
-  `npm install -g`: a global HyperFrames self-upgrades in a detached process. The runner records the installed
-  version and refuses one below the floor in `setup/floors.json` with `CLI_MISSING` (ADR 0099); it never compares
-  against an exact version. `acceptance` runs that check as the node's identity.
+  `npm install -g`: a global HyperFrames self-upgrades in a detached process. The runner refuses a
+  missing CLI, or one older than the floor in `setup/floors.json`, with `CLI_MISSING` (ADR 0099); any newer
+  release runs, and a release that moves a flag is absorbed in the runner, never pinned away. The
+  installed version is recorded in `installed.json` (`components.hyperframes.version`).
+  `acceptance` runs that check as the node's identity.
 - **Offline renders.** Vetted templates reference no URL, and every font family they use is declared
   with `@font-face` from the shared kit. An undeclared family makes the compiler request the Google
   Fonts CSS API, with the page's character set in the query.
@@ -3582,7 +3589,7 @@ one line per delegating machine, a CLI ticket dies with the CLI, a late-binding 
 ## Comfy workflow templates catalog (phase A)
 
 `render/templates-catalog.mjs` is a read-only catalog of the ComfyUI workflow templates a node
-carries: the `comfyui-workflow-templates` package that ComfyUI itself pins, a checkout of the upstream
+carries: the `comfyui-workflow-templates` package that ComfyUI itself requires, a checkout of the upstream
 repository, or a `pip download` extract of a candidate version. It lists and classifies. It never runs a
 template, downloads a model, installs a package, changes a config or touches the network, and the only
 file it writes is the one named by `--out`. The `offload_run_template` tool reads the same catalog (see
@@ -3640,7 +3647,7 @@ acknowledges it. The catalog row also names the input files the template's activ
 
 **Readiness is directory-aware.** A file is usable by a template only if ComfyUI would offer it to the
 loader that reads it, and that is a question about directories, not names: a VAE loader lists the `vae`
-class and nothing else. The check reproduces ComfyUI 0.37.0's `folder_paths.py`, `utils/extra_config.py`
+class and nothing else. The check reproduces the directory rules of ComfyUI's `folder_paths.py`, `utils/extra_config.py`
 and the lines of `main.py` (`apply_custom_paths`) that register directories: default directories per class,
 three of them dual (`text_encoders` also reads `clip/`, `diffusion_models` also reads `unet/`, `controlnet`
 also reads `t2i_adapter/`); the yaml keys `unet` and `clip` mapped to their classes; `base_path` joined to
@@ -3660,9 +3667,11 @@ answers it, more than one file could answer it, or a file answers another name C
 other class.
 `--mode basename-only` is the older shortcut (any file with that name, anywhere), kept so its numbers can be
 reproduced and compared. Only `local` templates are evaluated. A snapshot records the node's ComfyUI version
-and the hashes of `folder_paths.py` and `utils/extra_config.py`; `readiness` compares the hashes with the
-0.37.0 files and reports `rules_check` (advisory: the node is scored either way, and the directory-aware text
-table prints a `rules:` line under a node whose files differ).
+and the hashes of `folder_paths.py` and `utils/extra_config.py`. `node render/templates-catalog.mjs record-rules --comfy-dir <dir>`
+writes those two hashes to `.offload-rule-files.json` in the ComfyUI folder when the harness registers or refreshes a checkout;
+`readiness` compares the node's current files with that record and reports `rules_check` (advisory: the node is scored either
+way; with no record it says "not recorded", never a refusal; the directory-aware text table prints a `rules:` line under a node
+whose files differ from the record).
 
 **Verbs** (`node render/templates-catalog.mjs <verb>`): `summary`, `list`, `catalog` (the full catalog as
 JSON), `snapshot` (one node's package versions and fingerprint, API node ids, resolved model roots, model
@@ -3695,8 +3704,8 @@ repo signal; whether ADR 0011 reaches a reused FLUX VAE is the operator's call. 
 run-graph satisfier's presence check (`modelCandidates` in `manifest-satisfy.mjs`) looks only where the
 manifest path's own class is registered, so on a node with no `extra_model_paths.yaml` it does not find a
 file under `models/unet` for a `models/diffusion_models/...` path that ComfyUI itself lists; that is a
-follow-up for the models phase, not part of this one. The directory rules are ComfyUI 0.37.0's: a node whose
-rule files differ is scored with them anyway and `rules_check` says so, and `main.py` is not hashed, so a change
+follow-up for the models phase, not part of this one. The directory rules are those of the ComfyUI source this reproduces: a node whose
+rule files differ from its record is scored with them anyway and `rules_check` says so, and `main.py` is not hashed, so a change
 confined to it is not seen. An `extra_model_paths.yaml` entry that is rooted but has no drive letter
 (`/models/x`) under a drive-lettered `base_path` resolves onto that drive under Windows path join and is left as
 written here (measured against ComfyUI's own loader, not on a live file).

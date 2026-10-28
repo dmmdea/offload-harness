@@ -2,6 +2,7 @@ package hfinstall
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -9,26 +10,34 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
-const setupPkg = `{"name":"offload-harness-hyperframes","private":true,"dependencies":{"hyperframes":"0.8.114"}}`
-const setupLock = `{"lockfileVersion":3,"packages":{"":{"dependencies":{"hyperframes":"0.8.114"}},"node_modules/hyperframes":{"version":"0.8.114"}}}`
-const oldPkg = `{"name":"offload-harness-hyperframes","private":true,"dependencies":{"hyperframes":"0.8.108"}}`
+// Versions here are fixtures: the package's contract is "newest release, at or above a floor",
+// so nothing below depends on any real HyperFrames version.
+const (
+	newest     = "9.9.9-fixture"
+	olderBuild = "1.2.0"
+	floorBuild = "1.0.0"
+)
 
-// box lays out a runner pinning runnerPin and, when installed is set, an install of that
-// version written the way an older release left it (its own package.json, a marker file).
-func box(t *testing.T, runnerPin, installed string) (runner, dir string) {
+const setupPkg = `{"name":"offload-harness-hyperframes","private":true,"dependencies":{"hyperframes":"latest"}}`
+const oldPkg = `{"name":"offload-harness-hyperframes","private":true,"dependencies":{"hyperframes":"latest"},"note":"previous"}`
+
+// box lays out a runner stub beside a floors.json and, when installed is set, an install of
+// that version written the way an older release left it (its own package.json, a marker file).
+func box(t *testing.T, installed string) (runner, dir string) {
 	t.Helper()
 	root := t.TempDir()
 	runner = filepath.Join(root, "render", "compose-hyperframes.mjs")
-	write(t, runner, "#!/usr/bin/env node\nexport const PINNED_VERSION = \""+runnerPin+"\";\nexport const X = 1;\n")
+	write(t, runner, "#!/usr/bin/env node\nexport const X = 1;\n")
+	write(t, filepath.Join(root, "setup", "floors.json"), `{"hyperframes":{"harness":"`+floorBuild+`"}}`)
 	dir = filepath.Join(root, "hyperframes")
 	if installed != "" {
 		installAt(t, dir, installed)
 		pkg := oldPkg
-		if installed == "0.8.114" {
+		if installed == newest {
 			pkg = setupPkg
-			write(t, filepath.Join(dir, "package-lock.json"), setupLock)
 		}
 		write(t, filepath.Join(dir, "package.json"), pkg)
 		write(t, filepath.Join(dir, "node_modules", "marker-"+installed), "")
@@ -54,8 +63,8 @@ func write(t *testing.T, p, s string) {
 
 func exists(p string) bool { _, err := os.Stat(p); return err == nil }
 
-// fake records every command (name, args, cwd) and plays npm ci by installing the pin in
-// the directory it runs in.
+// fake records every command (name, args, cwd), answers the registry's latest tag, and plays
+// npm install by installing `resolves` in the directory it runs in.
 type fake struct {
 	t        *testing.T
 	calls    []string
@@ -65,7 +74,8 @@ type fake struct {
 	lsFails  bool
 	browser  string
 	version  string
-	pinOnNpm string
+	latest   string // what `npm view hyperframes dist-tags.latest` prints
+	resolves string // what `npm install` leaves in node_modules/hyperframes
 }
 
 func (f *fake) run(_ context.Context, dir string, _ []string, name string, args ...string) (string, error) {
@@ -78,8 +88,10 @@ func (f *fake) run(_ context.Context, dir string, _ []string, name string, args 
 		return "", errors.New("exit status 1: simulated")
 	}
 	switch {
-	case strings.HasPrefix(call, "npm ci"):
-		installAt(f.t, dir, f.pinOnNpm)
+	case strings.HasPrefix(call, "npm view"):
+		return f.latest + "\n", nil
+	case strings.HasPrefix(call, "npm install"):
+		installAt(f.t, dir, f.resolves)
 	case strings.HasPrefix(call, "npm ls") && f.lsFails:
 		return "", errors.New("exit status 1: missing: hono@^4")
 	case call == "runner browser":
@@ -94,90 +106,145 @@ func (f *fake) run(_ context.Context, dir string, _ []string, name string, args 
 }
 
 func newFake(t *testing.T) *fake {
-	return &fake{t: t, pinOnNpm: "0.8.114",
-		browser: `{"ok":true,"op":"browser","browser_path":"/b/chrome-headless-shell","chrome_version":"152.0.7977.30"}`,
-		version: `{"ok":true,"op":"version","version":"0.8.114","pinned":"0.8.114","matches_pin":true}`}
+	return &fake{t: t, latest: newest, resolves: newest,
+		browser: `{"ok":true,"op":"browser","browser_path":"/b/chrome-headless-shell"}`,
+		version: `{"ok":true,"op":"version","version":"` + newest + `","at_floor":true}`}
 }
 
 func opts(runner, dir string, f *fake) Options {
 	return Options{Dir: dir, Runner: runner, Node: "node", Npm: "npm",
-		PackageJSON: []byte(setupPkg), PackageLock: []byte(setupLock), Run: f.run}
+		PackageJSON: []byte(setupPkg), Floor: floorBuild, Run: f.run}
 }
 
-func TestAnOldPinIsStagedVerifiedThenSwappedIn(t *testing.T) {
-	runner, dir := box(t, "0.8.114", "0.8.108")
+func TestANewerReleaseIsStagedVerifiedSwappedInAndRecorded(t *testing.T) {
+	runner, dir := box(t, olderBuild)
 	f := newFake(t)
-	res, err := Install(context.Background(), opts(runner, dir, f))
+	manifest := filepath.Join(t.TempDir(), "installed.json")
+	// a schema-1 manifest: other keys stay, the flat hyperframes entry becomes the record
+	write(t, manifest, `{"profile":"p","components":{"hyperframes":"`+olderBuild+`","llama":"x"}}`)
+	o := opts(runner, dir, f)
+	o.ManifestPath = manifest
+	o.Now = func() time.Time { return time.Date(2026, 10, 28, 12, 0, 0, 0, time.UTC) }
+	res, err := Install(context.Background(), o)
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	want := []string{"npm ci --ignore-scripts --no-audit --no-fund", "npm audit signatures", "npm rebuild esbuild", "runner browser", "runner version"}
+	want := []string{"npm view hyperframes dist-tags.latest", "npm install --ignore-scripts --no-audit --no-fund", "npm audit signatures", "npm rebuild esbuild", "runner browser", "runner version"}
 	if strings.Join(f.calls, "|") != strings.Join(want, "|") {
 		t.Fatalf("calls = %q, want %q", f.calls, want)
 	}
 	staging := filepath.Join(dir, stagingDirName)
-	if f.cwds[0] != staging || f.cwds[1] != staging {
-		t.Errorf("npm ci and the signature audit must run in the staging dir, ran in %q", f.cwds[:2])
+	if f.cwds[1] != staging || f.cwds[2] != staging {
+		t.Errorf("npm install and the signature audit must run in the staging dir, ran in %q", f.cwds[1:3])
 	}
-	if f.cwds[2] != dir {
-		t.Errorf("npm rebuild esbuild runs on the swapped-in tree, ran in %q", f.cwds[2])
+	if f.cwds[3] != dir {
+		t.Errorf("npm rebuild esbuild runs on the swapped-in tree, ran in %q", f.cwds[3])
 	}
-	if !res.Reinstalled || !res.MatchesPin || res.Version != "0.8.114" || res.BrowserPath != "/b/chrome-headless-shell" || res.ChromeVersion != "152.0.7977.30" {
+	if !res.Reinstalled || res.Version != newest || res.BrowserPath != "/b/chrome-headless-shell" {
 		t.Fatalf("result = %+v", res)
 	}
-	if v, _ := InstalledVersion(dir); v != "0.8.114" {
-		t.Errorf("live install = %q, want 0.8.114", v)
+	if v, _ := InstalledVersion(dir); v != newest {
+		t.Errorf("live install = %q, want %s", v, newest)
 	}
-	if !exists(filepath.Join(dir, prevDirName, "marker-0.8.108")) || res.PreviousTree != filepath.Join(dir, prevDirName) {
-		t.Errorf("the replaced 0.8.108 tree must be kept for a rollback at %s (result says %q)", prevDirName, res.PreviousTree)
+	if !exists(filepath.Join(dir, prevDirName, "marker-"+olderBuild)) || res.PreviousTree != filepath.Join(dir, prevDirName) {
+		t.Errorf("the replaced tree must be kept for a rollback at %s (result says %q)", prevDirName, res.PreviousTree)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "package.json.prev")); string(b) != oldPkg {
 		t.Errorf("the replaced package.json must be kept beside it, got %q", b)
 	}
-	for name, want := range map[string]string{"package.json": setupPkg, "package-lock.json": setupLock} {
-		if b, _ := os.ReadFile(filepath.Join(dir, name)); string(b) != want {
-			t.Errorf("%s was not written from the embedded copy: %q", name, b)
-		}
+	if b, _ := os.ReadFile(filepath.Join(dir, "package.json")); string(b) != setupPkg {
+		t.Errorf("package.json was not written from the embedded copy: %q", b)
+	}
+	if exists(filepath.Join(dir, "package-lock.json")) {
+		t.Error("no lockfile may be left in the install dir: a lock is a pin set")
 	}
 	if exists(staging) {
 		t.Error("the staging dir must be gone after a swap")
 	}
-	if err := Drift(runner, dir); err != nil {
-		t.Errorf("after the install the route must not read as drifted: %v", err)
+	if err := Check(runner, dir); err != nil {
+		t.Errorf("after the install the route must not read as missing: %v", err)
+	}
+	var doc struct {
+		Profile    string `json:"profile"`
+		Components map[string]json.RawMessage
+	}
+	b, _ := os.ReadFile(manifest)
+	if err := json.Unmarshal(b, &doc); err != nil {
+		t.Fatal(err)
+	}
+	var hf struct {
+		Current struct {
+			ID          string `json:"id"`
+			Version     string `json:"version"`
+			InstalledAt string `json:"installed_at"`
+		} `json:"current"`
+	}
+	if err := json.Unmarshal(doc.Components["hyperframes"], &hf); err != nil {
+		t.Fatalf("components.hyperframes is not a record: %s", doc.Components["hyperframes"])
+	}
+	if doc.Profile != "p" || string(doc.Components["llama"]) != `"x"` ||
+		hf.Current.ID != newest || hf.Current.Version != newest || hf.Current.InstalledAt != "2026-10-28T12:00:00Z" {
+		t.Errorf("installed.json = %s", b)
 	}
 }
 
-func TestAHealthyInstallIsKeptAndReverified(t *testing.T) {
-	runner, dir := box(t, "0.8.114", "0.8.114")
+func TestAnInstallAtTheNewestIsKeptAndReverified(t *testing.T) {
+	runner, dir := box(t, newest)
 	f := newFake(t)
 	res, err := Install(context.Background(), opts(runner, dir, f))
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	want := []string{"npm ls --all", "npm audit signatures", "npm rebuild esbuild", "runner browser", "runner version"}
+	want := []string{"npm view hyperframes dist-tags.latest", "npm ls --all", "npm audit signatures", "npm rebuild esbuild", "runner browser", "runner version"}
 	if strings.Join(f.calls, "|") != strings.Join(want, "|") {
 		t.Fatalf("calls = %q, want %q", f.calls, want)
 	}
 	if res.Reinstalled || res.PreviousTree != "" || exists(filepath.Join(dir, prevDirName)) {
-		t.Fatalf("a healthy install must be kept as it is: %+v", res)
+		t.Fatalf("a healthy install at the newest must be kept as it is: %+v", res)
+	}
+}
+
+func TestANewerHandPlacedBuildIsNeverDowngraded(t *testing.T) {
+	runner, dir := box(t, "99.0.0-fixture")
+	write(t, filepath.Join(dir, "package.json"), setupPkg)
+	f := newFake(t) // the registry's latest is older than what is installed
+	res, err := Install(context.Background(), opts(runner, dir, f))
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if res.Reinstalled || strings.Contains(strings.Join(f.calls, "|"), "npm install") {
+		t.Fatalf("an install newer than the registry's latest must be kept: %q", f.calls)
+	}
+}
+
+func TestAnUnreachableRegistryKeepsAHealthyInstall(t *testing.T) {
+	runner, dir := box(t, newest)
+	f := newFake(t)
+	f.failOn = "npm view"
+	res, err := Install(context.Background(), opts(runner, dir, f))
+	if err != nil {
+		t.Fatalf("Install: %v", err)
+	}
+	if res.Reinstalled || strings.Contains(strings.Join(f.calls, "|"), "npm install") {
+		t.Fatalf("a healthy install must survive an unreachable registry: %q", f.calls)
 	}
 }
 
 func TestAnInstallMissingADependencyIsReinstalled(t *testing.T) {
-	runner, dir := box(t, "0.8.114", "0.8.114")
+	runner, dir := box(t, newest)
 	f := newFake(t)
 	f.lsFails = true
 	res, err := Install(context.Background(), opts(runner, dir, f))
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if !res.Reinstalled || !strings.Contains(strings.Join(f.calls, "|"), "npm ci") {
+	if !res.Reinstalled || !strings.Contains(strings.Join(f.calls, "|"), "npm install") {
 		t.Fatalf("npm ls failing means the tree is broken and must be rebuilt: %q", f.calls)
 	}
 }
 
 func TestAnInstallMissingTheCLIEntryIsReinstalled(t *testing.T) {
-	runner, dir := box(t, "0.8.114", "0.8.114")
+	runner, dir := box(t, newest)
 	if err := os.Remove(filepath.Join(dir, "node_modules", "hyperframes", "bin", "hyperframes.mjs")); err != nil {
 		t.Fatal(err)
 	}
@@ -186,31 +253,13 @@ func TestAnInstallMissingTheCLIEntryIsReinstalled(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Install: %v", err)
 	}
-	if !res.Reinstalled || !strings.HasPrefix(f.calls[0], "npm ci") {
+	if !res.Reinstalled || !strings.HasPrefix(f.calls[1], "npm install") {
 		t.Fatalf("a missing CLI entry must trigger a rebuild before anything else: %q", f.calls)
 	}
 }
 
-func TestInstallRefusesWhenTheRunnerPinsAnotherVersion(t *testing.T) {
-	runner, dir := box(t, "0.8.108", "0.8.108")
-	f := newFake(t)
-	_, err := Install(context.Background(), opts(runner, dir, f))
-	if err == nil || !strings.Contains(err.Error(), "pins hyperframes 0.8.108 but this binary carries 0.8.114") {
-		t.Fatalf("a binary/render-tree mismatch must refuse up front, got %v", err)
-	}
-	if len(f.calls) != 0 {
-		t.Errorf("nothing may run before the refusal: %q", f.calls)
-	}
-	if v, _ := InstalledVersion(dir); v != "0.8.108" {
-		t.Errorf("the working install must be left alone, now %q", v)
-	}
-	if exists(filepath.Join(dir, "package-lock.json")) || exists(filepath.Join(dir, stagingDirName)) {
-		t.Error("nothing may be written before the refusal")
-	}
-}
-
 func TestInstallRefusesADirectoryThatIsNotAHarnessInstall(t *testing.T) {
-	runner, _ := box(t, "0.8.114", "")
+	runner, _ := box(t, "")
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "package.json"), `{"name":"someone-elses-app"}`)
 	write(t, filepath.Join(dir, "node_modules", "left-pad", "index.js"), "")
@@ -230,28 +279,31 @@ func TestInstallRefusesADirectoryThatIsNotAHarnessInstall(t *testing.T) {
 }
 
 func TestAFailedStagingStepLeavesTheLiveInstallUntouched(t *testing.T) {
-	for _, tc := range []struct{ failOn, want string }{
-		{"npm ci", "the live install is unchanged"},
-		{"npm audit", "refusing to swap it in, the live install is unchanged"},
+	for _, tc := range []struct {
+		name, failOn, resolves, want string
+	}{
+		{"npm install fails", "npm install", newest, "the live install is unchanged"},
+		{"signature audit fails", "npm audit", newest, "refusing to swap it in, the live install is unchanged"},
+		{"npm resolves below the floor", "", "0.0.1-fixture", "below the floor " + floorBuild},
 	} {
-		runner, dir := box(t, "0.8.114", "0.8.108")
+		runner, dir := box(t, olderBuild)
 		f := newFake(t)
-		f.failOn = tc.failOn
+		f.failOn, f.resolves = tc.failOn, tc.resolves
 		_, err := Install(context.Background(), opts(runner, dir, f))
 		if err == nil || !strings.Contains(err.Error(), tc.want) {
-			t.Errorf("%s: err = %v, want %q", tc.failOn, err, tc.want)
+			t.Errorf("%s: err = %v, want %q", tc.name, err, tc.want)
 		}
-		if v, _ := InstalledVersion(dir); v != "0.8.108" || !exists(filepath.Join(dir, "node_modules", "marker-0.8.108")) {
-			t.Errorf("%s: the live 0.8.108 tree must be exactly as it was, now %q", tc.failOn, v)
+		if v, _ := InstalledVersion(dir); v != olderBuild || !exists(filepath.Join(dir, "node_modules", "marker-"+olderBuild)) {
+			t.Errorf("%s: the live tree must be exactly as it was, now %q", tc.name, v)
 		}
 		if b, _ := os.ReadFile(filepath.Join(dir, "package.json")); string(b) != oldPkg {
-			t.Errorf("%s: the live package.json must be untouched, got %q", tc.failOn, b)
+			t.Errorf("%s: the live package.json must be untouched, got %q", tc.name, b)
 		}
 		if exists(filepath.Join(dir, stagingDirName)) || exists(filepath.Join(dir, prevDirName)) {
-			t.Errorf("%s: staging must be cleaned up and no rollback copy made", tc.failOn)
+			t.Errorf("%s: staging must be cleaned up and no rollback copy made", tc.name)
 		}
 		if strings.Contains(strings.Join(f.calls, "|"), "runner") {
-			t.Errorf("%s: the runner must not run after a failed stage: %q", tc.failOn, f.calls)
+			t.Errorf("%s: the runner must not run after a failed stage: %q", tc.name, f.calls)
 		}
 	}
 }
@@ -260,20 +312,26 @@ func TestAFailedCheckAfterTheSwapPutsThePreviousInstallBack(t *testing.T) {
 	for name, mut := range map[string]func(*fake){
 		"rebuild fails":           func(f *fake) { f.failOn = "npm rebuild" },
 		"browser ensure fails":    func(f *fake) { f.browser = `{"ok":false,"class":"BROWSER_MISSING","detail":"download refused"}` },
-		"version does not match":  func(f *fake) { f.version = `{"ok":true,"op":"version","version":"0.8.114","matches_pin":false}` },
-		"version reports failure": func(f *fake) { f.version = `{"ok":false,"class":"CLI_MISSING","detail":"the CLI reports 0.8.108"}` },
+		"version is under floor":  func(f *fake) { f.version = `{"ok":true,"op":"version","version":"0.0.1","at_floor":false}` },
+		"version reports failure": func(f *fake) { f.version = `{"ok":false,"class":"CLI_MISSING","detail":"the CLI reports a build below the floor"}` },
 	} {
-		runner, dir := box(t, "0.8.114", "0.8.108")
+		runner, dir := box(t, olderBuild)
 		f := newFake(t)
 		mut(f)
-		res, err := Install(context.Background(), opts(runner, dir, f))
+		manifest := filepath.Join(t.TempDir(), "installed.json")
+		o := opts(runner, dir, f)
+		o.ManifestPath = manifest
+		res, err := Install(context.Background(), o)
 		if err == nil || !strings.Contains(err.Error(), "the previous install was put back") {
 			t.Errorf("%s: err = %v, want the rollback named", name, err)
 		}
-		if res.MatchesPin || res.Reinstalled {
+		if res.Reinstalled || res.Version != "" {
 			t.Errorf("%s: a failed install must not report success: %+v", name, res)
 		}
-		if v, _ := InstalledVersion(dir); v != "0.8.108" || !exists(filepath.Join(dir, "node_modules", "marker-0.8.108")) {
+		if exists(manifest) {
+			t.Errorf("%s: a failed install must not be recorded", name)
+		}
+		if v, _ := InstalledVersion(dir); v != olderBuild || !exists(filepath.Join(dir, "node_modules", "marker-"+olderBuild)) {
 			t.Errorf("%s: the previous tree must be live again, now %q", name, v)
 		}
 		if b, _ := os.ReadFile(filepath.Join(dir, "package.json")); string(b) != oldPkg {
@@ -283,7 +341,7 @@ func TestAFailedCheckAfterTheSwapPutsThePreviousInstallBack(t *testing.T) {
 }
 
 func TestTheRunnerAlwaysGetsTheAbsoluteInstallDir(t *testing.T) {
-	runner, dir := box(t, "0.8.114", "0.8.108")
+	runner, dir := box(t, olderBuild)
 	t.Chdir(filepath.Dir(dir))
 	f := newFake(t)
 	o := opts(runner, filepath.Base(dir), f) // a relative --dir
@@ -306,37 +364,28 @@ func TestTheRunnerAlwaysGetsTheAbsoluteInstallDir(t *testing.T) {
 	}
 }
 
-func TestDrift(t *testing.T) {
-	runner, dir := box(t, "0.8.114", "0.8.114")
-	if err := Drift(runner, dir); err != nil {
-		t.Errorf("matching versions: %v", err)
+// TestCheck: the CLI must be present and at or above the floor beside the runner; any newer
+// release passes, and a tree without a floors file enforces presence only.
+func TestCheck(t *testing.T) {
+	runner, dir := box(t, newest)
+	if err := Check(runner, dir); err != nil {
+		t.Errorf("an install above the floor: %v", err)
 	}
-	runner, dir = box(t, "0.8.114", "0.8.108")
-	if err := Drift(runner, dir); err == nil || !strings.Contains(err.Error(), "holds hyperframes 0.8.108, not the runner's pin 0.8.114") ||
+	runner, dir = box(t, "0.9.9")
+	if err := Check(runner, dir); err == nil || !strings.Contains(err.Error(), "holds hyperframes 0.9.9, below the floor "+floorBuild) ||
 		!strings.Contains(err.Error(), "local-offload install hyperframes") {
-		t.Errorf("a drifted install must name both versions and the fix: %v", err)
+		t.Errorf("an install under the floor must name both versions and the fix: %v", err)
 	}
-	runner, dir = box(t, "0.8.114", "")
-	if err := Drift(runner, dir); err == nil || !strings.Contains(err.Error(), "cannot read the installed HyperFrames version") {
-		t.Errorf("an unreadable install is drift (the runner refuses it too): %v", err)
+	runner, dir = box(t, "")
+	if err := Check(runner, dir); err == nil || !strings.Contains(err.Error(), "cannot read the installed HyperFrames version") {
+		t.Errorf("an absent CLI is refused (the runner refuses it too): %v", err)
 	}
-	write(t, runner, "// a runner without a pin line\n")
-	if err := Drift(runner, dir); err != nil {
-		t.Errorf("an unreadable runner pin is not drift: %v", err)
-	}
-}
-
-func TestRunnerPinReadsTheShippedRunner(t *testing.T) {
-	pin, err := RunnerPin(filepath.Join("..", "..", "render", "compose-hyperframes.mjs"))
-	if err != nil {
-		t.Fatalf("RunnerPin on the shipped runner: %v", err)
-	}
-	b, err := os.ReadFile(filepath.Join("..", "..", "setup", "hyperframes", "package.json"))
-	if err != nil {
+	runner, dir = box(t, "0.0.1")
+	if err := os.Remove(filepath.Join(filepath.Dir(runner), "..", "setup", "floors.json")); err != nil {
 		t.Fatal(err)
 	}
-	if want, _ := PackagePin(b); pin != want {
-		t.Fatalf("runner pin %q != setup package.json pin %q", pin, want)
+	if err := Check(runner, dir); err != nil {
+		t.Errorf("without a floors file only presence is enforced: %v", err)
 	}
 }
 
@@ -399,20 +448,5 @@ func TestEnvWithNodeFirst(t *testing.T) {
 	}
 	if !strings.HasPrefix(path, filepath.Dir(node)+string(os.PathListSeparator)) {
 		t.Fatalf("PATH must start with the configured node's directory, got %q", path)
-	}
-}
-
-func TestPackageAndLockPins(t *testing.T) {
-	if p, err := PackagePin([]byte(setupPkg)); err != nil || p != "0.8.114" {
-		t.Errorf("PackagePin = %q, %v", p, err)
-	}
-	if p, err := LockPin([]byte(setupLock)); err != nil || p != "0.8.114" {
-		t.Errorf("LockPin = %q, %v", p, err)
-	}
-	runner, dir := box(t, "0.8.114", "")
-	o := opts(runner, dir, newFake(t))
-	o.PackageLock = []byte(strings.ReplaceAll(setupLock, `"version":"0.8.114"`, `"version":"0.8.113"`))
-	if _, err := Install(context.Background(), o); err == nil || !strings.Contains(err.Error(), "embedded lock resolves") {
-		t.Fatalf("a lock that disagrees with package.json must refuse, got %v", err)
 	}
 }

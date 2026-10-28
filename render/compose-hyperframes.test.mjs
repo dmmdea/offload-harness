@@ -13,7 +13,7 @@ import { DEFAULTS as CAPTION_DEFAULTS, PACES as CAPTION_PACES, TEMPLATE_LIMITS a
 import { copyAtomic } from "./atomic-out.mjs";
 import { fileURLToPath } from "node:url";
 import {
-  ALLOWED_BROWSER_SUBCOMMANDS, ALLOWED_SUBCOMMANDS, FORCED_ENV, PASSTHROUGH_ENV_KEYS, PINNED_VERSION, applyTemplateVariables, assertAllowedInvocation,
+  ALLOWED_BROWSER_SUBCOMMANDS, ALLOWED_SUBCOMMANDS, FORCED_ENV, PASSTHROUGH_ENV_KEYS, applyTemplateVariables, assertAllowedInvocation,
   buildCheckArgs, buildChildEnv, buildRenderArgs, buildSnapshotArgs, classifyFailure, compositionMeta,
   listTemplates, materializeTemplate, moveInto, parseJsonDoc, rewriteRootDuration, runCompose, summarizeProbe, verifyOutput,
 } from "./compose-hyperframes.mjs";
@@ -28,7 +28,7 @@ const SECRETS = {
   ELEVENLABS_API_KEY: "el-test", HEYGEN_API_KEY: "hg-test", HYPERFRAMES_API_KEY: "hf-test",
   OPENAI_API_KEY: "oa-test", GROQ_API_KEY: "gq-test", FIGMA_TOKEN: "fg-test", NVIDIA_API_KEY: "nv-test",
 };
-const ALSO_DROPPED = { NODE_OPTIONS: "--no-deprecation", GPU_LEASE_DIR: "/tmp/lease", GPU_LEASE_EPOCH: "7", GPU_LEASE_CLASS: "media", HTTPS_PROXY: "http://proxy:1", CI: "true" };
+const ALSO_DROPPED = { NODE_OPTIONS: "--no-deprecation", GPU_LEASE_DIR: "/tmp/lease", GPU_LEASE_EPOCH: "7", GPU_LEASE_CLASS: "media", HTTPS_PROXY: "http://proxy:1" };
 
 const STUB_CLI = String.raw`
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -103,6 +103,9 @@ const TEMPLATE_HTML = `<!doctype html><html><body>
  data-composition-variables='[{"id":"title","type":"string","default":"Hello"},{"id":"accent","type":"color","default":"#ff0000"},{"id":"duration","type":"number","default":6,"min":1,"max":60}]'>
 <h1 class="clip" data-start="0" data-duration="6" data-var-text="title">Hello</h1></div></body></html>`;
 
+// The runner needs only a version at or above the floor in setup/floors.json, so the stub CLI reports a fixture string.
+const FIXTURE_VERSION = "9.9.9-fixture";
+
 // fixture builds a throwaway hyperframes dir + stubs + templates, returns paths and a runner.
 function fixture(t, behavior = {}, probe = probeDoc()) {
   const root = scratchDir(t, "compose-test-");
@@ -110,10 +113,10 @@ function fixture(t, behavior = {}, probe = probeDoc()) {
   const bin = join(hf, "node_modules", "hyperframes", "bin");
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "hyperframes.mjs"), STUB_CLI);
-  writeFileSync(join(hf, "node_modules", "hyperframes", "package.json"), JSON.stringify({ name: "hyperframes", version: behavior.installed || PINNED_VERSION }));
+  writeFileSync(join(hf, "node_modules", "hyperframes", "package.json"), JSON.stringify({ name: "hyperframes", version: behavior.installed || FIXTURE_VERSION }));
   const browserPath = join(root, "chrome-headless-shell.exe");
   writeFileSync(browserPath, "chrome");
-  writeFileSync(join(bin, "behavior.json"), JSON.stringify({ browserPath, version: PINNED_VERSION, ...behavior }));
+  writeFileSync(join(bin, "behavior.json"), JSON.stringify({ browserPath, version: FIXTURE_VERSION, ...behavior }));
   const ffmpeg = join(root, "ffmpeg.exe");
   writeFileSync(ffmpeg, "ffmpeg");
   const ffprobe = join(root, "ffprobe-stub.mjs");
@@ -411,8 +414,8 @@ test("version and browser ops run through the same allowlist and env", (t) => {
   const fx = fixture(t);
   let r = fx.run(["version", "--hyperframes-dir", fx.hf]);
   assert.equal(r.status, 0, r.stdout);
-  assert.equal(r.last.version, PINNED_VERSION);
-  assert.equal(r.last.matches_pin, true);
+  assert.equal(r.last.version, FIXTURE_VERSION);
+  assert.equal(r.last.at_floor, true);
   r = fx.run(["browser", "--hyperframes-dir", fx.hf]);
   assert.equal(r.status, 0, r.stdout);
   assert.equal(r.last.browser_path, fx.browserPath);
@@ -432,37 +435,26 @@ test("version and browser ops run through the same allowlist and env", (t) => {
   }
 });
 
-test("a drifted install (not the runner's pin) is refused CLI_MISSING before anything spawns", (t) => {
-  const fx = fixture(t, { installed: "0.9.0" });
+test("an install below the floor is refused CLI_MISSING before anything spawns; a newer one is not", (t) => {
+  const fx = fixture(t, { installed: "0.1.0" });
   let r = fx.run(renderArgs(fx));
   assert.equal(r.last.class, "CLI_MISSING", r.stdout);
-  assert.match(r.last.detail, /holds hyperframes 0\.9\.0, not the runner's pin/);
+  assert.match(r.last.detail, /holds hyperframes 0\.1\.0, below the floor/);
   r = fx.run(["version", "--hyperframes-dir", fx.hf]);
   assert.equal(r.status, 1, "acceptance runs the version op: a drifted install must fail it");
   assert.equal(r.last.class, "CLI_MISSING");
   assert.equal(fx.calls().length, 0);
   // the CLI's own answer is checked too, not only package.json
-  const fy = fixture(t, { version: "0.8.60" });
+  const fy = fixture(t, { version: "0.1.0" });
   r = fy.run(["version", "--hyperframes-dir", fy.hf]);
   assert.equal(r.last.class, "CLI_MISSING", r.stdout);
 });
 
-test("the runner's pin IS the committed lockfile's pin (one version, three places)", () => {
+test("setup/hyperframes/package.json: private, one dependency", () => {
   const setup = join(__dirname, "..", "setup", "hyperframes");
   const pkg = JSON.parse(readFileSync(join(setup, "package.json"), "utf8"));
-  const lock = JSON.parse(readFileSync(join(setup, "package-lock.json"), "utf8"));
-  assert.equal(pkg.dependencies.hyperframes, PINNED_VERSION, "package.json pins an exact version equal to PINNED_VERSION");
-  assert.equal(lock.packages["node_modules/hyperframes"].version, PINNED_VERSION);
-  assert.equal(lock.packages[""].dependencies.hyperframes, PINNED_VERSION);
-  assert.equal(lock.packages["node_modules/hyperframes"].integrity,
-    "sha512-dIHdDQ//Wapovreuc0q2B+xLS5gbDUSles3ysXafkvxC4YXzZjc3NPvMqweEi5IZQDXefxZOJws5AgDByOiRAQ==",
-    "the lock carries the registry integrity verified for 0.8.114 — a bump must re-verify it");
   assert.equal(pkg.private, true);
   assert.deepEqual(Object.keys(pkg.dependencies), ["hyperframes"], "exactly one dependency");
-  // npm >= 11 blocks dependency install scripts unless package.json approves them, which turns the
-  // installers' deliberate `npm rebuild esbuild` into a silent no-op. The ONE approval is pinned to
-  // the lock's esbuild, so a bump that moves esbuild must re-approve it by name and version.
-  assert.deepEqual(pkg.allowScripts, { [`esbuild@${lock.packages["node_modules/esbuild"].version}`]: true });
 });
 
 // --- pure helpers -------------------------------------------------------------------------------

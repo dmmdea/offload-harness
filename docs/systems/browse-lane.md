@@ -288,8 +288,8 @@ pwsh setup/browse/install.ps1                          # into ~/.local-offload/b
 pwsh setup/browse/install.ps1 -OffloadHome <OFFLOAD_HOME>
 ```
 
-The script copies the sidecar, runs `uv sync --frozen` against the locked pins (`browser-harness`
-0.1.13, `jev-ultrafast` at a 40-character commit), runs the unit tests, disables browser-harness
+The script copies the sidecar, runs `uv sync` (no lockfile: `browser-harness` at the newest release at or above
+the floor in `pyproject.toml`, `jev-ultrafast` from the head of its git default branch, each download verified by uv), runs the unit tests, disables browser-harness
 telemetry, and prints one JSON line with the `browse_python` and `browse_script` values. Then:
 
 1. Set `browse_python`, `browse_script` and `browse_decision_url` (and optionally `browse_browser`) in
