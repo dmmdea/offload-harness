@@ -901,7 +901,7 @@ func refuseLlamaCppNineBAgentSeat(res renderResult) error {
 const eg2MinLlamaBuild = 11452
 
 // eg2FloorUncheckedTail ends the note a build whose name states no build gets. setup/install.ps1 keys on it
-// to leave out the note about its own pinned build (a test holds the two in step).
+// to leave out the note about the build it installed itself (a test holds the two in step).
 const eg2FloorUncheckedTail = "so the floor was not checked"
 
 // cleanEG2Bin turns --llama-bin-eg2 into the value the render, the stamp and the replay all share: ""

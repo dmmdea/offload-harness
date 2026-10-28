@@ -4,19 +4,19 @@ Several templates in `render/compose-templates/` are adapted from card designs i
 teaching kit for HyperFrames. This folder keeps the kit's licence texts exactly as received and records
 what was taken from it and what was not. For this repository the kit is a reference: none of its
 scripts, skills or CLI calls run anywhere in it. (Since 2026-10-02 the operator also keeps a private copy
-of the kit, pinned and wired to the compose lane with its paid and cloud steps removed, as a workspace of
+of the kit, wired to the compose lane with its paid and cloud steps removed, as a workspace of
 its own. Nothing from that copy is redistributed here.)
 
 | | |
 |---|---|
 | Source repository | `https://github.com/nateherkai/hyperframes-student-kit` |
-| Pinned commit | `0d30152a82b9ceb93cfdd9bdbf46f0d5ab3cde86` (2026-09-28) |
+| Source commit | `0d30152a82b9ceb93cfdd9bdbf46f0d5ab3cde86` (2026-09-28) |
 | Retained verbatim | [`LICENSE`](LICENSE) (MIT, for the kit's original material) and [`PIPELINE-USE-PERMISSION.txt`](PIPELINE-USE-PERMISSION.txt) (the kit's use permission for its style library, templates and pipeline skills) |
-| Checked by | `render/compose-hyperframes.test.mjs`, which hashes both files (line endings folded) against the copies at the pinned commit |
+| Checked by | `render/compose-hyperframes.test.mjs`, which hashes both files (line endings folded) against the copies at the source commit |
 
 ## What was adapted
 
-| template here | source card id | source file at the pinned commit | source sha256 |
+| template here | source card id | source file at the source commit | source sha256 |
 |---|---|---|---|
 | `stat-card` | `kallaway.t1.stat.figure` | `style-library/02-kallaway/cards/tier1/t1-stat-figure.html` | `e1294d1e4bb16594bb4f767fbe11f1de20189d12cf518c88f4e11a4495a12903` |
 | `section-title` | `kallaway.t1.section.breath` | `style-library/02-kallaway/cards/tier1/t1-section-breath.html` | `4e82a81883447b1b32ce68b050748be68f3bc2b7bc9ae72d24cb47df219ba085` |

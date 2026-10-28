@@ -879,7 +879,11 @@ func stopForSwap(ctx context.Context, plan Plan, deps Deps, log *Logger) error {
 		stopped = append(stopped, p.PID)
 	}
 	if len(stopped) == 0 {
-		log.Printf("stop-node: no running %q process found on %s", match, plan.Target)
+		if plan.RestartTaskName != "" {
+			log.Printf("stop-node: no %q process left on %s after ending task %s", match, plan.Target, plan.RestartTaskName)
+		} else {
+			log.Printf("stop-node: no running %q process found on %s", match, plan.Target)
+		}
 		return nil
 	}
 	deadline := deps.Now().Add(20 * time.Second)
