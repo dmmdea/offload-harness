@@ -764,14 +764,20 @@ func TestPulledSTTJobsWaitUnderTheSameCap(t *testing.T) {
 	}))
 	defer holder.Close()
 	client := &http.Client{Timeout: 5 * time.Second, Transport: netguard.SafeTransport(nil)}
-	for i := 1; i <= 2; i++ {
+	claim := func(i int) {
+		t.Helper()
 		if id, ok := s.claimOne(context.Background(), client, holder.URL, "testnode", cfg); !ok || id != "pulled-stt-"+string(rune('0'+i)) {
 			t.Fatalf("claimOne #%d = %q, %v", i, id, ok)
 		}
 	}
+	// The first job holds the slot before the second is claimed: two claims in a row race for the slot, and the
+	// second could take it first (CI, 2026-10-28: "first run = pulled-stt-2"). The cap is what is under test, not
+	// which goroutine wins.
+	claim(1)
 	if got := <-r.entered; got != "pulled-stt-1" {
 		t.Fatalf("first run = %s", got)
 	}
+	claim(2)
 	time.Sleep(150 * time.Millisecond)
 	if _, _, _, peak, started := r.snapshot(); peak != 1 || len(started) != 1 {
 		t.Fatalf("peak %d, started %v: a pulled stt job ran beside another, past the node's cap", peak, started)
