@@ -641,6 +641,28 @@ function Get-LiveGenerationTag {
   try { return [string](Get-Content -Raw -LiteralPath $metaPath | ConvertFrom-Json).tag } catch { return '' }
 }
 
+# The record of what the live junction serves for one component key, built from the generation's meta file
+# ($null when the live path is not a junction to a generation, or the meta does not carry $Key).
+function Get-LiveGenerationRecord {
+  param([string]$Dest, [string]$Key)
+  $t = Get-LiveTarget -Dest $Dest
+  if (-not $t -or $t -eq $Dest) { return $null }
+  $metaPath = "$t.meta.json"
+  if (-not (Test-Path -LiteralPath $metaPath)) { return $null }
+  try {
+    $meta = Get-Content -Raw -LiteralPath $metaPath | ConvertFrom-Json
+    $comps = @($meta.components)
+    $idx = [array]::IndexOf($comps, $Key)
+    if ($idx -lt 0) { return $null }
+    $digest = ''; $size = [int64]0
+    if ($meta.digests -and $idx -lt @($meta.digests).Count) { $digest = [string]@($meta.digests)[$idx] }
+    if ($meta.sizes -and $idx -lt @($meta.sizes).Count) { $size = [int64]@($meta.sizes)[$idx] }
+    $src = ''
+    if ($meta.source) { $src = "github:$($meta.source)" }
+    return New-ComponentRecord -Version ([string]$meta.tag) -Digest $digest -Size $size -Source $src -InstalledAt ([string]$meta.installed_at)
+  } catch { return $null }
+}
+
 # Processes running an executable from under the live directory (through the junction or its target). A held
 # directory is never swapped out from under a running engine: the generation is staged and the operator (or the
 # update verb, which drains and restarts) promotes it.
@@ -914,7 +936,9 @@ function Invoke-EngineInstall {
       $manifestComponents[$k] = New-ComponentRecord -Version $r.tag -Digest $r.digest -Size $r.size -Source "github:$($SOURCES[$k].repo)"
       Save-ComponentRecord -Key $k -Record $manifestComponents[$k]
     } else {
-      $old = Get-OldRecord $k
+      # what is LIVE is the record: the generation's meta file first, the prior manifest only when there is none
+      $old = Get-LiveGenerationRecord -Dest $Dest -Key $k
+      if (-not $old) { $old = Get-OldRecord $k }
       if (-not $old -and $plan.installed -and $plan.installed -ne '-') { $old = New-ComponentRecord -Version $plan.installed -Source "github:$($SOURCES[$k].repo)" }
       if ($old -and $staged) { $old['staged'] = $script:engineInstallResult.id }   # the generation waiting for a restart
       if ($old) { $manifestComponents[$k] = $old }
