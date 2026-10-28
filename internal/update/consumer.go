@@ -28,6 +28,12 @@ type FileConfig struct {
 	LlamaSwapYAML string `json:"llama_swap_yaml"`
 	// Gate configures the side-port smoke gate and the post-flip watch (docs/systems/update.md, "Gate").
 	Gate GateConfig `json:"gate"`
+	// Home is the install root when neither --home nor $OFFLOAD_HOME names one (a node whose binary does not sit
+	// under the root, and whose root is not ~/offload-stack).
+	Home string `json:"home"`
+	// Variant pins a component's build family (cuda13, cuda12, vulkan, cpu) when the live build and the node's
+	// backend would pick another.
+	Variant map[string]string `json:"variant"`
 }
 
 // RestartSpec names how a consumer restarts: a scheduled task, a shell command, or None (no restart: the swap

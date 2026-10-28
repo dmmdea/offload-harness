@@ -17,6 +17,11 @@ type UpdateConfig struct {
 	LlamaSwapYAML string `json:"llama_swap_yaml,omitempty"`
 	// Gate configures the side-port smoke gate and the post-flip watch.
 	Gate *UpdateGate `json:"gate,omitempty"`
+	// Home is the install root the update verb works on when neither --home nor $OFFLOAD_HOME names one.
+	Home string `json:"home,omitempty"`
+	// Variant names a component's build family (cuda13, cuda12, vulkan or cpu), keyed by component. The default is
+	// the family of the build at the component's live path, else the node's serving backend.
+	Variant map[string]string `json:"variant,omitempty"`
 }
 
 // UpdateRestart names how the daemon restarts: a scheduled task, a shell command, or None (no restart).
