@@ -367,7 +367,7 @@ foreach ($band in @('min','high')) {
   if ($m3Vis -match 'gemma-4-E2B-it-qat-UD-Q4_K_XL\.gguf' -and $m3Vis -match '--mmproj\s+\S*mmproj-gemma-4-E2B-it-Q8_0\.gguf') { Ok "maxwell-3/$band vision seat = E2B + the Q8_0 projector" } else { Bad "maxwell-3/$band vision seat weights (got: $m3Vis)" }
   if ($m3Vis -match '--ctx-size 8192' -and $m3Vis -match '--reasoning off' -and $m3Vis -match '--flash-attn on') { Ok "maxwell-3/$band vision seat at 8192, reasoning off, flash-attn on" } else { Bad "maxwell-3/$band vision seat flags moved" }
   $m3Stt = ([regex]::Match($r.yaml, '(?ms)^\s{2}whisper-stt:.*?(?=^\s{2}\S|\Z)')).Value
-  if ($m3Stt -match 'ggml-large-v3-turbo-q5_0\.bin' -and $m3Stt -match '--vad-model\s+\S*ggml-silero-v5\.1\.2\.bin' -and $m3Stt -match '\s-nfa(\s|$)') { Ok "maxwell-3/$band stt seat = large-v3-turbo q5_0 + silero, flash attention off" } else { Bad "maxwell-3/$band stt seat (got: $m3Stt)" }
+  if ($m3Stt -match 'ggml-large-v3-turbo-q8_0\.bin' -and $m3Stt -match '--vad-model\s+\S*ggml-silero-v5\.1\.2\.bin' -and $m3Stt -match '\s-nfa(\s|$)') { Ok "maxwell-3/$band stt seat = large-v3-turbo q8_0 + silero, flash attention off" } else { Bad "maxwell-3/$band stt seat (got: $m3Stt)" }
   if ($r.yaml -match '(?m)^\s{4}interactive:\s*"\+residents & \(e2b \| vis \| stt\)"' -and $r.yaml -match '(?m)^\s{4}residents:\s*"emb"') { Ok "maxwell-3/$band both media seats are swappable beside the chat E2B (residents = emb only)" } else { Bad "maxwell-3/$band seat residency (got: $(($r.yaml -split "`r?`n") | Where-Object { $_ -match 'interactive:|residents:' }))" }
 }
 # The memory stack's second embedder (include_embeddinggemma2, 2026-10-09): the entry, its matrix var,

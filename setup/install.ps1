@@ -339,12 +339,12 @@ $PINNED = @{
     sha  = '9406f99c16d68cda4f1f0552192dcc99021ea1fc6d2fd50b1dc3ccf30d04b292'
     version = '9406f99c'
   }
-  'model-whisper-turbo-q5' = @{
-    url  = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin'
-    name = 'ggml-large-v3-turbo-q5_0.bin'
-    size = 574041195
-    sha  = '394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2'
-    version = '39422170'
+  'model-whisper-turbo-q8' = @{
+    url  = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin'
+    name = 'ggml-large-v3-turbo-q8_0.bin'   # q5_0 gives the same transcript 300 MiB lighter; q8_0 is the quality pick the 3 GB card still holds with room
+    size = 874188075
+    sha  = '317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1'
+    version = '317eb69c'
   }
   'model-silero-v5' = @{
     url  = 'https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin'
