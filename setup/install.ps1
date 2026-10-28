@@ -696,7 +696,7 @@ function Install-Engine {
   $versionsDir = "$Dest-versions"
   $tag = $Resolved[$Keys[0]].tag
   $rand = [System.IO.Path]::GetRandomFileName().Replace('.', '')
-  $sig = (@($Keys | ForEach-Object { $Resolved[$_].digest }) -join ',')
+  $sig = (@($Keys | ForEach-Object { $Resolved[$_].digest } | Sort-Object) -join ',')   # order-free: the verb writes assets in its own order
   $id = $tag
   $target = Join-Path $versionsDir $id
   $reuse = $false
@@ -704,7 +704,7 @@ function Install-Engine {
     $same = $false
     $metaPath = "$target.meta.json"
     if (Test-Path -LiteralPath $metaPath) {
-      try { $same = ((@((Get-Content -Raw -LiteralPath $metaPath | ConvertFrom-Json).digests) -join ',') -eq $sig) } catch { $same = $false }
+      try { $same = ((@((Get-Content -Raw -LiteralPath $metaPath | ConvertFrom-Json).digests | Sort-Object) -join ',') -eq $sig) } catch { $same = $false }
     }
     if ($same -and (Test-Path -LiteralPath (Join-Path $target $ExeName))) { $reuse = $true }
     else {
