@@ -22,6 +22,12 @@ and silently blocked `Move-Item`/`Rename-Item`, even though nothing was actively
 half-finished swap, and it diagnoses a rename failure instead of guessing — stopping only an
 idle MCP helper on the same exe, never a live server.
 
+The same engine now also swaps llama-swap for `local-offload update` (generation bookkeeping, resolution and the
+publisher's digest are in [update.md](update.md)); `nodeswap.Preflight` lets that verb refuse a swap before it downloads.
+For a daemon laid out as a generation behind a junction or symlink, `Plan.Generation` replaces the backup-rename and
+install steps with a link flip (and a rollback with a flip back); the stop and the verification find the process by the
+generation's real executable path. Everything else in the sequence is unchanged.
+
 ## Questions this doc answers
 
 - How do I swap a fleet node's binary (and, optionally, its render tree) without babysitting an

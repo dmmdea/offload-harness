@@ -189,6 +189,8 @@ func main() {
 		err = runGPU(args)
 	case "node-swap":
 		err = runNodeSwap(args)
+	case "update":
+		err = runUpdate(args)
 	case "train-router":
 		err = runTrainRouter(args)
 	case "shadow-label":
@@ -382,6 +384,8 @@ Usage:
   local-offload trace-corpus <harvest|readout|freeze|check>   recorded agent runs: trace-bearing count, pager re-fetch rate vs its gate, compaction fire rate, prefill tokens (UNRECORDED reads null, never 0)
   local-offload loupe [--since N] [--json]  call-identity ledger view: duplicate rate,
                                          prefix reuse, exemplar histogram, artifact A/B arms
+  local-offload update [--component llama|llama-swap|whisper|sdcpp|hyperframes|all] [--channel nightly|release] [--dry-run] [--json] [--resolve COMPONENT] [--rollback COMPONENT] [--repoint YAML --component llama]
+                                         resolve each harness component's newest complete build from its publisher, verify the publisher's digest, stage, promote as a generation behind the live path (junction/symlink), keep the previous one, roll back on failure; nothing new upstream is one conditional request (docs/systems/update.md)
   local-offload node-swap --staged NEW.exe --target LIVE.exe --sha256 HEX [--restart-task NAME | --restart-command "..."] [--health-url URL] [--render-tarball t.tar.gz --render-dir DIR] [--dry-run] [--result out.json] [--log out.log] [--json]
                                          the reusable Windows fleet-node binary swap: verify hash -> wait idle -> backup+rename -> restart -> verify PID+hash+health -> auto-rollback on any failure (docs/systems/node-swap.md; launch detached via setup/windows-node-swap-launch.ps1 so an SSH drop cannot orphan it)
   local-offload version
