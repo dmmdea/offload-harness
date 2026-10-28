@@ -42,5 +42,8 @@
   `setup/render.tests.ps1` with a `maxwell-3` block on the min and high RAM bands (no `offload-e4b` entry or var,
   the interactive set opens on `e2b`, f16, no spill); an `ampere-6` render unchanged; the design and the
   measurement plan in `docs/specs/2026-10-28-maxwell-3-tier-design.md`, the tier page in
-  `docs/tiers/maxwell-3.md`. The profile's unmeasured values are marked PROJECTED in its notes until the
-  reference box `<node-g>` measures them.
+  `docs/tiers/maxwell-3.md`. Installed end to end on the reference box `<node-g>` on 2026-10-28: `install.ps1`
+  classified it `maxwell-3` and exit 0 in 409 s, `selftest.ps1` passed (E2B 37.1 tok/s, the depth-7000 canary), a
+  boot task serves llama-swap on 11436, and one real call per lane came back correct through it (summarize, vqa on
+  a receipt, transcribe a Spanish clip, generate-image through sd.cpp); the scrubbed report is
+  `docs/tiers/reports/maxwell-3-node-g.md`. Nothing in the profile is PROJECTED any more.

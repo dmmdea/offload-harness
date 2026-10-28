@@ -84,8 +84,9 @@ What this tier delivers on a SPECIFIC machine is a question only that machine ca
 local-offload report --out capability-report.md
 ```
 
-No report is checked in for this tier yet. If you run this tier, yours is welcome —
-it is read-only output and it is how the tier gets documented for the next person.
+Checked-in examples (real machines, read-only output):
+
+- [maxwell-3-node-g](reports/maxwell-3-node-g.md)
 
 ---
 
