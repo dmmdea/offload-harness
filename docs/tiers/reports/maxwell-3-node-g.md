@@ -2,7 +2,8 @@
 2026-10-28 right after the install (install.ps1 at feat/maxwell-3-tier 39f3c0c7: tier classified, llama-swap
 served by the boot task on 11436, the render runners placed by Step 7a). Scrubbed: host name and user path.
 The agent lane is the resident E2B by design (no agent_model entry); the sd.cpp binary, the sdxl-turbo weights
-and whisper-server are placed by the operator on this tier, as its page says. -->
+and whisper-server are placed by the operator on this tier, as its page says. The hyperframes browser cache path is
+elided to `<browser cache>`: its `home/.cache` segment reads as a home directory to the identity lint. -->
 
 # local-offload capability report
 
@@ -53,7 +54,7 @@ Derived from this machine's bindings, not declared. `CONFIGURED` = bound and the
 | flatten_design | NOT CONFIGURED | gimp | gimp_console_path is unset |
 | media | CONFIGURED | ffmpeg | ffmpeg_path=C:\Users\<user>\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe |
 | media:ffprobe | CONFIGURED | ffprobe | ffprobe=C:\Users\<user>\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe |
-| compose_video | CONFIGURED | hyperframes | compose_script=D:\offload-stack\harness\render\compose-hyperframes.mjs; hyperframes_dir (pinned CLI)=D:\offload-stack\hyperframes\node_modules\hyperframes\bin\hyperframes.mjs; hyperframes_browser_path=D:/offload-stack/hyperframes/home/.cache/hyperframes/chrome/chrome-headless-shell/win64-152.0.7977.30/chrome-headless-shell-win64/chrome-headless-shell.exe; ffmpeg_path=C:\Users\<user>\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe; ffprobe=C:\Users\<user>\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe; hyperframes=0.8.114; templates=callout-label,captions-bar,checklist-card,lower-third,section-title,stat-card,title-card |
+| compose_video | CONFIGURED | hyperframes | compose_script=D:\offload-stack\harness\render\compose-hyperframes.mjs; hyperframes_dir (pinned CLI)=D:\offload-stack\hyperframes\node_modules\hyperframes\bin\hyperframes.mjs; hyperframes_browser_path=D:/offload-stack/hyperframes/<browser cache>/chrome-headless-shell.exe ffmpeg_path=C:\Users\<user>\AppData\Local\Microsoft\WinGet\Links\ffmpeg.exe; ffprobe=C:\Users\<user>\AppData\Local\Microsoft\WinGet\Links\ffprobe.exe; hyperframes=0.8.114; templates=callout-label,captions-bar,checklist-card,lower-third,section-title,stat-card,title-card |
 | node _(prereq)_ | CONFIGURED | runtime | node_path=D:\Programas\nodejs\node.exe — every render script runs under it |
 
 ---
