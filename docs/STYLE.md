@@ -130,8 +130,9 @@ write what the gate leaves you; fix a finding by rewriting the text, never by as
 
 ### Naming machines (V1 to V4)
 
-- **V1. A machine is a node letter.** In docs and comments write `<node-a>` through `<node-f>`, or a role
-  phrase that stays true over time ("the workstation", "the Linux edge node", "the RK3588 board"). A role
+- **V1. A machine is a node letter.** In docs and comments write `<node-a>` through `<node-g>`, or a role
+  phrase that stays true over time ("the workstation", "the Linux edge node", "the RK3588 board", "the
+  2015 gaming laptop"). A role
   phrase never carries a tier id. In test fixtures a machine id is a per-test label (`node-a`, `node-b`,
   optionally with a tier suffix) chosen so that sorted output keeps its order; it names no real machine.
 - **V2. A tier id states the hardware class AT THE TIME a dated sentence describes, never a machine's

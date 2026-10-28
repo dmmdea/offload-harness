@@ -347,6 +347,7 @@ reference box" with a tier id, or use the node letter ([STYLE.md](STYLE.md#priva
 | `blackwell-8` | `<node-e>`, the compact desktop (RTX 5060 8 GB), since 2026-08-19 |
 | `rockchip-rk3588` | `<node-d>`, the RK3588 board |
 | `amd-gcn` | `<node-f>`, the AMD APU mini-PC (Ryzen 5 5625U, Vega 7) |
+| `maxwell-3` | `<node-g>`, the 2015 gaming laptop (GTX 970M 3 GB, 32 GB RAM), since 2026-10-28 |
 | any other tier | none: no machine of that class is in the fleet, so its figures are projected or contributed rather than measured on a fleet machine |
 
 A dated document keeps the era of its own date (rule V3): a sentence from August 2026 about the workstation

@@ -41,6 +41,7 @@ var (
 	vllmSeatDebt = map[string]string{
 		"ampere-6":        "6 GB: needs a measured sub-6 GB w4a16 candidate",
 		"ampere-8":        "8 GB: MEASURED, not a path for the 9B: text-only W4A16 weights alone exceed the card before KV (MiMo AutoRound 7.51 GiB, RedHatAI Qwen3.5-9B w4a16 9.35 GiB); owes a sub-8 GB candidate or an operator opt-out",
+		"maxwell-3":       "3 GB sm_52: no vLLM wheel targets Maxwell (torch dropped sm_5x) and no sub-3 GB w4a16 candidate exists; the seat is llama.cpp CUDA through the sm_50 PTX",
 		"amd-gcn":         "ROCm build path not established for this box class; the only vLLM run was on the CPU, MEASURED 2026-09-20: Qwen3.5-4B bf16 only, 3.1 tok/s against 9.27 for llama.cpp CPU (about 0.3x), not seated",
 		"amd-rdna3":       "ROCm build path not established for this box class",
 		"amd-rdna3-dgpu":  "ROCm build path not established for this box class",
