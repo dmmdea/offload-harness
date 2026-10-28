@@ -61,6 +61,7 @@ var bareClientAllowlist = map[string]struct {
 	"internal/pipeline/liveness.go:engineActivityProbe":          {1, "configured: the seat's own address from llama-swap /running (ADR 0061)"},
 	"internal/placement/live.go:<file-scope>":                    {1, "configured: fleet nodes from delegate_remotes (placement reads)"},
 	"internal/research/fetch.go:Fetch":                           {1, "guarded: wrapped in netguard.PublicTransport before the first dial (ADR 0042)"},
+	"install_forecast.go:<file-scope>":                             {1, "guarded: the Hugging Face API only, through netguard.PublicTransport (public addresses, no proxy; ADR 0042)"},
 	"internal/rosterprobe/token.go:<file-scope>":                 {1, "configured: fleet nodes from delegate_remotes (doctor's fleet-token check; netguard.SafeTransport, and the bearer is sent only to a roster base the tailnet guard admits)"},
 	"internal/seatguard/guard.go:New":                            {1, "configured: the local llama-swap"},
 	"internal/sttclient/sttclient.go:New":                        {1, "configured: the speech-to-text endpoint from config"},

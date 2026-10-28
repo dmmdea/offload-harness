@@ -19,6 +19,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/forecastserve"
+	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
@@ -41,13 +42,17 @@ var forecastHFPatterns = []string{"config.json", forecastWeightsFile, "LICENSE",
 
 var forecastFullSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
+// forecastHTTPClient dials only the publisher (huggingface.co, a public address) through netguard's public
+// transport: the address it validated is the address it dials, never a loopback or tailnet answer (ADR 0042).
+var forecastHTTPClient = &http.Client{Timeout: 60 * time.Second, Transport: netguard.PublicTransport(nil)}
+
 // forecastHTTPGet reads a URL's body; a seam so the resolver has one place that touches the network.
 var forecastHTTPGet = func(ctx context.Context, u string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := forecastHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
