@@ -28,7 +28,7 @@ layout for directory components on top.
 ```
 local-offload update [--component llama|llama-swap|whisper|sdcpp|hyperframes|all] [--channel nightly|release]
                      [--dry-run] [--json] [--resolve <component>] [--rollback <component>]
-                     [--repoint <yaml> --component llama] [--live <path>] [--home <dir>] [--no-gate]
+                     [--repoint <yaml> --component llama [--from <dir>]...] [--live <path>] [--home <dir>] [--no-gate]
 ```
 
 | flag | what it does |
@@ -37,11 +37,12 @@ local-offload update [--component llama|llama-swap|whisper|sdcpp|hyperframes|all
 | `--dry-run` | prints the plan (installed, resolved, action) without downloading; the manifest is not written |
 | `--rollback <c>` | returns one component to its previous generation (an operator decision: nothing is marked rejected) |
 | `--repoint <yaml>` | rewrites a hand-kept llama-swap yaml to the live llama path, see below |
+| `--from <dir>` | with `--repoint`: a llama build directory whose name carries no build number (`/opt/llama-vulkan`), rewritten like a build-named one; repeatable |
 | `--channel` | `nightly` (default: the newest complete `b<N>`) or `release` (the build `nightly-tag.txt` names); `update.channel` in `config.json` sets it per node |
 | `--no-gate` | skips the side-port smoke gate (see Gate); prints that it did. The offline self-check and the post-flip watch still run |
 | `--component` | one component, or `all` (the default). `all` updates what the node runs: a component with no record in `installed.json` and nothing at its live path is reported `not-installed` (exit 0, nothing written) and left alone. Naming it (`--component sdcpp`) is the only way the verb installs a component a node does not have |
 | `--live` | the live path of the one selected component, for a box whose layout is not `<home>/<component>`. The verb records it, so later runs need neither the flag nor a config entry |
-| `--home` | the install root `<home>`. Default: `$OFFLOAD_HOME`, else the folder above the running binary when it sits in `<home>/bin` beside the installer's `installed.json` (how the installers lay a node out, and how the fleet registry calls the verb over ssh with no environment), else `~/offload-stack` when it holds an `installed.json`. No root found is exit 2 with nothing changed: the verb never starts a fresh install in a guessed folder. It prints the root it chose |
+| `--home` | the install root `<home>`. Default: `$OFFLOAD_HOME`, else `update.home` in `config.json`, else the nearest folder that holds the installer's `installed.json` among the running binary's folder and the three above it (the Linux installer's `<home>/bin`, the Windows installer's `<home>/harness`, a clone built inside the root; this is how the fleet registry's ssh call, with no environment, finds it), else `~/offload-stack` when it holds an `installed.json`. No root found is exit 2 with nothing changed: the verb never starts a fresh install in a guessed folder. It prints the root it chose and where that came from |
 
 Exit codes: **0** no-op, updated, skipped (no prebuilt for this node), inconclusive (a lease or a busy seat: try
 again) or busy (another run holds `update.lock`); **1** a candidate was rejected or rolled back (loud, with the reason);
@@ -99,8 +100,13 @@ the real path of the generation's executable, which is what the OS reports for a
    installed: write `checked_at`, exit 0. That is the five-minute no-op. A candidate is **complete** only when every
    required asset for this node is present, uploaded, with a non-empty `sha256:` digest; otherwise the verb steps back
    one tag. The required-asset sets are a table in `internal/update/resolve.go` with patterns (`<TAG>`, `<N>`,
-   `<SHA7>`) and no version number. The CUDA family is the driver's CUDA major (13.x takes the cuda-13.4 assets,
-   anything else cuda-12; a card below compute 7.5 is always 12), else the backend `installed.json` records.
+   `<SHA7>`) and no version number. The **build family** (`cuda13`, `cuda12`, `vulkan`, `cpu`) is chosen per
+   component: `update.variant.<component>` in `config.json`, else the family of the build at the live path (a
+   `ggml-cuda` or `ggml-vulkan` library beside its program), else the node's backend. A node can run one component
+   in another family than the rest: the maxwell-3 tier serves llama.cpp on CUDA and sd.cpp on Vulkan, the only family
+   measured to render on that card, and resolving its sd.cpp from the node's CUDA backend would fetch a build with no
+   code for the card. The CUDA family is the driver's CUDA major (13.x takes the cuda-13.4 assets, anything else
+   cuda-12; a card below compute 7.5 is always 12), else the backend `installed.json` records.
 3. **Floor** (`setup/floors.json`, embedded in the binary): a candidate under a floor is never selected, and the
    verb never downgrades. A floor only ever rises; a ceiling or an exact pin is not representable (ADR 0099).
 4. **Download** to `.staging`, check size and the publisher's sha256 (the file is deleted on a mismatch), cross-check
@@ -214,6 +220,8 @@ renames and prunes, so the verb reads its config only from `--config`, `$LOCAL_O
 | `update.paths.<component>` | `<home>/<component>`; llama-swap `<home>/llama-swap/llama-swap[.exe]` | a component's live path (`llama`, `llama-swap`, `whisper`, `sdcpp`, `hyperframes`) |
 | `update.restart.llama-swap` | the box's own mechanism | `{"task": "<scheduled task>"}`, `{"command": "<shell command>"}` or `{"none": true}` (no daemon stop, drain or restart; the swap is proven by hash and `-version` alone) |
 | `update.llama_swap_yaml` | `<home>/llama-swap.yaml` | the rendered llama-swap config the llama flag check and the gate read |
+| `update.home` | none | the install root (an absolute path) when neither `--home` nor `$OFFLOAD_HOME` names one, for a node whose binary does not sit under its root |
+| `update.variant.<component>` | the live build's family, else the node's backend | the build family a component resolves in: `cuda13`, `cuda12`, `vulkan` or `cpu` |
 | `update.gate.*` | see below | the smoke gate and the post-flip watch |
 
 `config.json`, object `update.gate`:
@@ -231,10 +239,16 @@ Thresholds (`MaxSlowdown` 0.20, `MaxVRAMGrowth` 0.10) are constants in `smokegat
 ## Repoint
 
 `update --repoint <yaml> --component llama` is for a hand-kept yaml that names a build directory (`llama.cpp-b<N>`,
-`llamacpp-b<N>`, `llama-b<N>`). It backs the file up to `<yaml>.bak-<yyyyMMdd-HHmmss>`, replaces every occurrence
-with the live path, on Linux sets any `LD_LIBRARY_PATH=` in a repointed block to the live path's `bin` directory
-(the live path itself when it has none), prints a diff summary and never re-renders. Comment lines are left alone.
-llama-swap reads its config at start: restart it afterwards.
+`llamacpp-b<N>`, `llama-b<N>`), or a directory named with `--from` (a build kept under a name with no build number,
+such as `/opt/llama-vulkan`; matched only as whole path components, so `/opt/llama-vulkan-b9934` is left alone). It
+backs the file up to `<yaml>.bak-<yyyyMMdd-HHmmss>`, replaces every occurrence with the live path and drops a `bin`
+segment right after it when the live build has no `bin` folder (the publisher's archives are flat; a source tree
+keeps its programs in `build/bin`, so `llamacpp-b11669/bin/llama-server` becomes `<live>/llama-server`). On Linux it
+sets any other `LD_LIBRARY_PATH=` in a repointed block to the live path's `bin` directory (the live path itself when
+it has none); a line it already rewrote keeps the rest of its list (`:${LD_LIBRARY_PATH:-}`). It prints a diff
+summary and never re-renders. Comment lines are left alone. It refuses (exit 2, nothing written) while the live path
+is not there: install or copy the build first. Run it on a
+copy when llama-swap runs with `-watch-config` (it reloads on every write), and swap the copy in at a quiet moment.
 
 ## ADR 0085 notice
 

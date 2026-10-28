@@ -211,10 +211,16 @@ func (e *Env) Run(ctx context.Context, opts Options) ([]Report, int) {
 			continue
 		}
 		if def.Name != LlamaSwap && def.Rule != ruleNPM {
-			if variant == "" {
-				variant = DetectVariant(man.Backend())
+			v, why := e.variantFor(def, e.livePath(def, man.State(name), opts), func() string {
+				if variant == "" {
+					variant = DetectVariant(man.Backend())
+				}
+				return variant
+			})
+			if why != "" {
+				e.logf("%s: build family %s (%s)", def.Name, v, why)
 			}
-			rs.Variant = variant
+			rs.Variant = v
 		}
 		var rep Report
 		switch {

@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"runtime"
 	"sort"
@@ -434,6 +435,61 @@ func DetectVariant(backend string) string {
 		return "cpu"
 	}
 	return "cpu"
+}
+
+// variantFor is the build family a component resolves in: update.variant.<component> in config.json, else the
+// family of the build at its live path, else the node's serving backend (node). A node can run one component in
+// another family than the rest: the maxwell-3 tier serves llama.cpp on CUDA and sd.cpp on Vulkan, the only family
+// measured to render on that card, and the backend recorded for the node would replace that sd.cpp with a CUDA build
+// that carries no code for the card. why names the source when it is not the node's backend.
+func (e *Env) variantFor(def *compDef, live string, node func() string) (v, why string) {
+	if c := strings.ToLower(strings.TrimSpace(e.Config.Variant[def.Name])); c != "" {
+		switch c {
+		case "cuda13", "cuda12", "vulkan", "cpu":
+			return c, "update.variant." + def.Name + " in config.json"
+		}
+		e.logf("%s: update.variant.%s %q is not cuda13, cuda12, vulkan or cpu; ignored", def.Name, def.Name, c)
+	}
+	switch liveVariant(live) {
+	case "vulkan":
+		return "vulkan", "the live build carries the ggml Vulkan backend"
+	case "cuda":
+		if v := node(); strings.HasPrefix(v, "cuda") {
+			return v, "the live build carries the ggml CUDA backend"
+		}
+		smi, _ := exec.LookPath("nvidia-smi")
+		return cudaFamily(smi), "the live build carries the ggml CUDA backend"
+	}
+	return node(), ""
+}
+
+// liveVariant reads the build family of the build at a live directory from the ggml backend library beside its
+// program (ggml-cuda / libggml-cuda: "cuda"; ggml-vulkan / libggml-vulkan: "vulkan"), in the directory or its bin
+// folder. "" when neither is there: no live build yet, a CPU build, or a source build linked statically.
+func liveVariant(live string) string {
+	for _, dir := range []string{live, filepath.Join(live, "bin")} {
+		ents, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		cuda, vulkan := false, false
+		for _, ent := range ents {
+			n := strings.TrimPrefix(strings.ToLower(ent.Name()), "lib")
+			switch {
+			case strings.HasPrefix(n, "ggml-cuda."):
+				cuda = true
+			case strings.HasPrefix(n, "ggml-vulkan."):
+				vulkan = true
+			}
+		}
+		switch {
+		case cuda:
+			return "cuda"
+		case vulkan:
+			return "vulkan"
+		}
+	}
+	return ""
 }
 
 var cudaVerRe = regexp.MustCompile(`CUDA (?:UMD )?Version:\s*(\d+)\.(\d+)`)

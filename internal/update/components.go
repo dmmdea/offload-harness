@@ -47,7 +47,7 @@ var defs = map[string]*compDef{
 		Probes: [][]string{{"-version"}, {"--version"}}, IDProbe: regexp.MustCompile(`version:\s*v?(\d+)`), IDFormat: "v%s"},
 	Whisper: {Name: Whisper, Upstream: "whisper.cpp", Repo: "ggml-org/whisper.cpp", Rule: ruleB, Binary: "whisper-server",
 		Probes: [][]string{{"--version"}, {"-h"}}},
-	SDCpp: {Name: SDCpp, Upstream: "stable-diffusion.cpp", Repo: "leejet/stable-diffusion.cpp", Rule: ruleMaster, Binary: "sd",
+	SDCpp: {Name: SDCpp, Upstream: "stable-diffusion.cpp", Repo: "leejet/stable-diffusion.cpp", Rule: ruleMaster, Binary: "sd-cli",
 		Probes: [][]string{{"--version"}, {"-h"}}, IDProbe: regexp.MustCompile(`(master-\d+-[0-9a-f]{7})`), IDFormat: "%s"},
 	Hyperframes: {Name: Hyperframes, Upstream: "hyperframes", Repo: "hyperframes", Rule: ruleNPM},
 }
