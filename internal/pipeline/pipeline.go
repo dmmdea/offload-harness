@@ -1114,8 +1114,10 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 
 	// The call is on its seat from here to its return: registered (gpuactivity.KindVision), so
 	// `gpu status`, `offload_status` and a node's health name it and who asked for it. A cache
-	// hit and a lease defer above never reach the seat and are not registered.
-	act := gpuactivity.Start(p.cfg.GPULockPath, p.cfg.StateDir, gpuactivity.Run{Seat: meta.Model, Kind: gpuactivity.KindVision, Origin: visionRunOrigin(req), Goal: visionRunGoal(req)})
+	// hit and a lease defer above never reach the seat and are not registered. It registers in
+	// admission, like every run (register C-60), while a cold seat loads, and is running from
+	// the request on.
+	act := gpuactivity.Start(p.cfg.GPULockPath, p.cfg.StateDir, gpuactivity.Run{Seat: meta.Model, Kind: gpuactivity.KindVision, Origin: visionRunOrigin(req), Goal: visionRunGoal(req), Phase: gpuactivity.PhaseAdmission})
 	defer act.End()
 
 	// F49: a COLD vision seat is loaded BEFORE the request is sent, not inside it. The seat
@@ -1127,6 +1129,7 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	// request, so the vision request keeps its full timeout for inference. A seat already
 	// listed ready costs one /running read.
 	coldNote := p.waitForColdVisionSeat(ctx, meta.Model)
+	act.Phase(gpuactivity.PhaseRunning)
 
 	// LO-9 parity for the vision tier: stamp the call so a cold-swap timeout is
 	// exempt from breaker accounting (http_5xx / warm timeouts still count).
