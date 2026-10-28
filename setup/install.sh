@@ -367,6 +367,10 @@ else
   HF_RES="$(resolve_source hyperframes)" || die "could not resolve hyperframes from its publisher (the npm registry)"
   HF_VER="$(printf '%s' "$HF_RES" | jq -r .version)"
   HF_DIGEST="$(printf '%s' "$HF_RES" | jq -r .digest)"
+  # The version names directories below (staging, the generation, the symlink): only a semver shape is ever used
+  # in a path, so a registry answer cannot steer rm -rf or mv outside the versions tree.
+  printf '%s' "$HF_VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' \
+    || die "the npm registry answered an unusable hyperframes version '$HF_VER' (not a semver); refusing to use it in a path"
   if [ -n "$HF_FLOOR" ] && ! version_ge "$HF_VER" "$HF_FLOOR"; then
     die "the newest published hyperframes ($HF_VER) is below the floor $HF_FLOOR in setup/floors.json"
   fi
@@ -391,6 +395,15 @@ else
     [ "$HF_GOT" = "$HF_DIGEST" ] || hf_fail "hyperframes $HF_VER does not match the digest its publisher states (installed ${HF_GOT:-none}, published $HF_DIGEST) — refusing to promote it"
     (cd "$HF_STAGE" && npm audit signatures) || hf_fail "npm audit signatures FAILED for the hyperframes install — registry signature or provenance check did not pass; refusing to bind the compose lane"
     (cd "$HF_STAGE" && npm rebuild esbuild) || hf_fail "npm rebuild esbuild failed"
+    # The lock npm wrote stays inside the generation as its record. Against the previous generation's lock, name
+    # every package whose version moved (detect, not gate: the gate is the real render that follows).
+    if [ -n "$HF_HAVE" ] && [ -f "$HF_VERSIONS/$HF_HAVE/package-lock.json" ]; then
+      HF_MOVED="$(comm -13 \
+        <(jq -r '.packages | to_entries[] | select(.key != "") | "\(.key) \(.value.version)"' "$HF_VERSIONS/$HF_HAVE/package-lock.json" 2>/dev/null | sort) \
+        <(jq -r '.packages | to_entries[] | select(.key != "") | "\(.key) \(.value.version)"' "$HF_STAGE/package-lock.json" 2>/dev/null | sort) \
+        | sed 's#^node_modules/##')"
+      [ -z "$HF_MOVED" ] || say "hyperframes: packages that changed against $HF_HAVE ($(printf '%s\n' "$HF_MOVED" | wc -l | tr -d ' ')): $(printf '%s\n' "$HF_MOVED" | head -40 | tr '\n' ';')"
+    fi
     if [ -e "$HF_GEN" ]; then
       rm -rf "$HF_STAGE"
       say "hyperframes: generation $HF_VER already present (write-once) — reused"

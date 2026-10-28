@@ -693,8 +693,13 @@ OS drive on purpose, and re-run. An existing config that names no `home` prints 
 **Idempotency & re-run:** re-running is safe. A satisfied step prints `SKIP`. A component only
 SKIPs when **both** the artifact exists on disk **and** `installed.json` records a generation at or
 above the newest the publisher serves (or a newer hand-placed build, which is kept, never downgraded) — so a newer
-published build refreshes exactly that component and keeps the previous generation for rollback. There is **no
-`OFFLOAD_PLAN` dry-run mode** in this installer (see "Preview" below).
+published build refreshes exactly that component and keeps the previous generation for rollback. An engine whose
+live directory a running process holds (llama-swap serving, a seat loaded) is **staged, not swapped**: the
+generation lands under `<component>-versions\`, the table says `staged`, the record carries `staged`, and
+`local-offload update --component <name>` (which drains and restarts) or a re-run after the stack stops promotes
+it with no second download. Each record is written to `installed.json` the moment its component is live, so a run
+that stops half-way never leaves the manifest behind the disk. There is **no `OFFLOAD_PLAN` dry-run mode** in this
+installer (see "Preview" below).
 
 **Decision table:**
 
@@ -764,10 +769,13 @@ installs HyperFrames, which renders HTML/CSS motion graphics to video on the CPU
 route unbound (`compose_script: ""`, NOT CONFIGURED). A skipped lane is a legitimate state, not a
 failure. What the step does:
 
-1. Copies `setup/hyperframes/package.json` (npm `hyperframes`, the newest release, no lockfile) to
-   `<OFFLOAD_HOME>/hyperframes`.
+1. Resolves the newest published `hyperframes` from the npm registry (`install.sh`: version, SRI integrity and
+   tarball from the registry document; a generation under `<OFFLOAD_HOME>/hyperframes-versions/<version>` with
+   `hyperframes` a symlink to it). `install.ps1` still installs from `setup/hyperframes/package.json` with the
+   committed lockfile until the runtime-refusals change that follows this one moves it to the same resolver.
 2. `npm install --ignore-scripts`, which installs the newest tree, each package verified by npm against the registry's
-   integrity value, with no install script.
+   integrity value, with no install script; the top-level package must match the integrity the registry states, and
+   the packages whose versions moved against the previous generation are listed.
 3. `npm audit signatures`, which checks the registry signatures and SLSA provenance. **A failure is
    fatal and the installer stops.** Do not work around it. Surface it to the human, because the
    package or the registry answer is not what the registry's own signatures promise.
@@ -1021,9 +1029,10 @@ difference between a good first impression and a confused user.
 
 - **Logs:** `$OFFLOAD_HOME\install.log` (full install transcript). selftest writes transient logs to
   `%TEMP%\offload-selftest-*` and cleans them up.
-- **Version manifest:** `$OFFLOAD_HOME\installed.json` (per component: the current and previous
-  generation, rejected candidates, the ETag and the check time; the model list with the sizes recorded at download). A
-  component re-installs only when the publisher serves a newer complete build (ADR 0099).
+- **Version manifest:** `$OFFLOAD_HOME\installed.json` (schema 2: per component the version, the publisher's
+  digest, the size, the source and the install time, plus `dest` for a model file and `staged` for a generation
+  waiting for a restart; the update verb adds the previous generation, rejected candidates, the ETag and the check
+  time). A component re-installs only when the publisher serves a newer complete build (ADR 0099).
 - **Hash sentinels:** each model has a `<file>.sha-ok` sentinel beside it caching its verified hash;
   delete it to force a re-hash.
 - **Retry a component:** delete its directory under `$OFFLOAD_HOME` (e.g. `llama\`, `llama-swap\`,

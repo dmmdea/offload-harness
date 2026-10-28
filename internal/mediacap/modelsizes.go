@@ -48,11 +48,16 @@ func KnownSize(name string) (int64, bool) {
 	if json.Unmarshal(raw, &m) != nil {
 		return 0, false
 	}
+	// Only the LOCAL name a record carries (dest or file) is matched. The publisher's
+	// path (source) is deliberately not: the installer renames some files on the way
+	// in (the Z-Image AE lands as zimage_ae.safetensors from ae.safetensors), so a
+	// source-basename match would miss those and could hand an unrelated same-named
+	// file (any ae.safetensors) a size that is not its own.
 	for _, c := range m.Components {
 		if c.Size <= 0 {
 			continue
 		}
-		for _, ref := range []string{c.File, c.Dest, c.Source} {
+		for _, ref := range []string{c.File, c.Dest} {
 			if ref != "" && path.Base(strings.ReplaceAll(ref, `\`, "/")) == name {
 				return c.Size, true
 			}

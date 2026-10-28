@@ -143,7 +143,7 @@ func recordModelSize(t *testing.T, name string, size int64) {
 	t.Helper()
 	home := t.TempDir()
 	t.Setenv("OFFLOAD_HOME", home)
-	manifest := fmt.Sprintf(`{"schema":2,"components":{"model-x":{"version":"x","size":%d,"source":"hf:owner/repo/%s"}}}`, size, name)
+	manifest := fmt.Sprintf(`{"schema":2,"components":{"model-x":{"version":"x","size":%d,"source":"hf:owner/repo/weights.safetensors","dest":"%s"}}}`, size, name)
 	if err := os.WriteFile(filepath.Join(home, "installed.json"), []byte(manifest), 0o644); err != nil {
 		t.Fatal(err)
 	}

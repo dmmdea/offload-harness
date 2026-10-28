@@ -472,6 +472,7 @@ function Get-Verified {
   param([string]$Url, [string]$Dest, [long]$ExpectedSize, [string]$Sha)
   if (Test-OfflineResolve) { throw "offline resolve mode (OFFLOAD_RESOLVE=offline or -RenderOnly): downloads are refused - $Url" }
   $tmp = "$Dest.part"
+  $verified = $false
   for ($attempt = 1; $attempt -le 3; $attempt++) {
     try {
       # BITS only under Windows PowerShell: PowerShell 7 reaches it through a compatibility session where a job can
@@ -517,21 +518,32 @@ function Get-Verified {
         $actual = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash.ToLower()
         if ($actual -ne $Sha.ToLower()) { throw "SHA256 mismatch: got $actual, expected $Sha" }
       }
-      # A file already at $Dest (a model re-uploaded under the same name) is kept as <name>.prev, never overwritten
-      # in place: the verified new file replaces it by rename only after the whole download checked out.
-      if (Test-Path -LiteralPath $Dest) {
-        Remove-Item -LiteralPath "$Dest.prev" -Force -ErrorAction SilentlyContinue
-        Move-Item -LiteralPath $Dest -Destination "$Dest.prev"
-        Remove-Item -LiteralPath "$Dest.sha-ok" -Force -ErrorAction SilentlyContinue
-      }
-      Move-Item -Force $tmp $Dest
-      return
+      $verified = $true
+      break
     } catch {
       Write-Host "      download attempt $attempt/3 failed: $($_.Exception.Message)" -ForegroundColor Yellow
       Remove-Item $tmp -ErrorAction SilentlyContinue
       if ($attempt -eq 3) { throw "download failed after 3 attempts: $Url`n$($_.Exception.Message)" }
       Start-Sleep -Seconds ([math]::Pow(2, $attempt))
     }
+  }
+  if (-not $verified) { throw "download failed: $Url" }
+  # The swap happens ONCE, outside the retry loop: a verified multi-GB file is never re-downloaded because the rename
+  # failed. A file already at $Dest (a model re-uploaded under the same name) is kept as <name>.prev, never overwritten
+  # in place; if the final rename fails (a running engine holds $Dest open, an antivirus lock) the old file is put back
+  # and the verified download stays at <name>.part for the next run.
+  $rotated = $false
+  try {
+    if (Test-Path -LiteralPath $Dest) {
+      Remove-Item -LiteralPath "$Dest.prev" -Force -ErrorAction SilentlyContinue
+      Move-Item -LiteralPath $Dest -Destination "$Dest.prev"
+      $rotated = $true
+      Remove-Item -LiteralPath "$Dest.sha-ok" -Force -ErrorAction SilentlyContinue
+    }
+    Move-Item -LiteralPath $tmp -Destination $Dest -Force
+  } catch {
+    if ($rotated -and -not (Test-Path -LiteralPath $Dest)) { Move-Item -LiteralPath "$Dest.prev" -Destination $Dest -ErrorAction SilentlyContinue }
+    throw "verified download kept at $tmp; could not replace $Dest (is a running engine holding it open? unload the seat and re-run): $($_.Exception.Message)"
   }
 }
 
@@ -577,8 +589,10 @@ function Invoke-WebRequestWithProgress {
 function Set-LiveJunction {
   param([string]$Dest, [string]$Target, [string]$LegacyId = '')
   $di = New-Object System.IO.DirectoryInfo($Dest)
+  $oldTarget = ''
   if ($di.Exists) {
     if ($di.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+      $oldTarget = Get-LiveTarget -Dest $Dest
       [System.IO.Directory]::Delete($Dest)
     } elseif (@($di.GetFileSystemInfos()).Count -eq 0) {
       [System.IO.Directory]::Delete($Dest)
@@ -593,33 +607,73 @@ function Set-LiveJunction {
   } elseif (Test-Path -LiteralPath $Dest) {
     throw "$Dest exists and is not a directory"
   }
-  New-Item -ItemType Junction -Path $Dest -Target $Target | Out-Null
+  try { New-Item -ItemType Junction -Path $Dest -Target $Target | Out-Null }
+  catch {
+    # never leave the live path absent: put the previous junction back before failing
+    if ($oldTarget -and $oldTarget -ne $Dest -and -not (Test-Path -LiteralPath $Dest)) {
+      try { New-Item -ItemType Junction -Path $Dest -Target $oldTarget | Out-Null } catch { }
+    }
+    throw "could not point $Dest at $Target`: $($_.Exception.Message)"
+  }
+}
+
+# The directory the live path really is: the junction's target when it is one, else the path itself ('' when absent).
+function Get-LiveTarget {
+  param([string]$Dest)
+  $di = New-Object System.IO.DirectoryInfo($Dest)
+  if (-not $di.Exists) { return '' }
+  if ($di.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+    $t = $di.Target
+    if ($t) { return [string]($t | Select-Object -First 1) }
+    try { return [string]([System.IO.Directory]::ResolveLinkTarget($Dest, $true).FullName) } catch { return $Dest }
+  }
+  return $Dest
+}
+
+# The tag of the generation the live path serves, read from its <generation>.meta.json ('' when the live path is not a
+# junction to a generation with a meta file). This is the ground truth; a manifest record is only the memory of it.
+function Get-LiveGenerationTag {
+  param([string]$Dest)
+  $t = Get-LiveTarget -Dest $Dest
+  if (-not $t -or $t -eq $Dest) { return '' }
+  $metaPath = "$t.meta.json"
+  if (-not (Test-Path -LiteralPath $metaPath)) { return '' }
+  try { return [string](Get-Content -Raw -LiteralPath $metaPath | ConvertFrom-Json).tag } catch { return '' }
+}
+
+# Processes running an executable from under the live directory (through the junction or its target). A held
+# directory is never swapped out from under a running engine: the generation is staged and the operator (or the
+# update verb, which drains and restarts) promotes it.
+function Get-LiveDirHolders {
+  param([string]$Dest)
+  $paths = @()
+  foreach ($p in @($Dest, (Get-LiveTarget -Dest $Dest))) {
+    if ($p) { try { $paths += ([System.IO.Path]::GetFullPath($p).TrimEnd('\') + '\') } catch { } }
+  }
+  if ($paths.Count -eq 0) { return @() }
+  $holders = @()
+  foreach ($proc in @(Get-Process -ErrorAction SilentlyContinue)) {
+    $exe = $null
+    try { $exe = $proc.Path } catch { $exe = $null }
+    if (-not $exe) { continue }
+    foreach ($p in $paths) {
+      if ($exe.StartsWith($p, [System.StringComparison]::OrdinalIgnoreCase)) { $holders += "$($proc.ProcessName) (pid $($proc.Id))"; break }
+    }
+  }
+  return @($holders | Select-Object -Unique)
 }
 
 # Install one engine generation: download every key's zip (verified against the publisher's size and digest) into
 # <dest>-versions\.staging\<tag>.<rand>, extract them there, check $ExeName landed, rename the staging tree to
-# <dest>-versions\<tag> (write-once) and only then point the live path at it. $Resolved = key -> @{ tag; url; digest; size }.
+# <dest>-versions\<tag> (write-once) and only then point the live path at it. A generation already on disk with the
+# same publisher digests is reused without a download. $Resolved = key -> @{ tag; url; digest; size }.
+# Returns @{ target; id; live = $true when the live path now serves it, $false when a running process holds the live
+# directory and the generation was only staged; holders }.
 function Install-Engine {
   param([string[]]$Keys, [hashtable]$Resolved, [string]$Dest, [string]$ExeName, [string]$LegacyId = '')
   $versionsDir = "$Dest-versions"
   $tag = $Resolved[$Keys[0]].tag
   $rand = [System.IO.Path]::GetRandomFileName().Replace('.', '')
-  $stage = Join-Path (Join-Path $versionsDir '.staging') "$tag.$rand"
-  $dl  = Join-Path $stage '.dl'
-  $out = Join-Path $stage 'out'
-  New-Item -ItemType Directory -Force -Path $dl, $out | Out-Null
-  try {
-    foreach ($k in $Keys) {
-      $r = $Resolved[$k]
-      $zip = Join-Path $dl ([System.IO.Path]::GetFileName(([uri]$r.url).AbsolutePath))
-      Get-Verified -Url $r.url -Dest $zip -ExpectedSize $r.size -Sha $r.digest
-      Expand-Archive -Path $zip -DestinationPath $out -Force   # into the fresh staging tree, never a live directory
-    }
-    if (-not (Test-Path -LiteralPath (Join-Path $out $ExeName))) { throw "$ExeName not found in the staged extraction of $tag" }
-  } catch {
-    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
-    throw
-  }
   $sig = (@($Keys | ForEach-Object { $Resolved[$_].digest }) -join ',')
   $id = $tag
   $target = Join-Path $versionsDir $id
@@ -639,8 +693,24 @@ function Install-Engine {
     }
   }
   if ($reuse) {
-    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    Write-Host "      generation $id is already on disk with the publisher's digests; reused without a download" -ForegroundColor DarkGray
   } else {
+    $stage = Join-Path (Join-Path $versionsDir '.staging') "$tag.$rand"
+    $dl  = Join-Path $stage '.dl'
+    $out = Join-Path $stage 'out'
+    New-Item -ItemType Directory -Force -Path $dl, $out | Out-Null
+    try {
+      foreach ($k in $Keys) {
+        $r = $Resolved[$k]
+        $zip = Join-Path $dl ([System.IO.Path]::GetFileName(([uri]$r.url).AbsolutePath))
+        Get-Verified -Url $r.url -Dest $zip -ExpectedSize $r.size -Sha $r.digest
+        Expand-Archive -Path $zip -DestinationPath $out -Force   # into the fresh staging tree, never a live directory
+      }
+      if (-not (Test-Path -LiteralPath (Join-Path $out $ExeName))) { throw "$ExeName not found in the staged extraction of $tag" }
+    } catch {
+      Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+      throw
+    }
     Move-Item -LiteralPath $out -Destination $target
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     $meta = [ordered]@{
@@ -650,8 +720,18 @@ function Install-Engine {
     }
     $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$target.meta.json" -Encoding UTF8
   }
-  Set-LiveJunction -Dest $Dest -Target $target -LegacyId $LegacyId
-  return $target
+  $holders = @(Get-LiveDirHolders -Dest $Dest)
+  if ($holders.Count -eq 0) {
+    try { Set-LiveJunction -Dest $Dest -Target $target -LegacyId $LegacyId; return @{ target = $target; id = $id; live = $true; holders = @() } }
+    catch {
+      # a holder this session could not read (an elevated or another user's process) shows up as the move failing
+      if ($_.Exception.Message -notlike 'cannot move the existing*') { throw }
+      $holders = @("a process this session cannot read ($($_.Exception.Message))")
+    }
+  }
+  Write-Host "NOTE  $id is staged at $target but NOT live: a process runs from $Dest ($($holders -join ', '))." -ForegroundColor Yellow
+  Write-Host "      Promote it with 'local-offload update --component $(Split-Path -Leaf $Dest)' (it drains and restarts), or stop the stack and re-run this installer (no download: the generation is reused)." -ForegroundColor Yellow
+  return @{ target = $target; id = $id; live = $false; holders = $holders }
 }
 
 # ---------------------------------------------------------------------------
@@ -703,9 +783,32 @@ function Get-OldRecord {
 }
 
 function New-ComponentRecord {
-  param([string]$Version, [string]$Digest = '', [int64]$Size = 0, [string]$Source = '', [string]$InstalledAt = '')
+  param([string]$Version, [string]$Digest = '', [int64]$Size = 0, [string]$Source = '', [string]$InstalledAt = '', [string]$Dest = '')
   if (-not $InstalledAt) { $InstalledAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
-  return @{ version = $Version; digest = $Digest; size = $Size; source = $Source; installed_at = $InstalledAt }
+  $rec = @{ version = $Version; digest = $Digest; size = $Size; source = $Source; installed_at = $InstalledAt }
+  if ($Dest) { $rec['dest'] = $Dest }   # the local name a size guard matches on (never the publisher's path, which may differ)
+  return $rec
+}
+
+# Write one component's record into installed.json on disk NOW (schema 2, tmp + rename), so a run that stops later
+# never leaves the manifest behind what is live. The full manifest is still written at the end of the run.
+function Save-ComponentRecord {
+  param([string]$Key, [hashtable]$Record)
+  if ($RenderOnly) { return }
+  $doc = $null
+  if (Test-Path -LiteralPath $manifestPath) { try { $doc = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json } catch { $doc = $null } }
+  if ($null -eq $doc) { $doc = [pscustomobject]@{} }
+  Add-OrSet-Property -Object $doc -Name 'schema' -Value 2
+  if (-not ($doc.PSObject.Properties['components'] -and $doc.components -is [psobject] -and -not ($doc.components -is [string]))) {
+    Add-OrSet-Property -Object $doc -Name 'components' -Value ([pscustomobject]@{})
+  }
+  Add-OrSet-Property -Object $doc.components -Name $Key -Value ([pscustomobject]$Record)
+  if ($SOURCES.ContainsKey($Key) -and $SOURCES[$Key].kind -eq 'github-release') {
+    if ($SOURCES[$Key].dest -eq 'llama') { Add-OrSet-Property -Object $doc -Name 'llama_cpp_tag' -Value $Record.version }
+    if ($Key -eq 'llama-swap') { Add-OrSet-Property -Object $doc -Name 'llama_swap_tag' -Value $Record.version }
+  }
+  $doc | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath "$manifestPath.tmp" -Encoding UTF8
+  Move-Item -Force -LiteralPath "$manifestPath.tmp" -Destination $manifestPath
 }
 
 # The generation table printed at the end of an install: component | installed | resolved | action.
@@ -758,7 +861,11 @@ function Get-EnginePlan {
   $floor = Get-FloorFor -Key $primary
   $installedTag = ''
   $instN = $null
-  if ($rec -and $rec.version) { $installedTag = $rec.version; $instN = Get-TagNumber -Tag $rec.version -Rule $rule }
+  # The generation the live junction serves is the truth; the manifest record is only its memory (a run that moved
+  # the junction and stopped before the final write leaves the record behind).
+  $liveTag = Get-LiveGenerationTag -Dest $Dest
+  if ($liveTag) { $installedTag = $liveTag; $instN = Get-TagNumber -Tag $liveTag -Rule $rule }
+  elseif ($rec -and $rec.version) { $installedTag = $rec.version; $instN = Get-TagNumber -Tag $rec.version -Rule $rule }
   $held = (($null -ne $instN) -and $live -and (($null -eq $floor) -or ($instN -ge $floor)))
   if ($held -and -not $Update) {
     return @{ action = 'skip'; installed = $installedTag; resolved = '-'; results = $null }
@@ -791,27 +898,38 @@ function Get-EnginePlan {
 function Invoke-EngineInstall {
   param([string[]]$Keys, [string]$Dest, [string]$ExeName, [string]$Label)
   $plan = Get-EnginePlan -Keys $Keys -Dest $Dest -ExeName $ExeName
+  $script:engineInstallResult = $null
   Step $Label `
     { $plan.action -ne 'install' } `
     {
       $legacy = Get-RecordedTagForDest -Dest $Dest
-      Install-Engine -Keys $Keys -Resolved $plan.results -Dest $Dest -ExeName $ExeName -LegacyId $legacy | Out-Null
+      if ($plan.installed -and $plan.installed -ne '-') { $legacy = $plan.installed }
+      $script:engineInstallResult = Install-Engine -Keys $Keys -Resolved $plan.results -Dest $Dest -ExeName $ExeName -LegacyId $legacy
       if (-not (Test-Path -LiteralPath (Join-Path $Dest $ExeName))) { throw "$ExeName not found in $Dest after install" }
     }
+  $staged = ($plan.action -eq 'install' -and $script:engineInstallResult -and -not $script:engineInstallResult.live)
   foreach ($k in $Keys) {
-    if ($plan.action -eq 'install') {
+    if ($plan.action -eq 'install' -and -not $staged) {
       $r = $plan.results[$k]
       $manifestComponents[$k] = New-ComponentRecord -Version $r.tag -Digest $r.digest -Size $r.size -Source "github:$($SOURCES[$k].repo)"
+      Save-ComponentRecord -Key $k -Record $manifestComponents[$k]
     } else {
       $old = Get-OldRecord $k
+      if (-not $old -and $plan.installed -and $plan.installed -ne '-') { $old = New-ComponentRecord -Version $plan.installed -Source "github:$($SOURCES[$k].repo)" }
+      if ($old -and $staged) { $old['staged'] = $script:engineInstallResult.id }   # the generation waiting for a restart
       if ($old) { $manifestComponents[$k] = $old }
     }
   }
   $text = $plan.action
-  if ($text -eq 'install') { $text = 'installed' }
+  if ($staged) {
+    $text = "staged $($script:engineInstallResult.id), not live: held by $($script:engineInstallResult.holders -join ', ')"
+    [void]$script:StagedComponents.Add("$($Keys[0]) $($script:engineInstallResult.id)")
+  }
+  elseif ($text -eq 'install') { $text = 'installed' }
   elseif ($text -eq 'skip') { $text = 'skipped' }
   Add-GenRow -Component $Keys[0] -Installed $plan.installed -Resolved $plan.resolved -Action $text
 }
+$script:StagedComponents = New-Object System.Collections.ArrayList
 
 # Decide what a model file needs. A file that exists, whose recorded oid and size match, is kept with no network call
 # unless -Update; otherwise the published oid decides: the same oid keeps it, a different one (a re-upload) downloads
@@ -872,13 +990,14 @@ function Invoke-ModelInstall {
   if ($text -eq 'skip') { $text = 'skipped' }
   if ($plan.action -eq 'download') {
     $r = $plan.resolution
-    $manifestComponents[$Key] = New-ComponentRecord -Version $r.digest.Substring(0, 8) -Digest $r.digest -Size $r.size -Source "hf:$($s.repo)/$($s.file)"
+    $manifestComponents[$Key] = New-ComponentRecord -Version $r.digest.Substring(0, 8) -Digest $r.digest -Size $r.size -Source "hf:$($s.repo)/$($s.file)" -Dest $s.dest
+    Save-ComponentRecord -Key $Key -Record $manifestComponents[$Key]
     if ($existedBefore) { $text = 'updated (old kept as .prev)' } else { $text = 'downloaded' }
   } elseif ($plan.action -eq 'current' -or $plan.action -eq 'adopted') {
     $r = $plan.resolution
     $at = ''
     if ($old) { $at = $old.installed_at }
-    $manifestComponents[$Key] = New-ComponentRecord -Version $r.digest.Substring(0, 8) -Digest $r.digest -Size $r.size -Source "hf:$($s.repo)/$($s.file)" -InstalledAt $at
+    $manifestComponents[$Key] = New-ComponentRecord -Version $r.digest.Substring(0, 8) -Digest $r.digest -Size $r.size -Source "hf:$($s.repo)/$($s.file)" -InstalledAt $at -Dest $s.dest
   } elseif ($old) {
     $manifestComponents[$Key] = $old
   }
@@ -2518,6 +2637,11 @@ if ($script:dataHomeChoice) {
 $manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "$manifestPath.tmp" -Encoding UTF8
 Move-Item -Force -LiteralPath "$manifestPath.tmp" -Destination $manifestPath
 Show-GenerationTable
+if ($script:StagedComponents.Count -gt 0) {
+  Write-Host ""
+  Write-Host "WARN  staged but not live (a running process holds the live directory): $($script:StagedComponents -join '; ')" -ForegroundColor Yellow
+  Write-Host "      Promote with 'local-offload update --component <name>' (drains and restarts), or stop the stack and re-run this installer (no download: the generation is reused)." -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------------------
 # Step 9: start command + JSON verdict
