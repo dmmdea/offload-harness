@@ -1,11 +1,15 @@
 ### Fixed - the dev tooling and runtime refusals carry no version pins: ComfyUI node packs are admitted by repository, the forecast lane resolves at install time, CI reads its floors and tracks the newest releases
 
 - **What changed.** ComfyUI node packs are admitted by repository (`render/node-packs.json` has no commit column);
-  the node installs the head of the default branch and records the commit it got beside the pack. The forecast
+  a node clones a pack it does not hold at the head of the default branch and records the commit beside the pack. A
+  render request never moves an installed pack: updating one is the operator's (`git pull --ff-only` in its folder,
+  or the fleet's update tooling), so a holder of the render bearer cannot make a node fetch an upstream's newest push.
+  The dependency marker is keyed on the recorded commit, so a pack the operator moved is re-resolved. The forecast
   installer (`install forecast`) resolves the Hugging Face revision of `main` and the weights' digest and size from
   the publisher's API at install time, and installs the timestral package from the head of its default branch;
   python stays a floor (`>=3.13`). The browse sidecar takes `browser-harness>=0.1.13` and `jev-ultrafast` from its git
-  default branch, with no lockfile. CI reads the Go floor from `go.mod` (`go-version-file`, `check-latest`), tracks the
+  default branch, installed with `uv sync --upgrade`, so every install run re-resolves to the newest whatever
+  `uv.lock` the install folder already holds. CI reads the Go floor from `go.mod` (`go-version-file`, `check-latest`), tracks the
   current Node, installs `govulncheck@latest`, and no longer demands the compiler equal a `toolchain` line, which is
   gone from `go.mod`. The vendored llama-swap config schema is a refreshable snapshot
   (`scripts/refresh-llamaswap-schema.sh`), and `version drift` treats it as a floor: only a server older than the

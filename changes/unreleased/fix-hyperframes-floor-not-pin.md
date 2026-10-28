@@ -13,7 +13,12 @@
   staging copy (npm verifies each tarball against the registry's integrity field), run
   `npm audit signatures`, read the staged `node_modules/hyperframes/package.json`, check its version
   against the `hyperframes` floor in `setup/floors.json`, and swap it in with the previous tree kept as
-  `node_modules.prev`. An install at or above the registry's newest is kept, never downgraded. The
+  `node_modules.prev`. Every swap is a whole directory rename: PowerShell's `Move-Item` is not one (when a
+  render holds a file it moves what it can and splits the tree), so `setup/install.ps1` renames through
+  `Move-DirAtomic`, which also carries the engine installer's legacy-folder migration and staged-generation
+  move. A refused swap changes nothing; one that fails after the old tree moved aside puts it back. A lockfile an
+  older installer left is retired to `package-lock.json.prev`, and a rollback restores only the `.prev` files its
+  own swap wrote. An install at or above the registry's newest is kept, never downgraded. The
   version and time are recorded in `installed.json` under `components.hyperframes.current`
   (`{id, version, installed_at}`; a flat schema-1 entry is replaced by the record). The runner's
   `assertInstalled` throws `CLI_MISSING` only when the CLI is absent or below the floor, and capability
