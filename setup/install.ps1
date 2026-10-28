@@ -4,6 +4,11 @@
 # Every step is idempotent: satisfied steps print SKIP and do no work. Re-running is safe.
 # PowerShell 5.1 compatible (no ternary, no ?? operator). Fails LOUD on any hard error.
 #
+# Frontier rule: this file names no release tag, byte count or digest. Every component is resolved from its
+# publisher at run time (a GitHub release asset carries its sha256 digest and size; Hugging Face carries the LFS
+# oid and size) and the download is verified against exactly what the publisher returned. The only version
+# numbers a seat may need are FLOORS (the minimum build), and they live in setup/floors.json and nowhere else.
+#
 # Env overrides:  OFFLOAD_HOME (default $HOME\offload-stack) | OFFLOAD_WITH_FAMILY (default 1)
 #                 OFFLOAD_BACKEND (override detect.ps1: cuda|vulkan|cpu)
 #                 OFFLOAD_PROFILE / OFFLOAD_RAM_TIER / OFFLOAD_BIG_RAM (override the
@@ -16,11 +21,13 @@
 #                 the OS drive, a cloud-synced virtual drive or a FAT volume) | OFFLOAD_ALLOW_OS_DATA=1 (the explicit decision to keep data on the OS
 #                 drive, e.g. a one-disk machine; recorded, never a silent fallback)
 #                 OFFLOAD_EG2_LLAMA_BIN (opt-in; install render --llama-bin-eg2): a directory holding the
-#                 llama-server.exe of a SECOND llama.cpp build, b11452 or newer, that serves ONLY the
-#                 embeddinggemma2 entry. This script installs one pinned tag for every node it installs, so the
-#                 override is for a node that keeps an older main build. The directory must be a COMPLETE
-#                 extraction (the llama zip, plus the cudart zip for CUDA): Windows resolves DLLs beside the exe.
+#                 llama-server.exe of a SECOND llama.cpp build, at or above the harness floor in setup/floors.json, that serves ONLY the
+#                 embeddinggemma2 entry. This script installs the publisher's newest complete build for every node
+#                 it installs, so the override is for a node that keeps an older main build. The directory must be
+#                 a COMPLETE extraction (the llama zip, plus the cudart zip for CUDA): Windows resolves DLLs beside the exe.
 #                 Removing the override does not re-render by itself; re-run with -RenderOnly (or delete the yaml).
+#                 OFFLOAD_RESOLVE=offline: Resolve-Source reads setup/testdata/resolve-offline.json instead of the
+#                 network (CI and setup/render.tests.ps1); downloads are refused in that mode.
 #
 # -RenderOnly (H2): resolve the profile + render llama-swap.yaml ONLY (Step 1 + Step 6),
 #                 Rendering is DELEGATED to `local-offload install render` (ADR 0021), so
@@ -31,167 +38,77 @@
 #   overrides the output path (default $OFFLOAD_HOME\llama-swap.yaml). This is the render
 #   self-test / dry-run path — it never touches the network or a real install.
 #
-# installed.json (version manifest, written at $OFFLOAD_HOME\installed.json): each component's
-# SKIP test requires BOTH the artifact to exist on disk AND the manifest to record the pinned
-# version that produced it. Bumping a tag/sha in $PINNED therefore forces a re-download/re-extract
-# of exactly that component on the next run, even though the old artifact is still sitting there.
+# -Update: re-resolve every component from its publisher and install it when the publisher's build is newer
+#   than the recorded one (a model: when the published LFS oid differs from the recorded one). Without -Update a
+#   component that is recorded, at or above its floor and present on disk is skipped without any network call.
+#   Never a downgrade: an installed build newer than the resolved one is kept and reported.
+#
+# Layout: an engine's LIVE path (<home>\llama, <home>\llama-swap, <home>\sdcpp) is a junction to a write-once
+#   generation directory <live>-versions\<tag>. A new build is staged in <live>-versions\.staging\<tag>.<rand>,
+#   verified, renamed into place and only then does the junction move; a real directory found at the live path
+#   (an older install) is renamed into <live>-versions\ first. Nothing is ever extracted over a live directory.
+#
+# installed.json (version manifest, written at $OFFLOAD_HOME\installed.json, schema 2): components.<key> =
+# { version, digest, size, source, installed_at }. Each component's SKIP test requires BOTH the artifact to exist
+# on disk AND the manifest to record a version (engines) or the published oid (models) that produced it. Schema 1
+# manifests (components.<key> = a version string) are read as a record without a digest.
 [CmdletBinding()]
-param([switch]$RenderOnly, [string]$RenderOut)
+param([switch]$RenderOnly, [string]$RenderOut, [switch]$Update)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is ~10x faster without the progress UI
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot  = Split-Path -Parent $scriptDir
 
 # ---------------------------------------------------------------------------
-# PINNED assets - update tags/hashes HERE in one place. Verified live 2026-07-08; the llama.cpp
-# pins were re-read from the GitHub release API 2026-10-09.
-# llama.cpp release b11490 ; llama-swap v236. Model SHA256 = Hugging Face LFS oid
-# (fetched from the HF tree API at pin time - no model download needed to pin).
+# SOURCES - where every component comes from. No tag, size or digest here: Resolve-Source reads them from the
+# publisher at run time. Fields: kind (github-release | hf-file), repo, and
+#   github-release: asset (a file-name pattern; <TAG> = the release tag, <N> = its number, <SHA7> = the commit
+#                   suffix of a master-<N>-<sha7> tag; a name that carries none is plain), tagRule
+#                   (b-number | v-number | master-number: which tags are builds and how they order), dest
+#                   (the live directory under the install home).
+#   hf-file:        file (the path inside the repo, resolved at main), dest (the local file name under models\;
+#                   it may carry a subdirectory, which the download creates).
 # ---------------------------------------------------------------------------
-# b11490 (2026-10-08) replaces b9934. The floor is b11452: the EmbeddingGemma-2 entry's GGUF
-# architecture (gemma-embedding2, upstream PR #30054) first builds there and b11490 is the build it
-# was proven on; the Qwen3.6-35B-A3B spill seat needs b10964 (--load-mode). NAMING CHANGE: the CUDA
-# 13 asset family is cuda-13.4 from this tag on (was cuda-13.3 at b9934), so the llama-cuda13 /
-# llama-cudart13 URLs move with the tag, not only their hashes. The 12.4 cudart zip is byte-identical.
-$LLAMA_TAG = 'b11490'
-$SWAP_TAG  = 'v236'
-$PINNED = @{
-  # llama.cpp backend binaries (SHA256 from the GitHub release API; verified by download).
-  # FRONTIER FLOOR (J1, 2026-07-24): the vulkan build must be >= Mar-2026 — the AMD
-  # scalar-FA Wave32 + graphics-queue tuning (Feb–Mar 2026) is what makes the RDNA3
-  # tiers competitive, and FA+q8_0-KV support on Vulkan dates from the same window.
-  # The pin below is a SNAPSHOT OF FRONTIER, refreshed on a cadence (bump, re-run the
-  # H3 canary suite, promote) — never let it age below the floor. Show-FrontierNote
-  # surfaces newer upstream releases at install time so the pin never silently rots.
-  'llama-vulkan' = @{
-    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-vulkan-x64.zip"
-    sha  = '99cd7f7ca3e9de328026c5330b8ff92941103911b15df4d721ee9fd61055919d'
-    size = 33424529
-    version = $LLAMA_TAG
-  }
-  'llama-cuda' = @{
-    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-cuda-12.4-x64.zip"
-    sha  = '475de637171161bf259a2ef0a3384b8421ff9f70fe5aff0bad2cf931e01ad858'
-    size = 264960856
-    version = $LLAMA_TAG
-  }
-  'llama-cudart' = @{
-    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/cudart-llama-bin-win-cuda-12.4-x64.zip"
-    sha  = '8c79a9b226de4b3cacfd1f83d24f962d0773be79f1e7b75c6af4ded7e32ae1d6'
-    size = 391443627
-    version = $LLAMA_TAG
-  }
-  # H4: CUDA-13.4 build family (cuda-13.3 until b9934) — the Blackwell (sm_120) SERVE path.
-  # SHA256 = the GitHub release API asset digest for tag b11490 (read 2026-10-09; the vulkan, cpu
-  # and cuda-13.4 zips were also downloaded and hashed against it); Get-Verified re-checks size +
-  # SHA on every download.
-  'llama-cuda13' = @{
-    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-cuda-13.4-x64.zip"
-    sha  = 'd141c145909ea27aae64c0f73d58e93fc9ecca6112658aa8f0d79cc304443860'
-    size = 153309931
-    version = $LLAMA_TAG
-  }
-  'llama-cudart13' = @{
-    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/cudart-llama-bin-win-cuda-13.4-x64.zip"
-    sha  = '738f8c251ac22b70c3ae6f83a10cf222725df0395246a2cf58f32bdb85fbe668'
-    size = 423535356
-    version = $LLAMA_TAG
-  }
-  'llama-cpu' = @{
-    url  = "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/llama-$LLAMA_TAG-bin-win-cpu-x64.zip"
-    sha  = 'ed69a9e87713b84c63940b2f0e708c8e698e82b3d74dfa1364e94d97e334720c'
-    size = 19482170
-    version = $LLAMA_TAG
-  }
-  # llama-swap release (windows_amd64 zip).
-  'llama-swap' = @{
-    url  = "https://github.com/mostlygeek/llama-swap/releases/download/$SWAP_TAG/llama-swap_236_windows_amd64.zip"
-    sha  = '276a00765f072c8f5a276861906b2fea4c69b0620d5f3aeb9288206cda4ef421'
-    size = 14830229
-    version = $SWAP_TAG
-  }
-  # Models - Hugging Face resolve links; sha = real LFS oid (sha256) fetched from the HF tree
-  # API at pin time, e.g. https://huggingface.co/api/models/<repo>/tree/main?recursive=true
-  # (no model bytes downloaded to pin). 'name' = local filename (the template contract); for
-  # embeddinggemma the source file is capital-M but we save it lowercase-m to match.
-  # E4B/E2B re-pinned 2026-10-28 from the HF tree API: unsloth re-uploaded both GGUFs (2,016 bytes
-  # larger, new LFS oids), so the previous pins failed the size check on a fresh install.
-  'model-e4b' = @{
-    url  = 'https://huggingface.co/unsloth/gemma-4-E4B-it-qat-GGUF/resolve/main/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf'
-    name = 'gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf'
-    size = 4215695776
-    sha  = 'df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3'
-    version = 'df0fd4ee'
-  }
-  'model-e2b' = @{
-    url  = 'https://huggingface.co/unsloth/gemma-4-E2B-it-qat-GGUF/resolve/main/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf'
-    name = 'gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf'
-    size = 2620370976
-    sha  = 'e531007218dfab990486a5de7676a6932d6ea8dea233d1f698d7c21cf8a16889'
-    version = 'e5310072'
-  }
-  'model-26b' = @{
-    url  = 'https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/main/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf'
-    name = 'gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf'
-    size = 14249045120
-    sha  = 'dcf179a91153e3a7ece792e48ef872180d9d6ef9b7677f0a0bd3e83cfe624d5e'
-    version = 'dcf179a9'
-  }
-  # Qwen3.8-27B coder/agent seat (Seat Frontier Leg 1 winner, 2026-08-14). Gated on
-  # the resolved profile's include_qwen38 (Step 5) — mirrors the include_26b
-  # mechanism. sha = real LFS oid fetched from the HF tree API 2026-08-16.
+$SOURCES = @{
+  # llama.cpp backend binaries. The CUDA 13 asset family is cuda-13.4 (it was cuda-13.3 earlier), so the
+  # llama-cuda13 / llama-cudart13 names follow upstream's naming, not a literal build number.
+  'llama-vulkan'   = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-vulkan-x64.zip' }
+  'llama-cuda'     = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-cuda-12.4-x64.zip' }
+  'llama-cudart'   = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'cudart-llama-bin-win-cuda-12.4-x64.zip' }
+  # H4: the CUDA-13 build family - the Blackwell (sm_120) SERVE path.
+  'llama-cuda13'   = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-cuda-13.4-x64.zip' }
+  'llama-cudart13' = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'cudart-llama-bin-win-cuda-13.4-x64.zip' }
+  'llama-cpu'      = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-cpu-x64.zip' }
+  # llama-swap release (windows_amd64 zip; the file name carries the bare number, not the v).
+  'llama-swap'     = @{ kind = 'github-release'; repo = 'mostlygeek/llama-swap'; tagRule = 'v-number'; dest = 'llama-swap'; asset = 'llama-swap_<N>_windows_amd64.zip' }
+  # Models - Hugging Face files at main. `dest` = the local file name (the template contract); for embeddinggemma
+  # the source file is capital-M but it is saved lowercase-m to match.
+  'model-e4b' = @{ kind = 'hf-file'; repo = 'unsloth/gemma-4-E4B-it-qat-GGUF'; file = 'gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf'; dest = 'gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf' }
+  'model-e2b' = @{ kind = 'hf-file'; repo = 'unsloth/gemma-4-E2B-it-qat-GGUF'; file = 'gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf'; dest = 'gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf' }
+  'model-26b' = @{ kind = 'hf-file'; repo = 'unsloth/gemma-4-26B-A4B-it-qat-GGUF'; file = 'gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf'; dest = 'gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf' }
+  # Qwen3.8-27B coder/agent seat (Seat Frontier Leg 1 winner, 2026-08-14). Gated on the resolved profile's
+  # include_qwen38 (Step 5) — mirrors the include_26b mechanism.
   # The 16GB-class AGENT seat's weights (ADR 0047). A DIFFERENT quant from 'model-qwen38'
-  # above: the agent seat serves UD-IQ3_S (12.0 GB) because that is what fits a 15,356 MiB
+  # below: the agent seat serves UD-IQ3_S (12.0 GB) because that is what fits a 15,356 MiB
   # card at a 49,152 window, while the 27B coder entry serves UD-Q4_K_XL (17.9 GB). The
   # ampere-16 vision seat loads this same file, so a tier enabling both downloads it once.
-  'model-qwen38-iq3s' = @{
-    url  = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-IQ3_S.gguf'
-    name = 'Qwen3.8-27B-UD-IQ3_S.gguf'
-    size = 12040883104
-    sha  = 'd847e2c1e4aa276e4b7b8e9ad7628050e61e165d49ab995407bc36677a6f3864'
-    version = 'd847e2c1'
-  }
-  'model-qwen38' = @{
-    url  = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/Qwen3.8-27B-UD-Q4_K_XL.gguf'
-    name = 'Qwen3.8-27B-UD-Q4_K_XL.gguf'
-    size = 17923394624
-    sha  = 'bee238bbeb3dc0a34bde4d0dedbaee1f98c009e8bb4226f03070054c12fb1372'
-    version = 'bee238bb'
-  }
-  'model-qwen38-mmproj' = @{
-    url  = 'https://huggingface.co/unsloth/Qwen3.8-27B-GGUF/resolve/main/mmproj-F16.gguf'
-    name = 'mmproj-Qwen3.8-27B-F16.gguf'   # renamed locally to avoid mmproj collisions (embeddinggemma precedent for rename)
-    size = 927607488
-    sha  = 'cbb841a9ee0636b2ec172f5bb8df2ea8dfeb01e90fe7c6126581d662a0b4e43e'
-    version = 'cbb841a9'
-  }
+  'model-qwen38-iq3s' = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3.8-27B-GGUF'; file = 'Qwen3.8-27B-UD-IQ3_S.gguf'; dest = 'Qwen3.8-27B-UD-IQ3_S.gguf' }
+  'model-qwen38'      = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3.8-27B-GGUF'; file = 'Qwen3.8-27B-UD-Q4_K_XL.gguf'; dest = 'Qwen3.8-27B-UD-Q4_K_XL.gguf' }
+  # renamed locally to avoid mmproj collisions (embeddinggemma precedent for rename)
+  'model-qwen38-mmproj' = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3.8-27B-GGUF'; file = 'mmproj-F16.gguf'; dest = 'mmproj-Qwen3.8-27B-F16.gguf' }
   # Qwen3.5-4B AGENT seat for the small tiers (6GB-tier bake-off winner, 2026-08-17:
   # the only candidate strong on BOTH task shapes across ~40 runs). Gated on the
   # resolved profile's include_qwen35_4b (Step 5) — mirrors the include_qwen38
   # mechanism. NO mmproj: this seat is the agent planner, not a vision seat, and the
-  # tier keeps its own vision seat. sha = real LFS oid fetched from the HF tree API
-  # 2026-08-17.
-  'model-qwen35-4b' = @{
-    url  = 'https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-UD-Q4_K_XL.gguf'
-    name = 'Qwen3.5-4B-UD-Q4_K_XL.gguf'
-    size = 2912109728
-    sha  = 'b252c5610a42ca82d20fe2a12813e9d069eed89292907e26c783eeb0bc961bc7'
-    version = 'b252c561'
-  }
+  # tier keeps its own vision seat.
+  'model-qwen35-4b' = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3.5-4B-GGUF'; file = 'Qwen3.5-4B-UD-Q4_K_XL.gguf'; dest = 'Qwen3.5-4B-UD-Q4_K_XL.gguf' }
   # Qwen3.5-9B AGENT seat for the 8GB tiers (blackwell-8 on-box quality bake winner,
   # 2026-08-22: 100% extraction x2 + 5/5 search+reason x2 vs the E4B fallback's 0%;
   # 6344 MiB at 16K / 6696 MiB at 32K on the RTX 5060 reference box). Gated on the
   # resolved profile's include_qwen35_9b (Step 5) — mirrors the include_qwen35_4b
   # mechanism, and is mutually exclusive with it (shared agent-seat alias). NO
-  # mmproj: agent planner, not a vision seat. sha = real LFS oid fetched from the
-  # HF tree API 2026-08-23 and byte-verified against the staged reference copy.
-  'model-qwen35-9b' = @{
-    url  = 'https://huggingface.co/unsloth/Qwen3.5-9B-GGUF/resolve/main/Qwen3.5-9B-UD-Q4_K_XL.gguf'
-    name = 'Qwen3.5-9B-UD-Q4_K_XL.gguf'
-    size = 5966095584
-    sha  = '6f5d30666c2d8ae16a306e616d95341dcf3cc46810df84d7e6f5a7d1e4c1b293'
-    version = '6f5d3066'
-  }
+  # mmproj: agent planner, not a vision seat.
+  'model-qwen35-9b' = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3.5-9B-GGUF'; file = 'Qwen3.5-9B-UD-Q4_K_XL.gguf'; dest = 'Qwen3.5-9B-UD-Q4_K_XL.gguf' }
   # SECOND AGENT seat for the 8GB tiers: MiMo-V2.6-Distill-Qwen-9B (bartowski GGUF
   # Q4_K_M), measured 2026-09-24 a coin-flip quality tie against qwen3.5-9b-agent
   # (18/18 shape B x6 both 8GB reference boxes; shape C 5/5 x3 vs 4/5 x3, splitting by
@@ -201,228 +118,77 @@ $PINNED = @{
   # include_qwen35_9b mechanism, and shares its `agent-seat` alias exclusivity with
   # include_qwen35_4b, but NOT with include_qwen35_9b itself: the two 8GB seats may
   # both be included, with qwen3.5-9b-agent kept as the un-aliased rollback. NO
-  # mmproj: agent planner, not a vision seat. REQUIRES llama.cpp >= b11102 (upstream
-  # #29319 — b10964 misroutes MiMo's compact tool-call XML to the Qwen3-Coder parser
-  # and every tool call runs to the token cap). sha/size verified against the HF
-  # resolve redirect's X-Linked-Size/X-Linked-ETag 2026-09-24.
-  'model-mimo-9b' = @{
-    url  = 'https://huggingface.co/bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF/resolve/main/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf'
-    name = 'MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf'
-    size = 5841049120
-    sha  = '4bca6f18c73f72270c7a20c2ea2bea581de8246e318714277120369d34048c81'
-    version = '4bca6f18'
-  }
+  # mmproj: agent planner, not a vision seat. REQUIRES the llama.cpp build named for it in setup/floors.json (upstream
+  # #29319: an earlier build misroutes MiMo's compact tool-call XML to the Qwen3-Coder parser
+  # and every tool call runs to the token cap);
+  'model-mimo-9b' = @{ kind = 'hf-file'; repo = 'bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF'; file = 'MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf'; dest = 'MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf' }
   # RAM-SPILL agent seat (ADR 0080): Qwen3.6-35B-A3B UD-IQ3_XXS (35B total, ~3B active,
   # Apache-2.0), the routed experts in host RAM through `--n-cpu-moe 40`, attention and the
-  # KV cache on the card. Measured on the reference 6 GB node in the 2026-10-07/08 lean bake
-  # (llama.cpp b10964): blind pack 8.11 vs the 4B's 7.26, ~2.1 GB on the card, ~11.6 GB host
+  # KV cache on the card. Measured on the reference 6 GB node in the 2026-10-07/08 lean bake:
+  # blind pack 8.11 vs the 4B's 7.26, ~2.1 GB on the card, ~11.6 GB host
   # RSS released on unload. Gated on the resolved profile's include_qwen36_35b AND a RAM tier
   # of low, mid or high (Step 5: the entry is not rendered on `min`, so 12.3 GiB is not
-  # fetched there either). REQUIRES llama.cpp >= b10964 (`--load-mode`). `name` carries the
+  # fetched there either). REQUIRES the floors.json build for this seat (`--load-mode`). `dest` carries the
   # subdirectory the template's cmd names (__MODELS__/Qwen3.6-35B-A3B/...), which the
-  # download loop creates. size/sha read 2026-10-09 from the Hugging Face resolve redirect's
-  # X-Linked-Size / X-Linked-ETag (the LFS oid), the same method as model-mimo-9b; no model
-  # bytes were downloaded to pin. The bake node's own copy was NOT re-hashed against it.
-  'model-qwen36-35b' = @{
-    url  = 'https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf'
-    name = 'Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf'
-    size = 13211155424
-    sha  = '9c964e657212fea1f24905dd7b0a89b82fd807d19fab0b41da14251b07b88fbe'
-    version = '9c964e65'
-  }
-  'model-embed' = @{
-    url  = 'https://huggingface.co/unsloth/embeddinggemma-300m-GGUF/resolve/main/embeddinggemma-300M-Q8_0.gguf'
-    name = 'embeddinggemma-300m-Q8_0.gguf'
-    size = 328577056
-    sha  = 'a0f7b4e13c397a6e1b32c2de75b1f65a14c92ec524d5f674d94a4290a1c4969b'
-    version = 'a0f7b4e1'
-  }
+  # download loop creates.
+  'model-qwen36-35b' = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3.6-35B-A3B-GGUF'; file = 'Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf'; dest = 'Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf' }
+  'model-embed' = @{ kind = 'hf-file'; repo = 'unsloth/embeddinggemma-300m-GGUF'; file = 'embeddinggemma-300M-Q8_0.gguf'; dest = 'embeddinggemma-300m-Q8_0.gguf' }
   # EmbeddingGemma-2 (ggml-org GGUF) — the memory stack's second embedder, entry `embeddinggemma2`
   # (model + multimodal projector, so TWO files for the tier that carries the projector, ONE for a
   # text-only replica). Gated on the resolved profile's include_embeddinggemma2 (Step 5; ampere-6 with
   # the projector, the card it was measured on; ampere-8 and blackwell-3x16 text-only, their
   # embeddinggemma2_projector false, so `model-eg2-mmproj` is not fetched there), no RAM gate: it is
   # VRAM-resident (1,196 MiB loaded with the projector, 460 MiB without, on the reference
-  # 6 GB node). REQUIRES llama.cpp >= b11452 (gemma-embedding2 architecture). size/sha
-  # read 2026-10-09 from the Hugging Face resolve redirect's X-Linked-Size / X-Linked-ETag (the LFS
-  # oid) and equal the values the memory-stack session measured on; no model bytes were downloaded.
-  'model-eg2' = @{
-    url  = 'https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/embeddinggemma-2-Q8_0.gguf'
-    name = 'embeddinggemma-2-Q8_0.gguf'
-    size = 309855456
-    sha  = '2188ac1deca4b77dffefd603c2776a9d76d9d74ec01841392982ebb840b09135'
-    version = '2188ac1d'
-  }
-  'model-eg2-mmproj' = @{
-    url  = 'https://huggingface.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/mmproj-embeddinggemma-2-Q8_0.gguf'
-    name = 'mmproj-embeddinggemma-2-Q8_0.gguf'
-    size = 554821024
-    sha  = 'c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f'
-    version = 'c4a8a526'
-  }
+  # 6 GB node). REQUIRES the floors.json build for this seat (gemma-embedding2 architecture).
+  'model-eg2'        = @{ kind = 'hf-file'; repo = 'ggml-org/embeddinggemma-2-GGUF'; file = 'embeddinggemma-2-Q8_0.gguf'; dest = 'embeddinggemma-2-Q8_0.gguf' }
+  'model-eg2-mmproj' = @{ kind = 'hf-file'; repo = 'ggml-org/embeddinggemma-2-GGUF'; file = 'mmproj-embeddinggemma-2-Q8_0.gguf'; dest = 'mmproj-embeddinggemma-2-Q8_0.gguf' }
   # --- J2 media tier: stable-diffusion.cpp (Vulkan) + the Apache-2.0 image roster ---
-  # sd.cpp uses rolling per-master releases (no semver): the pin is tag+commit, a
-  # SNAPSHOT OF FRONTIER (same rule as the llama.cpp pin — refresh via the media
-  # canaries, never let it rot). SHA256 = the GitHub release asset digest; binary
-  # inside is sd-cli.exe (+ sd-server.exe, the recorded warm-swap upgrade path).
-  'sdcpp-vulkan' = @{
-    url  = 'https://github.com/leejet/stable-diffusion.cpp/releases/download/master-1000-95ff762/sd-master-95ff762-bin-win-vulkan-x64.zip'
-    sha  = '589bae4e3db130fc1aa3e2fe3663fdb95c47354a277ae24703c56780767f54db'
-    size = 29612427
-    version = 'master-1000-95ff762'
-  }
+  # sd.cpp uses rolling per-master releases (no semver): the tag is master-<N>-<sha7>, ordered by <N>.
+  # The binary inside is sd-cli.exe (+ sd-server.exe, the recorded warm-swap upgrade path).
+  'sdcpp-vulkan' = @{ kind = 'github-release'; repo = 'leejet/stable-diffusion.cpp'; tagRule = 'master-number'; dest = 'sdcpp'; asset = 'sd-master-<SHA7>-bin-win-vulkan-x64.zip' }
   # Lead image model: Z-Image-Turbo (Apache-2.0 end-to-end; 8-step few-step DiT).
   # jayn7's GGUF build, NOT leejet's: leejet's mixed-rule low-bit quants produce
   # blank/solid images on Vulkan+AMD (sd.cpp issue #1031); jayn7's K-quants are the
   # community-confirmed-working set. Q8_0 = quality-first within UMA reality.
-  'model-zimage' = @{
-    url  = 'https://huggingface.co/jayn7/Z-Image-Turbo-GGUF/resolve/main/z_image_turbo-Q8_0.gguf'
-    name = 'z_image_turbo-Q8_0.gguf'
-    size = 7224707136
-    sha  = 'f163d60b0eb427469510b8226243d196574a18139a2e40c017409cfbda95ecfe'
-    version = 'f163d60b'
-  }
-  # Z-Image companions: the Qwen3-4B LLM text encoder (sd.cpp --llm; the exact repo
-  # named in the pinned release's docs/z_image.md) + the Flux AE VAE from the UNGATED
-  # Comfy-Org mirror (the BFL original is gated and its LFS sha is API-masked).
-  'model-zimage-llm' = @{
-    url  = 'https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf'
-    name = 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf'
-    size = 2497281120
-    sha  = '3605803b982cb64aead44f6c1b2ae36e3acdb41d8e46c8a94c6533bc4c67e597'
-    version = '3605803b'
-  }
-  'model-zimage-vae' = @{
-    url  = 'https://huggingface.co/Comfy-Org/z_image_turbo/resolve/main/split_files/vae/ae.safetensors'
-    name = 'zimage_ae.safetensors'
-    size = 335304388
-    sha  = 'afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38'
-    version = 'afc8e282'
-  }
+  'model-zimage' = @{ kind = 'hf-file'; repo = 'jayn7/Z-Image-Turbo-GGUF'; file = 'z_image_turbo-Q8_0.gguf'; dest = 'z_image_turbo-Q8_0.gguf' }
+  # Z-Image companions: the Qwen3-4B LLM text encoder (sd.cpp --llm; the repo named in the
+  # release's docs/z_image.md) + the Flux AE VAE from the UNGATED Comfy-Org mirror (the BFL
+  # original is gated and its LFS sha is API-masked).
+  'model-zimage-llm' = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3-4B-Instruct-2507-GGUF'; file = 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf'; dest = 'Qwen3-4B-Instruct-2507-Q4_K_M.gguf' }
+  'model-zimage-vae' = @{ kind = 'hf-file'; repo = 'Comfy-Org/Z-Image-Turbo'; file = 'split_files/vae/ae.safetensors'; dest = 'zimage_ae.safetensors' }
   # Optional roster extras (OFFLOAD_MEDIA_EXTRAS=1): SD 1.5 speed floor (single-file,
   # creativeml-openrail-m; the repo carries fp32 only, 4.27GB) + SDXL base slow path
   # (openrail++) with the fp16-fix VAE (MIT; REQUIRED on AMD iGPUs - the stock fp16
   # VAE renders all-black there, sd.cpp issue #563). NOT installed by default.
   # Excluded on license/ADR grounds: SDXL-Turbo (sai-nc-community, non-commercial)
   # and the entire FLUX family (ADR 0011 - even Apache schnell; reopening = new ADR).
-  'model-sd15' = @{
-    url  = 'https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors'
-    name = 'v1-5-pruned-emaonly.safetensors'
-    size = 4265146304
-    sha  = '6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa'
-    version = '6ce01616'
-  }
-  'model-sdxl' = @{
-    url  = 'https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors'
-    name = 'sd_xl_base_1.0.safetensors'
-    size = 6938078334
-    sha  = '31e35c80fc4829d14f90153f4c74cd59c90b779f6afe05a74cd6120b893f7e5b'
-    version = '31e35c80'
-  }
-  'model-sdxl-vae' = @{
-    url  = 'https://huggingface.co/madebyollin/sdxl-vae-fp16-fix/resolve/main/sdxl_vae.safetensors'
-    name = 'sdxl_vae_fp16_fix.safetensors'
-    size = 334641162
-    sha  = '235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1'
-    version = '235745af'
-  }
-  # --- maxwell-3 (the 3 GB band, 2026-10-28) media-seat weights, PIN-ONLY like the CT-51 I5 rows below:
+  'model-sd15'     = @{ kind = 'hf-file'; repo = 'stable-diffusion-v1-5/stable-diffusion-v1-5'; file = 'v1-5-pruned-emaonly.safetensors'; dest = 'v1-5-pruned-emaonly.safetensors' }
+  'model-sdxl'     = @{ kind = 'hf-file'; repo = 'stabilityai/stable-diffusion-xl-base-1.0'; file = 'sd_xl_base_1.0.safetensors'; dest = 'sd_xl_base_1.0.safetensors' }
+  'model-sdxl-vae' = @{ kind = 'hf-file'; repo = 'madebyollin/sdxl-vae-fp16-fix'; file = 'sdxl_vae.safetensors'; dest = 'sdxl_vae_fp16_fix.safetensors' }
+  # --- maxwell-3 (the 3 GB band, 2026-10-28) media-seat weights, PLACED BY HAND like the CT-51 I5 rows below:
   # `install render` emits the tier's vision and stt seats from profiles.json and WARNS when these files are
   # not under the models dir; nothing here downloads them yet (no gate names these keys), so the operator places
-  # them out of band. Each sha256 is the Hugging Face LFS oid, equal to the bytes measured on the reference box
-  # (<node-g>). The image lane's sdxl-turbo Q4_0 and the sd.cpp build are the amd-rdna3 media leg's (Step 5b,
-  # OFFLOAD_WITH_MEDIA=1 pulls the Z-Image set, which does NOT fit 3 GB), so that tier places them by hand too.
-  'model-e2b-mmproj' = @{
-    url  = 'https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf'
-    name = 'mmproj-gemma-4-E2B-it-Q8_0.gguf'   # the Q8_0 projector: the F16 one (986 MB) puts the vision seat over a 3 GB card
-    size = 557368064
-    sha  = '9406f99c16d68cda4f1f0552192dcc99021ea1fc6d2fd50b1dc3ccf30d04b292'
-    version = '9406f99c'
-  }
-  'model-whisper-turbo-q8' = @{
-    url  = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin'
-    name = 'ggml-large-v3-turbo-q8_0.bin'   # q5_0 gives the same transcript 300 MiB lighter; q8_0 is the quality pick the 3 GB card still holds with room
-    size = 874188075
-    sha  = '317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1'
-    version = '317eb69c'
-  }
-  'model-silero-v5' = @{
-    url  = 'https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin'
-    name = 'ggml-silero-v5.1.2.bin'
-    size = 885098
-    sha  = '29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf'
-    version = '29940d98'
-  }
-  # --- CT-51 I5: the amd-gcn (Vulkan iGPU) media models, PIN-ONLY. Nothing in this installer downloads them
-  # (no gate names these keys; the Linux install has no media leg yet, so the weights are placed out of band);
-  # the pins record the exact bytes the tier's config_seed binds, each one measured 2026-10-03 and verified against
-  # the Hugging Face LFS sha256 on the reference node. internal/mediacap/modelsizes.go mirrors the sizes
-  # (TestKnownModelSizesMatchInstaller). Licences: FastWan2.2-TI2V-5B, the Wan 2.2 / 2.1 VAEs, umt5-xxl, taew2_2,
+  # them out of band. The image lane's sdxl-turbo Q4_0 and the sd.cpp build are the amd-rdna3 media leg's
+  # (Step 5b, OFFLOAD_WITH_MEDIA=1 pulls the Z-Image set, which does NOT fit 3 GB), so that tier places them by hand too.
+  # The Q8_0 projector: the F16 one (986 MB) puts the vision seat over a 3 GB card.
+  'model-e2b-mmproj' = @{ kind = 'hf-file'; repo = 'ggml-org/gemma-4-E2B-it-GGUF'; file = 'mmproj-gemma-4-E2B-it-Q8_0.gguf'; dest = 'mmproj-gemma-4-E2B-it-Q8_0.gguf' }
+  # q5_0 gives the same transcript 300 MiB lighter; q8_0 is the quality pick the 3 GB card still holds with room.
+  'model-whisper-turbo-q8' = @{ kind = 'hf-file'; repo = 'ggerganov/whisper.cpp'; file = 'ggml-large-v3-turbo-q8_0.bin'; dest = 'ggml-large-v3-turbo-q8_0.bin' }
+  'model-silero-v5'        = @{ kind = 'hf-file'; repo = 'ggml-org/whisper-vad'; file = 'ggml-silero-v5.1.2.bin'; dest = 'ggml-silero-v5.1.2.bin' }
+  # --- CT-51 I5: the amd-gcn (Vulkan iGPU) media models, PLACED BY HAND. Nothing in this installer downloads them
+  # (no gate names these keys; the Linux install has no media leg yet, so the weights are placed out of band).
+  # Licences: FastWan2.2-TI2V-5B, the Wan 2.2 / 2.1 VAEs, umt5-xxl, taew2_2,
   # Wan2.1 VACE 1.3B and Depth-Anything V2 Small are Apache-2.0 (commercial use allowed); Chatterbox is MIT;
   # the ACE-Step 1.5 licence is MIT (the LICENSE file of its project and its Hugging Face card, read 2026-10-18; commercial use allowed); the audio lanes have no commercial_use key to set.
-  'model-fastwan' = @{
-    url  = 'https://huggingface.co/Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF/resolve/main/FastWan2.2-TI2V-5B-q8_0.gguf'
-    name = 'FastWan2.2-TI2V-5B-q8_0.gguf'
-    size = 5412844128
-    sha  = 'b62f50ff87c4dfa2910c6883d45015e05b709366581698b302e259e7f25c9208'
-    version = 'b62f50ff'
-  }
-  'model-wan22-vae' = @{
-    url  = 'https://huggingface.co/QuantStack/Wan2.2-TI2V-5B-GGUF/resolve/main/VAE/Wan2.2_VAE.safetensors'
-    name = 'Wan2.2_VAE.safetensors'
-    size = 1409400960
-    sha  = 'e40321bd36b9709991dae2530eb4ac303dd168276980d3e9bc4b6e2b75fed156'
-    version = 'e40321bd'
-  }
-  'model-umt5-xxl' = @{
-    url  = 'https://huggingface.co/city96/umt5-xxl-encoder-gguf/resolve/main/umt5-xxl-encoder-Q8_0.gguf'
-    name = 'umt5-xxl-encoder-Q8_0.gguf'
-    size = 6043068256
-    sha  = '2521d4de0bf9e1cc6549866463ceae85e4ec3239bc6063f7488810be39033bbc'
-    version = '2521d4de'
-  }
-  'model-wan22-tae' = @{
-    url  = 'https://huggingface.co/lightx2v/Autoencoders/resolve/main/taew2_2.safetensors'
-    name = 'taew2_2.safetensors'
-    size = 22848048
-    sha  = '5243c5c9d77ecf2d74800d672bac3678c0d72462899f1b3b10aa1bbc11eae461'
-    version = '5243c5c9'
-  }
-  'model-vace' = @{
-    url  = 'https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors'
-    name = 'wan2.1_vace_1.3B_fp16.safetensors'
-    size = 4309519800
-    sha  = '640ccc0577e6a5d4bb15cd91b11b699ef914fc55f126c5a1c544e152130784f2'
-    version = '640ccc05'
-  }
-  'model-wan21-vae' = @{
-    url  = 'https://huggingface.co/Comfy-Org/Wan_2.1_ComfyUI_repackaged/resolve/main/split_files/vae/wan_2.1_vae.safetensors'
-    name = 'wan_2.1_vae.safetensors'
-    size = 253815318
-    sha  = '2fc39d31359a4b0a64f55876d8ff7fa8d780956ae2cb13463b0223e15148976b'
-    version = '2fc39d31'
-  }
-  'model-depth-anything' = @{
-    url  = 'https://huggingface.co/mudler/depth-anything.cpp-gguf/resolve/main/depth-anything2-small-q8_0.gguf'
-    name = 'depth-anything2-small-q8_0.gguf'
-    size = 36780864
-    sha  = 'e778ad03adc6c2917894cc5a9ad458278973568b75c892c629b6cbed9348f228'
-    version = 'e778ad03'
-  }
-  'model-chatterbox' = @{
-    url  = 'https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/Chatterbox-GGUF/chatterbox-q8_0.gguf'
-    name = 'chatterbox-q8_0.gguf'
-    size = 2088393668
-    sha  = 'd586dd1aa59613cab8046176fb7ca5ba191c02a9b10ffa5b0d892ed22b470656'
-    version = 'd586dd1a'
-  }
-  'model-ace-step' = @{
-    url  = 'https://huggingface.co/audio-cpp/audio.cpp-gguf/resolve/main/ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf'
-    name = 'ace-step-1.5-turbo-bf16.gguf'
-    size = 10090398272
-    sha  = '93974239a29a1a821b3cc1b1ca7e1c6229b1a900a0e44a1a9770bb2271d2be5f'
-    version = '93974239'
-  }
+  'model-fastwan'        = @{ kind = 'hf-file'; repo = 'Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF'; file = 'FastWan2.2-TI2V-5B-q8_0.gguf'; dest = 'FastWan2.2-TI2V-5B-q8_0.gguf' }
+  'model-wan22-vae'      = @{ kind = 'hf-file'; repo = 'QuantStack/Wan2.2-TI2V-5B-GGUF'; file = 'VAE/Wan2.2_VAE.safetensors'; dest = 'Wan2.2_VAE.safetensors' }
+  'model-umt5-xxl'       = @{ kind = 'hf-file'; repo = 'city96/umt5-xxl-encoder-gguf'; file = 'umt5-xxl-encoder-Q8_0.gguf'; dest = 'umt5-xxl-encoder-Q8_0.gguf' }
+  'model-wan22-tae'      = @{ kind = 'hf-file'; repo = 'lightx2v/Autoencoders'; file = 'taew2_2.safetensors'; dest = 'taew2_2.safetensors' }
+  'model-vace'           = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors'; dest = 'wan2.1_vace_1.3B_fp16.safetensors' }
+  'model-wan21-vae'      = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/vae/wan_2.1_vae.safetensors'; dest = 'wan_2.1_vae.safetensors' }
+  'model-depth-anything' = @{ kind = 'hf-file'; repo = 'mudler/depth-anything.cpp-gguf'; file = 'depth-anything2-small-q8_0.gguf'; dest = 'depth-anything2-small-q8_0.gguf' }
+  'model-chatterbox'     = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'Chatterbox-GGUF/chatterbox-q8_0.gguf'; dest = 'chatterbox-q8_0.gguf' }
+  'model-ace-step'       = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf'; dest = 'ace-step-1.5-turbo-bf16.gguf' }
 }
 
 # ---------------------------------------------------------------------------
@@ -450,28 +216,251 @@ function Update-SessionPath {
 }
 
 # ---------------------------------------------------------------------------
-# J1 frontier surfacing: the pins are SNAPSHOTS OF FRONTIER (house rule: recency
-# floors, never staleness pins). This best-effort check asks GitHub for the latest
-# llama.cpp / llama-swap release tags and prints a NOTE when the pin is behind —
-# it NEVER blocks or fails the install (offline boxes just skip it silently), and
-# it never substitutes an asset (Hard rule 2: pins only change by a human bumping
-# them and re-running the canary suite). OFFLOAD_SKIP_UPDATE_CHECK=1 disables.
+# Resolution: every component comes from its publisher at run time (see $SOURCES).
+#   Resolve-Source -Key <k> [-With <k2>,...]  ->  @{ tag; url; digest; size }   (digest = 64 hex, no 'sha256:')
+#   -With names sibling keys of the same repo that must be present on the SAME release (a llama zip and its
+#   cudart zip), so a release that is visible before every asset is uploaded is stepped back from.
+# OFFLOAD_RESOLVE=offline reads setup/testdata/resolve-offline.json and never touches the network;
+# -RenderOnly is always offline.
 # ---------------------------------------------------------------------------
-function Show-FrontierNote {
-  if ($env:OFFLOAD_SKIP_UPDATE_CHECK -eq '1') { return }
-  $checks = @(
-    @{ repo = 'ggml-org/llama.cpp';     pinned = $LLAMA_TAG; name = 'llama.cpp' }
-    @{ repo = 'mostlygeek/llama-swap';  pinned = $SWAP_TAG;  name = 'llama-swap' }
-  )
-  foreach ($c in $checks) {
+try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch { }
+$script:GhReleaseCache = @{}
+$script:HfTreeCache = @{}
+$script:GhToken = $null      # $null = not asked yet, '' = none
+
+function Test-OfflineResolve {
+  return (($env:OFFLOAD_RESOLVE -eq 'offline') -or [bool]$RenderOnly)
+}
+
+function Get-OfflineResolution {
+  param([string]$Key)
+  $path = Join-Path (Join-Path $scriptDir 'testdata') 'resolve-offline.json'
+  if (-not (Test-Path -LiteralPath $path)) { throw "offline resolve requested but $path is missing" }
+  $doc = Get-Content -Raw -LiteralPath $path | ConvertFrom-Json
+  $e = $doc.PSObject.Properties[$Key]
+  if (-not $e) { throw "resolve-offline.json has no entry for '$Key'" }
+  return @{ tag = [string]$e.Value.tag; url = [string]$e.Value.url; digest = ([string]$e.Value.digest).ToLower(); size = [int64]$e.Value.size }
+}
+
+# The number a tag orders by under its tagRule ($null = not a build tag of that rule).
+function Get-TagNumber {
+  param([string]$Tag, [string]$Rule)
+  if (-not $Tag) { return $null }
+  $m = $null
+  if ($Rule -eq 'b-number')           { $m = [regex]::Match($Tag, '^b(\d+)$') }
+  elseif ($Rule -eq 'v-number')       { $m = [regex]::Match($Tag, '^v(\d+)$') }
+  elseif ($Rule -eq 'master-number')  { $m = [regex]::Match($Tag, '^master-(\d+)-[0-9a-f]+$') }
+  else { throw "unknown tagRule '$Rule'" }
+  if ($m.Success) { return [int64]$m.Groups[1].Value }
+  return $null
+}
+
+# <TAG> = the tag, <N> = its number, <SHA7> = the commit suffix of a master-<N>-<sha7> tag.
+function Expand-AssetName {
+  param([string]$Pattern, [string]$Tag, [int64]$N)
+  $sha7 = ''
+  $mm = [regex]::Match($Tag, '^master-\d+-([0-9a-f]+)$')
+  if ($mm.Success) { $sha7 = $mm.Groups[1].Value }
+  return $Pattern.Replace('<TAG>', $Tag).Replace('<N>', "$N").Replace('<SHA7>', $sha7)
+}
+
+# A GitHub token only raises the API rate limit; it is read from the gh CLI when one is on PATH and never printed.
+function Get-GitHubToken {
+  if ($null -ne $script:GhToken) { return $script:GhToken }
+  $script:GhToken = ''
+  if (Get-Command gh -ErrorAction SilentlyContinue) {
     try {
-      $r = Invoke-RestMethod -Uri "https://api.github.com/repos/$($c.repo)/releases/latest" -TimeoutSec 5 `
-             -Headers @{ 'User-Agent' = 'offload-harness-installer' }
-      if ($r.tag_name -and ($r.tag_name -ne $c.pinned)) {
-        Write-Host "NOTE  $($c.name): newer release $($r.tag_name) available (pinned $($c.pinned) = the verified frontier snapshot). Do NOT substitute mid-install; refresh the pin via the canary suite (bump + re-run selftest + promote)." -ForegroundColor Yellow
-      }
-    } catch { }   # offline / rate-limited / API change: silently skip — never install-fatal
+      $t = @(& gh auth token --user dmmdea 2>$null)
+      if ($LASTEXITCODE -eq 0 -and $t.Count -gt 0 -and $t[0]) { $script:GhToken = "$($t[0])".Trim() }
+    } catch { $script:GhToken = '' }
   }
+  return $script:GhToken
+}
+
+function Invoke-GitHubApi {
+  param([string]$Uri)
+  $h = @{ 'User-Agent' = 'offload-harness-installer'; 'Accept' = 'application/vnd.github+json' }
+  $tok = Get-GitHubToken
+  if ($tok) {
+    $h['Authorization'] = "Bearer $tok"
+    try { return (Invoke-RestMethod -Uri $Uri -Headers $h -TimeoutSec 30) }
+    catch { $h.Remove('Authorization') }   # a stale token must not turn a public read into a failure
+  }
+  return (Invoke-RestMethod -Uri $Uri -Headers $h -TimeoutSec 30)
+}
+
+function Get-GitHubReleases {
+  param([string]$Repo)
+  if (-not $script:GhReleaseCache.ContainsKey($Repo)) {
+    $script:GhReleaseCache[$Repo] = @(Invoke-GitHubApi -Uri "https://api.github.com/repos/$Repo/releases?per_page=10")
+  }
+  return $script:GhReleaseCache[$Repo]
+}
+
+# The newest release of $Repo whose tag follows $TagRule, is not a draft and carries EVERY asset named by
+# $AssetPatterns with a non-empty sha256 digest. A newer release missing one (still uploading) is stepped back from.
+# Returns @{ tag; assets = @{ <pattern> = @{ url; digest; size } } }.
+function Get-GitHubLatestTag {
+  param([string]$Repo, [string]$TagRule, [string[]]$AssetPatterns)
+  $cands = @()
+  foreach ($rel in @(Get-GitHubReleases -Repo $Repo)) {
+    if ($rel.draft) { continue }
+    $n = Get-TagNumber -Tag ([string]$rel.tag_name) -Rule $TagRule
+    if ($null -eq $n) { continue }
+    $cands += [pscustomobject]@{ N = $n; Tag = [string]$rel.tag_name; Rel = $rel }
+  }
+  if ($cands.Count -eq 0) { throw "no $TagRule release among the newest 10 of $Repo" }
+  $skipped = @()
+  foreach ($c in @($cands | Sort-Object -Property N -Descending)) {
+    $found = @{}
+    $why = ''
+    foreach ($pat in $AssetPatterns) {
+      $name = Expand-AssetName -Pattern $pat -Tag $c.Tag -N $c.N
+      $a = @($c.Rel.assets | Where-Object { $_.name -eq $name })
+      if ($a.Count -eq 0) { $why = "$name is not attached"; break }
+      $d = [string]$a[0].digest
+      if ($d -notmatch '^sha256:([0-9a-fA-F]{64})$') { $why = "$name has no sha256 digest"; break }
+      if ($a[0].PSObject.Properties['state'] -and $a[0].state -and $a[0].state -ne 'uploaded') { $why = "$name is not fully uploaded"; break }
+      $found[$pat] = @{ url = [string]$a[0].browser_download_url; digest = $Matches[1].ToLower(); size = [int64]$a[0].size }
+    }
+    if (-not $why) {
+      foreach ($s in $skipped) { Write-Host "NOTE  $Repo $s - using the previous release $($c.Tag)" -ForegroundColor Yellow }
+      return @{ tag = $c.Tag; assets = $found }
+    }
+    $skipped += "$($c.Tag) is incomplete ($why)"
+  }
+  throw "no complete $TagRule release of $Repo among the newest 10: $($skipped -join '; ')"
+}
+
+function Resolve-GitHubSet {
+  param([string[]]$Keys)
+  $first = $SOURCES[$Keys[0]]
+  foreach ($k in $Keys) {
+    if (-not $SOURCES.ContainsKey($k)) { throw "unknown source key '$k'" }
+    if ($SOURCES[$k].kind -ne 'github-release' -or $SOURCES[$k].repo -ne $first.repo) { throw "source '$k' is not a github-release of $($first.repo): a set resolves from one release" }
+  }
+  $pats = @($Keys | ForEach-Object { $SOURCES[$_].asset })
+  $latest = Get-GitHubLatestTag -Repo $first.repo -TagRule $first.tagRule -AssetPatterns $pats
+  $out = @{}
+  foreach ($k in $Keys) {
+    $a = $latest.assets[$SOURCES[$k].asset]
+    $out[$k] = @{ tag = $latest.tag; url = $a.url; digest = $a.digest; size = $a.size }
+  }
+  return $out
+}
+
+# Hugging Face tree listing of a repo at main (every page), cached for the run.
+function Get-HfTree {
+  param([string]$Repo)
+  if ($script:HfTreeCache.ContainsKey($Repo)) { return $script:HfTreeCache[$Repo] }
+  $all = @()
+  $uri = "https://huggingface.co/api/models/$Repo/tree/main?recursive=true"
+  $guard = 0
+  while ($uri -and $guard -lt 50) {
+    $guard++
+    $r = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 60 -Headers @{ 'User-Agent' = 'offload-harness-installer' }
+    $all += @($r.Content | ConvertFrom-Json)
+    $uri = $null
+    $link = $r.Headers['Link']
+    if ($link) {
+      $m = [regex]::Match(($link -join ','), '<([^>]+)>\s*;\s*rel="next"')
+      if ($m.Success) { $uri = $m.Groups[1].Value }
+    }
+  }
+  $script:HfTreeCache[$Repo] = $all
+  return $all
+}
+
+# The 302 of a resolve URL carries the file's sha256 (X-Linked-ETag) and size (X-Linked-Size).
+function Get-HfLinkedHeaders {
+  param([string]$Url)
+  $req = [System.Net.HttpWebRequest]::Create($Url)
+  $req.Method = 'HEAD'
+  $req.AllowAutoRedirect = $false
+  $req.UserAgent = 'offload-harness-installer'
+  $req.Timeout = 30000
+  $resp = $req.GetResponse()
+  try {
+    $etag = [string]$resp.Headers['X-Linked-ETag']
+    $sz = [string]$resp.Headers['X-Linked-Size']
+  } finally { $resp.Close() }
+  $etag = $etag.Trim()
+  if ($etag.StartsWith('W/')) { $etag = $etag.Substring(2) }
+  $szNum = [int64]0
+  if ($sz) { $szNum = [int64]$sz }
+  return @{ digest = $etag.Trim('"').ToLower(); size = $szNum }
+}
+
+# @{ url; digest; size } of $File in $Repo at main: the tree listing's lfs.oid and size, else the resolve redirect's headers.
+function Get-HfFile {
+  param([string]$Repo, [string]$File)
+  $url = "https://huggingface.co/$Repo/resolve/main/$File"
+  $digest = ''
+  $size = [int64]0
+  try {
+    foreach ($x in @(Get-HfTree -Repo $Repo)) {
+      if ($x.path -eq $File -and $x.type -eq 'file') {
+        if ($x.PSObject.Properties['lfs'] -and $x.lfs -and $x.lfs.oid) { $digest = ([string]$x.lfs.oid).ToLower(); $size = [int64]$x.size }
+        break
+      }
+    }
+  } catch { $digest = '' }
+  if ($digest -notmatch '^[0-9a-f]{64}$') {
+    $h = Get-HfLinkedHeaders -Url $url
+    $digest = $h.digest
+    $size = $h.size
+  }
+  if ($digest -notmatch '^[0-9a-f]{64}$') { throw "Hugging Face publishes no sha256 for $Repo/$File" }
+  if ($size -le 0) { throw "Hugging Face publishes no size for $Repo/$File" }
+  return @{ url = $url; digest = $digest; size = $size }
+}
+
+function Resolve-Source {
+  param([Parameter(Mandatory = $true)][string]$Key, [string[]]$With = @())
+  if (-not $SOURCES.ContainsKey($Key)) { throw "unknown source key '$Key'" }
+  if (Test-OfflineResolve) { return (Get-OfflineResolution -Key $Key) }
+  $s = $SOURCES[$Key]
+  if ($s.kind -eq 'github-release') {
+    $set = Resolve-GitHubSet -Keys (@($Key) + @($With))
+    return $set[$Key]
+  }
+  if ($s.kind -eq 'hf-file') {
+    $r = Get-HfFile -Repo $s.repo -File $s.file
+    return @{ tag = $r.digest.Substring(0, 8); url = $r.url; digest = $r.digest; size = $r.size }
+  }
+  throw "source '$Key' has unknown kind '$($s.kind)'"
+}
+
+# Several keys of one release (a llama zip and its cudart zip) resolved to one tag: key -> @{ tag; url; digest; size }.
+function Resolve-SourceSet {
+  param([string[]]$Keys)
+  if (Test-OfflineResolve) {
+    $o = @{}
+    foreach ($k in $Keys) { $o[$k] = Get-OfflineResolution -Key $k }
+    return $o
+  }
+  return (Resolve-GitHubSet -Keys $Keys)
+}
+
+# Floors (setup/floors.json): the minimum build a seat needs. $null = no floor for the component.
+$script:FloorsDoc = $null
+function Get-FloorFor {
+  param([string]$Key)
+  if ($null -eq $script:FloorsDoc) {
+    $fp = Join-Path $scriptDir 'floors.json'
+    if (Test-Path -LiteralPath $fp) { $script:FloorsDoc = Get-Content -Raw -LiteralPath $fp | ConvertFrom-Json }
+    else { Write-Host "NOTE  setup/floors.json is missing: no minimum builds are enforced" -ForegroundColor Yellow; $script:FloorsDoc = [pscustomobject]@{} }
+  }
+  $name = ''
+  if ($SOURCES[$Key].repo -eq 'ggml-org/llama.cpp') { $name = 'llama.cpp' }
+  elseif ($SOURCES[$Key].repo -eq 'leejet/stable-diffusion.cpp') { $name = 'stable-diffusion.cpp' }
+  if (-not $name) { return $null }
+  $p = $script:FloorsDoc.PSObject.Properties[$name]
+  if (-not $p) { return $null }
+  $h = $p.Value.PSObject.Properties['harness']
+  if (-not $h) { return $null }
+  if ($h.Value -is [int] -or $h.Value -is [long] -or $h.Value -is [double]) { return [int64]$h.Value }
+  return $null
 }
 
 # ---------------------------------------------------------------------------
@@ -481,11 +470,14 @@ function Show-FrontierNote {
 # ---------------------------------------------------------------------------
 function Get-Verified {
   param([string]$Url, [string]$Dest, [long]$ExpectedSize, [string]$Sha)
-  if ((Test-Path $Dest) -and ((Get-Item $Dest).Length -eq $ExpectedSize)) { return }  # already complete
+  if (Test-OfflineResolve) { throw "offline resolve mode (OFFLOAD_RESOLVE=offline or -RenderOnly): downloads are refused - $Url" }
   $tmp = "$Dest.part"
   for ($attempt = 1; $attempt -le 3; $attempt++) {
     try {
-      $bits = Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue
+      # BITS only under Windows PowerShell: PowerShell 7 reaches it through a compatibility session where a job can
+      # sit in Connecting forever, so there the plain stream (with the same progress lines) is the path.
+      $bits = $null
+      if ($PSVersionTable.PSEdition -eq 'Desktop') { $bits = Get-Command Start-BitsTransfer -ErrorAction SilentlyContinue }
       if ($bits) {
         try {
           # BITS runs as an async job; poll it every <=60s and print bytes/percent so the
@@ -509,7 +501,9 @@ function Get-Verified {
             throw "BITS job did not complete (state: $(if($job){$job.JobState}else{'unknown'}))"
           }
         } catch {
-          Get-BitsTransfer -DisplayName 'offload-download' -ErrorAction SilentlyContinue | Remove-BitsTransfer -ErrorAction SilentlyContinue
+          # PowerShell 7 reaches BITS through a compatibility session whose cmdlets may lack these parameters: the
+          # cleanup is best-effort and must never stop the plain-stream fallback below from running.
+          try { Get-BitsTransfer -DisplayName 'offload-download' -ErrorAction SilentlyContinue | Remove-BitsTransfer -ErrorAction SilentlyContinue } catch { }
           Invoke-WebRequestWithProgress -Url $Url -Dest $tmp
         }
       } else {
@@ -522,6 +516,13 @@ function Get-Verified {
       if ($Sha) {
         $actual = (Get-FileHash -Path $tmp -Algorithm SHA256).Hash.ToLower()
         if ($actual -ne $Sha.ToLower()) { throw "SHA256 mismatch: got $actual, expected $Sha" }
+      }
+      # A file already at $Dest (a model re-uploaded under the same name) is kept as <name>.prev, never overwritten
+      # in place: the verified new file replaces it by rename only after the whole download checked out.
+      if (Test-Path -LiteralPath $Dest) {
+        Remove-Item -LiteralPath "$Dest.prev" -Force -ErrorAction SilentlyContinue
+        Move-Item -LiteralPath $Dest -Destination "$Dest.prev"
+        Remove-Item -LiteralPath "$Dest.sha-ok" -Force -ErrorAction SilentlyContinue
       }
       Move-Item -Force $tmp $Dest
       return
@@ -570,20 +571,93 @@ function Invoke-WebRequestWithProgress {
   }
 }
 
-# Download a pinned zip (by $PINNED key) into $stage and expand it into $dest.
-function Install-Zip {
-  param([string]$Key, [string]$Stage, [string]$Dest)
-  $p = $PINNED[$Key]
-  $zip = Join-Path $Stage (Split-Path -Leaf $p.url)
-  Get-Verified -Url $p.url -Dest $zip -ExpectedSize $p.size -Sha $p.sha
-  New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-  Expand-Archive -Path $zip -DestinationPath $Dest -Force
+# Make $Dest (the live path) a junction to $Target. A junction already there is replaced (the link only, never its
+# target); an empty real directory is removed; a real directory with content (an older install) is first renamed into
+# <live>-versions\<$LegacyId, else unknown-yyyyMMdd>. Nothing is ever extracted over a live directory.
+function Set-LiveJunction {
+  param([string]$Dest, [string]$Target, [string]$LegacyId = '')
+  $di = New-Object System.IO.DirectoryInfo($Dest)
+  if ($di.Exists) {
+    if ($di.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
+      [System.IO.Directory]::Delete($Dest)
+    } elseif (@($di.GetFileSystemInfos()).Count -eq 0) {
+      [System.IO.Directory]::Delete($Dest)
+    } else {
+      if (-not $LegacyId) { $LegacyId = "unknown-$(Get-Date -Format 'yyyyMMdd')" }
+      $migrated = Join-Path "$Dest-versions" $LegacyId
+      if (Test-Path -LiteralPath $migrated) { $migrated = "$migrated.$([System.IO.Path]::GetRandomFileName().Replace('.', ''))" }
+      try { Move-Item -LiteralPath $Dest -Destination $migrated }
+      catch { throw "cannot move the existing $Dest into $Dest-versions (is a process running from it? stop the stack and re-run): $($_.Exception.Message)" }
+      Write-Host "      migrated the existing $Dest to $migrated" -ForegroundColor DarkGray
+    }
+  } elseif (Test-Path -LiteralPath $Dest) {
+    throw "$Dest exists and is not a directory"
+  }
+  New-Item -ItemType Junction -Path $Dest -Target $Target | Out-Null
+}
+
+# Install one engine generation: download every key's zip (verified against the publisher's size and digest) into
+# <dest>-versions\.staging\<tag>.<rand>, extract them there, check $ExeName landed, rename the staging tree to
+# <dest>-versions\<tag> (write-once) and only then point the live path at it. $Resolved = key -> @{ tag; url; digest; size }.
+function Install-Engine {
+  param([string[]]$Keys, [hashtable]$Resolved, [string]$Dest, [string]$ExeName, [string]$LegacyId = '')
+  $versionsDir = "$Dest-versions"
+  $tag = $Resolved[$Keys[0]].tag
+  $rand = [System.IO.Path]::GetRandomFileName().Replace('.', '')
+  $stage = Join-Path (Join-Path $versionsDir '.staging') "$tag.$rand"
+  $dl  = Join-Path $stage '.dl'
+  $out = Join-Path $stage 'out'
+  New-Item -ItemType Directory -Force -Path $dl, $out | Out-Null
+  try {
+    foreach ($k in $Keys) {
+      $r = $Resolved[$k]
+      $zip = Join-Path $dl ([System.IO.Path]::GetFileName(([uri]$r.url).AbsolutePath))
+      Get-Verified -Url $r.url -Dest $zip -ExpectedSize $r.size -Sha $r.digest
+      Expand-Archive -Path $zip -DestinationPath $out -Force   # into the fresh staging tree, never a live directory
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $out $ExeName))) { throw "$ExeName not found in the staged extraction of $tag" }
+  } catch {
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    throw
+  }
+  $sig = (@($Keys | ForEach-Object { $Resolved[$_].digest }) -join ',')
+  $id = $tag
+  $target = Join-Path $versionsDir $id
+  $reuse = $false
+  if (Test-Path -LiteralPath $target) {
+    $same = $false
+    $metaPath = "$target.meta.json"
+    if (Test-Path -LiteralPath $metaPath) {
+      try { $same = ((@((Get-Content -Raw -LiteralPath $metaPath | ConvertFrom-Json).digests) -join ',') -eq $sig) } catch { $same = $false }
+    }
+    if ($same -and (Test-Path -LiteralPath (Join-Path $target $ExeName))) { $reuse = $true }
+    else {
+      # the same tag already holds another build family (e.g. cuda 12 vs 13): keep both, write-once
+      $id = "$tag-$($Keys[0])"
+      $target = Join-Path $versionsDir $id
+      if (Test-Path -LiteralPath $target) { $id = "$id.$rand"; $target = Join-Path $versionsDir $id }
+    }
+  }
+  if ($reuse) {
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+  } else {
+    Move-Item -LiteralPath $out -Destination $target
+    Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
+    $meta = [ordered]@{
+      id = $id; tag = $tag; components = @($Keys); digests = @($Keys | ForEach-Object { $Resolved[$_].digest })
+      sizes = @($Keys | ForEach-Object { $Resolved[$_].size }); source = $SOURCES[$Keys[0]].repo
+      installed_at = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+    $meta | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath "$target.meta.json" -Encoding UTF8
+  }
+  Set-LiveJunction -Dest $Dest -Target $target -LegacyId $LegacyId
+  return $target
 }
 
 # ---------------------------------------------------------------------------
 # R3.4: hash a file once and cache the result beside it as <file>.sha-ok, stamped with the
 # sha it matched. A later call with the SAME expected sha reuses the sentinel (fast path);
-# a different expected sha (pin bump) forces a real re-hash.
+# a different expected sha (the publisher's file changed) forces a real re-hash.
 # ---------------------------------------------------------------------------
 function Test-CachedSha {
   param([string]$Path, [string]$ExpectedSha)
@@ -601,16 +675,214 @@ function Test-CachedSha {
 
 # ---------------------------------------------------------------------------
 # R3.5: version manifest helpers. $manifestOld = what a PRIOR run recorded (read once, up
-# front); $manifestNew = what THIS run will record (built up as components complete, written
-# at the very end). A component's Step test checks $manifestOld for a matching version -
-# this is what makes a $PINNED tag/sha bump force a real re-do even though old bytes remain.
+# front); $manifestComponents = what THIS run will record (built up as components complete,
+# written at the very end). A component's SKIP test checks $manifestOld for a recorded version
+# (engines) or oid (models): bytes on disk with no record are never trusted. Schema 2 records
+# { version; digest; size; source; installed_at } per component; a schema 1 manifest holds the
+# version string alone and is read as a record without a digest.
 # ---------------------------------------------------------------------------
 function Get-OldVersion {
   param([string]$Component)
-  if ($manifestOld -and $manifestOld.components -and $manifestOld.components.PSObject.Properties[$Component]) {
-    return $manifestOld.components.$Component
-  }
+  $rec = Get-OldRecord $Component
+  if ($rec) { return $rec.version }
   return $null
+}
+
+function Get-OldRecord {
+  param([string]$Component)
+  if (-not ($manifestOld -and $manifestOld.components -and $manifestOld.components.PSObject.Properties[$Component])) { return $null }
+  $raw = $manifestOld.components.$Component
+  if ($null -eq $raw) { return $null }
+  if ($raw -is [string]) { return @{ version = $raw; digest = ''; size = [int64]0; source = ''; installed_at = '' } }
+  $rec = @{ version = ''; digest = ''; size = [int64]0; source = ''; installed_at = '' }
+  foreach ($f in @('version', 'digest', 'source', 'installed_at')) {
+    if ($raw.PSObject.Properties[$f] -and $null -ne $raw.$f) { $rec[$f] = [string]$raw.$f }
+  }
+  if ($raw.PSObject.Properties['size'] -and $null -ne $raw.size) { $rec['size'] = [int64]$raw.size }
+  return $rec
+}
+
+function New-ComponentRecord {
+  param([string]$Version, [string]$Digest = '', [int64]$Size = 0, [string]$Source = '', [string]$InstalledAt = '')
+  if (-not $InstalledAt) { $InstalledAt = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+  return @{ version = $Version; digest = $Digest; size = $Size; source = $Source; installed_at = $InstalledAt }
+}
+
+# The generation table printed at the end of an install: component | installed | resolved | action.
+$script:GenRows = New-Object System.Collections.ArrayList
+function Add-GenRow {
+  param([string]$Component, [string]$Installed, [string]$Resolved, [string]$Action)
+  if (-not $Installed) { $Installed = '-' }
+  if (-not $Resolved) { $Resolved = '-' }
+  [void]$script:GenRows.Add([pscustomobject]@{ Component = $Component; Installed = $Installed; Resolved = $Resolved; Action = $Action })
+}
+function Show-GenerationTable {
+  if ($script:GenRows.Count -eq 0) { return }
+  $w = @(9, 9, 8)
+  foreach ($r in $script:GenRows) {
+    if ($r.Component.Length -gt $w[0]) { $w[0] = $r.Component.Length }
+    if ($r.Installed.Length -gt $w[1]) { $w[1] = $r.Installed.Length }
+    if ($r.Resolved.Length  -gt $w[2]) { $w[2] = $r.Resolved.Length }
+  }
+  Write-Host ""
+  Write-Host "Generations:" -ForegroundColor White
+  Write-Host ("  {0}  {1}  {2}  {3}" -f 'component'.PadRight($w[0]), 'installed'.PadRight($w[1]), 'resolved'.PadRight($w[2]), 'action') -ForegroundColor White
+  foreach ($r in $script:GenRows) {
+    Write-Host ("  {0}  {1}  {2}  {3}" -f $r.Component.PadRight($w[0]), $r.Installed.PadRight($w[1]), $r.Resolved.PadRight($w[2]), $r.Action)
+  }
+}
+
+# The tag a prior run recorded for the engine whose live directory is $Dest ('' when none): names the migrated generation.
+function Get-RecordedTagForDest {
+  param([string]$Dest)
+  $leaf = Split-Path -Leaf $Dest
+  foreach ($k in @($SOURCES.Keys | Sort-Object)) {
+    if ($SOURCES[$k].kind -eq 'github-release' -and $SOURCES[$k].dest -eq $leaf) {
+      $v = Get-OldVersion $k
+      if ($v) { return $v }
+    }
+  }
+  return ''
+}
+
+# Decide what an engine needs. SKIP (no network) when a prior run recorded a version, it is at or above the floor
+# and the live path holds the executable; -Update (or a missing/below-floor install) re-resolves. Never a downgrade:
+# an installed build newer than the resolved one is kept and reported.
+# Returns @{ action = install|skip|current|kept-newer; installed; resolved; results }.
+function Get-EnginePlan {
+  param([string[]]$Keys, [string]$Dest, [string]$ExeName)
+  $primary = $Keys[0]
+  $rule = $SOURCES[$primary].tagRule
+  $rec = Get-OldRecord $primary
+  $live = Test-Path -LiteralPath (Join-Path $Dest $ExeName)
+  $floor = Get-FloorFor -Key $primary
+  $installedTag = ''
+  $instN = $null
+  if ($rec -and $rec.version) { $installedTag = $rec.version; $instN = Get-TagNumber -Tag $rec.version -Rule $rule }
+  $held = (($null -ne $instN) -and $live -and (($null -eq $floor) -or ($instN -ge $floor)))
+  if ($held -and -not $Update) {
+    return @{ action = 'skip'; installed = $installedTag; resolved = '-'; results = $null }
+  }
+  try { $res = Resolve-SourceSet -Keys $Keys }
+  catch {
+    if ($held) {
+      Write-Host "NOTE  $primary`: cannot reach the publisher ($($_.Exception.Message)); keeping $installedTag" -ForegroundColor Yellow
+      return @{ action = 'skip'; installed = $installedTag; resolved = '-'; results = $null }
+    }
+    throw
+  }
+  $resTag = $res[$primary].tag
+  $resN = Get-TagNumber -Tag $resTag -Rule $rule
+  if ($held) {
+    if ($resN -gt $instN) { return @{ action = 'install'; installed = $installedTag; resolved = $resTag; results = $res } }
+    if ($resN -lt $instN) {
+      Write-Host "NOTE  $primary`: installed $installedTag is newer than the publisher's newest complete build $resTag; keeping it (never a downgrade)" -ForegroundColor Yellow
+      return @{ action = 'kept-newer'; installed = $installedTag; resolved = $resTag; results = $null }
+    }
+    return @{ action = 'current'; installed = $installedTag; resolved = $resTag; results = $null }
+  }
+  if ($null -ne $floor -and $resN -lt $floor) {
+    throw "$primary`: the publisher's newest complete build is $resTag, below the floor $floor in setup/floors.json - nothing installable meets the floor yet"
+  }
+  return @{ action = 'install'; installed = $installedTag; resolved = $resTag; results = $res }
+}
+
+# One engine (all of $Keys land in $Dest): plan, then Step (SKIP unless the plan says install), then record.
+function Invoke-EngineInstall {
+  param([string[]]$Keys, [string]$Dest, [string]$ExeName, [string]$Label)
+  $plan = Get-EnginePlan -Keys $Keys -Dest $Dest -ExeName $ExeName
+  Step $Label `
+    { $plan.action -ne 'install' } `
+    {
+      $legacy = Get-RecordedTagForDest -Dest $Dest
+      Install-Engine -Keys $Keys -Resolved $plan.results -Dest $Dest -ExeName $ExeName -LegacyId $legacy | Out-Null
+      if (-not (Test-Path -LiteralPath (Join-Path $Dest $ExeName))) { throw "$ExeName not found in $Dest after install" }
+    }
+  foreach ($k in $Keys) {
+    if ($plan.action -eq 'install') {
+      $r = $plan.results[$k]
+      $manifestComponents[$k] = New-ComponentRecord -Version $r.tag -Digest $r.digest -Size $r.size -Source "github:$($SOURCES[$k].repo)"
+    } else {
+      $old = Get-OldRecord $k
+      if ($old) { $manifestComponents[$k] = $old }
+    }
+  }
+  $text = $plan.action
+  if ($text -eq 'install') { $text = 'installed' }
+  elseif ($text -eq 'skip') { $text = 'skipped' }
+  Add-GenRow -Component $Keys[0] -Installed $plan.installed -Resolved $plan.resolved -Action $text
+}
+
+# Decide what a model file needs. A file that exists, whose recorded oid and size match, is kept with no network call
+# unless -Update; otherwise the published oid decides: the same oid keeps it, a different one (a re-upload) downloads
+# the new file and keeps the old one as <name>.prev. Returns @{ action = download|skip|current|adopted|kept-offline; ... }.
+function Get-ModelPlan {
+  param([string]$Key, [string]$Dest)
+  $rec = Get-OldRecord $Key
+  $exists = Test-Path -LiteralPath $Dest
+  $len = [int64]-1
+  if ($exists) { $len = (Get-Item -LiteralPath $Dest).Length }
+  $recDigest = ''
+  $recVer = ''
+  if ($rec) { $recDigest = $rec.digest; $recVer = $rec.version }
+  $recShort = '-'
+  if ($recVer) { $recShort = $recVer }
+  if ($exists -and $recDigest -and $len -eq $rec.size -and -not $Update) {
+    return @{ action = 'skip'; installed = $recShort; resolved = '-'; resolution = $null }
+  }
+  try { $r = Resolve-Source -Key $Key }
+  catch {
+    if ($exists) {
+      Write-Host "NOTE  $Key`: cannot reach the publisher ($($_.Exception.Message)); keeping the file on disk" -ForegroundColor Yellow
+      return @{ action = 'kept-offline'; installed = $recShort; resolved = '-'; resolution = $null }
+    }
+    throw
+  }
+  $resShort = $r.digest.Substring(0, 8)
+  if (-not $exists) { return @{ action = 'download'; installed = $recShort; resolved = $resShort; resolution = $r } }
+  if ($len -eq $r.size) {
+    if ($recDigest -and $recDigest -eq $r.digest) { return @{ action = 'current'; installed = $recShort; resolved = $resShort; resolution = $r } }
+    if (-not $recDigest) {
+      # a schema 1 record (the oid's first 8 hex) or no record at all: adopt the file when it is the published one
+      if ($recVer -and $r.digest.StartsWith($recVer)) { return @{ action = 'adopted'; installed = $recShort; resolved = $resShort; resolution = $r } }
+      if (Test-CachedSha -Path $Dest -ExpectedSha $r.digest) { return @{ action = 'adopted'; installed = $recShort; resolved = $resShort; resolution = $r } }
+    }
+  }
+  return @{ action = 'download'; installed = $recShort; resolved = $resShort; resolution = $r }
+}
+
+# One model file under $modelDir: plan, then Step, then record.
+function Invoke-ModelInstall {
+  param([string]$Key, [string]$StepPrefix = 'model')
+  $s = $SOURCES[$Key]
+  $dest = Join-Path $modelDir $s.dest
+  $plan = Get-ModelPlan -Key $Key -Dest $dest
+  $existedBefore = Test-Path -LiteralPath $dest
+  Step "$StepPrefix`: $($s.dest)" `
+    { $plan.action -ne 'download' } `
+    {
+      # a dest may carry a subdirectory (the Qwen3.6-35B-A3B seat's cmd names one).
+      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
+      $r = $plan.resolution
+      Get-Verified -Url $r.url -Dest $dest -ExpectedSize $r.size -Sha $r.digest
+      Test-CachedSha -Path $dest -ExpectedSha $r.digest | Out-Null   # seed the sentinel for the next run
+    }
+  $old = Get-OldRecord $Key
+  $text = $plan.action
+  if ($text -eq 'skip') { $text = 'skipped' }
+  if ($plan.action -eq 'download') {
+    $r = $plan.resolution
+    $manifestComponents[$Key] = New-ComponentRecord -Version $r.digest.Substring(0, 8) -Digest $r.digest -Size $r.size -Source "hf:$($s.repo)/$($s.file)"
+    if ($existedBefore) { $text = 'updated (old kept as .prev)' } else { $text = 'downloaded' }
+  } elseif ($plan.action -eq 'current' -or $plan.action -eq 'adopted') {
+    $r = $plan.resolution
+    $at = ''
+    if ($old) { $at = $old.installed_at }
+    $manifestComponents[$Key] = New-ComponentRecord -Version $r.digest.Substring(0, 8) -Digest $r.digest -Size $r.size -Source "hf:$($s.repo)/$($s.file)" -InstalledAt $at
+  } elseif ($old) {
+    $manifestComponents[$Key] = $old
+  }
+  Add-GenRow -Component $Key -Installed $plan.installed -Resolved $plan.resolved -Action $text
 }
 
 # ---------------------------------------------------------------------------
@@ -761,10 +1033,10 @@ function Test-YamlHasEveryExpertFlag {
 # the TOOLKIT (nvcc) only matters for the source-build path, so it is reported
 # as an opportunity, never required.
 #
-# Matrix (upstream reality, release b11490 — asset names verified 2026-10-09; the sm_120 / cuBLAS
-# findings below were measured on b9934 on 2026-07-15 and are not re-measured on this build):
+# Matrix (upstream reality — the sm_120 / cuBLAS findings below were measured on an earlier build on
+# 2026-07-15 and are not re-measured on every newer one):
 #   * win-cuda-12.4 prebuilt: NO sm_120 -> will not run Blackwell at all.
-#   * win-cuda-13.4 prebuilt (13.3 until b9934): SERVES Blackwell (MMQ falls back to cuBLAS,
+#   * win-cuda-13.4 prebuilt (13.3 on older builds): SERVES Blackwell (MMQ falls back to cuBLAS,
 #     ~5.6x slower prefill on Q4 — functional, not peak). Needs a CUDA-13 driver.
 #   * NO win-cuda-12.8 prebuilt exists -> the PEAK path (sm_120 MMQ,
 #     -DCMAKE_CUDA_ARCHITECTURES=120) is a documented source-build vs a
@@ -775,7 +1047,7 @@ function Test-YamlHasEveryExpertFlag {
 #     (driver branch R580+ still DRIVES the V100 — only the toolkit dropped it).
 #
 # Returns @{ component; keys; tier; refuse; report } where component is the
-# manifest/PINNED key of the llama zip ('' when refuse), keys = zips to install,
+# manifest/$SOURCES key of the llama zip ('' when refuse), keys = zips to install,
 # tier = standard|serves|refuse, report = operator-facing lines (always >=1).
 # ---------------------------------------------------------------------------
 function Select-CudaBuild {
@@ -792,7 +1064,7 @@ function Select-CudaBuild {
 
   if ($ProfileId -eq 'dual-gpu') {
     return @{ component = ''; keys = @(); tier = 'refuse'; refuse = $true; report = @(
-      "dual-gpu (sm_70 Volta + sm_120 Blackwell): no pinned prebuilt covers BOTH arches ($cudaDesc).",
+      "dual-gpu (sm_70 Volta + sm_120 Blackwell): no prebuilt covers BOTH arches ($cudaDesc).",
       "The 12.4 prebuilt has no sm_120; the CUDA-13 toolkit cannot compile sm_70 (Volta offline compilation removed in CUDA 13.0).",
       "Source-build llama.cpp with a CUDA 12.8/12.9 toolkit: -DCMAKE_CUDA_ARCHITECTURES=`"70;120`" (an R580+ driver still drives the V100).",
       "See setup/SETUP-AGENT.md - Blackwell note (multi-arch build)." ) }
@@ -810,7 +1082,7 @@ function Select-CudaBuild {
     }
     if ($driverVer -and $driverVer -ge [version]'12.8') {
       return @{ component = ''; keys = @(); tier = 'refuse'; refuse = $true; report = @(
-        "Blackwell (sm_120), ${cudaDesc}: NO pinned prebuilt runs here - the 12.4 build has no sm_120 and the CUDA-13.4 build needs a CUDA-13 (R580+) driver.",
+        "Blackwell (sm_120), ${cudaDesc}: NO prebuilt runs here - the 12.4 build has no sm_120 and the CUDA-13.4 build needs a CUDA-13 (R580+) driver.",
         "Either upgrade the NVIDIA driver to R580+ and re-run install (the 13.4 prebuilt then serves), or source-build vs a 12.8/12.9 toolkit for peak (-DCMAKE_CUDA_ARCHITECTURES=120).",
         "See setup/SETUP-AGENT.md - Blackwell note." ) }
     }
@@ -820,10 +1092,10 @@ function Select-CudaBuild {
       "See setup/SETUP-AGENT.md - Blackwell note." ) }
   }
 
-  # Every other CUDA profile (ampere-*/volta-16/other/none): the pinned 12.4 build
+  # Every other CUDA profile (ampere-*/volta-16/other/none): the verified 12.4 build
   # is the verified status-quo path (sm_70..sm_89 covered; any 12.4+ driver runs it).
   return @{ component = 'llama-cuda'; keys = @('llama-cuda','llama-cudart'); tier = 'standard'; refuse = $false;
-    report = @("CUDA build: pinned 12.4 prebuilt (profile=$(if ($ProfileId) { $ProfileId } else { '(none)' }), $cudaDesc).") }
+    report = @("CUDA build: 12.4 prebuilt (profile=$(if ($ProfileId) { $ProfileId } else { '(none)' }), $cudaDesc).") }
 }
 
 
@@ -840,7 +1112,7 @@ function Select-CudaBuild {
 # string value, including strings inside array values. "" = no substitution
 # (keeps every pre-J2 caller/test byte-identical).
 # ---------------------------------------------------------------------------
-# Which PINNED model keys a tier's GATES add to the download set. Extracted as a pure
+# Which $SOURCES model keys a tier's GATES add to the download set. Extracted as a pure
 # function so the SPLIT-BRAIN this mechanism exists to prevent is actually testable: a
 # seeded seat whose weights never download, or a download whose seat nothing renders.
 # Previously this lived inline in the main flow, below the dot-source test seam, so no
@@ -1433,13 +1705,13 @@ if ($env:OFFLOAD_HOME) { $HOME_DIR = $env:OFFLOAD_HOME } else { $HOME_DIR = Join
 # Set here, beside HOME_DIR, so EVERY path that can reach the seed merge has it.
 if ($env:HAILO_HOME) { $HAILO_HOME = $env:HAILO_HOME } else { $HAILO_HOME = Join-Path $HOME_DIR 'hailo' }
 if ($null -ne $env:OFFLOAD_WITH_FAMILY) { $withFamily = ($env:OFFLOAD_WITH_FAMILY -ne '0') } else { $withFamily = $true }
-$llamaDir = Join-Path $HOME_DIR 'llama'
-$swapDir  = Join-Path $HOME_DIR 'llama-swap'
+# The engines' live paths are junctions into <live>-versions\; they are created by the install, never pre-made here.
+$llamaDir = Join-Path $HOME_DIR $SOURCES['llama-cpu'].dest
+$swapDir  = Join-Path $HOME_DIR $SOURCES['llama-swap'].dest
 $modelDir = Join-Path $HOME_DIR 'models'
 $harnessDir = Join-Path $HOME_DIR 'harness'
-$stageDir = Join-Path $HOME_DIR '.stage'
 # -RenderOnly is a side-effect-free dry run: it renders ONE yaml and touches no artifact/build/
-# manifest paths, so creating the full install tree (llama/llama-swap/models/harness/.stage) would
+# manifest paths, so creating the full install tree (models/harness/kvslots) would
 # just litter $HOME\offload-stack with empty dirs when OFFLOAD_HOME is unset. Under -RenderOnly
 # create ONLY the render's output parent; a normal install still builds the whole tree below.
 if ($RenderOnly) {
@@ -1450,7 +1722,7 @@ if ($RenderOnly) {
   # Without it llama-server refuses every save with a 501 and the node's kvslot lane
   # answers 501 too — the POSIX installer creates the same directory.
   $kvSlotDir = Join-Path $HOME_DIR 'kvslots'
-  foreach ($d in @($HOME_DIR, $llamaDir, $swapDir, $modelDir, $harnessDir, $stageDir, $kvSlotDir)) {
+  foreach ($d in @($HOME_DIR, $modelDir, $harnessDir, $kvSlotDir)) {
     New-Item -ItemType Directory -Force -Path $d | Out-Null
   }
 }
@@ -1543,7 +1815,6 @@ function Test-Go126 {
   return ([int]$parts[0] -gt 1) -or ([int]$parts[0] -eq 1 -and [int]$parts[1] -ge 26)
 }
 if (-not $RenderOnly) {
-Show-FrontierNote   # J1: surface newer upstream releases (best-effort, never fatal)
 $wingetFlags = @('--accept-package-agreements', '--accept-source-agreements', '--silent')
 Step 'prereq: Git' `
   { [bool](Get-Command git -ErrorAction SilentlyContinue) } `
@@ -1566,57 +1837,42 @@ Step 'prereq: Go >=1.26' `
 
 # ---------------------------------------------------------------------------
 # Step 3: llama.cpp binaries for the backend (+ cudart for CUDA)
-# SKIP requires: artifact present AND manifest records the currently-pinned tag
+# SKIP requires: artifact present AND manifest records a version at or above the floor
 # under the SELECTED component key — so a CUDA-build switch (e.g. 12.4 -> 13.4
 # after a driver upgrade, or the V100 arriving flipping the profile) forces a
 # real re-install on the next run even though old bytes are still on disk.
+# -Update re-resolves and installs the publisher's newest complete build when it is newer.
+# The new build is staged, verified and swapped in by junction (Install-Engine).
 # H4: for CUDA the build is CHOSEN from (profile, detected CUDA) — flexible,
 # never a fixed assumption. A refuse verdict fails LOUD with the guidance.
 # ---------------------------------------------------------------------------
-$llamaExe = Join-Path $llamaDir 'llama-server.exe'
 $cudaBuild = $null
 if ($backend -eq 'cuda') {
   $cudaBuild = Select-CudaBuild -ProfileId $profileId -CudaDriver $cudaDriver -CudaToolkit $cudaToolkit
   $cudaBuild.report | ForEach-Object { Write-Host "NOTE  $_" -ForegroundColor Yellow }
-  if ($cudaBuild.refuse) { throw "no viable pinned llama.cpp CUDA build for profile '$profileId' - see the NOTE lines above" }
+  if ($cudaBuild.refuse) { throw "no viable llama.cpp CUDA build for profile '$profileId' - see the NOTE lines above" }
   Write-Host "OK    CUDA build selected: $($cudaBuild.component) (tier=$($cudaBuild.tier))" -ForegroundColor Green
   $llamaComponentKey = $cudaBuild.component
 } else {
   $llamaComponentKey = "llama-$backend"
 }
-Step "llama.cpp ($backend -> $llamaComponentKey) -> $llamaDir" `
-  { (Test-Path $llamaExe) -and ((Get-OldVersion $llamaComponentKey) -eq $LLAMA_TAG) } `
-  {
-    if ($backend -eq 'cuda') {
-      foreach ($k in $cudaBuild.keys) { Install-Zip -Key $k -Stage $stageDir -Dest $llamaDir }
-    } elseif ($backend -eq 'vulkan') {
-      Install-Zip -Key 'llama-vulkan' -Stage $stageDir -Dest $llamaDir
-    } else {
-      Install-Zip -Key 'llama-cpu'    -Stage $stageDir -Dest $llamaDir
-    }
-    if (-not (Test-Path $llamaExe)) { throw "llama-server.exe not found in $llamaDir after unzip" }
-  }
-$manifestComponents[$llamaComponentKey] = $LLAMA_TAG
+if ($backend -eq 'cuda') { $llamaKeys = @($cudaBuild.keys) } else { $llamaKeys = @($llamaComponentKey) }
+Invoke-EngineInstall -Keys $llamaKeys -Dest $llamaDir -ExeName 'llama-server.exe' -Label "llama.cpp ($backend -> $llamaComponentKey) -> $llamaDir"
 
 # ---------------------------------------------------------------------------
 # Step 4: llama-swap
 # ---------------------------------------------------------------------------
 $swapExe = Join-Path $swapDir 'llama-swap.exe'
-Step "llama-swap -> $swapDir" `
-  { (Test-Path $swapExe) -and ((Get-OldVersion 'llama-swap') -eq $SWAP_TAG) } `
-  {
-    Install-Zip -Key 'llama-swap' -Stage $stageDir -Dest $swapDir
-    if (-not (Test-Path $swapExe)) { throw "llama-swap.exe not found in $swapDir after unzip" }
-  }
-$manifestComponents['llama-swap'] = $SWAP_TAG
+Invoke-EngineInstall -Keys @('llama-swap') -Dest $swapDir -ExeName 'llama-swap.exe' -Label "llama-swap -> $swapDir"
 
 # ---------------------------------------------------------------------------
 # Step 5: models - E4B + embed always; E2B + 26B only when withFamily; the
 # Qwen3.8-27B coder/agent GGUF + mmproj only when the resolved profile sets
 # include_qwen38 (mirrors the include_26b mechanism — the renderer strips the
 # yaml entry on the same flag, so download set and served roster stay in step).
-# R3.4: SKIP test hashes once (cached via <file>.sha-ok) against the pinned sha; a pin bump
-# (different sha) invalidates both the sentinel comparison and the manifest version check.
+# R3.4: a file is kept when it exists and the manifest records the published oid (hashed once, cached via
+# <file>.sha-ok, when a file is adopted without a record). A changed published oid (-Update) downloads the new
+# file beside the old one and keeps the old as <name>.prev.
 # ---------------------------------------------------------------------------
 # $pp (resolved above the artifact steps) decides the 26B: it is fetched only when the
 # yaml Step 6 renders will serve it (include_26b after the RAM gate).
@@ -1711,22 +1967,7 @@ if ($profileId -and (Test-Path $profilesJsonStep5)) {
 # Gate -> download-set mapping lives in Get-GatedModelKeys (above the test seam) so it
 # can be regression-pinned; the rules and their deliberate asymmetry are documented there.
 $modelKeys += Get-GatedModelKeys -IncludeQwen38 $includeQwen38 -IncludeQwen354B $includeQwen354B -IncludeQwen359B $includeQwen359B -IncludeQwen3827B $includeQwen3827B -IncludeMimo9B $includeMimo9B -IncludeQwen3635B $includeQwen3635B -RamTier $ramTier -IncludeEmbeddingGemma2 $includeEmbeddingGemma2 -IncludeEmbeddingGemma2Projector $includeEmbeddingGemma2Projector -WithFamily $withFamily
-foreach ($key in $modelKeys) {
-  $m = $PINNED[$key]
-  $dest = Join-Path $modelDir $m.name
-  Step "model: $($m.name)" `
-    {
-      (Test-Path $dest) -and ((Get-Item $dest).Length -eq $m.size) -and
-      ((Get-OldVersion $key) -eq $m.version) -and (Test-CachedSha -Path $dest -ExpectedSha $m.sha)
-    } `
-    {
-      # A pinned name may carry a subdirectory (the Qwen3.6-35B-A3B seat's cmd names one).
-      New-Item -ItemType Directory -Force -Path (Split-Path -Parent $dest) | Out-Null
-      Get-Verified -Url $m.url -Dest $dest -ExpectedSize $m.size -Sha $m.sha
-      Test-CachedSha -Path $dest -ExpectedSha $m.sha | Out-Null   # seed the sentinel for the next run
-    }
-  $manifestComponents[$key] = $m.version
-}
+foreach ($key in $modelKeys) { Invoke-ModelInstall -Key $key -StepPrefix 'model' }
 # ---------------------------------------------------------------------------
 # Step 5b (J2): media tier - stable-diffusion.cpp (Vulkan) + the image roster.
 # Default gate: ON for the AMD/Vulkan profiles (amd-*: the tier this leg was built
@@ -1737,32 +1978,12 @@ foreach ($key in $modelKeys) {
 $withMedia = ($profileId -match '^amd-rdna3')
 if ($env:OFFLOAD_WITH_MEDIA -eq '1') { $withMedia = $true }
 if ($env:OFFLOAD_WITH_MEDIA -eq '0') { $withMedia = $false }
-$sdcppDir = Join-Path $HOME_DIR 'sdcpp'
-$sdcppExe = Join-Path $sdcppDir 'sd-cli.exe'
+$sdcppDir = Join-Path $HOME_DIR $SOURCES['sdcpp-vulkan'].dest
 if ($withMedia) {
-  Step "sd.cpp (vulkan) -> $sdcppDir" `
-    { (Test-Path $sdcppExe) -and ((Get-OldVersion 'sdcpp-vulkan') -eq $PINNED['sdcpp-vulkan'].version) } `
-    {
-      Install-Zip -Key 'sdcpp-vulkan' -Stage $stageDir -Dest $sdcppDir
-      if (-not (Test-Path $sdcppExe)) { throw "sd-cli.exe not found in $sdcppDir after unzip" }
-    }
-  $manifestComponents['sdcpp-vulkan'] = $PINNED['sdcpp-vulkan'].version
+  Invoke-EngineInstall -Keys @('sdcpp-vulkan') -Dest $sdcppDir -ExeName 'sd-cli.exe' -Label "sd.cpp (vulkan) -> $sdcppDir"
   $mediaKeys = @('model-zimage', 'model-zimage-llm', 'model-zimage-vae')
   if ($env:OFFLOAD_MEDIA_EXTRAS -eq '1') { $mediaKeys += @('model-sd15', 'model-sdxl', 'model-sdxl-vae') }
-  foreach ($key in $mediaKeys) {
-    $m = $PINNED[$key]
-    $dest = Join-Path $modelDir $m.name
-    Step "media model: $($m.name)" `
-      {
-        (Test-Path $dest) -and ((Get-Item $dest).Length -eq $m.size) -and
-        ((Get-OldVersion $key) -eq $m.version) -and (Test-CachedSha -Path $dest -ExpectedSha $m.sha)
-      } `
-      {
-        Get-Verified -Url $m.url -Dest $dest -ExpectedSize $m.size -Sha $m.sha
-        Test-CachedSha -Path $dest -ExpectedSha $m.sha | Out-Null
-      }
-    $manifestComponents[$key] = $m.version
-  }
+  foreach ($key in $mediaKeys) { Invoke-ModelInstall -Key $key -StepPrefix 'media model' }
 } else {
   Write-Host "SKIP  media tier (profile=$(if ($profileId) { $profileId } else { '(none)' }) is not amd-*; set OFFLOAD_WITH_MEDIA=1 to install sd.cpp + the image roster on any Vulkan-capable box)" -ForegroundColor DarkGray
 }
@@ -1863,15 +2084,15 @@ $gatedSeats = [ordered]@{
 # -RenderOnly always renders fresh: drop any stale output so the Step SKIP test can't short-circuit it.
 if ($RenderOnly -and (Test-Path $yamlDest)) { Remove-Item $yamlDest -Force }
 # OFFLOAD_EG2_LLAMA_BIN: the embeddinggemma2 entry's OWN llama.cpp build, for a node whose main build is older
-# than b11452 and cannot load it (the entry's architecture is gemma-embedding2). Opt-in and operator-managed:
-# the pinned tag above is already at or past the floor, so an installer-managed node needs no second build.
+# than the embeddinggemma2 floor in setup/floors.json and cannot load it (the entry's architecture is gemma-embedding2). Opt-in and operator-managed:
+# the build this installer resolves is held at or above the floor (setup/floors.json), so an installer-managed node needs no second build.
 # Forward slashes, like every rendered path (llama-swap on Windows chokes on backslash escapes). The renderer
 # refuses the flag, naming the tier, on a tier that renders no embeddinggemma2 entry.
 $eg2Bin = ''
 if ($env:OFFLOAD_EG2_LLAMA_BIN) {
   $eg2Dir = $env:OFFLOAD_EG2_LLAMA_BIN.Trim()
   if (-not (Test-Path -LiteralPath (Join-Path $eg2Dir 'llama-server.exe'))) {
-    throw "OFFLOAD_EG2_LLAMA_BIN=$eg2Dir holds no llama-server.exe - point it at the directory of a COMPLETE llama.cpp b11452-or-newer extraction (the llama zip, plus the cudart zip for CUDA), or unset it"
+    throw "OFFLOAD_EG2_LLAMA_BIN=$eg2Dir holds no llama-server.exe - point it at the directory of a COMPLETE llama.cpp extraction at or above the floor in setup/floors.json (the llama zip, plus the cudart zip for CUDA), or unset it"
   }
   $eg2Bin = $eg2Dir.Replace('\', '/').TrimEnd('/')
 }
@@ -1882,7 +2103,7 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $llamaDir -Quiet) -and   # backslash path = stale pre-R3.6 render
     (($tplBackend -eq 'cpu') -or -not (Test-YamlHasEveryExpertFlag -Path $yamlDest)) -and   # 0186 w4: a yaml an older installer rendered with the every-expert placement on a backend with a card must be re-rendered, not kept (the audit refuses it)
     (($tplBackend -ne 'vulkan') -or (Select-String -Path $yamlDest -SimpleMatch -Pattern 'GGML_VK_VISIBLE_DEVICES' -Quiet)) -and   # J1: vulkan render without the device pin = stale pre-0.22.19 render
-    ((-not $eg2Bin) -or (Select-String -Path $yamlDest -SimpleMatch -Pattern "$eg2Bin/llama-server.exe" -Quiet)) -and   # OFFLOAD_EG2_LLAMA_BIN set but the entry not on that build = rendered before the override (or on another one): an upgrade must re-render. Anchored on the executable: a bare directory is a substring of a longer sibling (llama-b11490 inside llama-b11490-bin-win-cuda-12.4-x64)
+    ((-not $eg2Bin) -or (Select-String -Path $yamlDest -SimpleMatch -Pattern "$eg2Bin/llama-server.exe" -Quiet)) -and   # OFFLOAD_EG2_LLAMA_BIN set but the entry not on that build = rendered before the override (or on another one): an upgrade must re-render. Anchored on the executable: a bare directory is a substring of a longer sibling (a build directory is a substring of a longer sibling named for the same build, e.g. a -bin-win-cuda one; floors.json)
     # A gated seat this tier enables but the rendered yaml does not contain = that yaml
     # PREDATES the seat. Without this probe an UPGRADE on an existing box downloads the
     # weights in Step 5 and then SKIPs the render here, so the installer prints all-OK
@@ -1951,9 +2172,9 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     # The payload lines are indented continuations under the WARNING header — the old
     # header-only filter silently truncated every file list the warning exists to show.
     # `note:` lines are the renderer's advisories on stdout (stderr would abort this install, see above):
-    # an embeddinggemma2 build whose directory name states no b<number>, so the b11452 floor went unchecked.
+    # an embeddinggemma2 build whose directory name states no b<number>, so the floors.json floor went unchecked.
     # The one about THIS script's own build (<home>/llama, which never states a build) is not relayed:
-    # that build is the pinned tag, held at or above the floor by a test, so on every embeddinggemma2
+    # that build is held at or above the floor by the installer (setup/floors.json), so on every embeddinggemma2
     # tier it would be a false alarm. With OFFLOAD_EG2_LLAMA_BIN set the operator chose the build, and
     # the note is the only warning about it.
     $renderOut | Where-Object { $_ -match 'WARNING' -or $_ -match '^\s{2}\S' -or ($_ -match '^note:' -and ($eg2Bin -or $_ -notmatch 'so the floor was not checked')) } | ForEach-Object { Write-Host "      $_" -ForegroundColor Yellow }
@@ -1979,8 +2200,7 @@ $agentExe   = Join-Path $harnessDir 'local-agent.exe'
 # SKIP requires the exe AND its version: a bare Test-Path let a re-install keep a
 # STALE local-offload.exe whose embedded templates/structs render the NEW on-disk
 # profiles.json wrong (silently - see the version-gate note above Resolve-HarnessExe).
-# The exe's own --version is the ground truth, exactly as a $PINNED tag bump forces
-# a re-install of a downloaded component.
+# The exe's own --version is the ground truth.
 Step 'build local-offload.exe' `
   { (Test-Path $harnessExe) -and ((Get-HarnessExeVersion $harnessExe) -eq $repoVersion) } `
   {
@@ -1992,7 +2212,7 @@ Step 'build local-offload.exe' `
     } finally { Pop-Location }
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
   }
-$manifestComponents['local-offload'] = $repoVersion
+$manifestComponents['local-offload'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
 # Step 7a: the render runners beside the harness exe. The shipped defaults are
 # "render/*.mjs", resolved against the EXECUTABLE's directory (gpugen.ResolveScript),
 # so they must ship beside it - exactly what install.sh does for $PREFIX/bin/render.
@@ -2011,7 +2231,7 @@ Step 'render runners -> harness\render' { $false } {
   Write-Host "      $runnerCount runners in $renderDst (relative render/*.mjs bindings resolve here)" -ForegroundColor DarkGray
 }
 # local-agent has no --version verb, so its rebuild gate uses the manifest version
-# idiom instead (same staleness class, same fix shape as every pinned component).
+# idiom instead (same staleness class, same fix shape as a downloaded component).
 Step 'build local-agent.exe' `
   { (Test-Path $agentExe) -and ((Get-OldVersion 'local-agent') -eq $repoVersion) } `
   {
@@ -2023,7 +2243,7 @@ Step 'build local-agent.exe' `
     } finally { Pop-Location }
     if (-not (Test-Path $agentExe)) { throw "local-agent.exe not produced" }
   }
-$manifestComponents['local-agent'] = $repoVersion
+$manifestComponents['local-agent'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
 
 # ---------------------------------------------------------------------------
 # Step 7b: the composition lane (HyperFrames; ADR 0059). Skipped with a reason on a
@@ -2262,9 +2482,15 @@ if (Test-Path $comfyDir) {
 # ---------------------------------------------------------------------------
 # R3.5: write the version manifest now that every component version is known.
 # ---------------------------------------------------------------------------
+# The recorded versions (data, not a pin): the llama.cpp and llama-swap builds now on disk.
+$llamaTagRecorded = $null
+if ($manifestComponents.ContainsKey($llamaComponentKey)) { $llamaTagRecorded = $manifestComponents[$llamaComponentKey].version }
+$swapTagRecorded = $null
+if ($manifestComponents.ContainsKey('llama-swap')) { $swapTagRecorded = $manifestComponents['llama-swap'].version }
 $manifest = [ordered]@{
-  llama_cpp_tag  = $LLAMA_TAG
-  llama_swap_tag = $SWAP_TAG
+  schema         = 2
+  llama_cpp_tag  = $llamaTagRecorded
+  llama_swap_tag = $swapTagRecorded
   backend        = $backend
   cuda_build     = $(if ($cudaBuild) { $cudaBuild.component } else { $null })   # H4: which CUDA family was installed
   cuda_driver    = $cudaDriver
@@ -2277,7 +2503,7 @@ $manifest = [ordered]@{
   render_backend = $tplBackend
   install_date   = (Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')
   components     = $manifestComponents
-  models         = @($modelKeys | ForEach-Object { @{ name = $PINNED[$_].name; sha256 = $PINNED[$_].sha } })
+  models         = @($modelKeys | ForEach-Object { @{ name = $SOURCES[$_].dest; sha256 = $(if ($manifestComponents.ContainsKey($_)) { $manifestComponents[$_].digest } else { '' }) } })
 }
 # Where the data went and why (register C-92), so a later operator can see the choice
 # without re-deriving it. A re-run that keeps an existing config carries the old record.
@@ -2288,7 +2514,10 @@ if ($script:dataHomeChoice) {
   $manifest['data_home'] = $manifestOld.data_home
   if ($manifestOld.PSObject.Properties['data_home_because']) { $manifest['data_home_because'] = $manifestOld.data_home_because }
 }
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -Path $manifestPath -Encoding UTF8
+# Replaced atomically (tmp + rename): an interrupted run never leaves a half-written manifest.
+$manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "$manifestPath.tmp" -Encoding UTF8
+Move-Item -Force -LiteralPath "$manifestPath.tmp" -Destination $manifestPath
+Show-GenerationTable
 
 # ---------------------------------------------------------------------------
 # Step 9: start command + JSON verdict

@@ -1,45 +1,77 @@
 package mediacap
 
-// knownModelSizes pins the exact byte size of every model file this harness's own
-// installer (setup/install.ps1's $PINNED models section — Hugging Face resolve
-// URLs, byte size recorded at pin time alongside the sha256) downloads under a
-// fixed name. resolveBinding below uses it to catch a file that is only PARTWAY
-// copied into place: a bare os.Stat reports FOUND the instant a same-named file of
-// ANY size exists in the right class directory, which is exactly what happened on
-// <node-b> during the 2026-09-23 media-route remediation — doctor printed
-// `animate_character: OK CONFIGURED` while a 16.65 GB unet was still ~70% written
-// (`internal/mediacap/modelbindings.go`'s resolveBinding, register F-38).
+import (
+	"encoding/json"
+	"os"
+	"path"
+	"path/filepath"
+	"strings"
+)
+
+// KnownSize returns the byte size the installer recorded for a model file at
+// download time, read from $OFFLOAD_HOME/installed.json (schema 2:
+// components.<key>.{version,digest,size,source,installed_at}). ok is false when
+// no manifest exists, it does not parse, or no component records a size for
+// that file name — the overwhelming majority of ComfyUI-class weights on the
+// fleet are sourced ad hoc from a peer box rather than this installer, and for
+// those doctor keeps the exists-only verdict: it must never fabricate a size.
 //
-// A file this map does not name — the overwhelming majority of ComfyUI-class
-// weights on the fleet, sourced ad hoc from a peer box rather than this installer
-// — keeps the pre-existing exists-only verdict: there is no known-good size to
-// compare it against, and doctor must never fabricate one. This is deliberately
-// NOT a hash: comparing a size is one already-open os.Stat's Size() field, free;
-// hashing a multi-GB file on every doctor run is the opposite of what doctor is
-// for (register: the operator's "never hash multi-GB files in doctor by default,
-// keep it fast" instruction, F-38).
+// resolveBinding uses it to catch a file that is only PARTWAY copied into place:
+// a bare os.Stat reports FOUND the instant a same-named file of ANY size exists
+// in the right class directory, which is exactly what happened on <node-b>
+// during the 2026-09-23 media-route remediation — doctor printed
+// `animate_character: OK CONFIGURED` while a 16.65 GB unet was still ~70%
+// written (register F-38). INCOMPLETE means the file is SMALLER than the size
+// recorded when it was downloaded; a larger file (a newer, hand-placed build of
+// the same name) is never flagged.
 //
-// Keep this in sync with setup/install.ps1's $PINNED whenever a pinned model's
-// size changes (a version bump) — TestKnownModelSizesMatchInstaller parses that
-// file directly and fails if the two disagree on any name both claim to track.
-// wan_2.1_vae.safetensors (253815318 bytes, pinned in install.ps1 as model-wan21-vae for the amd-gcn
-// animate lane) is deliberately NOT sized here. It is the builder-default VAE of every ComfyUI Wan route,
-// so sizing it would call a differently built file of that name on a CUDA host INCOMPLETE, and the
-// route tests of this package stand in tiny files under that name. The pin in install.ps1 still records
-// its exact size and sha256 for the placed file.
-var knownModelSizes = map[string]int64{
-	"z_image_turbo-Q8_0.gguf":            7224707136,
-	"Qwen3-4B-Instruct-2507-Q4_K_M.gguf": 2497281120,
-	"zimage_ae.safetensors":              335304388,
-	"v1-5-pruned-emaonly.safetensors":    4265146304,
-	"sd_xl_base_1.0.safetensors":         6938078334,
-	"sdxl_vae_fp16_fix.safetensors":      334641162,
-	"FastWan2.2-TI2V-5B-q8_0.gguf":       5412844128,
-	"Wan2.2_VAE.safetensors":             1409400960,
-	"umt5-xxl-encoder-Q8_0.gguf":         6043068256,
-	"taew2_2.safetensors":                22848048,
-	"wan2.1_vace_1.3B_fp16.safetensors":  4309519800,
-	"depth-anything2-small-q8_0.gguf":    36780864,
-	"chatterbox-q8_0.gguf":               2088393668,
-	"ace-step-1.5-turbo-bf16.gguf":       10090398272,
+// There is deliberately no literal size table in this package: a table here
+// would be a second pin store that rots on every model update (ADR 0099 — floors
+// never pins). This is also deliberately NOT a hash: comparing a size is one
+// already-open os.Stat's Size() field, free; hashing a multi-GB file on every
+// doctor run is the opposite of what doctor is for (F-38).
+func KnownSize(name string) (int64, bool) {
+	raw, err := os.ReadFile(installedManifestPath())
+	if err != nil {
+		return 0, false
+	}
+	// Tolerant by construction: unknown fields, a missing "components" (schema 1)
+	// or a malformed row all read as "nothing recorded", never an error.
+	var m struct {
+		Components map[string]struct {
+			Size   int64  `json:"size"`
+			Source string `json:"source"`
+			Dest   string `json:"dest"`
+			File   string `json:"file"`
+		} `json:"components"`
+	}
+	if json.Unmarshal(raw, &m) != nil {
+		return 0, false
+	}
+	for _, c := range m.Components {
+		if c.Size <= 0 {
+			continue
+		}
+		for _, ref := range []string{c.File, c.Dest, c.Source} {
+			if ref != "" && path.Base(strings.ReplaceAll(ref, `\`, "/")) == name {
+				return c.Size, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// installedManifestPath is $OFFLOAD_HOME/installed.json, OFFLOAD_HOME defaulting
+// to ~/offload-stack exactly like the installer (mirrors fleetnode.InstalledJSONPath,
+// which this package cannot import: fleetnode already imports mediacap).
+func installedManifestPath() string {
+	home := os.Getenv("OFFLOAD_HOME")
+	if home == "" {
+		userHome, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		home = filepath.Join(userHome, "offload-stack")
+	}
+	return filepath.Join(home, "installed.json")
 }

@@ -63,9 +63,8 @@ Do not put detailed system behavior in this file — it belongs in `docs/`.
 
 Point yourself at **`setup/SETUP-AGENT.md`** and follow it exactly. It is an agent-executable
 runbook: run `setup/detect.ps1` → `setup/install.ps1` → `setup/selftest.ps1` (Windows, PowerShell),
-read each script's final JSON line, and branch on the decision tables. Do **not** substitute pinned
-assets, install ROCm/CUDA, or start the unauthenticated agent server beyond loopback without asking
-the human.
+read each script's final JSON line, and branch on the decision tables. Do **not** install ROCm/CUDA or start the unauthenticated agent server beyond loopback without asking
+the human. Versions are never pinned: the installers resolve the newest complete build from the publisher and verify its digest; floors live in `setup/floors.json` (ADR 0099).
 
 ## Operating the stack
 

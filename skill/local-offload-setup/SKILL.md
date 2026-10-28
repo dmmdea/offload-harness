@@ -5,7 +5,7 @@ description: >-
   cascade that lets a coding agent delegate short-context grunt work (summarize / classify /
   extract / triage) so those tokens never hit the cloud context. Cross-vendor: NVIDIA (CUDA, ≥8GB),
   AMD Radeon incl. RDNA3 iGPUs like the 780M/gfx1103 (Vulkan, native Windows), or CPU-only fallback.
-  Builds a pinned llama.cpp + llama-swap stack, pulls the Gemma-4 QAT family (E2B/E4B/26B-A4B) +
+  Builds a llama.cpp + llama-swap stack (the newest complete builds, verified against the publisher), pulls the Gemma-4 QAT family (E2B/E4B/26B-A4B) +
   EmbeddingGemma, builds the Go CLI/MCP + local coding agent, and registers it with Claude Code.
   Triggers: "set up local offload", "install the local-offload harness", "offload model setup",
   "give Claude a free local model", "install the AMD/NVIDIA offload stack".
@@ -34,7 +34,7 @@ Run the three scripts in order, reading each one's final JSON line, and follow
 
 ```powershell
 pwsh -NoProfile -File setup\detect.ps1      # -> backend + blockers
-pwsh -NoProfile -File setup\install.ps1     # -> pinned binaries, models, Go build, rendered yaml
+pwsh -NoProfile -File setup\install.ps1     # -> newest published binaries, models, Go build, rendered yaml
 pwsh -NoProfile -File setup\selftest.ps1    # -> receipt JSON: verdict pass|warn|fail
 ```
 
@@ -47,10 +47,11 @@ claude mcp add local-offload -- "$env:OFFLOAD_HOME\harness\local-offload.exe" mc
 
 ## Do not
 
-- Do NOT install CUDA or ROCm — the pinned llama.cpp release binaries carry their own runtime;
+- Do NOT install CUDA or ROCm — the llama.cpp release binaries carry their own runtime;
   Vulkan uses the GPU driver.
-- Do NOT substitute a different model, build, or "latest" asset if a pin 404s or a hash mismatches —
-  stop and surface it.
+- Versions are never pinned: the installer resolves the newest complete build and verifies the publisher's digest
+  (floors live in `setup/floors.json`, ADR 0099). Do NOT substitute a different file, model or build if an asset
+  404s or an integrity check mismatches — stop and surface it.
 - Do NOT update a GPU driver, reboot, or start the unauthenticated `local-agent --serve` endpoint
   beyond loopback without asking the human first.
 

@@ -1,3 +1,5 @@
+Historical snapshot (2026-08-26). Build numbers below are the state measured then; the harness never pins versions (ADR 0099).
+
 > **FROZEN 2026-09-18.** This is the 2026-08-26 roadmap body, kept verbatim for the verdicts it records. It is no longer a plan of record: the program is planned in **plan v3** (see `docs/ROADMAP.md` for the pointer). Nothing below is updated any more; a section that names open work is answered by the register row the pointer maps it to.
 
 # Local-Offload — ROADMAP (decided order)

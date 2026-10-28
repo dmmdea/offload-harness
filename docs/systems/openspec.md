@@ -3,8 +3,7 @@
 ## Purpose
 
 Give the repository one place for spec and plan artifacts of a change: a proposal, the spec deltas, a design and a task
-list, written to a fixed shape and checked by a validator. The tool is the OpenSpec CLI, installed from a hash-pinned
-tarball (the row in [security.md](security.md#admitted-third-party-software)). The `openspec/` tree is tracked, so the
+list, written to a fixed shape and checked by a validator. The tool is the OpenSpec CLI, installed as the newest npm release, verified against the registry's integrity value (the row in [security.md](security.md#admitted-third-party-software)). The `openspec/` tree is tracked, so the
 [leak gate](leak-gate.md) reads it like every other path.
 
 OpenSpec is a pilot. No other workstream depends on it, waits for it or names it: work outside it keeps the ADR, the pull
@@ -34,10 +33,10 @@ and the docs travel the same way.
 
 `harness-change` keeps `proposal` -> `specs` -> `design` -> `tasks` as `spec-driven` has it and adds `adr`, an ADR draft for a
 change that makes a decision. The artifact is optional by the shape of the graph: it requires `design`, and nothing requires
-it, neither `tasks` nor `apply`. OpenSpec 1.14.1 has no `optional` key in its artifact schema (an unknown key is dropped
+it, neither `tasks` nor `apply`. The OpenSpec CLI has no `optional` key in its artifact schema (an unknown key is dropped
 without a warning), so the property is held by `TestOpenSpecAdrArtifactIsOptional` instead of by a flag.
 
-What that looks like in use, checked in a scratch project against the pinned CLI:
+What that looks like in use, checked in a scratch project against the CLI as of 2026-10-28:
 
 - With `proposal`, `specs`, `design` and `tasks` written and no `adr.md`, `openspec instructions apply` reports `state: ready`,
   `openspec validate --all --strict` passes, and the propose flow leaves `adr` alone (it creates only the artifacts
@@ -46,7 +45,7 @@ What that looks like in use, checked in a scratch project against the pinned CLI
   `isPlanningComplete` stays `false` until an `adr.md` exists. The propose and apply flows ignore that: they follow
   `applyRequires` (here `tasks`), not that flag.
 - The archive flow does not ignore it. The generated `/opsx:archive` skill warns about every artifact that is neither done
-  nor skipped and asks for confirmation, so a change with no `adr.md` meets that prompt each time; the pinned CLI has no
+  nor skipped and asks for confirmation, so a change with no `adr.md` meets that prompt each time; the CLI has no
   `optional` flag to silence it (the key is dropped), so the friction is the price of an optional artifact being a graph shape.
   Confirm and move on; do not create an empty `adr.md` to make the prompt go away. The CLI command
   `openspec archive <name> --yes` archives without asking.
@@ -58,32 +57,26 @@ What that looks like in use, checked in a scratch project against the pinned CLI
 The CLI is installed by `scripts/openspec-install.sh <prefix>` (or `OPENSPEC_PREFIX`), where the prefix is a directory of its
 own on a data drive. There is no default prefix. The script:
 
-1. fetches the tarball with `npm pack @fission-ai/openspec@1.14.1 --ignore-scripts` into a scratch directory under the
-   prefix (the scoped name always: the unscoped npm package `openspec` is another publisher's);
-2. refuses, installing nothing, when the tarball's sha256 is not the pinned one (the constants in the script must equal the
-   admitted row, which `TestOpenSpecInstallScriptPinsWhatSecurityMdAdmitted` checks);
-3. copies `scripts/openspec/package.json` and `scripts/openspec/package-lock.json` into the scratch directory, next to the
-   verified tarball, and runs `npm ci --ignore-scripts` there: the CLI is that file and every dependency is the exact version
-   in the lockfile under its sha512 integrity value, with no lifecycle script run;
-4. checks the staged CLI reports the pinned version, moves the staged `node_modules` into the prefix (replacing an earlier
+1. resolves the newest release of `@fission-ai/openspec` from the npm registry (`dist-tags.latest`) and fetches its tarball
+   with `npm pack --ignore-scripts` into a scratch directory under the prefix (the scoped name always: the unscoped npm
+   package `openspec` is another publisher's);
+2. refuses, installing nothing, when the tarball's integrity does not match the `dist.integrity` the registry publishes for
+   that release (nothing hashed lives in the repository);
+3. copies `scripts/openspec/package.json` into the scratch directory, next to the verified tarball, and runs
+   `npm install --ignore-scripts` there: the CLI is that file and its dependencies resolve to their newest compatible
+   releases, each verified by npm against the registry's integrity value, with no lifecycle script run;
+4. checks the staged CLI runs and reports a version, moves the staged `node_modules` into the prefix (replacing an earlier
    install of this CLI, refusing a `node_modules` that is something else's), removes the scratch directory and prints the four
    exports below.
 
 npm's cache, logs and temporary files stay under the prefix, and the script touches neither the user-level npm prefix nor the
-npmrc. The prefix ends up holding `node_modules`, `.npm-cache` and, if the CLI writes any, `config`. The dependency tree is
-pinned, not just the CLI: `scripts/openspec/package-lock.json` lists 70 packages (the CLI and its 69 dependencies), each by exact
-version and sha512 integrity, so the installed set cannot drift between installs. The pin in the script (`OPENSPEC_SHA256`)
-covers the CLI tarball, the lockfile the rest; `TestOpenSpecLockfilePinsTheWholeTree` fails on a range, a missing integrity
-value, a non-registry URL or a link.
+npmrc. The prefix ends up holding `node_modules`, `.npm-cache` and, if the CLI writes any, `config`. Versions are never
+pinned (ADR 0099): there is no lockfile and no version or digest constant in the script; the registry is the integrity
+source, `--ignore-scripts` and the validator gate are the mitigations, and a release that breaks the workflow is fixed in the
+schema or the templates, not by freezing the CLI.
 
-To uninstall, delete the prefix directory. A new version is a new admission: change the table row, the two constants and the
-test fixture together, and regenerate the lockfile from the new verified tarball:
-
-1. in an empty scratch directory put the tarball (its file name carries the version, `fission-ai-openspec-<version>.tgz`) and a
-   `package.json` like `scripts/openspec/package.json` with the new file name;
-2. run `npm install --package-lock-only --ignore-scripts` there, with npm's cache and temp folders on a data drive;
-3. copy the two files back to `scripts/openspec/`, then check the new lock's CLI integrity against the admitted sha512 and run
-   the install script into a scratch prefix.
+To uninstall, delete the prefix directory. To update, run the script again: it takes the newest release. A new admitted
+source (a different package or publisher) is a new admission: change the row in `security.md`.
 
 ### Telemetry and the config home
 
@@ -124,7 +117,7 @@ touches `openspec/` runs `scripts/openspec-validate.sh` there, with the CLI inst
 `openspec init --tools claude,opencode --profile core` writes, besides `openspec/`, six skills and six slash commands for
 each tool: `.claude/skills/openspec-*/`, `.claude/commands/opsx/` and `.opencode/` (commands and skills). They are
 gitignored and regenerated by `openspec update`; a tracked copy would put tool prompt text in the public tree and drift from
-the CLI version that wrote it. `TestOpenSpecGeneratedToolFilesStayUntracked` pins the ignore lines.
+the CLI version that wrote it. `TestOpenSpecGeneratedToolFilesStayUntracked` holds the ignore lines.
 
 ## Invariants and pitfalls
 
@@ -138,19 +131,18 @@ the CLI version that wrote it. `TestOpenSpecGeneratedToolFilesStayUntracked` pin
   `.openspec.yaml` records the schema from `config.yaml` (`harness-change`). Check the `Schema:` line it prints after.
 - The CLI also keeps a user-level data directory (user schemas, stores, worksets): `XDG_DATA_HOME` when set, else
   `%LOCALAPPDATA%\openspec` on Windows. The commands this workflow uses (`init`, `new change`, `status`, `validate`,
-  `schema fork` and `schema validate`) did not create it in the checks against the pinned CLI. Do not use the `store` or
+  `schema fork` and `schema validate`) did not create it in the checks against the CLI. Do not use the `store` or
   `workset` commands; if one is ever needed, point `XDG_DATA_HOME` under the prefix first.
 - A change with no spec deltas fails validation unless its `.openspec.yaml` sets `skip_specs: true`.
 
 ## Testing notes
 
-`go test -run 'TestOpenSpec|TestDocsLint' .` covers the structure, the lockfile, both scripts (against stand-in `openspec` and
-`npm` programs, so the switches, the arguments, the exit code, the hash refusal and the install's success path, with npm's
+`go test -run 'TestOpenSpec|TestDocsLint' .` covers the structure, both scripts (against stand-in `openspec` and
+`npm` programs, so the switches, the arguments, the exit code, the integrity refusal and the install's success path, with npm's
 cache and temp folders under the prefix in the fetch and in the install whatever the caller exported, need neither the network nor the CLI) and the ignore
 lines. With `OPENSPEC_BIN` set it also runs the real CLI. With `OPENSPEC_INSTALL_TEST=1` it also runs the install script for
 real (npm and the network) into a scratch prefix, with home, application-data, XDG and temp folders pointed at empty folders
-beside it: the test fails if any of them gains a file, if the binary does not report the pinned version, or if the installed
-packages differ from the lockfile.
+beside it: the test fails if any of them gains a file or if the binary does not report a version.
 
 ## Source map
 
@@ -159,8 +151,8 @@ packages differ from the lockfile.
 | `openspec/config.yaml` | the schema choice, the invariants as `context`, the per-artifact `rules` |
 | `openspec/schemas/harness-change/schema.yaml` | the forked workflow and the optional `adr` artifact |
 | `openspec/schemas/harness-change/templates/` | the artifact templates, including `adr.md` |
-| `scripts/openspec-install.sh` | the pinned, hash-verified install into a caller-chosen prefix |
-| `scripts/openspec/package.json`, `scripts/openspec/package-lock.json` | the install project: the admitted tarball by file name, and the exact version and sha512 of every dependency |
+| `scripts/openspec-install.sh` | the registry-verified install of the newest release into a caller-chosen prefix |
+| `scripts/openspec/package.json` | the install project: the admitted package, newest release, no lockfile |
 | `scripts/openspec-validate.sh` | the gate: strict validation plus schema validation, telemetry off |
 | `openspec_tree_test.go` | the structural tests, the script tests and `TestOpenSpecTreeValidates` |
 | `openspec_ignore_test.go` | the generated tool files stay untracked |
@@ -169,7 +161,7 @@ packages differ from the lockfile.
 
 ## Related docs
 
-- [security.md](security.md#admitted-third-party-software): the admitted row (version, sha256, telemetry, data location) and the
+- [security.md](security.md#admitted-third-party-software): the admitted row (source, licence, telemetry, data location) and the
   admission checks behind it.
 - [leak-gate.md](leak-gate.md): the privacy gate that scans the tree.
 - [STYLE.md](../STYLE.md): documentation rules, the ADR rules and the privacy vocabulary.

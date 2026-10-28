@@ -506,7 +506,7 @@ younger calls on this machine's lane queue behind it. A call that must leave thi
 `auto` on a machine with no graph lane) still sends it, with the node's check by name only. On every route that sends a graph to
 a node, the node must run this machine's own release (the file check ships with it): a node on another release, or one that
 publishes none, is skipped by name, so a fleet part-way through an upgrade takes graphs only on the nodes already upgraded. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
-is satisfied BEFORE ComfyUI starts (a pack is taken only at a repository and commit pinned in `render/node-packs.json`, and a model only under `models/<class>/` from a listed https host; anything else is refused before the first clone or download): packs cloned at their pinned commits with all deps
+is satisfied BEFORE ComfyUI starts (a pack is taken only from a repository admitted in `render/node-packs.json`, at the head of its default branch, with the commit recorded, and a model only under `models/<class>/` from a listed https host; anything else is refused before the first clone or download): packs cloned from their admitted repositories (the commit recorded) with all deps
 resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
 installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and
 sha-verified when a hash is given (`sha256: null` downloads are reported in
@@ -766,7 +766,7 @@ variables and limits. `captions-bar` reads one `words_json` variable that `rende
 builds from `offload_transcribe`'s `<base>.segments.json`; render the overlay silent to `webm` or `mov`
 and lay it over the footage with ffmpeg's `overlay` filter or in an editor.
 
-This renders an HTML/CSS composition to video with the pinned HyperFrames CLI. It runs on the CPU:
+This renders an HTML/CSS composition to video with the installed HyperFrames CLI (the newest npm release, never pinned). It runs on the CPU:
 software GL and CPU encode, with no GPU lock, so it runs next to every render and text seat. The
 steps are `lint`, then `check`, then `render`, then an ffprobe gate. Every returned field is
 measured. Any failure defers with a typed class (`BAD_INPUT`, `LINT_ERRORS`, `CHECK_FAILED`,
@@ -774,7 +774,7 @@ measured. Any failure defers with a typed class (`BAD_INPUT`, `LINT_ERRORS`, `CH
 `DISK_HEADROOM`, `TIMEOUT`).
 
 **Binding the lane.** The installer's hyperframes step does this on a box with Node >= 22. It
-installs the lockfile into `<home>/hyperframes`, runs `npm audit signatures` (fatal on failure) and
+installs the newest release into `<home>/hyperframes`, runs `npm audit signatures` (fatal on failure) and
 `browser ensure`, and writes three keys into a FRESH config. An existing config is never rewritten,
 so the installer prints the three keys instead. To bind by hand:
 
@@ -785,7 +785,7 @@ so the installer prints the three keys instead. To bind by hand:
 ```
 
 `ffmpeg_path` must name an ffmpeg with ffprobe beside it. `local-offload doctor` then reports
-`compose_video CONFIGURED` with the template list, and `local-offload acceptance` runs the pinned
+`compose_video CONFIGURED` with the template list, and `local-offload acceptance` runs the installed
 CLI's `--version` through the runner as this identity. Optional keys: `compose_quality` (`high`
 default), `compose_workers` (`auto` default; on the reference box neither 1 nor `auto` wins consistently for
 a short card, but a clip longer than about two minutes needs 1: above one worker HyperFrames stores every
@@ -843,7 +843,7 @@ where `"--- Intro ---"` alone was read as a flag and the text came out empty. Ev
 even when it starts with a dash; a lone `-` is still stdin. The same holds for `generate-video`, `animate-character` and the verbs that
 take one file, text or prompt.
 
-**A busy image lane overflows to the fleet ([ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md)).** An `auto` image call on a machine that has the lane and a fleet asks its own pipeline whether the lane is free; when it is not (a lease holds the card, callers are in line, or the host-RAM guard is holding the lane back), the call goes to an idle node that renders **the same recipe**: the same weight files at the same sizes and with the same content fingerprint, and the same sampling, compared as `digest` in `/fleet/health` `image_recipes`. A match is strict and never substitutes a quantization; it also needs the node on the same release, and the answer names the key that differs and the family of yours that would match (`send family=qwen-image-2.1-fast to use its qwen-image-2.1`). A node that holds any lease is not a candidate. When nothing admits, the call becomes a **ticket** ([ADR 0083](architecture/decisions/0083-a-busy-image-call-is-a-ticket-the-harness-holds-until-the-first-matching-lane-frees.md)): the harness holds the job and starts it on the first matching lane that frees anywhere (your own, or a node that renders the same recipe), in the order it arrived, and the answer says where it stands: its position, your own lane, and one row of `cluster[]` per node of `delegate_remotes` with the state (`busy` and by what, `in-use`, `not-capable` and the key that differs, `unreachable`, `bounced`, `refused`) and since when, and **do not call again** (a repeat of the identical request attaches to the same ticket; `waiter_token=mq-...` collects the result). A node that took the call and passed it back (another job held its card, or its own lease could not be taken) is left alone for a minute, then five, and its row says so in the node's own words (a host short of RAM reads as that, not as a held card); the MCP server remembers that across the calls of a session. A node that refused the recipe (412) because it had only not finished reading its weight files (`pending`) is left alone for a minute and never for five, and that is not counted as a bounce; one whose files or binding changed, or that cannot read a file, is bounced like the rest. `offload_generate_image` takes `wait_s` (how long the call waits before it answers "queued"; default `gpu_wait_ms`); the CLI `generate-image` blocks until the job is done, prints where the ticket stands on stderr, and the first Ctrl-C cancels a ticket that has sent nothing. `offload_status` lists the tickets as `media_queue[]`. A node added to `delegate_remotes` joins a running MCP session when the config file changes (no restart). A finished result nobody has collected is kept 6 hours (10 minutes for a failure), and for 2 minutes after a call took it, so a second call naming the ticket still gets it. A lane the pipeline could not read (its card table past 4 s and the one 10 s retry that follows a read that ran out of time, its lease directory not opening) is not taken for a free lane: the fleet is looked at first and the call runs here only if no node can take it. `route local` never leaves. A digest covers each weight file's name, byte size and a sampled content fingerprint (64 evenly spaced MiB of the file): a same-named file of the same size with other bytes no longer matches and the answer names it; a change confined to the stretch between two sampled blocks is not seen (that stretch is about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of a 42 GB one, and a layer-wise merge or a baked-in VAE can sit inside it), so after a copy you doubt, or a merge you swap in, compare whole-file hashes. A node that has just started, or whose file just changed, publishes that file as `pending` for a few seconds on a warm disk (longer on a cold or network one), with no digest, and is a named miss until it has read it; a read that has not finished in a minute is given up on and the file reads `unreadable`. Every node must run the same release for digests to match. Before relying on a match, read `image_recipes` on both nodes and compare the digests.
+**A busy image lane overflows to the fleet ([ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md)).** An `auto` image call on a machine that has the lane and a fleet asks its own pipeline whether the lane is free; when it is not (a lease holds the card, callers are in line, or the host-RAM guard is holding the lane back), the call goes to an idle node that renders **the same recipe**: the same weight files at the same sizes and with the same content fingerprint, and the same sampling, compared as `digest` in `/fleet/health` `image_recipes`. A match is strict and never swaps in a different quantization; it also needs the node on the same release, and the answer names the key that differs and the family of yours that would match (`send family=qwen-image-2.1-fast to use its qwen-image-2.1`). A node that holds any lease is not a candidate. When nothing admits, the call becomes a **ticket** ([ADR 0083](architecture/decisions/0083-a-busy-image-call-is-a-ticket-the-harness-holds-until-the-first-matching-lane-frees.md)): the harness holds the job and starts it on the first matching lane that frees anywhere (your own, or a node that renders the same recipe), in the order it arrived, and the answer says where it stands: its position, your own lane, and one row of `cluster[]` per node of `delegate_remotes` with the state (`busy` and by what, `in-use`, `not-capable` and the key that differs, `unreachable`, `bounced`, `refused`) and since when, and **do not call again** (a repeat of the identical request attaches to the same ticket; `waiter_token=mq-...` collects the result). A node that took the call and passed it back (another job held its card, or its own lease could not be taken) is left alone for a minute, then five, and its row says so in the node's own words (a host short of RAM reads as that, not as a held card); the MCP server remembers that across the calls of a session. A node that refused the recipe (412) because it had only not finished reading its weight files (`pending`) is left alone for a minute and never for five, and that is not counted as a bounce; one whose files or binding changed, or that cannot read a file, is bounced like the rest. `offload_generate_image` takes `wait_s` (how long the call waits before it answers "queued"; default `gpu_wait_ms`); the CLI `generate-image` blocks until the job is done, prints where the ticket stands on stderr, and the first Ctrl-C cancels a ticket that has sent nothing. `offload_status` lists the tickets as `media_queue[]`. A node added to `delegate_remotes` joins a running MCP session when the config file changes (no restart). A finished result nobody has collected is kept 6 hours (10 minutes for a failure), and for 2 minutes after a call took it, so a second call naming the ticket still gets it. A lane the pipeline could not read (its card table past 4 s and the one 10 s retry that follows a read that ran out of time, its lease directory not opening) is not taken for a free lane: the fleet is looked at first and the call runs here only if no node can take it. `route local` never leaves. A digest covers each weight file's name, byte size and a sampled content fingerprint (64 evenly spaced MiB of the file): a same-named file of the same size with other bytes no longer matches and the answer names it; a change confined to the stretch between two sampled blocks is not seen (that stretch is about a sixty-third of the file: roughly 0.3 GB of a 20 GB checkpoint and 0.65 GB of a 42 GB one, and a layer-wise merge or a baked-in VAE can sit inside it), so after a copy you doubt, or a merge you swap in, compare whole-file hashes. A node that has just started, or whose file just changed, publishes that file as `pending` for a few seconds on a warm disk (longer on a cold or network one), with no digest, and is a named miss until it has read it; a read that has not finished in a minute is given up on and the file reads `unreadable`. Every node must run the same release for digests to match. Before relying on a match, read `image_recipes` on both nodes and compare the digests.
 
 **Naming the node that runs a video, animation or audio call ([ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md) Amendment 3).**
 `local-offload generate-video out.mp4 still.png "a slow pan" --node node-b` (or `animate-character ... --node node-b`,
@@ -870,18 +870,16 @@ declared variables, a duration variable, and a README with a measured render. Li
 be clean, the frames must be looked at, and `framemd5` must match at 1, 2, 4 and 6 workers and at
 `auto` twice (a frame has to be a pure function of time; see the contract).
 
-**Bumping HyperFrames.** Change the exact version in `setup/hyperframes/package.json` and
-`PINNED_VERSION` in the runner. Regenerate the lock with `npm install --package-lock-only
---ignore-scripts` and verify the new integrity against `npm view hyperframes@<v> dist.integrity`.
-Then re-run the installer step and a two-template smoke that includes `captions-bar`: it reads the
+**Updating HyperFrames.** There is nothing to edit: the version is never pinned. `local-offload install hyperframes`
+(or `local-offload update --component hyperframes`) takes the newest npm release, npm verifies it against the registry's
+`dist.integrity`, and the runner records the installed version and refuses only one below the floor in
+`setup/floors.json` (ADR 0099). After an update run a two-template smoke that includes `captions-bar`: it reads the
 runtime's `hf-seek` event, which the package dispatches but does not document, so render its default
 sample, confirm a known group is on screen at a known time (the frame at 1.5 s shows "Captions follow
-the words"), and record the new version in the Measured section of its README (a test fails until that
-section names the pin). Never `npm install -g hyperframes`: a global HyperFrames self-upgrades in a
-detached process. When the release ships, run `local-offload install hyperframes` and then
-`local-offload acceptance` on every node with the lane, right after its binary and render tree are
-swapped: the new runner refuses the old install, so until then that node's `doctor` reads
-`compose_video` BOUND-BUT-MISSING and every composition defers `CLI_MISSING`.
+the words"), and record the version you measured in the Measured section of its README as a dated record. Never
+`npm install -g hyperframes`: a global HyperFrames self-upgrades in a detached process. After an update run
+`local-offload acceptance` on every node with the lane; an install below the floor makes that node's `doctor` read
+`compose_video` BOUND-BUT-MISSING and every composition defer `CLI_MISSING` until it is updated.
 
 ## 4. Drive the coding agent
 
@@ -948,7 +946,7 @@ on every step. The harness calls only loopback and holds no key, but your endpoi
 decision model. Do not browse pages whose text must not leave the machine.
 
 ```powershell
-# 1. install the pinned sidecar; it prints the browse_python / browse_script values
+# 1. install the browse sidecar (newest dependencies, floors only); it prints the browse_python / browse_script values
 pwsh setup/browse/install.ps1 -OffloadHome <OFFLOAD_HOME>
 # 2. config: browse_python, browse_script, browse_decision_url (plain http on loopback only),
 #    browse_cdp_url for a dedicated agent profile (e.g. http://127.0.0.1:9333; recommended),
@@ -1936,7 +1934,7 @@ figures, so the template seat env lists them commented out. Proven by `setup/tem
 which runs the whole launcher against stand-ins and reads the argument list vllm was started with.
 
 **Humming kernels (2026-10-21, [ADR 0095](architecture/decisions/0095-humming-serves-the-weight-formats-marlin-cannot.md)):**
-vLLM installs Humming, a JIT-compiled GEMM library for quantized weights, as a pinned dependency, and serves on it every
+vLLM installs Humming, a JIT-compiled GEMM library for quantized weights, as a dependency (always the newest), and serves on it every
 checkpoint whose weights Marlin cannot (2, 3, 5, 6 or 7 bits); 4-bit and 8-bit seats stay on Marlin. Humming compiles a layer's
 kernels on its first forward. The launchers keep those kernels beside vLLM's compile cache (`humming-cache` and `humming-tmp`
 under `seat_fg.sh`'s work directory, `cache/humming` under the systemd stack) and build at most eight at once, where
@@ -2192,8 +2190,8 @@ withdraw of any job, and the read of any rendered file); it used to cover only t
 bytes. With the token set, a request without it is `401`; with none set, a node answers only on loopback (the box's own trust
 boundary), refuses everything with `403` on any other listener, and `fleet-serve` will not start there. `/fleet/health` and the
 jobs feed stay readable without the token, with the lease's free-text reason, the store path and the weight-file rows (and a
-job's error text) left out. A run-graph manifest may name a node pack only at a pinned repository and commit
-(`render/node-packs.json`), and a model only under `models/<class>/` from an https host listed there (`model_hosts`): a token
+job's error text) left out. A run-graph manifest may name a node pack only from a repository admitted in
+`render/node-packs.json` (the commit is recorded at install), and a model only under `models/<class>/` from an https host listed there (`model_hosts`): a token
 holder can have the node render, not run code of its choosing or write files where it chooses.
 **Choose a long random value** for it: it is the one secret behind every lane, and a node does not slow down repeated wrong
 bearers. Generate it with `openssl rand -hex 32` (64 hex characters) and use the output as the value of `fleet_auth_token`,
@@ -2635,10 +2633,11 @@ go build -o "$OFFLOAD_HOME/harness/local-offload.exe" .
 go build -o "$OFFLOAD_HOME/harness/local-agent.exe" ./cmd/local-agent
 ```
 ```powershell
-pwsh -NoProfile -File setup\install.ps1    # picks up any bumped pins (idempotent; unchanged components SKIP)
+pwsh -NoProfile -File setup\install.ps1    # resolves the newest complete builds (idempotent; a component already at the newest SKIPs)
 pwsh -NoProfile -File setup\selftest.ps1   # re-verify: expect verdict pass|warn
 ```
 
-A bumped pin in `install.ps1`'s `$PINNED` table forces a re-download of exactly that component
-(the `installed.json` version check fails for it) while everything else SKIPs. After any update,
+A newer published build forces a re-download of exactly that component (the installed generation in `installed.json`
+is older than what the publisher serves, and the previous generation is kept for rollback) while everything else SKIPs;
+a newer build already on the box is kept, never downgraded. After any update,
 re-run selftest and confirm the receipt `verdict` is `pass` (or `warn` for known-soft signals).

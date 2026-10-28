@@ -401,7 +401,7 @@ func warnMissingSeatModelsTo(seats []mediaseat.Seat, modelsDir, target string, w
 // into the roster whether or not its weights are on disk, and llama-swap lists
 // models from the CONFIG — so the alias checks pass and the route fails only
 // when called, exactly like a seat. The filenames are the templates' own cmd
-// contract (the same names install.ps1's $PINNED table downloads to).
+// contract (the same names install.ps1's $SOURCES table downloads to).
 // Same shape as the seat warning: a warning, never an error, and skipped when
 // rendering for another machine, where a local miss means nothing.
 func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B, includeQ3635B, includeEG2, includeEG2Projector bool, modelsDir, target string) {

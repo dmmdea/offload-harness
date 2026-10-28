@@ -20,7 +20,7 @@ import (
 	"testing"
 )
 
-// The filenames are the templates' own cmd contract (and install.ps1's $PINNED
+// The filenames are the templates' own cmd contract (and install.ps1's $SOURCES
 // table). Duplicated here deliberately: if a rename lands on one side only, this
 // test fails rather than silently checking a path nothing downloads to.
 const (

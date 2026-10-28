@@ -95,16 +95,16 @@ window with the time in seconds at every seek; the page finds the group that is 
 (a binary search) and sets the element's text, opacity and offset from it. A frame is a pure function of
 the time, whichever worker draws it. One animated element per group was measured first and does not scale
 (see the contract, item 7, in the [templates README](../README.md)). The `hf-seek` event is dispatched by the
-pinned runtime but is not in the package's documentation (only `getVariables()` is), so this template has to be
-measured again on every HyperFrames bump: the Measured section below names the version it was last measured on,
-a test fails as soon as the pin moves past it, and the bump steps in the operator guide say what to confirm (the
+runtime but is not in the package's documentation (only `getVariables()` is), so this template has to be
+measured again after a HyperFrames update: the Measured section below names the version it was last measured on
+(a dated record, not a requirement), and the update steps in the operator guide say what to confirm (the
 default sample, and a known group on screen at a known time).
 
 ## Measured
 
 Rendered on 2026-10-02 through `render/compose-hyperframes.mjs` with HyperFrames 0.8.114, on a 36-thread Windows
 box with software GL. The same sample was first measured on 0.8.61 on 2026-09-30 and again on 0.8.108 earlier on
-2026-10-02, and every figure below was taken again after the pin moved to 0.8.114. The default three-group sample,
+2026-10-02, and every figure below was taken again on 0.8.114. The default three-group sample,
 `webm`, quality `high`:
 
 - `lint` found 0 errors and 0 warnings, and `check` passed;

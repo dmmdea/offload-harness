@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"testing"
 
@@ -16,8 +14,8 @@ import (
 // CT-51 I5: the amd-gcn tier seeds the measured iGPU media set (sd.cpp video and animate, audio.cpp voice
 // and music). These tests resolve the real profiles.json seed for a fresh Linux install and prove that
 // (1) the seed lands as a config whose four routes mediacap reads BOUND-BUT-MISSING until the files are
-// placed and CONFIGURED once they are, (2) every weight it binds has a pin (name, size, sha256) in the
-// installer's pin table, and (3) the licence fields say what was verified and nothing more.
+// placed and CONFIGURED once they are, (2) every weight it binds has a `$SOURCES` row in the
+// installer, and (3) the licence fields say what was verified and nothing more.
 
 func resolveAmdGcn(t *testing.T, home string) (config.Config, map[string]any) {
 	t.Helper()
@@ -211,10 +209,10 @@ func TestAmdGcnMediaSeedValues(t *testing.T) {
 	}
 }
 
-// Every weight the seed binds is pinned (name, size, sha256) in the installer's pin table, and the sizes the
-// mediacap size table keeps agree with it. The Windows installer downloads none of these keys; the pins
-// are what an operator or the Linux media leg verifies the placed files against.
-func TestAmdGcnMediaSeedWeightsArePinned(t *testing.T) {
+// Every weight the seed binds has a `$SOURCES` row in setup/install.ps1 (matched on the file name inside the
+// hashtable text): the installer knows where to fetch it from. Name only, by design: no size, digest or version
+// is asserted anywhere (ADR 0099: floors never pins). Sizes are recorded at download time in installed.json.
+func TestAmdGcnMediaSeedWeightsAreSourced(t *testing.T) {
 	cfg, _ := resolveAmdGcn(t, "/oh")
 	fb := cfg.VideoGenFamilies["fastwan"]
 	weights := []string{fb.SdcppModel, fb.SdcppVAE, fb.SdcppT5xxl, fb.SdcppTAE,
@@ -224,40 +222,16 @@ func TestAmdGcnMediaSeedWeightsArePinned(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	blockRe := regexp.MustCompile(`(?s)@\{(.*?)\n\s*\}`)
-	field := func(blk, name string) string {
-		m := regexp.MustCompile(name + `\s*=\s*'?([^'\r\n]+)'?`).FindStringSubmatch(blk)
-		if m == nil {
-			return ""
-		}
-		return strings.TrimSpace(m[1])
+	ps1 := string(raw)
+	start := strings.Index(ps1, "$SOURCES")
+	if start < 0 {
+		t.Fatal("setup/install.ps1 has no $SOURCES table")
 	}
-	pins := map[string]string{} // name -> block
-	for _, m := range blockRe.FindAllStringSubmatch(string(raw), -1) {
-		if n := field(m[1], "name"); n != "" {
-			pins[n] = m[1]
-		}
-	}
-	hex64 := regexp.MustCompile(`^[0-9a-f]{64}$`)
+	table := ps1[start:]
 	for _, w := range weights {
 		name := filepath.Base(w)
-		blk, ok := pins[name]
-		if !ok {
-			t.Errorf("%s is bound by the amd-gcn seed but has no $PINNED entry in setup/install.ps1", name)
-			continue
-		}
-		if sha := field(blk, "sha"); !hex64.MatchString(sha) {
-			t.Errorf("%s: pinned sha256 %q is not 64 hex digits", name, sha)
-		}
-		size, err := strconv.ParseInt(field(blk, "size"), 10, 64)
-		if err != nil || size <= 0 {
-			t.Errorf("%s: pinned size %q", name, field(blk, "size"))
-		}
-		if v, sha := field(blk, "version"), field(blk, "sha"); v == "" || !strings.HasPrefix(sha, v) {
-			t.Errorf("%s: version %q is not the sha256 prefix", name, v)
-		}
-		if u := field(blk, "url"); !strings.HasPrefix(u, "https://huggingface.co/") || !strings.Contains(u, "/resolve/main/") {
-			t.Errorf("%s: url %q is not a Hugging Face resolve URL", name, u)
+		if !strings.Contains(table, name) {
+			t.Errorf("%s is bound by the amd-gcn seed but has no $SOURCES row in setup/install.ps1", name)
 		}
 	}
 }

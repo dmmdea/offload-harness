@@ -3,7 +3,7 @@
 ## Purpose
 
 How `offload_run_graph` takes a caller-supplied ComfyUI graph plus a Node Manifest, makes the
-environment real (node packs at pinned commits, model files present), runs the graph, and returns
+environment real (node packs from admitted repositories, model files present), runs the graph, and returns
 node-addressed outputs — or a typed Defer explaining precisely what it could not satisfy.
 
 This is the generic primitive that lets a workflow repository own graph authoring while the harness
@@ -29,10 +29,10 @@ environment.
    are required per pack; `name` is derived from the repository when absent. Only `path` is required
    per model — `sha256` defaults to null.
 
-1a. **Refuse any pack that is not pinned.** A pack makes the node clone its repository and install its requirements, which is
-   the caller's code running on the node, so a pack is taken only when its `repo` AND `commit` are a row of
-   `render/node-packs.json` (exact strings, a full 40-digit commit, the row's directory name or the one the repository gives
-   it). A fleet node refuses an unpinned pack at the door (`400` naming the pack, before a job or a temp file exists:
+1a. **Refuse any pack that is not admitted.** A pack makes the node clone its repository and install its requirements, which is
+   the caller's code running on the node, so a pack is taken only when its `repo` is a row of
+   `render/node-packs.json` (an exact string, the row's directory name or the one the repository gives it); the commit that
+   was checked out is recorded at install, not compared with a literal (ADR 0099). A fleet node refuses an unadmitted pack at the door (`400` naming the pack, before a job or a temp file exists:
    `mediacap.CheckManifestNodePacks`), and the satisfier refuses again before the first tooling probe, model download or git
    command with the typed defer `NODE_PACK_NOT_ALLOWED` (`ref` = the pack). The table holds the packs the shipped graph builders
    need; a workflow that needs another adds a reviewed row to the file and to its Go copy.
@@ -70,19 +70,19 @@ environment.
    `source_url` → `MODEL_DOWNLOAD_FAILED`. Models downloaded without a declared hash are reported as
    `unverified_models` in the success envelope rather than silently trusted.
 
-5. **Clone or check out each node pack** at its pinned commit. A pack is considered changed by
+5. **Clone or check out each node pack** from its admitted repository (the commit is recorded). A pack is considered changed by
    comparing git HEAD before and after — a same-commit checkout is correctly a no-op. Packs are placed
    *before* dependency resolution, because the unified resolve reads their on-disk requirements.
 
 6. **Resolve and install dependencies once**, for all packs together, under host-pin constraints that
    prevent anything moving `torch`, `torchvision`, `torchaudio`, or `numpy`. The resolve runs on
    every satisfy EXCEPT the proven re-run: it is skipped only when no checkout moved AND a
-   **persisted marker** proves this exact pin-set was already resolved+checked successfully.
+   **persisted marker** proves this exact requirement set was already resolved+checked successfully.
    `uv` resolves; `python -m pip` installs. The marker (`<venv>/.offload-deps-satisfied` — it
-   attests venv state, so it lives inside the venv and dies with it; holding the pin-set
+   attests venv state, so it lives inside the venv and dies with it; holding the requirement set
    key `name@commit|…`), written ONLY after a fully successful resolve+check — "git didn't move this
    run" alone proves nothing: a prior run that checked packs out and failed before installing must
-   still resolve. A tripwire re-checks the pins afterward with full local versions; the cheap
+   still resolve. A tripwire re-checks the held host versions afterward with full local versions; the cheap
    `pip check` coherence gate always runs. Failure → `VENV_INCOHERENT`. See
    [ADR 0007](../architecture/decisions/0007-host-torch-pinned-additive-provisioning.md).
 
@@ -90,7 +90,7 @@ environment.
    after a long batch was misreported as venv incoherence): if a satisfier subprocess (git, uv,
    pip) fails to *start*, it is retried once after 500 ms, then defers **`SATISFIER_SPAWN_FAILED`**
    — never `VENV_INCOHERENT`, because "the check could not run" says nothing about the venv. One
-   deliberate, narrow fail-open: when the pin-set is unchanged AND the satisfied-marker proves it
+   deliberate, narrow fail-open: when the requirement set is unchanged AND the satisfied-marker proves it
    was previously resolved+checked, a coherence check whose subprocess fails to spawn yields a
    `warning` (stderr `SATISFY WARN`) instead of a defer. Anything unproven fails closed. The git
    checkout stage is deliberately NOT retried — a retry would recompute its HEAD-before against its
@@ -149,7 +149,7 @@ a `diffusion_models` file under `models/unet` and a `text_encoders` file under `
 
 ## Data and state changes
 
-Node packs cloned into ComfyUI's custom-nodes directory at pinned commits; Python packages installed
+Node packs cloned into ComfyUI's custom-nodes directory from admitted repositories; Python packages installed
 into its virtual environment (additively); model files and `.sha-ok` sentinels written under the
 ComfyUI tree; outputs written to `out_dir`. Successful renders also record a VRAM footprint
 observation.
@@ -194,7 +194,7 @@ one shaped the current design.
    v0.22.11. Presence checked only `comfy_dir`, so a model held on a secondary tree registered in
    `extra_model_paths.yaml` read as missing and re-downloaded tens of GB per run; and the skip gate
    trusted the `.sha-ok` sidecar alone, so a byte-correct hand-provisioned file fell into the
-   download branch. Presence now spans the full search path, and a present file with a pinned sha is
+   download branch. Presence now spans the full search path, and a present file whose manifest entry declares a sha is
    hashed once and adopted. This closes the old note that "there is no code path that hashes an
    already-present file" — there is one now, and it is the adoption path.
 
@@ -230,7 +230,7 @@ commits is what makes it auditable; it is not a sandbox. Do not expose it to an 
 The defer `code` identifies the stage; `ref` identifies the offending pack, model, or node class.
 
 > **Diagnosability (fixed in stages):** since v0.22.5 the defer detail names the actual problem —
-> host-pin drift reports *which* pinned package moved (expected vs observed), a genuine conflict
+> host-constraint drift reports *which* held package moved (expected vs observed), a genuine conflict
 > reports pip's own message. Since v0.22.13 a subprocess that failed to *spawn* is a separate code
 > entirely (`SATISFIER_SPAWN_FAILED`) rather than masquerading as incoherence.
 

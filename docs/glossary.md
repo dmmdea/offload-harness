@@ -111,6 +111,14 @@ larger model against a broken endpoint fails identically.
 The HTTP interface a node exposes to a compute-fleet dispatcher: health, dispatch, and job polling.
 Published and versioned; the node implements it, the dispatcher consumes it.
 
+## Floor
+
+The minimum build of a component that a seat needs to run, such as llama.cpp b11452 for the `gemma-embedding2`
+architecture or stable-diffusion.cpp master-968 for FLUX 3. Floors live in exactly one file, `setup/floors.json`, and
+only rise; a candidate build under a floor is never selected, and a node above its floor is never moved down. A floor
+is a minimum, never an exact version and never a ceiling, so it is not a Version pin. See
+[architecture/decisions/0099-frontier-updates-floors-never-pins.md](architecture/decisions/0099-frontier-updates-floors-never-pins.md).
+
 ## Footprint
 
 A measured VRAM cost for a model family and task, advertised so a dispatcher can place work. Derived
@@ -126,6 +134,15 @@ forwards to a fleet node when the box binds no forecast model or its card is lea
 routes defer; the node side is `POST /fleet/forecast`, exempt from `fleet_max_concurrent_jobs`. See
 [systems/offload-pipeline.md](systems/offload-pipeline.md#the-forecast-lane-timestral-209m) and
 [architecture/decisions/0098-a-forecaster-is-a-llama-swap-media-seat-and-a-box-with-no-forecast-model-forwards.md](architecture/decisions/0098-a-forecaster-is-a-llama-swap-media-seat-and-a-box-with-no-forecast-model-forwards.md).
+
+## Generation
+
+One installed build of one component on a node (llama.cpp, llama-swap, whisper.cpp, stable-diffusion.cpp,
+HyperFrames, ComfyUI). A node keeps the current and the previous generation: the live path is a junction (Windows) or a
+symlink (Linux) to a write-once `<component>-versions/<id>` directory, the switch is atomic, and a failed gate or a
+failed first load points the live path back at the previous generation. Anything older, and any rejected candidate, is
+deleted. `installed.json` records them. See
+[architecture/decisions/0099-frontier-updates-floors-never-pins.md](architecture/decisions/0099-frontier-updates-floors-never-pins.md).
 
 ## GPU Lock
 
@@ -232,13 +249,13 @@ Amendment 3.
 
 ## Node Manifest
 
-The declaration accompanying a run-graph request: which ComfyUI custom node packs are required (at
-pinned commits) and which model files must be present (with optional hashes). The harness satisfies
+The declaration accompanying a run-graph request: which ComfyUI custom node packs are required (from
+admitted repositories) and which model files must be present (with optional hashes). The harness satisfies
 it before executing the graph, or defers explaining what it could not satisfy.
 
 ## Node Pack
 
-A ComfyUI custom-node repository, pinned to an exact commit in a Node Manifest. Packs supply the node
+A ComfyUI custom-node repository named in a Node Manifest and admitted by `render/node-packs.json`; the commit taken is recorded at install. Packs supply the node
 classes a graph references.
 
 ## Op
@@ -280,6 +297,11 @@ annotation was a constant `low` across 54/54 emitted declarations — including 
 destructive calls — so park-gate recall was 0%. The structural gate is the risk-rule table
 (`--rules`); parking is the fail-safe residue around it. See
 [systems/coding-agent.md](systems/coding-agent.md).
+
+## Placement pin
+
+The routing and GPU-placement sense of "pin" (ADR 0078): a call or a model held to one box or one card, with a reason.
+It is unrelated to versions; see **Pin** below, and **Version pin** for the forbidden kind.
 
 ## Pin
 
@@ -393,6 +415,14 @@ Historical term, retired with the Mirror model on 2026-07-18. It named the act o
 old public mirror as a single squashed snapshot. With the public repository now canonical
 (ADR 0012), development happens there directly and there is nothing to publish. Retained here only so
 older references resolve.
+
+## Version pin
+
+An exact release tag, commit, byte count or digest written into the repository for a dependency, or a rule that holds a
+component to one version. **Forbidden** (ADR 0099): the installers and `local-offload update` resolve the newest complete
+build from the publisher and verify its digest; the only version literals allowed are Floors in `setup/floors.json`, and a
+lint keeps every other file clean. A dated measurement ("measured on b11490 on 2026-10-09") is a record, not a pin. Not to
+be confused with a Placement pin.
 
 ## Tier
 

@@ -356,7 +356,7 @@ RKNPU vector is in its own space, neither the Hailo's `tinyclip` nor the Coral's
 Changed 2026-09-30 on operator order (no licence costs): **no AGPL or GPL model ships.** The
 Ultralytics YOLOv8n (AGPL-3.0) and the Rockchip ResNet18 prebuilt (untraced provenance) are gone.
 The manifest is [`accelerators/rknpu/models.json`](../../accelerators/rknpu/models.json); the
-sidecar serves only a file whose sha256 it pins.
+sidecar serves only a file whose sha256 was recorded on this box when the file was fetched or converted.
 
 | Tool | Manifest key | Model | Licence | What the sidecar feeds it |
 |---|---|---|---|---|
@@ -368,19 +368,19 @@ The zoo and toolkit files are Rockchip's (zoo code Apache-2.0). The classifier's
 `CLASSIFY_MODEL` in `server.py`; the board measured both builds (below) and the INT8 one is served.
 
 - **No model has a public `.rknn`.** `fetch-models.sh --convert` builds each on an x86_64 host from
-  the recipe under its `convert` key: `ppyoloe_s` and CLIP from a sha256-pinned ONNX on the
-  zoo's download host, the two ResNet-50 files from an ONNX **exported** from the timm weights
-  (`export` recipe: weights downloaded and sha256-checked at a pinned Hugging Face revision, opset
+  the recipe under its `convert` key: `ppyoloe_s` and CLIP from an ONNX on the
+  zoo's download host, verified against the digest the host publishes,, the two ResNet-50 files from an ONNX **exported** from the timm weights
+  (`export` recipe: weights downloaded from the newest Hugging Face revision and checked against the published `lfs.oid`, opset
   12; the exported ONNX has no hash, because an export is not reproducible across torch versions).
   A conversion is not bit-reproducible either (about a kilobyte of embedded build metadata differs
-  between two runs), so each `sha256` pins the exact bytes that were built and checked, and a
+  between two runs), so each recorded `sha256` identifies the exact bytes that were built and checked on this box, and a
   rebuild has to have its new hash recorded before the sidecar serves it.
 - **The INT8 calibration images are not what a rebuild uses.** `ppyoloe_s` was calibrated on the 200
   COCO val2017 images of `accelerators/rknpu/calib/coco_val2017_calib_200.txt`; `resnet50tv2-i8`
   was calibrated on 200 ImageNetV2 images, while its recipe names the COCO list. Both are Flickr
   photographs under per-image terms, used only to compute quantisation scales and never
   redistributed. The list is fetched image by image from `images.cocodataset.org` over plain http
-  (its https certificate does not match its name) and the images are not pinned by hash.
+  (its https certificate does not match its name) and the images are not checked against a hash.
 - **Detector decoding.** The head is anchor-free with a Distribution Focal Loss box: the sidecar
   reads the bin count from the box tensor (17 bins for PP-YOLOE, 16 for a YOLOv8-shaped head),
   takes the best class probability as the score (no box-confidence factor, exactly as the zoo's

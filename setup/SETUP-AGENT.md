@@ -43,16 +43,19 @@ llama.cpp, no model, no service. What it can and cannot reach: `docs/systems/del
 
 1. **Verify, do not infer.** Parse the actual JSON each script prints. Never assume a step
    succeeded — read its verdict.
-2. **NO SUBSTITUTION.** The installer pins exact release tags and model SHA256s. If a pinned asset
-   404s, the hash mismatches, or a download fails after 3 retries, the script fails loud. **Do not
-   substitute a different model, a different llama.cpp build, or an unpinned "latest" asset. Stop
-   and surface the failure to the human.**
+2. **THE FRONTIER RULE.** Versions are never pinned. The installer resolves the newest complete build of
+   every component from its publisher (GitHub releases, the Hugging Face tree, npm) and verifies the
+   publisher's own digest; floors, the minimum build a seat needs, live in `setup/floors.json` and a
+   floor only rises (ADR 0099). **Never install a build older than a floor, and never downgrade a newer
+   build already on the box.** If an asset 404s, the integrity check mismatches, or a download fails after
+   3 retries, the script fails loud. **Do not substitute a different file, model or build to get past the
+   failure. Stop and surface it to the human.**
 3. **STOP-AND-ASK-THE-HUMAN** before any of:
    - **Updating the GPU driver** (AMD Adrenalin / NVIDIA) — you must never do this unattended.
    - **Rebooting** the machine.
    - **The ~7–20 GB model download** if the link may be metered/capped — get consent first
      (`OFFLOAD_WITH_FAMILY=1` pulls ~21 GB of GGUFs; `=0` pulls ~4.5 GB).
-   - **Any deviation from the pins** (see rule 2).
+   - **Substituting a file to get past an integrity mismatch or a floor** (see rule 2).
 4. **FORBIDDEN detours (research-verified dead ends — do not attempt):**
    - **ROCm / HIP on an AMD iGPU (gfx1103, e.g. Radeon 780M).** AMD ships no gfx1103 compute
      kernels; llama.cpp does not target it; the Vulkan backend is both supported and faster on this
@@ -148,7 +151,7 @@ ctx (quality lever; model window is 256K design / 128K common serving cap). Thes
 carry a `config_seed` (720p-class video defaults) applied ONLY to a fresh
 `~/.local-offload/config.json` — an existing per-machine config is never touched. llama-swap
 does NO VRAM accounting: all values are PROJECTED until `selftest.ps1` measures the real box.
-On a real `blackwell-72` box the 26B stays Q4_K today; a **Q8_0 26B pin (~28 GB)** is an
+On a real `blackwell-72` box the 26B stays Q4_K today; a **Q8_0 26B option (~28 GB)** is an
 available quality upgrade held as a follow-up — activate it only after a ≥64 GB card verifies
 the download fits all-resident and measures the quality/throughput gain (spec decision 3 +
 "Out of scope").
@@ -168,12 +171,12 @@ node manifest, every pip/uv it spawns is constrained to the host's installed
 `torch/torchvision/torchaudio/numpy` (`PIP_CONSTRAINT`/`UV_CONSTRAINT` + a post-install drift
 tripwire). A pack set that cannot install additively around the box's CUDA stack DEFERs
 `VENV_INCOHERENT` — it never replaces ComfyUI's torch (which would break the video path).
-Do not remove these pins to "make a pack install work"; that trade is never authorized.
+Do not remove these constraints to "make a pack install work"; that trade is never authorized.
 
 Every ≥16GB CUDA tier's `config_seed` binds: HiDream-O1 **bf16 Base** via `imagegen_family`
 (the official graph — never the generic SDXL graph for a DiT), Wan 2.2 **Q8_0** experts +
 **umt5_xxl_fp16**, 720p × 81 frames. The seed only writes a FRESH config; for an existing
-box, set the same keys in its config.json. Model download set (SHA256 from the HF API):
+box, set the same keys in its config.json. Model download set (each file verified against the oid and size the HF API publishes):
 `hidream_o1_image_bf16.safetensors` (16.4GB, Comfy-Org/HiDream-O1-Image),
 `Wan2.2-I2V-A14B-{High,Low}Noise-Q8_0.gguf` (15.4GB ×2, QuantStack/Wan2.2-I2V-A14B-GGUF),
 `umt5_xxl_fp16.safetensors` (10.6GB, Comfy-Org/Wan_2.2_ComfyUI_Repackaged). Requires
@@ -194,72 +197,69 @@ see the 8GB section below. HiDream-O1 (t2i) and Wan (video) stay the config_seed
 bindings; RealVisXL is the SDXL-class inpaint binding. **FLUX-family stays prohibited** (BFL
 non-commercial — ADR 0011).
 
-> **GGUF quant caveat — pin a `_1` quant, never a `_K_` one.** Qwen-Image-Edit-2511 K-quants
+> **GGUF quant caveat — choose a `_1` quant, never a `_K_` one.** Qwen-Image-Edit-2511 K-quants
 > (`Q5_K_S` and friends, including the common unsloth default) **fail to load** in ComfyUI-GGUF's
 > `UnetLoaderGGUF` with `cannot reshape array`, even on a byte-perfect file (verified: disk sha ==
 > upstream LFS oid, gguf 0.19.0, pack at HEAD). Only **`Q4_1` / `Q5_1`** load for 2511 — see
 > city96/ComfyUI-GGUF issue #247. Measured live on `blackwell-16` (<node-b>, then a single RTX 5060 Ti 16 GB) 2026-07-19 by the
 > creative-marketing-pipelines session: **Q5_1 (15.4GB) + fp8 Qwen2.5-VL encoder fits 16GB with
 > block-swap** — composite peak **15,757 MiB** (HiDream for comparison: 15,688 MiB). A manifest that
-> pins a K-quant will download 15GB and then fail at load time, so pin the `_1` quant explicitly.
+> selects a K-quant will download 15GB and then fail at load time, so choose the `_1` quant explicitly.
 
 **Qwen-Image-2.1 — an opt-in family (ADR 0058), never a default.** The installer never downloads
 its weights. `blackwell-8` seeds it as a named image family and a named edit family in its
 RAM-conditional layer (`config_seed_ram_mid_high`); any other node that should offer it binds it as a named
 `imagegen_families` / `gen_edit_families` overlay (how-to: `docs/OPERATOR-GUIDE.md` §3 "Add a named image or edit family";
 graph, schedules and launch profile: `docs/systems/media-generation.md`). Requirements: **ComfyUI ≥
-v0.37.0** (the 2.1 nodes; master ≥ `95539f56` recommended for the KV-cache placement fix), torch
-cu130 for the int8 files. Files, from `Comfy-Org/Qwen-Image-2.1` at revision
-`5dc5850eb514a3685f6a03a2641728a8f7549c69` — the repo's folder names ARE the ComfyUI model classes,
-so `--local-dir <model_root>` lands each file where its loader looks (size and sha256 = the HF LFS
-oid; verify with `sha256sum` after download):
+v0.37.0** (the 2.1 nodes; the newest master is recommended: it carries the KV-cache placement fix), torch
+cu130 for the int8 files. Files, from `Comfy-Org/Qwen-Image-2.1` at `main` — the repo's folder names ARE the
+ComfyUI model classes, so `--local-dir <model_root>` lands each file where its loader looks (the download verifies
+size and the HF LFS oid; recheck with `sha256sum` against the oid the Hub shows):
 
-| set | file (→ `<model_root>/<same path>`) | bytes | sha256 |
-|---|---|---|---|
-| quality (bf16) | `diffusion_models/qwen_image_2.1_bf16.safetensors` | 14,230,280,616 | `89f4158d066cc33906a199fca85634f766892dd78f49b6698dabf187ac86c4bc` |
-| quality (bf16) | `text_encoders/qwen3vl_8b_bf16.safetensors` | 17,534,334,616 | `68bdc82bc1b66851162ae656225e7e2068166b603db19bd5d5a3b90eb12669a9` |
-| quality (bf16) | `vae/qwen_image_2.1_vae_bf16.safetensors` | 675,509,688 | `bb21f7473051e1ac368515dd3f2e15cd44d7a11748ee8823e1ddca3e4876b7c9` |
-| speed (int8) | `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` | 7,256,783,064 | `cb74113cb03faecd79611b01fd7fd642f0aa60d6f0b95086abee214d75eaa57d` |
-| speed (int8) | `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | 9,350,798,360 | `8bfd0f6e12abf2d2d697ecc888e5e90b0d6741d6708f05799f53afa560452e8f` |
-| optional | `text_encoders/qwen3vl_8b_w4a8.safetensors` | 6,312,105,364 | `7754425e55e7bea2bfde4dde59a4cc236cb44e5ee9c215ea66ef8d47012824eb` |
+| set | file (→ `<model_root>/<same path>`) | bytes (as published, 2026-10) |
+|---|---|---|
+| quality (bf16) | `diffusion_models/qwen_image_2.1_bf16.safetensors` | 14,230,280,616 |
+| quality (bf16) | `text_encoders/qwen3vl_8b_bf16.safetensors` | 17,534,334,616 |
+| quality (bf16) | `vae/qwen_image_2.1_vae_bf16.safetensors` | 675,509,688 |
+| speed (int8) | `diffusion_models/qwen_image_2.1_int8_convrot.safetensors` | 7,256,783,064 |
+| speed (int8) | `text_encoders/qwen3vl_8b_int8_convrot.safetensors` | 9,350,798,360 |
+| optional | `text_encoders/qwen3vl_8b_w4a8.safetensors` | 6,312,105,364 |
 
 The quality set is 32.44 GB; with the int8 pair, 49.05 GB. The bf16 text encoder alone (17.5 GB)
 is larger than one 16 GB card, so a single-card bf16 binding needs ComfyUI's dynamic VRAM
 (`comfy_dynamic_vram: "on"` on the family) to stream it. Example (not run by the installer):
 `hf download Comfy-Org/Qwen-Image-2.1 diffusion_models/qwen_image_2.1_bf16.safetensors
-text_encoders/qwen3vl_8b_bf16.safetensors vae/qwen_image_2.1_vae_bf16.safetensors --revision
-5dc5850eb514a3685f6a03a2641728a8f7549c69 --local-dir <model_root>` (it leaves a
+text_encoders/qwen3vl_8b_bf16.safetensors vae/qwen_image_2.1_vae_bf16.safetensors --local-dir <model_root>` (it leaves a
 `.cache/huggingface/` beside the files; remove it). No GGUF loader is wired for this family.
 
 **FLUX 3 Image Klein — the named family `flux3-klein` (FLUX Kommunity License v1.0, bound `commercial_use: true` by
 operator ruling 2026-10-24).** The installer never downloads its weights. `ampere-6` and `amd-gcn` seed it on sd.cpp
 (base `config_seed`) and `blackwell-8` on ComfyUI (`config_seed_ram_mid_high`); any other node binds it by hand
 (`docs/OPERATOR-GUIDE.md` §3, graph and traps: `docs/systems/media-generation.md`). The ComfyUI files come from BFL's
-gated `black-forest-labs/flux-3-image-klein-comfy` (accept the license on its page once; revision
-`feef60b0aaf63a4773ace96636ebbcf43b881312`), the VAE from the Apache-2.0 `Comfy-Org/Flux-2-Klein-4B`
-(`533c4cbc3d3b89af1743d9466c434e89810391c0`, `split_files/vae/`), into `<model_root>/<folder>/`:
+gated `black-forest-labs/flux-3-image-klein-comfy` (accept the license on its page once; `main`), the VAE from the Apache-2.0 `Comfy-Org/Flux-2-Klein-4B`
+(`main`, `split_files/vae/`), into `<model_root>/<folder>/`:
 
-| use | file | bytes | sha256 |
-|---|---|---|---|
-| 16 GB+ (bf16) | `diffusion_models/flux3-image-klein-bf16.safetensors` | 11,097,404,512 | `c3e9813cdd049c831c836b2e9db61150e49a93fc1a4c63b256494642fee0bd7c` |
-| 8 GB (int8) | `diffusion_models/flux3-image-klein-int8-convrot.safetensors` | 5,827,874,779 | `847d8933548afd93df4af2cac2498e70891bf28d9dae06d695f536992e168fe2` |
-| Blackwell opt-in | `diffusion_models/flux3-image-klein-nvfp4.safetensors` | 5,277,685,632 | `15d421e2558443fcf83ba46f3cd884d9d181c2c7a0a7bdcd2974af234a2d4f5c` |
-| 16 GB+ | `text_encoders/qwen3vl_4b_bf16.safetensors` | 8,875,719,408 | `f0b24fc5c8d7c0ea6ca909da14c20af5cac53f22506be942c6c956f838b9630f` |
-| 8 GB | `text_encoders/qwen3vl_4b_int8_convrot.safetensors` | 4,858,559,240 | `32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c` |
-| upsampler, 16 GB+ | `text_encoders/qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors` | 9,748,113,996 | `cb8cb9b9dcd2569509de755dca54d96fd93a16a7aabfd2f4051f0a144230620f` |
-| upsampler, 8 GB | `text_encoders/qwen3.5_9b_flux3_prompt_upsampler_w4a8.safetensors` | 6,724,090,780 | `e5d85a7421d197bf5a12474511936ecabce19a833252f16e9310a983194a4458` |
-| all | `vae/flux2-vae.safetensors` | 336,211,292 | `868fe7b343cc8f3a19dbcfcafbc3d5f888802be3f89bd81b65b3621a066ce8f3` |
+| use | file | bytes (as published, 2026-10) |
+|---|---|---|
+| 16 GB+ (bf16) | `diffusion_models/flux3-image-klein-bf16.safetensors` | 11,097,404,512 |
+| 8 GB (int8) | `diffusion_models/flux3-image-klein-int8-convrot.safetensors` | 5,827,874,779 |
+| Blackwell opt-in | `diffusion_models/flux3-image-klein-nvfp4.safetensors` | 5,277,685,632 |
+| 16 GB+ | `text_encoders/qwen3vl_4b_bf16.safetensors` | 8,875,719,408 |
+| 8 GB | `text_encoders/qwen3vl_4b_int8_convrot.safetensors` | 4,858,559,240 |
+| upsampler, 16 GB+ | `text_encoders/qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors` | 9,748,113,996 |
+| upsampler, 8 GB | `text_encoders/qwen3.5_9b_flux3_prompt_upsampler_w4a8.safetensors` | 6,724,090,780 |
+| all | `vae/flux2-vae.safetensors` | 336,211,292 |
 
 The sd.cpp files go to `<OFFLOAD_HOME>/models/flux3-klein/` (the seeds' paths): the DiT from `leejet/flux-3-image-klein-GGUF`
-(`1c2ad2f9b9247ccca6506a23bdb033fdb0873321`; `flux3-image-klein-Q4_K.gguf` 3,514,023,104 B
-`19ddbfbed61da4bb16ebf169aaf48e9e5db43aba557be1ee537e9f00f586092e` for ampere-6, `flux3-image-klein-Q8_0.gguf`
-6,151,716,032 B `8b71ffd749bcacbd50cc0acca4f2d31a044c94412743e1e780db99bf13f89752` for amd-gcn), the text encoder from
-`Qwen/Qwen3-VL-4B-Instruct-GGUF` (`1cd86afb9a95c410a6038ab3b40d8b578c892266`; `Qwen3VL-4B-Instruct-Q4_K_M.gguf`
-2,497,281,664 B `66358cb18bb6b3b1b6675aa412c7a88ef01d228f481184d13668e5201c730a0a`, `Qwen3VL-4B-Instruct-Q8_0.gguf`
-4,280,406,144 B `054721f478bc5fa6beffb7f38eae575d45298f88cbb8d2f83ef675a727863eb1`) and the same `flux2-vae.safetensors`.
-sd.cpp must be master-968 or later (the Windows installer pins master-1000; `amd-gcn`'s seed names its own
-`sdcpp-m1000` build). The fast upsampler seat for a ComfyUI node is BFL's PUP as a GGUF,
-`unsloth/flux-3-image-klein-pup-GGUF` (`cf6eff4e20c0cb14e9b2b7b6d2eaa04358411fcd`), served by llama-swap (hand-wired: no
+(`main`; `flux3-image-klein-Q4_K.gguf` 3,514,023,104 B as published in 2026-10, for ampere-6, `flux3-image-klein-Q8_0.gguf`
+6,151,716,032 B for amd-gcn), the text encoder from
+`Qwen/Qwen3-VL-4B-Instruct-GGUF` (`main`; `Qwen3VL-4B-Instruct-Q4_K_M.gguf`
+2,497,281,664 B, `Qwen3VL-4B-Instruct-Q8_0.gguf`
+4,280,406,144 B) and the same `flux2-vae.safetensors`. The download verifies each file against the oid and size the Hub
+publishes.
+sd.cpp must be master-968 or later (the floor in `setup/floors.json`; the Windows installer takes the newest complete
+release, which is past it; `amd-gcn`'s seed names its own sd.cpp build directory). The fast upsampler seat for a ComfyUI node is BFL's PUP as a GGUF,
+`unsloth/flux-3-image-klein-pup-GGUF` (`main`), served by llama-swap (hand-wired: no
 tier renders it yet).
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on fresh installs** —
@@ -282,10 +282,10 @@ family beside the default edit binding, `inpaint_ckpt` = `RealVisXL_V5.0_fp16.sa
 `videogen_upscale_model`/`upscale_model` = `4x-UltraSharp.pth` — so a fresh blackwell-8 provision
 must stage those weight files too (out-of-band, LAN pre-seed): the fp8 pair from
 `Comfy-Org/Wan_2.2_ComfyUI_Repackaged` and the edit unet from `Comfy-Org/Qwen-Image-Edit_ComfyUI` (their
-revisions and sha256 pins are in the tier notes, `docs/tiers/blackwell-8.md`) into ComfyUI's
+sources are in the tier notes, `docs/tiers/blackwell-8.md`) into ComfyUI's
 `diffusion_models/`, plus the two Wan builder defaults the seed leaves unbound
 (`umt5_xxl_fp8_e4m3fn_scaled.safetensors`, `wan_2.1_vae.safetensors`). Neither the fp8 pair nor the
-fp8mixed file is installer-pinned, so a box that staged only the Q8_0 pair and the Q5_1 file reports
+fp8mixed file is installer-provisioned, so a box that staged only the Q8_0 pair and the Q5_1 file reports
 `BOUND-BUT-MISSING` in `doctor` until they are there; the `qwen-image-2.1` family's three files are the
 quality (bf16) set in the table above, and without them only that family reports it. Stage the vision seat's
 `Qwen3.5-9B-UD-Q4_K_XL.gguf` + `mmproj-Qwen3.5-9B-F16.gguf` as well. Low-RAM 8GB boxes still get no media
@@ -294,7 +294,7 @@ out-of-band like the ≥16GB seeds.
 > K-quant caveat update, measured 2026-08-23 on `blackwell-8` at ComfyUI-GGUF HEAD:
 > `qwen-image-edit-2511-Q3_K_S` **loaded and rendered correctly** (quality-equal to Q5_1 on
 > text-fix + removal), so the issue-#247 reshape failure appears FIXED upstream. The ≥16GB seeds
-> still pin Q5_1 (the fleet-proven quant; `blackwell-8` now seeds the fp8mixed file instead); treat
+> still select Q5_1 (the fleet-proven quant; `blackwell-8` now seeds the fp8mixed file instead); treat
 > K-quants as usable-after-verifying on current nodes.
 
 ### Media seat weights (vision/STT/OCR) — out-of-band provisioning gotchas
@@ -328,7 +328,7 @@ both. Field-measured traps (<node-e>, 2026-08-22):
 ### run-graph satisfier prerequisite (`offload_run_graph`)
 
 `offload_run_graph` self-provisions a workflow's node manifest against the ComfyUI install.
-Packs are cloned/checked out at their pinned commits via **git**, then ALL packs' deps are
+Packs are cloned/checked out from their admitted repositories (the commit recorded) via **git**, then ALL packs' deps are
 resolved in **one `uv pip compile`** (under the host-torch constraints) and installed as one
 lock — so **`uv` in the ComfyUI venv is the REQUIRED satisfier tool** (live finding
 2026-07-17: the installed cm-cli has no `--uv` flag, so uv is driven directly).
@@ -374,8 +374,8 @@ CUDA version + the *detected* GPU set, not a fixed assumption:
   placement.
 
 **H4 (shipped): `install.ps1` automates this selection.** Step 3 reads detect's
-`cuda_driver`/`cuda_toolkit` (`Select-CudaBuild`): Blackwell profile + CUDA-13 driver → the pinned
-`llama-cuda13` (13.4 since the b11490 pin, 13.3 before) prebuilt, SHA-verified (tier `serves`); Blackwell on a 12.x driver / undetected
+`cuda_driver`/`cuda_toolkit` (`Select-CudaBuild`): Blackwell profile + CUDA-13 driver → the
+`llama-cuda13` prebuilt (the newest complete build's CUDA 13.4 asset), digest-verified against the publisher (tier `serves`); Blackwell on a 12.x driver / undetected
 CUDA → **refuses loudly** with the exact driver-upgrade-or-source-build guidance; `dual-gpu` →
 refuses with the multi-arch source-build recipe (`-DCMAKE_CUDA_ARCHITECTURES="70;120"`, 12.8/12.9
 toolkit); every other CUDA profile keeps the verified 12.4 prebuilt. The selection is reported as
@@ -403,13 +403,12 @@ canary-gated promotions below, and send back the receipt that turns every PROJEC
 MEASURED. The profile's serving floor is deliberately conservative; the canaries are how it earns
 its real performance.
 
-**Why this tier is frontier-pinned:** the AMD Vulkan flash-attention tuning that makes a 780M
+**Why this tier has a floor:** the AMD Vulkan flash-attention tuning that makes a 780M
 competitive landed **Feb–Mar 2026** (scalar-FA Wave32 + AMD graphics-queue work ≈ +56% on AMD
-iGPUs), and FA + q8_0-KV on Vulkan dates from the same window. The pinned llama.cpp build satisfies
-this **≥ Mar-2026 floor**; `install.ps1` prints a NOTE when upstream is ahead of the pin
-(`Show-FrontierNote`). **Never install a build older than the floor, and never substitute a newer
-one mid-install** (Hard rule 2 — pins change by a human bumping them, then re-running this
-chapter's canaries).
+iGPUs), and FA + q8_0-KV on Vulkan dates from the same window. The newest complete llama.cpp build
+the installer resolves is past this **≥ Mar-2026 floor** (it is recorded in `setup/floors.json`).
+**Never install a build older than the floor, and never downgrade a newer one** (Hard rule 2); a
+newer build takes this chapter's canaries again.
 
 ### What to expect (so you don't misread normal as broken)
 
@@ -475,7 +474,7 @@ attribute is worse than a slower verified config.
 
 **HARD FORBIDDEN (no canary overrides these):** updating/downgrading the GPU driver or Adrenalin
 (**always** STOP-and-ask); ROCm/HIP or WSL2 for inference (dead ends — Hard rules); substituting
-any pinned asset; binding a vision model (above); exposing any server beyond loopback.
+a file to get past an integrity mismatch or a floor; binding a vision model (above); exposing any server beyond loopback.
 
 ### The 5 hardware questions (ask the human once; answers pin the perf envelope)
 
@@ -509,7 +508,7 @@ real-hardware validation set — seven tiers as of 2026-09-07 (`blackwell-2x16`,
 ### Media tier (J2) — image generation via stable-diffusion.cpp
 
 On the `amd-*` profiles, `install.ps1` also lays down the **media tier** (skip with
-`OFFLOAD_WITH_MEDIA=0`; force onto any Vulkan-capable box with `=1`): the pinned
+`OFFLOAD_WITH_MEDIA=0`; force onto any Vulkan-capable box with `=1`): the newest complete
 **stable-diffusion.cpp win-vulkan build** (`sdcpp/sd-cli.exe`; `sd-server.exe` ships in the same
 zip and is the recorded warm-swap upgrade path — not wired yet) plus the **Apache-2.0 lead
 roster** (~10.1 GB — Hard rule 3: get download consent on a metered link):
@@ -524,7 +523,7 @@ roster** (~10.1 GB — Hard rule 3: get download consent on a metered link):
 fp16-fix VAE (slow path, openrail++/MIT, 7.3 GB). **Excluded on license grounds:** SDXL-Turbo
 (non-commercial) and the whole FLUX family (ADR 0011 — includes Apache schnell; a new ADR is the
 only reopening path). **The jayn7 GGUF build is load-bearing:** leejet's own low-bit Z-Image
-quants render blank/solid images on Vulkan+AMD (sd.cpp issue #1031) — never substitute them.
+quants render blank/solid images on Vulkan+AMD (sd.cpp issue #1031) — never use them instead.
 
 The `config_seed` binds `imagegen_engine:"sdcpp"` with turbo sampling (steps 8, cfg 1) and
 `--vae-on-cpu` (iGPU VAE stability class, sd.cpp #563/#1621; the dgpu profile seeds
@@ -547,17 +546,17 @@ load from disk — not a hang.
 `gpu_vae.promote:true`; add `--vae-tiling` (via `sdcpp_extra_args`) if large renders fail after a
 clean 512² reference. **Media FORBIDDEN:** `--vae-conv-direct` on Vulkan (distorted output,
 sd.cpp #1673); SD2-class models (RDNA3-adjacent crash, #1340); fp8 anything (Q8_0/Q4_K GGUF
-only); substituting quant builds or unpinned models (Hard rule 2).
+only); substituting quant builds or unlisted models (Hard rule 2).
 
 ### iGPU media engines: video, animate, voice, music (CT-49)
 
 A Vulkan-only box (an iGPU such as the amd-gcn Vega 7 class: no CUDA, no ROCm) can serve `generate_video`, `animate_character` and `generate_audio` voice and music without ComfyUI or Python.
 
-**The `amd-gcn` tier seeds the measured set** (CT-51, `config_seed` in `setup/templates/profiles.json`, listed in `docs/tiers/amd-gcn.md`): the sd.cpp video family `fastwan`, sd.cpp VACE animate (default clip `animategen_frames` 33, sized to its token cap) and audio.cpp voice and music, every path under `__OFFLOAD_HOME__` (`<home>/models/<subdir>/<file>`, the engines under `<home>`). On that tier do not hand-bind or overwrite those keys: the provision renders them. The seed binds files, it does not place them: the Linux install has no media leg for this tier, so **you must still stage, out-of-band at the seeded paths, the engine binaries (`<home>/sdcpp/sd-cli` unless an earlier install leg already laid it down there, the depth-anything.cpp `da3-cli`, the audio.cpp `audiocpp_cli` built per step 1) and the nine model files** (their URLs, sizes and sha256 pins are in `setup/install.ps1`'s `$PINNED` table, which only pins them: no gate downloads them), the same way the blackwell-8 provision stages its weights (the out-of-band LAN pre-seed paragraph above, in the `blackwell-8` tier notes). Until they are there the four routes (`generate_video`, `animate_character`, `generate_audio:voice`, `generate_audio:music`) read BOUND-BUT-MISSING and `local-offload doctor` prints FAIL for each; once placed they read CONFIGURED with no further change. The ACE-Step licence is not verified, so its `commercial_use` stays unset: check it at the ACE-Step source before recording one.
+**The `amd-gcn` tier seeds the measured set** (CT-51, `config_seed` in `setup/templates/profiles.json`, listed in `docs/tiers/amd-gcn.md`): the sd.cpp video family `fastwan`, sd.cpp VACE animate (default clip `animategen_frames` 33, sized to its token cap) and audio.cpp voice and music, every path under `__OFFLOAD_HOME__` (`<home>/models/<subdir>/<file>`, the engines under `<home>`). On that tier do not hand-bind or overwrite those keys: the provision renders them. The seed binds files, it does not place them: the Linux install has no media leg for this tier, so **you must still stage, out-of-band at the seeded paths, the engine binaries (`<home>/sdcpp/sd-cli` unless an earlier install leg already laid it down there, the depth-anything.cpp `da3-cli`, the audio.cpp `audiocpp_cli` built per step 1) and the nine model files** (their sources are rows of `setup/install.ps1`'s source table, which only names them: no gate downloads them, and the publisher's oid and size are what verify them), the same way the blackwell-8 provision stages its weights (the out-of-band LAN pre-seed paragraph above, in the `blackwell-8` tier notes). Until they are there the four routes (`generate_video`, `animate_character`, `generate_audio:voice`, `generate_audio:music`) read BOUND-BUT-MISSING and `local-offload doctor` prints FAIL for each; once placed they read CONFIGURED with no further change. The ACE-Step licence is not verified, so its `commercial_use` stays unset: check it at the ACE-Step source before recording one.
 
 **On any other Vulkan-only tier nothing is seeded**: the seeds carry measured values only after a live run, so an installing agent binds the keys by hand (step 3) and checks them with `local-offload doctor`. Steps 1 to 4 below are the same procedure either way; on amd-gcn, step 3 is already done.
 
-1. **Download consent first (Hard rule 3).** The engines are the pinned stable-diffusion.cpp Vulkan build (`sd-cli`, already laid down by the media tier), the audio.cpp `audiocpp_cli` Vulkan build (Apache-2.0), and the depth-anything.cpp `da3-cli` build with a depth GGUF. Models: a Wan2.2 TI2V-5B GGUF with its VAE and umt5-xxl encoder for video, the Wan2.1 VACE 1.3B **`.safetensors`** checkpoint (Comfy-Org `wan2.1_vace_1.3B_fp16.safetensors`) with the Wan2.1 VAE for animate (the public VACE GGUFs lack `vace_patch_embedding.weight` and sd-cli refuses them: `MODEL_INCOMPATIBLE`), the audio.cpp `chatterbox` GGUF for voice and the **bf16** `ace_step` package (`ace-step-1.5-turbo-bf16.gguf`; upstream grades q8_0 "No") for music. Optional: lightx2v's `taew2_2.safetensors` as the tiny autoencoder for `fast: true` (Apache-2.0; **never bind `lighttaew2_2`, it is broken in this sd.cpp**).
+1. **Download consent first (Hard rule 3).** The engines are the newest complete stable-diffusion.cpp Vulkan build (`sd-cli`, already laid down by the media tier), the audio.cpp `audiocpp_cli` Vulkan build (Apache-2.0), and the depth-anything.cpp `da3-cli` build with a depth GGUF. Models: a Wan2.2 TI2V-5B GGUF with its VAE and umt5-xxl encoder for video, the Wan2.1 VACE 1.3B **`.safetensors`** checkpoint (Comfy-Org `wan2.1_vace_1.3B_fp16.safetensors`) with the Wan2.1 VAE for animate (the public VACE GGUFs lack `vace_patch_embedding.weight` and sd-cli refuses them: `MODEL_INCOMPATIBLE`), the audio.cpp `chatterbox` GGUF for voice and the **bf16** `ace_step` package (`ace-step-1.5-turbo-bf16.gguf`; upstream grades q8_0 "No") for music. Optional: lightx2v's `taew2_2.safetensors` as the tiny autoencoder for `fast: true` (Apache-2.0; **never bind `lighttaew2_2`, it is broken in this sd.cpp**).
    - **The measured releases** are stable-diffusion.cpp **master-945** (`a1ded76`: on the measured FastWan run its decoded frames are bit-identical to master-929's and it runs about 10% faster; master-929 keeps working, the log guard reads both releases' log formats) and audio.cpp **v0.9.1** (the Chatterbox S3 encoder fix, upstream #778; v0.9.0 works the same).
    - **Build audio.cpp on the node on a CPU without AVX-512** (a Zen 3 box is one): the official `audio-v0.9.0-bin-ubuntu-x64-vulkan` tarball is built with AVX-512 and dies with SIGILL (`ILLEGAL_INSTRUCTION`) as soon as a model runs, while `--list-devices` still works. Build from the v0.9.1 tag (the measured release), native optimisation on: `scripts/build_linux.sh --backend vulkan --model-set custom --models chatterbox,ace_step --target audiocpp_cli`.
    - **Apply the ACE-Step planner prefill patch before that build:** `patch -p1 < setup/patches/audiocpp-v0.9.0-vulkan-planner-prefill.patch` from the audio.cpp source root. The file keeps its v0.9.0 name; it applies to v0.9.1 unchanged. Upstream runs the Vulkan planner prefill on the host, which loads a second copy of the planner on the CPU (`ace_step.planner.weights.buffer_name CPU`), so a stock build fails the no-CPU guard for music; the patch (three changes, see `docs/systems/media-generation.md`) moves the prefill onto the device. Without it, music fails `CPU_PLACEMENT` by design.
@@ -692,8 +691,9 @@ OS drive on purpose, and re-run. An existing config that names no `home` prints 
 `local-offload data status` / `data migrate` (a copy, never a move).
 
 **Idempotency & re-run:** re-running is safe. A satisfied step prints `SKIP`. A component only
-SKIPs when **both** the artifact exists on disk **and** `installed.json` records the currently
-pinned version — so bumping a pin forces exactly that component to refresh. There is **no
+SKIPs when **both** the artifact exists on disk **and** `installed.json` records a generation at or
+above the newest the publisher serves (or a newer hand-placed build, which is kept, never downgraded) — so a newer
+published build refreshes exactly that component and keeps the previous generation for rollback. There is **no
 `OFFLOAD_PLAN` dry-run mode** in this installer (see "Preview" below).
 
 **Decision table:**
@@ -703,12 +703,12 @@ pinned version — so bumping a pin forces exactly that component to refresh. Th
 | final `{"installed":true,...}` | success | Proceed to Step 2. |
 | `git missing and winget unavailable` / `Go >=1.26 missing and winget unavailable` | no package manager | **STOP.** Ask the human to install Git / Go 1.26+ manually, then re-run. |
 | `Go still <1.26 after winget install + PATH refresh` | stale Go | Report to human; a reboot may be needed to fully refresh PATH — **ask before rebooting**. |
-| `SHA256 mismatch` / `size mismatch` | corrupt or wrong asset | Do NOT substitute. The script already retried 3×. Delete the named `.part`/component dir and re-run once; if it recurs, **STOP** and surface (the pin may be stale — a human decision). |
+| integrity mismatch against the publisher's digest | corrupt or wrong asset | Do NOT substitute. The script already retried 3×. Delete the named `.part` and re-run once; if it recurs, **STOP** and surface. |
 | `download failed after 3 attempts` (HTTP 429 / network) | rate-limited or offline | Wait and re-run (idempotent — completed files SKIP). Repeated 429 from Hugging Face → **STOP**, ask the human. |
 | `template not found` | repo tree incomplete | Ensure the full repo is checked out; re-run. |
 
 **Preview without downloading (there is no dry-run flag):** to see the plan first, read the
-`$PINNED` table at the top of `setup\install.ps1` (URLs + sizes) and the model list. A partial
+source table at the top of `setup\install.ps1` (publishers and file names; the newest build and its digest are resolved at run time) and the model list. A partial
 install can be resumed safely — completed components SKIP on the next run.
 
 ### Accelerators (hailo-8l)
@@ -746,8 +746,8 @@ wheels, the venv and the 837 MB checkpoint).
 local-offload install forecast            # --home / --models to relocate; --json prints one final result line
 ```
 
-It builds `<OFFLOAD_HOME>/forecast/venv` (python 3.13), installs torch with `--torch-backend=auto`, installs `timestral` at the
-pinned commit, fetches the weights at the pinned revision into `<models>/timestral-209m` (sha256-verified) and writes the
+It builds `<OFFLOAD_HOME>/forecast/venv` (python 3.13), installs torch with `--torch-backend=auto`, installs `timestral` from the
+head of its default branch (the commit recorded), fetches the weights at the newest revision into `<models>/timestral-209m` (verified against the published oid) and writes the
 server file. A second run changes nothing. The weights are Modified MIT: keep the attribution "2026 - Mistral AI" and note that
 there are no rights for a company whose global consolidated monthly revenue exceeds USD 20M (the install prints this line
 and nothing gates on it). The seat's command runs the harness binary where the installer laid it down
@@ -764,40 +764,40 @@ installs HyperFrames, which renders HTML/CSS motion graphics to video on the CPU
 route unbound (`compose_script: ""`, NOT CONFIGURED). A skipped lane is a legitimate state, not a
 failure. What the step does:
 
-1. Copies `setup/hyperframes/package.json` + `package-lock.json` (npm `hyperframes`, exact pin,
-   lock integrity `sha512-dIHd…RAQ==` for 0.8.114) to `<OFFLOAD_HOME>/hyperframes`.
-2. `npm ci --ignore-scripts`, which installs the lockfile's exact tree with no install script.
+1. Copies `setup/hyperframes/package.json` (npm `hyperframes`, the newest release, no lockfile) to
+   `<OFFLOAD_HOME>/hyperframes`.
+2. `npm install --ignore-scripts`, which installs the newest tree, each package verified by npm against the registry's
+   integrity value, with no install script.
 3. `npm audit signatures`, which checks the registry signatures and SLSA provenance. **A failure is
    fatal and the installer stops.** Do not work around it. Surface it to the human, because the
-   package or the registry answer is not what the lockfile promises.
+   package or the registry answer is not what the registry's own signatures promise.
 4. `npm rebuild esbuild`, the one postinstall the CLI needs, run on purpose after verification.
 5. `node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>`, which runs `browser ensure`
    through the harness runner. The env is scrubbed and HyperFrames' state lands in
-   `<dir>/home`. It downloads the CLI's pinned chrome-headless-shell from Chrome for Testing
-   (152.0.7977.30 for 0.8.114, as for 0.8.108 and 0.8.61; 270 MB on disk on win64) and prints its path.
+   `<dir>/home`. It downloads the CLI's own chrome-headless-shell from Chrome for Testing
+   (the build HyperFrames names; 152.0.7977.30 for 0.8.114 when measured on 2026-10-09; about 270 MB on disk on win64) and prints its path.
 6. Seeds `compose_script`, `hyperframes_dir` and `hyperframes_browser_path` into a **fresh**
    config. An existing config is never rewritten; the installer prints the three keys to add by
    hand.
 
 On a node that is already installed, `local-offload install hyperframes` runs steps 1-5 on their own,
-from the `package.json` and lock the binary carries, so a node with no repository checkout can do it.
+from the `package.json` the binary carries, so a node with no repository checkout can do it.
 It works in the config's `hyperframes_dir` (or `--dir`) and never leaves the node worse off:
 
-- it refuses before touching anything when the runner beside the binary pins another version, or when
-  the directory holds something other than a harness install;
-- a healthy install (the committed package files, the pinned version and a tree `npm ls` accepts) is
-  kept and only re-verified;
-- anything else is built in `<dir>/.install-staging`, where `npm ci` and `npm audit signatures` run, so
+- it refuses before touching anything when the directory holds something other than a harness install;
+- a healthy install (the package file, a version at or above the floor and a tree `npm ls` accepts) at the
+  newest published release is kept and only re-verified; an older one is replaced by the newest;
+- anything else is built in `<dir>/.install-staging`, where `npm install` and `npm audit signatures` run, so
   a failure there leaves the live install exactly as it was; only a verified tree is swapped in, and the
-  replaced one is kept as `<dir>/node_modules.prev` (with `package.json.prev` and `package-lock.json.prev`)
+  replaced one is kept as `<dir>/node_modules.prev` (with `package.json.prev`)
   for a rollback to an older release;
 - `npm rebuild esbuild` and the runner's `browser` and `version` ops then run on the new tree, and if one
   fails the previous install is put back.
 
-It fails when the config binds another Chrome build than the pin resolves (it names the value to set),
-and gives up after `--timeout` (45 minutes by default). A release that moves the pin needs it on every
-node with the lane: until it runs, `doctor` reads `compose_video` BOUND-BUT-MISSING ("holds hyperframes
-X, not the runner's pin Y") and every composition defers `CLI_MISSING`.
+It fails when the config binds another Chrome build than the one the installed HyperFrames resolves (it names the
+value to set), and gives up after `--timeout` (45 minutes by default). A node whose install is below the floor in
+`setup/floors.json` reads `compose_video` BOUND-BUT-MISSING in `doctor` and every composition defers `CLI_MISSING`
+until the command runs.
 
 Rules for the installing agent:
 
@@ -805,9 +805,9 @@ Rules for the installing agent:
   `npx skills add heygen-com/hyperframes`. A global install self-upgrades in a detached process.
   `init` and `skills` write agent skills into `~/.claude` and every other agent's skills dir.
 - Do not substitute a lookalike package (`dsh-hyperframes`, `hyfrme`, `framevox`, `framepack`). The
-  lockfile names `hyperframes` and `@hyperframes/*` only.
+  install names `hyperframes` and `@hyperframes/*` only.
 - Verify with `local-offload doctor` (expect `compose_video CONFIGURED … templates=callout-label,captions-bar,checklist-card,lower-third,section-title,stat-card,title-card`)
-  and `local-offload acceptance` (a `hyperframes (compose runner)` row, which runs the pinned CLI's
+  and `local-offload acceptance` (a `hyperframes (compose runner)` row, which runs the installed CLI's
   `--version` as this identity).
 - On a Linux node, chrome-headless-shell needs the usual Chrome shared libraries (`libnss3`,
   `libatk-bridge2.0-0`, `libgbm1`, …). If one is missing, Chrome fails to launch, and the defer
@@ -1007,7 +1007,7 @@ difference between a good first impression and a confused user.
 | `install.ps1`: `data home: no eligible data volume` | only the OS drive, a cloud-synced virtual drive or a FAT volume qualifies (or `install volumes --data` could not run; the error names each volume it passed over) | Set `$env:OFFLOAD_DATA_HOME` to a directory on a data drive, or `$env:OFFLOAD_ALLOW_OS_DATA='1'` to keep the data on the OS drive on purpose; re-run. |
 | `doctor`: `data volume ... FAIL` | the harness's data sits on the OS drive while a data drive could hold it | `local-offload data migrate --apply --stopped` (stop fleet-serve and the MCP doors first), then set the `home` line it prints. |
 | `install.ps1`: `winget unavailable` | no package manager | Human installs Git + Go 1.26+ manually; re-run. |
-| `install.ps1`: SHA/size mismatch | corrupt/wrong asset | Do not substitute. Delete the `.part` / component dir, re-run once; recurs → STOP. |
+| `install.ps1`: integrity mismatch against the publisher's digest | corrupt/wrong asset | Do not substitute. Delete the `.part` and re-run once; recurs → STOP and surface. |
 | HF download 429 / timeout | rate-limited | Re-run (idempotent); persistent → STOP, ask human. |
 | `selftest` canary `fail`, device-lost | old AMD Adrenalin (deep-context crash #17432) | STOP → ask human to update the AMD driver; interim: lower `-ngl` or the window. |
 | `selftest` port `18801`/`18802` in use | a prior run leaked a process | Kill stray `llama-server.exe` / `local-agent.exe`, or reboot after asking; re-run. |
@@ -1021,8 +1021,9 @@ difference between a good first impression and a confused user.
 
 - **Logs:** `$OFFLOAD_HOME\install.log` (full install transcript). selftest writes transient logs to
   `%TEMP%\offload-selftest-*` and cleans them up.
-- **Version manifest:** `$OFFLOAD_HOME\installed.json` (llama.cpp tag, llama-swap version, model
-  list + SHA256s). A component re-installs only when a pin changes.
+- **Version manifest:** `$OFFLOAD_HOME\installed.json` (per component: the current and previous
+  generation, rejected candidates, the ETag and the check time; the model list with the sizes recorded at download). A
+  component re-installs only when the publisher serves a newer complete build (ADR 0099).
 - **Hash sentinels:** each model has a `<file>.sha-ok` sentinel beside it caching its verified hash;
   delete it to force a re-hash.
 - **Retry a component:** delete its directory under `$OFFLOAD_HOME` (e.g. `llama\`, `llama-swap\`,
