@@ -64,7 +64,7 @@ The installer seeds this tier's media bindings (`config_seed`):
 | `compose_script` | `render/compose-hyperframes.mjs` |
 | `imagegen_cfg` | `1` |
 | `imagegen_engine` | `sdcpp` |
-| `imagegen_families` | `{"flux3-klein":{"commercial_use":true,"imagegen_cfg":1,"imagegen_engine":"sdcpp","imagegen_family":"flux3-klein","imagegen_sampler":"euler","imagegen_steps":16,"imagegen_upsampler":"qwen3.5-4b-agent","license":"FLUX Kommunity License v1.0","sdcpp_bin":"__OFFLOAD_HOME__/sdcpp-m1000/sd-cli__EXE__","sdcpp_extra_args":["--backend","vulkan0","--flash-attn","on","--vae-tiling","--conv-direct","auto,vae=off","-v"],"sdcpp_llm":"__OFFLOAD_HOME__/models/flux3-klein/Qwen3VL-4B-Instruct-Q8_0.gguf","sdcpp_model":"__OFFLOAD_HOME__/models/flux3-klein/flux3-image-klein-Q8_0.gguf","sdcpp_model_kind":"diffusion","sdcpp_vae":"__OFFLOAD_HOME__/models/flux3-klein/flux2-vae.safetensors"}}` |
+| `imagegen_families` | `{"flux3-klein":{"commercial_use":true,"imagegen_cfg":1,"imagegen_engine":"sdcpp","imagegen_family":"flux3-klein","imagegen_sampler":"euler","imagegen_steps":16,"imagegen_upsampler":"qwen3.5-4b-agent","license":"FLUX Kommunity License v1.0","sdcpp_bin":"__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__","sdcpp_extra_args":["--backend","vulkan0","--flash-attn","on","--vae-tiling","--conv-direct","auto,vae=off","-v"],"sdcpp_llm":"__OFFLOAD_HOME__/models/flux3-klein/Qwen3VL-4B-Instruct-Q8_0.gguf","sdcpp_model":"__OFFLOAD_HOME__/models/flux3-klein/flux3-image-klein-Q8_0.gguf","sdcpp_model_kind":"diffusion","sdcpp_vae":"__OFFLOAD_HOME__/models/flux3-klein/flux2-vae.safetensors"}}` |
 | `imagegen_family` | `z-image-turbo` |
 | `imagegen_steps` | `8` |
 | `imagegen_timeout_sec` | `1800` |

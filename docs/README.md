@@ -36,6 +36,9 @@ where the code lives.
 - [systems/node-swap.md](systems/node-swap.md) — `node-swap`: the reusable Windows fleet-node
   binary swap (verify hash, wait idle, backup+rename, restart, verify, auto-rollback), and its
   detached launcher for an SSH-session-proof run
+- [systems/update.md](systems/update.md) — `update`: resolve each engine's newest complete build from its publisher,
+  verify the publisher's digest, stage, promote as a generation behind the live path, keep the previous one,
+  roll back on failure; a no-op when nothing changed; `--repoint` for hand-kept yamls
 - [systems/accelerators.md](systems/accelerators.md) — devices beside the GPU tier (hailo-8l, coral-edgetpu and rknpu):
   detection, seeding, the on-demand sidecar, tool ownership
 - [systems/cache-server.md](systems/cache-server.md) — the optional second-device KV tier for a vLLM seat:

@@ -115,6 +115,7 @@ var gatedRouteFiles = map[string]struct {
 	"internal/sttclient/sttclient.go": {"an /upstream subpath handed to fencedURL, which is modelaffinity.AwaitUpstream", false},
 	"internal/ttsclient/ttsclient.go": {"tts_endpoint is a separate OpenAI-shaped speech server that owns its GPU, never llama-swap (ttsclient package doc)", false},
 	"cmd/local-agent/serve.go":        {"a route this process SERVES, not a request it sends", false},
+	"internal/update/sideport.go":     {"the smoke gate's own side-port llama-server, started under the GPU lease the gate holds; never llama-swap", false},
 }
 
 // TestModelDispatchedRoutesAreBuiltOnlyBehindAGate extends the /upstream rule to
