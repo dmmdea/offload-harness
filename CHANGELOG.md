@@ -6,6 +6,259 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.204.0] - 2026-10-28 - Frontier updates: the harness pins no version, and `local-offload update` moves every engine to its publisher's newest build behind a measured gate with rollback
+
+### Changed - the harness never pins a version: installers resolve the newest complete build from the publisher, floors live in one file, and a lint keeps it that way
+
+- **What it does.** No release tag, commit, byte count or digest literal for a dependency lives in the repository any
+  more. `setup/install.ps1` and `setup/install.sh` resolve each component (llama.cpp, llama-swap, whisper.cpp,
+  stable-diffusion.cpp, the models) from its publisher at run time, take the newest complete build, and verify the
+  publisher's own digest: the GitHub release `assets[].digest` (and `gh attestation verify` where a project publishes
+  attestations), the Hugging Face `lfs.oid` and size, the npm `dist.integrity`. A mismatch deletes the partial file and
+  retries (three attempts); a verified file is swapped in once, outside the retry loop, the old one kept as `.prev`. A fresh install lands on the newest build, a re-run over a newer
+  build changes nothing, and a newer hand-placed build is kept, never downgraded.
+- **Floors, not pins.** The minimum build a seat needs (llama.cpp b11452 for `gemma-embedding2`, stable-diffusion.cpp
+  master-968 for FLUX 3) lives in exactly one file, `setup/floors.json`. A floor only rises; a ceiling or an exact
+  version is unrepresentable there; a candidate under a floor is never selected. The placement pin of ADR 0078 (a model
+  held to a card) is unrelated and stays.
+- **Generations with rollback.** Per component a node keeps the current and the previous generation. The live path
+  (`<home>/llama`, `<home>/sdcpp`, ...) becomes a junction or symlink to a write-once `<component>-versions/<id>`
+  directory, so no rendered config, task or probe changes; a candidate is staged, verified and switched atomically, and
+  a failed gate or first load points the live path back at the previous generation. An engine whose live directory
+  a running process holds is staged, reported and recorded as `staged`, never swapped out from under it. `installed.json`
+  (schema 2) records per component the version, the publisher's digest, the size, the source and the install time, `dest`
+  for a model file and `staged` for a generation waiting for a restart, each written the moment its component is live;
+  the update verb (its own change) adds `current`, `previous`, `rejected[]`, the ETag and the check time.
+- **The lint.** `no_version_pins_test.go` fails when an installer, a render script, a dependency manifest or an
+  accelerator recipe carries a release tag, a build number, a 40- or 64-hex digest or an exact dependency version, naming
+  file and line; `setup/floors.json` is the one place a build number may appear. The repository `AGENTS.md` and
+  `CLAUDE.md` carry the rule in one sentence each.
+- **Docs.** ADR 0099 (`docs/architecture/decisions/0099-frontier-updates-floors-never-pins.md`) records the rule, the
+  publisher-integrity source, the generations layout, the update verb and the lint, and reverses the 2026-08-27 "blessed
+  tag, never the newest nightly" policy: a measured gate with automatic rollback replaces curation, and the `release`
+  channel stays selectable per node. ADR 0081's second-build doctrine is superseded (its status reads Superseded by 0099;
+  the body is kept as history). The setup runbook (Hard rule 2 and the integrity-mismatch rows), the system docs, the root
+  docs, the glossary (Floor, Version pin, Placement pin, Generation), the maxwell-3 design and plan, the older specs and
+  plans, the profile notes and the regenerated `docs/tiers/` pages no longer state pinning as policy; dated measurements
+  ("measured on b11490 on 2026-10-28") stay as records. The frozen 2026-08-26 roadmap gains one line marking it a
+  historical snapshot.
+- **Check.** `go generate ./...` regenerated `docs/tiers/*.md` from `setup/templates/profiles.json`; `go run
+  ./cmd/changelog check` and the tier-docs, operator-identity and changelog-tree tests pass; a search of the docs, the
+  runbook, the profile notes and the root docs for the old pin wording returns nothing.
+
+### Added - the `maxwell-3` tier: a 3 GB NVIDIA card (GTX 970M-class, sm_52) gets its own band, with the E4B workhorse omitted and the E2B resident
+
+- **What it does.** `hwdetect` and `detect.ps1` classify an NVIDIA card with less than 4 GB of VRAM (and no
+  Blackwell or Volta label) as `maxwell-3` instead of letting it fall through to `ampere-6`, whose E4B workhorse
+  needs 3,100 MiB at 16K and cannot load on a 3,072 MiB card. The arch label `maxwell` (GTX 900 desktop and
+  mobile, 750/750 Ti/745, the 8x0M and 9x0M(X) mobile parts, Quadro M, the original TITAN X) keeps the card out
+  of the "unrecognized NVIDIA" warning; the band keys on VRAM, so a 4 GB card stays `ampere-6` and an unknown
+  VRAM (0) keeps the old fall-through. The tier renders the cuda template with the E2B resident, 32768 ctx, f16
+  KV, flash-attn on, no 26B, no spill seat, no embeddinggemma2, one fleet worker and the research agent profile;
+  the 12.4 prebuilt serves the card through its embedded sm_50 PTX (a one-time JIT the install caches).
+- **`omit_e4b`.** A new profile field in the other polarity of the `include_*` family: `true` removes the
+  `offload-e4b` entry, its matrix var and its set membership (new `__E4B_LEAD__` / `__E4B_AND__` tokens in every
+  template, rendering their old literals by default) and drops `model-e4b` from the Windows download set.
+  Absent or false renders every existing tier byte for byte as before (the render goldens did not move). The
+  renderer and `Resolve-ProfileParams` refuse the flag without `resident_tier` `gemma4-e2b`, and together with
+  the CPU seat family, which mirrors the workhorse. `selftest.ps1` benches the first served tier when
+  `offload-e4b` is not served. The spec stamp carries the field (`omit_e4b`, omitted when false).
+- **Media seats, measured on the box.** The tier declares a vision seat (`gemma4-e2b-vision`: the resident E2B
+  weights plus the ggml-org Q8_0 projector at an 8192 window, reasoning off, an image capped at 768 tokens;
+  2,578 MiB loaded, 2,819 peak on a receipt and 2,896 on a 4K screenshot under the cap, a screenshot and a
+  receipt read correctly; a 512 cap misreads receipt lines, which is why 768 is the bound) and an STT seat (`whisper-stt`: large-v3-turbo q8_0 with the silero
+  v5.1.2 VAD and flash attention OFF per the house Spanish-audio rule; 1,263 / 1,323 MiB, a 759 KB Spanish clip
+  in 3.2 s warmed, the same transcript as q5_0 and as flash attention on). Both are swappable, because either
+  one beside the chat seat overflows a 3 GB card. The image lane binds the sd.cpp Vulkan build the installer resolves with
+  sdxl-turbo Q4_0 exactly as ampere-6 does: a correct 512x512 in 45 s on the card, the weights parked in host
+  RAM and staged per step (1,964 MiB peak on the card).
+- **Agent seat and spill, measured.** The six-arm bake on the box (G1 fit and decode, G2 ten strict tool
+  calls, G3 the grounded digest-8 contract through `local-offload delegate`, G4 a Jev judge over the
+  survivors) keeps the resident E2B as the agent seat: 8/8 grounded digests, every one format-clean, the
+  lowest fabrication signal of the three survivors, 926 MiB free at peak, and one weight file shared with
+  chat and vision, so an agent call never evicts the chat seat. LFM3-1.7B Q6_K and Q8_0 also reach 8/8
+  (Q6_K leads on coverage) but need a newer llama.cpp build than the one installed at bake time, so Q6_K
+  is recorded as the runner-up to bind once the newest build carries it; Qwen3.5-2B and LFM3 QAD-Q4_0 fall at G3, the 4B
+  quants and MiniCPM5-2B at G1. The Qwen3.6-35B-A3B RAM spill loads cleanly (ADR 0080 gates 2 and 3)
+  but decodes at 9.4-10.9 tok/s on this single-channel host, under the 10 tok/s bar, so it is not carried.
+- **Sources.** `model-e2b` and `model-e4b` follow the current upstream LFS objects (unsloth re-uploaded
+  both QAT GGUFs, 2,016 bytes larger with new oids); stale recorded sizes failed the check on a fresh install. The
+  three media-seat files get source rows (`model-e2b-mmproj`, `model-whisper-turbo-q8`, `model-silero-v5`):
+  recorded bytes and sha256, placed by the operator, warned about by `install render` when absent.
+- **Check.** `detect.ps1 -SelfTest` and `go test ./internal/hwdetect/` with the new rows (970M 3 GB ->
+  `maxwell-3`, 3.9 -> `maxwell-3`, 4 -> `ampere-6`, unknown VRAM -> `ampere-6`, 1050 Ti -> `other`);
+  `setup/render.tests.ps1` with a `maxwell-3` block on the min and high RAM bands (no `offload-e4b` entry or var,
+  the interactive set opens on `e2b`, f16, no spill); an `ampere-6` render unchanged; the design and the
+  measurement plan in `docs/specs/2026-10-28-maxwell-3-tier-design.md`, the tier page in
+  `docs/tiers/maxwell-3.md`. Installed end to end on the reference box `<node-g>` on 2026-10-28: `install.ps1`
+  classified it `maxwell-3` and exit 0 in 409 s, `selftest.ps1` passed (E2B 37.1 tok/s, the depth-7000 canary), a
+  boot task serves llama-swap on 11436, and one real call per lane came back correct through it (summarize, vqa on
+  a receipt, transcribe a Spanish clip, generate-image through sd.cpp); the scrubbed report is
+  `docs/tiers/reports/maxwell-3-node-g.md`. Nothing in the profile is PROJECTED any more.
+
+### Added - `local-offload update`: every engine moves to its publisher's newest complete build, with generations, a kept previous build and automatic rollback
+
+- **What it does.** A new verb resolves llama.cpp, llama-swap, whisper.cpp, stable-diffusion.cpp and HyperFrames from
+  their publishers at run time (GitHub releases, npm), picks the newest build whose every required asset for this node
+  is uploaded with a digest (a half-uploaded release steps back one tag), verifies the publisher's own sha256 (and the
+  checksums file and `gh attestation verify` when they exist), stages it, runs an offline self-check (the program
+  starts; for llama, every `--flag` the rendered llama-swap yaml passes to it must exist in the staged
+  `llama-server --help`), and promotes it as a write-once generation. The component's live path keeps its name and
+  becomes a junction (Windows) or symlink (Linux) to `<live>-versions/<id>`, so no rendered yaml, task or probe changes.
+  Exactly the current and the previous generation are kept; a failure after the flip re-points to the previous one and
+  records the id in `rejected` so it is never retried.
+- **A free no-op.** The listing is fetched with `If-None-Match` from `installed.json`; a `304`, the same id, a rejected
+  id or an older one ends the run with exit 0 and a timestamp, so running it every five minutes downloads, hashes and
+  extracts nothing.
+- **llama-swap** is swapped through `node-swap` (hash verify, drain of the running seats through llama-swap's own
+  unload, stop, swap, restart, verify `/running` and `-version`, rollback); `--rollback <component>` returns to the
+  previous generation. The layout is decided once (`internal/update/layout.go`): where `<home>/llama-swap` is the
+  installer's junction or symlink into `llama-swap-versions` the build is staged as a write-once generation and the link
+  is flipped (rollback flips it back); a hand layout (one file in an ordinary directory) keeps the file swap with the
+  previous build as `<file>.bak-<id>`. Both share the drain, stop, restart and verification.
+- **Floors, not pins.** `setup/floors.json` (embedded in the binary) holds the minimum build a seat needs; the verb never
+  selects a candidate under a floor and never downgrades. No tag, build number or digest literal exists in the code.
+- **`installed.json` schema 2** adds `{current, previous, rejected[], etag, checked_at, floor}` per component, written
+  atomically; a missing manifest is bootstrapped by probing `--version`. The installer's own flat record
+  (`{version, digest, size, source, installed_at, dest?, staged?}`, keyed by build family such as `llama-cuda13`) is read
+  as the current generation, `dest` is carried through, and the live path's own `<id>.meta.json` settles a disagreement.
+  A generation the installer left `staged` behind a running engine is promoted without a download when its meta file's
+  digests equal the publisher's for the newest build (a newer build ignores it); the verb's meta files now carry the
+  installer's `tag`, `digests` and `sizes` fields too, so the installer reads and reuses them.
+- **Config.** `update` (`channel`, `paths`, `restart`, `llama_swap_yaml`, `gate`) is a declared `config.json` key: no
+  more `unknown config key "update"` warning.
+- **`--repoint <yaml> --component llama`** backs up a hand-kept llama-swap yaml, replaces every build-named directory
+  with the live path and (Linux) points `LD_LIBRARY_PATH` at the live `bin`, without re-rendering.
+- **Side-port smoke gate for llama.** Before a staged llama.cpp build is promoted the verb takes the node's GPU lease
+  (the `gpu reserve --wait --drain --unload-seat` path, `update.gate.lease_wait`, default 30m), starts the staged
+  `llama-server` on a loopback side port with one of the node's own seat command lines, measures load time, prefill and
+  decode tok/s and VRAM, then does the same with the previous generation and rejects on no load, an empty or non-200
+  answer, a rate more than 20 percent lower, or VRAM more than 10 percent higher. A lease timeout is "inconclusive,
+  retry later", never a rejection. The numbers go in the generation's meta file. After the flip llama-swap reloads its
+  seats through its own API and the first real seat load is watched (`update.gate.post_flip_timeout`); a failure rolls
+  back with "post-flip load failed". `--no-gate` and `update.gate.enabled: false` opt out.
+- **Hardening.** The restart mechanism is probed before any drain (a missing task or unit skips the component,
+  nothing stopped; on Windows the one task that runs the live llama-swap is found when the default name is absent);
+  the verb reads its config only from `--config`, `$LOCAL_OFFLOAD_CONFIG` or the home config, never the current
+  directory's; pruning deletes only meta-file-backed generations inside the live path's own `-versions` folder and
+  never the live target; the Windows junction flip makes the new link first and restores the old one by rename; the
+  attestation result is reported and ratchets (a once-attested publisher that stops attesting is rejected); the npm
+  version must be a semver; a `--repoint` backup keeps the yaml's file mode and the gate's job file carries no seat
+  environment; a lock older than three hours is taken over; timeouts, out-of-memory answers and busy seats are
+  inconclusive (rolled back, retried), never a rejection. The post-flip watch loads the seat through the GPU-lease
+  fence (`modelaffinity.AwaitModelRoute`), so a render that took the cards after the gate never gets a model loaded
+  onto them; the gate's own side-port requests live in `internal/update/sideport.go`, admitted by the fence lint.
+  With no `--home` and no `$OFFLOAD_HOME`, the install root is the folder above the running binary's `bin` when it
+  holds the installer's `installed.json`, else `~/offload-stack` when that holds one; no root found is exit 2, never a
+  fresh install in a guessed folder.
+- **Not in this change.** The installers and the fleet registry rows.
+- **Known gap.** After a rejected llama build the gate's `gpu reserve` wrapper still warms the old seat back and the next
+  flip unloads it again; a "no warm-back on reject" option belongs to `gpu reserve` (follow-up).
+- **Check.** Real run on the ampere-8 reference box: `update --resolve llama` and `--dry-run` against the live publisher,
+  and on a scratch installer layout a llama-swap update (junction flipped, previous kept, record rewritten) and a
+  rollback (see `docs/systems/update.md`).
+
+### Fixed - the HyperFrames lane no longer refuses to run unless one exact version is installed: the harness installs the newest npm release and the runner requires only a floor
+
+- **What was wrong.** The composition lane was welded to one HyperFrames release. The runner
+  (`render/compose-hyperframes.mjs`) threw `CLI_MISSING` on any version but its exact-version constant, the
+  Go installer (`internal/hfinstall`) embedded a committed `package-lock.json` and compared the runner's
+  pin, the lock and `package.json` for equality, `local-offload install hyperframes` compared the
+  chrome-headless-shell build, and capability status read `BOUND-BUT-MISSING` whenever the install
+  differed from the pin. A newer upstream release was therefore refused by every layer until someone
+  edited five files in step, and a node that fell one release behind answered `CLI_MISSING` to every
+  composition. Nothing about a newer release is wrong in itself.
+- **The fix.** The installed HyperFrames is a record with a floor. `setup/hyperframes/package.json`
+  depends on `latest` and the lockfile is gone; the installers run `npm install --ignore-scripts` in a
+  staging copy (npm verifies each tarball against the registry's integrity field), run
+  `npm audit signatures`, read the staged `node_modules/hyperframes/package.json`, check its version
+  against the `hyperframes` floor in `setup/floors.json`, and swap it in with the previous tree kept as
+  `node_modules.prev`. Every swap is a whole directory rename: PowerShell's `Move-Item` is not one (when a
+  render holds a file it moves what it can and splits the tree), so `setup/install.ps1` renames through
+  `Move-DirAtomic`, which also carries the engine installer's legacy-folder migration and staged-generation
+  move. A refused swap changes nothing; one that fails after the old tree moved aside puts it back. A lockfile an
+  older installer left is retired to `package-lock.json.prev`, and a rollback restores only the `.prev` files its
+  own swap wrote. An install at or above the registry's newest is kept, never downgraded. The
+  version and time are recorded in `installed.json` under `components.hyperframes.current`
+  (`{id, version, installed_at}`; a flat schema-1 entry is replaced by the record). The runner's
+  `assertInstalled` throws `CLI_MISSING` only when the CLI is absent or below the floor, and capability
+  status (`BOUND-BUT-MISSING`) agrees. The exact-version constant, its assertion, the drift, pin-match and lock-pin helpers and the
+  chrome-headless-shell comparison are removed: HyperFrames fetches its own browser and
+  the harness only reports where it put it. The `version` op now answers `{version, floor, at_floor}`.
+- **What an operator sees.** `local-offload install hyperframes` moves a node to the newest release (or
+  says it already is), prints the browser path, and `installed.json` names the version. A release that
+  changes a flag the runner relies on is absorbed in the runner's argument builders, not pinned away.
+
+### Fixed - the Windows installer ships the render runners beside the harness, so the sd.cpp and hyperframes routes resolve on a fresh install
+
+- **What was wrong.** Every relative render binding the config carries (`render/sdcpp-generate.mjs` on
+  the tiers that seed the sd.cpp image lane, `render/compose-hyperframes.mjs` wherever the installer
+  binds the compose lane) resolves against the harness executable's directory, and `install.sh` copies
+  the `render/` tree to `<prefix>/bin/render` for that reason. `install.ps1` never did: a fresh Windows
+  install built `harness\local-offload.exe`, installed hyperframes, bound both scripts, and `doctor`
+  then reported both routes `BOUND-BUT-MISSING` (`script not found at <home>\harness\render\...`),
+  found on the `maxwell-3` reference box on 2026-10-28; `generate_image` deferred on its first call.
+- **The fix.** A new Step 7a copies the repo's `render/` tree to `<home>\harness\render` on every
+  install (never skipped, like a rebuilt exe), fails loudly when no runner lands, and
+  `SETUP-AGENT.md` lists the directory among what the installer lays down. Boxes that bound an absolute
+  `compose_script` by hand keep working; a relative binding now resolves on Windows as it does on Linux.
+- **Check.** `install.ps1` re-run on the reference box: `doctor` reports `generate_image` and
+  `compose_video` `CONFIGURED`, and `local-offload generate-image` renders a 512x512 through sd.cpp.
+
+### Fixed - the dev tooling and runtime refusals carry no version pins: ComfyUI node packs are admitted by repository, the forecast lane resolves at install time, CI reads its floors and tracks the newest releases
+
+- **What changed.** ComfyUI node packs are admitted by repository (`render/node-packs.json` has no commit column);
+  a node clones a pack it does not hold at the head of the default branch and records the commit beside the pack. A
+  render request never moves an installed pack: updating one is the operator's (`git pull --ff-only` in its folder,
+  or the fleet's update tooling), so a holder of the render bearer cannot make a node fetch an upstream's newest push.
+  The dependency marker is keyed on the recorded commit, so a pack the operator moved is re-resolved. The forecast
+  installer (`install forecast`) resolves the Hugging Face revision of `main` and the weights' digest and size from
+  the publisher's API at install time, and installs the timestral package from the head of its default branch;
+  python stays a floor (`>=3.13`). The browse sidecar takes `browser-harness>=0.1.13` and `jev-ultrafast` from its git
+  default branch, installed with `uv sync --upgrade`, so every install run re-resolves to the newest whatever
+  `uv.lock` the install folder already holds. CI takes the newest stable Go (`go-version: stable`, `check-latest`; `go.mod`'s `go` line stays the floor), tracks the
+  current Node, installs `govulncheck@latest`, and no longer demands the compiler equal a `toolchain` line, which is
+  gone from `go.mod`. The vendored llama-swap config schema is a refreshable snapshot
+  (`scripts/refresh-llamaswap-schema.sh`), and `version drift` treats it as a floor: only a server older than the
+  snapshot is drift. The vLLM and LMCache patch notes say the patches target the version they were written against and
+  carry a re-base duty. `no_version_pins_test.go` now also scans `render/`, `install_*.go`, `scripts/openspec*`,
+  `accelerators/`, the browse and HyperFrames manifests and the CI workflow.
+- **Accelerators.** `accelerators/coral/models.json` and `accelerators/rknpu/models.json` carry no `sha256` and no
+  version. Both `fetch-models.sh` scripts resolve at run time and verify against the publisher: Coral reads the git
+  blob id of each file at the tip of `google-coral/test_data`; RKNPU takes the newest non-draft release of
+  `airockchip/rknn-toolkit2` (runtime library and the wheel for the venv's python) and `airockchip/rknn_model_zoo`
+  (labels, test images, the ONNX download links) that carries every file asked of it, and the timm weights' `lfs.oid`
+  from the Hugging Face tree API at `main`. Each file that passes is recorded as `{file, digest, publisher_digest,
+  size, source, fetched_at}` in `models.installed.json` beside the weights, and the sidecars refuse a model whose
+  bytes differ from that record (`model_sha_mismatch`); a file with no record is served and listed under
+  `models_unverified` in `/health`. `fetch-models.sh --dry-run` prints the resolved digests and downloads nothing. The
+  conversion recipe's pip lines are floors.
+- **OpenSpec.** `scripts/openspec-install.sh` installs `@fission-ai/openspec` at the registry's `latest` with
+  `npm install --ignore-scripts`, then checks the installed package's recorded integrity against a second
+  `npm view ... dist.integrity` and runs `npm audit signatures`; `OPENSPEC_VERSION`, `OPENSPEC_SHA256` and
+  `scripts/openspec/package-lock.json` are gone, and the admitted-software table in `docs/systems/security.md`
+  names a source instead of a version and hash.
+- **ComfyUI rule files.** The two rule-file hashes `render/templates-catalog.mjs` compared against are no longer
+  literals in the runner. `templates-catalog.mjs record-rules --comfy-dir <dir>` records them in
+  `.offload-rule-files.json` in the ComfyUI folder when a checkout is registered or refreshed; readiness compares a
+  node's current files with that record and says "not recorded" when there is none.
+- **Why.** A pin freezes every install at one release and rots against the fleet; floors live in `setup/floors.json`
+  and `go.mod`'s `go` line only (ADR 0099).
+- **Upgrade notes.** A manifest that still names a `commit` for a node pack is accepted and the commit is not read.
+  Re-run `fetch-models.sh` on each accelerator box once: a model with no record in `models.installed.json` is served as
+  unverified until then, and a converted RKNPU model is recorded by `fetch-models.sh --convert` on the build host.
+  `version drift --json` keeps its `cli_pinned_surface` field name for schema compatibility; `comfy features --json`
+  renames `pinned_api_version` to `known_api_version`.
+- **Docs.** No document describes a pin, a lockfile, a blessed version or an exact sha as policy any more. The accelerator
+  page has a section on how the Coral and RKNPU artifacts are fetched and verified (resolve at fetch time, the publisher's
+  digest, the `models.installed.json` record, `models_unverified`, `--dry-run`); the media-generation, operator, setup,
+  fleet-node, run-graph and glossary pages say a node pack is admitted by repository and its commit is recorded, that
+  HyperFrames is the newest npm release at or above the floor, and that the ComfyUI rule files are compared with the
+  record `templates-catalog.mjs record-rules` writes (`.offload-rule-files.json`, "not recorded" when absent). The Coral
+  design and the browse-lane plan carry a dated line saying their pins were replaced by resolve-at-fetch (ADR 0099); the
+  ADRs that decided a pin (0007, 0023, 0059, 0060, 0062, 0081, 0090, 0098) keep their text and carry a
+  `Superseded by ADR 0099 for the pinning mechanism` status line, mirrored in the ADR index.
+
 ## [0.203.0] - 2026-10-25 - The forecast lane: Timestral-209M time-series forecasting on any box, locally or through the fleet
 
 ### Added - the forecast lane: `offload_forecast` forecasts time series on Timestral-209M, on any box, locally or through the fleet
