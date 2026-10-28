@@ -16,7 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # The deletion guard below diffs against the base branch and against
           # HEAD's first parent; neither ref exists in a depth-1 checkout.
@@ -49,14 +49,14 @@ jobs:
           fi
           bash ./scripts/check-deletions.sh 'HEAD^1' HEAD
 
-      # go.mod's `go` line is the floor. With GOTOOLCHAIN at its default (auto) the go command downloads a newer
-      # toolchain when the module needs one, and check-latest makes the action take the newest release of the
-      # line's minor, so build, vet and test judge the compiler a contributor gets today. No version is named
-      # here: the action reads the floor from go.mod and nothing else.
+      # The newest stable Go release (`stable`, re-checked every run by check-latest), so build, vet and test judge
+      # the compiler a contributor gets today. go.mod's `go` line stays the floor (the go command refuses an older
+      # one). It is not read here: setup-go reads that line as an exact version, which held CI at the floor and
+      # scanned a standard library two security fixes behind (2026-10-28).
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
           check-latest: true
 
       - name: Build
@@ -91,7 +91,7 @@ jobs:
 
       # The render runners are ~170 node:test assertions that were never in CI.
       - name: Set up Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: current
 
@@ -109,13 +109,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
-      # The Go floor comes from go.mod here as in the build job (see the comment there).
+      # The newest stable Go here as in the build job (see the comment there).
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
           check-latest: true
 
       # D-98. The Windows cage's environment proof runs here, on a Windows runner, on every change. Its
@@ -195,12 +195,12 @@ jobs:
         working-directory: tools/comfyui
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
           check-latest: true
           cache-dependency-path: tools/comfyui/go.sum
 
@@ -233,12 +233,12 @@ jobs:
         working-directory: tools/llamaswap
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
           check-latest: true
           cache-dependency-path: tools/llamaswap/go.sum
 
@@ -262,7 +262,7 @@ jobs:
         working-directory: integrations/opencode
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@v2
@@ -279,14 +279,15 @@ jobs:
         run: bun test
 
   # H-26 (supply-chain lane). Every pull request and push is scanned for known vulnerabilities with
-  # the newest compiler the floor in go.mod allows. The root module and both printed CLIs under tools/
+  # the newest stable Go release. The root module and both printed CLIs under tools/
   # (separate modules, which the root's `./...` never reaches) are scanned for linux AND windows, because
   # some advisories name one OS.
   #
   # Nothing here is pinned: the scanner is `govulncheck@latest` and the advisory data is the database's
   # newest, so a new release of either, or a new advisory, can turn this job red between releases, and the
-  # fix is a bump of the dependency. The Go release comes from go.mod's `go` line as a floor, taken at its
-  # newest by check-latest.
+  # fix is a bump of the dependency. The Go release is the newest stable one (`go-version: stable`,
+  # check-latest). The last step also turns the job red when an action this workflow uses is behind its
+  # publisher's newest major release: the fix is moving the `@v<N>` here, never holding it back.
   #
   # govulncheck exits 3 when the code calls a vulnerable function and 1 when the scan could not run
   # (the vulnerability database is unreachable, a package does not load). All six scans always run,
@@ -296,14 +297,14 @@ jobs:
     timeout-minutes: 20
     steps:
       - name: Check out code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       # No module cache: this job downloads a compiler, a scanner and three dependency graphs it never
       # builds, and a cache restored into a security scan is one more thing to trust.
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: stable
           check-latest: true
           cache: false
 
@@ -326,5 +327,31 @@ jobs:
                 status=1
               fi
             done
+          done
+          exit "$status"
+
+      # Every `uses: <owner>/<repo>@v<N>` in the workflows names its publisher's newest major release. A floating
+      # major is the publisher's own channel, but a major left behind is an old build all the same.
+      - name: Every action is at its publisher's newest major
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          status=0
+          refs=$(grep -hoE 'uses: *[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@v[0-9]+' .github/workflows/*.yml | sed -E 's/uses: *//' | sort -u)
+          for ref in $refs; do
+            repo=${ref%@*}
+            have=${ref##*@v}
+            tag=$(gh api "repos/$repo/releases/latest" --jq .tag_name)
+            newest=$(printf '%s' "$tag" | sed -nE 's/^v?([0-9]+).*/\1/p')
+            if [ -z "$newest" ]; then
+              echo "::error::$repo: its newest release ($tag) names no major version"
+              status=1
+            elif [ "$have" -lt "$newest" ]; then
+              echo "::error::$ref is behind $repo's newest release $tag: move it to @v$newest"
+              status=1
+            else
+              echo "ok $ref (newest release $tag)"
+            fi
           done
           exit "$status"

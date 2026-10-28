@@ -10,8 +10,9 @@ package main
 //
 // Two details are easy to get wrong and are checked here:
 //
-//   - The compiler. Nothing names one: the job reads the floor from go.mod (setup-go's go-version-file, taken at its
-//     newest by check-latest) and the go command downloads a newer toolchain when the module needs one.
+//   - The compiler. Nothing names one: the job takes the newest stable Go release (setup-go's `go-version: stable`,
+//     re-checked by check-latest). go.mod's `go` line is the floor, never read as the version to install: setup-go
+//     reads that line as an exact version, which held this job at the floor (2026-10-28).
 //   - The verdict. govulncheck exits 3 for a finding and 1 for an error, such as a vulnerability
 //     database it cannot reach; either must fail the job, for every module and OS, never only the last.
 //
@@ -197,9 +198,9 @@ func TestCIRunsGovulncheckOnEveryModuleOnBothOSes(t *testing.T) {
 		t.Errorf("job %s must set up Go, then install govulncheck, then scan; steps are at %d, %d, %d",
 			g.name, g.setupGo, g.install, g.scan)
 	}
-	// The Go release comes from go.mod's floor, never from a version typed into the workflow.
-	if st := job.Steps[g.setupGo]; st.With["go-version-file"] != "go.mod" || st.With["go-version"] != nil {
-		t.Errorf("job %s: setup-go must read go.mod (go-version-file) and name no go-version; with is %v", g.name, st.With)
+	// The Go release is the newest stable one, never a version typed into the workflow and never go.mod's floor.
+	if st := job.Steps[g.setupGo]; st.With["go-version"] != "stable" || st.With["go-version-file"] != nil || st.With["check-latest"] != true {
+		t.Errorf("job %s: setup-go must take go-version: stable with check-latest and read no go-version-file; with is %v", g.name, st.With)
 	}
 
 	t.Run("govulncheck is installed and can be found", func(t *testing.T) {

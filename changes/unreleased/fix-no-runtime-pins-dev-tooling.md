@@ -9,7 +9,7 @@
   the publisher's API at install time, and installs the timestral package from the head of its default branch;
   python stays a floor (`>=3.13`). The browse sidecar takes `browser-harness>=0.1.13` and `jev-ultrafast` from its git
   default branch, installed with `uv sync --upgrade`, so every install run re-resolves to the newest whatever
-  `uv.lock` the install folder already holds. CI reads the Go floor from `go.mod` (`go-version-file`, `check-latest`), tracks the
+  `uv.lock` the install folder already holds. CI takes the newest stable Go (`go-version: stable`, `check-latest`; `go.mod`'s `go` line stays the floor), tracks the
   current Node, installs `govulncheck@latest`, and no longer demands the compiler equal a `toolchain` line, which is
   gone from `go.mod`. The vendored llama-swap config schema is a refreshable snapshot
   (`scripts/refresh-llamaswap-schema.sh`), and `version drift` treats it as a floor: only a server older than the

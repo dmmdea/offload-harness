@@ -25,7 +25,7 @@ import (
 // 64-hex digest, an exact python requirement (==x.y), an exact x.y.z in a package.json
 // dependencies map, or a go.mod `toolchain go1.` line. setup/floors.json is the one
 // file allowed to carry a build number (a minimum, never a maximum); a line that names
-// floors.json is skipped, and so is an action's own major tag (actions/checkout@v4,
+// floors.json is skipped, and so is an action's own major tag (actions/checkout@v7,
 // upstream's floating channel).
 func TestInstallersCarryNoVersionPins(t *testing.T) {
 	patterns := []*regexp.Regexp{

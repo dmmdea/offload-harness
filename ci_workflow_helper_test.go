@@ -486,7 +486,7 @@ func TestCIGateSwitchesAreSeen(t *testing.T) {
     runs-on: ubuntu-latest
     steps:
       - name: set up
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@v7
       - name: proof
         run: echo proof
       - name: after
@@ -517,10 +517,10 @@ func TestCIGateSwitchesAreSeen(t *testing.T) {
 		{name: "both on the job", job: "    if: false\n    continue-on-error: true", listed: []int{1},
 			expect: []string{"job gate has `if`", "job gate has `continue-on-error`"}},
 		{name: "a step-level if", listed: []int{1},
-			steps:  "\n    runs-on: ubuntu-latest\n    steps:\n      - name: set up\n        uses: actions/setup-go@v5\n      - name: proof\n        if: github.event_name == 'push'\n        run: echo proof\n",
+			steps:  "\n    runs-on: ubuntu-latest\n    steps:\n      - name: set up\n        uses: actions/setup-go@v7\n      - name: proof\n        if: github.event_name == 'push'\n        run: echo proof\n",
 			expect: []string{`step "proof" of job gate has ` + "`if`"}},
 		{name: "a step-level continue-on-error", listed: []int{1},
-			steps:  "\n    runs-on: ubuntu-latest\n    steps:\n      - name: set up\n        uses: actions/setup-go@v5\n      - name: proof\n        run: echo proof\n        continue-on-error: true\n",
+			steps:  "\n    runs-on: ubuntu-latest\n    steps:\n      - name: set up\n        uses: actions/setup-go@v7\n      - name: proof\n        run: echo proof\n        continue-on-error: true\n",
 			expect: []string{`step "proof" of job gate has ` + "`continue-on-error`"}},
 		{name: "no step listed: every step is read", listed: nil,
 			steps:  "\n    runs-on: ubuntu-latest\n    steps:\n      - name: set up\n        if: false\n      - name: proof\n        run: echo proof\n        continue-on-error: true\n",

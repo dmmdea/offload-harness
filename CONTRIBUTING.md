@@ -19,7 +19,7 @@ suite by hand, and see "Testing rule" below for what a change carries instead of
 The `go` line in `go.mod` is a floor, the oldest compiler the harness builds with; there is no `toolchain`
 line, so nothing holds the compiler to an exact release. With `GOTOOLCHAIN=auto` a Go older than the floor
 downloads a newer one on the first build in this tree (from the module proxy, into the module cache), and
-CI's `setup-go` reads the floor from `go.mod` and takes the newest release (`check-latest`).
+CI's `setup-go` takes the newest stable Go release (`go-version: stable`, `check-latest`); the `go` line is never read as the version to install.
 `GOTOOLCHAIN=local` builds with the installed Go instead, which is the way to build offline. CI also scans
 the harness module and both printed CLIs for known vulnerabilities, for linux and windows, in the
 `govulncheck` job. To run one scan by hand: `go install golang.org/x/vuln/cmd/govulncheck@latest`, then
