@@ -100,7 +100,7 @@ func runUpdate(args []string) error {
 	case *comp == "all" || *comp == "":
 		opts.Components = update.AllComponents
 	default:
-		opts.Components = []string{*comp}
+		opts.Components, opts.Explicit = []string{*comp}, true
 	}
 	if *live != "" && len(opts.Components) != 1 {
 		return &exitCodeError{code: 2, msg: "update: --live names one component's path; pass --component"}

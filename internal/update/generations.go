@@ -470,7 +470,7 @@ func (e *Env) stageNPM(ctx context.Context, def *compDef, live string, cand *Can
 // rollback returns a component to its previous generation, on the operator's word (not a failure: nothing is rejected).
 func (e *Env) rollback(ctx context.Context, def *compDef, man *Manifest, opts Options) Report {
 	st := man.State(def.Name)
-	live := e.livePath(def, opts)
+	live := e.livePath(def, st, opts)
 	rep := Report{Component: def.Name, Live: live, Installed: installedID(st), Action: "rollback"}
 	if st.Previous == nil {
 		rep.Action, rep.Detail, rep.exit = "error", "no previous generation is recorded; nothing to roll back to", ExitError

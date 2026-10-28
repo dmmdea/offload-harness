@@ -41,6 +41,9 @@ type State struct {
 	Floor     string      `json:"floor,omitempty"`
 	// Dest is the installer's local name for the component, carried through untouched.
 	Dest string `json:"dest,omitempty"`
+	// Live is the live path the verb last worked on (a junction, symlink or file): a later run with no --live and no
+	// update.paths finds the component there.
+	Live string `json:"live,omitempty"`
 	// Staged is the generation the installer left on disk, behind a running engine, for the verb to promote
 	// (<live>-versions/<Staged>); the verb clears it once it has promoted, or superseded it with a newer build.
 	Staged string `json:"staged,omitempty"`
