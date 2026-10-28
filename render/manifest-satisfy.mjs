@@ -308,14 +308,6 @@ export function buildInstallCmd(lockPath, { comfyPy }) {
   return [comfyPy, "-m", "pip", "install", "-r", lockPath];
 }
 
-// buildEnsurePackCmd: bring an existing pack to the head of its default branch. Fast-forward only: a pack
-// whose checkout carries a local edit or has diverged fails loud instead of being overwritten. No ref comes from
-// the caller, so there is nothing to mistake for a git option (the repository is the allowlisted row's).
-export function buildEnsurePackCmd(pack, { comfyDir }) {
-  const dir = `${comfyDir}/custom_nodes/${pack.name}`;
-  return ["git", "-C", dir, "pull", "--ff-only"];
-}
-
 // buildClonePackCmd: `git clone -- <repo> <dir>`. The literal `--` terminates option parsing,
 // so a `repo` value starting with `-` is treated as a positional (a path/URL), never a flag (#5).
 export function buildClonePackCmd(pack, { comfyDir }) {
@@ -377,20 +369,27 @@ async function runOut(cmd, opts = {}) {
   });
 }
 
-// recordPackInstall: write the commit a pack landed on, and when, beside the pack
+// recordPackInstall: write the commit a pack is at, and when it got there, beside the pack
 // (custom_nodes/<name>.installed.json: ComfyUI loads only directories and .py files from custom_nodes, so the
-// record is inert there). A record the node cannot write never fails the install.
-export function recordPackInstall(pack, commit, { comfyDir, write = writeFileAtomic, now = () => new Date().toISOString() }) {
+// record is inert there). A record that already names this commit is left alone, so installed_at stays the time the
+// pack reached it. A record the node cannot write never fails the install.
+export function recordPackInstall(pack, commit, { comfyDir, write = writeFileAtomic, read = (p) => readFileSync(p, "utf8"), now = () => new Date().toISOString() }) {
   try {
+    const path = `${comfyDir}/custom_nodes/${pack.name}.installed.json`;
+    let held = null;
+    try { held = JSON.parse(read(path)); } catch { held = null; }
+    if (held && held.commit === commit && held.repo === pack.repo) return;
     write(`${comfyDir}/custom_nodes/${pack.name}.installed.json`, JSON.stringify({ repo: pack.repo, commit, installed_at: now() }, null, 2) + "\n");
   } catch { /* the record is informational */ }
 }
 
-// makeEnsurePack: build the per-pack "clone if absent, fast-forward to the default branch head, report changed"
-// step from injectable primitives so it is unit-testable without spawning git. #3: `changed`
-// is decided by the git HEAD before-vs-after (a fresh clone, or a pull that MOVED HEAD),
-// NOT merely "did the dir exist" — an already-current checkout is correctly a no-op. The
-// commit it landed on is returned and recorded (recordPackInstall).
+// makeEnsurePack: build the per-pack "clone if absent, report changed" step from injectable primitives so it is
+// unit-testable without spawning git. A pack that is absent is cloned at the head of its repository's default branch
+// (changed); a pack already on disk is used as it is (not changed). A render request never moves an installed pack:
+// moving one to a newer commit is the operator's update (`git -C custom_nodes/<name> pull --ff-only`, or the fleet's
+// update tooling), so a caller holding only the render bearer cannot make a node fetch and run whatever an upstream
+// pushed a minute ago. The commit the pack is at is returned and recorded (recordPackInstall); the dependency marker
+// is keyed on it, so a pack the operator moved is re-resolved on the next request that names it.
 export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd, record = (pack, commit) => recordPackInstall(pack, commit, { comfyDir }) }) {
   return async (pack) => {
     // The last stop before git: the directory, the clone and the checkout all come from the pack, so a pack that is
@@ -402,12 +401,10 @@ export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun,
     }
     const dir = `${comfyDir}/custom_nodes/${pack.name}`;
     const existed = exists(dir);
-    const headBefore = existed ? await gitHead(dir) : null;
     if (!existed) await gitRun(buildClone(pack, { comfyDir }));
-    if (existed) await gitRun(buildEnsurePackCmd(pack, { comfyDir }));
-    const headAfter = await gitHead(dir);
-    record(pack, headAfter);
-    return { changed: !existed || headBefore !== headAfter, commit: headAfter };
+    const commit = await gitHead(dir);
+    record(pack, commit);
+    return { changed: !existed, commit };
   };
 }
 

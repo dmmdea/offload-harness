@@ -8,7 +8,7 @@ import { satisfyManifest, buildHostConstraints, publicPin, isSpawnFailure, runRe
 import { parseManifest } from "./manifest.mjs";
 import { makeStub, stubAvailable } from "./igpu-stub.mjs";
 import { scratchDir } from "./test-scratch.mjs";
-import { buildCompileCmd, buildInstallCmd, buildEnsurePackCmd, buildClonePackCmd, makeEnsurePack } from "./manifest-satisfy.mjs";
+import { buildCompileCmd, buildInstallCmd, buildClonePackCmd, makeEnsurePack } from "./manifest-satisfy.mjs";
 
 const base = {
   comfyDir: "C:/ComfyUI",
@@ -461,12 +461,6 @@ test("buildInstallCmd installs the unified lock with the venv python", () => {
   assert.deepEqual(buildInstallCmd("LOCK", { comfyPy: "PY" }), ["PY", "-m", "pip", "install", "-r", "LOCK"]);
 });
 
-test("buildEnsurePackCmd fast-forwards the pack to the head of its default branch, naming no ref", () => {
-  const cmd = buildEnsurePackCmd({ name: "A", repo: "https://x/a" }, { comfyDir: "C:/ComfyUI" });
-  assert.deepEqual(cmd.slice(-2), ["pull", "--ff-only"]);
-  assert.match(cmd.join(" "), /custom_nodes/);
-});
-
 // #5: clone neutralizes a leading-dash repo with a literal `--` before the positionals.
 test("buildClonePackCmd inserts -- so a leading-dash repo is a positional, not a flag", () => {
   const cmd = buildClonePackCmd({ name: "A", repo: "--upload-pack=evil" }, { comfyDir: "C:/ComfyUI" });
@@ -475,28 +469,19 @@ test("buildClonePackCmd inserts -- so a leading-dash repo is a positional, not a
   assert.ok(cmd.indexOf("--upload-pack=evil") > dd, "repo comes AFTER the -- terminator");
 });
 
-// #3 drift: `changed` is decided by the git HEAD before-vs-after, not "did the dir exist".
-test("makeEnsurePack: HEAD moved on the pull → changed:true, and the commit it landed on is recorded", async () => {
-  let head = "aaaaaaa";
-  const recorded = [];
+// A render request never moves an installed pack: no git command runs, and the commit it is at is reported.
+test("makeEnsurePack: an installed pack is used as it is → no git command, changed:false, its commit recorded", async () => {
+  const ran = [], recorded = [];
   const ep = makeEnsurePack({
     comfyDir: "C:/ComfyUI", exists: () => true, packAllowed: () => null,
-    gitHead: async () => head,
-    gitRun: async (cmd) => { if (cmd.includes("pull")) head = "bbbbbbb"; }, // the pull moves HEAD
+    gitHead: async () => "samehead", gitRun: async (cmd) => { ran.push(cmd); },
     record: (pack, commit) => recorded.push([pack.name, commit]),
   });
   const r = await ep({ name: "A", repo: "r" });
-  assert.equal(r.changed, true);
-  assert.equal(r.commit, "bbbbbbb");
-  assert.deepEqual(recorded, [["A", "bbbbbbb"]]);
-});
-test("makeEnsurePack: HEAD unchanged (already current) → changed:false", async () => {
-  const ep = makeEnsurePack({
-    comfyDir: "C:/ComfyUI", exists: () => true, packAllowed: () => null,
-    gitHead: async () => "samehead", gitRun: async () => {}, record: () => {},
-  });
-  const r = await ep({ name: "A", repo: "r" });
   assert.equal(r.changed, false);
+  assert.equal(r.commit, "samehead");
+  assert.deepEqual(ran, []);
+  assert.deepEqual(recorded, [["A", "samehead"]]);
 });
 test("makeEnsurePack: fresh clone (dir absent) → changed:true, clones once, pulls nothing", async () => {
   let cloned = 0, pulled = 0;

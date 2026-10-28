@@ -8,7 +8,7 @@ import (
 
 // The node packs a run-graph manifest may name.
 //
-// A manifest's node_packs makes the node `git clone` each repository (or fast-forward it) and pip-install the
+// A manifest's node_packs makes the node `git clone` each repository it does not hold yet and pip-install the
 // pack's requirements into its ComfyUI venv: the caller's code, running on the node. The fleet bearer lets a caller
 // run renders, not code, so a manifest is taken only when every pack it names is a row below, by repository, under
 // the row's directory name. The node installs the head of the repository's default branch and records the commit it

@@ -1,6 +1,6 @@
 // node-packs.mjs — the node packs a run-graph manifest may name.
 //
-// A manifest's node_packs makes the node `git clone` each repository (or fast-forward it) and pip-install the
+// A manifest's node_packs makes the node `git clone` each repository it does not hold yet and pip-install the
 // pack's requirements into the ComfyUI venv: that is the caller's code running on the node. So a pack is taken only
 // when its repository is a row of node-packs.json (the allowlist of the packs the shipped graph builders need), and
 // the directory it installs under is the row's name. Anything else is refused with a typed NODE_PACK_NOT_ALLOWED

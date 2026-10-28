@@ -70,11 +70,14 @@ environment.
    `source_url` → `MODEL_DOWNLOAD_FAILED`. Models downloaded without a declared hash are reported as
    `unverified_models` in the success envelope rather than silently trusted.
 
-5. **Clone each node pack, or fast-forward it,** to the head of its repository's default branch (`git pull --ff-only`: a pack
-   with a local edit or a diverged history fails loud instead of being overwritten). The commit it landed on is recorded beside
-   the pack in `custom_nodes/<name>.installed.json` (`{repo, commit, installed_at}`). A pack is considered changed by
-   comparing git HEAD before and after — an already-current pack is correctly a no-op. Packs are placed
-   *before* dependency resolution, because the unified resolve reads their on-disk requirements.
+5. **Clone each node pack the node does not hold yet** at the head of its repository's default branch. A pack already on
+   disk is used as it is: a render request never moves an installed pack, so a caller holding only the render bearer
+   cannot make a node fetch and run whatever an upstream pushed a minute ago. Moving a pack to a newer commit is the
+   operator's update (`git -C custom_nodes/<name> pull --ff-only`, or the fleet's update tooling). The commit a pack is at
+   is recorded beside it in `custom_nodes/<name>.installed.json` (`{repo, commit, installed_at}`, rewritten only when the
+   commit changes), and the dependency marker is keyed on it, so a pack the operator moved is re-resolved on the next
+   request that names it. A fresh clone is a change; an installed pack is not. Packs are placed *before* dependency
+   resolution, because the unified resolve reads their on-disk requirements.
 
 6. **Resolve and install dependencies once**, for all packs together, under host-pin constraints that
    prevent anything moving `torch`, `torchvision`, `torchaudio`, or `numpy`. The resolve runs on
