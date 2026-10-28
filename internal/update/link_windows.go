@@ -36,20 +36,46 @@ func makeLink(link, target string) error {
 	return nil
 }
 
-// flipLink points link at target. A junction cannot be replaced in one step, so the old one is removed (the
-// directory it names is untouched) and the new one made at once; if that fails the old one is put back.
+// flipLink points link at target. A junction cannot be replaced in one step, so the step that can fail for reasons
+// outside this process (mklink: an antivirus block, a path cmd.exe cannot carry) runs first, beside the live link,
+// while it is still intact: the new junction is made as <link>.new, the old one is renamed aside to <link>.old, the
+// new one renamed into place, and only then is the old one removed. Every step after the first is a rename of a
+// junction (the directories they name are never touched), and a failed rename puts the old junction back by rename,
+// so a failure never leaves the live path missing.
 func flipLink(link, target string) error {
-	old, had := readLink(link)
-	if had {
-		if err := os.Remove(link); err != nil {
-			return fmt.Errorf("removing the old junction %s: %w", link, err)
+	link = filepath.Clean(link)
+	tmp, parked := link+".new", link+".old"
+	for _, p := range []string{tmp, parked} {
+		if _, isLink := readLink(p); isLink {
+			_ = os.Remove(p) // a leftover junction from an interrupted flip (removes the link only)
+		} else if exists(p) {
+			return fmt.Errorf("%s exists and is not a junction; move it away and retry (the live link is untouched)", p)
 		}
 	}
-	if err := makeLink(link, target); err != nil {
-		if had {
-			_ = makeLink(link, old)
+	if err := makeLink(tmp, target); err != nil {
+		return fmt.Errorf("%w (the live link is untouched)", err)
+	}
+	_, had := readLink(link)
+	if had {
+		if err := os.Rename(link, parked); err != nil {
+			_ = os.Remove(tmp)
+			return fmt.Errorf("moving the old junction %s aside: %w (the live link is untouched)", link, err)
 		}
-		return err
+	} else if exists(link) {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("%s exists and is not a junction (the live link is untouched)", link)
+	}
+	if err := os.Rename(tmp, link); err != nil {
+		if had {
+			if rerr := os.Rename(parked, link); rerr != nil {
+				return fmt.Errorf("renaming %s into place: %v; putting the old junction back from %s ALSO failed: %v", tmp, err, parked, rerr)
+			}
+		}
+		_ = os.Remove(tmp)
+		return fmt.Errorf("renaming %s into place: %w (the old junction is back)", tmp, err)
+	}
+	if had {
+		_ = os.Remove(parked)
 	}
 	return nil
 }

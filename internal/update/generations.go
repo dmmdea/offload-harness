@@ -1,6 +1,7 @@
 package update
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -93,6 +95,11 @@ func (e *Env) applyDir(ctx context.Context, def *compDef, st *State, cand *Candi
 			return e.rejected(st, cand, "extract: "+err.Error())
 		}
 	}
+	if rej, inc := e.attestationRatchet(st, vroot, fe); rej != "" {
+		return e.rejected(st, cand, rej)
+	} else if inc != "" {
+		return result{"inconclusive", "nothing changed, will retry: " + inc, ExitOK, nil}
+	}
 	notes, err := SelfCheck(ctx, def, gen, e.yamlPath(), live)
 	if err == nil && def.Rule == ruleNPM {
 		if id, _, _ := Probe(ctx, def, gen); id != cand.ID {
@@ -101,6 +108,9 @@ func (e *Env) applyDir(ctx context.Context, def *compDef, st *State, cand *Candi
 	}
 	if err != nil {
 		return e.rejected(st, cand, err.Error())
+	}
+	if n := attestationNote(fe); n != "" {
+		notes = append(notes, n)
 	}
 	var prevDir string
 	if st.Current != nil {
@@ -158,8 +168,13 @@ func (e *Env) applyDir(ctx context.Context, def *compDef, st *State, cand *Candi
 			InstalledAt: nowStamp(now), Checks: notes, Gate: e.Gate.Name(), GateNumbers: g.Numbers})
 	}
 
-	back := func(reason string) result {
+	// back points the live path at the previous build again. soft is a failure that says nothing about the build
+	// (a timeout, a card another process holds, a seat that stayed busy): rolled back, not rejected, retried next run.
+	back := func(reason string, soft bool) result {
 		out := result{"rolled-back", reason, ExitRejected, notes}
+		if soft {
+			out = result{"inconclusive", reason + "; rolled back to the previous build, not rejected, will retry", ExitOK, notes}
+		}
 		if oldTarget != "" {
 			if ferr := flipLink(live, oldTarget); ferr != nil {
 				out.action, out.exit = "error", ExitError
@@ -172,7 +187,9 @@ func (e *Env) applyDir(ctx context.Context, def *compDef, st *State, cand *Candi
 		_, _ = e.unloadHosted(ctx, def, live, "the previous build") // before the delete: a seat that loaded the new build holds its files
 		_ = os.RemoveAll(finalDir)
 		_ = os.Remove(filepath.Join(vroot, filepath.Base(finalDir)+".meta.json"))
-		e.reject(st, cand.ID, reason)
+		if !soft {
+			e.reject(st, cand.ID, reason)
+		}
 		return out
 	}
 
@@ -181,18 +198,19 @@ func (e *Env) applyDir(ctx context.Context, def *compDef, st *State, cand *Candi
 	}
 	un, uerr := e.unloadHosted(ctx, def, live, "the new build")
 	if uerr != nil {
-		return back("reloading the consumer failed after the flip: " + uerr.Error())
+		return back("reloading the consumer failed after the flip: "+uerr.Error(),
+			errors.Is(uerr, llamaswap.ErrDrainTimeout) || errors.Is(uerr, llamaswap.ErrDrainUnobservable))
 	}
 	notes = append(notes, un...)
 	if id, ok, detail := Probe(ctx, def, live); !ok {
-		return back("the live path does not start after the flip: " + detail)
+		return back("the live path does not start after the flip: "+detail, false)
 	} else if id != "" && def.IDProbe != nil && cmpID(id, cand.ID) != 0 {
-		return back(fmt.Sprintf("the live path reports %s after the flip, expected %s", id, cand.ID))
+		return back(fmt.Sprintf("the live path reports %s after the flip, expected %s", id, cand.ID), false)
 	}
 	if def.Name == Llama && e.Config.Gate.On() {
 		wnote, werr := e.WatchFirstLoad(ctx, live)
 		if werr != nil {
-			return back("post-flip load failed: " + werr.Error())
+			return back("post-flip load failed: "+werr.Error(), isSoft(werr))
 		}
 		if wnote != "" {
 			notes = append(notes, wnote)
@@ -205,7 +223,7 @@ func (e *Env) applyDir(ctx context.Context, def *compDef, st *State, cand *Candi
 		st.Previous = st.Current
 	}
 	st.Current = newGen
-	e.prune(vroot, st)
+	e.prune(vroot, live, st)
 	verb := "updated"
 	if st.Previous == nil {
 		verb = "installed"
@@ -255,32 +273,81 @@ func (e *Env) migrate(ctx context.Context, def *compDef, st *State, live, vroot 
 	return dir, id, nil
 }
 
-// prune deletes every generation that is neither current nor previous, and the staging area.
-func (e *Env) prune(vroot string, st *State) {
+// prune deletes the generations this verb or the installer made (a directory with a sibling <name>.meta.json that
+// carries an id) that are neither current nor previous, and the staging area. It prunes nothing it cannot prove is
+// its own: the versions root must be exactly <liveDir>-versions beside the live link, the build the link points at is
+// always kept whatever the record says, and a directory without a meta file (a hand-placed build) is left alone.
+func (e *Env) prune(vroot, liveDir string, st *State) {
+	if want := versionsRoot(liveDir, false); !samePath(vroot, want) {
+		e.logf("prune: skipped: %s is not %s (the live link's own -versions folder); nothing is deleted", vroot, want)
+		return
+	}
 	keep := map[string]bool{".staging": true}
 	for _, g := range []*Generation{st.Current, st.Previous} {
-		if g != nil && filepath.Dir(g.Path) == filepath.Clean(vroot) {
+		if g != nil && samePath(filepath.Dir(g.Path), vroot) {
 			keep[filepath.Base(g.Path)] = true
-			keep[g.ID+".meta.json"] = true
-			keep[filepath.Base(g.Path)+".meta.json"] = true
 		}
+		if g != nil {
+			keep[g.ID] = true // its <id>.meta.json stays, whatever the directory is called
+		}
+	}
+	if t, ok := resolveLink(liveDir); ok && samePath(filepath.Dir(t), vroot) {
+		keep[filepath.Base(t)] = true // the live build, whatever the record says
 	}
 	ents, err := os.ReadDir(vroot)
 	if err != nil {
 		return
 	}
 	for _, en := range ents {
-		if keep[en.Name()] {
+		name := en.Name()
+		if !en.IsDir() {
+			// A meta file whose generation is gone and that nothing keeps.
+			if dirName, ok := strings.CutSuffix(name, ".meta.json"); ok && !keep[dirName] && !exists(filepath.Join(vroot, dirName)) {
+				if id, ok := readMetaID(filepath.Join(vroot, name)); ok && id != "" {
+					_ = os.Remove(filepath.Join(vroot, name))
+				}
+			}
 			continue
 		}
-		if !en.IsDir() && !strings.HasSuffix(en.Name(), ".meta.json") {
-			continue // never delete a file this package did not make
+		if keep[name] {
+			continue
 		}
-		if rerr := os.RemoveAll(filepath.Join(vroot, en.Name())); rerr != nil {
-			e.logf("prune: %s is in use and stays until the next update (%v)", en.Name(), rerr)
+		mp := filepath.Join(vroot, name+".meta.json")
+		if m, ok := readMetaID(mp); !ok || m == "" {
+			continue // not made by this verb or the installer
 		}
+		if rerr := os.RemoveAll(filepath.Join(vroot, name)); rerr != nil {
+			e.logf("prune: %s is in use and stays until the next update (%v)", name, rerr)
+			continue
+		}
+		_ = os.Remove(mp)
 	}
 	_ = os.RemoveAll(filepath.Join(vroot, ".staging"))
+}
+
+// readMetaID is the id of a meta file; ok is false when it is missing or does not parse.
+func readMetaID(path string) (string, bool) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return "", false
+	}
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
+	var m struct {
+		ID string `json:"id"`
+	}
+	if json.Unmarshal(b, &m) != nil {
+		return "", false
+	}
+	return m.ID, true
+}
+
+// samePath compares two paths the way the OS does (case-insensitive on Windows, separators aside).
+func samePath(a, b string) bool {
+	a, b = filepath.Clean(a), filepath.Clean(b)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(a, b)
+	}
+	return a == b
 }
 
 // extractAll unpacks each archive on its own, lifts a single wrapper directory, and merges them into gen.

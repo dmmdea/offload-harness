@@ -33,8 +33,8 @@ type compDef struct {
 	Upstream string // the key in floors.json, "" = no floor
 	Repo     string // GitHub owner/repo, or the npm package for ruleNPM
 	Rule     tagRule
-	Single   bool     // the live path is one file (llama-swap), swapped through nodeswap
-	Binary   string   // the program the offline self-check runs (no .exe)
+	Single   bool   // the live path is one file (llama-swap), swapped through nodeswap
+	Binary   string // the program the offline self-check runs (no .exe)
 	Probes   [][]string
 	IDProbe  *regexp.Regexp // pulls the upstream id out of the probe's output
 	IDFormat string         // sprintf of submatch 1

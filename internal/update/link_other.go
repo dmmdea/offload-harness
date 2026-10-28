@@ -21,6 +21,9 @@ func makeLink(link, target string) error { return os.Symlink(filepath.Clean(targ
 // flipLink points link at target atomically: a new symlink is made as <link>.tmp and renamed over the old one.
 func flipLink(link, target string) error {
 	tmp := link + ".tmp"
+	if fi, err := os.Lstat(tmp); err == nil && fi.Mode()&os.ModeSymlink == 0 {
+		return fmt.Errorf("%s exists and is not a symlink; move it away and retry (the live link is untouched)", tmp)
+	}
 	_ = os.Remove(tmp)
 	if err := makeLink(tmp, target); err != nil {
 		return fmt.Errorf("creating %s: %w", tmp, err)

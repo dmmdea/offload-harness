@@ -9,6 +9,7 @@
 package update
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -51,6 +52,8 @@ type Env struct {
 	Out      io.Writer
 	Logf     func(format string, args ...any)
 	Now      func() time.Time
+
+	restart map[string]RestartSpec // the restart mechanism prepareRestart settled on, per component
 }
 
 // NewEnv builds the real environment: publisher hosts reached through the public-only dial guard, the default
@@ -376,6 +379,43 @@ type result struct {
 	detail string
 	exit   int
 	notes  []string
+}
+
+// attestationNote is the report line for a fetched build's attestation; "" when nothing was fetched.
+func attestationNote(fe *fetched) string {
+	if fe == nil || fe.attestation == "" {
+		return ""
+	}
+	return "attestation: " + fe.attestation
+}
+
+// attestationRatchet compares the candidate's attestation with the generation now serving: a publisher whose last
+// build was verified does not silently become unattested. It returns reject when the candidate's publisher no
+// longer publishes one ("none published": a substituted asset reads exactly like that), inconclusive when the check
+// could not run this time (gh missing or signed out), and "" when the candidate is as attested as the current build.
+func (e *Env) attestationRatchet(st *State, vroot string, fe *fetched) (reject, inconclusive string) {
+	if fe == nil || st == nil || st.Current == nil || fe.attestation == "verified" {
+		return "", ""
+	}
+	if !strings.HasPrefix(fe.attestation, "none published") && !strings.HasPrefix(fe.attestation, "skipped") {
+		return "", ""
+	}
+	raw, err := os.ReadFile(filepath.Join(vroot, st.Current.ID+".meta.json"))
+	if err != nil {
+		return "", ""
+	}
+	raw = bytes.TrimPrefix(raw, []byte{0xEF, 0xBB, 0xBF})
+	var m struct {
+		Attestation string `json:"attestation"`
+	}
+	if json.Unmarshal(raw, &m) != nil || m.Attestation != "verified" {
+		return "", ""
+	}
+	why := fmt.Sprintf("the serving build %s was attested by its publisher and this one is not (%s)", st.Current.ID, fe.attestation)
+	if strings.HasPrefix(fe.attestation, "skipped") {
+		return "", why + "; sign gh in on this node and retry"
+	}
+	return why, ""
 }
 
 func (e *Env) reject(st *State, id, reason string) {

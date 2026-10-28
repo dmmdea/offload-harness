@@ -179,7 +179,11 @@ func (e *Env) WatchFirstLoad(ctx context.Context, live string) (note string, err
 	started := time.Now()
 	r := chat(ctx, base, seat.ID, readyPrompt, 16, false, timeout)
 	if r.Err != "" {
-		return "", fmt.Errorf("seat %s did not answer a completion through llama-swap within %s: %s", seat.ID, timeout, r.Err)
+		err := fmt.Errorf("seat %s did not answer a completion through llama-swap within %s: %s", seat.ID, timeout, r.Err)
+		if r.Soft {
+			return "", softError{err}
+		}
+		return "", err
 	}
 	if r.Text == "" {
 		return "", fmt.Errorf("seat %s answered an empty completion through llama-swap", seat.ID)

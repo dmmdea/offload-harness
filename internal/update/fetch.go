@@ -104,7 +104,9 @@ func Attest(ctx context.Context, repo, file string) (string, error) {
 	}
 	low := strings.ToLower(string(out))
 	switch {
-	case strings.Contains(low, "no attestation"), strings.Contains(low, "http 404"), strings.Contains(low, "not found"):
+	// Only the two answers that mean "this publisher attests nothing here": a bare "not found" also matches failures
+	// of the check itself ("trusted root not found"), which must not pass as "none published".
+	case strings.Contains(low, "no attestations found"), strings.Contains(low, "http 404"):
 		return "none published", nil // the publisher does not attest this repository's releases
 	case strings.Contains(low, "gh auth login"), strings.Contains(low, "authentication token"), strings.Contains(low, "http 401"):
 		return "skipped (gh is not signed in)", nil

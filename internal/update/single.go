@@ -30,13 +30,16 @@ import (
 // restartSpec says how the llama-swap consumer is restarted: config first, else the box's own mechanism (the
 // scheduled task on Windows, the systemd unit elsewhere).
 func (e *Env) restartSpec(def *compDef) RestartSpec {
+	if s, ok := e.restart[def.Name]; ok {
+		return s // the mechanism prepareRestart settled on
+	}
 	if s, ok := e.Config.Restart[def.Name]; ok {
 		return s
 	}
 	if runtime.GOOS == "windows" {
-		return RestartSpec{Task: "llama-swap-native"}
+		return RestartSpec{Task: defaultWindowsTask}
 	}
-	return RestartSpec{Command: "systemctl restart llama-swap.service"}
+	return RestartSpec{Command: "systemctl restart " + defaultSystemdUnit}
 }
 
 var idSafe = regexp.MustCompile(`[^A-Za-z0-9._-]`)
@@ -115,6 +118,11 @@ func firstFailure(o nodeswap.Outcome) string {
 }
 
 func (e *Env) applySingle(ctx context.Context, def *compDef, st *State, cand *Candidate, live string, pre *preGen) result {
+	// The daemon is only drained and stopped when it can be started again: nothing is touched, not even a folder,
+	// on a node whose restart mechanism is not there.
+	if missing := e.prepareRestart(ctx, def, live); missing != "" {
+		return skipped(def.Name, missing)
+	}
 	lay := e.layoutOf(def, live)
 	vroot := lay.Vroot
 	if err := os.MkdirAll(vroot, 0o755); err != nil {
@@ -150,12 +158,20 @@ func (e *Env) applySingle(ctx context.Context, def *compDef, st *State, cand *Ca
 		}
 		staged = findFile(gen, def.exeName())
 	}
+	if rej, inc := e.attestationRatchet(st, vroot, fe); rej != "" {
+		return e.rejected(st, cand, rej)
+	} else if inc != "" {
+		return result{"inconclusive", "nothing changed, will retry: " + inc, ExitOK, nil}
+	}
 	if staged == "" {
 		return e.rejected(st, cand, def.exeName()+" is not in the archive")
 	}
 	notes, err := SelfCheck(ctx, def, filepath.Dir(staged), "", live)
 	if err != nil {
 		return e.rejected(st, cand, err.Error())
+	}
+	if n := attestationNote(fe); n != "" {
+		notes = append(notes, n)
 	}
 	g := e.Gate.Run(ctx, GateInput{Component: def.Name, Candidate: cand, StagedDir: filepath.Dir(staged), PreviousDir: filepath.Dir(live), Live: live})
 	switch g.Verdict {
@@ -267,6 +283,9 @@ func (e *Env) restoreSingle(ctx context.Context, def *compDef, st *State, cand *
 }
 
 func (e *Env) rollbackSingle(ctx context.Context, def *compDef, st *State, live string) result {
+	if missing := e.prepareRestart(ctx, def, live); missing != "" {
+		return skipped(def.Name, missing)
+	}
 	if lay := e.layoutOf(def, live); lay.Kind == layoutGens {
 		return e.rollbackSingleGens(ctx, def, st, live, lay)
 	}
@@ -384,7 +403,7 @@ func (e *Env) applySingleGens(ctx context.Context, def *compDef, st *State, cand
 	st.Previous = prev
 	st.Current = &Generation{ID: cand.ID, Path: finalDir, Digest: cand.Assets[0].Digest, Size: fe.size, Source: cand.Source,
 		InstalledAt: now, Asset: cand.Assets[0].Name, FileSHA256: out.NewSHA256}
-	e.prune(vroot, st)
+	e.prune(vroot, lay.Dir, st)
 	return result{"updated", fmt.Sprintf("%s now points at %s (%s -> %s, previous generation kept in %s)", lay.Dir, finalDir, curID, cand.ID, prior), ExitOK, notes}
 }
 

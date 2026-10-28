@@ -51,8 +51,26 @@ func runUpdate(args []string) error {
 		return nil
 	}
 
-	cfg, src := config.LoadWithSource(scanConfigFlag(args))
-	fc := update.ReadFileConfig(src.Path)
+	// The update keys name commands this verb runs (update.restart) and directories it renames and prunes
+	// (update.paths), so its config comes only from a file the operator named or owns: --config,
+	// $LOCAL_OFFLOAD_CONFIG or ~/.local-offload/config.json, never a config.json in whatever directory the verb
+	// happens to run from.
+	cfgPath := updateConfigPath(scanConfigFlag(args))
+	if cfgPath != "" {
+		if _, serr := os.Stat(cfgPath); serr != nil {
+			return &exitCodeError{code: 2, msg: "update: config " + cfgPath + " (from --config or $LOCAL_OFFLOAD_CONFIG): " + serr.Error()}
+		}
+	}
+	cfg, lerr := config.Load(cfgPath)
+	if lerr != nil {
+		return &exitCodeError{code: 2, msg: "update: config " + cfgPath + ": " + lerr.Error()}
+	}
+	fc := update.ReadFileConfig(cfgPath)
+	if cfgPath == "" {
+		fmt.Fprintln(os.Stderr, "update: no config file (--config, $LOCAL_OFFLOAD_CONFIG, ~/.local-offload/config.json); built-in defaults")
+	} else {
+		fmt.Fprintln(os.Stderr, "update: config "+cfgPath)
+	}
 	root := *home
 	if root == "" {
 		root = os.Getenv("OFFLOAD_HOME")
@@ -71,7 +89,7 @@ func runUpdate(args []string) error {
 	}
 
 	if sg, ok := env.Gate.(*update.SmokeGate); ok {
-		sg.ConfigPath = src.Path
+		sg.ConfigPath = cfgPath
 	}
 	if *noGate {
 		env.Gate = update.OfflineGate{}
@@ -140,4 +158,17 @@ func runUpdateRepoint(env *update.Env, yamlPath string, opts update.Options) err
 	}
 	fmt.Println("repoint: llama-swap reads its config at start; reload it (the update verb's llama step unloads the seats, a config change needs a llama-swap restart)")
 	return nil
+}
+
+// updateConfigPath is the config the update verb reads: an explicit --config, else $LOCAL_OFFLOAD_CONFIG, else the
+// operator's own ~/.local-offload/config.json; the current directory's config.json is never a candidate here.
+func updateConfigPath(flagPath string) string {
+	home, _ := os.UserHomeDir()
+	return config.ResolvePath(flagPath, os.Getenv("LOCAL_OFFLOAD_CONFIG"), home, func(p string) bool {
+		if p == "config.json" { // the cwd candidate
+			return false
+		}
+		fi, err := os.Stat(p)
+		return err == nil && !fi.IsDir()
+	})
 }

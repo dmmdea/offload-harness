@@ -1,6 +1,9 @@
 package update
 
-import "context"
+import (
+	"context"
+	"errors"
+)
 
 // Verdict is a gate's answer about a staged build.
 type Verdict int
@@ -52,4 +55,16 @@ func (OfflineGate) Name() string { return "offline self-check only" }
 // Run implements Gate.
 func (OfflineGate) Run(context.Context, GateInput) GateResult {
 	return GateResult{Verdict: GatePass, Reason: "offline self-check passed; no smoke gate installed"}
+}
+
+// softError is a failure after the flip that says nothing about the build (a timeout, a card another process holds,
+// a seat that stayed busy): the build is rolled back but not rejected, so the next run tries it again.
+type softError struct{ error }
+
+func (s softError) Unwrap() error { return s.error }
+
+// isSoft reports whether err is a softError.
+func isSoft(err error) bool {
+	var s softError
+	return errors.As(err, &s)
 }

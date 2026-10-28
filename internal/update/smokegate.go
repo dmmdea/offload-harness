@@ -117,9 +117,12 @@ func (g *SmokeGate) logf(f string, a ...any) {
 	}
 }
 
-// smokeJob is what the lease-held child needs; it is handed over as a file.
+// smokeJob is what the lease-held child needs; it is handed over as a file. It never carries the seat's environment
+// (a yaml's env may hold a token): the child reads the seat again from YAML, and Seat travels without its Env.
 type smokeJob struct {
 	Seat        *Seat
+	YAML        string
+	Live        string
 	Candidate   string
 	StagedDir   string
 	PreviousDir string
@@ -153,8 +156,10 @@ func (g *SmokeGate) Run(ctx context.Context, in GateInput) GateResult {
 	}
 	defer os.RemoveAll(tmp)
 	jobPath, resPath := filepath.Join(tmp, "job.json"), filepath.Join(tmp, "result.json")
-	b, _ := json.Marshal(smokeJob{Seat: seat, Candidate: id, StagedDir: in.StagedDir, PreviousDir: in.PreviousDir,
-		Port: port, LoadTimeout: g.Cfg.LoadTimeoutOr()})
+	bare := *seat
+	bare.Env = nil
+	b, _ := json.Marshal(smokeJob{Seat: &bare, YAML: g.YAML, Live: in.Live, Candidate: id, StagedDir: in.StagedDir,
+		PreviousDir: in.PreviousDir, Port: port, LoadTimeout: g.Cfg.LoadTimeoutOr()})
 	if err := os.WriteFile(jobPath, b, 0o600); err != nil {
 		return GateResult{Verdict: GateInconclusive, Reason: "temp file: " + err.Error()}
 	}
@@ -245,6 +250,11 @@ func RunGateChild(ctx context.Context, jobPath, resPath string, w io.Writer) err
 	var job smokeJob
 	if err := json.Unmarshal(b, &job); err != nil {
 		return err
+	}
+	if job.YAML != "" && job.Seat != nil {
+		if s, perr := PickSeat(job.YAML, job.Live); perr == nil && s.ID == job.Seat.ID {
+			job.Seat = s // the seat's environment comes from the yaml, never from the job file
+		}
 	}
 	_ = os.WriteFile(resPath+".started", []byte("1"), 0o600)
 	res := measureGate(ctx, job, w)
@@ -443,6 +453,9 @@ type chatResult struct {
 	Prefill float64
 	Decode  float64
 	Err     string
+	// Soft is a failure that says nothing about the build: the request timed out, or the server reported it ran out
+	// of memory (another process holds the VRAM).
+	Soft bool
 }
 
 func chat(ctx context.Context, base, model, prompt string, maxTokens int, noCache bool, timeout time.Duration) chatResult {
@@ -461,13 +474,15 @@ func chat(ctx context.Context, base, model, prompt string, maxTokens int, noCach
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := localClient().Do(req)
 	if err != nil {
-		return chatResult{Err: err.Error()}
+		var ne net.Error
+		return chatResult{Err: err.Error(), Soft: errors.Is(err, context.DeadlineExceeded) || (errors.As(err, &ne) && ne.Timeout())}
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
 	r := chatResult{Status: resp.StatusCode}
 	if resp.StatusCode != http.StatusOK {
 		r.Err = fmt.Sprintf("HTTP %d: %s", resp.StatusCode, truncate(strings.TrimSpace(string(data)), 160))
+		r.Soft = outOfMemory(string(data))
 		return r
 	}
 	var cr struct {
@@ -494,6 +509,18 @@ func chat(ctx context.Context, base, model, prompt string, maxTokens int, noCach
 	}
 	r.Prefill, r.Decode = cr.Timings.PromptPerSecond, cr.Timings.PredictedPerSecond
 	return r
+}
+
+// outOfMemory reports whether a server's answer says it could not get the memory to load (VRAM held by another
+// process), as opposed to a build that crashes or answers wrongly.
+func outOfMemory(s string) bool {
+	low := strings.ToLower(s)
+	for _, m := range []string{"out of memory", "cudamalloc failed", "failed to allocate", "unable to allocate", "insufficient memory"} {
+		if strings.Contains(low, m) {
+			return true
+		}
+	}
+	return false
 }
 
 func median(v []float64) float64 {
@@ -606,13 +633,16 @@ func measure(ctx context.Context, label, dir string, seat *Seat, port int, loadT
 	for !ready {
 		select {
 		case <-exited:
-			return sample{Fault: "the " + label + " llama-server exited while loading: " + logTail(), Bad: true}
+			tail := logTail() // out of memory says another process holds the card, not that the build is bad
+			return sample{Fault: "the " + label + " llama-server exited while loading: " + tail, Bad: !outOfMemory(tail)}
 		case <-ctx.Done():
 			return sample{Fault: "cancelled"}
 		default:
 		}
 		if time.Now().After(deadline) {
-			return sample{Fault: fmt.Sprintf("the %s llama-server did not answer /health within %s: %s", label, loadTimeout, logTail()), Bad: true}
+			// A slow load is not a verdict on the build (a busy disk, a card another process holds): inconclusive, so
+			// nothing is promoted and the next run measures again.
+			return sample{Fault: fmt.Sprintf("the %s llama-server did not answer /health within %s: %s", label, loadTimeout, logTail())}
 		}
 		rctx, cancel := context.WithTimeout(ctx, 3*time.Second)
 		req, _ := http.NewRequestWithContext(rctx, http.MethodGet, base+"/health", nil)
@@ -630,7 +660,7 @@ func measure(ctx context.Context, label, dir string, seat *Seat, port int, loadT
 	// One fixed completion: the answer must exist.
 	r := chat(ctx, base, seat.ID, readyPrompt, 32, false, 3*time.Minute)
 	if r.Err != "" {
-		s.Fault, s.Bad = "completion failed: "+r.Err, true
+		s.Fault, s.Bad = "completion failed: "+r.Err, !r.Soft
 		return s
 	}
 	if r.Text == "" {
@@ -644,7 +674,7 @@ func measure(ctx context.Context, label, dir string, seat *Seat, port int, loadT
 	for i := 0; i < 3; i++ {
 		t := chat(ctx, base, seat.ID, timedPrompt(), 64, true, 3*time.Minute)
 		if t.Err != "" {
-			s.Fault, s.Bad = "timed completion failed: "+t.Err, true
+			s.Fault, s.Bad = "timed completion failed: "+t.Err, !t.Soft
 			return s
 		}
 		pre, dec = append(pre, t.Prefill), append(dec, t.Decode)

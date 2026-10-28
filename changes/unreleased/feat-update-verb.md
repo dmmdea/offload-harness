@@ -39,6 +39,15 @@
   retry later", never a rejection. The numbers go in the generation's meta file. After the flip llama-swap reloads its
   seats through its own API and the first real seat load is watched (`update.gate.post_flip_timeout`); a failure rolls
   back with "post-flip load failed". `--no-gate` and `update.gate.enabled: false` opt out.
+- **Hardening.** The restart mechanism is probed before any drain (a missing task or unit skips the component,
+  nothing stopped; on Windows the one task that runs the live llama-swap is found when the default name is absent);
+  the verb reads its config only from `--config`, `$LOCAL_OFFLOAD_CONFIG` or the home config, never the current
+  directory's; pruning deletes only meta-file-backed generations inside the live path's own `-versions` folder and
+  never the live target; the Windows junction flip makes the new link first and restores the old one by rename; the
+  attestation result is reported and ratchets (a once-attested publisher that stops attesting is rejected); the npm
+  version must be a semver; a `--repoint` backup keeps the yaml's file mode and the gate's job file carries no seat
+  environment; a lock older than three hours is taken over; timeouts, out-of-memory answers and busy seats are
+  inconclusive (rolled back, retried), never a rejection.
 - **Not in this change.** The installers and the fleet registry rows.
 - **Known gap.** After a rejected llama build the gate's `gpu reserve` wrapper still warms the old seat back and the next
   flip unloads it again; a "no warm-back on reject" option belongs to `gpu reserve` (follow-up).

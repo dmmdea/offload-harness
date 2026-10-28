@@ -85,15 +85,17 @@ func Repoint(yamlPath, live string, now time.Time) (*RepointResult, error) {
 	if res.Replaced == 0 && res.LDLines == 0 {
 		return res, nil
 	}
-	res.Backup = yamlPath + ".bak-" + now.Format("20060102-150405")
-	if err := os.WriteFile(res.Backup, raw, 0o644); err != nil {
-		return nil, fmt.Errorf("backing up %s: %w", yamlPath, err)
-	}
+	// The yaml may carry secrets (an HF_TOKEN in env, an --api-key): the backup gets the original's mode, never wider.
 	st, _ := os.Stat(yamlPath)
-	mode := os.FileMode(0o644)
+	mode := os.FileMode(0o600)
 	if st != nil {
 		mode = st.Mode().Perm()
 	}
+	res.Backup = yamlPath + ".bak-" + now.Format("20060102-150405")
+	if err := os.WriteFile(res.Backup, raw, mode); err != nil {
+		return nil, fmt.Errorf("backing up %s: %w", yamlPath, err)
+	}
+	_ = os.Chmod(res.Backup, mode) // WriteFile applies the umask; an existing backup keeps its old mode
 	tmp := yamlPath + ".tmp-repoint"
 	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")), mode); err != nil {
 		return nil, err

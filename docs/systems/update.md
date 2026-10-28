@@ -75,14 +75,19 @@ once.
 
 The daemon is drained through llama-swap's own unload (never killed while a seat is busy), stopped through the box's
 own mechanism, and restarted by it: the scheduled task `llama-swap-native` on Windows, `systemctl restart
-llama-swap.service` elsewhere. `update.restart.llama-swap` (`task`, `command` or `none`) overrides it. The swap engine is
+llama-swap.service` elsewhere. `update.restart.llama-swap` (`task`, `command` or `none`) overrides it. The mechanism is
+probed before anything is drained or stopped (the task exists, the unit answers `systemctl cat`, the command's program
+resolves); on Windows, when `llama-swap-native` does not exist but exactly one scheduled task runs the live
+`llama-swap.exe`, that task is used and named. A mechanism that is not there skips the component with "set
+update.restart.llama-swap" (exit 0, nothing touched): a daemon is never stopped that cannot be started again. The swap engine is
 `node-swap`'s (`nodeswap.Plan.Generation` replaces its rename-and-copy steps with the link flip; the process is found by
 the real path of the generation's executable, which is what the OS reports for a process started through a link).
 `update --dry-run` prints which layout it found.
 
 ## Algorithm
 
-1. **Lock** `<home>/update.lock`. Busy: exit 0, say so. A lock whose process is gone is taken over.
+1. **Lock** `<home>/update.lock`. Busy: exit 0, say so. A lock whose process is gone, or older than three hours (a
+   pid reused after a crash or a reboot), is taken over.
 2. **Resolve** from the publisher (GitHub releases, `per_page=10`, paged; npm `latest`) with `If-None-Match` from
    `installed.json`. A `304`, a candidate equal to the installed id, a candidate in `rejected[]` or older than what is
    installed: write `checked_at`, exit 0. That is the five-minute no-op. A candidate is **complete** only when every
@@ -94,8 +99,10 @@ the real path of the generation's executable, which is what the OS reports for a
    verb never downgrades. A floor only ever rises; a ceiling or an exact pin is not representable (ADR 0099).
 4. **Download** to `.staging`, check size and the publisher's sha256 (the file is deleted on a mismatch), cross-check
    the publisher's checksums file when there is one, run `gh attestation verify` when `gh` exists (fail closed when it
-   is present and fails; "none published" is recorded as such), extract (zip-slip safe, a lone wrapper directory is
-   lifted).
+   is present and fails; "none published" only for the publisher's own "no attestations found" or a 404), extract
+   (zip-slip safe, a lone wrapper directory is lifted). The attestation result is a line of the report. It only ever
+   ratchets: when the generation now serving was `verified`, a candidate whose publisher no longer attests ("none
+   published") is rejected, and one whose check could not run (`gh` missing or signed out) is inconclusive.
 5. **Offline self-check**: the program starts (`--version` exits 0). For llama, every `--flag` the rendered
    llama-swap yaml passes to this binary must appear in the staged `llama-server --help`; an unknown flag rejects the
    candidate before any seat moves.
@@ -103,7 +110,11 @@ the real path of the generation's executable, which is what the OS reports for a
    GPU lease, measured back to back against the previous generation. A lease that cannot be had in time is
    "inconclusive", never a rejection.
 7. **Promote**: rename staging to `versions/<id>`, flip the junction or symlink (Linux: `current.tmp`, then rename
-   over), rotate `previous`, prune everything that is neither current nor previous. llama and whisper: llama-swap is
+   over), rotate `previous`, prune the generations that are neither current nor previous. Pruning deletes only what
+   this verb or the installer made (a directory with a sibling `<id>.meta.json`), only inside the live path's own
+   `<live>-versions` folder, and never the directory the live link points at, whatever the record says; a hand-placed
+   build without a meta file stays. The flip never leaves the live path missing: on Windows the new junction is made
+   as `<live>.new` first, the old one renamed aside and back on a failure. llama and whisper: llama-swap is
    asked to unload (with drain, through its own client, keep-set members left alone and named) the models that run from
    the live path, so the next load uses the new build, and for llama the first real load is watched (Gate below).
    llama-swap: drained, then swapped and restarted through
@@ -174,10 +185,19 @@ from the live path, never a kill. The verb then sends one short completion for t
 seat's `/health` through llama-swap is not failing. A failure within `update.gate.post_flip_timeout` rolls back with
 the reason "post-flip load failed". Nothing to watch (no endpoint, no chat seat, llama-swap down) is a note.
 
+A failure that says nothing about the build is **inconclusive**, not a rejection: a timeout, an out-of-memory answer
+(another process holds the card), a seat that stayed busy through the drain. In the gate nothing is promoted; after the
+flip the live path goes back to the previous build. Either way the id is not added to `rejected[]` and the next run
+tries it again. A crash, a wrong or empty answer, an unknown flag or a measured regression is a rejection. The gate's
+job file never carries the seat's environment (a yaml's `env` may hold a token): the lease-held child reads the seat
+from the yaml again.
+
 ## Config keys
 
 All optional; the `update` object of `config.json` is declared in `internal/config` (`UpdateConfig`), so it is a known
-key, and read by the verb through `internal/update.FileConfig`.
+key, and read by the verb through `internal/update.FileConfig`. These keys name commands the verb runs and folders it
+renames and prunes, so the verb reads its config only from `--config`, `$LOCAL_OFFLOAD_CONFIG` or
+`~/.local-offload/config.json`, never a `config.json` in the directory it runs from, and prints the file it used.
 
 | key | default | meaning |
 |---|---|---|

@@ -246,6 +246,10 @@ func (r *Resolver) applyFloor(def *compDef, c *Candidate, etag string) (*Candida
 
 var numRe = regexp.MustCompile(`\d+`)
 
+// npmVersionShape is a semver without build metadata: what npm enforces at publish, checked again here because the
+// value names a directory.
+var npmVersionShape = regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
+
 func expand(p, tag string) string {
 	n := numRe.FindString(tag)
 	sha := ""
@@ -360,6 +364,10 @@ func (r *Resolver) resolveNPM(ctx context.Context, def *compDef, etag string) (*
 	}
 	if v.Version == "" || v.Dist.Integrity == "" || v.Dist.Tarball == "" {
 		return nil, "", false, fmt.Errorf("npm %s: the registry answer has no version or integrity", def.Repo)
+	}
+	// The version names a generation directory and an npm spec: only a semver shape is ever used there.
+	if !npmVersionShape.MatchString(v.Version) {
+		return nil, "", false, fmt.Errorf("npm %s: the registry answered an unusable version %q (not a semver)", def.Repo, v.Version)
 	}
 	c := &Candidate{Component: def.Name, ID: v.Version, Source: "npm:" + def.Repo, Channel: "latest",
 		Assets: []Asset{{Name: def.Repo + "-" + v.Version + ".tgz", URL: v.Dist.Tarball, Digest: v.Dist.Integrity}}}
