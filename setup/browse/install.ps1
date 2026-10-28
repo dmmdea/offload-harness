@@ -3,7 +3,8 @@
   Opt-in installer for the browse-lane sidecar.
 .DESCRIPTION
   Copies runner.py and pyproject.toml into <OffloadHome>/browse, builds the
-  environment with `uv sync` (newest versions, no lockfile), runs the unit tests with the venv python, disables
+  environment with `uv sync --upgrade` (re-resolved to the newest versions on every run; the uv.lock uv writes
+  there is a by-product, never an input), runs the unit tests with the venv python, disables
   browser-harness telemetry, and prints one final JSON line:
     {"browse_python": "...", "browse_script": "...", "ok": true}
   or {"ok": false, "reason": "..."}.
@@ -44,8 +45,8 @@ try {
         Copy-Item -Force -Path (Join-Path $src $f) -Destination (Join-Path $dir $f)
     }
 
-    Invoke-Native { uv sync --project $dir }
-    if ($LASTEXITCODE -ne 0) { Fail "uv sync exited $LASTEXITCODE" }
+    Invoke-Native { uv sync --upgrade --project $dir }
+    if ($LASTEXITCODE -ne 0) { Fail "uv sync --upgrade exited $LASTEXITCODE" }
 
     $venvPython = if ($IsLinux -or $IsMacOS) { Join-Path $dir '.venv/bin/python' } else { Join-Path $dir '.venv\Scripts\python.exe' }
     if (-not (Test-Path $venvPython)) { Fail "venv python not found at $venvPython" }

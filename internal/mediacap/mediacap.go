@@ -330,7 +330,7 @@ func composeRoute(cfg config.Config, exeDir string) (Route, bool) {
 	} {
 		if k.value == "" {
 			return Route{Name: name, Engine: engine, State: BoundButMissing,
-				Detail: "compose_script is bound but " + k.key + " is unset — every composition defers; run the installer's hyperframes step (npm ci + browser ensure)"}, true
+				Detail: "compose_script is bound but " + k.key + " is unset — every composition defers; run the installer's hyperframes step (npm install + browser ensure)"}, true
 		}
 	}
 	entry := filepath.Join(cfg.HyperframesDir, "node_modules", "hyperframes", "bin", "hyperframes.mjs")

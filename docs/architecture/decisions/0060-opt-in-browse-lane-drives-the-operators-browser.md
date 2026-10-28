@@ -5,7 +5,7 @@ date: "2026-09-28"
 
 # ADR 0060 — An opt-in browse lane drives the operator's own browser; the harness owns every model call and reaches only a loopback decision endpoint
 
-> Status: Superseded by ADR 0099 for the pinning mechanism (2026-10-28): the lockfile and the two pins are gone: the sidecar's dependencies are floors in `pyproject.toml` and the git default branch of `jev-ultrafast`, resolved by `uv sync` at install time. The rest of this decision stands, and the text below is kept as written.
+> Status: Superseded by ADR 0099 for the pinning mechanism (2026-10-28): the lockfile and the two pins are gone: the sidecar's dependencies are floors in `pyproject.toml` and the git default branch of `jev-ultrafast`, re-resolved to the newest by `uv sync --upgrade` on every install run. The rest of this decision stands, and the text below is kept as written.
 
 ## Context
 

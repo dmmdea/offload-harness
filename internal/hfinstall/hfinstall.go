@@ -428,6 +428,13 @@ func swapIn(dir string, pkg []byte) (string, error) {
 	if err := os.RemoveAll(prev); err != nil {
 		return "", fmt.Errorf("clearing the old rollback copy %s: %w", prev, err)
 	}
+	// The .prev files a rollback restores are this swap's own: one left by an earlier swap (an old installer's
+	// lockfile among them) must never come back as the live package.json or package-lock.json.
+	for _, name := range []string{"package.json.prev", "package-lock.json.prev"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("clearing the old rollback file %s: %w", name, err)
+		}
+	}
 	oldPkg, readErr := os.ReadFile(filepath.Join(dir, "package.json"))
 	kept := ""
 	if _, err := os.Stat(live); err == nil {

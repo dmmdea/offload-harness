@@ -583,6 +583,18 @@ function Invoke-WebRequestWithProgress {
   }
 }
 
+# Move-DirAtomic: one rename of a directory on the same volume, whole or not at all. Move-Item is not that: when the
+# rename is refused (a file held open by a running engine, a render or an antivirus scan) it falls back to moving the
+# entries it can one by one and leaves the rest, splitting the tree in two. A refused rename is retried a few times
+# over about three seconds, then thrown with nothing moved.
+function Move-DirAtomic {
+  param([string]$From, [string]$To)
+  for ($i = 1; ; $i++) {
+    try { [System.IO.Directory]::Move($From, $To); return }
+    catch { if ($i -ge 4) { throw }; Start-Sleep -Milliseconds (250 * $i) }
+  }
+}
+
 # Make $Dest (the live path) a junction to $Target. A junction already there is replaced (the link only, never its
 # target); an empty real directory is removed; a real directory with content (an older install) is first renamed into
 # <live>-versions\<$LegacyId, else unknown-yyyyMMdd>. Nothing is ever extracted over a live directory.
@@ -600,7 +612,7 @@ function Set-LiveJunction {
       if (-not $LegacyId) { $LegacyId = "unknown-$(Get-Date -Format 'yyyyMMdd')" }
       $migrated = Join-Path "$Dest-versions" $LegacyId
       if (Test-Path -LiteralPath $migrated) { $migrated = "$migrated.$([System.IO.Path]::GetRandomFileName().Replace('.', ''))" }
-      try { Move-Item -LiteralPath $Dest -Destination $migrated }
+      try { Move-DirAtomic $Dest $migrated }
       catch { throw "cannot move the existing $Dest into $Dest-versions (is a process running from it? stop the stack and re-run): $($_.Exception.Message)" }
       Write-Host "      migrated the existing $Dest to $migrated" -ForegroundColor DarkGray
     }
@@ -733,7 +745,7 @@ function Install-Engine {
       Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
       throw
     }
-    Move-Item -LiteralPath $out -Destination $target
+    Move-DirAtomic $out $target
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     $meta = [ordered]@{
       id = $id; tag = $tag; components = @($Keys); digests = @($Keys | ForEach-Object { $Resolved[$_].digest })
@@ -1740,10 +1752,25 @@ function Install-Hyperframes {
         & npm audit signatures
         if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
       } finally { Pop-Location }
+      # Each move is one whole rename (Move-DirAtomic; Move-Item would split a tree a render holds a file in) and the
+      # swap stops on the first one refused: a render holding a file leaves the live install as it was, and a
+      # failure after the old tree moved aside puts it back.
       $live = Join-Path $Dest 'node_modules'; $prev = Join-Path $Dest 'node_modules.prev'
-      if (Test-Path $prev) { Remove-Item -Recurse -Force $prev }
-      if (Test-Path $live) { Move-Item -Force $live $prev }
-      Move-Item -Force (Join-Path $stage 'node_modules') $live
+      if (Test-Path $prev) { Remove-Item -Recurse -Force $prev -ErrorAction Stop }
+      $movedAside = $false
+      if (Test-Path $live) {
+        try { Move-DirAtomic $live $prev; $movedAside = $true }
+        catch { Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue; throw "cannot move the live hyperframes install aside (is a composition rendering?); nothing changed: $($_.Exception.Message)" }
+      }
+      try { Move-DirAtomic (Join-Path $stage 'node_modules') $live }
+      catch {
+        if ($movedAside -and -not (Test-Path $live)) { try { Move-DirAtomic $prev $live } catch { } }
+        Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+        throw "moving the new hyperframes tree into place failed; the previous install is back: $($_.Exception.Message)"
+      }
+      # A lockfile an older installer left is a pin set for the tree just replaced: kept as .prev, out of the live dir.
+      $oldLock = Join-Path $Dest 'package-lock.json'
+      if (Test-Path $oldLock) { Move-Item -Force $oldLock "$oldLock.prev" -ErrorAction SilentlyContinue }
       Copy-Item -Force (Join-Path $src 'package.json') (Join-Path $Dest 'package.json')
       Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
     }
