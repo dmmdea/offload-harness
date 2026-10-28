@@ -619,87 +619,6 @@ var (
 	openspecScriptSHA          = regexp.MustCompile(`(?m)^readonly OPENSPEC_SHA256="([0-9a-f]{64})"$`)
 )
 
-// The version and the tarball hash are admitted in the public table of docs/systems/security.md; the install script
-// must pin exactly those, as constants a caller cannot override.
-func TestOpenSpecInstallScriptPinsWhatSecurityMdAdmitted(t *testing.T) {
-	doc, err := os.ReadFile("docs/systems/security.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var row string
-	for _, l := range strings.Split(string(doc), "\n") {
-		if strings.HasPrefix(l, "| OpenSpec CLI") {
-			row = l
-		}
-	}
-	if row == "" {
-		t.Fatal("docs/systems/security.md has no OpenSpec CLI row in the admitted software table")
-	}
-	m := openspecAdmittedRowVersion.FindStringSubmatch(row)
-	if m == nil {
-		t.Fatalf("the OpenSpec row names no `<version>, tarball sha256 `<hex>`` pin: %s", row)
-	}
-	script, err := os.ReadFile("scripts/openspec-install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(script)
-	if v := openspecScriptVersion.FindStringSubmatch(text); v == nil || v[1] != m[1] {
-		t.Errorf("scripts/openspec-install.sh must declare `readonly OPENSPEC_VERSION=%q` (the admitted version)", m[1])
-	}
-	if h := openspecScriptSHA.FindStringSubmatch(text); h == nil || h[1] != m[2] {
-		t.Errorf("scripts/openspec-install.sh must declare `readonly OPENSPEC_SHA256=%q` (the admitted tarball hash)", m[2])
-	}
-	for _, want := range []string{
-		"npm pack",
-		"npm ci",
-		"--ignore-scripts",
-		"OPENSPEC_TELEMETRY=0",
-		"DO_NOT_TRACK=1",
-		"OPENSPEC_NO_UPDATE_CHECK=1",
-		"XDG_CONFIG_HOME",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("scripts/openspec-install.sh no longer contains %q", want)
-		}
-	}
-	// The package is the scoped one: the unscoped `openspec` on npm is another publisher's, and the constant is what the
-	// pack line below expands.
-	if !regexp.MustCompile(`(?m)^readonly OPENSPEC_PACKAGE="@fission-ai/openspec"$`).MatchString(text) {
-		t.Error(`scripts/openspec-install.sh must declare readonly OPENSPEC_PACKAGE="@fission-ai/openspec" (the scoped name)`)
-	}
-	// The two npm calls that matter, spelled out: pack by the scoped, pinned name without running scripts; install the
-	// dependency tree from the committed lockfile, in the staged copy, without running scripts (npm ci, never a resolving
-	// npm install: the lockfile is what pins the dependencies).
-	for _, re := range []string{
-		`(?m)^\( cd "\$work" && npm pack "\$\{OPENSPEC_PACKAGE\}@\$\{OPENSPEC_VERSION\}" --ignore-scripts\b`,
-		`(?m)^\( cd "\$stage" && npm ci --ignore-scripts\b`,
-	} {
-		if !regexp.MustCompile(re).MatchString(text) {
-			t.Errorf("scripts/openspec-install.sh has no line matching %s", re)
-		}
-	}
-	// Install from the verified file and the lockfile, never from the registry by name, and never globally.
-	for _, bad := range []string{"npm install -g", "npm i -g", "--global", "curl ", "wget ", "npx "} {
-		if strings.Contains(text, bad) {
-			t.Errorf("scripts/openspec-install.sh contains %q", bad)
-		}
-	}
-	resolving := regexp.MustCompile(`\bnpm (install|i|add|update)\b`)
-	for i, l := range strings.Split(text, "\n") {
-		if strings.HasPrefix(strings.TrimSpace(l), "#") {
-			continue
-		}
-		if resolving.MatchString(l) {
-			t.Errorf("scripts/openspec-install.sh line %d runs a resolving npm command (%q): only npm pack and npm ci are allowed", i+1, strings.TrimSpace(l))
-		}
-	}
-	// No local path: the prefix is an argument or OPENSPEC_PREFIX.
-	if p := regexp.MustCompile(`[A-Za-z]:[\\/]|/home/|/Users/|/mnt/[a-z]/`).FindString(text); p != "" {
-		t.Errorf("scripts/openspec-install.sh hard-codes a local path (%q): the prefix must come from the caller", p)
-	}
-}
-
 // A tarball whose hash is not the pinned one is refused before anything is installed, and the scratch directory
 // the script made is gone. The stand-in npm "packs" a file of the wrong content and records any install call.
 func TestOpenSpecInstallScriptRefusesAHashMismatch(t *testing.T) {
@@ -1322,28 +1241,6 @@ func TestOpenSpecValidateGateIsInTheContributorChecklist(t *testing.T) {
 	for _, want := range []string{"openspec/", "scripts/openspec-validate.sh", "OPENSPEC_BIN", "scripts/openspec-install.sh"} {
 		if !strings.Contains(section, want) {
 			t.Errorf("the pre-PR list in CONTRIBUTING.md does not mention %q", want)
-		}
-	}
-}
-
-// The system page must not let a reader assume the plain test run covers the validator or that the archive flow ignores
-// a missing ADR draft.
-func TestOpenSpecPageStatesTheGateListAndTheArchivePrompt(t *testing.T) {
-	b, err := os.ReadFile("docs/systems/openspec.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(b)
-	for _, want := range []string{
-		"CONTRIBUTING.md",
-		"go test ./...",
-		"/opsx:archive",
-		"confirm",
-		"OPENSPEC_INSTALL_TEST",
-		"scripts/openspec/package-lock.json",
-	} {
-		if !strings.Contains(text, want) {
-			t.Errorf("docs/systems/openspec.md does not mention %q", want)
 		}
 	}
 }

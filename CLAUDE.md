@@ -59,7 +59,7 @@ echo "some text" | local-offload --config setup\templates\config.json summarize 
 ```powershell
 # Install / verify the stack (Windows):
 pwsh -NoProfile -File setup\detect.ps1      # backend verdict JSON
-pwsh -NoProfile -File setup\install.ps1     # pinned binaries + models + Go build
+pwsh -NoProfile -File setup\install.ps1     # newest published binaries + models + Go build (versions are never pinned: the installers resolve the newest complete build from the publisher and verify its digest; floors live in setup/floors.json, ADR 0099)
 pwsh -NoProfile -File setup\selftest.ps1    # receipt JSON: verdict pass|warn|fail
 # Start it:
 & "$env:OFFLOAD_HOME\llama-swap\llama-swap.exe" --config "$env:OFFLOAD_HOME\llama-swap.yaml" --listen 127.0.0.1:11436

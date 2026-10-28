@@ -335,12 +335,12 @@ node render/compose-hyperframes.mjs render --hyperframes-dir <dir> --browser <ch
 node render/compose-hyperframes.mjs render ... --template lower-third --format webm \
   --variables-file vars.json --snapshots 1,2.5 --out lt.webm
 node render/captions-groups.mjs clip.segments.json --out chunks.json   # words_json for captions-bar
-node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>   # pinned Chrome (installer step)
+node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>   # the CLI's own Chrome (installer step)
 node render/compose-hyperframes.mjs version --hyperframes-dir <dir>   # acceptance check
 ```
 
-This is the only door to the pinned HyperFrames CLI (npm `hyperframes`, installed from the
-lockfile in `setup/hyperframes/`). It is **CPU-class**: software GL and CPU encode, with no
+This is the only door to the installed HyperFrames CLI (npm `hyperframes`, the newest release, installed from the
+package manifest in `setup/hyperframes/`; versions are never pinned, ADR 0099). It is **CPU-class**: software GL and CPU encode, with no
 `withGpuSlot` and no GPU lease (ADR 0059).
 
 Every call goes through the same guards:
@@ -467,7 +467,7 @@ node --test render/builder-drift.test.mjs                       # builder side, 
 COMFYUI_DIR=<comfyui-tree> node --test render/builder-drift.test.mjs   # plus the template side against the installed package
 node render/builder-drift.mjs check   --templates-dir <extract>/comfyui_workflow_templates_json/templates   # a candidate package
 node render/builder-drift.mjs explain --comfy-dir <comfyui-tree>   # template and builder values side by side
-node render/builder-drift.mjs record  --comfy-dir <comfyui-tree>   # re-pin, after comparing the builder with the template
+node render/builder-drift.mjs record  --comfy-dir <comfyui-tree>   # re-record, after comparing the builder with the template
 node render/builder-drift.mjs check --comfy-dir <comfyui-tree> --require-templates --strict   # upgrade runbook
 ```
 

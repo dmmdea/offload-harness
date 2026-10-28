@@ -94,9 +94,9 @@ Two things follow that the profile does not say out loud:
 
 ## 3. Measurements
 
-All numbers from llama.cpp **b9934** — the exact tag pinned in `setup/install.ps1` — using the
-official `llama-b9934-bin-ubuntu-vulkan-x64` build, and the byte-identical E2B model the installer
-pins (2,620,368,960 bytes, verified against the `size` field in `install.ps1`).
+All numbers were measured on llama.cpp **b9934** (the build installed on the reference box on 2026-07-17) using the
+official `llama-b9934-bin-ubuntu-vulkan-x64` build, and the E2B model as published then (2,620,368,960 bytes, verified
+against the size the publisher reported).
 
 ### 3.1 Raw throughput (`llama-bench`, 2 repetitions)
 
@@ -305,13 +305,13 @@ is good practice; the README does not inherit it.
 ## 7. Reproducing this
 
 ```bash
-# 1. The exact pinned llama.cpp, Linux Vulkan build
+# 1. The build these numbers were measured on (any newer build reproduces them or beats them), Linux Vulkan
 gh release download b9934 --repo ggml-org/llama.cpp \
   --pattern 'llama-b9934-bin-ubuntu-vulkan-x64.tar.gz'
 tar xzf llama-b9934-bin-ubuntu-vulkan-x64.tar.gz && cd llama-b9934
 export LD_LIBRARY_PATH=$PWD
 
-# 2. The exact pinned model (verify: 2620368960 bytes)
+# 2. The model as published when measured (2620368960 bytes then; verify against the publisher's current size)
 curl -L -o e2b.gguf 'https://huggingface.co/unsloth/gemma-4-E2B-it-qat-GGUF/resolve/main/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf'
 
 # 3. Throughput

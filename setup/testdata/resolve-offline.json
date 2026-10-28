@@ -1,0 +1,244 @@
+{
+  "_comment": "Offline resolver fixture (OFFLOAD_RESOLVE=offline): fake tag, url, digest and size per source key. Never fetched.",
+  "llama-vulkan": {
+    "tag": "b99999",
+    "url": "https://offline.invalid/llama-vulkan",
+    "digest": "d3fdd495f16b56449c6ba35af86d70485a1afbce76850355c8cecb1fdca88743",
+    "size": 1048576
+  },
+  "llama-cuda": {
+    "tag": "b99999",
+    "url": "https://offline.invalid/llama-cuda",
+    "digest": "d4ad267c7bf8e9c81eadb45516a42fd56d77d4834f6a8c34d20e4a599b5afe16",
+    "size": 1048576
+  },
+  "llama-cudart": {
+    "tag": "b99999",
+    "url": "https://offline.invalid/llama-cudart",
+    "digest": "36de455b52f8584f57b7dae5816df41208cc690b526122a0ab12d23c3fad0753",
+    "size": 1048576
+  },
+  "llama-cuda13": {
+    "tag": "b99999",
+    "url": "https://offline.invalid/llama-cuda13",
+    "digest": "cdbf1fbd8b43e46ad652423f1020300ae4d000bd0a080bd43880b57492b06e8a",
+    "size": 1048576
+  },
+  "llama-cudart13": {
+    "tag": "b99999",
+    "url": "https://offline.invalid/llama-cudart13",
+    "digest": "240de32f2c1d1690923927d9642765ec93609c931df9385111d2ec8163bc44c9",
+    "size": 1048576
+  },
+  "llama-cpu": {
+    "tag": "b99999",
+    "url": "https://offline.invalid/llama-cpu",
+    "digest": "5d59dcd0db6faee6fc954cf6bfc92dd7b0fd28580191a67573e08f2199df941c",
+    "size": 1048576
+  },
+  "llama-swap": {
+    "tag": "v999",
+    "url": "https://offline.invalid/llama-swap",
+    "digest": "61c9286895d05ee25397baf133fcca5614184394ed4d075aa985c2817bb6a941",
+    "size": 1048576
+  },
+  "model-e4b": {
+    "tag": "db0838ce",
+    "url": "https://offline.invalid/model-e4b",
+    "digest": "db0838ce93bc5c5038a4248a27f315db1d1282e583c57efdcd94432c62c00480",
+    "size": 1048576
+  },
+  "model-e2b": {
+    "tag": "d10a209d",
+    "url": "https://offline.invalid/model-e2b",
+    "digest": "d10a209db412aaf5dda0e72476df6496385339dc29f03f7b32946ba6b2179517",
+    "size": 1048576
+  },
+  "model-26b": {
+    "tag": "72fc09e6",
+    "url": "https://offline.invalid/model-26b",
+    "digest": "72fc09e6572ccbfd3b0693db499668009338149a14338aa9618ee2caac43179b",
+    "size": 1048576
+  },
+  "model-qwen38-iq3s": {
+    "tag": "f2bc7642",
+    "url": "https://offline.invalid/model-qwen38-iq3s",
+    "digest": "f2bc764259eec937817b84c9b06faa71f0173285cb733323c5f1c241d6d177e7",
+    "size": 1048576
+  },
+  "model-qwen38": {
+    "tag": "4b4c114c",
+    "url": "https://offline.invalid/model-qwen38",
+    "digest": "4b4c114c7e7a32fae431afc4df90b36899d23478141c9f851508a93ba05519b3",
+    "size": 1048576
+  },
+  "model-qwen38-mmproj": {
+    "tag": "6fc0d656",
+    "url": "https://offline.invalid/model-qwen38-mmproj",
+    "digest": "6fc0d6566e1c8c7af313834665c6fa83656f41dc9ff70bd3276522c9dd2e4c7e",
+    "size": 1048576
+  },
+  "model-qwen35-4b": {
+    "tag": "7028d859",
+    "url": "https://offline.invalid/model-qwen35-4b",
+    "digest": "7028d85902d9197e7e65c889deebd90a93a173cc363669299dfb1d1d42b3323c",
+    "size": 1048576
+  },
+  "model-qwen35-9b": {
+    "tag": "4fb68754",
+    "url": "https://offline.invalid/model-qwen35-9b",
+    "digest": "4fb68754c53ce10727aabf479bbdc540defb96c8c448d684c8f269de4d92754c",
+    "size": 1048576
+  },
+  "model-mimo-9b": {
+    "tag": "ecc2cc70",
+    "url": "https://offline.invalid/model-mimo-9b",
+    "digest": "ecc2cc70ad8a514f804ecfde05e850fe6d1279e525bc3d39fe9ac21c4274b8b7",
+    "size": 1048576
+  },
+  "model-qwen36-35b": {
+    "tag": "353abdff",
+    "url": "https://offline.invalid/model-qwen36-35b",
+    "digest": "353abdffadc2820b2a285c294fbb1876769d524233733a11baff1a7677bb6c4d",
+    "size": 1048576
+  },
+  "model-embed": {
+    "tag": "c76b7f58",
+    "url": "https://offline.invalid/model-embed",
+    "digest": "c76b7f580c3ff7c6ed29daf2bceddb627a1b23b81e55e4c27c0d814b5d75a448",
+    "size": 1048576
+  },
+  "model-eg2": {
+    "tag": "9419dc24",
+    "url": "https://offline.invalid/model-eg2",
+    "digest": "9419dc24fb5997726aa42f3767eb604c92b6c7d18123902a1449fab56abfd656",
+    "size": 1048576
+  },
+  "model-eg2-mmproj": {
+    "tag": "f1effaa6",
+    "url": "https://offline.invalid/model-eg2-mmproj",
+    "digest": "f1effaa63cf75fd0bf465791d44df7f3baf5f3e71f69495416b9fadc3c10cdb5",
+    "size": 1048576
+  },
+  "sdcpp-vulkan": {
+    "tag": "master-9999-abcdef0",
+    "url": "https://offline.invalid/sdcpp-vulkan",
+    "digest": "c276745cad5812a2311a235a5a3e73ca4521e2c40f023fda4f6acc8967d49d09",
+    "size": 1048576
+  },
+  "model-zimage": {
+    "tag": "7a29d9ed",
+    "url": "https://offline.invalid/model-zimage",
+    "digest": "7a29d9edeefdef41eacf1a3e63d862bc6f7a9a08dcf5017cb9250066480276a0",
+    "size": 1048576
+  },
+  "model-zimage-llm": {
+    "tag": "d5f5d59c",
+    "url": "https://offline.invalid/model-zimage-llm",
+    "digest": "d5f5d59c469898205cc1ce8b0caa022bf2915bf23ec1e95f0fd600c52e3e4926",
+    "size": 1048576
+  },
+  "model-zimage-vae": {
+    "tag": "09528786",
+    "url": "https://offline.invalid/model-zimage-vae",
+    "digest": "0952878605cb631c7ffe262350f64538879a36e7fb54a3479dbaf35f827573f5",
+    "size": 1048576
+  },
+  "model-sd15": {
+    "tag": "83cbc2ea",
+    "url": "https://offline.invalid/model-sd15",
+    "digest": "83cbc2eacc6e8561384079200109d78836fb2a3ec2041a3e9b26141a3c1b67ff",
+    "size": 1048576
+  },
+  "model-sdxl": {
+    "tag": "a27e670f",
+    "url": "https://offline.invalid/model-sdxl",
+    "digest": "a27e670fa6a640ede23823365d7aa20acc5d8ee0296d835aa3a3b9d82077c49f",
+    "size": 1048576
+  },
+  "model-sdxl-vae": {
+    "tag": "0e57549a",
+    "url": "https://offline.invalid/model-sdxl-vae",
+    "digest": "0e57549ac4b2409cea71eefa44cd2d4947f75fd9388c7a87f05b1ddcddff513a",
+    "size": 1048576
+  },
+  "model-e2b-mmproj": {
+    "tag": "1a4250cd",
+    "url": "https://offline.invalid/model-e2b-mmproj",
+    "digest": "1a4250cd8ddcfed0c63681cd219533bab7b23596e33ee954aa52d940763dee66",
+    "size": 1048576
+  },
+  "model-whisper-turbo-q8": {
+    "tag": "412c5718",
+    "url": "https://offline.invalid/model-whisper-turbo-q8",
+    "digest": "412c5718b0121f320e1f439b5a6777e8064d871fe8eff59f7bb1114ff9582d3d",
+    "size": 1048576
+  },
+  "model-silero-v5": {
+    "tag": "a93ac8a2",
+    "url": "https://offline.invalid/model-silero-v5",
+    "digest": "a93ac8a27d0d32d7d74676c8f96560cab80e3dd50901d6df5297c9b92ee68068",
+    "size": 1048576
+  },
+  "model-fastwan": {
+    "tag": "8191bf2f",
+    "url": "https://offline.invalid/model-fastwan",
+    "digest": "8191bf2f4d77739dd5ef233cc33eda6dae7d689d29ba9ca5c35c17a4f1b45dea",
+    "size": 1048576
+  },
+  "model-wan22-vae": {
+    "tag": "354c217f",
+    "url": "https://offline.invalid/model-wan22-vae",
+    "digest": "354c217f51dbd9c210133500bcf83d008bb8c79c5cb2f7f266445f0b95b0cf92",
+    "size": 1048576
+  },
+  "model-umt5-xxl": {
+    "tag": "9e05ff84",
+    "url": "https://offline.invalid/model-umt5-xxl",
+    "digest": "9e05ff84ad4db14b7f96f4cb69af9058c0ed286d5e5360b778bb99ba30603e1b",
+    "size": 1048576
+  },
+  "model-wan22-tae": {
+    "tag": "c3931051",
+    "url": "https://offline.invalid/model-wan22-tae",
+    "digest": "c3931051ca5b93d6866a23e24cfe762c284f2966a1ea854821bbc074b37f251a",
+    "size": 1048576
+  },
+  "model-vace": {
+    "tag": "0e17d8f0",
+    "url": "https://offline.invalid/model-vace",
+    "digest": "0e17d8f072c48b1541a3b09749d320701f39cc7928ca8bed6a84d8a6d5a1d46f",
+    "size": 1048576
+  },
+  "model-wan21-vae": {
+    "tag": "93373765",
+    "url": "https://offline.invalid/model-wan21-vae",
+    "digest": "93373765bb81f8a89f743a4f4957bf701d2bcb7626167c1af61ff0a40cd161f8",
+    "size": 1048576
+  },
+  "model-depth-anything": {
+    "tag": "e78cb1a0",
+    "url": "https://offline.invalid/model-depth-anything",
+    "digest": "e78cb1a0833cce95ba0bb0e9833d104e5936416bd81f6e4c68ce33a2b3b682e6",
+    "size": 1048576
+  },
+  "model-chatterbox": {
+    "tag": "863b7fca",
+    "url": "https://offline.invalid/model-chatterbox",
+    "digest": "863b7fca2147290fca395cca954e029b90094ab9db6cc909ca1f18d0a6b61f8c",
+    "size": 1048576
+  },
+  "model-ace-step": {
+    "tag": "37914f1f",
+    "url": "https://offline.invalid/model-ace-step",
+    "digest": "37914f1f8ee68b128637289800847b22c685b2c189038d09cb0ad8b87f55a81e",
+    "size": 1048576
+  },
+  "hyperframes": {
+    "version": "1.0.0-offline-fixture",
+    "digest": "sha512-offline-fixture",
+    "url": "https://offline.invalid/hyperframes",
+    "size": null,
+    "source": "npm:hyperframes"
+  }
+}

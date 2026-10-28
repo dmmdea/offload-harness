@@ -22,7 +22,7 @@ templates exported to an alpha format lost their background and kept only the te
 
 **Where they come from.** `title-card`, `lower-third` and `captions-bar` were written for this harness.
 `stat-card`, `section-title`, `callout-label` and `checklist-card` are adapted from card designs in a
-community teaching kit, pinned at one commit and used under the kit's own licences. Those licence texts are
+community teaching kit, vendored from one commit (2026-09-28) and used under the kit's own licences. Those licence texts are
 kept verbatim, with a record of what was taken and what was not, in
 [`_third_party/hyperframes-student-kit/`](_third_party/hyperframes-student-kit/PROVENANCE.md). Nothing from
 the kit is installed or run: the four templates are rewrites in CSS, and each README lists what changed.

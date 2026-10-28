@@ -116,8 +116,8 @@ func TestGatedWeightFilenamesMatchTheShippedTemplates(t *testing.T) {
 	}
 }
 
-// TestGatedWeightFilenamesMatchTheInstaller pins the same names against
-// install.ps1's $PINNED table — the contract that decides what lands on disk. The
+// TestGatedWeightFilenamesMatchTheInstaller checks the same names against
+// install.ps1's $SOURCES table — the contract that decides what lands on disk. The
 // warning compares on-disk presence, so a name the installer does not fetch can
 // never be satisfied.
 func TestGatedWeightFilenamesMatchTheInstaller(t *testing.T) {

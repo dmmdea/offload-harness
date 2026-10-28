@@ -21,7 +21,7 @@
   receipt read correctly; a 512 cap misreads receipt lines, which is why 768 is the bound) and an STT seat (`whisper-stt`: large-v3-turbo q8_0 with the silero
   v5.1.2 VAD and flash attention OFF per the house Spanish-audio rule; 1,263 / 1,323 MiB, a 759 KB Spanish clip
   in 3.2 s warmed, the same transcript as q5_0 and as flash attention on). Both are swappable, because either
-  one beside the chat seat overflows a 3 GB card. The image lane binds the house sd.cpp Vulkan pin with
+  one beside the chat seat overflows a 3 GB card. The image lane binds the sd.cpp Vulkan build the installer resolves with
   sdxl-turbo Q4_0 exactly as ampere-6 does: a correct 512x512 in 45 s on the card, the weights parked in host
   RAM and staged per step (1,964 MiB peak on the card).
 - **Agent seat and spill, measured.** The six-arm bake on the box (G1 fit and decode, G2 ten strict tool
@@ -29,13 +29,13 @@
   survivors) keeps the resident E2B as the agent seat: 8/8 grounded digests, every one format-clean, the
   lowest fabrication signal of the three survivors, 926 MiB free at peak, and one weight file shared with
   chat and vision, so an agent call never evicts the chat seat. LFM3-1.7B Q6_K and Q8_0 also reach 8/8
-  (Q6_K leads on coverage) but need llama.cpp b11938 or later, so the global pin stays at b11490 and Q6_K
-  is recorded as the runner-up for a later pin-bump PR; Qwen3.5-2B and LFM3 QAD-Q4_0 fall at G3, the 4B
+  (Q6_K leads on coverage) but need a newer llama.cpp build than the one installed at bake time, so Q6_K
+  is recorded as the runner-up to bind once the newest build carries it; Qwen3.5-2B and LFM3 QAD-Q4_0 fall at G3, the 4B
   quants and MiniCPM5-2B at G1. The Qwen3.6-35B-A3B RAM spill loads cleanly (ADR 0080 gates 2 and 3)
   but decodes at 9.4-10.9 tok/s on this single-channel host, under the 10 tok/s bar, so it is not carried.
-- **Pins.** `model-e2b` and `model-e4b` are re-pinned to the current upstream LFS objects (unsloth re-uploaded
-  both QAT GGUFs, 2,016 bytes larger with new oids); the old pins failed the size check on a fresh install. The
-  three media-seat files get pin-only rows (`model-e2b-mmproj`, `model-whisper-turbo-q8`, `model-silero-v5`):
+- **Sources.** `model-e2b` and `model-e4b` follow the current upstream LFS objects (unsloth re-uploaded
+  both QAT GGUFs, 2,016 bytes larger with new oids); stale recorded sizes failed the check on a fresh install. The
+  three media-seat files get source rows (`model-e2b-mmproj`, `model-whisper-turbo-q8`, `model-silero-v5`):
   recorded bytes and sha256, placed by the operator, warned about by `install render` when absent.
 - **Check.** `detect.ps1 -SelfTest` and `go test ./internal/hwdetect/` with the new rows (970M 3 GB ->
   `maxwell-3`, 3.9 -> `maxwell-3`, 4 -> `ampere-6`, unknown VRAM -> `ampere-6`, 1050 Ti -> `other`);

@@ -4,9 +4,9 @@
 
 **Goal:** A 3 GB NVIDIA card classifies as its own tier, `maxwell-3`, and renders only seats measured to fit on the reference box `<node-g>`, each the best quality that fits.
 
-**Architecture:** One new VRAM band in the classifier and its PowerShell twin; one new inverted-polarity profile flag (`omit_e4b`) so the renderer and the installer drop the E4B workhorse on a tier that cannot load it; one `profiles.json` entry whose values are PROJECTED until the box's bakes replace them; generated tier docs; refreshed E2B/E4B pins. Measurements on the box decide the agent, vision, STT and image seats and are recorded in the profile notes and the benchmarks folder.
+**Architecture:** One new VRAM band in the classifier and its PowerShell twin; one new inverted-polarity profile flag (`omit_e4b`) so the renderer and the installer drop the E4B workhorse on a tier that cannot load it; one `profiles.json` entry whose values are PROJECTED until the box's bakes replace them; generated tier docs; the E2B/E4B files resolved from the publisher (no size or hash literal in the repository). Measurements on the box decide the agent, vision, STT and image seats and are recorded in the profile notes and the benchmarks folder.
 
-**Tech Stack:** Go 1.26 (harness, `internal/hwdetect`, `internal/servingtmpl`, `install_render.go`), PowerShell 5.1/7 (`setup/detect.ps1`, `setup/install.ps1`), llama.cpp `b11490` win-cuda-12.4 (pin), llama-swap v236.
+**Tech Stack:** Go 1.26 (harness, `internal/hwdetect`, `internal/servingtmpl`, `install_render.go`), PowerShell 5.1/7 (`setup/detect.ps1`, `setup/install.ps1`), llama.cpp win-cuda-12.4 (the newest complete build; measured on b11490 on 2026-10-28), llama-swap (the newest release).
 
 **Spec:** `docs/specs/2026-10-28-maxwell-3-tier-design.md`
 
@@ -16,7 +16,7 @@
 - `omit_e4b` is inverted-polarity: absent/false renders exactly today's output; the goldens change only where the token literal is substituted.
 - No real machine, person or path names in any tracked file: the box is `<node-g>`; the leak gate scans every file.
 - No new tests. Existing tables that enumerate tiers gain a row; red tests are fixed by rows, never by edits to the assertion.
-- Every pin is size + LFS sha256 read from the Hugging Face tree API; no model bytes are downloaded to pin.
+- No version, size or hash literal is written into the repository: the installer resolves each model file from the Hugging Face tree API at install time and verifies its published `lfs.oid` and size (ADR 0099).
 - Every seat ttl 300; `fleet_max_concurrent_jobs: 1`; `escalation_model` and `reasoning_model` blank.
 
 ---
@@ -46,7 +46,6 @@
 - Modify: `setup/templates/profiles.json` (`_fields`), `install_render.go:81-95,676,766`, `internal/servingtmpl/servingtmpl.go` (Params ~64, drop ~306-311, token map ~562-575, validate ~674), `internal/servingtmpl/provenance.go:157,193,210`, `altcpu.go:32`
 - Modify: the eight templates' set expressions: `llama-swap.win-cuda.yaml:249`, `linux-cuda:321`, `win-vulkan:163`, `linux-vulkan:224`, `win-cpu:90`, `linux-cpu:99` (`e4b | ` → `__E4B_LEAD__`), `win-cuda-resident:109`, `win-dual-cuda:121` (`& e4b` → `__E4B_AND__`)
 - Modify: `setup/install.ps1:1581` (model key list), `Resolve-ProfileParams` (read the flag), `seat_closure_test.go:98-131` (`renderParams` helper gains the field)
-- Re-pin: `internal/servingtmpl/testdata/eg2bin-unset-render.golden` via `OFFLOAD_UPDATE_GOLDEN=1`
 
 **Interfaces:**
 - Produces: `servingProfile.OmitE4B bool \`json:"omit_e4b"\``, `servingtmpl.Params.OmitE4B bool`, `ParamsBasis.OmitE4B`, tokens `__E4B_LEAD__` (renders `e4b | ` or empty) and `__E4B_AND__` (renders ` & e4b` or empty); `dropE4B` removes the `offload-e4b` entry and the `e4b` var when set.
@@ -78,16 +77,16 @@
   Expected: all PASS; `docs/tiers/maxwell-3.md` exists and `docs_tiers_test` is green; the render test's maxwell-3 block prints ok lines.
 - [ ] **Step 5: Commit** `feat(tiers): maxwell-3 profile (projected), tables, generated docs`
 
-### Task 4: Refresh the stale E2B/E4B pins
+### Task 4: The E2B/E4B files resolve from the publisher
 
 **Files:**
-- Modify: `setup/install.ps1:117-130` (`model-e4b`, `model-e2b`)
+- Modify: `setup/install.ps1` (`model-e4b`, `model-e2b`: a source row naming the repository and file, no size or hash)
 
-- [ ] **Step 1: Set** `model-e2b` size `2620370976` sha `e531007218dfab990486a5de7676a6932d6ea8dea233d1f698d7c21cf8a16889` version `e5310072`; `model-e4b` size `4215695776` sha `df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3` version `df0fd4ee` (both read 2026-10-28 from the HF tree API; the comment records the date).
+- [ ] **Step 1: Set** the `model-e2b` and `model-e4b` rows to the repository and file name only. The installer reads the current `lfs.oid` and size from the Hugging Face tree API at install time and re-fetches a file only when the published oid differs from the recorded one (unsloth re-uploaded both QAT GGUFs on 2026-10-28, 2,016 bytes larger with new oids, which is exactly the change a literal could not follow).
 - [ ] **Step 2: Run it once for real**
-  Run: `curl -sIL <both resolve URLs> | grep -i x-linked-size` and `grep -n "sha  = 'e5310072\|sha  = 'df0fd4ee" setup/install.ps1`
-  Expected: the two X-Linked-Size headers equal the pinned sizes.
-- [ ] **Step 3: Commit** `fix(install): re-pin gemma-4 E2B/E4B GGUFs to the current upstream LFS oids`
+  Run: `curl -sIL <both resolve URLs> | grep -i x-linked-size`, then the installer's model step.
+  Expected: the downloaded files match the sizes the publisher reports.
+- [ ] **Step 3: Commit** `fix(install): resolve gemma-4 E2B/E4B GGUFs from the publisher`
 
 ### Task 5 (box): engine go/no-go and the quant/speed matrix
 

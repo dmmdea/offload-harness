@@ -1012,26 +1012,6 @@ test("captions-bar script: every chunk the helper emits from a transcript longer
   }
 });
 
-// The page depends on HyperFrames' seek event, which the pinned package dispatches but does not document (only
-// getVariables() is documented), so a HyperFrames bump must render this template again. The README records the
-// version it was last measured on; this fails on a bump until that section is redone.
-test("captions-bar: its Measured section names the HyperFrames version it was measured on, which is the runner's pin", () => {
-  // Each check reads only the paragraph or section it is about: a mention elsewhere in the file must not satisfy it.
-  const readme = readFileSync(join(TEMPLATES_DIR, "captions-bar", "README.md"), "utf8").replace(/\r\n/g, "\n");
-  const at = readme.indexOf("\n## Measured\n");
-  assert.ok(at >= 0, "captions-bar/README.md has a Measured section");
-  const next = readme.indexOf("\n## ", at + 1);
-  const measured = readme.slice(at, next < 0 ? readme.length : next);
-  assert.ok(measured.includes(`HyperFrames ${PINNED_VERSION}`), `the Measured section of captions-bar/README.md must say it was measured on HyperFrames ${PINNED_VERSION}; after a version bump, render it again (default sample, and a known group at a known time) and update that section`);
-  const guide = readFileSync(join(__dirname, "..", "docs", "OPERATOR-GUIDE.md"), "utf8").replace(/\r\n/g, "\n");
-  const start = guide.indexOf("**Bumping HyperFrames.**");
-  assert.ok(start >= 0, "the operator guide has a 'Bumping HyperFrames' step");
-  const end = guide.indexOf("\n\n", start);
-  const bump = guide.slice(start, end < 0 ? guide.length : end);
-  assert.match(bump, /captions-bar/, "the bump step itself names captions-bar");
-  assert.match(bump, /hf-seek/, "and says why: the template reads the runtime's undocumented seek event");
-});
-
 // --- alpha overlays stay transparent ------------------------------------------------------------------
 // The pixel proof is a render (README "Measured": the alpha plane at fixed times), which a bare-Node run cannot
 // make. What can be read statically is where the page paints: the page, the body and the root must paint nothing,

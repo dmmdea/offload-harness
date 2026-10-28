@@ -115,7 +115,7 @@ divergence. A model in no matrix set runs alone under llama-swap's rule; the gua
 such model.
 
 With no vLLM seat loaded, the chain and every request body are byte-identical to the guard-off
-build (pinned by test).
+build (held by a test).
 
 What fills those slots — and the separate terminal reasoning tier described below — is a
 per-machine choice; the validated recommendation per hardware tier lives in the model matrix
@@ -345,8 +345,8 @@ the seat's `ttl` frees the card, so there is no unload after a burst.
 
 **Installing it.** `local-offload install forecast [--home H] [--models M] [--ref <sha|branch>] [--torch-backend auto] [--json]`
 needs `uv` on PATH and builds `<home>/forecast/venv` (python 3.13), installs torch with `uv pip install torch
---torch-backend=auto`, installs the `timestral` package at its pinned commit, fetches the weights by
-`snapshot_download` at the pinned Hugging Face revision into `<models>/timestral-209m` and verifies the sha256, and writes the
+--torch-backend=auto`, installs the `timestral` package from the head of its default branch (the commit recorded), fetches the weights by
+`snapshot_download` at the newest Hugging Face revision into `<models>/timestral-209m` and verifies them against the published `lfs.oid`, and writes the
 embedded server file. Every step verifies what is there and skips when it is right, so a second run changes nothing. It never
 loads the model: the card is the seat's. `--json` prints one final result line (`ok`, `forecast_dir`, `venv_python`, `torch`,
 `cuda_available`, `timestral`, `model_dir`, `sha256`). The weights licence is Modified MIT: the attribution "2026 - Mistral AI"
@@ -606,7 +606,7 @@ the exemplar rows, and is not part of the cache key. It percent-escapes `%`, `;`
 values so that every top-level `key=value;` entry is unambiguous, renders exactly as it always did for
 parameters without those characters (Windows paths with backslashes included), and keeps Go's `%v`
 rendering for nested and non-string values: a limit that now matters only for file stems and exemplar
-rows, and is pinned by a test. The stems hash the prompt and this string with no boundary between
+rows, and is held by a test. The stems hash the prompt and this string with no boundary between
 them, so the escaping does not make file names injective.
 
 The encoding changed once. It used to join the parts with a NUL byte, so `Key("a", "b")` was
@@ -857,7 +857,7 @@ routing solver and the guard's reading and staleness rules. `internal/grounding/
   the forecast seat and its typed errors
 - [`internal/forecastserve/`](../../internal/forecastserve/forecastserve.go) — the launcher and the embedded
   [`timestral_server.py`](../../internal/forecastserve/timestral_server.py)
-- [`install_forecast.go`](../../install_forecast.go) — `install forecast`, with the pinned revisions and hashes
+- [`install_forecast.go`](../../install_forecast.go) — `install forecast`, which resolves the newest revisions and verifies the publisher's digests
 
 ## Related docs
 

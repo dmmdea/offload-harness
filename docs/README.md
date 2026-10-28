@@ -70,7 +70,7 @@ where the code lives.
   (measure, gate, adopt or keep the incumbent) and the parts that carry it, the failure register, the trace-corpus
   readout, the measurement gate and SHA-bound review evidence, with the two proposed parts marked not on main yet
 - [systems/openspec.md](systems/openspec.md) — the `openspec/` spec-and-plan tree: the forked `harness-change`
-  schema with an optional ADR artifact, the hash-pinned install script, the strict validate gate
+  schema with an optional ADR artifact, the registry-verified install script, the strict validate gate
 
 ## Hardware tiers — what YOUR machine gets
 

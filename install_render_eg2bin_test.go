@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -571,24 +570,6 @@ func TestTheFloorIsAWriteTimeGateOnly(t *testing.T) {
 	}
 	if rep := provenanceOf(stamped); rep.State != servingtmpl.StateMatch {
 		t.Errorf("a stamped config on a build below the floor audits %s: %s", rep.State, rep.Detail)
-	}
-}
-
-// TestInstallPs1PinsABuildAtOrAboveTheEG2Floor ties the two files that each state the floor: the Windows
-// installer downloads one pinned tag for every node it installs, so that tag must be at or above the build
-// the renderer refuses below.
-func TestInstallPs1PinsABuildAtOrAboveTheEG2Floor(t *testing.T) {
-	b, err := os.ReadFile(filepath.Join("setup", "install.ps1"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m := regexp.MustCompile(`(?m)^\$LLAMA_TAG\s*=\s*'b(\d+)'`).FindStringSubmatch(string(b))
-	if m == nil {
-		t.Fatal("setup/install.ps1 states no $LLAMA_TAG = 'bNNNNN'")
-	}
-	tag, _ := strconv.Atoi(m[1])
-	if tag < eg2MinLlamaBuild {
-		t.Errorf("install.ps1 pins llama.cpp b%d, below the b%d floor the renderer refuses under: every Windows install it makes would render an entry that cannot load", tag, eg2MinLlamaBuild)
 	}
 }
 

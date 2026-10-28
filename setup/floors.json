@@ -1,0 +1,16 @@
+{
+  "_comment": "Floors only: the minimum build a seat needs. A ceiling or an exact pin is not representable here and is forbidden everywhere else (ADR 0099).",
+  "llama.cpp": {
+    "harness": 11452,
+    "seats": {
+      "embeddinggemma2": 11452,
+      "qwen3.6-35b-a3b-agent": 10964,
+      "mimo-9b-agent": 11102,
+      "lfm3": 11938
+    }
+  },
+  "whisper.cpp": { "harness": "1.8.3" },
+  "stable-diffusion.cpp": { "harness": 968 },
+  "hyperframes": { "harness": "0.8.0" },
+  "node": { "harness": "22" }
+}

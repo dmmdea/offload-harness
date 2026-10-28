@@ -382,37 +382,34 @@ Assert (($explicitProj -contains 'model-eg2') -and ($explicitProj -contains 'mod
 $projNoEntry = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeEmbeddingGemma2 $false -IncludeEmbeddingGemma2Projector $true -WithFamily $true)
 Assert ($projNoEntry.Count -eq 0)                                                'the projector flag alone downloads nothing: it means something only with the entry'
 foreach ($k in @('model-eg2', 'model-eg2-mmproj')) {
-  $pin = $PINNED[$k]
-  Assert ([bool]$pin)                                                          "PINNED defines $k"
-  Assert ($pin.sha -match '^[0-9a-f]{64}$')                                    "$k pins a full sha256"
-  Assert ($pin.version -eq $pin.sha.Substring(0, 8))                           "$k version is the first 8 hex of its sha"
-  Assert ($pin.url -match '^https://huggingface\.co/ggml-org/embeddinggemma-2-GGUF/resolve/main/') "$k is fetched from the ggml-org EmbeddingGemma-2 repo"
-  Assert ($pin.url.EndsWith($pin.name))                                        "$k local name is the file the template cmd names"
+  $src = $SOURCES[$k]
+  Assert ([bool]$src)                                                          "SOURCES defines $k"
+  Assert ($src.kind -eq 'hf-file')                                             "$k is a Hugging Face file"
+  Assert ($src.repo -eq 'ggml-org/embeddinggemma-2-GGUF')                      "$k is fetched from the ggml-org EmbeddingGemma-2 repo"
+  Assert ($src.file -eq $src.dest)                                             "$k local name is the file the template cmd names"
 }
-Assert ([int64]$PINNED['model-eg2'].size -eq 309855456)                        'model-eg2 size is the measured 309,855,456 bytes'
-Assert ($PINNED['model-eg2'].sha.StartsWith('2188ac1d'))                       'model-eg2 sha256 begins 2188ac1d (the memory-stack session''s prefix)'
-Assert ([int64]$PINNED['model-eg2-mmproj'].size -eq 554821024)                 'model-eg2-mmproj size is the measured 554,821,024 bytes'
-Assert ($PINNED['model-eg2-mmproj'].sha -eq 'c4a8a52691ecef40618438928bdf9e68379b854e24166f292592353db0aab64f') 'model-eg2-mmproj sha256 is the measured one'
 
-# --- The pinned llama.cpp build (Lane B, 2026-10-09): the floor, the naming, and one tag everywhere --------------
+# --- The llama.cpp rows: names and kinds only (the tag, size and digest come from the publisher at run time) ----
 Write-Host ""
-Write-Host "== The pinned llama.cpp build: floor, asset naming, one tag =="
-Assert ($LLAMA_TAG -match '^b\d+$')                                            'LLAMA_TAG has the bNNNN shape'
-Assert ([int]$LLAMA_TAG.Substring(1) -ge 11452)                                'LLAMA_TAG is at or above b11452 (the gemma-embedding2 architecture)'
+Write-Host "== The llama.cpp sources: asset naming, one release rule =="
 foreach ($k in @('llama-vulkan', 'llama-cuda', 'llama-cudart', 'llama-cuda13', 'llama-cudart13', 'llama-cpu')) {
-  $p = $PINNED[$k]
-  Assert ($p.url -like "https://github.com/ggml-org/llama.cpp/releases/download/$LLAMA_TAG/*") "$k downloads from the $LLAMA_TAG release"
-  Assert ($p.version -eq $LLAMA_TAG)                                           "$k manifest version is the tag (a bump re-downloads it)"
-  Assert ($p.sha -match '^[0-9a-f]{64}$')                                      "$k pins a full sha256"
-  Assert ([int64]$p.size -gt 1000000)                                          "$k pins a size"
+  $p = $SOURCES[$k]
+  Assert ($p.kind -eq 'github-release' -and $p.repo -eq 'ggml-org/llama.cpp')   "$k is a ggml-org/llama.cpp release asset"
+  Assert ($p.tagRule -eq 'b-number')                                           "$k orders releases by their b-number"
+  Assert ($p.dest -eq 'llama')                                                 "$k lands in the llama live directory"
 }
-Assert ($PINNED['llama-cuda13'].url.EndsWith("llama-$LLAMA_TAG-bin-win-cuda-13.4-x64.zip"))   'llama-cuda13 names the cuda-13.4 asset this tag ships (cuda-13.3 is gone)'
-Assert ($PINNED['llama-cudart13'].url.EndsWith('cudart-llama-bin-win-cuda-13.4-x64.zip'))     'llama-cudart13 names the cuda-13.4 cudart asset'
-Assert ($PINNED['llama-cuda'].url.EndsWith("llama-$LLAMA_TAG-bin-win-cuda-12.4-x64.zip"))      'llama-cuda keeps the 12.4 asset name'
-Assert ($PINNED['llama-vulkan'].url.EndsWith("llama-$LLAMA_TAG-bin-win-vulkan-x64.zip"))       'llama-vulkan names the vulkan asset'
-Assert ($PINNED['llama-cpu'].url.EndsWith("llama-$LLAMA_TAG-bin-win-cpu-x64.zip"))             'llama-cpu names the cpu asset'
-$sixShas = @('llama-vulkan', 'llama-cuda', 'llama-cudart', 'llama-cuda13', 'llama-cudart13', 'llama-cpu') | ForEach-Object { $PINNED[$_].sha }
-Assert (($sixShas | Select-Object -Unique).Count -eq 6)                       'the six llama.cpp assets pin six different hashes'
+Assert ($SOURCES['llama-cuda13'].asset -eq 'llama-<TAG>-bin-win-cuda-13.4-x64.zip')       'llama-cuda13 names the cuda-13.4 asset family'
+Assert ($SOURCES['llama-cudart13'].asset -eq 'cudart-llama-bin-win-cuda-13.4-x64.zip')    'llama-cudart13 names the cuda-13.4 cudart asset'
+Assert ($SOURCES['llama-cuda'].asset -eq 'llama-<TAG>-bin-win-cuda-12.4-x64.zip')         'llama-cuda keeps the 12.4 asset name'
+Assert ($SOURCES['llama-vulkan'].asset -eq 'llama-<TAG>-bin-win-vulkan-x64.zip')          'llama-vulkan names the vulkan asset'
+Assert ($SOURCES['llama-cpu'].asset -eq 'llama-<TAG>-bin-win-cpu-x64.zip')                'llama-cpu names the cpu asset'
+Assert ($SOURCES['llama-swap'].tagRule -eq 'v-number')                         'llama-swap releases order by their v-number'
+Assert ($SOURCES['sdcpp-vulkan'].tagRule -eq 'master-number')                  'stable-diffusion.cpp releases order by their master-number'
+foreach ($k in @($SOURCES.Keys)) {
+  foreach ($banned in @('sha', 'bytes', 'size', 'version', 'url')) {
+    Assert (-not $SOURCES[$k].ContainsKey($banned))                            "$k carries no '$banned' field (the publisher supplies it)"
+  }
+}
 
 # The RAM gate Step 5 applies BEFORE it hands the flag to Get-GatedModelKeys: low, mid and high
 # (28 GB and up), never min or an unknown tier. Twin of tierseed.RAMLowUp in Go.
@@ -422,31 +419,29 @@ Assert ([bool](Get-Command Test-RamLowUp -ErrorAction SilentlyContinue)) 'dot-so
 foreach ($r in @('low', 'mid', 'high')) { Assert ((Test-RamLowUp -RamTier $r) -eq $true)  "ram_tier $r is on the spill seat's side of the floor" }
 foreach ($r in @('min', '', 'none', 'huge')) { Assert ((Test-RamLowUp -RamTier $r) -eq $false) "ram_tier '$r' is below the floor (no seat, no 12 GB download)" }
 
-# The pin: size and sha read from the Hugging Face resolve redirect (X-Linked-Size / X-Linked-ETag).
-$pin36 = $PINNED['model-qwen36-35b']
-Assert ([bool]$pin36)                                                       'PINNED defines model-qwen36-35b'
-Assert ($pin36.name -eq 'Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf') 'the pinned name carries the subdirectory the template cmd names'
-Assert ($pin36.sha -match '^[0-9a-f]{64}$')                                 'the pinned sha is a full sha256'
-Assert ($pin36.version -eq $pin36.sha.Substring(0, 8))                      'the pinned version is the first 8 hex of the sha, like every other model'
-Assert ([int64]$pin36.size -gt 13000000000 -and [int64]$pin36.size -lt 13500000000) 'the pinned size is the 12.30 GiB GGUF'
+# The spill seat's source: the name carries the subdirectory the template cmd names.
+$src36 = $SOURCES['model-qwen36-35b']
+Assert ([bool]$src36)                                                       'SOURCES defines model-qwen36-35b'
+Assert ($src36.dest -eq 'Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf') 'the local name carries the subdirectory the template cmd names'
+Assert ($src36.kind -eq 'hf-file')                                          'the spill seat is a Hugging Face file'
 
-# Every key a gate can emit must exist in $PINNED, or the install dies mid-download.
+# Every key a gate can emit must exist in $SOURCES, or the install dies mid-download.
 foreach ($k in @('model-qwen35-4b', 'model-qwen35-9b', 'model-mimo-9b', 'model-qwen36-35b', 'model-eg2', 'model-eg2-mmproj', 'model-qwen38', 'model-qwen38-mmproj')) {
-  Assert ([bool]$PINNED[$k])                                                "PINNED defines $k (gate cannot name a key with no pin)"
+  Assert ([bool]$SOURCES[$k])                                                "SOURCES defines $k (gate cannot name a key with no source)"
 }
-# Closure the other way: a tier that sets the flag must have its pin present.
+# Closure the other way: a tier that sets the flag must have its source present.
 foreach ($t in @($profiles.PSObject.Properties.Name)) {
   if ($profiles.$t.include_qwen35_4b -eq $true) {
-    Assert ([bool]$PINNED['model-qwen35-4b'])                               "tier $t sets include_qwen35_4b and the pin exists"
+    Assert ([bool]$SOURCES['model-qwen35-4b'])                               "tier $t sets include_qwen35_4b and the source exists"
   }
   if ($profiles.$t.include_qwen35_9b -eq $true) {
-    Assert ([bool]$PINNED['model-qwen35-9b'])                               "tier $t sets include_qwen35_9b and the pin exists"
+    Assert ([bool]$SOURCES['model-qwen35-9b'])                               "tier $t sets include_qwen35_9b and the source exists"
   }
   if ($profiles.$t.include_mimo_9b -eq $true) {
-    Assert ([bool]$PINNED['model-mimo-9b'])                                 "tier $t sets include_mimo_9b and the pin exists"
+    Assert ([bool]$SOURCES['model-mimo-9b'])                                 "tier $t sets include_mimo_9b and the source exists"
   }
   if ($profiles.$t.include_embeddinggemma2 -eq $true) {
-    Assert ([bool]$PINNED['model-eg2'] -and [bool]$PINNED['model-eg2-mmproj']) "tier $t sets include_embeddinggemma2 and both pins exist"
+    Assert ([bool]$SOURCES['model-eg2'] -and [bool]$SOURCES['model-eg2-mmproj']) "tier $t sets include_embeddinggemma2 and both sources exist"
   }
   # embeddinggemma2_projector: a JSON boolean when present (Step 5 throws on anything else), and
   # meaningful only on a tier that carries the entry.
@@ -455,7 +450,7 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
     Assert ($profiles.$t.include_embeddinggemma2 -eq $true)                    "tier $t sets embeddinggemma2_projector only with include_embeddinggemma2"
   }
   if ($profiles.$t.include_qwen36_35b -eq $true) {
-    Assert ([bool]$PINNED['model-qwen36-35b'])                              "tier $t sets include_qwen36_35b and the pin exists"
+    Assert ([bool]$SOURCES['model-qwen36-35b'])                              "tier $t sets include_qwen36_35b and the source exists"
     # The tier must declare the measured spill the write gate checks the entry's --n-cpu-moe against.
     Assert ([int]$profiles.$t.n_cpu_moe_max -ge 40)                         "tier $t sets include_qwen36_35b and declares n_cpu_moe_max >= 40"
     # ...and bind the seat only through the low-and-up overlay, never the base seed.
@@ -509,7 +504,7 @@ foreach ($t in @($profiles.PSObject.Properties.Name)) {
 # set from Get-FamilyModelKeys fed the resolved $pp.include_26b, resolved before Step 5.
 $installText = Get-Content -Raw (Join-Path $setupDir 'install.ps1')
 Assert ($installText -match '\$modelKeys \+= @\(Get-FamilyModelKeys -WithFamily \$withFamily -Include26B \(\[bool\]\$pp\.include_26b\)\)') 'Step 5 builds the family set from Get-FamilyModelKeys + $pp.include_26b'
-Assert (([regex]::Matches($installText, "'model-26b'")).Count -eq 3) "'model-26b' appears only in PINNED, Get-FamilyModelKeys and its comment (no hard-coded download)"
+Assert (([regex]::Matches($installText, "'model-26b'")).Count -eq 3) "'model-26b' appears only in SOURCES, Get-FamilyModelKeys and its comment (no hard-coded download)"
 $ppAt = $installText.IndexOf('$pp = Resolve-ProfileParams')
 $step5At = $installText.IndexOf('$modelKeys = @(')
 Assert (($ppAt -gt 0) -and ($ppAt -lt $step5At)) '$pp is resolved before the Step 5 download set'

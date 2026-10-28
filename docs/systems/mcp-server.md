@@ -567,7 +567,7 @@ and both end where a fetched page ends: the text goes through the same digest pa
   versions are in [security.md](security.md#admitted-third-party-software)). **`ytdlp_path` is trusted as written**, with
   nothing checking the file, **unless the optional key `ytdlp_sha256` is set** (64 hexadecimal digits, either case): the file
   is then hashed before every run, and a mismatch, an unreadable file or a malformed value fails the source as `ytdlp_path`
-  and starts nothing, while unset nothing is hashed. A file replaced between the hash and the start is not caught: the pin
+  and starts nothing, while unset nothing is hashed. A file replaced between the hash and the start is not caught: the check
   is against a wrong or changed binary, not against a writer who races each call. On Windows the file must be launchable by
   the system itself, an `.exe` or a wrapper `.cmd` that starts the interpreter: the admitted zipapp is a
   `#!/usr/bin/env python3` script, which runs directly only on a POSIX host with `python3` on `PATH`, and a Windows host that
@@ -596,7 +596,7 @@ and both end where a fetched page ends: the text goes through the same digest pa
   removed, entities decoded, and the rolling duplication automatic captions carry is removed (a line equal to the one before
   it is dropped, and a line that only extends it replaces it). A srv3 track that ends inside a cue, cut by the 2 MiB read
   bound or interrupted, yields the cues read before the cut and is marked `truncated`. Subtitle text and the same words
-  pasted as a page therefore reach the digest stage as the same bytes (pinned by
+  pasted as a page therefore reach the digest stage as the same bytes (held by
   `TestSubtitleTextAndPastedPageGiveTheSameDigestInput`; no model is called). A site break degrades to a skipped source with a
   typed `error_kind` and no retry: `subtitle_site_break` (the binary exited non-zero), `no_subtitles` (exit zero and no file;
   the reason ends with the last line yt-dlp printed, because it reports a refused subtitle download, an HTTP 429 rate limit
@@ -1005,7 +1005,7 @@ payload, deferrals and early refusals included, carries an `outcome` and an `evi
 - **Stays advisory.** An outcome is a label on a result a lead reads; nothing here
   blocks a merge or a commit.
 
-Everything the lane returns is ADVISORY: it never gates a merge and never substitutes for the
+Everything the lane returns is ADVISORY: it never gates a merge and is never a replacement for the
 final does-it-actually-work verification, which stays with the caller — as do security review,
 architecture judgement, and any call the caller is accountable for. Findings are triage input;
 a `severe` label from a small local model is a prompt to read those lines, not proof. It shares
@@ -1240,8 +1240,8 @@ size and the modification time in `<file>.tofu`, beside the file wherever ComfyU
 size and modification time trusts the record without hashing (a 20 GB file takes minutes to hash on every run). A file whose
 size or time moved is hashed again, and only the recorded hash passes: another hash is refused as `MODEL_SHA_MISMATCH`, naming
 both hashes and the record to delete. The first sighting of a large file pays the hash once. A model whose annotation does
-declare a sha256 is left to the satisfier's own check. The record is not the `.sha-ok` sentinel (which means "matched a pinned
-hash") and never makes a pinned model skip its check. The limits: bytes replaced under an unchanged size and time are not seen,
+declare a sha256 is left to the satisfier's own check. The record is not the `.sha-ok` sentinel (which means "matched a declared
+hash") and never makes a model with a declared hash skip its check. The limits: bytes replaced under an unchanged size and time are not seen,
 and a record is the first sighting's word for a file, not a statement about where it came from. A record that cannot be read or
 written refuses the model as `MODEL_TOFU_RECORD` (a read-only model directory cannot be trusted this way).
 
@@ -1484,7 +1484,7 @@ manifest is a repo-root file.
 transport: the default against the golden in `testdata/`, each block alone, the brief form, the
 refusals, `config_error` ordering, the schema's enum, and that the fleet section never samples the
 GPUs. The fixture holds a fixed startup identity (a fixture version over a fixture installed image), so the
-`process` block is in the pinned answer with constant values and the test binary's own build hash never reaches the
+`process` block is in the recorded answer with constant values and the test binary's own build hash never reaches the
 golden. `stale_image_test.go` covers the block itself: stale after a swap to another version, fresh for the same
 bytes, unknown (no key, a note) for an unreadable installed file, and no hash while the installed file's stat is
 unchanged. `stalebinary_test.go` covers the guard on stamps alone, and `stale_agreement_test.go` pins that the two signals

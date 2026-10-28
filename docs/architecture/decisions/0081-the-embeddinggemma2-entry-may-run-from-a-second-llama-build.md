@@ -1,6 +1,7 @@
 ---
-status: Proposed
+status: Superseded
 date: "2026-10-09"
+superseded_by: 0099-frontier-updates-floors-never-pins.md
 ---
 
 # The embeddinggemma2 entry may run from a second llama.cpp build

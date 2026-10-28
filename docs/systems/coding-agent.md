@@ -570,7 +570,7 @@ clauses (elision marker, skeleton, dedupe reference), because the always-on dedu
 loop's re-execute decision both ask it; a separate `IsLogCollapseArtifact` recognises the rung's
 header, and the trace harvest asks both so it still refuses a transcript the rung has already
 compacted. A tool body that merely quotes the header, such as a saved collapsed log read back with
-`read_file`, is ordinary content to the default ladder, and a pinned set of digests over such
+`read_file`, is ordinary content to the default ladder, and a recorded set of digests over such
 transcripts holds that. With the rung on, the skeleton prefix, the elide marker (and the reactive
 last-resort marker) and the dedupe reference of a folded body name the size the body had before
 the fold, so a marker never says that less was lost than was. The header is believed only when the
@@ -962,10 +962,10 @@ file names its upstream file and commit). It is unrelated to `kvbench`, which me
 | `sudoku_sketchpad` | one fully specified move per turn | the agent re-prints the whole board after each move | share of gold board versions it displayed exactly (in-context state maintenance) |
 
 Tasks are generated, not downloaded. Each generator reproduces the original's random stream (the Mersenne
-Twister, `choice`, `sample`, `shuffle` and `choices` of CPython), and a test pins the digest of every family's
+Twister, `choice`, `sample`, `shuffle` and `choices` of CPython), and a test holds the digest of every family's
 operation stream against the original generator's output, so `--seed 42` is the published seed-42 instance;
-`scripts/contextbench_parity_regen.py` regenerates those digests from a checkout of the pinned upstream commit and
-reports any that the tests no longer pin.
+`scripts/contextbench_parity_regen.py` regenerates those digests from a checkout of the upstream repository and
+reports any that the tests no longer hold.
 The published levels are the `--level` names (`R130` to `R16000`, `L160` to `L12800`, `K4-C4` to `K2-C224`,
 `t4` to `t150`); without one, each family runs its smallest level whose uncompacted transcript (the instruction,
 every operation and, for `sudoku_sketchpad`, the whole board panel the agent prints after each move) exceeds the

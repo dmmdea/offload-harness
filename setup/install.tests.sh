@@ -94,7 +94,7 @@ render_expr="$(awk '/"\$BIN" install render/,/--out "\$SWAP_YAML"/' "$INSTALL" |
   && pass "render passes --rknpu-home like seed" || fail "render passes --rknpu-home like seed" "seed=[$seed_expr] render=[$render_expr]"
 
 # 8-12. --llama-bin-eg2: a second llama.cpp build for the embeddinggemma2 entry alone (a node whose main
-#       build is older than b11452). Same shape as --llama-bin: it must be a directory, the dry run says
+#       build is below the embeddinggemma2 seat floor). Same shape as --llama-bin: it must be a directory, the dry run says
 #       what it would render with, an absent flag changes nothing, and the render call passes it only when set.
 mkdir -p "$TMP/llama-eg2"
 run_install cuda --llama-bin "$TMP/llama" --llama-bin-eg2 "$TMP/absent-eg2"

@@ -36,9 +36,9 @@ const (
 	// class directory the graph never loads from (the 2026-08-31 krea2 shape).
 	BindingMisplaced BindingState = "MISPLACED"
 	// BindingIncomplete — a file of this name sits at the expected path, but its
-	// size does not match knownModelSizes: a copy or download still in progress
+	// size is below the size KnownSize recorded: a copy or download still in progress
 	// (or a truncated one), not a usable weight file. Only reported for a name
-	// knownModelSizes actually pins — F-38.
+	// KnownSize actually records — F-38.
 	BindingIncomplete BindingState = "INCOMPLETE"
 )
 
@@ -347,7 +347,7 @@ func resolveBinding(roots []ModelRoot, key, name string, expected []string) Bind
 				// so this does NOT return immediately: it keeps scanning, and only
 				// wins if no root/class ever resolves a correctly-sized (or at
 				// least basename-present) copy of this name.
-				if want, known := knownModelSizes[base]; known && fi.Size() != want {
+				if want, known := KnownSize(base); known && fi.Size() < want {
 					// Every size-known mismatch, in every root, skips straight to the
 					// next candidate — only the FIRST one is kept for the report, but
 					// a LATER mismatch must never be treated as "not a mismatch" and

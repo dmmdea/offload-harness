@@ -7,6 +7,7 @@
 #   pwsh       -File setup/render.tests.ps1
 #   powershell -ExecutionPolicy Bypass -File setup\render.tests.ps1
 $ErrorActionPreference = 'Stop'
+$env:OFFLOAD_RESOLVE = 'offline'   # install.ps1 resolves components from setup/testdata/resolve-offline.json, never the network
 $here    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $install = Join-Path $here 'install.ps1'
 $psExe   = (Get-Process -Id $PID).Path         # render with the SAME host running this test

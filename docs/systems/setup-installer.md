@@ -3,7 +3,7 @@
 ## Purpose
 
 The cross-vendor installer that turns a bare machine into a serving harness: detect the hardware,
-pick a profile, install pinned binaries and models, generate a serving config, and prove it works.
+pick a profile, install the newest complete binaries and models, generate a serving config, and prove it works.
 
 ## Questions this doc answers
 
@@ -33,7 +33,7 @@ JSON line each script prints, which the runbook's decision tables key on.
 Three scripts run in order, each ending with a machine-readable JSON line:
 
 1. **`detect.ps1`** classifies the machine and emits a backend verdict.
-2. **`install.ps1`** installs pinned binaries and models, substitutes the template placeholders, and
+2. **`install.ps1`** installs the newest complete binaries and models (resolved from the publisher and verified against its digest), substitutes the template placeholders, and
    builds the Go binaries.
 3. **`selftest.ps1`** emits a receipt with verdict `pass | warn | fail`. On a Vulkan backend it
    also runs the **H3 canary suite** (`fa_q8kv`, `ctx_sweep`, `bench`, `swap_leak`, `embedder`,
@@ -170,15 +170,15 @@ confusion:
   image embeds, 1,536 MiB after a short video with the projector; 460 MiB loaded and 482 MiB at peak text-only, at
   `--ubatch-size 2048`. On a text-only box the memory stack's `MEM0_MEDIA_EMBEDDER=off` (memory stack 1.35.1)
   makes offline media search a clean 400. It needs llama.cpp
-  b11452 or newer (the `gemma-embedding2` architecture); on Windows `install.ps1` pins b11490 and downloads the two
+  b11452 or newer (the `gemma-embedding2` architecture); on Windows `install.ps1` resolves the newest complete build (far past that floor; b11490 is the build it was proven on) and downloads the two
   GGUFs (309,855,456 and 554,821,024 bytes) for a tier that carries the projector and the model alone for a text-only
   tier, with no RAM gate (`Get-GatedModelKeys -IncludeEmbeddingGemma2Projector`). A node whose main build is older keeps
   it for its other seats and runs this one entry from a second build (0.177.0, `--llama-bin-eg2`; see "A second llama.cpp
   build for the embeddinggemma2 entry" under "Serving config on Linux" below), and `install render` refuses a build it
   can read as older than b11452.
-- **The Windows llama.cpp pin is b11490** (was b9934): the pre-built assets are `win-cuda-12.4`, **`win-cuda-13.4`**
-  (named `13.3` until b9934, so the `llama-cuda13` / `llama-cudart13` URLs moved, not only their hashes), `win-vulkan`
-  and `win-cpu`, each pinned by the GitHub release API digest. `Select-CudaBuild` still keys on the DRIVER's CUDA
+- **The Windows llama.cpp build is never pinned** (ADR 0099): the installer takes the newest complete release, whose
+  pre-built assets are `win-cuda-12.4`, **`win-cuda-13.4`** (named `13.3` until b9934), `win-vulkan` and `win-cpu`, each
+  verified against the digest the GitHub release API publishes, with a floor per seat in `setup/floors.json`. `Select-CudaBuild` still keys on the DRIVER's CUDA
   major (13.0 or newer for the Blackwell serve path), so the selection logic did not move.
 - **The RAM-spill agent seat is a second, measured exception** (ADR 0080): `qwen3.6-35b-a3b-agent`
   writes its flags as literals (`--n-cpu-moe 40`, `--cache-ram 0`, `--load-mode none`, a 32768 window,
@@ -208,7 +208,7 @@ overlay ALSO seeds the wan22 video lane, `gen_edit_*`, and `inpaint_*` (2026-08-
 seat measured on its reference box — see `docs/tiers/blackwell-8.md`). The AMD profiles
 seed the **sdcpp engine** (J2): `imagegen_engine:"sdcpp"` with the Apache-2.0 Z-Image-Turbo GGUF
 set, full paths carried via the `__OFFLOAD_HOME__` token that `Merge-ConfigSeed` expands at install
-time. The media leg itself (Step 5b: the pinned sd.cpp win-vulkan zip + roster downloads) defaults
+time. The media leg itself (Step 5b: the newest complete sd.cpp win-vulkan zip + roster downloads) defaults
 on for `amd-*` profiles only; `OFFLOAD_WITH_MEDIA=1|0` forces it on/off anywhere and
 `OFFLOAD_MEDIA_EXTRAS=1` adds the SD1.5/SDXL extras. `selftest.ps1` gains the first **media leg**
 (`receipt.media`): a fixed-prompt reference render (non-blank gate: sampled distinct-colors) plus a
@@ -253,7 +253,7 @@ runbook.
 ## Dependencies
 
 PowerShell 7, a serving backend (CUDA, Vulkan, or CPU llama.cpp builds), Go 1.26+, and network access
-for pinned assets at install time.
+for the publisher (GitHub, Hugging Face, npm) at install time.
 
 ## Downstream effects
 
@@ -266,7 +266,7 @@ quietly under-uses hardware rather than failing loudly. Note that the fleet disp
 1. `--jinja` and `--reasoning off` on every task-serving entry.
 2. No MTP or draft flags.
 3. K and V cache types stay symmetric.
-4. Pinned assets are pinned — an agent does not substitute versions.
+4. Versions are never pinned — the installer resolves the newest complete build and verifies the publisher's digest; an agent does not substitute a file to get past an integrity mismatch (ADR 0099).
 5. Profiles are additive: adding a band means adding its template and its self-test assertion.
 
 ## Error handling
@@ -276,8 +276,8 @@ the runbook's decision tables; `fail` stops the install.
 
 ## Security and privacy notes
 
-The runbook explicitly bounds unsupervised agent behavior: **do not** substitute pinned assets,
-install ROCm/CUDA, or start the agent server beyond loopback without asking the human. Installers run
+The runbook explicitly bounds unsupervised agent behavior: **do not** substitute a file to get past an integrity
+mismatch, install ROCm/CUDA, or start the agent server beyond loopback without asking the human. Installers run
 with real privileges and fetch remote assets, which is why the boundary is stated rather than assumed.
 
 ## Where an install goes (`local-offload install volumes`)
@@ -382,6 +382,9 @@ llama.cpp build with the Vulkan backend, as for `vulkan`; the installer script n
 
 #### A second llama.cpp build for the embeddinggemma2 entry (`--llama-bin-eg2`)
 
+> With every node on the newest complete build (ADR 0099, which supersedes ADR 0081's second-build doctrine) the second
+> build is unnecessary; the flag and the floor check stay for a node that keeps an older build by hand.
+
 The `embeddinggemma2` entry needs llama.cpp b11452 or newer (the `gemma-embedding2` architecture). The render used to
 have one build for every entry, so a node whose main build is older, and has to stay that way for its other seats (the
 `ampere-6` reference box ran b10964 when the entry arrived), could not load the entry from a rendered config. Its only
@@ -402,9 +405,8 @@ local-offload install render --profile ampere-6 --home /opt/offload --llama-bin 
   not the target OS.
 - **How.** A rewrite of the `embeddinggemma2` block inside `servingtmpl.Render`, before substitution, on the same block
   scanner as the text-only projector strip. No template and no `profiles.json` edit, so `template_sha256` and every
-  `profiles_entry_sha256` stay put: an unset render is byte-identical to the previous release's (pinned by sha256 on all ten
-  templates, projector kept and stripped, in `internal/servingtmpl/testdata/eg2bin-unset-render.golden`, taken from the
-  0.175.0 renderer), and no stamped node reads STALE because of this change. The rewrite is exact in
+  `profiles_entry_sha256` stay put: an unset render is byte-identical to the previous release's, and no stamped node reads STALE because of this change
+  (the render audit's MATCH/STALE re-render check is the guard). The rewrite is exact in
   both directions: the entry must name `__LLAMA_BIN__` exactly once, and on a Linux template carry exactly one `${ld}`
   item, or the render fails naming the entry.
 - **The value.** Backslashes become forward slashes and a trailing slash goes (llama-swap on Windows mis-parses
@@ -427,12 +429,11 @@ local-offload install render --profile ampere-6 --home /opt/offload --llama-bin 
   directory called `llama`) is a `note:` line and the render proceeds. The note goes to stdout when `--out` is set
   (`install.ps1` captures that stream, relays its `note:` lines to the operator, and its self-test treats stderr output as
   an error) and to stderr otherwise, where stdout is the stamped config itself. `install.ps1` leaves out the note about its
-  own build (`<home>/llama` never states one, and the pinned tag is held at or above the floor), so on Windows the note
+  own build (`<home>/llama` never states one, and the installer takes the newest build, at or above the floor), so on Windows the note
   appears only for an `OFFLOAD_EG2_LLAMA_BIN` directory whose name states no build. **Behaviour change when the flag is unset:** a render whose main build is named
   below b11452, on a tier that carries the entry, is now refused where it used to be written; that entry cannot start on
   such a build. The replay never checks the floor (`audit-yaml` runs on another machine with another machine's recorded
-  paths and must not judge them), and `TestInstallPs1PinsABuildAtOrAboveTheEG2Floor` holds the Windows installer's pinned
-  tag at or above it.
+  paths and must not judge them), and the installer never selects a build under the floor in `setup/floors.json`.
 - **Provenance and audit.** The stamp's basis records `eg2_llama_bin` (omitted when unset, so an unset render keeps its
   spec hash) and the replay carries it, so a node rendered with the flag audits MATCH. `audit-yaml` has no per-entry
   view: an entry's path edited by hand still reads HAND-EDITED, and the same change made by the renderer (on a template
@@ -444,7 +445,7 @@ local-offload install render --profile ampere-6 --home /opt/offload --llama-bin 
   left it. **A binary older than 0.177.0 auditing a stamp that carries `eg2_llama_bin` reads HAND-EDITED**
   (it drops the key it does not know, so the spec hash no longer matches): upgrade the binary before re-rendering with the
   flag.
-- **Windows.** `install.ps1` installs one pinned tag for every node it installs (b11490, at or above the floor), so an
+- **Windows.** `install.ps1` installs the newest complete tag for every node it installs (at or above the floor), so an
   installer-managed node needs no second build. `OFFLOAD_EG2_LLAMA_BIN=<dir>` is the opt-in override for a node that keeps
   an older main build: the directory must hold `llama-server.exe` (else the script throws), is normalised to forward
   slashes, is appended to the render args as `--llama-bin-eg2`, and joins the Step 6 skip test so an upgrade re-renders (the test matches the executable's path,
@@ -886,8 +887,7 @@ version classifier). `setup/tests/` carries PowerShell tests for config-seed beh
 canary pure helpers (`selftest-canaries.test.ps1` — word-overlap, flash-attn log-state scan with
 live-captured log lines, cosine). Go-side config round-tripping is covered by
 `example_config_test.go` and `doctor_test.go`, which also guard against tier-key drift between
-`config.example.json` and the code. The second-build flag is pinned by `internal/servingtmpl/eg2bin_test.go` (what the
-rewrite touches and refuses, on all ten templates, and the golden hashes of the unset renders), `install_render_eg2bin_test.go` (the flag, the floor check, the replay),
+`config.example.json` and the code. The second-build flag is covered by `install_render_eg2bin_test.go` (the flag, the floor check, the replay),
 `setup/install.tests.sh` and the `OFFLOAD_EG2_LLAMA_BIN` cases of `setup/render.tests.ps1` and
 `setup/tests/install-config-seed.test.ps1`.
 

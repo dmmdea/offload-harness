@@ -16,17 +16,16 @@ go vet ./...     # static analysis — keep this clean
 Both must pass before you open a pull request. CI runs the test suite and is the gate: do not run the full
 suite by hand, and see "Testing rule" below for what a change carries instead of tests.
 
-`go.mod` names the compiler the harness ships with (`toolchain go1.27.3`; the `go` line is only the
-oldest one allowed). With `GOTOOLCHAIN` at its default, a Go older than that downloads the release
-on the first build in this tree (from the module proxy, into the module cache) and builds with it.
-`GOTOOLCHAIN=local` builds with the installed Go instead and ignores the line without a message,
-which is the way to build offline. CI does not build that way: its `build` and `installer-windows`
-jobs fail unless the go command runs exactly the release the line names. CI also scans the harness
-module and both printed CLIs for known vulnerabilities, for linux and windows, in the `govulncheck`
-job. To run one scan by hand: `go install golang.org/x/vuln/cmd/govulncheck@v1.8.0`, then
+The `go` line in `go.mod` is a floor, the oldest compiler the harness builds with; there is no `toolchain`
+line, so nothing holds the compiler to an exact release. With `GOTOOLCHAIN=auto` a Go older than the floor
+downloads a newer one on the first build in this tree (from the module proxy, into the module cache), and
+CI's `setup-go` reads the floor from `go.mod` and takes the newest release (`check-latest`).
+`GOTOOLCHAIN=local` builds with the installed Go instead, which is the way to build offline. CI also scans
+the harness module and both printed CLIs for known vulnerabilities, for linux and windows, in the
+`govulncheck` job. To run one scan by hand: `go install golang.org/x/vuln/cmd/govulncheck@latest`, then
 `govulncheck ./...` in the module's directory (`GOOS=windows govulncheck ./...` for the other
-system). A finding fails the job; the fix is a newer toolchain pin in `go.mod` (and the floor in
-`gomod_toolchain_pin_test.go`) or a newer dependency.
+system). A finding fails the job; the fix is a newer dependency or a newer Go (ADR 0099: versions are never
+pinned, floors live in `go.mod` and `setup/floors.json`).
 
 ## Guidelines
 
@@ -210,7 +209,7 @@ finds the script. When the only bash on the machine is that launcher, the test s
 2. Make your change, with `go build ./...` and `go vet ./...` clean. CI runs the tests and is the gate; do not add
    tests (see "Testing rule").
 3. If you changed anything under `openspec/` (see [docs/systems/openspec.md](docs/systems/openspec.md)), run the OpenSpec
-   validator too: install the pinned CLI with `scripts/openspec-install.sh <prefix>` (a directory on a data drive), then
+   validator too: install the newest CLI with `scripts/openspec-install.sh <prefix>` (a directory on a data drive), then
    `OPENSPEC_BIN=<prefix>/node_modules/.bin/openspec scripts/openspec-validate.sh`. `go test ./...` runs the real validator
    only where `OPENSPEC_BIN` is set, and CI does not set it, so this step is yours.
 4. If you changed published behavior, add a changelog fragment under `changes/unreleased/` (see "The

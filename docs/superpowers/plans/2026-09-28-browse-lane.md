@@ -7,7 +7,7 @@
 **Goal:** Let an MCP caller and the coding-agent seat drive the operator's own, already-running
 Chromium browser toward a natural-language goal, as an explicit opt-in lane.
 
-**Architecture:** The harness spawns a pinned Python sidecar (`setup/browse/runner.py`, built on
+**Architecture:** The harness spawns a Python sidecar (newest dependencies, floors only) (`setup/browse/runner.py`, built on
 browser-use's `jev-ultrafast` agent loop and `browser-harness` CDP client) with a scrubbed environment.
 The sidecar owns the browser; the harness owns every model call. Over a JSON-lines stdio protocol
 the sidecar asks the harness for (a) a typed decision, which the harness proxies to a configured
@@ -57,10 +57,10 @@ diagnostic tail only.
 
 | File | Responsibility |
 |---|---|
-| `setup/browse/runner.py` | Sidecar: browser resolution, deny filter, host check, capture + redaction, jev-ultrafast loop with harness-backed `post_json`/`field_text`. Pure helpers importable without the pinned deps. |
+| `setup/browse/runner.py` | Sidecar: browser resolution, deny filter, host check, capture + redaction, jev-ultrafast loop with harness-backed `post_json`/`field_text`. Pure helpers importable without the browser dependencies. |
 | `setup/browse/test_runner.py` | stdlib `unittest` for the pure helpers and the protocol. |
-| `setup/browse/pyproject.toml`, `setup/browse/uv.lock` | Pins: `browser-harness==0.1.13`, `jev-ultrafast` at a 40-char commit. |
-| `setup/browse/install.ps1` | Opt-in install into `<OFFLOAD_HOME>/browse` (`uv sync --frozen`), prints the config keys. |
+| `setup/browse/pyproject.toml` | Dependencies: `browser-harness` and `jev-ultrafast`, floors only (`>=`), the newest at install; no lockfile (ADR 0099). |
+| `setup/browse/install.ps1` | Opt-in install into `<OFFLOAD_HOME>/browse` (`uv sync`), prints the config keys. |
 | `internal/config/config.go` | `browse_*` keys, `agent_allow_browse`, `BrowseConfigured()`, load warning. |
 | `internal/core/types.go` | `TaskBrowse`. |
 | `internal/pipeline/browse.go` | `runBrowse`: validation, slot, spawn, protocol loop, decision proxy, grammar text, typed defers, ledger. |
@@ -79,7 +79,7 @@ Tests first in `internal/config/browse_test.go`: loopback URL accepted (`127.0.0
 Tests first in `internal/pipeline/browse_test.go` with a Go helper-process sidecar (`os.Args[1] == "-test.run=^TestBrowseHelperProcess$"`) and `httptest` servers for the decision endpoint and the llama chat route: happy path (decide → text → done), decision endpoint 500 → defer `DECISION_UNAVAILABLE`, sidecar exits without a result → `RUNNER_FAILED`, sidecar hangs → `TIMEOUT` within the budget, bad URL → `BAD_INPUT` before any spawn, unconfigured → `not_configured`, second concurrent call → `BUSY`, oversized decide body → refused.
 
 ### Task 3: Sidecar (`setup/browse/`)
-Pure helpers + unittest; the jev-ultrafast integration behind `main()`; pins and install script. Tests: deny regex (blocks "Publish", "Send test email", "Delete draft"; does not block "Published posts", because the pattern is word-bounded), allow_labels only when attended, header redaction, host allowlist, DevToolsActivePort parsing, protocol request/response pairing.
+Pure helpers + unittest; the jev-ultrafast integration behind `main()`; dependency floors and install script. Tests: deny regex (blocks "Publish", "Send test email", "Delete draft"; does not block "Published posts", because the pattern is word-bounded), allow_labels only when attended, header redaction, host allowlist, DevToolsActivePort parsing, protocol request/response pairing.
 
 ### Task 4: MCP `offload_browse`
 Registered only when configured; `route` other than `local`/"" → defer; Door `offload_browse`; `.printing-press.json` lists it; status strings name the external decision endpoint.

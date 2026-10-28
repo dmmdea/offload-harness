@@ -20,12 +20,24 @@
 # Windows installer and this one cannot drift.
 #
 # PREREQUISITES (this script does not build or download them, and says so up front):
-#   - a built llama.cpp (llama-server + its shared objects); b11452 or newer for a tier that renders
-#     the embeddinggemma2 memory-stack entry, b10964 or newer for ampere-6's RAM-spill agent seat
-#     (b11490 is the build both were proven on). A node that must keep an older main build passes a
-#     second, b11452-or-newer build for the embeddinggemma2 entry alone as --llama-bin-eg2
+#   - a built llama.cpp (llama-server + its shared objects), at or above the floors in
+#     setup/floors.json: the harness floor, and the per-seat floors for a tier that renders the
+#     embeddinggemma2 memory-stack entry or a RAM-spill agent seat. A node that must keep an older
+#     main build passes a second build that meets the embeddinggemma2 seat floor for that entry
+#     alone as --llama-bin-eg2
 #   - the GGUF model files for the tier
 #   - node (for the render runners), and the local-offload binary itself
+#
+# THE FRONTIER RULE: this file carries no version, build number, digest or size for any
+# component. Everything it fetches (HyperFrames today) is resolved from its publisher at run
+# time (`resolve_source`) and checked against the publisher's own digest; the only numbers that
+# may exist live in setup/floors.json, and they are floors, never ceilings. A newer
+# hand-placed build is kept, never downgraded. A component is staged beside the live path and
+# promoted by rename; it is never installed over a live directory.
+#
+# `source setup/install.sh --lib` defines the functions and stops, for a caller that wants
+# `resolve_source <key>` alone. OFFLOAD_RESOLVE=offline answers from setup/testdata/resolve-offline.json
+# and never touches the network.
 set -euo pipefail
 
 PREFIX=""
@@ -44,7 +56,9 @@ REMOTES=""
 TOKEN_FILE=""
 # The repo this script lives in, for `install vllm-seat --root` (it reads the seat
 # templates under setup/templates/vllm-seat/). Resolved from $0, not $PWD.
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+FLOORS_FILE="$REPO_ROOT/setup/floors.json"
+RESOLVE_FIXTURE="$REPO_ROOT/setup/testdata/resolve-offline.json"
 # The deployment half of a tier's vLLM agent seat. All three may stay empty: the
 # renderer falls back to the tier's llama.cpp agent seat and prints why, which is the
 # correct outcome on a box that has not hand-built the vLLM venv.
@@ -66,6 +80,61 @@ run() {
   if [ "$DRY_RUN" -eq 1 ]; then printf '  would run: %s\n' "$*"; else "$@"; fi
 }
 
+# ---- resolution: every component is "latest" from its publisher ---------------
+# floor_of <component>: the harness floor in setup/floors.json, empty when there is none (or no file).
+floor_of() {
+  [ -r "$FLOORS_FILE" ] || return 0
+  jq -r --arg c "$1" '(.[$c].harness // empty) | tostring' "$FLOORS_FILE" 2>/dev/null || true
+}
+
+# version_ge A B: true when A is the same as or newer than B (version sort).
+version_ge() { [ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | tail -n1)" = "$1" ]; }
+
+# resolve_source <key>: one JSON line {version, digest, url, size, source} for the newest published
+# build of <key>, with the digest the PUBLISHER states for it. Nonzero (and a reason on stderr) when it
+# cannot be resolved or the publisher states no usable digest. The npm registry is the only source this
+# installer fetches from: dist-tags.latest names the version, dist.integrity (an SRI digest) is its digest,
+# and the registry is asked with no Accept header, so it answers with the full
+# document that carries both.
+resolve_source() {
+  local key="${1:?resolve_source needs a component key}" out
+  if [ "${OFFLOAD_RESOLVE:-}" = "offline" ]; then
+    [ -r "$RESOLVE_FIXTURE" ] || { echo "resolve: $RESOLVE_FIXTURE is missing (OFFLOAD_RESOLVE=offline)" >&2; return 1; }
+    jq -ce --arg k "$key" '.[$k] // error("no offline entry for " + $k)' "$RESOLVE_FIXTURE"
+    return
+  fi
+  case "$key" in
+    hyperframes)
+      out="$(curl -fsS --retry 3 --max-time 120 "https://registry.npmjs.org/$key" \
+        | jq -ce --arg pkg "$key" '
+            (."dist-tags".latest) as $v
+            | (.versions[$v // ""].dist // {}) as $d
+            | select($v != null and (($d.integrity // "") | test("^sha(256|384|512)-")) and ($d.tarball // "") != "")
+            | {version: $v, digest: $d.integrity, url: $d.tarball, size: ($d.unpackedSize // null), source: ("npm:" + $pkg)}')" \
+        || { echo "resolve: the npm registry did not answer for $key" >&2; return 1; }
+      [ -n "$out" ] || { echo "resolve: the npm registry states no latest version with an SRI integrity for $key" >&2; return 1; }
+      printf '%s\n' "$out" ;;
+    *) echo "resolve: unknown component $key" >&2; return 1 ;;
+  esac
+}
+
+# record_component <key> <json>: merge {version, digest, size, source, installed_at} into
+# $MANIFEST as schema 2. A schema 1 file (no components) is upgraded in place, every other key kept;
+# a record already at the same version is left alone. Written beside the file and renamed.
+record_component() {
+  local key="$1" rec="$2" now
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq --arg k "$key" --argjson rec "$rec" --arg now "$now" '
+      if ((.components // {}) | type == "object") and (.components[$k].version // null) == $rec.version then .
+      else .schema = 2
+        | .components = ((.components // {}) | if type == "object" then . else {} end)
+        | .components[$k] = ($rec + {installed_at: $now})
+      end' "$MANIFEST" > "$MANIFEST.new" \
+    && mv "$MANIFEST.new" "$MANIFEST" || { rm -f "$MANIFEST.new"; return 1; }
+}
+
+if [ "${1:-}" = "--lib" ]; then return 0 2>/dev/null || exit 0; fi
+
 usage() {
   cat <<'USAGE'
 Usage: install.sh [options]
@@ -79,8 +148,9 @@ Usage: install.sh [options]
   --llama-bin-cpu DIR directory of a CPU llama-server build: renders the tier's CPU seat family
                       beside its GPU seats (only for a tier that declares alt_backends [cpu])
   --llama-bin-eg2 DIR directory of the llama.cpp build that serves ONLY the embeddinggemma2 entry
-                      (default: --llama-bin). For a node whose main build is older than b11452, which
-                      cannot load that entry; only for a tier that renders it (include_embeddinggemma2)
+                      (default: --llama-bin). For a node whose main build is below the embeddinggemma2
+                      seat floor in setup/floors.json, which cannot load that entry; only for a tier
+                      that renders it (include_embeddinggemma2)
   --models DIR        directory holding the GGUF files (default: <prefix>/models)
   --listen ADDR       llama-swap listen address (default 127.0.0.1:11436)
   --node-id NAME      fleet node id (default: hostname)
@@ -262,43 +332,123 @@ else
 fi
 
 # ---- 3b. the composition lane (HyperFrames; ADR 0059) ------------------------
-# The pinned, project-local install from setup/hyperframes' committed lockfile —
-# never `npm install -g` (a global HyperFrames self-upgrades in a detached process).
-# node >= 22 gates it; below that the tier's compose_script is UN-bound ("") so the
-# route reads NOT CONFIGURED instead of BOUND-BUT-MISSING. An integrity failure
-# (npm audit signatures) is FATAL: an unverifiable install is never bound.
+# The newest published HyperFrames, resolved from the npm registry at run time (resolve_source) and
+# installed project-local with --ignore-scripts into a staging directory beside the live path, never
+# `npm install -g` (a global HyperFrames self-upgrades in a detached process). The installed
+# integrity must equal the registry's published dist.integrity, and `npm audit signatures` must pass,
+# before the generation is promoted by rename to <prefix>/hyperframes-versions/<version>; the live path
+# <prefix>/hyperframes is then a symlink to it, swapped by rename. A newer hand-placed install is kept,
+# never downgraded. The node floor and the HyperFrames floor come from setup/floors.json. Below the node
+# floor the tier's compose_script is UN-bound ("") so the route reads NOT CONFIGURED instead of
+# BOUND-BUT-MISSING. An integrity failure is FATAL: an unverifiable install is never bound.
 HF_SEED='{"compose_script":""}'
 HF_DIR="$PREFIX/hyperframes"
-HF_PIN="$(jq -r '.dependencies.hyperframes' "$REPO_ROOT/setup/hyperframes/package.json")"
+HF_VERSIONS="$PREFIX/hyperframes-versions"
+HF_REC=""
+NODE_FLOOR="$(floor_of node)"
+HF_FLOOR="$(floor_of hyperframes)"
+[ -r "$FLOORS_FILE" ] || say "NOTE  $FLOORS_FILE not found - no floor is enforced"
 NODE_VER="$(node --version 2>/dev/null || true)"
 NODE_MAJOR="$(printf '%s' "$NODE_VER" | sed -n 's/^v\([0-9][0-9]*\)\..*/\1/p')"
 if [ -z "$NODE_MAJOR" ]; then
   say "SKIP  hyperframes (compose lane): no node on PATH — compose_video stays unbound"
-elif [ "$NODE_MAJOR" -lt 22 ]; then
-  say "SKIP  hyperframes (compose lane): node $NODE_VER found, HyperFrames needs >= 22 — compose_video stays unbound"
+elif [ -n "$NODE_FLOOR" ] && [ "$NODE_MAJOR" -lt "$NODE_FLOOR" ]; then
+  say "SKIP  hyperframes (compose lane): node $NODE_VER found, HyperFrames needs >= $NODE_FLOOR — compose_video stays unbound"
 elif ! command -v npm >/dev/null 2>&1; then
   say "SKIP  hyperframes (compose lane): node $NODE_VER found but no npm beside it — compose_video stays unbound"
-elif [ "$DRY_RUN" -eq 1 ]; then
-  say "  would install hyperframes $HF_PIN into $HF_DIR (npm ci --ignore-scripts, npm audit signatures, npm rebuild esbuild, browser ensure)"
-else
-  mkdir -p "$HF_DIR"
-  cp "$REPO_ROOT/setup/hyperframes/package.json" "$REPO_ROOT/setup/hyperframes/package-lock.json" "$HF_DIR/"
-  HF_HAVE="$(jq -r '.version // empty' "$HF_DIR/node_modules/hyperframes/package.json" 2>/dev/null || true)"
-  if [ "$HF_HAVE" != "$HF_PIN" ]; then
-    (cd "$HF_DIR" && npm ci --ignore-scripts --no-audit --no-fund) || die "npm ci (hyperframes $HF_PIN) failed"
+elif [ "$DRY_RUN" -eq 1 ] || [ "${OFFLOAD_RESOLVE:-}" = "offline" ]; then
+  # A dry run changes nothing, and an offline resolve has no registry to install from: say what would happen.
+  if HF_RES="$(resolve_source hyperframes)"; then
+    say "  would install hyperframes $(printf '%s' "$HF_RES" | jq -r .version) (digest $(printf '%s' "$HF_RES" | jq -r .digest)) into $HF_VERSIONS, then point $HF_DIR at it (npm install --ignore-scripts, integrity check, npm audit signatures, npm rebuild esbuild, browser ensure)"
+  else
+    say "  would install the newest published hyperframes into $HF_VERSIONS (it could not be resolved just now)"
   fi
-  (cd "$HF_DIR" && npm audit signatures) || die "npm audit signatures FAILED for the hyperframes install — registry signature or provenance check did not pass; refusing to bind the compose lane"
-  (cd "$HF_DIR" && npm rebuild esbuild) || die "npm rebuild esbuild failed"
+else
+  HF_RES="$(resolve_source hyperframes)" || die "could not resolve hyperframes from its publisher (the npm registry)"
+  HF_VER="$(printf '%s' "$HF_RES" | jq -r .version)"
+  HF_DIGEST="$(printf '%s' "$HF_RES" | jq -r .digest)"
+  # The version names directories below (staging, the generation, the symlink): only a semver shape is ever used
+  # in a path, so a registry answer cannot steer rm -rf or mv outside the versions tree.
+  printf '%s' "$HF_VER" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)?$' \
+    || die "the npm registry answered an unusable hyperframes version '$HF_VER' (not a semver); refusing to use it in a path"
+  if [ -n "$HF_FLOOR" ] && ! version_ge "$HF_VER" "$HF_FLOOR"; then
+    die "the newest published hyperframes ($HF_VER) is below the floor $HF_FLOOR in setup/floors.json"
+  fi
+  HF_HAVE="$(jq -r '.version // empty' "$HF_DIR/node_modules/hyperframes/package.json" 2>/dev/null || true)"
+  HF_ENSURE_DIR="$HF_DIR"
+  HF_GEN=""
+  if [ -n "$HF_HAVE" ] && version_ge "$HF_HAVE" "$HF_VER"; then
+    say "hyperframes: $HF_HAVE is installed and the newest published is $HF_VER — kept, never downgraded"
+    HF_ID="$HF_HAVE"
+    HF_KEPT_DIGEST="$HF_DIGEST"
+    [ "$HF_HAVE" = "$HF_VER" ] || HF_KEPT_DIGEST="$(jq -r '.packages["node_modules/hyperframes"].integrity // ""' "$HF_DIR/package-lock.json" 2>/dev/null || true)"
+    HF_REC="$(printf '%s' "$HF_RES" | jq -c --arg v "$HF_HAVE" --arg d "$HF_KEPT_DIGEST" '{version: $v, digest: $d, size: (if $v == .version then .size else null end), source: .source}')"
+  else
+    HF_ID="$HF_VER"
+    HF_GEN="$HF_VERSIONS/$HF_VER"
+    HF_STAGE="$HF_VERSIONS/.staging/$HF_VER.$$"
+    hf_fail() { rm -rf "$HF_STAGE"; die "$*"; }
+    mkdir -p "$HF_STAGE"
+    printf '{"name":"offload-harness-hyperframes","version":"0.0.0","private":true}\n' > "$HF_STAGE/package.json"
+    (cd "$HF_STAGE" && npm install --ignore-scripts --no-audit --no-fund "hyperframes@$HF_VER") || hf_fail "npm install (hyperframes $HF_VER) failed"
+    HF_GOT="$(jq -r '.packages["node_modules/hyperframes"].integrity // empty' "$HF_STAGE/package-lock.json" 2>/dev/null || true)"
+    [ "$HF_GOT" = "$HF_DIGEST" ] || hf_fail "hyperframes $HF_VER does not match the digest its publisher states (installed ${HF_GOT:-none}, published $HF_DIGEST) — refusing to promote it"
+    (cd "$HF_STAGE" && npm audit signatures) || hf_fail "npm audit signatures FAILED for the hyperframes install — registry signature or provenance check did not pass; refusing to bind the compose lane"
+    (cd "$HF_STAGE" && npm rebuild esbuild) || hf_fail "npm rebuild esbuild failed"
+    # The lock npm wrote stays inside the generation as its record. Against the previous generation's lock, name
+    # every package whose version moved (detect, not gate: the gate is the real render that follows).
+    if [ -n "$HF_HAVE" ] && [ -f "$HF_VERSIONS/$HF_HAVE/package-lock.json" ]; then
+      HF_MOVED="$(comm -13 \
+        <(jq -r '.packages | to_entries[] | select(.key != "") | "\(.key) \(.value.version)"' "$HF_VERSIONS/$HF_HAVE/package-lock.json" 2>/dev/null | sort) \
+        <(jq -r '.packages | to_entries[] | select(.key != "") | "\(.key) \(.value.version)"' "$HF_STAGE/package-lock.json" 2>/dev/null | sort) \
+        | sed 's#^node_modules/##')"
+      [ -z "$HF_MOVED" ] || say "hyperframes: packages that changed against $HF_HAVE ($(printf '%s\n' "$HF_MOVED" | wc -l | tr -d ' ')): $(printf '%s\n' "$HF_MOVED" | head -40 | tr '\n' ';')"
+    fi
+    if [ -e "$HF_GEN" ]; then
+      rm -rf "$HF_STAGE"
+      say "hyperframes: generation $HF_VER already present (write-once) — reused"
+    else
+      mv "$HF_STAGE" "$HF_GEN" || hf_fail "could not promote $HF_STAGE to $HF_GEN"
+    fi
+    HF_ENSURE_DIR="$HF_GEN"
+    HF_REC="$(printf '%s' "$HF_RES" | jq -c '{version, digest, size, source}')"
+  fi
   # browser ensure runs through the harness runner: the scrubbed env, --json, and
-  # HyperFrames' state in $HF_DIR/home — never the service account's real home.
+  # HyperFrames' state in <dir>/home — never the service account's real home. A new generation is
+  # ensured BEFORE the live path moves, so a failure leaves the live install exactly as it was.
   HF_RUNNER="$PREFIX/bin/render/compose-hyperframes.mjs"
   [ -f "$HF_RUNNER" ] || HF_RUNNER="$REPO_ROOT/render/compose-hyperframes.mjs"
-  HF_JSON="$(node "$HF_RUNNER" browser --hyperframes-dir "$HF_DIR" | tail -n1 || true)"
+  HF_JSON="$(node "$HF_RUNNER" browser --hyperframes-dir "$HF_ENSURE_DIR" | tail -n1 || true)"
   HF_BROWSER="$(printf '%s' "$HF_JSON" | jq -r 'select(.ok == true) | .browser_path // empty' 2>/dev/null || true)"
   [ -n "$HF_BROWSER" ] || die "hyperframes browser ensure failed: $HF_JSON"
+  if [ -n "$HF_GEN" ]; then
+    # Promote: an existing real directory at the live path becomes a generation of its own (named by the
+    # version it holds), then the live path is a symlink to the new generation, swapped by rename.
+    # The link is made first, so a filesystem that cannot hold one fails before the live path is touched,
+    # and a failed swap puts a migrated directory back.
+    rm -f "$HF_DIR.new"
+    ln -s "hyperframes-versions/$HF_VER" "$HF_DIR.new" || die "could not create a symlink beside $HF_DIR (the live path must be a symlink to a generation)"
+    HF_OLD_ID=""
+    if [ -d "$HF_DIR" ] && [ ! -L "$HF_DIR" ]; then
+      HF_OLD_ID="${HF_HAVE:-legacy-$(date -u +%Y%m%dT%H%M%SZ)}"
+      [ ! -e "$HF_VERSIONS/$HF_OLD_ID" ] || HF_OLD_ID="$HF_OLD_ID-$$"
+      mv "$HF_DIR" "$HF_VERSIONS/$HF_OLD_ID" || { rm -f "$HF_DIR.new"; die "could not move the live $HF_DIR into $HF_VERSIONS/$HF_OLD_ID"; }
+    fi
+    if ! mv -T "$HF_DIR.new" "$HF_DIR"; then
+      rm -f "$HF_DIR.new"
+      [ -z "$HF_OLD_ID" ] || mv "$HF_VERSIONS/$HF_OLD_ID" "$HF_DIR"
+      die "could not point $HF_DIR at $HF_GEN"
+    fi
+    [ -z "$HF_OLD_ID" ] || say "hyperframes: the live directory became generation $HF_OLD_ID"
+    # The browser path the config binds names the LIVE path, so the next generation changes nothing in it.
+    case "$HF_BROWSER" in "$HF_GEN"/*) HF_BROWSER="$HF_DIR${HF_BROWSER#"$HF_GEN"}" ;; esac
+    [ -e "$HF_BROWSER" ] || die "the browser $HF_BROWSER is not reachable through the live path $HF_DIR"
+  else
+    (cd "$HF_DIR" && npm audit signatures) || die "npm audit signatures FAILED for the hyperframes install — registry signature or provenance check did not pass; refusing to bind the compose lane"
+  fi
   HF_SEED="$(jq -n --arg dir "$HF_DIR" --arg browser "$HF_BROWSER" \
     '{compose_script: "render/compose-hyperframes.mjs", hyperframes_dir: $dir, hyperframes_browser_path: $browser}')"
-  say "hyperframes: $HF_PIN, chrome-headless-shell $(printf '%s' "$HF_JSON" | jq -r .chrome_version) at $HF_BROWSER"
+  say "hyperframes: $HF_ID, chrome-headless-shell $(printf '%s' "$HF_JSON" | jq -r .chrome_version) at $HF_BROWSER"
 fi
 
 # ---- 4. the harness config: one home key plus this tier's media bindings -----
@@ -365,7 +515,8 @@ if [ ! -f "$MANIFEST" ]; then
     BACKEND="$("$BIN" install tier-info --profile "$TIER" --json | jq -r .backend)"
     ALT=""; [ -n "$LLAMA_BIN_CPU" ] && ALT="cpu"
     jq -n --arg profile "$TIER" --arg accel "$ACCELERATORS" --arg backend "$BACKEND" --arg alt "$ALT" \
-      '{profile: $profile, backend: $backend, accelerators: ($accel | if . == "" then [] else split(",") end), alt_backends: ($alt | if . == "" then [] else split(",") end)}' > "$MANIFEST"
+      '{schema: 2, profile: $profile, backend: $backend, accelerators: ($accel | if . == "" then [] else split(",") end), alt_backends: ($alt | if . == "" then [] else split(",") end), components: {}}' > "$MANIFEST.new"
+    mv "$MANIFEST.new" "$MANIFEST"
     say "manifest:  $MANIFEST written"
   fi
 elif ! RECORDED="$(jq -r '.profile // empty' "$MANIFEST" 2>/dev/null)"; then
@@ -376,9 +527,17 @@ elif [ "$RECORDED" != "$TIER" ]; then
   else
     BACKEND="$("$BIN" install tier-info --profile "$TIER" --json | jq -r .backend)"
     jq --arg profile "$TIER" --arg backend "$BACKEND" '. + {profile: $profile, backend: $backend}' "$MANIFEST" > "$MANIFEST.new"
+    # (a schema 1 file is upgraded to 2 only when a component is recorded into it, below)
     mv "$MANIFEST.new" "$MANIFEST"
     say "manifest:  $MANIFEST profile ${RECORDED:-(none)} -> $TIER, backend $BACKEND (other keys kept)"
   fi
+fi
+# Schema 2 (components.<key> = {version, digest, size, source, installed_at}): what this run installed or
+# kept is merged in, over a schema 1 file too (every other key stays), replaced by rename. A run that
+# installed nothing leaves the file untouched.
+if [ -n "$HF_REC" ] && [ "$DRY_RUN" -eq 0 ] && [ -f "$MANIFEST" ] && jq -e . "$MANIFEST" >/dev/null 2>&1; then
+  record_component hyperframes "$HF_REC" || die "could not record hyperframes in $MANIFEST"
+  say "manifest:  $MANIFEST records hyperframes $(printf '%s' "$HF_REC" | jq -r .version) (schema 2)"
 fi
 
 # ---- 5. the serving config --------------------------------------------------
