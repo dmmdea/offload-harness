@@ -36,6 +36,17 @@ var archRules = []struct {
 	{regexp.MustCompile(`(?i)RTX\s*40\b`), "ada"},
 	{regexp.MustCompile(`(?i)RTX\s*30\d{2}`), "ampere"},
 	{regexp.MustCompile(`(?i)RTX\s*30\b`), "ampere"},
+	// NVIDIA Maxwell (sm_50/sm_52, 2014-2016): the GTX 900 series desktop and mobile
+	// (970M is the reference <node-g>), the GTX 750/750 Ti/745 (GM107), the 8x0M /
+	// 9x0M(X) mobile parts, the Quadro M line and the original TITAN X. These must sit
+	// ABOVE the AMD `\b7\d{2}M\b` rule, which would otherwise read a "750M" as RDNA3.
+	// The arch label is informational (the 3 GB band keys on VRAM, see classify.go);
+	// its job is to keep a recognised card out of the "unrecognized NVIDIA" warning.
+	{regexp.MustCompile(`(?i)\bGTX\s+(9[5-8]0|965)(\s*Ti)?M?\b`), "maxwell"},
+	{regexp.MustCompile(`(?i)\bGTX\s+(750|745)(\s*Ti)?\b`), "maxwell"},
+	{regexp.MustCompile(`(?i)\bGeForce\s+(GTX\s+)?(8[3-6]0M|9[3-5]0MX?|920MX|MX1[13]0)\b`), "maxwell"},
+	{regexp.MustCompile(`(?i)\bQuadro\s+M\d{3,4}M?\b`), "maxwell"},
+	{regexp.MustCompile(`(?i)\bTITAN\s+X\b`), "maxwell"},
 	// Tesla / data-center Volta.
 	{regexp.MustCompile(`(?i)\bV100\b`), "volta"},
 	// AMD RDNA3: 780M/760M iGPU (Phoenix) and 7000-series discrete.

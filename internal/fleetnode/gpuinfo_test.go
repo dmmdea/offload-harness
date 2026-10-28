@@ -17,6 +17,7 @@ func TestVendorArchFromProfile(t *testing.T) {
 		{"blackwell-16", "nvidia", "blackwell"},
 		{"blackwell-72", "nvidia", "blackwell"},
 		{"ampere-8", "nvidia", "ampere"},
+		{"maxwell-3", "nvidia", "maxwell"},
 		{"volta-16", "nvidia", "volta"},
 		{"dual-gpu", "nvidia", "blackwell"},
 		{"rockchip-rk3588", "rockchip", "rk3588"},
@@ -43,6 +44,7 @@ func TestUMAFromProfile(t *testing.T) {
 		{"rockchip-rk3588", true, true}, // an SoC: no carve-out, GPU and NPU share the CPU's RAM
 		{"blackwell-16", false, true},
 		{"ampere-8", false, true},
+		{"maxwell-3", false, true}, // a discrete 3 GB card, dedicated VRAM
 		{"volta-16", false, true},
 		{"dual-gpu", false, true},
 		{"", false, false},    // no signal — caller falls back to the capacity heuristic

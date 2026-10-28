@@ -22,7 +22,7 @@ import "strings"
 // nothing it does not — so it stays pure and testable against synthetic tuples.
 type Facts struct {
 	// Vendor is nvidia|amd|rockchip|none. Arch is
-	// blackwell|ampere|ada|volta|rdna3|gcn|rk3588|other|none.
+	// blackwell|ampere|ada|volta|maxwell|rdna3|gcn|rk3588|other|none.
 	Vendor string `json:"vendor"`
 	Arch   string `json:"arch"`
 	// VRAMGb is the DEDICATED VRAM of the primary GPU. On an AMD iGPU this is the
@@ -178,12 +178,19 @@ func classifyProfile(f Facts) Verdict {
 		case "volta":
 			return band("volta-16", "volta (V100-class) has its own serving profile")
 		default:
-			// ampere / ada / anything else NVIDIA share the ampere-* bands.
+			// ampere / ada / maxwell / anything else NVIDIA share the VRAM-banded tiers.
 			switch {
 			case f.VRAMGb >= 12:
 				return band("ampere-16", "nvidia "+orUnknown(arch)+", VRAM >= 12 GB (3090-class)")
 			case f.VRAMGb >= 7:
 				return band("ampere-8", "nvidia "+orUnknown(arch)+", VRAM >= 7 GB (8 GB band)")
+			case f.VRAMGb > 0 && f.VRAMGb < 4:
+				// A 3 GB card cannot load the 6 GB band's E4B workhorse (3,100 MiB at
+				// 16K on <node-c>), so it gets its own tier rather than an OOM. The band
+				// keys on VRAM, not on the maxwell arch label: a 4 GB GTX 1650 is NOT in
+				// it (it falls to ampere-6 as before), and an unknown-VRAM card (0) keeps
+				// the ampere-6 fall-through. Design: docs/specs/2026-10-28-maxwell-3-tier-design.md.
+				return band("maxwell-3", "nvidia "+orUnknown(arch)+", VRAM < 4 GB (3 GB band: no E4B, E2B resident)")
 			}
 			return band("ampere-6", "nvidia "+orUnknown(arch)+", VRAM < 7 GB (6 GB band)")
 		}

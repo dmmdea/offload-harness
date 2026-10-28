@@ -73,7 +73,7 @@ Assert (($r.report -join ' ') -match '70;120') 'dual-gpu guidance carries -DCMAK
 Assert (($r.report -join ' ') -match '12\.8/12\.9') 'dual-gpu guidance pins the 12.8/12.9 toolkit requirement'
 
 Write-Host "== Select-CudaBuild: non-Blackwell profiles keep the 12.4 status quo =="
-foreach ($p in @('ampere-8', 'ampere-16', 'ampere-6', 'volta-16', $null)) {
+foreach ($p in @('ampere-8', 'ampere-16', 'ampere-6', 'maxwell-3', 'volta-16', $null)) {
   $r = Select-CudaBuild -ProfileId $p -CudaDriver '12.4' -CudaToolkit $null
   $label = if ($p) { $p } else { '(none)' }
   Assert ((-not $r.refuse) -and $r.component -eq 'llama-cuda') "$label -> llama-cuda (12.4 prebuilt)"

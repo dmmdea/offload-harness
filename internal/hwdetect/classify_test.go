@@ -25,6 +25,14 @@ func TestArchFromNameMatchesTheShippedTable(t *testing.T) {
 		{"NVIDIA GeForce RTX 3070 Laptop GPU", "ampere"},
 		{"NVIDIA GeForce RTX 3050", "ampere"},
 		{"Tesla V100-PCIE-16GB", "volta"},
+		// Maxwell (<node-g>'s 970M and its desktop/mobile siblings), added 2026-10-28.
+		{"NVIDIA GeForce GTX 970M", "maxwell"},
+		{"NVIDIA GeForce GTX 980 Ti", "maxwell"},
+		{"NVIDIA GeForce GTX 750 Ti", "maxwell"},
+		{"NVIDIA GeForce 940MX", "maxwell"},
+		{"Quadro M2000M", "maxwell"},
+		// A Pascal 1050 Ti must NOT read as maxwell; it stays "other" (VRAM-banded).
+		{"NVIDIA GeForce GTX 1050 Ti", "other"},
 		{"NVIDIA RTX PRO 4500 Blackwell", "blackwell"},
 		{"NVIDIA RTX PRO 5000 Blackwell", "blackwell"},
 		{"NVIDIA RTX PRO 6000 Blackwell Workstation Edition", "blackwell"},
@@ -65,6 +73,13 @@ func TestClassifyMatchesTheShippedTable(t *testing.T) {
 		{"RX 7700 XT 12GB", "amd", "rdna3", 12, 1, 32, "amd-rdna3-dgpu", false},
 		{"5060 8GB (cfg8)", "nvidia", "blackwell", 8, 1, 32, "blackwell-8", false},
 		{"3050 6GB (cfg10)", "nvidia", "ampere", 6, 1, 16, "ampere-6", false},
+		// The 3 GB band (2026-10-28): keyed on VRAM < 4, never on the arch label.
+		{"970M 3GB (<node-g>)", "nvidia", "maxwell", 3, 1, 32, "maxwell-3", false},
+		{"3.9GB still the 3 GB band", "nvidia", "maxwell", 3.9, 1, 32, "maxwell-3", false},
+		{"4GB maxwell -> ampere-6 (band ceiling)", "nvidia", "maxwell", 4, 1, 32, "ampere-6", false},
+		{"6GB maxwell -> ampere-6", "nvidia", "maxwell", 6, 1, 32, "ampere-6", false},
+		{"unknown-arch 3GB -> maxwell-3 (VRAM decides)", "nvidia", "other", 3, 1, 16, "maxwell-3", false},
+		{"unknown VRAM (0) keeps the ampere-6 fall-through", "nvidia", "other", 0, 1, 16, "ampere-6", false},
 		{"3090 24GB (defensive)", "nvidia", "ampere", 24, 1, 64, "ampere-16", false},
 		{"5090 32GB (cfg13)", "nvidia", "blackwell", 32, 1, 64, "blackwell-32", false},
 		{"PRO 4500 32GB (cfg13)", "nvidia", "blackwell", 32, 1, 128, "blackwell-32", false},
