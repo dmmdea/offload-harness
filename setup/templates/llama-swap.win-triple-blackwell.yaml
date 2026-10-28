@@ -297,7 +297,7 @@ matrix:
     eg2: 1000
   sets:
     residents: "emb & rer__EG2_AND__"
-    text: "+residents & (e4b | e2b__M26_ALT____Q38_ALT__ | q38l | q38p__SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
+    text: "+residents & (__E4B_LEAD__e2b__M26_ALT____Q38_ALT__ | q38l | q38p__SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
     # __DISPLAY_SET_BEGIN__ — the display rung is concurrent with the pair seat, which
     # is the whole point: the pair keeps its 32 streams and the small call still runs.
 #|    display: "+residents & __VLLM_VAR__(e4bd | e2bd)"

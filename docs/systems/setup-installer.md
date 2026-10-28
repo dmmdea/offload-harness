@@ -63,13 +63,14 @@ paths that set `big_ram` (RAM ≥ 120 GB), and `hwdetect` carries the same table
 | NVIDIA Volta (unconditional) | `volta-16` |
 | NVIDIA Ampere/Ada ≥12 GB | `ampere-16` |
 | NVIDIA Ampere/Ada ≥7 GB | `ampere-8` |
+| NVIDIA (any non-Blackwell, non-Volta arch) below 4 GB | `maxwell-3` (the 3 GB band: GTX 970M-class; the E4B workhorse is omitted, the E2B is resident) |
 | NVIDIA Ampere/Ada, below | `ampere-6` |
 | AMD RDNA3 ≥12 GB dedicated | `amd-rdna3-dgpu` (discrete RX 7900-class; 26B resident) |
 | AMD RDNA3, below | `amd-rdna3` (iGPU/UMA floor — an iGPU's dedicated number is just the BIOS carve-out) |
 | AMD, anything else | `amd-gcn` |
 | No usable GPU | `cpu` |
 
-Fifteen bands. Linux adds one PowerShell has no row for: `hwdetect` (the Go classifier `install detect`
+Sixteen bands. Linux adds one PowerShell has no row for: `hwdetect` (the Go classifier `install detect`
 runs) reads the device tree's root `compatible` when no NVIDIA or AMD adapter answered, and a board
 that names the RK3588 SoC (`rockchip,rk3588` on the vendor kernel, `rockchip,rk3588s` on mainline)
 is `rockchip-rk3588` — a board with no PCI adapter would otherwise fall through to `cpu` and be handed

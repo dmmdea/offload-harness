@@ -114,19 +114,21 @@ $PINNED = @{
   # API at pin time, e.g. https://huggingface.co/api/models/<repo>/tree/main?recursive=true
   # (no model bytes downloaded to pin). 'name' = local filename (the template contract); for
   # embeddinggemma the source file is capital-M but we save it lowercase-m to match.
+  # E4B/E2B re-pinned 2026-10-28 from the HF tree API: unsloth re-uploaded both GGUFs (2,016 bytes
+  # larger, new LFS oids), so the previous pins failed the size check on a fresh install.
   'model-e4b' = @{
     url  = 'https://huggingface.co/unsloth/gemma-4-E4B-it-qat-GGUF/resolve/main/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf'
     name = 'gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf'
-    size = 4215693760
-    sha  = 'b3052f962d6449b4eb2075733c068bdec1c51eadb7b237e6c3157bfbb7b1dae0'
-    version = 'b3052f96'
+    size = 4215695776
+    sha  = 'df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3'
+    version = 'df0fd4ee'
   }
   'model-e2b' = @{
     url  = 'https://huggingface.co/unsloth/gemma-4-E2B-it-qat-GGUF/resolve/main/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf'
     name = 'gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf'
-    size = 2620368960
-    sha  = 'cd4526493dccbfd6791bee8822e37e30340074d1d4d9aada52ce09afefd6a33a'
-    version = 'cd452649'
+    size = 2620370976
+    sha  = 'e531007218dfab990486a5de7676a6932d6ea8dea233d1f698d7c21cf8a16889'
+    version = 'e5310072'
   }
   'model-26b' = @{
     url  = 'https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/main/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf'
@@ -323,6 +325,33 @@ $PINNED = @{
     size = 334641162
     sha  = '235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1'
     version = '235745af'
+  }
+  # --- maxwell-3 (the 3 GB band, 2026-10-28) media-seat weights, PIN-ONLY like the CT-51 I5 rows below:
+  # `install render` emits the tier's vision and stt seats from profiles.json and WARNS when these files are
+  # not under the models dir; nothing here downloads them yet (no gate names these keys), so the operator places
+  # them out of band. Each sha256 is the Hugging Face LFS oid, equal to the bytes measured on the reference box
+  # (<node-g>). The image lane's sdxl-turbo Q4_0 and the sd.cpp build are the amd-rdna3 media leg's (Step 5b,
+  # OFFLOAD_WITH_MEDIA=1 pulls the Z-Image set, which does NOT fit 3 GB), so that tier places them by hand too.
+  'model-e2b-mmproj' = @{
+    url  = 'https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf'
+    name = 'mmproj-gemma-4-E2B-it-Q8_0.gguf'   # the Q8_0 projector: the F16 one (986 MB) puts the vision seat over a 3 GB card
+    size = 557368064
+    sha  = '9406f99c16d68cda4f1f0552192dcc99021ea1fc6d2fd50b1dc3ccf30d04b292'
+    version = '9406f99c'
+  }
+  'model-whisper-turbo-q8' = @{
+    url  = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q8_0.bin'
+    name = 'ggml-large-v3-turbo-q8_0.bin'   # q5_0 gives the same transcript 300 MiB lighter; q8_0 is the quality pick the 3 GB card still holds with room
+    size = 874188075
+    sha  = '317eb69c11673c9de1e1f0d459b253999804ec71ac4c23c17ecf5fbe24e259a1'
+    version = '317eb69c'
+  }
+  'model-silero-v5' = @{
+    url  = 'https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin'
+    name = 'ggml-silero-v5.1.2.bin'
+    size = 885098
+    sha  = '29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf'
+    version = '29940d98'
   }
   # --- CT-51 I5: the amd-gcn (Vulkan iGPU) media models, PIN-ONLY. Nothing in this installer downloads them
   # (no gate names these keys; the Linux install has no media leg yet, so the weights are placed out of band);
@@ -675,6 +704,18 @@ function Resolve-ProfileParams {
     elseif ($moeMode -eq 'n_cpu_moe') { $moeStr = "--n-cpu-moe $([int]$p.n_cpu_moe) -ngl 999" }
   }
 
+  # omit_e4b (the 3GB band): the tier drops the offload-e4b workhorse entry AND its GGUF download.
+  # STRICT bool like the include_* gates ([bool]'false' is $true in PowerShell): only a JSON true
+  # omits, absent/null keeps the workhorse, anything else is a malformed profile and fails loud.
+  $omitVal = $p.omit_e4b
+  if ($null -ne $omitVal -and -not ($omitVal -is [bool])) {
+    throw "profile '$ProfileId': omit_e4b must be a JSON boolean, got '$omitVal' ($($omitVal.GetType().Name)) - fix setup/templates/profiles.json"
+  }
+  $omitE4B = ($omitVal -is [bool] -and $omitVal)
+  if ($omitE4B -and $p.resident_tier -ne 'gemma4-e2b') {
+    throw "profile '$ProfileId': omit_e4b drops the workhorse, so resident_tier must be gemma4-e2b (got '$($p.resident_tier)')"
+  }
+
   return @{
     known         = $true
     ctx           = "$($p.ctx_size)"
@@ -686,6 +727,7 @@ function Resolve-ProfileParams {
     dual          = [bool]$p.dual_resident
     resident_tier = $p.resident_tier
     include_26b   = $include
+    omit_e4b      = $omitE4B
     moe_26b       = $moeStr
     moe_mode      = $moeMode
     notes         = $p.notes
@@ -1578,7 +1620,15 @@ $manifestComponents['llama-swap'] = $SWAP_TAG
 # ---------------------------------------------------------------------------
 # $pp (resolved above the artifact steps) decides the 26B: it is fetched only when the
 # yaml Step 6 renders will serve it (include_26b after the RAM gate).
-$modelKeys = @('model-e4b', 'model-embed')
+# The E4B workhorse is in every download set EXCEPT on a tier that omits it (omit_e4b: the 3GB
+# band, whose card cannot load it) - the renderer drops its entry on the same flag, so the
+# download set and the served roster stay in step (the include_26b rule, inverted).
+$modelKeys = @('model-embed')
+if ([bool]$pp.omit_e4b) {
+  Write-Host "SKIP  model: gemma-4-E4B (profile '$profileId' omits the workhorse: omit_e4b; resident is $($pp.resident_tier))" -ForegroundColor DarkGray
+} else {
+  $modelKeys = @('model-e4b') + $modelKeys
+}
 $modelKeys += @(Get-FamilyModelKeys -WithFamily $withFamily -Include26B ([bool]$pp.include_26b))
 if ($withFamily -and -not $pp.include_26b) {
   Write-Host "SKIP  model: gemma-4-26B (profile '$profileId' drops the 26B: moe_26b=$($pp.moe_mode), ram_tier=$ramTier)" -ForegroundColor DarkGray
@@ -1943,6 +1993,23 @@ Step 'build local-offload.exe' `
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
   }
 $manifestComponents['local-offload'] = $repoVersion
+# Step 7a: the render runners beside the harness exe. The shipped defaults are
+# "render/*.mjs", resolved against the EXECUTABLE's directory (gpugen.ResolveScript),
+# so they must ship beside it - exactly what install.sh does for $PREFIX/bin/render.
+# Without this, every media route the config binds (generate_image on the sd.cpp tiers,
+# compose_video wherever Step 7b installs hyperframes) reported BOUND-BUT-MISSING on a
+# fresh Windows install (<node-g>, 2026-10-28). Always refreshed, never SKIPped: a stale
+# runner beside a new exe is the same drift class as a stale exe beside a new profiles.json.
+$renderSrc = Join-Path $repoRoot 'render'
+$renderDst = Join-Path $harnessDir 'render'
+Step 'render runners -> harness\render' { $false } {
+  if (-not (Test-Path $renderSrc)) { throw "no render/ directory at $renderSrc - every media route would report BOUND-BUT-MISSING" }
+  New-Item -ItemType Directory -Force -Path $renderDst | Out-Null
+  Copy-Item -Path (Join-Path $renderSrc '*') -Destination $renderDst -Recurse -Force
+  $runnerCount = @(Get-ChildItem $renderDst -Filter '*.mjs' -File | Where-Object { $_.Name -notlike '*.test.mjs' }).Count
+  if ($runnerCount -lt 1) { throw "render tree copied but no runner (*.mjs) landed in $renderDst" }
+  Write-Host "      $runnerCount runners in $renderDst (relative render/*.mjs bindings resolve here)" -ForegroundColor DarkGray
+}
 # local-agent has no --version verb, so its rebuild gate uses the manifest version
 # idiom instead (same staleness class, same fix shape as every pinned component).
 Step 'build local-agent.exe' `

@@ -28,6 +28,10 @@ import (
 //     NO statement about OCR quality (the fleet-first review calls them "unmeasured on Q4"). The
 //     page being silent is not a verdict, so they keep the lane unrestricted until a measurement or
 //     a page says otherwise.
+//   - maxwell-3: the same Q4 E2B weights as its chat seat with the Q8_0 projector; its page records
+//     one real receipt read correctly on the card (merchant, date, total, the three priciest lines)
+//     and makes no statement against OCR, so it keeps the lane unrestricted like ampere-6 until an
+//     ocrprobe run says otherwise.
 //   - rockchip-rk3588: the runtime cannot constrain sampling, and assess_image always sends a
 //     grammar, so it serves vqa and ocr only (TestRK3588VisionLaneIsLimitedToWhatTheRuntimeCanDo).
 func TestShippedTiersDeclareTheVisionLaneTheirPagesSupport(t *testing.T) {
@@ -40,6 +44,7 @@ func TestShippedTiersDeclareTheVisionLaneTheirPagesSupport(t *testing.T) {
 		"rockchip-rk3588": {"vqa", "ocr"},
 
 		"ampere-6":       unrestricted,
+		"maxwell-3":      unrestricted,
 		"amd-gcn":        unrestricted,
 		"amd-rdna3":      unrestricted,
 		"amd-rdna3-dgpu": unrestricted,

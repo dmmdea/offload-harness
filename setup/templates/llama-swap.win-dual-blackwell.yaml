@@ -179,4 +179,4 @@ matrix:
     eg2: 1000
   sets:
     residents: "emb & rer__EG2_AND__"
-    text: "+residents & (e4b | e2b__M26_ALT____Q38_ALT__ | q38p__SEATS_SWAPPABLE__)__SEATS_RESIDENT__"
+    text: "+residents & (__E4B_LEAD__e2b__M26_ALT____Q38_ALT__ | q38p__SEATS_SWAPPABLE__)__SEATS_RESIDENT__"

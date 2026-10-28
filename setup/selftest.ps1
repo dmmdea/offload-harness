@@ -817,6 +817,13 @@ try {
   $installedTiers = @(Select-ServedTiers -Tiers $tiersOnDisk -ConfigPath $yamlPath)
   if ($installedTiers.Count -eq 0) { throw "no chat-tier gguf found in $modelDir - nothing to exercise" }
   LogOk ("installed chat tiers: {0}" -f (($installedTiers | ForEach-Object { $_.id }) -join ', '))
+  # A tier that omits the workhorse (omit_e4b: the 3GB band) serves no offload-e4b to bench the
+  # agent telemetry against: fall back to the first SERVED tier, unless OFFLOAD_AGENT_TIER chose one.
+  if (-not $env:OFFLOAD_AGENT_TIER -and -not @($installedTiers | Where-Object { $_.id -eq $AGENT_TIER })) {
+    $AGENT_TIER = $installedTiers[0].id
+    $receipt.agent.tier = $AGENT_TIER
+    Log "  agent tier: offload-e4b is not served by this stack; benching $AGENT_TIER instead"
+  }
   $servedIds = @($installedTiers | ForEach-Object { $_.id })
   $unservedTiers = @($tiersOnDisk | Where-Object { $servedIds -notcontains $_.id })
   if ($unservedTiers.Count -gt 0) {

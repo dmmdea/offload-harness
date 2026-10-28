@@ -60,6 +60,7 @@ func TestParamsBasisMirrorsParams(t *testing.T) {
 	p.IncludeQ38, p.IncludeQ359B, p.IncludeMimo9B, p.DisableCUDAGraphs = true, true, true, true
 	p.IncludeQ3827B, p.IncludeQ3635B, p.IncludeEG2, p.EG2TextOnly = true, true, true, true
 	p.EG2LlamaBin = "/opt/llama-b11490" // the embeddinggemma2 entry's own build: a BasisOf that forgot it would hash "" forever
+	p.OmitE4B = true                    // the 3 GB band's inverted gate: a BasisOf that forgot it would hash false forever
 	// The composite tier’s display layer (ADR 0052) rides in the hashed set too:
 	// left nil here, a BasisOf that forgot to carry it would round-trip cleanly
 	// and hash nil forever on the one tier that actually sets it.

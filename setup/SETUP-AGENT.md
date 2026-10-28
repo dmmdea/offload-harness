@@ -134,7 +134,8 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `amd-rdna3` | #7 (780M + 64 GB, Vulkan) | `offload-e4b` | 16K (floor; canary → 32K) | f16 (floor; canary → q8_0) | full-offload `-ngl 99` on the unified-memory iGPU (~20–25 t/s measured elsewhere) — see the [AMD RDNA3 chapter](#amd-rdna3--the-780m-class-runbook-for-the-installing-agent) |
 | `amd-rdna3-dgpu` | discrete RDNA3 ≥12 GB (RX 7900-class, Vulkan) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU `-ngl 99`; a 12 GB card fails the 26B load and selftest says so (it never edits the yaml; see the `tiers[].status:"fail"` row of the per-field reads) |
 | `ampere-6` | #10/#11 (3050 6 GB) | `offload-e4b` | 32K | q8_0 (conservative default; f16 measured viable) | dropped |
-| `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan + CPU alt route) | `gemma4-e2b` (agent `qwen3.5-4b-agent`) | 32K | f16, FA on (measured 2026-09-20) | dropped |
+| `maxwell-3` | #18 (GTX 970M 3 GB, sm_52; the 2015 gaming laptop `<node-g>`) | `gemma4-e2b` (the E4B is OMITTED: 3,100 MiB at 16K does not fit a 3 GB card; no agent seat bound, the lane falls back to the E2B until the box's bake) | 32K | f16, FA on (measured faster on Maxwell's f32 kernels) | dropped; runs the 12.4 prebuilt through its sm_50 PTX (one-time JIT, cached) |
+| `amd-gcn` | #12 (Vega 7 + 32 GB, Vulkan + CPU alt route) | `offload-e4b` (agent `mimo-9b-agent`, `qwen3.5-4b-agent` as the un-aliased rollback) | 32K | f16, FA on (measured 2026-09-20) | dropped |
 | `cpu` | no GPU | `offload-e4b` (CPU) | 8K | f16, FA off | kept if RAM ≥ ~56 GB, else dropped (no card to overflow from, so this is the one tier exempt from the every-expert rule) |
 | `rockchip-rk3588` | Rockchip RK3588 SoC board (the reference board, 7.7 GiB shared by CPU/GPU/NPU); Linux only, detected from the device tree | `qwen3.5-2b-npu` (NPU via RKLLM, chat + vision); no llama.cpp entry (Vulkan faults the Mali, measured); no CPU inference | the NPU seat 16K | n/a (RKLLM) | dropped |
 
@@ -678,7 +679,8 @@ Last stdout line: `{"installed":true,"backend":"...","home":"...","next":"run se
 
 **What it lays down** under `$OFFLOAD_HOME` (default `$HOME\offload-stack`):
 `llama\llama-server.exe`, `llama-swap\llama-swap.exe`, `models\*.gguf`, `harness\local-offload.exe`,
-`harness\local-agent.exe`, rendered `llama-swap.yaml`, `installed.json` (version manifest),
+`harness\local-agent.exe`, `harness\render\*.mjs` (the render runners every relative `render/*.mjs`
+binding resolves to, the way `install.sh` ships them in `<prefix>/bin/render`), rendered `llama-swap.yaml`, `installed.json` (version manifest),
 `install.log` (full transcript). The harness config is copied to `$HOME\.local-offload\config.json`
 (not overwritten if present — prints SKIP). The harness's **data** (cache, ledger, media, delegation
 log, pipeline jobs) is NOT left under the user profile on the OS drive: a fresh config gets

@@ -106,4 +106,4 @@ matrix:
     emb: 1000
     eg2: 1000
   sets:
-    resident: "emb__EG2_AND__ & e4b & e2b__M26_AND____Q38_AND____SEATS_RESIDENT__"
+    resident: "emb__EG2_AND____E4B_AND__ & e2b__M26_AND____Q38_AND____SEATS_RESIDENT__"

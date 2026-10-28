@@ -117,6 +117,8 @@ func renderParams(prof servingProfile, goos string) servingtmpl.Params {
 		// Backend was missing until 2026-09-20: without it every closure render treated the
 		// cpu tier as a GPU tier (seats gained -ngl/--flash-attn the installer never emits).
 		Backend: prof.Backend,
+		// The 3 GB band omits the workhorse; the closure gate must see the roster it renders.
+		OmitE4B: prof.OmitE4B,
 	}
 }
 

@@ -221,4 +221,4 @@ matrix:
     eg2: 1000
   sets:
     residents: "emb & rer__EG2_AND____SEATS_RESIDENT__"
-    interactive: "+residents & (e4b | e2b__M26_ALT____Q354B_ALT____Q359B_ALT____MIMO9B_ALT____Q3827B_ALT____SEATS_SWAPPABLE__)"
+    interactive: "+residents & (__E4B_LEAD__e2b__M26_ALT____Q354B_ALT____Q359B_ALT____MIMO9B_ALT____Q3827B_ALT____SEATS_SWAPPABLE__)"

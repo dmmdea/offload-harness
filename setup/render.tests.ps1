@@ -333,6 +333,44 @@ foreach ($band in @('min','low','mid','high')) {
     if ($q354Aliased)                                          { Ok "ampere-6/$band the 4B keeps agent-seat (it is the only agent seat here)" } else { Bad "ampere-6/$band the 4B lost agent-seat with no spill seat to take it" }
   }
 }
+# maxwell-3 (2026-10-28, spec docs/specs/2026-10-28-maxwell-3-tier-design.md): the 3GB band. The
+# E4B workhorse cannot load on the card (3,100 MiB at 16K), so the tier is the first to set
+# omit_e4b: the offload-e4b entry, its matrix var and its set membership must be ABSENT, the E2B
+# is the resident, f16 KV at 32K, no 26B, no spill seat on any RAM band, no agent seat entry
+# beyond the resident until the box's bake binds one. Both the lowest and the highest band are
+# asserted so a RAM gate can never put a seat on this card that was not measured to fit.
+foreach ($band in @('min','high')) {
+  Write-Host "== maxwell-3 / ram=$band - 3GB band: E2B resident, NO E4B, f16 32768 =="
+  $r = Invoke-Render -Backend 'cuda' -ProfileId 'maxwell-3' -RamTier $band -BigRam $false
+  $macro = Get-CommonMacro $r.yaml
+  $m3Functional = (($r.yaml -split "`r?`n") | Where-Object { $_.Trim() -and $_.Trim() -notmatch '^#' }) -join "`n"
+  if ($macro -match '--ctx-size 32768')                        { Ok "maxwell-3/$band ctx=32768" } else { Bad "maxwell-3/$band ctx (got: $macro)" }
+  if ($macro -match '--cache-type-k f16' -and $macro -match '--cache-type-v f16') { Ok "maxwell-3/$band f16 KV" } else { Bad "maxwell-3/$band KV type (got: $macro)" }
+  if ($macro -match '--flash-attn on')                         { Ok "maxwell-3/$band flash-attn on" } else { Bad "maxwell-3/$band flash-attn (got: $macro)" }
+  if ($r.yaml -match '(?m)^\s{2}gemma4-e2b:')                  { Ok "maxwell-3/$band has the E2B resident" } else { Bad "maxwell-3/$band E2B missing" }
+  if ($m3Functional -notmatch 'offload-e4b')                   { Ok "maxwell-3/$band has NO offload-e4b entry (omit_e4b)" } else { Bad "maxwell-3/$band offload-e4b LEAKED IN (it cannot load on 3GB)" }
+  if ($m3Functional -notmatch '(?m)^\s{4}e4b:')                { Ok "maxwell-3/$band has no e4b matrix var" } else { Bad "maxwell-3/$band e4b var left behind" }
+  if ($r.yaml -match '(?m)^\s{4}interactive:\s*"\+residents & \(e2b')  { Ok "maxwell-3/$band interactive set opens on e2b (no e4b member)" } else { Bad "maxwell-3/$band interactive set (got: $(($r.yaml -split "`r?`n") | Where-Object { $_ -match 'interactive:' }))" }
+  if ($r.yaml -notmatch '__E4B_')                              { Ok "maxwell-3/${band}: no unsubstituted E4B token" } else { Bad "maxwell-3/$band left __E4B_*__" }
+  if ($r.yaml -notmatch 'gemma4-26b-a4b')                      { Ok "maxwell-3/$band has NO 26B tier" } else { Bad "maxwell-3/$band 26B LEAKED IN" }
+  if ($r.verdict -and $r.verdict.moe_mode -eq 'drop')          { Ok "maxwell-3/$band moe_mode=drop" } else { Bad "maxwell-3/$band moe_mode (got: $($r.verdict.moe_mode))" }
+  if ($m3Functional -notmatch 'cpu-moe')                       { Ok "maxwell-3/$band renders no expert spill on any band" } else { Bad "maxwell-3/$band emitted a cpu-moe flag (unmeasured spill on 3GB)" }
+  if ($m3Functional -notmatch '(?m)^\s{2}qwen3\.6-35b-a3b-agent:') { Ok "maxwell-3/$band no spill agent seat" } else { Bad "maxwell-3/$band spill seat rendered without a measurement" }
+  if ($r.yaml -notmatch '(?m)^\s{2}embeddinggemma2:')          { Ok "maxwell-3/$band no embeddinggemma2 (the 300M embedder is the stack's)" } else { Bad "maxwell-3/$band embeddinggemma2 rendered on a 3GB card" }
+  if ($r.yaml -match '(?m)^\s{2}embeddinggemma:')              { Ok "maxwell-3/$band embeddinggemma resident" } else { Bad "maxwell-3/$band embeddinggemma missing" }
+  # The two media seats measured on the box (2026-10-28): the E2B vision seat reads the SAME weights
+  # as the chat seat plus the Q8_0 projector (the F16 one does not fit), at its own 8192 window with
+  # reasoning off; the whisper seat runs with flash attention OFF (-nfa), the faster path on this card.
+  # Both are SWAPPABLE: either one beside the chat E2B overflows the 3 GB card, so they share the
+  # interactive set with it instead of the residents set.
+  $m3Vis = ([regex]::Match($r.yaml, '(?ms)^\s{2}gemma4-e2b-vision:.*?(?=^\s{2}\S|\Z)')).Value
+  if ($m3Vis -match 'gemma-4-E2B-it-qat-UD-Q4_K_XL\.gguf' -and $m3Vis -match '--mmproj\s+\S*mmproj-gemma-4-E2B-it-Q8_0\.gguf') { Ok "maxwell-3/$band vision seat = E2B + the Q8_0 projector" } else { Bad "maxwell-3/$band vision seat weights (got: $m3Vis)" }
+  if ($m3Vis -match '--ctx-size 8192' -and $m3Vis -match '--reasoning off' -and $m3Vis -match '--flash-attn on') { Ok "maxwell-3/$band vision seat at 8192, reasoning off, flash-attn on" } else { Bad "maxwell-3/$band vision seat flags moved" }
+  if ($m3Vis -match '--image-max-tokens 768')                  { Ok "maxwell-3/$band vision seat caps an image at 768 tokens (4K screenshot measured at 2,896 MiB)" } else { Bad "maxwell-3/$band vision seat image cap (got: $m3Vis)" }
+  $m3Stt = ([regex]::Match($r.yaml, '(?ms)^\s{2}whisper-stt:.*?(?=^\s{2}\S|\Z)')).Value
+  if ($m3Stt -match 'ggml-large-v3-turbo-q8_0\.bin' -and $m3Stt -match '--vad-model\s+\S*ggml-silero-v5\.1\.2\.bin' -and $m3Stt -match '\s-nfa(\s|$)') { Ok "maxwell-3/$band stt seat = large-v3-turbo q8_0 + silero, flash attention off" } else { Bad "maxwell-3/$band stt seat (got: $m3Stt)" }
+  if ($r.yaml -match '(?m)^\s{4}interactive:\s*"\+residents & \(e2b \| vis \| stt\)"' -and $r.yaml -match '(?m)^\s{4}residents:\s*"emb"') { Ok "maxwell-3/$band both media seats are swappable beside the chat E2B (residents = emb only)" } else { Bad "maxwell-3/$band seat residency (got: $(($r.yaml -split "`r?`n") | Where-Object { $_ -match 'interactive:|residents:' }))" }
+}
 # The memory stack's second embedder (include_embeddinggemma2, 2026-10-09): the entry, its matrix var,
 # its evict cost and its member of the stack's residency set render on ampere-6 (the memory
 # authority's card, where it was measured, WITH its projector) and on ampere-8 and blackwell-3x16 as

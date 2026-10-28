@@ -253,6 +253,8 @@ func VendorArchFromProfile(profile string) (vendor, arch string) {
 		return "nvidia", "blackwell"
 	case strings.HasPrefix(profile, "ampere-"):
 		return "nvidia", "ampere"
+	case strings.HasPrefix(profile, "maxwell-"):
+		return "nvidia", "maxwell"
 	case profile == "volta-16":
 		return "nvidia", "volta"
 	case profile == "dual-gpu":
@@ -281,7 +283,7 @@ func UMAFromProfile(profile string) (uma, ok bool) {
 		return false, true
 	default:
 		if strings.HasPrefix(profile, "blackwell-") || strings.HasPrefix(profile, "ampere-") ||
-			profile == "volta-16" || profile == "dual-gpu" {
+			strings.HasPrefix(profile, "maxwell-") || profile == "volta-16" || profile == "dual-gpu" {
 			return false, true // discrete NVIDIA classes
 		}
 		return false, false

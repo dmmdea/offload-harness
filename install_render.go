@@ -74,6 +74,14 @@ type servingProfile struct {
 	// grows a second route the tier table does not know about.
 	AltBackends []string `json:"alt_backends,omitempty"`
 	Include26B  bool     `json:"include_26b"`
+	// OmitE4B drops the offload-e4b workhorse entry (and, in install.ps1, its GGUF
+	// download) for a card that cannot load it at all: the 3 GB band. INVERTED
+	// polarity on purpose — absent = false = every existing tier renders as before.
+	// The tier's resident_tier must then be gemma4-e2b (omitE4BDefect refuses otherwise).
+	OmitE4B bool `json:"omit_e4b"`
+	// ResidentTier is read here only for that check; the seed half (internal/tierseed)
+	// is what acts on it.
+	ResidentTier string `json:"resident_tier"`
 	// IncludeQwen38 gates the Qwen3.8-27B coder/agent entry (and, in install.ps1,
 	// its GGUF+mmproj downloads) the same way Include26B gates the 26B. Absent =
 	// false: only the tiers that measured (or project) the seat set it.
@@ -281,6 +289,17 @@ func moePlacement(p servingProfile, ramTier string) (flag string, include bool) 
 // the defect being named. A tier that does not include the 26B places nothing, so it is not refused. The
 // seed rule (seed_rules_test.go) already forbids the table entry; this stops the installer from
 // producing it from a table that regressed, and from a profile that lost its N.
+// omitE4BDefect refuses a tier that omits the workhorse without naming the E2B as its
+// resident: the seed derives the agent seat and the chat fallback chain from
+// resident_tier, and a resident the render does not serve routes every request
+// nowhere. install.ps1's Resolve-ProfileParams mirrors this check.
+func omitE4BDefect(id string, p servingProfile) error {
+	if p.OmitE4B && p.ResidentTier != "gemma4-e2b" {
+		return fmt.Errorf("tier %s: omit_e4b drops the workhorse, so resident_tier must be gemma4-e2b (got %q)", id, p.ResidentTier)
+	}
+	return nil
+}
+
 func moeDefect(id string, p servingProfile) error {
 	if !p.Include26B {
 		return nil
@@ -639,6 +658,9 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 	ramTier := strings.ToLower(strings.TrimSpace(req.RAMTier))
 	// A placement that would put every expert in host RAM is refused here, whatever the RAM tier, so the
 	// operator reads the defect instead of the gate (or a silently dropped 26B) after the fact.
+	if err := omitE4BDefect(id, p); err != nil {
+		return renderResult{}, err
+	}
 	if err := moeDefect(id, p); err != nil {
 		return renderResult{}, err
 	}
@@ -684,6 +706,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat:          seat, ExtraVLLMSeats: extras, VLLMRuntime: seatRT,
 		DisplayLayer: displayLayerOf(layers),
+		OmitE4B:      p.OmitE4B,
 	}
 	rendered, err := servingtmpl.Render(tmpl, params)
 	if err != nil {

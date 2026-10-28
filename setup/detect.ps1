@@ -3,7 +3,7 @@
 # Exit 0 = a viable backend exists; exit 1 = hard blocker (explained on stderr).
 #
 # H1 (arch-class matrix): in addition to the base verdict this now emits
-#   gpu_arch  — blackwell|ampere|ada|volta|rdna3|gcn|other|none  (name-regex match)
+#   gpu_arch  — blackwell|ampere|ada|volta|maxwell|rdna3|gcn|other|none  (name-regex match)
 #   gpu_count — number of discrete NVIDIA+AMD GPUs (Intel iGPUs excluded)
 #   profile   — one of the arch-class ids the installer (H2) keys a template off
 #   ram_tier  — high|mid|low|min  (drives the 26B RAM gate)
@@ -28,6 +28,8 @@ param([switch]$SelfTest)
 #   ada       : RTX 40-series (4060 / 4090 / any "RTX 40xx").
 #   ampere    : RTX 30-series (3050 / 3070 / 3080 / 3090 / any "RTX 30xx").
 #   volta     : Tesla V100 / bare "V100".
+#   maxwell   : GTX 900 series desktop+mobile (970M = <node-g>), GTX 750/750 Ti/745,
+#               8x0M / 9x0M(X) mobile, Quadro M, the original TITAN X (sm_50/sm_52).
 #   rdna3     : AMD RDNA3 — Radeon 780M/760M iGPU and 7xxx discrete (RX 7900, etc.).
 #   gcn       : older AMD — Vega (e.g. "Vega 7" iGPU) / GCN-era parts.
 #   other     : a GPU we recognise as NVIDIA/AMD but not a class above.
@@ -47,6 +49,14 @@ function Get-GpuArch {
   if ($Name -imatch 'RTX\s+PRO\s+\d{4}') { return 'blackwell' }
   if ($Name -imatch 'RTX\s*40\d{2}' -or $Name -imatch 'RTX\s*40\b') { return 'ada' }
   if ($Name -imatch 'RTX\s*30\d{2}' -or $Name -imatch 'RTX\s*30\b') { return 'ampere' }
+  # NVIDIA Maxwell (sm_50/sm_52): GTX 900 desktop+mobile, 750/750 Ti/745, 8x0M / 9x0M(X)
+  # mobile, Quadro M, the original TITAN X. ABOVE the AMD '\b7\d{2}M\b' rule, which would
+  # otherwise read a "750M" as RDNA3. Same rules as internal/hwdetect/arch.go.
+  if ($Name -imatch '\bGTX\s+(9[5-8]0|965)(\s*Ti)?M?\b') { return 'maxwell' }
+  if ($Name -imatch '\bGTX\s+(750|745)(\s*Ti)?\b') { return 'maxwell' }
+  if ($Name -imatch '\bGeForce\s+(GTX\s+)?(8[3-6]0M|9[3-5]0MX?|920MX|MX1[13]0)\b') { return 'maxwell' }
+  if ($Name -imatch '\bQuadro\s+M\d{3,4}M?\b') { return 'maxwell' }
+  if ($Name -imatch '\bTITAN\s+X\b') { return 'maxwell' }
   # Tesla / data-center Volta.
   if ($Name -imatch '\bV100\b') { return 'volta' }
   # AMD RDNA3: 780M/760M iGPU (Phoenix) and 7000-series discrete.
@@ -66,7 +76,7 @@ function Get-GpuArch {
 function Get-UnrecognizedNvidiaWarning {
   param(
     [string]$Vendor,      # nvidia|amd|none
-    [string]$GpuArch,     # blackwell|ampere|ada|volta|rdna3|gcn|other|none
+    [string]$GpuArch,     # blackwell|ampere|ada|volta|maxwell|rdna3|gcn|other|none
     [string]$GpuName,
     [string]$ProfileId
   )
@@ -158,7 +168,7 @@ function Get-Accelerators {
 function Get-Profile {
   param(
     [string]$Vendor,   # nvidia|amd|none
-    [string]$Arch,     # blackwell|ampere|ada|volta|rdna3|gcn|other|none
+    [string]$Arch,     # blackwell|ampere|ada|volta|maxwell|rdna3|gcn|other|none
     [double]$VramGb,
     [int]$GpuCount,
     [int]$RamGb,
@@ -238,9 +248,13 @@ function Get-Profile {
         return @{ profile = 'volta-16'; big_ram = $false }
       }
       default {
-        # ampere / ada / other NVIDIA share the ampere-* bands (Ada ~= Ampere here).
+        # ampere / ada / maxwell / other NVIDIA share the VRAM-banded tiers (Ada ~= Ampere here).
         if ($VramGb -ge 12) { return @{ profile = 'ampere-16'; big_ram = $false } }  # defensive: 3090-class
         if ($VramGb -ge 7)  { return @{ profile = 'ampere-8';  big_ram = $false } }  # 8GB band (3070/5060 fallback)
+        # 3GB band (970M-class): the 6GB band's E4B workhorse cannot load on 3GB, so the
+        # card gets its own tier. Keyed on VRAM, not the arch label; 0 (unknown VRAM) and
+        # a 4GB card keep the ampere-6 fall-through. Twin of internal/hwdetect/classify.go.
+        if ($VramGb -gt 0 -and $VramGb -lt 4) { return @{ profile = 'maxwell-3'; big_ram = $false } }
         return @{ profile = 'ampere-6'; big_ram = $false }                            # 6GB band (3050)
       }
     }
@@ -314,6 +328,13 @@ if ($SelfTest) {
   Assert-Arch 'NVIDIA GeForce RTX 3070 Laptop GPU' 'ampere'
   Assert-Arch 'NVIDIA GeForce RTX 3050'           'ampere'
   Assert-Arch 'Tesla V100-PCIE-16GB'              'volta'
+  # Maxwell (<node-g>'s 970M and its siblings), 2026-10-28. A Pascal 1050 Ti stays 'other'.
+  Assert-Arch 'NVIDIA GeForce GTX 970M'           'maxwell'
+  Assert-Arch 'NVIDIA GeForce GTX 980 Ti'         'maxwell'
+  Assert-Arch 'NVIDIA GeForce GTX 750 Ti'         'maxwell'
+  Assert-Arch 'NVIDIA GeForce 940MX'              'maxwell'
+  Assert-Arch 'Quadro M2000M'                     'maxwell'
+  Assert-Arch 'NVIDIA GeForce GTX 1050 Ti'        'other'
   # RTX PRO Blackwell workstation cards: "RTX PRO" breaks the RTX\s*50xx match,
   # so these need their own rules (72-96GB workstation cards classify here).
   Assert-Arch 'NVIDIA RTX PRO 4500 Blackwell'     'blackwell'
@@ -356,6 +377,12 @@ if ($SelfTest) {
   Assert-Profile 'RX 7700 XT 12GB'      'amd'    'rdna3'     12  1 32 'amd-rdna3-dgpu'
   Assert-Profile '5060 8GB (cfg8)'      'nvidia' 'blackwell' 8  1 32  'blackwell-8'
   Assert-Profile '3050 6GB (cfg10)'     'nvidia' 'ampere'    6  1 16  'ampere-6'
+  # The 3GB band (2026-10-28): VRAM < 4 decides it, never the arch label.
+  Assert-Profile '970M 3GB (<node-g>)'  'nvidia' 'maxwell'   3  1 32  'maxwell-3'
+  Assert-Profile '3.9GB still the 3GB band' 'nvidia' 'maxwell' 3.9 1 32 'maxwell-3'
+  Assert-Profile '4GB maxwell -> ampere-6 (ceiling)' 'nvidia' 'maxwell' 4 1 32 'ampere-6'
+  Assert-Profile 'unknown-arch 3GB -> maxwell-3' 'nvidia' 'other' 3 1 16 'maxwell-3'
+  Assert-Profile 'unknown VRAM (0) keeps ampere-6' 'nvidia' 'other' 0 1 16 'ampere-6'
   Assert-Profile '3090 24GB (defensive)' 'nvidia' 'ampere'   24 1 64  'ampere-16'
   # Blackwell bands above 16GB (configs 13-15; spec 2026-07-16-blackwell-profile-tiers-design.md)
   Assert-Profile '5090 32GB (cfg13)'    'nvidia' 'blackwell' 32 1 64  'blackwell-32'
@@ -410,6 +437,7 @@ if ($SelfTest) {
   Assert-UnrecognizedWarning 'unknown NVIDIA (arch=other) warns' 'nvidia' 'other' 'NVIDIA GeForce RTX 6070' 'ampere-16' $true
   # A recognized NVIDIA card (arch=ampere) must NOT get this warning.
   Assert-UnrecognizedWarning 'recognized ampere does NOT warn' 'nvidia' 'ampere' 'NVIDIA GeForce RTX 3070 Laptop GPU' 'ampere-8' $false
+  Assert-UnrecognizedWarning 'recognized maxwell does NOT warn' 'nvidia' 'maxwell' 'NVIDIA GeForce GTX 970M' 'maxwell-3' $false
   # AMD arch=other must NOT trip the NVIDIA-only warning (AMD warns via its own path).
   Assert-UnrecognizedWarning 'AMD arch=other does NOT warn' 'amd' 'other' 'AMD Radeon Pro Wxxxx' 'amd-gcn' $false
 

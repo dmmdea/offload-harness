@@ -78,6 +78,10 @@ var projectedAgentSeats = map[string]agentSeatLabel{
 		Why:             "generic two-card fallback; the seat follows whichever tier it resolves to and none has run on it",
 		FailedElsewhere: "gemma-4-26b-agent",
 	},
+	"maxwell-3": {
+		Seat: "",
+		Why:  "binds no seat: the workhorse is the resident E2B (config_seed.model, so the derive rule exempts it) and the agent lane falls back to it until the <node-g> bake (shapes B/C of the 2026-08-17 ampere-6 instrument) picks a seat that fits the 3 GB card beside the embedder",
+	},
 	"rockchip-rk3588": {
 		Seat: "",
 		Why:  "no agent seat chosen: fleet_agent_enabled is false and the NPU seat serves vision and constrained text only",
