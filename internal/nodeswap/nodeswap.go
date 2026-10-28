@@ -140,6 +140,36 @@ type Plan struct {
 
 	// FleetKey is what the caller read of the config the node's fleet-serve reads; nil = not checked.
 	FleetKey *FleetKeyCheck
+
+	// Generation, when set, replaces the file swap (steps 4 and 5: backup-rename and install) for a build that is
+	// reached through a junction or symlink: the new build already sits in its own write-once directory, so the
+	// swap is re-pointing the link, and a rollback re-points it back. Staged is the new executable, Target the
+	// live path through the link; everything else (hash check, idle wait, stop, restart, verification) is the
+	// same code. The update verb uses it for llama-swap laid out like every engine (docs/systems/update.md).
+	Generation *Generation
+}
+
+// Generation is the link flip of a Plan. OldExe and NewExe are the executables behind the link before and after,
+// as paths a running process reports for itself (the link resolved): the stop and the verification find the
+// process by them, since the OS names the generation directory, not the link.
+type Generation struct {
+	OldExe, NewExe string
+	// Flip points the live link at the new build (toNew true) or back at the previous one (false).
+	Flip func(toNew bool) error
+}
+
+// at is the plan as seen from one side of the flip: Target becomes that side's real executable, so a process is
+// found by the path it reports. A plan without a Generation is returned unchanged.
+func (p Plan) at(newBuild bool) Plan {
+	if p.Generation == nil {
+		return p
+	}
+	if newBuild {
+		p.Target = p.Generation.NewExe
+	} else {
+		p.Target = p.Generation.OldExe
+	}
+	return p
 }
 
 // FleetKeyCheck is whether the node's config holds a fleet_auth_token, and which config that was. The value itself is
@@ -441,41 +471,53 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 
 	// 3. Stop whatever is currently serving Target so its file lock clears —
 	// necessary on Windows, where a live-image rename fails outright.
-	if err := stopForSwap(ctx, plan, deps, log); err != nil {
+	if err := stopForSwap(ctx, plan.at(false), deps, log); err != nil {
 		return fail("stop-node", err.Error())
 	}
 	step("stop-node", true, "")
 
-	// 4. Rename the old exe to a backup. On failure, diagnose the holder and
-	// — ONLY for an idle MCP helper sharing the exe, never anything else —
-	// stop it and retry once.
-	//
-	// A failure here happens AFTER stop-node (step 3) has already stopped the
-	// node, so simply returning would leave a stopped node with nobody ever
-	// restarting it — the exact outage class this tool exists to prevent.
-	// renameWithRetry either fully succeeds or leaves Target untouched (a
-	// Windows same-volume rename is atomic), so recovery is: restart the
-	// binary that is still sitting at Target. Passing "" as the backup path
-	// tells rollback there is nothing to restore FROM — Target was never
-	// moved — so it goes straight to restart+verify.
-	if err := renameWithRetry(plan, deps, log, plan.Target, backupPath); err != nil {
-		r := rollback(ctx, plan, deps, log, "", "", "backing up the old binary failed: "+err.Error())
-		return mergeAndFail(r)
+	if plan.Generation != nil {
+		// 4-5 for a linked build: nothing is renamed or copied, the link is re-pointed. A failure here is after
+		// stop-node, so it routes through the same rollback (which flips back, restarts and verifies).
+		if err := plan.Generation.Flip(true); err != nil {
+			r := rollback(ctx, plan, deps, log, "", "", "re-pointing the live link failed: "+err.Error())
+			return mergeAndFail(r)
+		}
+		step("flip-link", true, plan.Generation.NewExe)
 	}
-	out.BackupPath = backupPath
-	step("backup-old", true, backupPath)
 
-	// 5. Move the new binary into place. A failure here ALSO happens after
-	// stop-node, so it routes through the same rollback (which restores
-	// backupPath -> Target, then restarts and verifies) instead of the
-	// restore-only-no-restart handling this used to have. installNewBinary
-	// transparently falls back to a verified copy when Staged and Target are
-	// on different volumes (see CopyFile/IsCrossDeviceRenameErr above).
-	if err := installNewBinary(plan, deps, log, backupSuffix); err != nil {
-		r := rollback(ctx, plan, deps, log, backupPath, "", fmt.Sprintf("moving staged binary into place: %v", err))
-		return mergeAndFail(r)
+	if plan.Generation == nil {
+		// 4. Rename the old exe to a backup. On failure, diagnose the holder and
+		// — ONLY for an idle MCP helper sharing the exe, never anything else —
+		// stop it and retry once.
+		//
+		// A failure here happens AFTER stop-node (step 3) has already stopped the
+		// node, so simply returning would leave a stopped node with nobody ever
+		// restarting it — the exact outage class this tool exists to prevent.
+		// renameWithRetry either fully succeeds or leaves Target untouched (a
+		// Windows same-volume rename is atomic), so recovery is: restart the
+		// binary that is still sitting at Target. Passing "" as the backup path
+		// tells rollback there is nothing to restore FROM — Target was never
+		// moved — so it goes straight to restart+verify.
+		if err := renameWithRetry(plan, deps, log, plan.Target, backupPath); err != nil {
+			r := rollback(ctx, plan, deps, log, "", "", "backing up the old binary failed: "+err.Error())
+			return mergeAndFail(r)
+		}
+		out.BackupPath = backupPath
+		step("backup-old", true, backupPath)
+
+		// 5. Move the new binary into place. A failure here ALSO happens after
+		// stop-node, so it routes through the same rollback (which restores
+		// backupPath -> Target, then restarts and verifies) instead of the
+		// restore-only-no-restart handling this used to have. installNewBinary
+		// transparently falls back to a verified copy when Staged and Target are
+		// on different volumes (see CopyFile/IsCrossDeviceRenameErr above).
+		if err := installNewBinary(plan, deps, log, backupSuffix); err != nil {
+			r := rollback(ctx, plan, deps, log, backupPath, "", fmt.Sprintf("moving staged binary into place: %v", err))
+			return mergeAndFail(r)
+		}
+		step("install-new", true, plan.Target)
 	}
-	step("install-new", true, plan.Target)
 
 	// 6. Optional render-tree swap: tarball + backup + extract + hash-verify
 	// (the file-count check is the caller's job via the extraction result;
@@ -510,7 +552,7 @@ func Run(ctx context.Context, plan Plan, deps Deps, log *Logger) Outcome {
 
 	// 8. Prove the swap: a NEW process, its running image's sha256 equal to
 	// what was just installed, and (when configured) a healthy /fleet/health.
-	pid, imageSHA, healthVersion, err := verifyRunning(ctx, plan, deps, newHash)
+	pid, imageSHA, healthVersion, err := verifyRunning(ctx, plan.at(true), deps, newHash)
 	if err != nil {
 		r := rollback(ctx, plan, deps, log, backupPath, renderBackupPath, "post-restart verification failed: "+err.Error())
 		return mergeAndFail(r)
@@ -709,6 +751,20 @@ func refuseUnreadableHolders(plan Plan, deps Deps) error {
 	}
 	return fmt.Errorf("pid %s runs a program named %s whose path and command line this process cannot read: it runs elevated or as another account (a node restarted over `ssh localhost` runs elevated). node-swap could neither stop it nor see the new node start, and would roll back against a running node. Nothing was touched. Run node-swap at the node's elevation (an elevated shell, or through `ssh localhost`)",
 		strings.Join(pids, ", "), filepath.Base(plan.Target))
+}
+
+// Preflight is what Run checks before it touches anything, without waiting or moving a file: the plan is valid and,
+// when a restart is configured, no process on the target's name is one this process cannot read. A caller that
+// stages a download first (the update verb) calls it before the download, so a swap that Run would refuse costs
+// nothing.
+func Preflight(plan Plan, deps Deps) error {
+	if err := validatePlan(plan); err != nil {
+		return err
+	}
+	if plan.RestartTaskName != "" || plan.RestartCommand != "" {
+		return refuseUnreadableHolders(plan, deps)
+	}
+	return nil
 }
 
 // mayStop reports whether this deploy may stop p: stopForSwap stops the node process (the
@@ -1134,8 +1190,11 @@ func rollback(ctx context.Context, plan Plan, deps Deps, log *Logger, backupPath
 	}
 
 	// Stop whatever is currently running (the bad new binary, if it managed
-	// to start at all) before touching files again.
-	_ = stopForSwap(ctx, plan, deps, log)
+	// to start at all) before touching files again. A linked build can be running from either side of the flip.
+	_ = stopForSwap(ctx, plan.at(true), deps, log)
+	if plan.Generation != nil {
+		_ = stopForSwap(ctx, plan.at(false), deps, log)
+	}
 
 	if renderBackupPath != "" {
 		_ = deps.RemoveAll(plan.RenderDir)
@@ -1154,6 +1213,14 @@ func rollback(ctx context.Context, plan Plan, deps Deps, log *Logger, backupPath
 	// genuinely broken state (no backup AND Target missing) is reported as
 	// a real restore failure.
 	switch {
+	case plan.Generation != nil:
+		if err := plan.Generation.Flip(false); err != nil {
+			step("restore-link", false, err.Error())
+			out.RolledBack = false
+			out.RollbackOK = false
+			return out
+		}
+		step("restore-link", true, plan.Generation.OldExe)
 	case backupPath != "" && deps.Exists(backupPath):
 		if err := deps.RemoveAll(plan.Target); err != nil {
 			log.Printf("rollback: clearing %s before restore: %v (continuing — RenameFile below will surface a real failure if this matters)", plan.Target, err)
@@ -1183,7 +1250,7 @@ func rollback(ctx context.Context, plan Plan, deps Deps, log *Logger, backupPath
 	step("restart-after-rollback", true, "")
 
 	oldHash, _ := deps.Hash(plan.Target)
-	if _, _, _, err := verifyRunning(ctx, plan, deps, oldHash); err != nil {
+	if _, _, _, err := verifyRunning(ctx, plan.at(false), deps, oldHash); err != nil {
 		step("verify-after-rollback", false, err.Error())
 		out.RollbackOK = false
 		return out

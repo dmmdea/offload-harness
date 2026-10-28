@@ -227,6 +227,11 @@ type Config struct {
 	// node, not the delegator, knows the file names. Off by default until the
 	// A/B on the seat says otherwise; a property of the seat like the rules.
 	AgentSeedContextReads bool `json:"agent_seed_context_reads,omitempty"`
+	// Update configures `local-offload update` (docs/systems/update.md): the release channel, each component's
+	// live path, how the llama-swap daemon restarts, and the smoke gate. Every key is optional; nil/absent = the
+	// verb's own defaults. The verb reads the same object itself (internal/update.FileConfig); it is declared here so
+	// the key is a known one and the typed config carries it.
+	Update *UpdateConfig `json:"update,omitempty"`
 	// KVCacheServers is the OPTIONAL "cache server" tier: a second machine's RAM
 	// behind LMCache MP, bound ONE BINDING PER vLLM SEAT (see kvcacheserver.go and
 	// kvcacheservers.go). Empty = no tier, the pre-key behavior; nothing in the
