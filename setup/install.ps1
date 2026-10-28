@@ -326,6 +326,33 @@ $PINNED = @{
     sha  = '235745af8d86bf4a4c1b5b4f529868b37019a10f7c0b2e79ad0abca3a22bc6e1'
     version = '235745af'
   }
+  # --- maxwell-3 (the 3 GB band, 2026-10-28) media-seat weights, PIN-ONLY like the CT-51 I5 rows below:
+  # `install render` emits the tier's vision and stt seats from profiles.json and WARNS when these files are
+  # not under the models dir; nothing here downloads them yet (no gate names these keys), so the operator places
+  # them out of band. Each sha256 is the Hugging Face LFS oid, equal to the bytes measured on the reference box
+  # (<node-g>). The image lane's sdxl-turbo Q4_0 and the sd.cpp build are the amd-rdna3 media leg's (Step 5b,
+  # OFFLOAD_WITH_MEDIA=1 pulls the Z-Image set, which does NOT fit 3 GB), so that tier places them by hand too.
+  'model-e2b-mmproj' = @{
+    url  = 'https://huggingface.co/ggml-org/gemma-4-E2B-it-GGUF/resolve/main/mmproj-gemma-4-E2B-it-Q8_0.gguf'
+    name = 'mmproj-gemma-4-E2B-it-Q8_0.gguf'   # the Q8_0 projector: the F16 one (986 MB) puts the vision seat over a 3 GB card
+    size = 557368064
+    sha  = '9406f99c16d68cda4f1f0552192dcc99021ea1fc6d2fd50b1dc3ccf30d04b292'
+    version = '9406f99c'
+  }
+  'model-whisper-turbo-q5' = @{
+    url  = 'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo-q5_0.bin'
+    name = 'ggml-large-v3-turbo-q5_0.bin'
+    size = 574041195
+    sha  = '394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2'
+    version = '39422170'
+  }
+  'model-silero-v5' = @{
+    url  = 'https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin'
+    name = 'ggml-silero-v5.1.2.bin'
+    size = 885098
+    sha  = '29940d98d42b91fbd05ce489f3ecf7c72f0a42f027e4875919a28fb4c04ea2cf'
+    version = '29940d98'
+  }
   # --- CT-51 I5: the amd-gcn (Vulkan iGPU) media models, PIN-ONLY. Nothing in this installer downloads them
   # (no gate names these keys; the Linux install has no media leg yet, so the weights are placed out of band);
   # the pins record the exact bytes the tier's config_seed binds, each one measured 2026-10-03 and verified against

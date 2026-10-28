@@ -15,8 +15,15 @@
   renderer and `Resolve-ProfileParams` refuse the flag without `resident_tier` `gemma4-e2b`, and together with
   the CPU seat family, which mirrors the workhorse. `selftest.ps1` benches the first served tier when
   `offload-e4b` is not served. The spec stamp carries the field (`omit_e4b`, omitted when false).
+- **Media seats, measured on the box.** The tier declares a vision seat (`gemma4-e2b-vision`: the resident E2B
+  weights plus the ggml-org Q8_0 projector at an 8192 window, reasoning off; 2,578 MiB loaded, 2,819 peak, a
+  screenshot and a receipt read correctly) and an STT seat (`whisper-stt`: large-v3-turbo q5_0 with the silero
+  v5.1.2 VAD and flash attention OFF, the faster path on this card: 10.4 s against 14.5 s for the same Spanish
+  clip, 977 / 1,037 MiB). Both are swappable, because either one beside the chat seat overflows a 3 GB card.
 - **Pins.** `model-e2b` and `model-e4b` are re-pinned to the current upstream LFS objects (unsloth re-uploaded
-  both QAT GGUFs, 2,016 bytes larger with new oids); the old pins failed the size check on a fresh install.
+  both QAT GGUFs, 2,016 bytes larger with new oids); the old pins failed the size check on a fresh install. The
+  three media-seat files get pin-only rows (`model-e2b-mmproj`, `model-whisper-turbo-q5`, `model-silero-v5`):
+  recorded bytes and sha256, placed by the operator, warned about by `install render` when absent.
 - **Check.** `detect.ps1 -SelfTest` and `go test ./internal/hwdetect/` with the new rows (970M 3 GB ->
   `maxwell-3`, 3.9 -> `maxwell-3`, 4 -> `ampere-6`, unknown VRAM -> `ampere-6`, 1050 Ti -> `other`);
   `setup/render.tests.ps1` with a `maxwell-3` block on the min and high RAM bands (no `offload-e4b` entry or var,
