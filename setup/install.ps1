@@ -659,7 +659,7 @@ function Get-LiveGenerationRecord {
     if ($meta.sizes -and $idx -lt @($meta.sizes).Count) { $size = [int64]@($meta.sizes)[$idx] }
     $src = ''
     if ($meta.source) { $src = "github:$($meta.source)" }
-    return New-ComponentRecord -Version ([string]$meta.tag) -Digest $digest -Size $size -Source $src -InstalledAt ([string]$meta.installed_at)
+    return New-ComponentRecord -Version ([string]$meta.tag) -Digest $digest -Size $size -Source $src -InstalledAt (ConvertTo-IsoStamp $meta.installed_at)
   } catch { return $null }
 }
 
@@ -783,6 +783,14 @@ function Test-CachedSha {
 # { version; digest; size; source; installed_at } per component; a schema 1 manifest holds the
 # version string alone and is read as a record without a digest.
 # ---------------------------------------------------------------------------
+# JSON stamps come back from ConvertFrom-Json as [datetime]; a record always stores the ISO form.
+function ConvertTo-IsoStamp {
+  param($Value)
+  if ($null -eq $Value) { return '' }
+  if ($Value -is [datetime]) { return $Value.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ') }
+  return [string]$Value
+}
+
 function Get-OldVersion {
   param([string]$Component)
   $rec = Get-OldRecord $Component
@@ -798,7 +806,7 @@ function Get-OldRecord {
   if ($raw -is [string]) { return @{ version = $raw; digest = ''; size = [int64]0; source = ''; installed_at = '' } }
   $rec = @{ version = ''; digest = ''; size = [int64]0; source = ''; installed_at = '' }
   foreach ($f in @('version', 'digest', 'source', 'installed_at')) {
-    if ($raw.PSObject.Properties[$f] -and $null -ne $raw.$f) { $rec[$f] = [string]$raw.$f }
+    if ($raw.PSObject.Properties[$f] -and $null -ne $raw.$f) { $rec[$f] = $(if ($f -eq 'installed_at') { ConvertTo-IsoStamp $raw.$f } else { [string]$raw.$f }) }
   }
   if ($raw.PSObject.Properties['size'] -and $null -ne $raw.size) { $rec['size'] = [int64]$raw.size }
   return $rec
