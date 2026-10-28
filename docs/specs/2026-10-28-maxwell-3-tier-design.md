@@ -70,7 +70,7 @@ Go harness + PowerShell installer, as the repo already does: a `profiles.json` e
 | disable_cuda_graphs | true | graphs are disabled below Volta anyway; keep the ampere-* default |
 | agent_model | bake decides (see R-AGENT) | PROJECTED |
 | media_seats | vision `gemma4-e2b-vision` = E2B + `mmproj-gemma-4-E2B-it-Q8_0.gguf` at ctx 8192, reasoning off, swappable: 2,578 MiB loaded / 2,819 peak beside the embedder, screenshot and receipt both read correctly (prefill 120-132 tok/s, decode 41); stt `whisper-stt` = large-v3-turbo q5_0 + silero v5.1.2 with flash attention OFF, swappable: 977 / 1,037 MiB, a 759 KB Spanish clip in 10.4 s (FA on: 14.5 s, same text) | MEASURED 2026-10-28 (smokes 2 and 6); q8_0 whisper still to measure |
-| config_seed | memory_stack [embeddinggemma, bge-reranker-v2-m3], escalation/reasoning "", agent_profile research, fleet_max_concurrent_jobs 1, imagegen sdcpp if smoke 4 passes | PROJECTED |
+| config_seed | model gemma4-e2b, escalation/reasoning "", agent_profile research, fleet_max_concurrent_jobs 1, the unserved media scripts blanked; NO memory_stack (the table test refuses a stack that names what the tier does not serve, and this box is not the memory authority); imagegen sdcpp only if smoke 4 renders | PARTLY MEASURED (image pending) |
 
 ### Install on the reference box
 
