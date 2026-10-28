@@ -39,7 +39,8 @@ local-offload update [--component llama|llama-swap|whisper|sdcpp|hyperframes|all
 | `--repoint <yaml>` | rewrites a hand-kept llama-swap yaml to the live llama path, see below |
 | `--channel` | `nightly` (default: the newest complete `b<N>`) or `release` (the build `nightly-tag.txt` names); `update.channel` in `config.json` sets it per node |
 | `--no-gate` | skips the side-port smoke gate (see Gate); prints that it did. The offline self-check and the post-flip watch still run |
-| `--live` | the live path of the one selected component, for a box whose layout is not `<home>/<component>` |
+| `--component` | one component, or `all` (the default). `all` updates what the node runs: a component with no record in `installed.json` and nothing at its live path is reported `not-installed` (exit 0, nothing written) and left alone. Naming it (`--component sdcpp`) is the only way the verb installs a component a node does not have |
+| `--live` | the live path of the one selected component, for a box whose layout is not `<home>/<component>`. The verb records it, so later runs need neither the flag nor a config entry |
 | `--home` | the install root `<home>`. Default: `$OFFLOAD_HOME`, else the folder above the running binary when it sits in `<home>/bin` beside the installer's `installed.json` (how the installers lay a node out, and how the fleet registry calls the verb over ssh with no environment), else `~/offload-stack` when it holds an `installed.json`. No root found is exit 2 with nothing changed: the verb never starts a fresh install in a guessed folder. It prints the root it chose |
 
 Exit codes: **0** no-op, updated, skipped (no prebuilt for this node), inconclusive (a lease or a busy seat: try
@@ -48,8 +49,12 @@ again) or busy (another run holds `update.lock`); **1** a candidate was rejected
 
 ## Layout
 
-The component's live path keeps its name, so no rendered yaml, scheduled task or probe changes. Live paths default to
-`<home>/<component>` and `update.paths.<component>` in `config.json` overrides them.
+The component's live path keeps its name, so no rendered yaml, scheduled task or probe changes. The live path is, in
+order: `--live` (one component), `update.paths.<component>` in `config.json`, the `live` path `installed.json` recorded
+the last time the verb worked on the component, else `<home>/<component>`. Every run that finds the live build records
+its path, so a node laid out by hand (llama-swap in `C:/llama-swap`) is told once and found from then on. A record
+written before `live` existed still finds a single-file component through its current generation's path when that is
+a file.
 
 ```
 <home>/installed.json                       node-local truth, replaced atomically (tmp + rename)
@@ -61,7 +66,7 @@ The component's live path keeps its name, so no rendered yaml, scheduled task or
 ```
 
 A live path that is a real directory on the first run is migrated: renamed to `<live>-versions/<id>` (the id from
-`installed.json`, else from `--version`, else `unknown-YYYYMMDD`) and replaced by the junction. Models running from it
+`installed.json`, else from the live build's own version probe, else `unknown-YYYYMMDD`) and replaced by the junction. Models running from it
 are unloaded first through llama-swap (with drain), because Windows will not rename a directory a process holds.
 Exactly two generations are kept, current and previous; everything else, and every rejected candidate, is deleted at
 once.

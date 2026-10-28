@@ -36,6 +36,9 @@ type Options struct {
 	ResolveOnly bool
 	Rollback    bool // roll the (single) component back to its previous generation
 	Live        string
+	// Explicit is true when the operator named the component (--component X): only then may the verb install a
+	// component the node does not have. "all" updates what the node runs and installs nothing.
+	Explicit bool
 }
 
 // Env is everything the verb needs from the node. NewEnv builds the real one.
@@ -102,22 +105,42 @@ func (e *Env) logf(f string, a ...any) {
 	}
 }
 
-func (e *Env) livePath(def *compDef, opts Options) string {
+// livePath is where a component's live build is: --live (one component), config.json update.paths, the live path
+// installed.json recorded the last time the verb worked on the component, else <home>/<component>.
+func (e *Env) livePath(def *compDef, st *State, opts Options) string {
 	if opts.Live != "" && len(opts.Components) == 1 {
 		return filepath.Clean(opts.Live)
 	}
 	if p := e.Config.Paths[def.Name]; p != "" {
 		return filepath.Clean(p)
 	}
+	if st != nil {
+		if st.Live != "" {
+			return filepath.Clean(st.Live)
+		}
+		// A record written before `live` existed: a single-file component in the file layout recorded the live
+		// file itself as its current generation (a generation directory is never a live path).
+		if def.Single && st.Current != nil && st.Current.Path != "" {
+			if fi, err := os.Stat(st.Current.Path); err == nil && !fi.IsDir() {
+				return filepath.Clean(st.Current.Path)
+			}
+		}
+	}
 	return filepath.Join(e.Home, def.liveRel())
 }
 
-// LivePath is where a component's live build is (the --live flag, config.json update.paths, else <home>/<component>).
+// LivePath is where a component's live build is (the --live flag, config.json update.paths, the recorded live path,
+// else <home>/<component>).
 func (e *Env) LivePath(name string, opts Options) string {
-	if def := defs[name]; def != nil {
-		return e.livePath(def, opts)
+	def := defs[name]
+	if def == nil {
+		return ""
 	}
-	return ""
+	var st *State
+	if man, err := LoadManifest(filepath.Join(e.Home, "installed.json")); err == nil {
+		st = man.State(name)
+	}
+	return e.livePath(def, st, opts)
 }
 
 func (e *Env) yamlPath() string {
@@ -204,7 +227,7 @@ func (e *Env) Run(ctx context.Context, opts Options) ([]Report, int) {
 		}
 		reports = append(reports, rep)
 		exit = max(exit, rep.exit)
-		if mutating && rep.Action != "unsupported" {
+		if mutating && rep.Action != "unsupported" && rep.Action != "not-installed" {
 			if serr := man.Save(); serr != nil {
 				reports = append(reports, Report{Component: name, Action: "error", Detail: "writing installed.json: " + serr.Error(), exit: ExitError})
 				exit = max(exit, ExitError)
@@ -246,8 +269,17 @@ func installedID(st *State) string {
 // one is resolve -> floor -> compare -> (stage -> promote) for one component.
 func (e *Env) one(ctx context.Context, def *compDef, rs *Resolver, man *Manifest, opts Options) Report {
 	st := man.State(def.Name)
-	live := e.livePath(def, opts)
+	live := e.livePath(def, st, opts)
 	rep := Report{Component: def.Name, Live: live}
+	// Updates move what a node runs. A component with no record and nothing at its live path is installed only when
+	// the operator names it: "all" must never put an engine on a node that does not use one.
+	if st.Current == nil && !opts.Explicit {
+		if _, err := os.Stat(live); err != nil {
+			rep.Installed, rep.Action, rep.exit = "none", "not-installed", ExitOK
+			rep.Detail = fmt.Sprintf("not on this node (no record, nothing at %s); `update --component %s` installs it, update.paths.%s points at a build elsewhere", live, def.Name, def.Name)
+			return rep
+		}
+	}
 	if def.Single {
 		if _, err := os.Stat(live); err != nil {
 			rep.Installed, rep.Action, rep.exit = "none", "error", ExitError
@@ -269,6 +301,9 @@ func (e *Env) one(ctx context.Context, def *compDef, rs *Resolver, man *Manifest
 			}
 			st.Current = &Generation{ID: id, Path: live, Source: "probed", InstalledAt: nowStamp(e.Now())}
 		}
+	}
+	if _, err := os.Stat(live); err == nil {
+		st.Live = live // the next run finds the component here with no flag and no config
 	}
 	rep.Installed = installedID(st)
 	if st.Previous != nil {
