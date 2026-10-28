@@ -38,7 +38,7 @@ var everyTaskType = []string{"image-gen", "video-gen", "animate", "audio-gen", "
 const (
 	plainGraph      = `{"1":{"class_type":"KSampler"}}`
 	hostilePackBody = `{"job_id":"rg-hostile","task_type":"run-graph","payload":{"graph":` + plainGraph +
-		`,"manifest":{"node_packs":[{"name":"payload","repo":"https://example.invalid/payload","commit":"0000000000000000000000000000000000000000"}]}}}`
+		`,"manifest":{"node_packs":[{"name":"payload","repo":"https://example.invalid/payload"}]}}}`
 )
 
 func TestEveryTaskTypeRidesTheBearerRule(t *testing.T) {

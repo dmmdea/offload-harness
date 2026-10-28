@@ -275,7 +275,8 @@ Ownership when both devices are present:
 ### Coral tools and the shared-name rule (0.114.0)
 
 The Coral owns four capabilities, each on an artifact from `google-coral/test_data`
-(Apache-2.0) that the sidecar verifies by sha256 (`accelerators/coral/models.json`):
+(Apache-2.0) that the sidecar checks against the digest `fetch-models.sh` recorded for it (`accelerators/coral/models.json`
+names the files and the source, no hash and no version; see "How the artifacts are fetched and verified" below):
 
 | MCP / loop tool | Sidecar tool | Model (default; options) | Result |
 |---|---|---|---|
@@ -336,7 +337,7 @@ injection still works for every existing caller and test.
 ### RKNPU tools
 
 The RKNPU owns three capabilities, each a sidecar tool under the Coral's contract
-(`POST /v1/<tool>`) on `.rknn` models the sidecar verifies by sha256 (an `.rknn` is compiled for one
+(`POST /v1/<tool>`) on `.rknn` models the sidecar checks against the digest recorded for them (an `.rknn` is compiled for one
 target SoC, here rk3588):
 
 | MCP / loop tool | Sidecar tool | Arguments | Result |
@@ -355,8 +356,10 @@ RKNPU vector is in its own space, neither the Hailo's `tinyclip` nor the Coral's
 
 Changed 2026-09-30 on operator order (no licence costs): **no AGPL or GPL model ships.** The
 Ultralytics YOLOv8n (AGPL-3.0) and the Rockchip ResNet18 prebuilt (untraced provenance) are gone.
-The manifest is [`accelerators/rknpu/models.json`](../../accelerators/rknpu/models.json); the
-sidecar serves only a file whose sha256 was recorded on this box when the file was fetched or converted.
+The manifest is [`accelerators/rknpu/models.json`](../../accelerators/rknpu/models.json): it names each
+model's file, tool and conversion recipe, and the repositories to fetch from. It carries no sha256 and no
+version; the sidecar serves a file whose bytes match the digest recorded when the file was fetched or built
+(see "How the artifacts are fetched and verified" below).
 
 | Tool | Manifest key | Model | Licence | What the sidecar feeds it |
 |---|---|---|---|---|
@@ -368,27 +371,28 @@ The zoo and toolkit files are Rockchip's (zoo code Apache-2.0). The classifier's
 `CLASSIFY_MODEL` in `server.py`; the board measured both builds (below) and the INT8 one is served.
 
 - **No model has a public `.rknn`.** `fetch-models.sh --convert` builds each on an x86_64 host from
-  the recipe under its `convert` key: `ppyoloe_s` and CLIP from an ONNX on the
-  zoo's download host, verified against the digest the host publishes,, the two ResNet-50 files from an ONNX **exported** from the timm weights
-  (`export` recipe: weights downloaded from the newest Hugging Face revision and checked against the published `lfs.oid`, opset
-  12; the exported ONNX has no hash, because an export is not reproducible across torch versions).
-  A conversion is not bit-reproducible either (about a kilobyte of embedded build metadata differs
-  between two runs), so each recorded `sha256` identifies the exact bytes that were built and checked on this box, and a
-  rebuild has to have its new hash recorded before the sidecar serves it.
+  the recipe under its `convert` key: `ppyoloe_s` and CLIP from the ONNX on the zoo's download host
+  (the link is read from the zoo's `download_model.sh` at the resolved release; that host publishes
+  no digest, so the sha256 the script saw is recorded), the two ResNet-50 files from an ONNX **exported**
+  from the timm weights (`export` recipe: weights downloaded and checked against the Hugging Face
+  `lfs.oid` at `main`, opset 12; the exported ONNX has no hash, because an export is not reproducible
+  across torch versions). A conversion is not bit-reproducible either (about a kilobyte of embedded
+  build metadata differs between two runs), so the record names the exact bytes that were built and
+  checked, and a rebuild is recorded again (`fetch-models.sh --convert`) before the sidecar treats it as verified.
 - **The INT8 calibration images are not what a rebuild uses.** `ppyoloe_s` was calibrated on the 200
   COCO val2017 images of `accelerators/rknpu/calib/coco_val2017_calib_200.txt`; `resnet50tv2-i8`
   was calibrated on 200 ImageNetV2 images, while its recipe names the COCO list. Both are Flickr
   photographs under per-image terms, used only to compute quantisation scales and never
   redistributed. The list is fetched image by image from `images.cocodataset.org` over plain http
-  (its https certificate does not match its name) and the images are not checked against a hash.
+  (its https certificate does not match its name) and the images are checked against no digest.
 - **Detector decoding.** The head is anchor-free with a Distribution Focal Loss box: the sidecar
   reads the bin count from the box tensor (17 bins for PP-YOLOE, 16 for a YOLOv8-shaped head),
   takes the best class probability as the score (no box-confidence factor, exactly as the zoo's
   Python demo does), applies per-class NMS, and reads the three stride branches in any order. The
   score-sum branch is ignored: the zoo's Python demo replaces it with ones and its C demo uses it
   only to skip cells early. The defaults are the zoo demo's own: score threshold 0.25, NMS IoU 0.45.
-- **Measured on the NPU (<node-d>, RK3588S, 2026-09-30).** The pinned files ran on the board
-  (librknnrt 2.3.2, rknpu 0.9.8, one NPU core) over the same evaluation lists as the host FP32
+- **Measured on the NPU (<node-d>, RK3588S, 2026-09-30).** The files built that day ran on the board
+  (the librknnrt the fetch resolved then, rknpu 0.9.8, one NPU core) over the same evaluation lists as the host FP32
   baselines below, with a post-processing port that reproduces those baselines on the host to the
   fourth decimal:
 
@@ -436,6 +440,29 @@ devices is tested on both.
 table (`laneConfigFor`), with no registry — a missed site registers nothing, and only the status
 block says so. A test holds every device `profiles.json` declares to all three: its owned capabilities are the MCP
 tools, the loop's tools and a pipeline lane.
+
+### How the artifacts are fetched and verified (ADR 0099)
+
+Nothing in `accelerators/coral/` or `accelerators/rknpu/` names a version, a commit or a sha256 as policy. Each
+`models.json` lists files and sources only; the two `fetch-models.sh` scripts resolve at the moment they run and
+take the integrity check from the publisher:
+
+- **Coral.** The tip of the default branch of `google-coral/test_data`; each file's publisher digest is its git
+  blob id (and size) at that tip, and the downloaded bytes must hash to it.
+- **RKNPU.** The newest non-draft, non-prerelease release of `airockchip/rknn-toolkit2` (the runtime library and the
+  wheel for the venv's python) and of `airockchip/rknn_model_zoo` (labels, test images, the ONNX download links) that
+  carries every file asked of it (a half-published release steps back to the one before), with the digest read from
+  the GitHub API (asset digest or git blob id); the timm weights are checked against the Hugging Face tree API's
+  `lfs.oid` at `main`.
+- **The record.** A file that passes is written to `models.installed.json` beside the weights as
+  `{file, digest, publisher_digest, size, source, fetched_at}`. `digest` is the sha256 of the bytes. The record is data
+  about what was installed, not a rule: the next run resolves again.
+- **The gate.** The sidecar re-checks a model's bytes against the recorded digest before it loads it and refuses a
+  mismatch with `model_sha_mismatch`. A model with no record is served and listed under `models_unverified` in
+  `/health`. A file that fails its publisher check is deleted and reported.
+- **`--dry-run`.** Prints the resolution (the release or tip it chose and each publisher digest) and downloads and writes
+  nothing. A converted RKNPU model has no publisher digest; `fetch-models.sh --convert` records the sha256 of the bytes it
+  built, on the build host.
 
 ## Fleet routing — reaching a device this box lacks (0.115.0, ADR 0038)
 

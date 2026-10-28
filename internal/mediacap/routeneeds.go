@@ -373,16 +373,14 @@ type nodePack struct {
 }
 
 // pollockjj/ComfyUI-MultiGPU archives 2026-09-30 (issue #223, no successor endorsed).
-// The pinned commit is upstream v2.6.4's last code commit (b51c99a525e9607e43545ee2a8b7694c74a4775a,
-// pyproject.toml version "2.6.4") PLUS one local fix already carried by the fleet
-// (ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83, "fix(p2p): platform-aware cudart load +
-// fail-closed P2P on Windows/WDDM" — the first-stage fix for upstream issue #220's
-// libcudart.so-on-Windows crash). Mirrored (private) at dmmdea/ComfyUI-MultiGPU-mirror
-// since upstream becomes read-only. See docs/systems/media-generation.md "Archival".
-const multiGPUPinnedCommit = "ed1ffaef7cec1a66f35106c6a4c7a40927c2dc83"
+// The head of upstream is v2.6.4's last code commit; the mirror's head adds one local fix already carried by the
+// fleet ("fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM", the first-stage fix for upstream
+// issue #220's libcudart.so-on-Windows crash). Mirrored (private) at dmmdea/ComfyUI-MultiGPU-mirror since upstream
+// becomes read-only; the mirror is the repository to install from. No commit is named: the node installs the head
+// of the default branch and records it. See docs/systems/media-generation.md "Archival".
 const multiGPUMirrorURL = "https://github.com/dmmdea/ComfyUI-MultiGPU-mirror"
 
-var multiGPUArchivalNote = " — ARCHIVED upstream 2026-09-30 (no successor); pinned " + multiGPUPinnedCommit[:12] + ", mirror " + multiGPUMirrorURL
+var multiGPUArchivalNote = " — ARCHIVED upstream 2026-09-30 (no successor); install from the mirror " + multiGPUMirrorURL
 
 var nodePacks = map[string]nodePack{
 	"ComfyUI-VideoHelperSuite": {"ComfyUI-VideoHelperSuite", "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite", "VHS_VideoCombine", ""},

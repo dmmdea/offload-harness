@@ -16,9 +16,9 @@ composition is code that HyperFrames' Chrome runs without a sandbox (ADR 0059).
 | [`captions-bar`](captions-bar/README.md) | caption track: one short group of words at a time in a bar near the bottom edge, over transparency | yes (webm / mov) | 8 s (1 to 600 s) |
 
 A template marked "no" stays opaque in every format, `webm`, `mov` and `png-sequence` included: since
-HyperFrames 0.8.112 an alpha export keeps the composition root's background. Before that, the four opaque
+HyperFrames's releases of early October 2026 an alpha export keeps the composition root's background. Before that, the four opaque
 templates exported to an alpha format lost their background and kept only the text (measured on `title-card`
-`webm`: the alpha plane averaged 10 to 14 on 0.8.108 and is 255 everywhere on 0.8.114).
+`webm`: the alpha plane averaged 10 to 14 on the release before and is 255 everywhere on the one after).
 
 **Where they come from.** `title-card`, `lower-third` and `captions-bar` were written for this harness.
 `stat-card`, `section-title`, `callout-label` and `checklist-card` are adapted from card designs in a

@@ -1575,7 +1575,7 @@ test("cli: an unknown verb or a missing source is a usage error (exit 2) that na
   const help = await run(["--help"]);
   assert.equal(help.code, 0);
   assert.match(help.stdout, /usage: templates-catalog/);
-  assert.match(help.stdout, /read-only/);
+  assert.match(help.stdout, /never runs/);
 });
 
 test("cli: nothing is written unless --out is given, and then exactly that one file", async () => {
@@ -1654,9 +1654,6 @@ test("golden: the installed 0.1.94 package reproduces the research counts (skipp
     assert.equal(s.api_signals.disagreements, 0);
     // The node-id scan alone sees every paid template, so the api_ prefix is a second opinion and not what keeps three of them paid.
     assert.equal(s.api_signals.by_node_id, s.api_signals.by_open_source_false);
-    // A tree that reports the class table's ComfyUI version carries the rule files the table was checked against.
-    const tree = C.snapshotNode({ comfyDir: comfy.replace(/\\/g, "/"), io: C.nodeIo });
-    if (tree.comfyui_version === C.COMFYUI_RULE_FILES.version) assert.deepEqual({ ...C.checkRules(tree) }, { ok: true, table_version: C.COMFYUI_RULE_FILES.version, node_version: tree.comfyui_version, differs: [], reason: null });
   }
 });
 
@@ -3274,45 +3271,46 @@ test("snapshot: a file under <output>/loras is listed, and --output-directory an
   assert.deepEqual(both.model_roots.classes.vae.dirs.map((d) => d.path), ["D:/x/base/models/vae", "D:/x/out/vae"], "--output-directory wins over <base>/output");
 });
 
-// The class table is ComfyUI 0.37.0's. A snapshot records the node's ComfyUI version and hashes of the two rule files (folder_paths.py
-// and utils/extra_config.py, line endings normalised); readiness never looked at them, so a node on other rules was scored silently
-// with this table. The hashes decide (a tree can be commits past a release and still report its version); the check is advisory.
+// A snapshot records the node's ComfyUI version, the hashes of the two rule files (folder_paths.py and utils/extra_config.py, line
+// endings normalised) and the hashes the harness recorded for them when it registered the checkout (record-rules). The hashes decide
+// (a tree can be commits past a release and still report its version); the check is advisory, and no record is "not recorded".
 const stampedCatalog = () => C.buildCatalog({ templatesDir: REAL_TEMPLATES, apiIds: realApiIds(), stamp: C.stampFor({ templatesDir: REAL_TEMPLATES, basis: "installed-package", io: C.nodeIo }), licenseMap: fixtureMap(), io: C.nodeIo });
-const ruleFiles = { folder_paths_sha256: C.COMFYUI_RULE_FILES?.folder_paths_sha256, extra_config_sha256: C.COMFYUI_RULE_FILES?.extra_config_sha256 };
+const ruleFiles = { folder_paths_sha256: "a".repeat(64), extra_config_sha256: "b".repeat(64) };
 
-test("readiness: a node whose ComfyUI rule files are not the ones the class table was checked against says so, and is still scored", () => {
+test("readiness: a node whose ComfyUI rule files are not the ones recorded at registration says so, and is still scored", () => {
   const cat = stampedCatalog();
-  const snap = (over = {}) => ({ ...nodeSnapshot(ACE_TREE), comfyui_version: "0.37.0", comfy_files: { ...ruleFiles }, ...over });
+  const snap = (over = {}) => ({ ...nodeSnapshot(ACE_TREE), comfyui_version: "1.2.3", comfy_files: { ...ruleFiles }, comfy_rule_files_recorded: { ...ruleFiles }, ...over });
   const good = C.nodeReadiness({ catalog: cat, snapshot: snap() });
-  assert.deepEqual({ ...good.rules_check }, { ok: true, table_version: "0.37.0", node_version: "0.37.0", differs: [], reason: null });
-  const other = C.nodeReadiness({ catalog: cat, snapshot: snap({ comfyui_version: "0.38.0", comfy_files: { ...ruleFiles, folder_paths_sha256: "0".repeat(64) } }) });
+  assert.deepEqual({ ...good.rules_check }, { ok: true, node_version: "1.2.3", differs: [], reason: null });
+  const other = C.nodeReadiness({ catalog: cat, snapshot: snap({ comfyui_version: "1.3.0", comfy_files: { ...ruleFiles, folder_paths_sha256: "0".repeat(64) } }) });
   assert.equal(other.rules_check.ok, false);
   assert.deepEqual(other.rules_check.differs, ["folder_paths.py"]);
-  assert.equal(other.rules_check.node_version, "0.38.0");
+  assert.equal(other.rules_check.node_version, "1.3.0");
   assert.match(other.rules_check.reason, /folder_paths\.py/);
-  assert.match(other.rules_check.reason, /0\.37\.0/);
+  assert.match(other.rules_check.reason, /recorded/);
   assert.equal(other.counts.ready.with_weights, 1, "advisory: the node is scored all the same");
   const both = C.nodeReadiness({ catalog: cat, snapshot: snap({ comfy_files: { folder_paths_sha256: "1".repeat(64), extra_config_sha256: null } }) });
   assert.deepEqual(both.rules_check.differs, ["folder_paths.py", "utils/extra_config.py"], "a rule file that is missing counts as different");
-  assert.equal(C.nodeReadiness({ catalog: cat, snapshot: snap({ comfyui_version: "0.99.0" }) }).rules_check.ok, true, "the hashes decide: the same files under another version string are the same rules");
+  assert.equal(C.nodeReadiness({ catalog: cat, snapshot: snap({ comfyui_version: "9.9.9" }) }).rules_check.ok, true, "the hashes decide: the same files under another version string are the same rules");
 });
 
-test("readiness: a snapshot with no rule-file hashes is unverified, not failed; one that names another ComfyUI version is different", () => {
+test("readiness: a snapshot with no record or no rule-file hashes is unverified, not failed", () => {
   const cat = stampedCatalog();
   const bare = C.nodeReadiness({ catalog: cat, snapshot: nodeSnapshot(ACE_TREE) });
   assert.equal(bare.rules_check.ok, null);
   assert.equal(bare.rules_check.node_version, null);
-  assert.match(bare.rules_check.reason, /no rule-file hashes/);
-  const versioned = C.nodeReadiness({ catalog: cat, snapshot: { ...nodeSnapshot(ACE_TREE), comfyui_version: "0.40.1" } });
-  assert.equal(versioned.rules_check.ok, false);
-  assert.match(versioned.rules_check.reason, /0\.40\.1/);
-  assert.match(versioned.rules_check.reason, /0\.37\.0/);
-  const refused = C.nodeReadiness({ catalog: cat, snapshot: { ...nodeSnapshot(ACE_TREE, { "comfyui-workflow-templates-json": "0.1.96" }), comfyui_version: "0.40.1" } });
+  assert.match(bare.rules_check.reason, /not recorded/);
+  const versioned = C.nodeReadiness({ catalog: cat, snapshot: { ...nodeSnapshot(ACE_TREE), comfyui_version: "9.9.9" } });
+  assert.equal(versioned.rules_check.ok, null, "a version string alone is neither a record nor a failure");
+  const noHashes = C.nodeReadiness({ catalog: cat, snapshot: { ...nodeSnapshot(ACE_TREE), comfy_rule_files_recorded: { ...ruleFiles } } });
+  assert.equal(noHashes.rules_check.ok, null);
+  assert.match(noHashes.rules_check.reason, /no rule-file hashes/);
+  const refused = C.nodeReadiness({ catalog: cat, snapshot: { ...nodeSnapshot(ACE_TREE, { "comfyui-workflow-templates-json": "0.1.96" }), comfy_files: { ...ruleFiles, folder_paths_sha256: "0".repeat(64) }, comfy_rule_files_recorded: { ...ruleFiles } } });
   assert.ok(refused.refused && refused.rules_check.ok === false, "a refused node still reports its rules");
 });
 
 test("cli: readiness prints one line about a node that runs other ComfyUI rules, and the exit code stays 0", async () => {
-  const withRules = (files, hashes) => JSON.stringify({ package: { versions: V094 }, inventory: invFrom(files), comfyui_version: "0.37.0", comfy_files: hashes });
+  const withRules = (files, hashes) => JSON.stringify({ package: { versions: V094 }, inventory: invFrom(files), comfyui_version: "1.2.3", comfy_files: hashes, comfy_rule_files_recorded: { ...ruleFiles } });
   const t = await tempFiles({
     "same.json": withRules(ACE_TREE, { ...ruleFiles }),
     "other.json": withRules(ACE_TREE, { ...ruleFiles, extra_config_sha256: "2".repeat(64) }),
@@ -3530,29 +3528,21 @@ test("catalog: a text-generation template with only a text encoder from a FLUX-f
 // ---------------------------------------------------------------------------------------------
 
 // Kills: the rule-file check reading a non-object comfy_files (null, a string), the wording of its reason (one file or two, with or without a
-// version), and the class table drifting from the files it was checked against without a test noticing.
-test("rules: the reason names the files and the release, and a comfy_files that is not an object is unverified, not a crash", () => {
-  const snap = (over) => ({ ...nodeSnapshot(ACE_TREE), comfyui_version: "0.37.0", ...over });
+// version), and a missing record being read as a failure.
+test("rules: the reason names the files, and a comfy_files that is not an object is unverified, not a crash", () => {
+  const snap = (over) => ({ ...nodeSnapshot(ACE_TREE), comfyui_version: "1.2.3", comfy_rule_files_recorded: { ...ruleFiles }, ...over });
   assert.equal(C.checkRules(snap({ comfy_files: { ...ruleFiles, folder_paths_sha256: "0".repeat(64) } })).reason,
-    "folder_paths.py differs from the ComfyUI 0.37.0 file the directory rules were checked against (the node reports 0.37.0)");
+    "folder_paths.py differs from the file recorded when the harness registered this ComfyUI (the node reports 1.2.3)");
   assert.equal(C.checkRules(snap({ comfy_files: { folder_paths_sha256: "0".repeat(64), extra_config_sha256: "1".repeat(64) } })).reason,
-    "folder_paths.py and utils/extra_config.py differ from the ComfyUI 0.37.0 files the directory rules were checked against (the node reports 0.37.0)");
-  assert.equal(C.checkRules({ comfy_files: { ...ruleFiles, extra_config_sha256: null } }).reason,
-    "utils/extra_config.py differs from the ComfyUI 0.37.0 file the directory rules were checked against", "no version, no parenthesis");
-  const unverified = { ok: null, table_version: "0.37.0", node_version: null, differs: [], reason: "the snapshot carries no rule-file hashes, so the ComfyUI rules it ran cannot be checked" };
-  for (const comfy_files of [null, undefined, "x", 5]) assert.deepEqual({ ...C.checkRules({ comfy_files }) }, unverified, String(comfy_files));
-  assert.deepEqual({ ...C.checkRules(null) }, unverified);
-  assert.deepEqual({ ...C.checkRules(undefined) }, unverified);
-});
-
-test("rules: the class table is pinned to the ComfyUI 0.37.0 files by their hashes", () => {
-  assert.deepEqual({ ...C.COMFYUI_RULE_FILES }, {
-    version: "0.37.0",
-    folder_paths_sha256: "b748be5d1e068ad673f6c4de069fb6b7b723405c40ae3c3c44465d416f7df2db",
-    extra_config_sha256: "ebb923e58956587acf5196e3a76ae3c576196f2f498e5933ce9416fca1ddaf9e",
-  });
-  assert.equal(C.COMFYUI_CLASS_TABLE_VERSION, C.COMFYUI_RULE_FILES.version);
-  assert.equal(Object.isFrozen(C.COMFYUI_RULE_FILES), true);
+    "folder_paths.py and utils/extra_config.py differ from the files recorded when the harness registered this ComfyUI (the node reports 1.2.3)");
+  assert.equal(C.checkRules({ comfy_rule_files_recorded: { ...ruleFiles }, comfy_files: { ...ruleFiles, extra_config_sha256: null } }).reason,
+    "utils/extra_config.py differs from the file recorded when the harness registered this ComfyUI", "no version, no parenthesis");
+  const unverified = { ok: null, node_version: null, differs: [], reason: "the snapshot carries no rule-file hashes, so the ComfyUI rules it ran cannot be checked" };
+  for (const comfy_files of [null, undefined, "x", 5]) assert.deepEqual({ ...C.checkRules({ comfy_rule_files_recorded: { ...ruleFiles }, comfy_files }) }, unverified, String(comfy_files));
+  const notRecorded = { ok: null, node_version: null, differs: [], reason: "not recorded: this node has no record of its ComfyUI rule files from when the harness registered it" };
+  assert.deepEqual({ ...C.checkRules(null) }, notRecorded);
+  assert.deepEqual({ ...C.checkRules(undefined) }, notRecorded);
+  for (const comfy_rule_files_recorded of [null, undefined, "x", 5]) assert.deepEqual({ ...C.checkRules({ comfy_files: { ...ruleFiles }, comfy_rule_files_recorded }) }, notRecorded, String(comfy_rule_files_recorded));
 });
 
 // Kills: any one of the three markers dropped from the tree check, and the missing-flag message replaced by the unreadable-directory one.

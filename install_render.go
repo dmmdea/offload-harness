@@ -102,7 +102,7 @@ type servingProfile struct {
 	// but NOT with IncludeQwen359B itself: the two may render TOGETHER, with
 	// qwen3.5-9b-agent kept as the rollback seat and stripped of the `agent-seat` alias
 	// (servingtmpl.Render moves the alias to whichever of the two is present, and
-	// refuses only the 4B+Mimo combination). REQUIRES llama.cpp >= b11102: on b10964
+	// refuses only the 4B+Mimo combination). REQUIRES the llama.cpp floor of the mimo-9b-agent seat (setup/floors.json): below it
 	// the chat-template auto-detector misroutes MiMo's compact tool-call XML to the
 	// Qwen3-Coder parser and every tool call runs to the token cap (upstream #29319).
 	IncludeMimo9B bool `json:"include_mimo_9b"`
@@ -119,7 +119,7 @@ type servingProfile struct {
 	// binds agent_model to it on exactly those boxes, so the seat and the binding agree by
 	// construction. It claims the `agent-seat` alias, so the 4B / 9B entry stays rendered as
 	// an opt-in un-aliased rollback (servingtmpl.Render hands the alias off) and mimo-9b-agent
-	// cannot share a tier with it. REQUIRES llama.cpp >= b10964 (`--load-mode`), and the tier
+	// cannot share a tier with it. REQUIRES the llama.cpp floor that has `--load-mode` (setup/floors.json), and the tier
 	// must declare n_cpu_moe_max >= 40 or the write gate refuses the render.
 	IncludeQwen3635B bool `json:"include_qwen36_35b"`
 	// IncludeEmbeddingGemma2 adds the embeddinggemma2 entry (EmbeddingGemma-2 Q8_0) to the tier's
@@ -127,7 +127,7 @@ type servingProfile struct {
 	// bge-reranker-v2-m3 and its GGUF (and its projector, see EmbeddingGemma2Projector) joins the
 	// Windows download set. Default false; true on ampere-6 (the memory authority's card, where it
 	// was measured, WITH the projector) and on ampere-8 and blackwell-3x16 as text-only replicas.
-	// No RAM gate. REQUIRES llama.cpp >= b11452 (the gemma-embedding2 architecture). The
+	// No RAM gate. REQUIRES the llama.cpp floor of the gemma-embedding2 architecture (setup/floors.json). The
 	// embeddinggemma (300M) entry stays regardless.
 	IncludeEmbeddingGemma2 bool `json:"include_embeddinggemma2"`
 	// EmbeddingGemma2Projector says whether the embeddinggemma2 entry carries the multimodal
@@ -937,8 +937,8 @@ func slashDir(dir string) string {
 }
 
 // buildDirName is the path element a llama.cpp build is named by: the directory's own last element, or, when
-// that is the generic `bin` or `build` of a CMake tree or a release archive (llamacpp-b10964/bin,
-// llama-b11490/build/bin), the nearest element above it that is not. "" when every element is generic.
+// that is the generic `bin` or `build` of a CMake tree or a release archive (llamacpp-<tag>/bin,
+// llama-<tag>/build/bin), the nearest element above it that is not. "" when every element is generic.
 func buildDirName(dir string) string {
 	elems := strings.Split(slashDir(dir), "/")
 	for i := len(elems) - 1; i >= 0; i-- {
@@ -950,7 +950,7 @@ func buildDirName(dir string) string {
 }
 
 // llamaBuildOf reads the llama.cpp build number a directory's name states: a standalone `b<digits>` token
-// of 4 to 6 digits in buildDirName (llamacpp-b10964, llama.cpp-b11490, b11452). The name is the only source:
+// of 4 to 6 digits in buildDirName (llamacpp-<tag>, llama.cpp-<tag>, <tag>). The name is the only source:
 // the renderer never runs a llama-server, because `--version` initialises every CUDA card on the box and
 // `install render` runs on live nodes. A name that states no build, or two different ones, is unknown, never
 // guessed, so the floor check built on this is ADVISORY: it protects a directory named for its build, and

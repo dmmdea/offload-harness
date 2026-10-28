@@ -583,6 +583,18 @@ function Invoke-WebRequestWithProgress {
   }
 }
 
+# Move-DirAtomic: one rename of a directory on the same volume, whole or not at all. Move-Item is not that: when the
+# rename is refused (a file held open by a running engine, a render or an antivirus scan) it falls back to moving the
+# entries it can one by one and leaves the rest, splitting the tree in two. A refused rename is retried a few times
+# over about three seconds, then thrown with nothing moved.
+function Move-DirAtomic {
+  param([string]$From, [string]$To)
+  for ($i = 1; ; $i++) {
+    try { [System.IO.Directory]::Move($From, $To); return }
+    catch { if ($i -ge 4) { throw }; Start-Sleep -Milliseconds (250 * $i) }
+  }
+}
+
 # Make $Dest (the live path) a junction to $Target. A junction already there is replaced (the link only, never its
 # target); an empty real directory is removed; a real directory with content (an older install) is first renamed into
 # <live>-versions\<$LegacyId, else unknown-yyyyMMdd>. Nothing is ever extracted over a live directory.
@@ -600,7 +612,7 @@ function Set-LiveJunction {
       if (-not $LegacyId) { $LegacyId = "unknown-$(Get-Date -Format 'yyyyMMdd')" }
       $migrated = Join-Path "$Dest-versions" $LegacyId
       if (Test-Path -LiteralPath $migrated) { $migrated = "$migrated.$([System.IO.Path]::GetRandomFileName().Replace('.', ''))" }
-      try { Move-Item -LiteralPath $Dest -Destination $migrated }
+      try { Move-DirAtomic $Dest $migrated }
       catch { throw "cannot move the existing $Dest into $Dest-versions (is a process running from it? stop the stack and re-run): $($_.Exception.Message)" }
       Write-Host "      migrated the existing $Dest to $migrated" -ForegroundColor DarkGray
     }
@@ -733,7 +745,7 @@ function Install-Engine {
       Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
       throw
     }
-    Move-Item -LiteralPath $out -Destination $target
+    Move-DirAtomic $out $target
     Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue
     $meta = [ordered]@{
       id = $id; tag = $tag; components = @($Keys); digests = @($Keys | ForEach-Object { $Resolved[$_].digest })
@@ -1671,24 +1683,43 @@ function Get-HyperframesSeed {
   return [pscustomobject]@{ compose_script = '' }
 }
 
-# Install-Hyperframes: the pinned, project-local HyperFrames install. Copies the
-# committed package.json + package-lock.json (setup/hyperframes) to $Dest, then
-#   npm ci --ignore-scripts   (the lockfile's exact tree; no install script runs)
-#   npm audit signatures      (registry signatures + SLSA provenance; a failure is FATAL)
-#   npm rebuild esbuild       (the one postinstall the CLI needs, run deliberately)
-# and resolves the pinned chrome-headless-shell through the harness runner's
-# `browser` op, so `browser ensure` runs under the scrubbed env and HyperFrames'
-# state lands in $Dest/home. Never `npm install -g` (a global HyperFrames
-# self-upgrades in a detached process). Returns @{ dir; browser; version }.
+# Install-Hyperframes: the project-local HyperFrames install of the NEWEST npm release.
+# setup/hyperframes/package.json says "latest"; npm resolves dist-tags.latest and verifies
+# each tarball against the registry's integrity field. No lockfile, no exact version: the one
+# number is the floor in setup/floors.json, and an install at or above the newest is kept,
+# never downgraded. The new tree is built in a staging dir
+#   npm install --ignore-scripts   (no install script runs)
+#   npm audit signatures           (registry signatures + SLSA provenance; a failure is FATAL)
+# then swapped in (the old tree kept as node_modules.prev); then
+#   npm rebuild esbuild            (the one postinstall the CLI needs, run deliberately)
+# and the harness runner's `browser` op reports HyperFrames' own browser path, under the
+# scrubbed env, with HyperFrames' state in $Dest/home. Never `npm install -g` (a global
+# HyperFrames self-upgrades in a detached process). Returns @{ dir; browser; version }.
 function Install-Hyperframes {
   param([string]$RepoRoot, [string]$Dest, [string]$NodeExe)
   $src = Join-Path (Join-Path $RepoRoot 'setup') 'hyperframes'
   New-Item -ItemType Directory -Force -Path $Dest | Out-Null
-  foreach ($f in @('package.json', 'package-lock.json')) {
-    Copy-Item -Force (Join-Path $src $f) (Join-Path $Dest $f)
+  $floor = ''
+  $floorsFile = Join-Path (Join-Path $RepoRoot 'setup') 'floors.json'
+  if (Test-Path $floorsFile) {
+    $fj = Get-Content -Raw $floorsFile | ConvertFrom-Json
+    if ($fj.hyperframes -and $fj.hyperframes.harness) { $floor = [string]$fj.hyperframes.harness }
+  }
+  # AtLeast: the numeric dotted part of A is B's or newer ('' B is always met)
+  $atLeast = {
+    param([string]$A, [string]$B)
+    if (-not $B) { return $true }
+    $ca = [regex]::Match($A, '^v?(\d+(\.\d+)*)'); $cb = [regex]::Match($B, '^v?(\d+(\.\d+)*)')
+    if (-not $ca.Success) { return $false }
+    if (-not $cb.Success) { return $true }
+    $pa = @($ca.Groups[1].Value.Split('.') | ForEach-Object { [int]$_ }); $pb = @($cb.Groups[1].Value.Split('.') | ForEach-Object { [int]$_ })
+    for ($i = 0; $i -lt [Math]::Max($pa.Count, $pb.Count); $i++) {
+      $x = if ($i -lt $pa.Count) { $pa[$i] } else { 0 }; $y = if ($i -lt $pb.Count) { $pb[$i] } else { 0 }
+      if ($x -ne $y) { return ($x -gt $y) }
+    }
+    return $true
   }
   $entry = Join-Path $Dest 'node_modules/hyperframes/bin/hyperframes.mjs'
-  $pinned = (Get-Content -Raw (Join-Path $src 'package.json') | ConvertFrom-Json).dependencies.hyperframes
   $have = ''
   $pkg = Join-Path $Dest 'node_modules/hyperframes/package.json'
   if (Test-Path $pkg) { $have = (Get-Content -Raw $pkg | ConvertFrom-Json).version }
@@ -1698,12 +1729,51 @@ function Install-Hyperframes {
   $ErrorActionPreference = 'Continue'
   Push-Location $Dest
   try {
-    if (-not (Test-Path $entry) -or $have -ne $pinned) {
-      & npm ci --ignore-scripts --no-audit --no-fund
-      if ($LASTEXITCODE -ne 0) { throw "npm ci (hyperframes $pinned) failed (exit $LASTEXITCODE)" }
+    $latest = ''
+    $lv = & npm view hyperframes dist-tags.latest 2>$null
+    if ($LASTEXITCODE -eq 0 -and $lv) { $latest = ("$lv").Trim() }
+    $keep = ($have -and (Test-Path $entry) -and (& $atLeast $have $floor) -and ((-not $latest) -or (& $atLeast $have $latest)))
+    if ($keep) {
+      & npm audit signatures
+      if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
+    } else {
+      $stage = Join-Path $Dest '.install-staging'
+      if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+      New-Item -ItemType Directory -Force -Path $stage | Out-Null
+      Copy-Item -Force (Join-Path $src 'package.json') (Join-Path $stage 'package.json')
+      Push-Location $stage
+      try {
+        & npm install --ignore-scripts --no-audit --no-fund
+        if ($LASTEXITCODE -ne 0) { throw "npm install (newest hyperframes) failed (exit $LASTEXITCODE); the live install is unchanged" }
+        $stagedPkg = Join-Path $stage 'node_modules/hyperframes/package.json'
+        if (-not (Test-Path $stagedPkg)) { throw "npm install produced no node_modules/hyperframes/package.json; the live install is unchanged" }
+        $newVer = (Get-Content -Raw $stagedPkg | ConvertFrom-Json).version
+        if (-not (& $atLeast $newVer $floor)) { throw "npm resolved hyperframes $newVer, below the floor $floor in setup/floors.json; the live install is unchanged" }
+        & npm audit signatures
+        if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
+      } finally { Pop-Location }
+      # Each move is one whole rename (Move-DirAtomic; Move-Item would split a tree a render holds a file in) and the
+      # swap stops on the first one refused: a render holding a file leaves the live install as it was, and a
+      # failure after the old tree moved aside puts it back.
+      $live = Join-Path $Dest 'node_modules'; $prev = Join-Path $Dest 'node_modules.prev'
+      if (Test-Path $prev) { Remove-Item -Recurse -Force $prev -ErrorAction Stop }
+      $movedAside = $false
+      if (Test-Path $live) {
+        try { Move-DirAtomic $live $prev; $movedAside = $true }
+        catch { Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue; throw "cannot move the live hyperframes install aside (is a composition rendering?); nothing changed: $($_.Exception.Message)" }
+      }
+      try { Move-DirAtomic (Join-Path $stage 'node_modules') $live }
+      catch {
+        if ($movedAside -and -not (Test-Path $live)) { try { Move-DirAtomic $prev $live } catch { } }
+        Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+        throw "moving the new hyperframes tree into place failed; the previous install is back: $($_.Exception.Message)"
+      }
+      # A lockfile an older installer left is a pin set for the tree just replaced: kept as .prev, out of the live dir.
+      $oldLock = Join-Path $Dest 'package-lock.json'
+      if (Test-Path $oldLock) { Move-Item -Force $oldLock "$oldLock.prev" -ErrorAction SilentlyContinue }
+      Copy-Item -Force (Join-Path $src 'package.json') (Join-Path $Dest 'package.json')
+      Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
     }
-    & npm audit signatures
-    if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
     & npm rebuild esbuild
     if ($LASTEXITCODE -ne 0) { throw "npm rebuild esbuild failed (exit $LASTEXITCODE)" }
   } finally {
@@ -1716,7 +1786,7 @@ function Install-Hyperframes {
   if (-not $line) { throw "hyperframes browser ensure produced no result: $($out -join ' ')" }
   $res = $line | ConvertFrom-Json
   if (-not $res.ok) { throw "hyperframes browser ensure failed: $($res.class): $($res.detail)" }
-  return @{ dir = $Dest; browser = $res.browser_path; version = $pinned; chrome = $res.chrome_version }
+  return @{ dir = $Dest; browser = $res.browser_path; version = (Get-Content -Raw $pkg | ConvertFrom-Json).version; chrome = $res.chrome_version }
 }
 
 # Locate a gimp-console executable: newest GIMP major first ("GIMP 3" sorts

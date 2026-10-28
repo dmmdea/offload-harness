@@ -1,20 +1,17 @@
 package main
 
-// The openspec/ tree, its forked schema, and the two scripts around the pinned OpenSpec CLI.
+// The openspec/ tree, its forked schema, and the two scripts around the OpenSpec CLI.
 //
 // Two layers. The structural tests need no OpenSpec binary and run everywhere: they read openspec/config.yaml
 // and openspec/schemas/ and pin the shape the workflow depends on (a project-local schema that exists, an `adr`
 // artifact that nothing waits for, rules that name real artifacts, the standing invariants in the context). The
 // script tests drive scripts/openspec-validate.sh and scripts/openspec-install.sh against stand-in `openspec` and
-// `npm` programs, so the switches, the arguments, the hash refusal and the install's success path (what runs, where
+// `npm` programs, so the switches, the arguments and the install's success path (what runs, where
 // npm's cache and temp files go, what is left behind) are proved without the network or the CLI. Two tests run the
 // real thing and only when asked: TestOpenSpecTreeValidates when OPENSPEC_BIN names the CLI, and
 // TestOpenSpecInstallScriptInstallsTheRealPackage when OPENSPEC_INSTALL_TEST=1 (it uses the network).
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"os"
@@ -381,9 +378,8 @@ func TestOpenSpecStandInsAreNotShadowedByBashsDirectory(t *testing.T) {
 	shadow := filepath.ToSlash(filepath.Join(dir, "shadow-called.txt"))
 	writeOpenSpecStandIn(t, decoy, "npm", "echo shadowed >> \"$SHADOW\"\nexit 1\n")
 	writeOpenSpecStandIn(t, bin, "npm", `case "$1" in
-  pack)
-    printf 'not the admitted tarball' > fission-ai-openspec-1.14.1.tgz
-    echo fission-ai-openspec-1.14.1.tgz ;;
+  install)
+    exit 1 ;;
 esac
 `)
 	env := withBashOnPath(openspecScriptEnv(t, bash, "SHADOW="+shadow), filepath.Join(decoy, "bash"))
@@ -393,8 +389,8 @@ esac
 	if _, err := os.Stat(shadow); err == nil {
 		t.Fatalf("the npm in bash's directory ran instead of the stand-in:\n%s", out)
 	}
-	if !strings.Contains(string(out), "REFUSED: sha256 mismatch") {
-		t.Fatalf("the stand-in npm did not reach the hash check:\n%s", out)
+	if !strings.Contains(string(out), "npm install of") {
+		t.Fatalf("the stand-in npm did not reach the install step:\n%s", out)
 	}
 	envOf := func(key string) string {
 		v := ""
@@ -576,7 +572,7 @@ func TestOpenSpecValidateScriptIgnoresAnInheritedCDPATH(t *testing.T) {
 
 // The install script's `cd "$prefix"` has the same exposure: a relative prefix is resolved through CDPATH unless the
 // script clears it. The decoy `other/prefix` exists, the real prefix is the caller's own `prefix`, and the run must
-// reach the hash check with its scratch folder under the real one.
+// reach npm with its scratch folder under the real one.
 func TestOpenSpecInstallScriptIgnoresAnInheritedCDPATH(t *testing.T) {
 	bash := guardBash(t)
 	script, err := filepath.Abs(filepath.Join("scripts", "openspec-install.sh"))
@@ -590,73 +586,26 @@ func TestOpenSpecInstallScriptIgnoresAnInheritedCDPATH(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mark := filepath.ToSlash(filepath.Join(dir, "pack-cwd.txt"))
+	mark := filepath.ToSlash(filepath.Join(dir, "install-cwd.txt"))
 	writeOpenSpecStandIn(t, bin, "npm", `case "$1" in
-  pack)
+  install)
     pwd > "$MARK"
-    printf 'not the admitted tarball' > fission-ai-openspec-1.14.1.tgz ;;
+    exit 1 ;;
 esac
 `)
 	cmd := winexec.Command(bash, filepath.ToSlash(script), "prefix")
 	cmd.Dir = dir
 	cmd.Env = withStandInsFirst(openspecScriptEnv(t, bash, "MARK="+mark, "CDPATH=other"), bin)
 	combined, _ := cmd.CombinedOutput()
-	if !strings.Contains(string(combined), "REFUSED: sha256 mismatch") {
+	if !strings.Contains(string(combined), "npm install of") {
 		t.Fatalf("an inherited CDPATH kept the install script from resolving its relative prefix:\n%s", combined)
 	}
-	packed, err := os.ReadFile(filepath.FromSlash(mark))
+	ran, err := os.ReadFile(filepath.FromSlash(mark))
 	if err != nil {
-		t.Fatalf("npm pack never ran: %v\n%s", err, combined)
+		t.Fatalf("npm install never ran: %v\n%s", err, combined)
 	}
-	if got := strings.ReplaceAll(strings.TrimSpace(string(packed)), `\`, "/"); strings.Contains(got, "/other/") || !strings.Contains(got, "/prefix/") {
-		t.Errorf("npm pack ran in %q, want a scratch folder under the caller's prefix, not the CDPATH decoy", got)
-	}
-}
-
-var (
-	openspecAdmittedRowVersion = regexp.MustCompile("\\| (\\d+\\.\\d+\\.\\d+), tarball sha256 `([0-9a-f]{64})`")
-	openspecScriptVersion      = regexp.MustCompile(`(?m)^readonly OPENSPEC_VERSION="([^"]+)"$`)
-	openspecScriptSHA          = regexp.MustCompile(`(?m)^readonly OPENSPEC_SHA256="([0-9a-f]{64})"$`)
-)
-
-// A tarball whose hash is not the pinned one is refused before anything is installed, and the scratch directory
-// the script made is gone. The stand-in npm "packs" a file of the wrong content and records any install call.
-func TestOpenSpecInstallScriptRefusesAHashMismatch(t *testing.T) {
-	bash := guardBash(t)
-	dir := t.TempDir()
-	bin := filepath.Join(dir, "bin")
-	if err := os.MkdirAll(bin, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	mark := filepath.ToSlash(filepath.Join(dir, "install-called.txt"))
-	writeOpenSpecStandIn(t, bin, "npm", `case "$1" in
-  pack)
-    printf 'not the admitted tarball' > fission-ai-openspec-1.14.1.tgz
-    echo fission-ai-openspec-1.14.1.tgz ;;
-  *)
-    echo "$*" >> "$MARK" ;;
-esac
-`)
-	prefix := filepath.ToSlash(filepath.Join(dir, "prefix"))
-	cmd := winexec.Command(bash, "scripts/openspec-install.sh", prefix)
-	cmd.Env = withStandInsFirst(openspecScriptEnv(t, bash, "MARK="+mark), bin)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		t.Fatalf("the script accepted a tarball with the wrong hash:\n%s", out)
-	}
-	if !strings.Contains(strings.ToLower(string(out)), "sha256") {
-		t.Errorf("the refusal must say it is a sha256 mismatch, got:\n%s", out)
-	}
-	if _, statErr := os.Stat(filepath.FromSlash(mark)); statErr == nil {
-		b, _ := os.ReadFile(filepath.FromSlash(mark))
-		t.Errorf("npm install ran after a hash mismatch: %s", b)
-	}
-	left, _ := filepath.Glob(filepath.Join(filepath.FromSlash(prefix), ".openspec-pack.*"))
-	if len(left) != 0 {
-		t.Errorf("the scratch download directory was left behind: %v", left)
-	}
-	if _, statErr := os.Stat(filepath.Join(filepath.FromSlash(prefix), "node_modules")); statErr == nil {
-		t.Error("a node_modules directory exists after a refused install")
+	if got := strings.ReplaceAll(strings.TrimSpace(string(ran)), `\`, "/"); strings.Contains(got, "/other/") || !strings.Contains(got, "/prefix/") {
+		t.Errorf("npm install ran in %q, want a scratch folder under the caller's prefix, not the CDPATH decoy", got)
 	}
 }
 
@@ -674,56 +623,46 @@ func TestOpenSpecInstallScriptNeedsAPrefix(t *testing.T) {
 	}
 }
 
-// What the stand-in npm "packs". The install tests rewrite the script's pinned sha256 on a copy to this content's hash
-// (the constants are readonly, so a copy is the way a test gets a hash it can match).
-const openspecStandInTarball = "stand-in for the openspec tarball, not a real package"
-
 type openspecInstallRun struct {
 	out    string
 	err    error
 	prefix string            // the install prefix as the script sees it (symlinks and short names resolved)
 	calls  []string          // the npm subcommands the stand-in saw, in order
-	log    map[string]string // what the stand-in recorded: "pack argv", "ci cwd", "ci cache", ...
+	log    map[string]string // what the stand-in recorded: "install argv", "install cwd", "install cache", ...
 }
 
-// copyOpenSpecInstallScript puts a copy of the install script, with its pinned sha256 replaced by sha, under
-// dir/scripts, together with the lockfile project the script reads from beside itself (scripts/openspec/). It returns
-// the copy's path.
-func copyOpenSpecInstallScript(t *testing.T, dir, sha string) string {
+// copyOpenSpecInstallScript puts a copy of the install script under dir/scripts, together with the install project the
+// script reads from beside itself (scripts/openspec/package.json). It returns the copy's path.
+func copyOpenSpecInstallScript(t *testing.T, dir string) string {
 	t.Helper()
 	script, err := os.ReadFile("scripts/openspec-install.sh")
 	if err != nil {
 		t.Fatal(err)
-	}
-	pin := regexp.MustCompile(`(?m)^readonly OPENSPEC_SHA256="[0-9a-f]{64}"$`)
-	if !pin.Match(script) {
-		t.Fatal(`scripts/openspec-install.sh has no line readonly OPENSPEC_SHA256="<64 hex>"`)
 	}
 	scripts := filepath.Join(dir, "scripts")
 	if err := os.MkdirAll(filepath.Join(scripts, "openspec"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	copyPath := filepath.Join(scripts, "openspec-install.sh")
-	if err := os.WriteFile(copyPath, pin.ReplaceAll(script, []byte(`readonly OPENSPEC_SHA256="`+sha+`"`)), 0o755); err != nil {
+	if err := os.WriteFile(copyPath, script, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	for _, f := range []string{"package.json", "package-lock.json"} {
-		b, err := os.ReadFile(filepath.Join("scripts", "openspec", f))
-		if err != nil {
-			t.Fatalf("the install script installs from the committed lockfile project, scripts/openspec/%s: %v", f, err)
-		}
-		if err := os.WriteFile(filepath.Join(scripts, "openspec", f), b, 0o644); err != nil {
-			t.Fatal(err)
-		}
+	b, err := os.ReadFile(filepath.Join("scripts", "openspec", "package.json"))
+	if err != nil {
+		t.Fatalf("the install script installs from the install project, scripts/openspec/package.json: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(scripts, "openspec", "package.json"), b, 0o644); err != nil {
+		t.Fatal(err)
 	}
 	return filepath.ToSlash(copyPath)
 }
 
-// runOpenSpecInstallWithStandInNpm runs a copy of the install script, whose pin matches the stand-in tarball, against a
-// stand-in npm. The stand-in records its subcommands, the arguments, the directory it ran in, the cache and temp
-// settings it saw and whether the lockfile project and the tarball it was handed are the committed ones; its `ci`
-// "installs" an openspec binary that prints fakeVersion and records the config home it ran with. The caller's environment is hostile on purpose (npm's cache
-// and the temp folders point outside the prefix), so only the script itself can move them under the prefix.
+// runOpenSpecInstallWithStandInNpm runs a copy of the install script against a stand-in npm (node is the real one: the
+// script reads JSON with it). The stand-in records its subcommands, the arguments, the directory it ran in, the cache
+// and temp settings it saw and whether the install project it was handed is the committed one; its `install`
+// "installs" an openspec package and binary that report fakeVersion and record the config home they ran with, and its
+// `view` and `audit signatures` agree with it. The caller's environment is hostile on purpose (npm's cache and the temp
+// folders point outside the prefix), so only the script itself can move them under the prefix.
 func runOpenSpecInstallWithStandInNpm(t *testing.T, fakeVersion string, prepare func(prefix string)) openspecInstallRun {
 	t.Helper()
 	return runOpenSpecInstallAt(t, fakeVersion, false, prepare)
@@ -736,8 +675,10 @@ func runOpenSpecInstallAt(t *testing.T, fakeVersion string, viaSymlink bool, pre
 	t.Helper()
 	bash := guardBash(t)
 	dir := t.TempDir()
-	sum := sha256.Sum256([]byte(openspecStandInTarball))
-	script := copyOpenSpecInstallScript(t, dir, hex.EncodeToString(sum[:]))
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node is not on PATH: the install script reads npm's JSON with it")
+	}
+	script := copyOpenSpecInstallScript(t, dir)
 	bin := filepath.Join(dir, "bin")
 	if err := os.MkdirAll(bin, 0o755); err != nil {
 		t.Fatal(err)
@@ -753,21 +694,24 @@ log_env() {
 }
 log "call=$1"
 case "$1" in
-  pack)
-    log "pack argv=$*"
-    log_env pack
-    printf '%s' "$STANDIN_TARBALL" > fission-ai-openspec-1.14.1.tgz
-    echo fission-ai-openspec-1.14.1.tgz ;;
-  ci)
-    log "ci argv=$*"
-    log "ci cwd=$(pwd -W 2>/dev/null || pwd)"
-    log_env ci
-    cmp -s package.json "$SRC/package.json" && log "ci package.json=same" || log "ci package.json=different"
-    cmp -s package-lock.json "$SRC/package-lock.json" && log "ci lockfile=same" || log "ci lockfile=different"
-    [ "$(cat fission-ai-openspec-1.14.1.tgz)" = "$STANDIN_TARBALL" ] && log "ci tarball=same" || log "ci tarball=different"
-    mkdir -p node_modules/.bin
-    printf '#!/usr/bin/env bash\necho "bin xdg=${XDG_CONFIG_HOME-unset}" >> "%s"\necho %s\n' "$LOG" "$FAKE_VERSION" > node_modules/.bin/openspec
+  install)
+    log "install argv=$*"
+    log "install cwd=$(pwd -W 2>/dev/null || pwd)"
+    log_env install
+    cmp -s package.json "$SRC/package.json" && log "install package.json=same" || log "install package.json=different"
+    mkdir -p node_modules/.bin node_modules/@fission-ai/openspec
+    printf '{"name":"@fission-ai/openspec","version":"%s"}' "$FAKE_VERSION" > node_modules/@fission-ai/openspec/package.json
+    printf '{"packages":{"node_modules/@fission-ai/openspec":{"integrity":"sha512-standin"}}}' > package-lock.json
+    printf '#!/usr/bin/env bash
+echo "bin xdg=${XDG_CONFIG_HOME-unset}" >> "%s"
+echo %s
+' "$LOG" "$FAKE_VERSION" > node_modules/.bin/openspec
     chmod +x node_modules/.bin/openspec ;;
+  view)
+    log "view argv=$*"
+    echo sha512-standin ;;
+  audit)
+    log "audit argv=$*" ;;
   *)
     exit 1 ;;
 esac
@@ -804,7 +748,7 @@ esac
 	cmd := winexec.Command(bash, script, filepath.ToSlash(arg))
 	cmd.Env = openspecScriptEnv(t, bash,
 		"LOG="+filepath.ToSlash(logPath), "SRC="+filepath.ToSlash(repoProject),
-		"STANDIN_TARBALL="+openspecStandInTarball, "FAKE_VERSION="+fakeVersion,
+		"FAKE_VERSION="+fakeVersion,
 		"npm_config_cache="+hostile("cache"), "TMPDIR="+hostile("tmpdir"), "TMP="+hostile("tmp"), "TEMP="+hostile("temp"),
 		"XDG_CONFIG_HOME="+hostile("xdg"))
 	cmd.Env = withStandInsFirst(cmd.Env, bin)
@@ -837,113 +781,20 @@ func openspecSamePath(a, b string) bool {
 	return norm(a) == norm(b)
 }
 
-// The data-location cell of the admitted-software row says where the install lands. The script takes a prefix
-// directory from the caller and puts node_modules, the npm cache and the config home under it; an npm `--prefix` is
-// not how it works, and this row is what a reader trusts.
-func TestOpenSpecAdmittedRowDescribesTheInstallLayout(t *testing.T) {
-	doc, err := os.ReadFile("docs/systems/security.md")
-	if err != nil {
-		t.Fatal(err)
-	}
-	var row string
-	for _, l := range strings.Split(string(doc), "\n") {
-		if strings.HasPrefix(l, "| OpenSpec CLI") {
-			row = l
-		}
-	}
-	if row == "" {
-		t.Fatal("docs/systems/security.md has no OpenSpec CLI row in the admitted software table")
-	}
-	if strings.Contains(row, "--prefix") {
-		t.Error("the OpenSpec row still says `--prefix`: the install script takes a prefix directory and does not pass npm's --prefix")
-	}
-	for _, want := range []string{"prefix directory", "node_modules", ".npm-cache", "XDG_CONFIG_HOME"} {
-		if !strings.Contains(row, want) {
-			t.Errorf("the OpenSpec row's data-location cell does not mention %q", want)
-		}
-	}
-}
-
-// The success path, with a stand-in npm: pack by the scoped, pinned name; install with `npm ci --ignore-scripts` in a
-// staged copy of the committed lockfile project, next to the verified tarball; npm's cache and temp files under the
-// prefix whatever the caller exported; the binary in the prefix; no scratch directory left; the four exports printed.
-func TestOpenSpecInstallScriptInstallsFromTheLockfileUnderThePrefix(t *testing.T) {
-	r := runOpenSpecInstallWithStandInNpm(t, "1.14.1", nil)
-	if r.err != nil {
-		t.Fatalf("the script failed on a matching tarball and a matching binary: %v\n%s", r.err, r.out)
-	}
-	if got := strings.Join(r.calls, ","); got != "pack,ci" {
-		t.Errorf("npm was called with subcommands %q, want exactly pack then ci (no resolving install)", got)
-	}
-	if a := r.log["pack argv"]; !strings.HasPrefix(a, "pack @fission-ai/openspec@1.14.1 ") || !strings.Contains(a, "--ignore-scripts") {
-		t.Errorf("npm pack ran as %q, want the scoped, pinned name with --ignore-scripts", a)
-	}
-	if a := r.log["ci argv"]; !strings.HasPrefix(a, "ci ") || !strings.Contains(a, "--ignore-scripts") {
-		t.Errorf("npm ci ran as %q, want ci with --ignore-scripts", a)
-	}
-	if !openspecPathUnder(r.log["ci cwd"], r.prefix) {
-		t.Errorf("npm ci ran in %q, want a staged copy under the prefix %q", r.log["ci cwd"], r.prefix)
-	}
-	for _, k := range []string{"ci package.json", "ci lockfile", "ci tarball"} {
-		if r.log[k] != "same" {
-			t.Errorf("%s = %q: npm ci must run in a copy that holds the committed package.json, the committed package-lock.json and the verified tarball", k, r.log[k])
-		}
-	}
-	// Both steps that touch npm's cache and temp files, the fetch and the install, run with them under the prefix:
-	// the caller exported folders elsewhere (the user profile, the system drive), and only the script can move them.
-	for _, step := range []string{"pack", "ci"} {
-		if !openspecSamePath(r.log[step+" cache"], filepath.Join(r.prefix, ".npm-cache")) {
-			t.Errorf("npm %s used the cache %q, want <prefix>/.npm-cache whatever the caller exported", step, r.log[step+" cache"])
-		}
-		for _, v := range []string{"tmpdir", "tmp", "temp"} {
-			k := step + " " + v
-			if !openspecPathUnder(r.log[k], r.prefix) {
-				t.Errorf("%s was %q, want a folder under the prefix %q whatever the caller exported", k, r.log[k], r.prefix)
-			}
-		}
-	}
-	for _, want := range []string{"export OPENSPEC_TELEMETRY=0", "export DO_NOT_TRACK=1", "export OPENSPEC_NO_UPDATE_CHECK=1"} {
-		if !strings.Contains(r.out, want) {
-			t.Errorf("the output does not print %q:\n%s", want, r.out)
-		}
-	}
-	if !openspecPathUnder(r.log["bin xdg"], r.prefix) {
-		t.Errorf("the CLI's version check ran with XDG_CONFIG_HOME=%q, want a folder under the prefix %q whatever the caller exported", r.log["bin xdg"], r.prefix)
-	}
-	xdg := regexp.MustCompile(`(?m)^export XDG_CONFIG_HOME='([^']+)'\r?$`).FindStringSubmatch(r.out)
-	if xdg == nil || !openspecPathUnder(xdg[1], r.prefix) {
-		t.Errorf("the output must print an XDG_CONFIG_HOME export under the prefix, got %v in:\n%s", xdg, r.out)
-	}
-	if _, err := os.Stat(filepath.Join(r.prefix, "node_modules", ".bin", "openspec")); err != nil {
-		t.Errorf("the installed binary is not in the prefix: %v", err)
-	}
-	if left, _ := filepath.Glob(filepath.Join(r.prefix, ".openspec-pack.*")); len(left) != 0 {
-		t.Errorf("the scratch directory was left behind: %v", left)
-	}
-	entries, _ := os.ReadDir(r.prefix)
-	for _, e := range entries {
-		switch e.Name() {
-		case "node_modules", ".npm-cache", "config":
-		default:
-			t.Errorf("unexpected entry %q in the prefix after the install", e.Name())
-		}
-	}
-}
-
 // A prefix handed over as a symlink (a macOS temp folder: /var is a link to /private/var) is installed into, and every
 // path the script logs or prints is the physical one, which is how the other tests, and a caller who resolves the
 // prefix, spell it. The script settles on the physical path after the Windows attempt (`pwd -W`), which has no
 // symlinks to resolve.
 func TestOpenSpecInstallScriptSpellsAPrefixSymlinkPhysically(t *testing.T) {
-	r := runOpenSpecInstallAt(t, "1.14.1", true, nil)
+	r := runOpenSpecInstallAt(t, "1.0.0", true, nil)
 	if r.err != nil {
 		t.Fatalf("the script failed on a symlinked prefix: %v\n%s", r.err, r.out)
 	}
-	if !openspecPathUnder(r.log["ci cwd"], r.prefix) {
-		t.Errorf("npm ci ran in %q, want a folder under the physical prefix %q", r.log["ci cwd"], r.prefix)
+	if !openspecPathUnder(r.log["install cwd"], r.prefix) {
+		t.Errorf("npm install ran in %q, want a folder under the physical prefix %q", r.log["install cwd"], r.prefix)
 	}
-	if !openspecSamePath(r.log["ci cache"], filepath.Join(r.prefix, ".npm-cache")) {
-		t.Errorf("npm ci used the cache %q, want <physical prefix>/.npm-cache", r.log["ci cache"])
+	if !openspecSamePath(r.log["install cache"], filepath.Join(r.prefix, ".npm-cache")) {
+		t.Errorf("npm install used the cache %q, want <physical prefix>/.npm-cache", r.log["install cache"])
 	}
 	xdg := regexp.MustCompile(`(?m)^export XDG_CONFIG_HOME='([^']+)'\r?$`).FindStringSubmatch(r.out)
 	if xdg == nil || !openspecPathUnder(xdg[1], r.prefix) {
@@ -951,27 +802,10 @@ func TestOpenSpecInstallScriptSpellsAPrefixSymlinkPhysically(t *testing.T) {
 	}
 }
 
-// A binary that reports another version than the pin fails the install, and nothing of it reaches the prefix.
-func TestOpenSpecInstallScriptRejectsAnInstalledVersionThatIsNotThePin(t *testing.T) {
-	r := runOpenSpecInstallWithStandInNpm(t, "9.9.9", nil)
-	if r.err == nil {
-		t.Fatalf("the script accepted an installed CLI that reports 9.9.9:\n%s", r.out)
-	}
-	if !strings.Contains(r.out, "9.9.9") {
-		t.Errorf("the failure must name the version it found, got:\n%s", r.out)
-	}
-	if left, _ := filepath.Glob(filepath.Join(r.prefix, ".openspec-pack.*")); len(left) != 0 {
-		t.Errorf("the scratch directory was left behind: %v", left)
-	}
-	if _, err := os.Stat(filepath.Join(r.prefix, "node_modules")); err == nil {
-		t.Error("a node_modules directory reached the prefix although the installed version was wrong")
-	}
-}
-
-// npm ci replaces a node_modules wholesale, so the script replaces an earlier install of this CLI but never a
+// The install replaces a node_modules wholesale, so the script replaces an earlier install of this CLI but never a
 // node_modules that is something else's.
 func TestOpenSpecInstallScriptReplacesAnEarlierInstallOnly(t *testing.T) {
-	earlier := runOpenSpecInstallWithStandInNpm(t, "1.14.1", func(prefix string) {
+	earlier := runOpenSpecInstallWithStandInNpm(t, "1.0.0", func(prefix string) {
 		d := filepath.Join(prefix, "node_modules", "@fission-ai", "openspec")
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -993,7 +827,7 @@ func TestOpenSpecInstallScriptReplacesAnEarlierInstallOnly(t *testing.T) {
 	}
 
 	var foreign string
-	other := runOpenSpecInstallWithStandInNpm(t, "1.14.1", func(prefix string) {
+	other := runOpenSpecInstallWithStandInNpm(t, "1.0.0", func(prefix string) {
 		d := filepath.Join(prefix, "node_modules", "some-other-tool")
 		if err := os.MkdirAll(d, 0o755); err != nil {
 			t.Fatal(err)
@@ -1017,132 +851,13 @@ func TestOpenSpecInstallScriptReplacesAnEarlierInstallOnly(t *testing.T) {
 	}
 }
 
-type openspecLockPackage struct {
-	Version   string `json:"version"`
-	Resolved  string `json:"resolved"`
-	Integrity string `json:"integrity"`
-	Link      bool   `json:"link"`
-}
-
-type openspecLockfile struct {
-	LockfileVersion int `json:"lockfileVersion"`
-	Packages        map[string]struct {
-		openspecLockPackage
-		Dependencies map[string]string `json:"dependencies"`
-	} `json:"packages"`
-}
-
-func readOpenSpecLockfile(t *testing.T) openspecLockfile {
-	t.Helper()
-	raw, err := os.ReadFile("scripts/openspec/package-lock.json")
-	if err != nil {
-		t.Fatalf("the install script installs from a committed lockfile: %v", err)
-	}
-	var l openspecLockfile
-	if err := json.Unmarshal(raw, &l); err != nil {
-		t.Fatalf("scripts/openspec/package-lock.json is not valid JSON: %v", err)
-	}
-	return l
-}
-
-func openspecSRI(t *testing.T, where, integrity string) {
-	t.Helper()
-	b64, ok := strings.CutPrefix(integrity, "sha512-")
-	if !ok {
-		t.Errorf("%s: integrity %q is not a sha512 value", where, integrity)
-		return
-	}
-	if raw, err := base64.StdEncoding.DecodeString(b64); err != nil || len(raw) != 64 {
-		t.Errorf("%s: integrity %q is not the base64 of a 64-byte sha512", where, integrity)
-	}
-}
-
-// The lockfile pins the dependency tree: the install project names the one admitted tarball by file, and every other
-// package in the lock is an exact version from the registry under a sha512 value. A caret range, a missing integrity or
-// a link would let the tree drift between installs.
-func TestOpenSpecLockfilePinsTheWholeTree(t *testing.T) {
-	script, err := os.ReadFile("scripts/openspec-install.sh")
-	if err != nil {
-		t.Fatal(err)
-	}
-	v := openspecScriptVersion.FindStringSubmatch(string(script))
-	if v == nil {
-		t.Fatal("scripts/openspec-install.sh declares no readonly OPENSPEC_VERSION")
-	}
-	tarball := "fission-ai-openspec-" + v[1] + ".tgz"
-	if !strings.Contains(string(script), `fission-ai-openspec-${OPENSPEC_VERSION}.tgz`) {
-		t.Error("scripts/openspec-install.sh must stage the verified tarball under the name the lockfile project refers to (fission-ai-openspec-${OPENSPEC_VERSION}.tgz)")
-	}
-
-	rawProject, err := os.ReadFile("scripts/openspec/package.json")
-	if err != nil {
-		t.Fatalf("the install script installs from a committed project: %v", err)
-	}
-	var project struct {
-		Private      bool              `json:"private"`
-		Dependencies map[string]string `json:"dependencies"`
-	}
-	if err := json.Unmarshal(rawProject, &project); err != nil {
-		t.Fatalf("scripts/openspec/package.json is not valid JSON: %v", err)
-	}
-	if !project.Private {
-		t.Error("scripts/openspec/package.json must be private: it is an install recipe, never a package to publish")
-	}
-	want := map[string]string{"@fission-ai/openspec": "file:" + tarball}
-	if len(project.Dependencies) != 1 || project.Dependencies["@fission-ai/openspec"] != want["@fission-ai/openspec"] {
-		t.Errorf("scripts/openspec/package.json dependencies are %v, want exactly %v (the admitted tarball by file, never a range)", project.Dependencies, want)
-	}
-
-	l := readOpenSpecLockfile(t)
-	if l.LockfileVersion != 3 {
-		t.Errorf("lockfileVersion is %d, want 3", l.LockfileVersion)
-	}
-	root, ok := l.Packages[""]
-	if !ok || len(root.Dependencies) != 1 || root.Dependencies["@fission-ai/openspec"] != want["@fission-ai/openspec"] {
-		t.Errorf("the lockfile's root entry depends on %v, want exactly %v (npm ci refuses a lock that disagrees with package.json)", root.Dependencies, want)
-	}
-	cli, ok := l.Packages["node_modules/@fission-ai/openspec"]
-	if !ok {
-		t.Fatal("the lockfile has no node_modules/@fission-ai/openspec entry")
-	}
-	if cli.Version != v[1] || cli.Resolved != "file:"+tarball {
-		t.Errorf("the lockfile's CLI entry is version %q resolved %q, want %q and %q", cli.Version, cli.Resolved, v[1], "file:"+tarball)
-	}
-	openspecSRI(t, "node_modules/@fission-ai/openspec", cli.Integrity)
-
-	exact := regexp.MustCompile(`^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$`)
-	deps := 0
-	for name, p := range l.Packages {
-		if name == "" || name == "node_modules/@fission-ai/openspec" {
-			continue
-		}
-		deps++
-		if !strings.HasPrefix(name, "node_modules/") {
-			t.Errorf("lock entry %q is not under node_modules/: a workspace or a link would escape the pin", name)
-		}
-		if p.Link {
-			t.Errorf("%s is a link", name)
-		}
-		if !exact.MatchString(p.Version) {
-			t.Errorf("%s has version %q, want an exact version", name, p.Version)
-		}
-		if !strings.HasPrefix(p.Resolved, "https://registry.npmjs.org/") {
-			t.Errorf("%s resolves to %q, want the npm registry", name, p.Resolved)
-		}
-		openspecSRI(t, name, p.Integrity)
-	}
-	if deps < 2 {
-		t.Errorf("the lockfile pins %d dependencies besides the CLI: the tree is not pinned", deps)
-	}
-}
-
-// TestOpenSpecInstallScriptInstallsTheRealPackage runs the install script for real: real npm, the network, about 70
-// packages, into a scratch prefix. It runs only with OPENSPEC_INSTALL_TEST=1 and skips with the reason otherwise. Home,
+// TestOpenSpecInstallScriptInstallsTheRealPackage runs the install script for real: real npm, the network, the newest
+// release and its dependencies, into a scratch prefix. It runs only with OPENSPEC_INSTALL_TEST=1 and skips with the reason otherwise. Home,
 // application-data, XDG and temp folders are all pointed at empty folders beside the prefix, so a write outside the
-// prefix shows up as a file there; the installed package set is compared with the committed lockfile.
+// prefix shows up as a file there; the script's own integrity and signature checks are what it exercises.
 func TestOpenSpecInstallScriptInstallsTheRealPackage(t *testing.T) {
 	if os.Getenv("OPENSPEC_INSTALL_TEST") != "1" {
-		t.Skip("OPENSPEC_INSTALL_TEST=1 is not set: this test runs scripts/openspec-install.sh for real (npm, the network, about 70 packages) into a scratch prefix; the stand-in install tests above still ran")
+		t.Skip("OPENSPEC_INSTALL_TEST=1 is not set: this test runs scripts/openspec-install.sh for real (npm, the network, the newest release) into a scratch prefix; the stand-in install tests above still ran")
 	}
 	bash := guardBash(t)
 	root := t.TempDir()
@@ -1166,19 +881,24 @@ func TestOpenSpecInstallScriptInstallsTheRealPackage(t *testing.T) {
 	}
 	t.Logf("install output:\n%s", out)
 
-	script, err := os.ReadFile("scripts/openspec-install.sh")
+	pkgRaw, err := os.ReadFile(filepath.Join(prefix, "node_modules", "@fission-ai", "openspec", "package.json"))
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("the install left no package.json for the CLI: %v", err)
 	}
-	pin := openspecScriptVersion.FindStringSubmatch(string(script))[1]
+	var pkg struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal(pkgRaw, &pkg); err != nil || pkg.Version == "" {
+		t.Fatalf("the installed package.json names no version: %v", err)
+	}
 	run := winexec.Command(bash, filepath.ToSlash(filepath.Join(prefix, "node_modules", ".bin", "openspec")), "--version")
 	run.Env = openspecScriptEnv(t, bash, append(env, "OPENSPEC_TELEMETRY=0", "DO_NOT_TRACK=1", "OPENSPEC_NO_UPDATE_CHECK=1")...)
 	ver, err := run.Output()
 	if err != nil {
 		t.Fatalf("the installed binary does not run: %v", err)
 	}
-	if got := strings.TrimSpace(string(ver)); got != pin {
-		t.Errorf("the installed binary reports %q, want the pin %q", got, pin)
+	if got := strings.TrimSpace(string(ver)); got != pkg.Version {
+		t.Errorf("the installed binary reports %q, its package.json says %q", got, pkg.Version)
 	}
 
 	for k, d := range sandbox {
@@ -1195,34 +915,6 @@ func TestOpenSpecInstallScriptInstallsTheRealPackage(t *testing.T) {
 		t.Errorf("the scratch directory was left behind: %v", left)
 	}
 
-	// The installed tree is the committed lock's tree: same packages, same versions, same integrity values.
-	committed := readOpenSpecLockfile(t)
-	hiddenRaw, err := os.ReadFile(filepath.Join(prefix, "node_modules", ".package-lock.json"))
-	if err != nil {
-		t.Fatalf("npm left no node_modules/.package-lock.json to compare: %v", err)
-	}
-	var hidden openspecLockfile
-	if err := json.Unmarshal(hiddenRaw, &hidden); err != nil {
-		t.Fatal(err)
-	}
-	for name, p := range committed.Packages {
-		if name == "" {
-			continue
-		}
-		h, ok := hidden.Packages[name]
-		if !ok {
-			t.Errorf("%s is in the committed lockfile but was not installed", name)
-			continue
-		}
-		if h.Version != p.Version || h.Integrity != p.Integrity {
-			t.Errorf("%s installed as %s %s, the lockfile pins %s %s", name, h.Version, h.Integrity, p.Version, p.Integrity)
-		}
-	}
-	for name := range hidden.Packages {
-		if _, ok := committed.Packages[name]; !ok {
-			t.Errorf("%s was installed but is not in the committed lockfile", name)
-		}
-	}
 }
 
 // The OpenSpec validator runs in no automatic gate (CI does not set OPENSPEC_BIN), so the pre-PR list a contributor
@@ -1246,12 +938,12 @@ func TestOpenSpecValidateGateIsInTheContributorChecklist(t *testing.T) {
 }
 
 // TestOpenSpecTreeValidates runs the real CLI over the tree, through the wrapper the gate list uses. The CLI is a
-// separately installed, hash-pinned program (docs/systems/openspec.md), so the test runs only where OPENSPEC_BIN
+// separately installed program (docs/systems/openspec.md), so the test runs only where OPENSPEC_BIN
 // names it; everywhere else it skips and says why.
 func TestOpenSpecTreeValidates(t *testing.T) {
 	bin := strings.TrimSpace(os.Getenv("OPENSPEC_BIN"))
 	if bin == "" {
-		t.Skip("OPENSPEC_BIN is not set: the pinned OpenSpec CLI is not installed here (scripts/openspec-install.sh installs it); the structural OpenSpec tests above still ran")
+		t.Skip("OPENSPEC_BIN is not set: the OpenSpec CLI is not installed here (scripts/openspec-install.sh installs it); the structural OpenSpec tests above still ran")
 	}
 	bash := guardBash(t)
 	cmd := winexec.Command(bash, "scripts/openspec-validate.sh")

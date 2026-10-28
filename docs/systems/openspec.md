@@ -3,7 +3,8 @@
 ## Purpose
 
 Give the repository one place for spec and plan artifacts of a change: a proposal, the spec deltas, a design and a task
-list, written to a fixed shape and checked by a validator. The tool is the OpenSpec CLI, installed as the newest npm release, verified against the registry's integrity value (the row in [security.md](security.md#admitted-third-party-software)). The `openspec/` tree is tracked, so the
+list, written to a fixed shape and checked by a validator. The tool is the OpenSpec CLI, installed as the registry's newest
+release and checked against the registry's own integrity values (the row in [security.md](security.md#admitted-third-party-software)). The `openspec/` tree is tracked, so the
 [leak gate](leak-gate.md) reads it like every other path.
 
 OpenSpec is a pilot. No other workstream depends on it, waits for it or names it: work outside it keeps the ADR, the pull
@@ -57,25 +58,23 @@ What that looks like in use, checked in a scratch project against the CLI as of 
 The CLI is installed by `scripts/openspec-install.sh <prefix>` (or `OPENSPEC_PREFIX`), where the prefix is a directory of its
 own on a data drive. There is no default prefix. The script:
 
-1. resolves the newest release of `@fission-ai/openspec` from the npm registry (`dist-tags.latest`) and fetches its tarball
-   with `npm pack --ignore-scripts` into a scratch directory under the prefix (the scoped name always: the unscoped npm
-   package `openspec` is another publisher's);
-2. refuses, installing nothing, when the tarball's integrity does not match the `dist.integrity` the registry publishes for
-   that release (nothing hashed lives in the repository);
-3. copies `scripts/openspec/package.json` into the scratch directory, next to the verified tarball, and runs
-   `npm install --ignore-scripts` there: the CLI is that file and its dependencies resolve to their newest compatible
-   releases, each verified by npm against the registry's integrity value, with no lifecycle script run;
-4. checks the staged CLI runs and reports a version, moves the staged `node_modules` into the prefix (replacing an earlier
-   install of this CLI, refusing a `node_modules` that is something else's), removes the scratch directory and prints the four
-   exports below.
+1. copies `scripts/openspec/package.json` (one dependency, `@fission-ai/openspec` at the `latest` dist-tag: the scoped name
+   always, the unscoped npm package `openspec` is another publisher's) into a scratch directory under the prefix and runs
+   `npm install --ignore-scripts` there: npm resolves the registry's newest release and checks every tarball against the
+   sha512 integrity the registry publishes for it, with no lifecycle script run. The lockfile that run writes is a by-product,
+   discarded with the scratch directory; none is kept in the repository;
+2. verifies the result: the installed package names a version, the staged CLI reports that version, the integrity npm recorded
+   for the package equals the registry's `dist.integrity` for that exact version (a second, separate query), and
+   `npm audit signatures` passes for the whole tree. Any failure installs nothing;
+3. moves the staged `node_modules` into the prefix (replacing an earlier install of this CLI, refusing a `node_modules` that is
+   something else's), removes the scratch directory and prints the four exports below.
 
 npm's cache, logs and temporary files stay under the prefix, and the script touches neither the user-level npm prefix nor the
-npmrc. The prefix ends up holding `node_modules`, `.npm-cache` and, if the CLI writes any, `config`. Versions are never
-pinned (ADR 0099): there is no lockfile and no version or digest constant in the script; the registry is the integrity
-source, `--ignore-scripts` and the validator gate are the mitigations, and a release that breaks the workflow is fixed in the
-schema or the templates, not by freezing the CLI.
+npmrc. The prefix ends up holding `node_modules`, `.npm-cache` and, if the CLI writes any, `config`. Versions are never pinned (ADR 0099): nothing in the repository
+names a version or a hash of the CLI or of its dependencies: the integrity comes from the registry when the script runs, and
+the mitigations against a bad new release are `--ignore-scripts`, the signature audit and the gate, and a release that breaks the workflow is fixed in the schema or the templates, not by freezing the CLI.
 
-To uninstall, delete the prefix directory. To update, run the script again: it takes the newest release. A new admitted
+To uninstall, delete the prefix directory. To update, run the script again into a fresh prefix: it takes the newest release. A new admitted
 source (a different package or publisher) is a new admission: change the row in `security.md`.
 
 ### Telemetry and the config home
@@ -137,9 +136,9 @@ the CLI version that wrote it. `TestOpenSpecGeneratedToolFilesStayUntracked` hol
 
 ## Testing notes
 
-`go test -run 'TestOpenSpec|TestDocsLint' .` covers the structure, both scripts (against stand-in `openspec` and
-`npm` programs, so the switches, the arguments, the exit code, the integrity refusal and the install's success path, with npm's
-cache and temp folders under the prefix in the fetch and in the install whatever the caller exported, need neither the network nor the CLI) and the ignore
+`go test -run 'TestOpenSpec|TestDocsLint' .` covers the structure, both scripts (against stand-in `openspec` and `npm`
+programs, so the switches, the arguments, the exit code and the install's success path, with npm's cache and temp folders
+under the prefix whatever the caller exported, need neither the network nor the CLI) and the ignore
 lines. With `OPENSPEC_BIN` set it also runs the real CLI. With `OPENSPEC_INSTALL_TEST=1` it also runs the install script for
 real (npm and the network) into a scratch prefix, with home, application-data, XDG and temp folders pointed at empty folders
 beside it: the test fails if any of them gains a file or if the binary does not report a version.
@@ -151,8 +150,8 @@ beside it: the test fails if any of them gains a file or if the binary does not 
 | `openspec/config.yaml` | the schema choice, the invariants as `context`, the per-artifact `rules` |
 | `openspec/schemas/harness-change/schema.yaml` | the forked workflow and the optional `adr` artifact |
 | `openspec/schemas/harness-change/templates/` | the artifact templates, including `adr.md` |
-| `scripts/openspec-install.sh` | the registry-verified install of the newest release into a caller-chosen prefix |
-| `scripts/openspec/package.json` | the install project: the admitted package, newest release, no lockfile |
+| `scripts/openspec-install.sh` | the newest release, verified against the registry's integrity and signatures, installed into a caller-chosen prefix |
+| `scripts/openspec/package.json` | the install project: the one dependency, at the `latest` dist-tag |
 | `scripts/openspec-validate.sh` | the gate: strict validation plus schema validation, telemetry off |
 | `openspec_tree_test.go` | the structural tests, the script tests and `TestOpenSpecTreeValidates` |
 | `openspec_ignore_test.go` | the generated tool files stay untracked |
@@ -161,7 +160,7 @@ beside it: the test fails if any of them gains a file or if the binary does not 
 
 ## Related docs
 
-- [security.md](security.md#admitted-third-party-software): the admitted row (source, licence, telemetry, data location) and the
+- [security.md](security.md#admitted-third-party-software): the admitted row (source and integrity, licence, telemetry, data location) and the
   admission checks behind it.
 - [leak-gate.md](leak-gate.md): the privacy gate that scans the tree.
 - [STYLE.md](../STYLE.md): documentation rules, the ADR rules and the privacy vocabulary.

@@ -253,7 +253,7 @@ export function modelMetadataError(log, modelFile) {
 // What counts as evidence, per engine (formats read from the engines' own source at the
 // pinned commits and confirmed against real logs in render/testdata, see its README):
 //
-//   sdcpp    (stable-diffusion.cpp 3f8527a "master-929", a1ded76 "master-945")  PASS needs ALL of
+//   sdcpp    (stable-diffusion.cpp, both log shapes below)  PASS needs ALL of
 //              - "ggml_vulkan: <n> = <device> (...)" for a NON-software device,
 //              - the diffusion stage on a Vulkan device: a "<module> compute buffer size: ... on
 //                Vulkan<N>" line for a module that is not an auxiliary one (text encoder / VAE /
@@ -268,9 +268,9 @@ export function modelMetadataError(log, modelFile) {
 //            "params RAM" / "params CPU" are neither evidence nor a placement.
 //            sd.cpp's log record has two shapes and BOTH are read for good, because nodes upgrade at
 //            different times (a fleet update moves one node to the next release while the rest stay):
-//              master-929 and before   "[VERBOSE] ggml_runner.cpp:1019 - <message>"   (the tag is padded to 7:
+//              the older shape        "[VERBOSE] ggml_runner.cpp:1019 - <message>"   (the tag is padded to 7:
 //                                      "[INFO   ]", "[WARN   ]", "[ERROR  ]"; the line number is padded too)
-//              master-945 and after    "[V] <message> --- ggml_runner.cpp:1019"       (#2104: one-letter tags [D] [V]
+//              the newer shape        "[V] <message> --- ggml_runner.cpp:1019"       (#2104: one-letter tags [D] [V]
 //                                      [I] [W] [E], and the source location moved to the END, unpadded; #2106: the
 //                                      separator is " --- " (a build between the two commits has " - "), and the
 //                                      newlines of a prompt echo are escaped, "\n" as the two characters)
@@ -393,7 +393,7 @@ function stripAnsi(s) {
 //                 reset), so a prompt about "device lost" cannot end a healthy run.
 // A piece shorter than 6 characters is ignored: no evidence line is that short, so it can forge
 // nothing, and stripping it would only eat real words.
-// The pieces of a text are the text, each of its lines, and the text as sd.cpp (master-945+) prints
+// The pieces of a text are the text, each of its lines, and the text as sd.cpp (the newer log shape) prints
 // a prompt: on ONE line, with every newline escaped to the two characters "\n" (and a CR to "\r").
 // Without that spelling a two-line prompt echoed on one line would be two half-covered pieces
 // (under 60% each) and no echo at all.

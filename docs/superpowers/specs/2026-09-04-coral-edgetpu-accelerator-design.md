@@ -1,5 +1,7 @@
 # Coral Edge TPU as a harness accelerator — design
 
+2026-10-28: the sha256 rows and exact versions this document describes were replaced by resolve-at-fetch with publisher digests (ADR 0099); the mechanism below is history.
+
 Date: 2026-09-04 · Status: DRAFT, awaiting operator review · Path: architectural
 (second accelerator device; touches config, detection, seeding, MCP + loop tool surfaces,
 fleet health, docs, tier matrix)
@@ -131,10 +133,10 @@ else `cfg.Accelerators`. The Windows/manifest path is unchanged; a test pins bot
 Hailo wire contract verbatim: `GET /health`, `POST /v1/<tool>`, 404 `unknown_tool`, 400
 `bad_request`, structured 200 error dicts, 500 `internal` guard, idle self-exit, refuses a
 non-loopback bind), `coral-http.sh` (pins `$CORAL_HOME/venv/bin/python`, `CORAL_MODELS_DIR`
-default `$CORAL_HOME/models`), `models.json` (the artifact manifest: file name, sha256,
-labels file, input size, task — the sidecar refuses to serve an unlisted or mismatched
-file), `fetch-models.sh` (downloads from the `google-coral/test_data` raw URLs and verifies
-the sha256), `test_server.py` (contract tests with `CORAL_ENABLED=0`, runnable anywhere).
+default `$CORAL_HOME/models`), `models.json` (the artifact manifest: file name,
+labels file, input size, task, no hash — the sidecar refuses to serve an unlisted file or one whose bytes differ from
+the digest `fetch-models.sh` recorded), `fetch-models.sh` (resolves the tip of `google-coral/test_data` when it runs,
+verifies each file's git blob id from the GitHub API and records the sha256 in `models.installed.json`), `test_server.py` (contract tests with `CORAL_ENABLED=0`, runnable anywhere).
 
 The Hailo sidecar lives in its own repo because that repo pre-dated the tier and holds the
 HEF pipelines. The Coral has no such repo, the runtime is ~400 lines of stdlib + litert

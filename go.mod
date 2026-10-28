@@ -2,8 +2,6 @@ module github.com/dmmdea/offload-harness
 
 go 1.26.7
 
-toolchain go1.27.3
-
 require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/elastic/go-seccomp-bpf v1.6.0

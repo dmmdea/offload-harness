@@ -13,30 +13,30 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/hfinstall"
 )
 
-// The committed setup/hyperframes package.json + lock, embedded so a node that runs
-// from a binary drop (no repository checkout) can re-install the composition lane's
-// pinned CLI when a release moves the pin.
+// The committed setup/hyperframes package.json (hyperframes: "latest") and the floors file,
+// embedded so a node that runs from a binary drop (no repository checkout) can install the
+// composition lane's CLI: the newest npm release, at or above the floor in setup/floors.json.
 //
 //go:embed setup/hyperframes/package.json
 var hyperframesPackageJSON []byte
 
-//go:embed setup/hyperframes/package-lock.json
-var hyperframesPackageLock []byte
+//go:embed setup/floors.json
+var hyperframesFloorsJSON []byte
 
 // runInstallHyperframes is the installers' HyperFrames step on its own, for a node that
-// is already installed: a release that moves the pin runs it after the node's binary and
-// render tree are swapped, because the new runner refuses every op until the install
-// under hyperframes_dir holds its pin.
+// is already installed: it brings hyperframes_dir to the newest npm release (never below the
+// floor in setup/floors.json, never a downgrade) and records the version in installed.json.
 func runInstallHyperframes(args []string) error {
 	fs := flag.NewFlagSet("install hyperframes", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	dir := fs.String("dir", "", "install directory (default: the config's hyperframes_dir)")
 	asJSON := fs.Bool("json", false, "print the result as JSON")
-	timeout := fs.Duration("timeout", 45*time.Minute, "give up after this long (npm ci, the signature audit and the browser download included)")
+	timeout := fs.Duration("timeout", 45*time.Minute, "give up after this long (npm install, the signature audit and the browser download included)")
 	_ = fs.Parse(args)
 	cfg, _ := loadCfgWithSource(fs)
 
@@ -57,26 +57,26 @@ func runInstallHyperframes(args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
+	floor, ferr := hfinstall.FloorFromJSON(hyperframesFloorsJSON)
+	if ferr != nil {
+		return fmt.Errorf("install hyperframes: %w", ferr)
+	}
 	res, err := hfinstall.Install(ctx, hfinstall.Options{
 		Dir: target, Runner: runner, Node: node, Npm: npmBeside(node),
-		PackageJSON: hyperframesPackageJSON, PackageLock: hyperframesPackageLock,
-		Log: os.Stderr,
+		PackageJSON: hyperframesPackageJSON, Floor: floor,
+		ManifestPath: fleetnode.InstalledJSONPath(),
+		Log:          os.Stderr,
 	})
 
 	// The installers never rewrite an existing config, so say what this one should bind.
-	// A config bound to ANOTHER Chrome build than the pin resolves is an error, not a note:
-	// the runner would keep rendering with the old browser and status would not notice.
+	// HyperFrames fetches its own Chrome; the harness only reports where it put it.
 	var notes []string
 	if err == nil {
 		if !samePath(cfg.HyperframesDir, res.Dir) {
 			notes = append(notes, fmt.Sprintf("hyperframes_dir in the config is %q; this install is %q", cfg.HyperframesDir, res.Dir))
 		}
 		if !samePath(cfg.HyperframesBrowserPath, res.BrowserPath) {
-			if res.ChromeVersion != "" && !strings.Contains(filepath.ToSlash(cfg.HyperframesBrowserPath), res.ChromeVersion) {
-				err = fmt.Errorf("the config binds hyperframes_browser_path %q, which is not the pinned Chrome %s: set it to %q", cfg.HyperframesBrowserPath, res.ChromeVersion, res.BrowserPath)
-			} else {
-				notes = append(notes, fmt.Sprintf("the config binds the same Chrome build at another path (%q); the pinned one is %q", cfg.HyperframesBrowserPath, res.BrowserPath))
-			}
+			notes = append(notes, fmt.Sprintf("hyperframes_browser_path in the config is %q; HyperFrames' own browser is at %q", cfg.HyperframesBrowserPath, res.BrowserPath))
 		}
 	}
 	if *asJSON {
@@ -91,14 +91,14 @@ func runInstallHyperframes(args []string) error {
 	if err != nil {
 		return err
 	}
-	verb := "already at the pin"
+	verb := "already the newest"
 	if res.Reinstalled {
 		verb = "installed"
 	}
-	fmt.Printf("OK    hyperframes %s %s in %s (chrome-headless-shell %s at %s; the runner's version check matches its pin)\n",
-		res.Version, verb, res.Dir, res.ChromeVersion, res.BrowserPath)
+	fmt.Printf("OK    hyperframes %s %s in %s (browser at %s; the runner's version check passed the floor)\n",
+		res.Version, verb, res.Dir, res.BrowserPath)
 	if res.PreviousTree != "" {
-		fmt.Printf("NOTE  the replaced tree is kept at %s; to roll back with an older release, rename it to node_modules and put package.json.prev and package-lock.json.prev back\n", res.PreviousTree)
+		fmt.Printf("NOTE  the replaced tree is kept at %s; to roll back, rename it to node_modules and put package.json.prev back\n", res.PreviousTree)
 	}
 	for _, n := range notes {
 		fmt.Printf("NOTE  %s\n", n)

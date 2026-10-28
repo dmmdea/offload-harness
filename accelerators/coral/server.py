@@ -3,7 +3,7 @@
 
 Wire contract — the Hailo sidecar's, verbatim, so the harness's accelclient speaks to both:
 
-    GET  /health                -> 200 {enabled, device, status, temp_c, loaded, models_missing, runtime}
+    GET  /health                -> 200 {enabled, device, status, temp_c, loaded, models_missing, models_unverified, runtime}
     POST /v1/<tool>  (JSON)     -> 200 result dict          | 200 {"error": ...} structured failure
                                    404 {"error":"unknown_tool"} | 400 {"error":"bad_request", ...}
                                    500 {"error":"internal", ...}
@@ -18,8 +18,8 @@ sizes); ONE lock, one in-flight inference; the sidecar READS /sys/class/apex/ape
 and never writes sysfs — the thermal knobs stay the operator's (SETUP.md §6.4).
 
 Refusals: binds loopback only (a non-loopback CORAL_BIND is refused at startup); serves only
-files listed in models.json whose sha256 matches (an unlisted or mismatched file is a
-structured error, never a load); exits itself after CORAL_IDLE_SEC without a call.
+files listed in models.json; a file whose bytes differ from the digest fetch-models.sh recorded in
+models.installed.json is a structured error, never a load (no record: served, reported as unverified in /health); exits itself after CORAL_IDLE_SEC without a call.
 
 CORAL_ENABLED=0 runs the whole HTTP contract with the TPU path stubbed (for test_server.py
 on a box without the device); every inference then answers {"error":"tpu_disabled"}.
@@ -41,6 +41,8 @@ PORT = int(os.environ.get("CORAL_PORT", "18814"))
 IDLE_SEC = int(os.environ.get("CORAL_IDLE_SEC", "300"))
 MODELS_DIR = os.environ.get("CORAL_MODELS_DIR", os.path.join(os.path.dirname(HERE), "models"))
 MANIFEST = os.environ.get("CORAL_MANIFEST", os.path.join(HERE, "models.json"))
+# What fetch-models.sh verified against the publisher and recorded beside the weights: {"installed": [{file, digest, ...}]}.
+INSTALLED = os.environ.get("CORAL_INSTALLED", os.path.join(MODELS_DIR, "models.installed.json"))
 ENABLED = os.environ.get("CORAL_ENABLED", "1") != "0"
 DELEGATE_LIB = os.environ.get("CORAL_DELEGATE", "libedgetpu.so.1")
 DEVICE = "/dev/apex_0"
@@ -55,7 +57,7 @@ if BIND not in LOOPBACK:
 
 with open(MANIFEST, encoding="utf-8") as fh:
     _MAN = json.load(fh)
-MODELS: dict[str, dict] = _MAN["models"]  # key -> {file, sha256, task, input, labels?}
+MODELS: dict[str, dict] = _MAN["models"]  # key -> {file, task, input, labels?}
 
 _lock = threading.Lock()  # one in-flight inference, one model switch at a time
 _interp: dict[str, object] = {}  # model key -> resident Interpreter
@@ -80,8 +82,23 @@ def _sha256(path: str) -> str:
     return h.hexdigest()
 
 
+def _recorded_digest(name: str) -> str | None:
+    """The sha256 fetch-models.sh recorded for `name`, or None when there is no record (a hand-placed file, or a
+    box that never ran the fetch): an absent record means "unverified", never a refusal to start."""
+    try:
+        with open(INSTALLED, encoding="utf-8") as fh:
+            records = json.load(fh).get("installed", [])
+    except (OSError, ValueError, AttributeError):
+        return None
+    for rec in records:
+        digest = rec.get("digest") if isinstance(rec, dict) else None
+        if isinstance(rec, dict) and rec.get("file") == name and isinstance(digest, str) and digest.startswith("sha256:"):
+            return digest[len("sha256:"):]
+    return None
+
+
 def _model_path(key: str) -> str:
-    """Resolve a manifest key to a verified file; raise ValueError with a structured reason."""
+    """Resolve a manifest key to a file checked against its recorded digest; raise ValueError with a structured reason."""
     spec = MODELS.get(key)
     if spec is None:
         raise ValueError({"error": "unknown_model", "model": key, "known": sorted(MODELS)})
@@ -89,10 +106,12 @@ def _model_path(key: str) -> str:
     if not os.path.isfile(path):
         raise ValueError({"error": "model_missing", "model": key, "file": spec["file"],
                           "hint": "run fetch-models.sh"})
-    digest = _sha256(path)
-    if digest != spec["sha256"]:
-        raise ValueError({"error": "model_sha_mismatch", "model": key, "file": spec["file"],
-                          "expected": spec["sha256"], "got": digest})
+    want = _recorded_digest(spec["file"])
+    if want is not None:
+        digest = _sha256(path)
+        if digest != want:
+            raise ValueError({"error": "model_sha_mismatch", "model": key, "file": spec["file"],
+                              "expected": want, "got": digest})
     return path
 
 
@@ -321,9 +340,12 @@ TOOLS = {"classify": tool_classify, "object_detect": tool_object_detect,
 
 def _health() -> dict:
     missing = []
+    unverified = []  # present on disk with no digest recorded by fetch-models.sh
     for key, spec in MODELS.items():
         if not os.path.isfile(os.path.join(MODELS_DIR, spec["file"])):
             missing.append(spec["file"])
+        elif _recorded_digest(spec["file"]) is None:
+            unverified.append(spec["file"])
     temp_raw = _sysfs("temp")
     temp_c = None
     if temp_raw and temp_raw.lstrip("-").isdigit():
@@ -337,7 +359,7 @@ def _health() -> dict:
         runtime["litert"] = None
     runtime["libedgetpu"] = DELEGATE_LIB
     return {"enabled": ENABLED, "device": DEVICE, "status": _sysfs("status"), "temp_c": temp_c,
-            "loaded": sorted(_interp), "models_missing": missing, "runtime": runtime,
+            "loaded": sorted(_interp), "models_missing": missing, "models_unverified": unverified, "runtime": runtime,
             "uptime_sec": int(time.time() - _started), "idle_sec": IDLE_SEC, "tools": sorted(TOOLS)}
 
 

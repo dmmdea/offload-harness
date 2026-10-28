@@ -5,8 +5,8 @@
 // for the lease, the spawn and the progress-to-stderr contract.
 //
 // The Go side (internal/pipeline runGenerateVideoSdcpp) speaks OUR generic flag surface;
-// THIS file owns the mapping to sd-cli's real flags (verified against sd.cpp master-929,
-// `sd-cli --help`): --diffusion-model / --high-noise-diffusion-model / --vae / --t5xxl,
+// THIS file owns the mapping to sd-cli's real flags (verified against the sd.cpp build the
+// installer resolved from the newest release, floor in setup/floors.json, `sd-cli --help`): --diffusion-model / --high-noise-diffusion-model / --vae / --t5xxl,
 // -i (the still), -p/-n, --cfg-scale, --steps, --sampling-method, --flow-shift, -W/-H,
 // --video-frames, --fps, -s, --backend, --diffusion-fa, --vae-tiling, -v, -o. sd.cpp flag
 // drift on a pin bump is fixed HERE, never in Go.

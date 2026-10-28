@@ -35,7 +35,7 @@ esac
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 if ! command -v "$bin" >/dev/null 2>&1 && [ ! -x "$bin" ]; then
-  echo "openspec-validate: '$bin' not found; install the pinned CLI with scripts/openspec-install.sh and set OPENSPEC_BIN" >&2
+  echo "openspec-validate: '$bin' not found; install the CLI with scripts/openspec-install.sh and set OPENSPEC_BIN" >&2
   exit 2
 fi
 

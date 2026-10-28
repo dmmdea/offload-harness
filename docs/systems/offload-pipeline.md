@@ -345,8 +345,8 @@ the seat's `ttl` frees the card, so there is no unload after a burst.
 
 **Installing it.** `local-offload install forecast [--home H] [--models M] [--ref <sha|branch>] [--torch-backend auto] [--json]`
 needs `uv` on PATH and builds `<home>/forecast/venv` (python 3.13), installs torch with `uv pip install torch
---torch-backend=auto`, installs the `timestral` package from the head of its default branch (the commit recorded), fetches the weights by
-`snapshot_download` at the newest Hugging Face revision into `<models>/timestral-209m` and verifies them against the published `lfs.oid`, and writes the
+--torch-backend=auto`, installs the `timestral` package from the head of its default branch (resolved at install time), fetches the weights by
+`snapshot_download` at the newest Hugging Face revision (the one `main` names at that moment) into `<models>/timestral-209m` and verifies them against the digest and size the Hub publishes (`lfs.oid`), and writes the
 embedded server file. Every step verifies what is there and skips when it is right, so a second run changes nothing. It never
 loads the model: the card is the seat's. `--json` prints one final result line (`ok`, `forecast_dir`, `venv_python`, `torch`,
 `cuda_available`, `timestral`, `model_dir`, `sha256`). The weights licence is Modified MIT: the attribution "2026 - Mistral AI"
@@ -857,7 +857,7 @@ routing solver and the guard's reading and staleness rules. `internal/grounding/
   the forecast seat and its typed errors
 - [`internal/forecastserve/`](../../internal/forecastserve/forecastserve.go) — the launcher and the embedded
   [`timestral_server.py`](../../internal/forecastserve/timestral_server.py)
-- [`install_forecast.go`](../../install_forecast.go) — `install forecast`, which resolves the newest revisions and verifies the publisher's digests
+- [`install_forecast.go`](../../install_forecast.go) — `install forecast`, which resolves the revision and the weights' digest from the publisher at install time
 
 ## Related docs
 

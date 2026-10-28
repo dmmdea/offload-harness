@@ -4,17 +4,15 @@ package main
 //
 // Before this job nothing in the repository looked, so a Go advisory fixed in a patch release (the
 // tree built with go1.27.1 calls eleven standard-library ones) would have shipped unnoticed. The job
-// installs a pinned govulncheck and runs it over the root module and both printed CLIs under tools/
+// installs the newest govulncheck and runs it over the root module and both printed CLIs under tools/
 // (separate modules, so `./...` at the root never reaches them) for linux AND windows, because some
 // advisories are platform-specific: a scan of one OS says nothing of the other.
 //
 // Two details are easy to get wrong and are checked here:
 //
-//   - The compiler. govulncheck reports a standard-library finding against the toolchain that analyses
-//     the code, and the printed CLIs carry no toolchain line of their own, so every go command of the
-//     job must run under the toolchain go.mod names. The job reads that name from go.mod (never from
-//     the workflow: two copies drift) into GOTOOLCHAIN. That also builds govulncheck itself with it,
-//     which matters because `go install pkg@version` ignores the current module's toolchain line.
+//   - The compiler. Nothing names one: the job takes the newest stable Go release (setup-go's `go-version: stable`,
+//     re-checked by check-latest). go.mod's `go` line is the floor, never read as the version to install: setup-go
+//     reads that line as an exact version, which held this job at the floor (2026-10-28).
 //   - The verdict. govulncheck exits 3 for a finding and 1 for an error, such as a vulnerability
 //     database it cannot reach; either must fail the job, for every module and OS, never only the last.
 //
@@ -33,8 +31,6 @@ import (
 
 var (
 	govulncheckInstallRe = regexp.MustCompile(`go install\s+golang\.org/x/vuln/cmd/govulncheck@(\S+)`)
-	// A fixed release tag: not @latest, a branch, or a bare commit.
-	fixedTagRe = regexp.MustCompile(`^v[0-9]+\.[0-9]+\.[0-9]+$`)
 )
 
 // The scan matrix: every module the repository builds, for every OS it ships on.
@@ -105,9 +101,8 @@ func moduleScanProblems(found, scanned []string, excluded map[string]string) []s
 type govulncheckJob struct {
 	name      string
 	job       ciJob
-	setupGo   int // the last actions/setup-go step before the toolchain step, -1 when there is none
-	toolchain int // the step that writes GOTOOLCHAIN to GITHUB_ENV, -1 when there is none
-	install   int // the step that runs go install ...govulncheck@<tag>
+	setupGo   int // the last actions/setup-go step before the install, -1 when there is none
+	install   int // the step that runs go install ...govulncheck@latest
 	scan      int // the first step after the install that runs govulncheck, -1 when there is none
 }
 
@@ -121,14 +116,11 @@ func findGovulncheckJob(t *testing.T, w ciWorkflow) govulncheckJob {
 			if !govulncheckInstallRe.MatchString(st.Run) {
 				continue
 			}
-			g := govulncheckJob{name: name, job: job, setupGo: -1, toolchain: -1, install: i, scan: -1}
+			g := govulncheckJob{name: name, job: job, setupGo: -1, install: i, scan: -1}
 			for j := 0; j < i; j++ {
 				prev := job.Steps[j]
 				if strings.HasPrefix(prev.Uses, "actions/setup-go@") {
 					g.setupGo = j
-				}
-				if strings.Contains(prev.Run, "GITHUB_ENV") && strings.Contains(prev.Run, "GOTOOLCHAIN") {
-					g.toolchain = j
 				}
 			}
 			for j := i + 1; j < len(job.Steps); j++ {
@@ -142,7 +134,7 @@ func findGovulncheckJob(t *testing.T, w ciWorkflow) govulncheckJob {
 	}
 	switch len(found) {
 	case 0:
-		t.Fatal("ci.yml has no step that runs `go install golang.org/x/vuln/cmd/govulncheck@<tag>`: " +
+		t.Fatal("ci.yml has no step that runs `go install golang.org/x/vuln/cmd/govulncheck@latest`: " +
 			"nothing scans the code for known vulnerabilities (H-26)")
 	case 1:
 		return found[0]
@@ -189,72 +181,32 @@ func TestCIRunsGovulncheckOnEveryModuleOnBothOSes(t *testing.T) {
 			"larger runner is always billed) and analyses GOOS=windows from Linux", g.name, got)
 	}
 	tag := govulncheckInstallRe.FindStringSubmatch(install.Run)[1]
-	if !fixedTagRe.MatchString(tag) {
-		t.Errorf("job %s installs govulncheck@%s: pin a release tag such as v1.8.0, so a new release of the "+
-			"scanner cannot change what a pull request is judged by", g.name, tag)
+	if tag != "latest" {
+		t.Errorf("job %s installs govulncheck@%s: install the newest release (@latest); no version is pinned in this repository", g.name, tag)
 	}
 	// A job that is there and never gates: an `if` or a `continue-on-error` on the job or on any of its steps.
 	for _, p := range ciAlwaysGatesProblems(g.name, job) {
 		t.Error(p)
 	}
 	if g.setupGo < 0 {
-		t.Errorf("job %s has no actions/setup-go step before its toolchain step", g.name)
-	}
-	if g.toolchain < 0 {
-		t.Fatalf("job %s has no step before the install that writes GOTOOLCHAIN to $GITHUB_ENV from go.mod: the "+
-			"nested modules have no toolchain line, so without it they are scanned with the runner's own compiler", g.name)
+		t.Errorf("job %s has no actions/setup-go step before the install", g.name)
 	}
 	if g.scan < 0 {
 		t.Fatalf("job %s installs govulncheck and never runs it", g.name)
 	}
-	if !(g.setupGo < g.toolchain && g.toolchain < g.install && g.install < g.scan) {
-		t.Errorf("job %s must set up Go, then pin the toolchain, then install govulncheck, then scan; steps are at %d, %d, %d, %d",
-			g.name, g.setupGo, g.toolchain, g.install, g.scan)
+	if !(g.setupGo < g.install && g.install < g.scan) {
+		t.Errorf("job %s must set up Go, then install govulncheck, then scan; steps are at %d, %d, %d",
+			g.name, g.setupGo, g.install, g.scan)
+	}
+	// The Go release is the newest stable one, never a version typed into the workflow and never go.mod's floor.
+	if st := job.Steps[g.setupGo]; st.With["go-version"] != "stable" || st.With["go-version-file"] != nil || st.With["check-latest"] != true {
+		t.Errorf("job %s: setup-go must take go-version: stable with check-latest and read no go-version-file; with is %v", g.name, st.With)
 	}
 
-	t.Run("the toolchain step reads go.mod", func(t *testing.T) {
-		step := job.Steps[g.toolchain]
-		// A version nobody ships: if the step read it from the file, GOTOOLCHAIN has it; if it were typed into
-		// the workflow, the value would be the workflow's.
-		const made = "go1.99.9"
-		for _, c := range []struct {
-			name, goMod string
-		}{
-			{"LF", "module example.invalid/m\n\ngo 1.26.7\n\ntoolchain " + made + "\n"},
-			{"CRLF", "module example.invalid/m\r\n\r\ngo 1.26.7\r\n\r\ntoolchain " + made + "\r\n"},
-		} {
-			sb := newCIScriptSandbox(t)
-			sb.writeFile("go.mod", c.goMod)
-			if out, rc := sb.run(step.Run); rc != 0 {
-				t.Errorf("%s go.mod: the step exited %d:\n%s", c.name, rc, out)
-			}
-			if got := sb.githubEnv(); !hasLine(got, "GOTOOLCHAIN="+made) {
-				t.Errorf("%s go.mod: GITHUB_ENV is %q, want a line GOTOOLCHAIN=%s", c.name, got, made)
-			}
-		}
-		for _, c := range []struct {
-			name, goMod string
-		}{
-			{"no toolchain line", "module example.invalid/m\n\ngo 1.26.7\n"},
-			{"toolchain default", "module example.invalid/m\n\ngo 1.26.7\n\ntoolchain default\n"},
-		} {
-			// An empty GOTOOLCHAIN means "the default", and the job would carry on with the runner's own
-			// compiler and call it pinned: the step must fail instead.
-			sb := newCIScriptSandbox(t)
-			sb.writeFile("go.mod", c.goMod)
-			if out, rc := sb.run(step.Run); rc == 0 {
-				t.Errorf("%s: the step exited 0 and the job would go on unpinned:\n%s", c.name, out)
-			}
-			if got := sb.githubEnv(); strings.Contains(got, "GOTOOLCHAIN") {
-				t.Errorf("%s: the step wrote %q to GITHUB_ENV", c.name, got)
-			}
-		}
-	})
-
-	t.Run("govulncheck is built by that toolchain and can be found", func(t *testing.T) {
+	t.Run("govulncheck is installed and can be found", func(t *testing.T) {
 		sb := newCIScriptSandbox(t)
 		sb.standIn("go", goStandInBody)
-		out, rc := sb.run(install.Run, "GOTOOLCHAIN=go1.99.9", "FAKE_GOPATH=/fake/gopath")
+		out, rc := sb.run(install.Run, "FAKE_GOPATH=/fake/gopath")
 		if rc != 0 {
 			t.Fatalf("the install step exited %d:\n%s", rc, out)
 		}
@@ -269,10 +221,6 @@ func TestCIRunsGovulncheckOnEveryModuleOnBothOSes(t *testing.T) {
 		}
 		if want := "golang.org/x/vuln/cmd/govulncheck@" + tag; !installs[0].hasArgs("install", want) {
 			t.Errorf("go install ran with %v, want install %s", installs[0].Args, want)
-		}
-		if installs[0].Toolchain != "go1.99.9" {
-			t.Errorf("go install saw GOTOOLCHAIN=%s, want go1.99.9: the scanner must be built by the toolchain that analyses the code",
-				installs[0].Toolchain)
 		}
 		if got := sb.githubPath(); !hasLine(got, "/fake/gopath/bin") {
 			t.Errorf("GITHUB_PATH is %q: the scan finds govulncheck only if $(go env GOPATH)/bin is on PATH, and the "+
@@ -305,7 +253,7 @@ func TestCIRunsGovulncheckOnEveryModuleOnBothOSes(t *testing.T) {
 
 	t.Run("every module is scanned for both OSes", func(t *testing.T) {
 		sb := newScanSandbox(t)
-		out, rc := sb.run(scan.Run, "GOTOOLCHAIN=go1.99.9")
+		out, rc := sb.run(scan.Run)
 		if rc != 0 {
 			t.Fatalf("a scan that finds nothing exited %d:\n%s", rc, out)
 		}
@@ -319,9 +267,6 @@ func TestCIRunsGovulncheckOnEveryModuleOnBothOSes(t *testing.T) {
 			}
 			if n := len(c.Args); n == 0 || c.Args[n-1] != "./..." {
 				t.Errorf("govulncheck in %s for %s ran with %v, want the package pattern ./... last", c.Dir, c.Goos, c.Args)
-			}
-			if c.Toolchain != "go1.99.9" {
-				t.Errorf("govulncheck in %s for %s saw GOTOOLCHAIN=%s, want go1.99.9", c.Dir, c.Goos, c.Toolchain)
 			}
 		}
 		for _, m := range govulncheckModules {

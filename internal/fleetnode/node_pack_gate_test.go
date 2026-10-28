@@ -1,7 +1,7 @@
 package fleetnode
 
 // A holder of the fleet bearer is trusted to run renders, not to run code: a run-graph manifest may name a node
-// pack only when its repository and commit are pinned (render/node-packs.json), because naming one makes the
+// pack only when its repository is allowlisted (render/node-packs.json), because naming one makes the
 // node clone the repository and pip-install its requirements. The refusal is at the door, before a job, a
 // temp file or a lease exists, and it holds for every caller, a loopback one with no token included.
 
@@ -17,10 +17,10 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
-const pinnedPackBody = `{"job_id":"rg-pinned","task_type":"run-graph","payload":{"graph":` + plainGraph +
-	`,"manifest":{"node_packs":[{"name":"ComfyUI-VideoHelperSuite","repo":"https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite","commit":"4d907bee61e92c2e65af3bd6383a4e4d356126d1"}]}}}`
+const allowedPackBody = `{"job_id":"rg-allowed","task_type":"run-graph","payload":{"graph":` + plainGraph +
+	`,"manifest":{"node_packs":[{"name":"ComfyUI-VideoHelperSuite","repo":"https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"}]}}}`
 
-func TestATokenHolderCannotNameAnUnpinnedPack(t *testing.T) {
+func TestATokenHolderCannotNameAnUnlistedPack(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		token    string
@@ -38,8 +38,8 @@ func TestATokenHolderCannotNameAnUnpinnedPack(t *testing.T) {
 				t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 			}
 			msg, _ := decodeMap(t, rec)["error"].(string)
-			if !strings.Contains(msg, "payload") || !strings.Contains(msg, "pinned") {
-				t.Fatalf("error = %q, want it to name the pack and say the list is the pinned one", msg)
+			if !strings.Contains(msg, "payload") || !strings.Contains(msg, "allowlisted") {
+				t.Fatalf("error = %q, want it to name the pack and say the list is the allowlisted one", msg)
 			}
 			if _, ok := jobs.Get("rg-hostile"); ok {
 				t.Fatal("a refused manifest left a job behind")
@@ -51,24 +51,24 @@ func TestATokenHolderCannotNameAnUnpinnedPack(t *testing.T) {
 	}
 }
 
-func TestAPinnedPackIsAdmitted(t *testing.T) {
+func TestAnAllowlistedPackIsAdmitted(t *testing.T) {
 	s, _ := newTestServer(t, tokenCfg("s3cret"), &fakeRunner{}, authOpts(false))
 	hdr := map[string]string{"Authorization": "Bearer s3cret"}
-	rec := do(t, s, http.MethodPost, "/fleet/dispatch", pinnedPackBody, hdr)
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch", allowedPackBody, hdr)
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202 (body %s)", rec.Code, rec.Body.String())
 	}
-	pollJobWith(t, s, "rg-pinned", JobDone, hdr)
+	pollJobWith(t, s, "rg-allowed", JobDone, hdr)
 }
 
 // The builder is where the manifest is already decoded: it refuses with the typed error, and before it writes the
 // graph or the manifest to disk.
-func TestBuildRequestRefusesAnUnpinnedPackBeforeWritingAnyFile(t *testing.T) {
+func TestBuildRequestRefusesAnUnlistedPackBeforeWritingAnyFile(t *testing.T) {
 	tmp := t.TempDir()
 	for _, k := range []string{"TMP", "TEMP", "TMPDIR"} {
 		t.Setenv(k, tmp)
 	}
-	payload := json.RawMessage(`{"graph":` + plainGraph + `,"manifest":{"node_packs":[{"repo":"https://example.invalid/payload","commit":"` + strings.Repeat("0", 40) + `"}]}}`)
+	payload := json.RawMessage(`{"graph":` + plainGraph + `,"manifest":{"node_packs":[{"repo":"https://example.invalid/payload"}]}}`)
 	_, cleanup, err := BuildRequest(context.Background(), fullCfg(), true, "run-graph", payload)
 	cleanup()
 	var refused *mediacap.NodePackRefusedError

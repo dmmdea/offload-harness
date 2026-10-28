@@ -147,7 +147,7 @@
                 },
                 "sets": {
                     "type": "object",
-                    "description": "Named sets of concurrent model combinations. Values are DSL strings using & (AND), | (OR), () (grouping), and +ref (inline another set). Definition order is used for tie-breaking.",
+                    "description": "Named sets of concurrent model combinations. Values are DSL strings using & (AND), | (OR), () (grouping), +ref (inline another set), and +auto:orphans (each model that is not a leaf in a set). Definition order is used for tie-breaking.",
                     "minProperties": 1,
                     "additionalProperties": {
                         "type": "string"
@@ -162,7 +162,7 @@
             "type": "integer",
             "minimum": 15,
             "default": 120,
-            "description": "Number of seconds to wait for a model to be ready to serve requests."
+            "description": "Number of seconds to wait for a model to be ready to serve requests. When the health check reports loading progress, the countdown restarts each time the progress value changes."
         },
         "globalTTL": {
             "type": "integer",
@@ -175,6 +175,18 @@
             "minimum": 0,
             "default": 10,
             "description": "Graceful timeout in seconds when unloading a model (manual, API, or TTL expiry) before force-killing the model process. 0 uses the default of 10 seconds."
+        },
+        "globalConcurrencyLimit": {
+            "type": "integer",
+            "minimum": 0,
+            "default": 0,
+            "description": "Caps the number of inference requests served at once across all models combined, using a single shared semaphore rather than a per-model limit. 0 means no limit. Requests exceeding the limit receive an HTTP 429 Too Many Requests response immediately rather than being queued."
+        },
+        "maxRequestBodyMB": {
+            "type": "integer",
+            "minimum": 1,
+            "default": 250,
+            "description": "Maximum size in megabytes of a request body sent to a model endpoint (chat, completions, embeddings, audio, images, etc.). Larger requests receive an HTTP 413 Request Entity Too Large response."
         },
         "logLevel": {
             "type": "string",
@@ -280,6 +292,19 @@
             "additionalProperties": false,
             "default": {},
             "description": "Configuration for CPU, RAM and GPU monitoring statistics."
+        },
+        "helpagent": {
+            "type": "object",
+            "properties": {
+                "disable": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Hide the UI's Help page and do not serve the /api/mcp endpoint its documentation, configuration and source code tools use."
+                }
+            },
+            "additionalProperties": false,
+            "default": {},
+            "description": "Configuration for the UI's Help page and the /api/mcp endpoint."
         },
         "startPort": {
             "type": "integer",
@@ -426,6 +451,25 @@
                     "macros": {
                         "$ref": "#/definitions/macros"
                     },
+                    "capacities": {
+                        "type": "object",
+                        "description": "Resource requirements for the capacity router, in each pool's units. Keys must name declared pools. Omitted pools consume zero; an omitted or empty dictionary declares no usage.",
+                        "default": {},
+                        "propertyNames": {"pattern": "\\S"},
+                        "additionalProperties": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "maximum": 9223372036854775807
+                        },
+                        "examples": [{"gpu0": 12, "ram": 128}]
+                    },
+                    "evict_cost": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 9223372036854775807,
+                        "default": 0,
+                        "description": "Manual cost of evicting this model in the capacity router. Higher costs favor retention. Minimize summed cost, then eviction count, then sorted model IDs; a bounded search may return a feasible nonoptimal plan."
+                    },
                     "cmd": {
                         "type": "string",
                         "minLength": 1,
@@ -476,7 +520,7 @@
                         "type": "string",
                         "default": "/health",
                         "pattern": "^/.*$|^none$",
-                        "description": "URL path to check if the server is ready. Use 'none' to skip health checking."
+                        "description": "URL path to check if the server is ready. Use 'none' to skip health checking. A non-200 response with a JSON body like {\"progress\": 0.42, \"message\": \"...\"} reports loading progress."
                     },
                     "ttl": {
                         "type": "integer",
@@ -508,7 +552,7 @@
                                 "type": "object",
                                 "additionalProperties": true,
                                 "default": {},
-                                "description": "Dictionary of parameters to set/override in requests. Useful for enforcing specific parameter values. Protected params like 'model' cannot be overridden. Values can be strings, numbers, booleans, arrays, or objects."
+                                "description": "Dictionary of parameters to set/override in requests. Useful for enforcing specific parameter values. A key ending in '?' (e.g. 'max_tokens?') is set-if-undefined: it is only applied when the request does not already contain that parameter. Protected params like 'model' cannot be overridden. Values can be strings, numbers, booleans, arrays, or objects."
                             },
                             "setParamsByID": {
                                 "type": "object",
@@ -517,7 +561,7 @@
                                     "additionalProperties": true
                                 },
                                 "default": {},
-                                "description": "Dictionary mapping requested model IDs (or aliases) to parameters to set/override in requests. Applied after setParams and can override those values. Useful with aliases to vary behaviour depending on which alias the client used (e.g. different reasoning_effort per alias). Keys support ${MODEL_ID} macro substitution. Protected params like 'model' cannot be overridden."
+                                "description": "Dictionary mapping requested model IDs (or aliases) to parameters to set/override in requests. Applied after setParams and can override those values. Useful with aliases to vary behaviour depending on which alias the client used (e.g. different reasoning_effort per alias). A parameter key ending in '?' (e.g. 'max_tokens?') is set-if-undefined: it is only applied when the request does not already contain that parameter. Keys support ${MODEL_ID} macro substitution. Protected params like 'model' cannot be overridden."
                             }
                         },
                         "additionalProperties": false,
@@ -548,6 +592,11 @@
                     "timeouts": {
                         "$ref": "#/definitions/timeouts"
                     },
+                    "disableKeepAlives": {
+                        "type": "boolean",
+                        "default": false,
+                        "description": "Open a new upstream connection for every request instead of reusing idle ones. Works around upstreams that close a connection they advertised as keep-alive, such as llama-server after a streamed response (#1205). When true, timeouts.idleConn has no effect."
+                    },
                     "compat": {
                         "type": "object",
                         "properties": {
@@ -574,7 +623,8 @@
                                     "enum": [
                                         "text",
                                         "audio",
-                                        "image"
+                                        "image",
+                                        "video"
                                     ]
                                 },
                                 "description": "List of input modalities understood by the model."
@@ -589,7 +639,9 @@
                                     "enum": [
                                         "text",
                                         "audio",
-                                        "image"
+                                        "image",
+                                        "video",
+                                        "decisions"
                                     ]
                                 },
                                 "description": "List of output modalities generated by the model."
@@ -609,10 +661,24 @@
                                 "minimum": 0,
                                 "default": 0,
                                 "description": "Maximum token context length supported by the model."
+                            },
+                            "voices": {
+                                "type": "array",
+                                "uniqueItems": true,
+                                "default": [],
+                                "items": {
+                                    "type": "string"
+                                },
+                                "description": "Override for GET /v1/audio/voices?model={id}. When set, this list is returned instead of asking the upstream server and the model is not started to answer. When empty, the request goes to the upstream server."
+                            },
+                            "disableAuto": {
+                                "type": "boolean",
+                                "default": false,
+                                "description": "Disable automatic capability discovery for this model. By default llama-swap asks the upstream server what it supports when the model becomes ready and fills in any capability left unset here."
                             }
                         },
                         "additionalProperties": false,
-                        "description": "Defines what the model accepts for input, output and other metadata. Used in v1/models to inform clients what the model can do. An empty capabilities block (all zero values) is treated as not configured."
+                        "description": "Defines what the model accepts for input, output and other metadata. Used in v1/models to inform clients what the model can do. Fields left unset are filled in automatically from the upstream server unless disableAuto is true."
                     }
                 }
             }
@@ -636,10 +702,15 @@
                             },
                             "default": [],
                             "description": "List of model IDs to load on startup. Model names must match keys in models. When preloading multiple models, define a group to prevent swapping."
+                        },
+                        "profile": {
+                            "type": "string",
+                            "default": "",
+                            "description": "Profile to activate on startup and after a configuration reload. Must name a key under profiles. An empty value starts with no profile active."
                         }
                     },
                     "additionalProperties": false,
-                    "description": "Actions to perform on startup. Only supported action is preload."
+                    "description": "Actions to perform on startup."
                 }
             },
             "additionalProperties": false,
@@ -647,14 +718,9 @@
         },
         "logToStdout": {
             "type": "string",
-            "enum": [
-                "proxy",
-                "upstream",
-                "both",
-                "none"
-            ],
+            "pattern": "^\\s*(none|both|(proxy|upstream|http)(\\s*,\\s*(proxy|upstream|http))*)\\s*$",
             "default": "proxy",
-            "description": "Controls what is logged to stdout. 'proxy': logs generated by llama-swap, 'upstream': copy of upstream process stdout logs, 'both': both interleaved together, 'none': no logs written to stdout."
+            "description": "Controls which log streams are written to stdout. A comma separated list of 'proxy' (logs generated by llama-swap), 'upstream' (copy of upstream process stdout logs) and 'http' (one access log line per HTTP request), e.g. 'proxy,http'. 'both' selects every stream, 'none' writes no logs to stdout."
         },
         "apiKeys": {
             "type": "array",
@@ -664,6 +730,38 @@
             },
             "default": [],
             "description": "Require an API key when making requests to inference endpoints. When empty, authorization will not be checked. Each key is a non-empty string."
+        },
+        "tailcat": {
+            "type": "object",
+            "properties": {
+                "allow": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "pattern": "^(\\*|nodekey:[0-9a-f]{64})$"
+                    },
+                    "default": [],
+                    "description": "Client node public keys allowed to make requests. Other clients receive HTTP 403. Empty (the default) denies every client; '*' allows any client possessing the connection token. Updates on config reload."
+                },
+                "models": {
+                    "type": "array",
+                    "items": { "type": "string", "minLength": 1 },
+                    "default": [],
+                    "description": "Exact public model request IDs exposed through Tailcat. The -listen-tailcat flag requires at least one entry; '*' exposes every callable model."
+                },
+                "admin": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Expose llama-swap's complete HTTP surface through Tailcat. False exposes only health, model listings, and allowlisted inference endpoints."
+                },
+                "debug": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include verbose Tailcat transport diagnostics in the proxy log. Updates on config reload."
+                }
+            },
+            "additionalProperties": false,
+            "description": "Tailcat HTTP policy. A Tailcat listener starts only when -listen-tailcat supplies a server PrivateKey JSON file."
         },
         "peers": {
             "type": "object",
@@ -683,6 +781,11 @@
                         "type": "string",
                         "default": "",
                         "description": "A string key to be injected into the request. If blank, no key will be added. Key will be injected into headers: Authorization: Bearer <key> and x-api-key: <key>."
+                    },
+                    "tailcatKey": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Optional Tailcat client PrivateKey JSON file, or 'ephemeral'. Valid only when proxy uses tailcat://. Omitted and 'ephemeral' both create a process-lifetime identity per peer."
                     },
                     "models": {
                         "type": "array",
@@ -705,7 +808,7 @@
                                 "type": "object",
                                 "additionalProperties": true,
                                 "default": {},
-                                "description": "Dictionary of parameters to set/override in requests to this peer. Useful for injecting provider-specific settings. Protected params like 'model' cannot be overridden. Values can be strings, numbers, booleans, arrays, or objects."
+                                "description": "Dictionary of parameters to set/override in requests to this peer. Useful for injecting provider-specific settings. A key ending in '?' (e.g. 'max_tokens?') is set-if-undefined: it is only applied when the request does not already contain that parameter. Protected params like 'model' cannot be overridden. Values can be strings, numbers, booleans, arrays, or objects."
                             }
                         },
                         "additionalProperties": false,
@@ -730,8 +833,8 @@
                             "responseHeader": {
                                 "type": "integer",
                                 "minimum": 0,
-                                "default": 0,
-                                "description": "Time to wait for response headers in seconds."
+                                "default": 60,
+                                "description": "Time to wait for response headers in seconds. Defaults to 300 for Tailcat peers and 60 for other peers."
                             },
                             "tlsHandshake": {
                                 "type": "integer",
@@ -767,6 +870,100 @@
                         ".*\\.(js|json|css|png|gif|jpg|jpeg|ico|txt)$"
                     ],
                     "description": "List of RE2 compatible regular expressions. Any request to a path matching any of the regular expressions will be ignored and not trigger a swap. When not specified, defaults to a pattern matching common static-asset suffixes (.js, .json, .css, .png, .gif, .jpg, .jpeg, .ico, .txt)."
+                }
+            },
+            "additionalProperties": false,
+            "default": {}
+        },
+        "security": {
+            "type": "object",
+            "description": "Settings that control who may talk to llama-swap.",
+            "properties": {
+                "cors": {
+                    "type": "object",
+                    "description": "Access-Control-* headers llama-swap sends to browsers. Omit allowedOrigins to keep the permissive default of any origin, or set it to restrict access. Headers are only sent when the request carries an Origin, and any an upstream set are stripped from proxied responses.",
+                    "properties": {
+                        "allowedOrigins": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "minLength": 1
+                            },
+                            "minItems": 1,
+                            "description": "Browser origins allowed to read responses, each a bare scheme://host[:port]. Omit the key to allow any origin, or list \"*\" to allow any deliberately. Required once any other cors setting is present."
+                        },
+                        "allowCredentials": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Send Access-Control-Allow-Credentials: true so browsers may attach cookies and Authorization headers. Requires allowedOrigins to list origins explicitly."
+                        },
+                        "allowPrivateNetwork": {
+                            "type": "boolean",
+                            "default": false,
+                            "description": "Answer Chrome's Private Network Access preflight so a page on a public origin may reach llama-swap on a private address. Off by default, and cannot be combined with a \"*\" origin."
+                        },
+                        "allowedMethods": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "minLength": 1
+                            },
+                            "default": [
+                                "GET",
+                                "POST",
+                                "PUT",
+                                "PATCH",
+                                "DELETE",
+                                "OPTIONS"
+                            ],
+                            "description": "Methods advertised on preflight responses. When empty the default list is used."
+                        },
+                        "allowedHeaders": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "minLength": 1
+                            },
+                            "default": [],
+                            "description": "Request headers advertised on preflight responses. When empty the client's sanitized Access-Control-Request-Headers is echoed back, falling back to Content-Type, Authorization, Accept, X-Requested-With."
+                        },
+                        "exposedHeaders": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "minLength": 1
+                            },
+                            "default": [],
+                            "description": "Response headers a browser may read beyond the CORS-safelisted set. When empty the Access-Control-Expose-Headers header is omitted."
+                        },
+                        "maxAge": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 86400,
+                            "description": "How long in seconds a browser may cache a preflight response. 0 uses the default of 86400."
+                        }
+                    },
+                    "dependencies": {
+                        "allowCredentials": [
+                            "allowedOrigins"
+                        ],
+                        "allowPrivateNetwork": [
+                            "allowedOrigins"
+                        ],
+                        "allowedMethods": [
+                            "allowedOrigins"
+                        ],
+                        "allowedHeaders": [
+                            "allowedOrigins"
+                        ],
+                        "exposedHeaders": [
+                            "allowedOrigins"
+                        ],
+                        "maxAge": [
+                            "allowedOrigins"
+                        ]
+                    },
+                    "additionalProperties": false
                 }
             },
             "additionalProperties": false,
@@ -812,16 +1009,17 @@
                 },
                 "router": {
                     "type": "object",
-                    "description": "Router configuration. Selects between the group and matrix swapping strategies.",
+                    "description": "Router configuration. Selects group, matrix, or capacity swapping.",
                     "properties": {
                         "use": {
                             "type": "string",
                             "enum": [
                                 "group",
-                                "matrix"
+                                "matrix",
+                                "capacity"
                             ],
                             "default": "group",
-                            "description": "Router to use. 'group' uses static groups, 'matrix' uses the solver-based swap matrix."
+                            "description": "Router to use. 'group' uses static groups, 'matrix' uses allowed combinations, 'capacity' uses declared resource pools."
                         },
                         "settings": {
                             "type": "object",
@@ -831,18 +1029,71 @@
                                 },
                                 "matrix": {
                                     "$ref": "#/definitions/matrixConfig"
+                                },
+                                "capacity": {
+                                    "type": "object",
+                                    "description": "Independent resource limits in operator-chosen integer units. Model capacities use the same units as their referenced pools. No automatic measurement.",
+                                    "required": ["pools"],
+                                    "properties": {
+                                        "pools": {
+                                            "type": "object",
+                                            "minProperties": 1,
+                                            "propertyNames": {"pattern": "\\S"},
+                                            "additionalProperties": {
+                                                "type": "integer",
+                                                "minimum": 1,
+                                                "maximum": 9223372036854775807
+                                            }
+                                        }
+                                    },
+                                    "additionalProperties": false
                                 }
                             },
                             "additionalProperties": false
                         }
                     },
-                    "additionalProperties": false
+                    "additionalProperties": false,
+                    "allOf": [
+                        {
+                            "if": {
+                                "required": ["use"],
+                                "properties": {"use": {"const": "capacity"}}
+                            },
+                            "then": {
+                                "required": ["settings"],
+                                "properties": {
+                                    "settings": {
+                                        "required": ["capacity"]
+                                    }
+                                }
+                            }
+                        }
+                    ]
                 }
             },
             "additionalProperties": false
         }
     },
     "allOf": [
+        {
+            "if": {
+                "required": ["routing"],
+                "properties": {
+                    "routing": {
+                        "required": ["router"],
+                        "properties": {
+                            "router": {
+                                "required": ["use"],
+                                "properties": {"use": {"const": "capacity"}}
+                            }
+                        }
+                    }
+                }
+            },
+            "then": {
+                "not": {"anyOf": [{"required": ["groups"]}, {"required": ["matrix"]}]}
+            }
+        },
         {
             "if": {
                 "required": [

@@ -9,17 +9,18 @@ import (
 )
 
 // composeBox lays out a fully bound composition route under exeDir: the runner and two
-// templates beside it, the pinned CLI entry, the pinned browser and ffmpeg + ffprobe.
+// templates beside it, the CLI entry, the browser and ffmpeg + ffprobe.
 func composeBox(t *testing.T) (exeDir string, cfg func() configForCompose) {
 	t.Helper()
 	exeDir = t.TempDir()
-	writeFile(t, touch(t, exeDir, "render/compose-hyperframes.mjs"), "export const PINNED_VERSION = \"0.8.114\";\n")
+	writeFile(t, touch(t, exeDir, "render/compose-hyperframes.mjs"), "// runner stub\n")
+	writeFile(t, touch(t, exeDir, "setup/floors.json"), `{"hyperframes":{"harness":"1.2.0"}}`)
 	touch(t, exeDir, "render/compose-templates/title-card/index.html")
 	touch(t, exeDir, "render/compose-templates/lower-third/index.html")
 	touch(t, exeDir, "render/compose-templates/_shared/fonts/x.woff2")
 	hf := filepath.Join(exeDir, "hf")
 	touch(t, exeDir, "hf/node_modules/hyperframes/bin/hyperframes.mjs")
-	writeFile(t, touch(t, exeDir, "hf/node_modules/hyperframes/package.json"), `{"name":"hyperframes","version":"0.8.114"}`)
+	writeFile(t, touch(t, exeDir, "hf/node_modules/hyperframes/package.json"), `{"name":"hyperframes","version":"9.9.9-fixture"}`)
 	browser := touch(t, exeDir, "hf/chrome/chrome-headless-shell.exe")
 	ext := ""
 	if runtime.GOOS == "windows" {
@@ -113,20 +114,19 @@ func TestComposeRouteNeedsFfprobe(t *testing.T) {
 	}
 }
 
-// TestComposeRouteDriftedInstallIsBoundButMissing: the runner refuses every op while the
-// install holds another version than its pin, so status must not read CONFIGURED then — the
-// 0.159.0 pin move left a box answering CLI_MISSING to every composition while doctor and
-// offload_status both said CONFIGURED.
+// TestComposeRouteDriftedInstallIsBoundButMissing: the runner refuses every op (CLI_MISSING) while
+// the installed HyperFrames is older than the floor in setup/floors.json, so status must not read
+// CONFIGURED then. A release newer than the floor is never drift.
 func TestComposeRouteDriftedInstallIsBoundButMissing(t *testing.T) {
 	exeDir, base := composeBox(t)
-	if r := composeRouteFor(t, exeDir, base()); r.State != Configured || !strings.Contains(r.Detail, "hyperframes=0.8.114") {
-		t.Fatalf("control: a matching install is CONFIGURED and names its pin, got %s (%s)", r.State, r.Detail)
+	if r := composeRouteFor(t, exeDir, base()); r.State != Configured || !strings.Contains(r.Detail, "hyperframes=9.9.9-fixture") {
+		t.Fatalf("control: an install above the floor is CONFIGURED and names its version, got %s (%s)", r.State, r.Detail)
 	}
-	writeFile(t, filepath.Join(exeDir, "hf", "node_modules", "hyperframes", "package.json"), `{"name":"hyperframes","version":"0.8.108"}`)
+	writeFile(t, filepath.Join(exeDir, "hf", "node_modules", "hyperframes", "package.json"), `{"name":"hyperframes","version":"1.1.9"}`)
 	r := composeRouteFor(t, exeDir, base())
-	if r.State != BoundButMissing || !strings.Contains(r.Detail, "holds hyperframes 0.8.108, not the runner's pin 0.8.114") ||
+	if r.State != BoundButMissing || !strings.Contains(r.Detail, "holds hyperframes 1.1.9, below the floor 1.2.0") ||
 		!strings.Contains(r.Detail, "local-offload install hyperframes") {
-		t.Fatalf("compose_video = %s (%s), want BOUND-BUT-MISSING naming both versions and the fix", r.State, r.Detail)
+		t.Fatalf("compose_video = %s (%s), want BOUND-BUT-MISSING naming the version, the floor and the fix", r.State, r.Detail)
 	}
 }
 

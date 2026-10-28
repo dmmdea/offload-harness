@@ -330,7 +330,7 @@ func composeRoute(cfg config.Config, exeDir string) (Route, bool) {
 	} {
 		if k.value == "" {
 			return Route{Name: name, Engine: engine, State: BoundButMissing,
-				Detail: "compose_script is bound but " + k.key + " is unset — every composition defers; run the installer's hyperframes step (npm ci + browser ensure)"}, true
+				Detail: "compose_script is bound but " + k.key + " is unset — every composition defers; run the installer's hyperframes step (npm install + browser ensure)"}, true
 		}
 	}
 	entry := filepath.Join(cfg.HyperframesDir, "node_modules", "hyperframes", "bin", "hyperframes.mjs")
@@ -350,14 +350,14 @@ func composeRoute(cfg config.Config, exeDir string) (Route, bool) {
 	}
 	r.Detail += "; ffprobe=" + probe
 	if script, err := gpugen.ResolveScriptIn(cfg.ComposeScript, exeDir); err == nil {
-		// The runner refuses every op while the install holds anything but its pin
-		// (CLI_MISSING), so a drifted install is the middle verdict here too: status
-		// and the first composition must give the same answer.
-		if derr := hfinstall.Drift(script, cfg.HyperframesDir); derr != nil {
+		// The runner refuses every op (CLI_MISSING) when the CLI is absent or older than the
+		// floor in setup/floors.json, so that is the middle verdict here too: status and the
+		// first composition must give the same answer. A newer release is never drift.
+		if derr := hfinstall.Check(script, cfg.HyperframesDir); derr != nil {
 			return Route{Name: name, Engine: engine, State: BoundButMissing, Detail: derr.Error()}, true
 		}
-		if pin, perr := hfinstall.RunnerPin(script); perr == nil {
-			r.Detail += "; hyperframes=" + pin
+		if have, verr := hfinstall.InstalledVersion(cfg.HyperframesDir); verr == nil {
+			r.Detail += "; hyperframes=" + have
 		}
 		if names := composeTemplates(filepath.Join(filepath.Dir(script), "compose-templates")); len(names) > 0 {
 			r.Detail += "; templates=" + strings.Join(names, ",")

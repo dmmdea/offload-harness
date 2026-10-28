@@ -54,8 +54,8 @@ A chunk is 30 frames a second: 9,000 frames for 300 s, 18,000 for 600 s. Two lim
 one renders. Both were measured on a 300 s chunk (331 groups, 11,256 characters) on the reference box.
 
 - **Frame storage: render it with `"workers": 1`.** At `auto`, the lane's default, HyperFrames captures
-  with several Chrome workers and stores every frame as an image before it encodes (measured on 0.8.61; the
-  check and its message are the same in 0.8.108). It budgets 8.3 MB a frame
+  with several Chrome workers and stores every frame as an image before it encodes (measured on the first release; the
+  check and its message were the same on the next). It budgets 8.3 MB a frame
   at 1080p and refuses the render when that passes 90 % of the free space, and the runner defers
   `DISK_HEADROOM`. The 300 s chunk (9,017 frames) would store about 75 GB and was refused with 33 GB free; a
   600 s chunk would store about 150 GB. At one worker the frames stream to the encoder: the cache directory stayed
@@ -96,24 +96,23 @@ window with the time in seconds at every seek; the page finds the group that is 
 the time, whichever worker draws it. One animated element per group was measured first and does not scale
 (see the contract, item 7, in the [templates README](../README.md)). The `hf-seek` event is dispatched by the
 runtime but is not in the package's documentation (only `getVariables()` is), so this template has to be
-measured again after a HyperFrames update: the Measured section below names the version it was last measured on
-(a dated record, not a requirement), and the update steps in the operator guide say what to confirm (the
-default sample, and a known group on screen at a known time).
+measured again on every HyperFrames bump: the Measured section below says when it was last measured, and
+the check to repeat after a HyperFrames release is the default sample and a known group on screen at a known time.
 
 ## Measured
 
-Rendered on 2026-10-02 through `render/compose-hyperframes.mjs` with HyperFrames 0.8.114, on a 36-thread Windows
-box with software GL. The same sample was first measured on 0.8.61 on 2026-09-30 and again on 0.8.108 earlier on
-2026-10-02, and every figure below was taken again on 0.8.114. The default three-group sample,
+Rendered on 2026-10-02 through `render/compose-hyperframes.mjs` with the HyperFrames release npm served that day, on a 36-thread Windows
+box with software GL. The same sample was first measured on 2026-09-30 and again earlier on
+2026-10-02, on two older releases, and every figure below was taken again on the newer one. The default three-group sample,
 `webm`, quality `high`:
 
 - `lint` found 0 errors and 0 warnings, and `check` passed;
 - ffprobe read VP9 `yuva420p`, 1920×1080, 30 fps, 240 frames and 8.000 s, no audio stream;
 - HyperFrames' render time was 22.9 s at 1 worker, 21.7 s, 20.6 s and 20.6 s at 2, 4 and 6 workers, and 24.1 s and
-  23.9 s at `auto` (0.8.108 on the same box: 24.0 s at 1 worker, 27.2 s and 26.7 s at `auto`);
+  23.9 s at `auto` (the previous release on the same box: 24.0 s at 1 worker, 27.2 s and 26.7 s at `auto`);
 - rendered at 1, 2, 4 and 6 workers and at `auto` twice, all 15 pairs of decoded frames (libvpx decoder, so the
-  alpha is in the comparison) were identical, and they are identical to the frames a 0.8.108 render of the same
-  sample decodes to (0 of 240 differ), which matched the 0.8.61 render the same way;
+  alpha is in the comparison) were identical, and they are identical to the frames the previous release's render of the same
+  sample decodes to (0 of 240 differ), which matched the first release's render the same way;
 - the frame at 1.5 s showed "Captions follow the words"; the alpha plane was 0 everywhere at 0.3 s (before the first
   group), inside each group (1.5 s, 4.0 s and 6.0 s) it had a maximum of 255 and a mean of 7.99, 7.66 and 8.50, and
   it was 0 again in the gap at 2.8 s and after the last group ended, at 7.9 s;

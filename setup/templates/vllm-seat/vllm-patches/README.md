@@ -24,8 +24,9 @@ with `--kv-cache-memory-bytes`):
 - the same 209,597-token pool the seat had on vLLM 0.28. Without the split, vLLM 0.32 did not start: 30 `make_resident`
   failures.
 
-The patch is written against vLLM 0.32.0 (`vllm/v1/worker/utils.py`). Re-port it for any other version: it is checked to
-apply cleanly to 0.32.0 only.
+The patch targets the vLLM version it was written against, 0.32.0 (`vllm/v1/worker/utils.py`); that is the version it is
+known to apply to, not a pin. It carries a re-base duty: the update path re-applies it on the newest vLLM and fails loud
+when it does not apply, keeping the previous generation serving, and the patch is then re-ported to the newest version.
 
 ### Apply
 

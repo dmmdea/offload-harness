@@ -96,7 +96,7 @@ Two things follow that the profile does not say out loud:
 
 All numbers were measured on llama.cpp **b9934** (the build installed on the reference box on 2026-07-17) using the
 official `llama-b9934-bin-ubuntu-vulkan-x64` build, and the E2B model as published then (2,620,368,960 bytes, verified
-against the size the publisher reported).
+against the size the publisher reported). A measurement record, not a version the harness holds.
 
 ### 3.1 Raw throughput (`llama-bench`, 2 repetitions)
 
@@ -305,7 +305,7 @@ is good practice; the README does not inherit it.
 ## 7. Reproducing this
 
 ```bash
-# 1. The build these numbers were measured on (any newer build reproduces them or beats them), Linux Vulkan
+# 1. The llama.cpp build these numbers were measured on (any newer build reproduces them or beats them), Linux Vulkan
 gh release download b9934 --repo ggml-org/llama.cpp \
   --pattern 'llama-b9934-bin-ubuntu-vulkan-x64.tar.gz'
 tar xzf llama-b9934-bin-ubuntu-vulkan-x64.tar.gz && cd llama-b9934

@@ -505,8 +505,8 @@ saying the fleet was not asked and why (a result carries no such note). A waitin
 younger calls on this machine's lane queue behind it. A call that must leave this machine anyway (`--route remote`, or
 `auto` on a machine with no graph lane) still sends it, with the node's check by name only. On every route that sends a graph to
 a node, the node must run this machine's own release (the file check ships with it): a node on another release, or one that
-publishes none, is skipped by name, so a fleet part-way through an upgrade takes graphs only on the nodes already upgraded. The **node manifest** (`node_packs[{name,repo,commit}]` + `models[{path,source_url,sha256}]`)
-is satisfied BEFORE ComfyUI starts (a pack is taken only from a repository admitted in `render/node-packs.json`, at the head of its default branch, with the commit recorded, and a model only under `models/<class>/` from a listed https host; anything else is refused before the first clone or download): packs cloned from their admitted repositories (the commit recorded) with all deps
+publishes none, is skipped by name, so a fleet part-way through an upgrade takes graphs only on the nodes already upgraded. The **node manifest** (`node_packs[{name,repo}]` + `models[{path,source_url,sha256}]`; a `commit` on a pack is accepted and not read)
+is satisfied BEFORE ComfyUI starts (a pack is taken only from a repository listed in `render/node-packs.json`, and a model only under `models/<class>/` from a listed https host; anything else is refused before the first clone or download): packs cloned at the head of their default branch (the commit each got is recorded beside it in `custom_nodes/<name>.installed.json`) with all deps
 resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
 installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and
 sha-verified when a hash is given (`sha256: null` downloads are reported in
@@ -766,7 +766,7 @@ variables and limits. `captions-bar` reads one `words_json` variable that `rende
 builds from `offload_transcribe`'s `<base>.segments.json`; render the overlay silent to `webm` or `mov`
 and lay it over the footage with ffmpeg's `overlay` filter or in an editor.
 
-This renders an HTML/CSS composition to video with the installed HyperFrames CLI (the newest npm release, never pinned). It runs on the CPU:
+This renders an HTML/CSS composition to video with the HyperFrames CLI the installer put in place (the newest npm release, never pinned). It runs on the CPU:
 software GL and CPU encode, with no GPU lock, so it runs next to every render and text seat. The
 steps are `lint`, then `check`, then `render`, then an ffprobe gate. Every returned field is
 measured. Any failure defers with a typed class (`BAD_INPUT`, `LINT_ERRORS`, `CHECK_FAILED`,
@@ -774,7 +774,7 @@ measured. Any failure defers with a typed class (`BAD_INPUT`, `LINT_ERRORS`, `CH
 `DISK_HEADROOM`, `TIMEOUT`).
 
 **Binding the lane.** The installer's hyperframes step does this on a box with Node >= 22. It
-installs the newest release into `<home>/hyperframes`, runs `npm audit signatures` (fatal on failure) and
+installs the newest HyperFrames release from npm into `<home>/hyperframes` (`npm install --ignore-scripts`, each tarball verified against the registry's integrity field), runs `npm audit signatures` (fatal on failure) and
 `browser ensure`, and writes three keys into a FRESH config. An existing config is never rewritten,
 so the installer prints the three keys instead. To bind by hand:
 
@@ -870,16 +870,20 @@ declared variables, a duration variable, and a README with a measured render. Li
 be clean, the frames must be looked at, and `framemd5` must match at 1, 2, 4 and 6 workers and at
 `auto` twice (a frame has to be a pure function of time; see the contract).
 
-**Updating HyperFrames.** There is nothing to edit: the version is never pinned. `local-offload install hyperframes`
-(or `local-offload update --component hyperframes`) takes the newest npm release, npm verifies it against the registry's
-`dist.integrity`, and the runner records the installed version and refuses only one below the floor in
-`setup/floors.json` (ADR 0099). After an update run a two-template smoke that includes `captions-bar`: it reads the
-runtime's `hf-seek` event, which the package dispatches but does not document, so render its default
-sample, confirm a known group is on screen at a known time (the frame at 1.5 s shows "Captions follow
-the words"), and record the version you measured in the Measured section of its README as a dated record. Never
-`npm install -g hyperframes`: a global HyperFrames self-upgrades in a detached process. After an update run
-`local-offload acceptance` on every node with the lane; an install below the floor makes that node's `doctor` read
-`compose_video` BOUND-BUT-MISSING and every composition defer `CLI_MISSING` until it is updated.
+**Updating HyperFrames.** There is nothing to bump: the harness installs the newest HyperFrames
+release from npm, verified by the registry's integrity field, and the runner requires only the floor
+in `setup/floors.json` (ADR 0099). Run `local-offload install hyperframes` (or
+`local-offload update --component hyperframes`; it stages, verifies, swaps the new
+tree in with the old one kept as `node_modules.prev`, and records the version in `installed.json`),
+then `local-offload acceptance`, on every node with the lane. After a release, render a two-template
+smoke that includes `captions-bar`: it reads the runtime's `hf-seek` event, which the package
+dispatches but does not document, so render its default sample and confirm a known group is on screen
+at a known time (the frame at 1.5 s shows "Captions follow the words"), and record the version you
+measured in the Measured section of its README as a dated record. A release that changes a flag
+the runner relies on is fixed in the runner's argument builders, never by holding the install back.
+Never `npm install -g hyperframes`: a global HyperFrames self-upgrades in a detached process. A node
+whose install is below the floor reads `compose_video` BOUND-BUT-MISSING and defers `CLI_MISSING`
+until the same command runs.
 
 ## 4. Drive the coding agent
 
@@ -946,7 +950,7 @@ on every step. The harness calls only loopback and holds no key, but your endpoi
 decision model. Do not browse pages whose text must not leave the machine.
 
 ```powershell
-# 1. install the browse sidecar (newest dependencies, floors only); it prints the browse_python / browse_script values
+# 1. install the browse sidecar (floors only, newest at install); it prints the browse_python / browse_script values
 pwsh setup/browse/install.ps1 -OffloadHome <OFFLOAD_HOME>
 # 2. config: browse_python, browse_script, browse_decision_url (plain http on loopback only),
 #    browse_cdp_url for a dedicated agent profile (e.g. http://127.0.0.1:9333; recommended),
@@ -2190,8 +2194,8 @@ withdraw of any job, and the read of any rendered file); it used to cover only t
 bytes. With the token set, a request without it is `401`; with none set, a node answers only on loopback (the box's own trust
 boundary), refuses everything with `403` on any other listener, and `fleet-serve` will not start there. `/fleet/health` and the
 jobs feed stay readable without the token, with the lease's free-text reason, the store path and the weight-file rows (and a
-job's error text) left out. A run-graph manifest may name a node pack only from a repository admitted in
-`render/node-packs.json` (the commit is recorded at install), and a model only under `models/<class>/` from an https host listed there (`model_hosts`): a token
+job's error text) left out. A run-graph manifest may name a node pack only from a listed repository
+(`render/node-packs.json`; the node installs its default branch's head and records the commit beside the pack), and a model only under `models/<class>/` from an https host listed there (`model_hosts`): a token
 holder can have the node render, not run code of its choosing or write files where it chooses.
 **Choose a long random value** for it: it is the one secret behind every lane, and a node does not slow down repeated wrong
 bearers. Generate it with `openssl rand -hex 32` (64 hex characters) and use the output as the value of `fleet_auth_token`,

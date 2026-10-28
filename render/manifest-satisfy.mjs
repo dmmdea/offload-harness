@@ -189,8 +189,8 @@ export async function satisfyManifest(manifest, deps) {
 
   const hasPacks = (manifest.node_packs || []).length > 0;
 
-  // FIRST, before any tooling probe, model download or git command: a pack is taken only at a pinned repository
-  // and commit (node-packs.json). Naming one makes this node run the caller's code, and a manifest that gets
+  // FIRST, before any tooling probe, model download or git command: a pack is taken only from an allowlisted
+  // repository (node-packs.json). Naming one makes this node run the caller's code, and a manifest that gets
   // that far with a model download already done has spent the node's disk on a request it was going to refuse.
   // deps.packAllowed is a seam for tests that use stand-in packs; production leaves it unset, which is the table.
   const packAllowed = deps.packAllowed || checkNodePack;
@@ -232,27 +232,30 @@ export async function satisfyManifest(manifest, deps) {
   // production reads/writes a sidecar under custom_nodes. Read is fail-safe (null on error).
   const readDepsMarker = deps.readDepsMarker || (() => null);
   const writeDepsMarker = deps.writeDepsMarker || (() => {});
-  const packsKey = (manifest.node_packs || [])
-    .map((p) => `${p.name}@${p.commit}`).sort().join("|");
+  // The packs key is built from the commits the checkout stage reports, once every pack is on disk.
+  let packsKey = "";
 
   let changed = false;
   let warning;
   if (hasPacks) {
-    // 1. Checkout every pack at its pin (git-only). Deliberately NOT retried as a unit:
+    // 1. Bring every pack to the head of its default branch (git-only). Deliberately NOT retried as a unit:
     //    a retry would recompute the HEAD-before against attempt 1's surviving side effects
     //    (fresh clone / moved checkout) and misreport changed=false for a pack that just
     //    changed (adversarial-review repro, 2026-07-22). A git spawn failure defers typed —
     //    the caller can re-run the whole satisfy, which IS idempotent at this level.
+    const keyParts = [];
     for (const pack of manifest.node_packs) {
       let res;
       try { res = await ensurePack(pack); }
       catch (e) {
-        // The checkout stage refuses an unpinned pack too (makeEnsurePack): the same typed answer, never "the venv is broken".
+        // The checkout stage refuses a pack off the allowlist too (makeEnsurePack): the same typed answer, never "the venv is broken".
         if (e && e.code === "NODE_PACK_NOT_ALLOWED") return defer(e.code, e.ref || pack.name, e.detail || String(e.message || e));
         return spawnOrVenv(e, pack.name);
       }
       if (res.changed) changed = true;
+      keyParts.push(`${pack.name}@${res.commit || ""}`);
     }
+    packsKey = keyParts.sort().join("|");
     // 2. ONE unified resolve+install over all packs' on-disk requirements (under the
     //    host-torch constraints env), never per-pack pip. Skipped ONLY when nothing moved
     //    AND the persisted marker proves this exact pin-set was already resolved+checked
@@ -305,23 +308,6 @@ export function buildInstallCmd(lockPath, { comfyPy }) {
   return [comfyPy, "-m", "pip", "install", "-r", lockPath];
 }
 
-// isSafeRef: a git ref/commit that cannot be mistaken for a git OPTION. Rejects a leading
-// dash (the arg-injection vector — e.g. `--upload-pack=...`) and anything outside the safe
-// ref charset. `checkout <commit>` accepts no `--`-before-positional escape (that would mean
-// "these are paths"), so a commit MUST be validated rather than neutralized.
-function isSafeRef(s) {
-  return typeof s === "string" && s.length > 0 && !s.startsWith("-") && /^[A-Za-z0-9._\/-]+$/.test(s);
-}
-
-export function buildEnsurePackCmd(pack, { comfyDir }) {
-  const dir = `${comfyDir}/custom_nodes/${pack.name}`;
-  // #5: a commit starting with `-` (or carrying shell/ref-unsafe chars) could be read as a
-  // git flag — validate and reject rather than run it. checkout takes no `--` positional escape.
-  if (!isSafeRef(pack.commit)) throw new Error(`unsafe commit ref: ${JSON.stringify(pack.commit)}`);
-  // git -C <dir> checkout <commit>; clone first if absent (handled in glue).
-  return ["git", "-C", dir, "checkout", pack.commit];
-}
-
 // buildClonePackCmd: `git clone -- <repo> <dir>`. The literal `--` terminates option parsing,
 // so a `repo` value starting with `-` is treated as a positional (a path/URL), never a flag (#5).
 export function buildClonePackCmd(pack, { comfyDir }) {
@@ -339,11 +325,11 @@ export function buildClonePackCmd(pack, { comfyDir }) {
 // never a silently replaced torch.
 const HOST_PINNED = ["torch", "torchvision", "torchaudio", "numpy"];
 
-// publicPin: strip a PEP 440 local-version suffix ("torch==2.11.0+cu128" →
-// "torch==2.11.0") for the CONSTRAINTS FILE — local builds live on the PyTorch
+// publicPin: strip a PEP 440 local-version suffix ("torch 2.11.0+cu128" →
+// "torch 2.11.0") for the CONSTRAINTS FILE — local builds live on the PyTorch
 // index, not PyPI, so a resolver given the +cu128 pin finds "no version exists"
 // (live finding 2026-07-17). PEP 440: the installed +cu128 build SATISFIES the
-// public ==2.11.0 pin, so pip neither reinstalls nor upgrades it; the post-install
+// public 2.11.0 requirement, so pip neither reinstalls nor upgrades it; the post-install
 // TRIPWIRE still compares the full local-version pins, guarding the exact build.
 export function publicPin(line) {
   return line.replace(/\+[A-Za-z0-9.]+$/, "");
@@ -383,11 +369,28 @@ async function runOut(cmd, opts = {}) {
   });
 }
 
-// makeEnsurePack: build the per-pack "clone if absent, checkout the pin, report changed"
-// step from injectable primitives so it is unit-testable without spawning git. #3: `changed`
-// is decided by the git HEAD before-vs-after (a fresh clone, or a checkout that MOVED HEAD),
-// NOT merely "did the dir exist" — a same-commit checkout is correctly a no-op.
-export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd }) {
+// recordPackInstall: write the commit a pack is at, and when it got there, beside the pack
+// (custom_nodes/<name>.installed.json: ComfyUI loads only directories and .py files from custom_nodes, so the
+// record is inert there). A record that already names this commit is left alone, so installed_at stays the time the
+// pack reached it. A record the node cannot write never fails the install.
+export function recordPackInstall(pack, commit, { comfyDir, write = writeFileAtomic, read = (p) => readFileSync(p, "utf8"), now = () => new Date().toISOString() }) {
+  try {
+    const path = `${comfyDir}/custom_nodes/${pack.name}.installed.json`;
+    let held = null;
+    try { held = JSON.parse(read(path)); } catch { held = null; }
+    if (held && held.commit === commit && held.repo === pack.repo) return;
+    write(`${comfyDir}/custom_nodes/${pack.name}.installed.json`, JSON.stringify({ repo: pack.repo, commit, installed_at: now() }, null, 2) + "\n");
+  } catch { /* the record is informational */ }
+}
+
+// makeEnsurePack: build the per-pack "clone if absent, report changed" step from injectable primitives so it is
+// unit-testable without spawning git. A pack that is absent is cloned at the head of its repository's default branch
+// (changed); a pack already on disk is used as it is (not changed). A render request never moves an installed pack:
+// moving one to a newer commit is the operator's update (`git -C custom_nodes/<name> pull --ff-only`, or the fleet's
+// update tooling), so a caller holding only the render bearer cannot make a node fetch and run whatever an upstream
+// pushed a minute ago. The commit the pack is at is returned and recorded (recordPackInstall); the dependency marker
+// is keyed on it, so a pack the operator moved is re-resolved on the next request that names it.
+export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd, record = (pack, commit) => recordPackInstall(pack, commit, { comfyDir }) }) {
   return async (pack) => {
     // The last stop before git: the directory, the clone and the checkout all come from the pack, so a pack that is
     // not pinned is refused before any of them is looked at (satisfyManifest has refused it already; this is for a
@@ -398,11 +401,10 @@ export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun,
     }
     const dir = `${comfyDir}/custom_nodes/${pack.name}`;
     const existed = exists(dir);
-    const headBefore = existed ? await gitHead(dir) : null;
     if (!existed) await gitRun(buildClone(pack, { comfyDir }));
-    await gitRun(buildEnsurePackCmd(pack, { comfyDir }));
-    const headAfter = await gitHead(dir);
-    return { changed: !existed || headBefore !== headAfter };
+    const commit = await gitHead(dir);
+    record(pack, commit);
+    return { changed: !existed, commit };
   };
 }
 

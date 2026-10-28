@@ -1,12 +1,12 @@
 // Package hfinstall is the HyperFrames step of the composition lane (ADR 0059) as one
-// implementation: the two version reads that status and the runner must agree on, and
-// the re-install a deploy runs when the pin moves.
+// implementation: the version read that status and the runner agree on, and the install a
+// deploy runs.
 //
-// The runner (render/compose-hyperframes.mjs) refuses every op while the install under
-// hyperframes_dir holds anything but its PINNED_VERSION. Until this package existed the
-// re-install lived only in the installers' first-install path, so a release that moved
-// the pin left every already-installed node refusing every composition while doctor and
-// offload_status still read the route CONFIGURED (they checked file existence only).
+// The installed HyperFrames is a record with a floor, never an exact version (ADR 0099).
+// The harness installs the newest release npm resolves, stages and verifies it, swaps it in
+// with the previous tree kept for a rollback, and records {version, installed_at} in
+// installed.json. The runner (render/compose-hyperframes.mjs) and capability status refuse
+// only a CLI that is absent or older than the floor in setup/floors.json.
 package hfinstall
 
 import (
@@ -18,8 +18,8 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,22 +35,6 @@ const (
 	stagingDirName = ".install-staging"  // the new tree is built and verified here first
 	prevDirName    = "node_modules.prev" // the replaced tree, kept for a rollback
 )
-
-// pinRe matches the runner's one pin line: `export const PINNED_VERSION = "0.8.114";`.
-var pinRe = regexp.MustCompile(`(?m)^export const PINNED_VERSION = "([^"]+)";`)
-
-// RunnerPin reads the HyperFrames version the runner at path enforces.
-func RunnerPin(runner string) (string, error) {
-	b, err := os.ReadFile(runner)
-	if err != nil {
-		return "", err
-	}
-	m := pinRe.FindSubmatch(b)
-	if m == nil {
-		return "", fmt.Errorf("no PINNED_VERSION line in %s", runner)
-	}
-	return string(m[1]), nil
-}
 
 // InstalledVersion reads the version of the HyperFrames package installed under dir —
 // the same file the runner reads (node_modules/hyperframes/package.json).
@@ -71,52 +55,90 @@ func InstalledVersion(dir string) (string, error) {
 	return p.Version, nil
 }
 
-// PackagePin reads the exact version a committed setup/hyperframes/package.json pins.
-func PackagePin(packageJSON []byte) (string, error) {
-	var p struct {
-		Dependencies map[string]string `json:"dependencies"`
+// FloorFromJSON reads the HyperFrames floor ("hyperframes".harness) from the bytes of
+// setup/floors.json. "" with a nil error means the file names no floor.
+func FloorFromJSON(floorsJSON []byte) (string, error) {
+	var f struct {
+		Hyperframes struct {
+			Harness string `json:"harness"`
+		} `json:"hyperframes"`
 	}
-	if err := json.Unmarshal(packageJSON, &p); err != nil {
-		return "", fmt.Errorf("unreadable setup package.json: %w", err)
+	if err := json.Unmarshal(floorsJSON, &f); err != nil {
+		return "", fmt.Errorf("unreadable floors.json: %w", err)
 	}
-	v := p.Dependencies["hyperframes"]
-	if v == "" {
-		return "", errors.New("setup package.json pins no hyperframes dependency")
-	}
-	return v, nil
+	return f.Hyperframes.Harness, nil
 }
 
-// LockPin reads the hyperframes version a committed package-lock.json resolves.
-func LockPin(packageLock []byte) (string, error) {
-	var l struct {
-		Packages map[string]struct {
-			Version string `json:"version"`
-		} `json:"packages"`
-	}
-	if err := json.Unmarshal(packageLock, &l); err != nil {
-		return "", fmt.Errorf("unreadable setup package-lock.json: %w", err)
-	}
-	v := l.Packages["node_modules/hyperframes"].Version
-	if v == "" {
-		return "", errors.New("setup package-lock.json resolves no node_modules/hyperframes")
-	}
-	return v, nil
-}
-
-// Drift reports nil when the install under dir holds exactly the runner's pin, and
-// otherwise the reason every composition on this box defers CLI_MISSING. An unreadable
-// runner pin is not drift (nothing to compare against); an unreadable install is.
-func Drift(runner, dir string) error {
-	pin, err := RunnerPin(runner)
+// FloorFor reads the floor from setup/floors.json beside the runner's repo root
+// (<runner dir>/../setup/floors.json), the file the runner itself reads. "" when the tree
+// does not carry it: no floor is then enforced, presence only.
+func FloorFor(runner string) string {
+	b, err := os.ReadFile(filepath.Join(filepath.Dir(runner), "..", "setup", "floors.json"))
 	if err != nil {
-		return nil
+		return ""
 	}
+	v, _ := FloorFromJSON(b)
+	return v
+}
+
+// versionCore parses the leading numeric dotted part of a version ("9.9.9-rc.1" -> 9,9,9).
+func versionCore(v string) ([]int, bool) {
+	v = strings.TrimPrefix(strings.TrimSpace(v), "v")
+	end := 0
+	for end < len(v) && (v[end] == '.' || (v[end] >= '0' && v[end] <= '9')) {
+		end++
+	}
+	if end == 0 {
+		return nil, false
+	}
+	var out []int
+	for _, part := range strings.Split(strings.TrimRight(v[:end], "."), ".") {
+		n, err := strconv.Atoi(part)
+		if err != nil {
+			return nil, false
+		}
+		out = append(out, n)
+	}
+	return out, true
+}
+
+// AtLeast reports whether have is the floor or newer, comparing the numeric parts (a
+// pre-release tag on an equal or newer core does not lower it). An empty floor is always
+// met; an unreadable have is below any floor.
+func AtLeast(have, floor string) bool {
+	f, ok := versionCore(floor)
+	if !ok {
+		return true
+	}
+	h, ok := versionCore(have)
+	if !ok {
+		return false
+	}
+	for i := 0; i < len(h) || i < len(f); i++ {
+		var a, b int
+		if i < len(h) {
+			a = h[i]
+		}
+		if i < len(f) {
+			b = f[i]
+		}
+		if a != b {
+			return a > b
+		}
+	}
+	return true
+}
+
+// Check reports nil when the install under dir has the CLI and a version at or above the
+// floor beside the runner, and otherwise the reason every composition on this box defers
+// CLI_MISSING. A newer release than any this code has seen is not a problem.
+func Check(runner, dir string) error {
 	have, err := InstalledVersion(dir)
 	if err != nil {
-		return fmt.Errorf("cannot read the installed HyperFrames version under %s (%v), and the runner pins %s — every composition defers CLI_MISSING; run `local-offload install hyperframes`", dir, err, pin)
+		return fmt.Errorf("cannot read the installed HyperFrames version under %s (%v) — every composition defers CLI_MISSING; run `local-offload install hyperframes`", dir, err)
 	}
-	if have != pin {
-		return fmt.Errorf("the install at %s holds hyperframes %s, not the runner's pin %s — every composition defers CLI_MISSING; run `local-offload install hyperframes`", dir, have, pin)
+	if floor := FloorFor(runner); !AtLeast(have, floor) {
+		return fmt.Errorf("the install at %s holds hyperframes %s, below the floor %s in setup/floors.json — every composition defers CLI_MISSING; run `local-offload install hyperframes`", dir, have, floor)
 	}
 	return nil
 }
@@ -126,47 +148,51 @@ func Drift(runner, dir string) error {
 // unit-tested without npm, node or a network.
 type Runner func(ctx context.Context, dir string, env []string, name string, args ...string) (string, error)
 
-// Options for Install. PackageJSON and PackageLock are the committed setup/hyperframes
-// files, embedded in the binary so a node without a repository checkout can re-install.
+// Options for Install. PackageJSON is the committed setup/hyperframes/package.json (its
+// hyperframes dependency is "latest"), embedded in the binary so a node without a
+// repository checkout can install. Floor is the minimum version from setup/floors.json.
 type Options struct {
-	Dir         string // hyperframes_dir: where node_modules/hyperframes lives
-	Runner      string // the resolved compose_script
-	Node        string // the node executable every render script runs under
-	Npm         string // npm; empty = found on PATH (with Node's directory first)
-	PackageJSON []byte
-	PackageLock []byte
-	Log         io.Writer
-	Run         Runner // nil = exec
+	Dir          string // hyperframes_dir: where node_modules/hyperframes lives
+	Runner       string // the resolved compose_script
+	Node         string // the node executable every render script runs under
+	Npm          string // npm; empty = found on PATH (with Node's directory first)
+	PackageJSON  []byte
+	Floor        string // minimum acceptable version ("" = none known)
+	ManifestPath string // installed.json to record {version, installed_at} in ("" = do not record)
+	Log          io.Writer
+	Run          Runner           // nil = exec
+	Now          func() time.Time // nil = time.Now
 }
 
 // Result is what Install verified, all of it read back rather than assumed.
 type Result struct {
-	Dir           string `json:"dir"`
-	Version       string `json:"version"`
-	Reinstalled   bool   `json:"reinstalled"`
-	PreviousTree  string `json:"previous_tree,omitempty"`
-	BrowserPath   string `json:"browser_path"`
-	ChromeVersion string `json:"chrome_version"`
-	MatchesPin    bool   `json:"matches_pin"`
+	Dir          string `json:"dir"`
+	Version      string `json:"version"`
+	Reinstalled  bool   `json:"reinstalled"`
+	PreviousTree string `json:"previous_tree,omitempty"`
+	BrowserPath  string `json:"browser_path"`
+	Floor        string `json:"floor,omitempty"`
 }
 
-// Install brings the install under o.Dir to the embedded pin without ever leaving the
-// node worse off than it found it:
+// Install brings the install under o.Dir to the newest release npm resolves without ever
+// leaving the node worse off than it found it:
 //
-//   - It refuses before touching anything when the runner beside the binary pins another
-//     version than the binary carries (the binary and the render tree of one release ship
-//     together) or when o.Dir holds something that is not a harness install.
-//   - A healthy install — the committed package.json and lock, the pinned version, the CLI
-//     entry and a dependency tree `npm ls` accepts — is kept; its signatures are audited
-//     again and the runner's checks run.
-//   - Anything else is rebuilt in a staging directory inside o.Dir: `npm ci
-//     --ignore-scripts` and `npm audit signatures` (FATAL) run there, so a failure leaves
-//     the live tree exactly as it was. Only a verified tree is swapped in; the replaced one
-//     is kept as node_modules.prev for a rollback.
+//   - It refuses before touching anything when o.Dir holds something that is not a
+//     harness install.
+//   - An installed tree that npm accepts (`npm ls`), that holds the CLI entry and the
+//     committed package.json, and that is at or above the registry's latest, is kept (a
+//     newer hand-placed build is never downgraded); its signatures are audited again. An
+//     unreachable registry keeps a healthy tree at or above the floor.
+//   - Anything else is rebuilt in a staging directory inside o.Dir: `npm install
+//     --ignore-scripts` (resolving dist-tags.latest; npm verifies each tarball against the
+//     registry's integrity field) and `npm audit signatures` (FATAL) run there, the staged
+//     package's version is read back and checked against the floor, so a failure leaves
+//     the live tree exactly as it was. Only a verified tree is swapped in; the replaced
+//     one is kept as node_modules.prev for a rollback.
 //   - `npm rebuild esbuild` (the one postinstall the CLI needs) and the runner's own
-//     `browser` (ensure + path, under its scrubbed env) and `version` ops (must report
-//     matches_pin) run on the swapped-in tree; when one fails, the previous tree and its
-//     package files are put back.
+//     `browser` (ensure + path, under its scrubbed env) and `version` ops run on the
+//     swapped-in tree; when one fails, the previous tree and its package.json are put back.
+//   - The installed version and time are recorded in installed.json.
 func Install(ctx context.Context, o Options) (Result, error) {
 	logf := func(format string, a ...any) {
 		if o.Log != nil {
@@ -184,22 +210,7 @@ func Install(ctx context.Context, o Options) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-	res := Result{Dir: dir}
-	pin, err := PackagePin(o.PackageJSON)
-	if err != nil {
-		return res, err
-	}
-	if lp, err := LockPin(o.PackageLock); err != nil || lp != pin {
-		return res, fmt.Errorf("the embedded lock resolves hyperframes %q, not the embedded package.json's %s (%v)", lp, pin, err)
-	}
-	res.Version = pin
-	runnerPin, err := RunnerPin(o.Runner)
-	if err != nil {
-		return res, fmt.Errorf("cannot read the runner's pin: %w", err)
-	}
-	if runnerPin != pin {
-		return res, fmt.Errorf("the runner at %s pins hyperframes %s but this binary carries %s: ship the binary and the render tree of one release together, then re-run", o.Runner, runnerPin, pin)
-	}
+	res := Result{Dir: dir, Floor: o.Floor}
 	if err := ownsDir(dir); err != nil {
 		return res, err
 	}
@@ -209,19 +220,28 @@ func Install(ctx context.Context, o Options) (Result, error) {
 	}
 	env := envWithNodeFirst(o.Node)
 
+	have, _ := InstalledVersion(dir)
+	latest := ""
+	if out, err := run(ctx, dir, env, npm, "view", "hyperframes", "dist-tags.latest"); err == nil {
+		latest = strings.TrimSpace(out)
+	} else {
+		logf("could not ask the registry for the newest hyperframes (%v); keeping a healthy install", err)
+	}
+
 	swapped := false
-	if healthy(ctx, run, env, npm, dir, pin, o.PackageJSON, o.PackageLock) {
-		logf("hyperframes %s already installed in %s; re-verifying", pin, dir)
+	keep := healthy(ctx, run, env, npm, dir, o.PackageJSON) && AtLeast(have, o.Floor) &&
+		(latest == "" || AtLeast(have, latest))
+	if keep {
+		logf("hyperframes %s already installed in %s; re-verifying", have, dir)
 		if out, err := run(ctx, dir, env, npm, "audit", "signatures"); err != nil {
 			return res, fmt.Errorf("npm audit signatures FAILED on the installed tree (left unchanged): %v%s", err, tail(out))
 		}
 	} else {
-		have, _ := InstalledVersion(dir)
-		logf("npm ci: hyperframes %s -> %s, staged in %s", orNone(have), pin, filepath.Join(dir, stagingDirName))
-		if err := stage(ctx, run, env, npm, dir, pin, o.PackageJSON, o.PackageLock); err != nil {
+		logf("npm install: hyperframes %s -> newest, staged in %s", orNone(have), filepath.Join(dir, stagingDirName))
+		if err := stage(ctx, run, env, npm, dir, o.PackageJSON, o.Floor); err != nil {
 			return res, err
 		}
-		prev, err := swapIn(dir, o.PackageJSON, o.PackageLock)
+		prev, err := swapIn(dir, o.PackageJSON)
 		if err != nil {
 			return res, err
 		}
@@ -242,11 +262,10 @@ func Install(ctx context.Context, o Options) (Result, error) {
 		return fail(fmt.Errorf("npm rebuild esbuild failed: %v%s", err, tail(out)))
 	}
 	var browser struct {
-		OK            bool   `json:"ok"`
-		Class         string `json:"class"`
-		Detail        string `json:"detail"`
-		BrowserPath   string `json:"browser_path"`
-		ChromeVersion string `json:"chrome_version"`
+		OK          bool   `json:"ok"`
+		Class       string `json:"class"`
+		Detail      string `json:"detail"`
+		BrowserPath string `json:"browser_path"`
 	}
 	if err := runnerOp(ctx, run, env, o.Node, o.Runner, dir, "browser", &browser); err != nil {
 		return fail(err)
@@ -254,21 +273,74 @@ func Install(ctx context.Context, o Options) (Result, error) {
 	if !browser.OK {
 		return fail(fmt.Errorf("hyperframes browser ensure failed: %s: %s", browser.Class, browser.Detail))
 	}
-	res.BrowserPath, res.ChromeVersion = browser.BrowserPath, browser.ChromeVersion
+	res.BrowserPath = browser.BrowserPath
 	var version struct {
-		OK         bool   `json:"ok"`
-		Class      string `json:"class"`
-		Detail     string `json:"detail"`
-		MatchesPin bool   `json:"matches_pin"`
+		OK      bool   `json:"ok"`
+		Class   string `json:"class"`
+		Detail  string `json:"detail"`
+		Version string `json:"version"`
+		AtFloor bool   `json:"at_floor"`
 	}
 	if err := runnerOp(ctx, run, env, o.Node, o.Runner, dir, "version", &version); err != nil {
 		return fail(err)
 	}
-	if !version.OK || !version.MatchesPin {
+	if !version.OK || !version.AtFloor {
 		return fail(fmt.Errorf("the runner's version check did not pass after the install: %s %s", version.Class, version.Detail))
 	}
-	res.MatchesPin = true
+	got, err := InstalledVersion(dir)
+	if err != nil {
+		return fail(err)
+	}
+	res.Version = got
+	if o.ManifestPath != "" {
+		now := time.Now
+		if o.Now != nil {
+			now = o.Now
+		}
+		if err := RecordInstalled(o.ManifestPath, got, now()); err != nil {
+			return res, fmt.Errorf("hyperframes %s installed, but recording it in %s failed: %w", got, o.ManifestPath, err)
+		}
+	}
 	return res, nil
+}
+
+// RecordInstalled writes {version, installed_at} under components.hyperframes.current of the
+// installed.json at path (schema 2: current carries the version as its id). Every other key is
+// kept as found; a missing file is created; a flat schema-1 entry (components.hyperframes as a
+// bare version string) is replaced by the record. The file is replaced by rename.
+func RecordInstalled(path, version string, at time.Time) error {
+	doc := map[string]any{}
+	if b, err := os.ReadFile(path); err == nil {
+		if err := json.Unmarshal(b, &doc); err != nil {
+			return fmt.Errorf("%s is not readable JSON: %w", path, err)
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	if len(doc) == 0 {
+		doc["schema"] = 2
+	}
+	comps, _ := doc["components"].(map[string]any)
+	if comps == nil {
+		comps = map[string]any{}
+	}
+	rec := map[string]any{"id": version, "version": version, "installed_at": at.UTC().Format(time.RFC3339)}
+	entry, _ := comps["hyperframes"].(map[string]any)
+	if entry == nil {
+		entry = map[string]any{}
+	}
+	entry["current"] = rec
+	comps["hyperframes"] = entry
+	doc["components"] = comps
+	b, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".new"
+	if err := os.WriteFile(tmp, append(b, '\n'), 0o644); err != nil {
+		return err
+	}
+	return renameRetry(tmp, path)
 }
 
 // ownsDir refuses a directory that holds something other than a harness install: it
@@ -295,15 +367,13 @@ func ownsDir(dir string) error {
 }
 
 // healthy reports whether the install under dir can be kept as it is: the committed
-// package files, the pinned version, the CLI entry, and a dependency tree npm accepts
-// (`npm ls` fails on a missing or mismatched package, e.g. after an interrupted npm ci).
-func healthy(ctx context.Context, run Runner, env []string, npm, dir, pin string, pkg, lock []byte) bool {
-	for name, want := range map[string][]byte{"package.json": pkg, "package-lock.json": lock} {
-		if have, err := os.ReadFile(filepath.Join(dir, name)); err != nil || !bytes.Equal(have, want) {
-			return false
-		}
+// package.json, a readable version, the CLI entry, and a dependency tree npm accepts
+// (`npm ls` fails on a missing or mismatched package, e.g. after an interrupted install).
+func healthy(ctx context.Context, run Runner, env []string, npm, dir string, pkg []byte) bool {
+	if have, err := os.ReadFile(filepath.Join(dir, "package.json")); err != nil || !bytes.Equal(have, pkg) {
+		return false
 	}
-	if have, err := InstalledVersion(dir); err != nil || have != pin {
+	if _, err := InstalledVersion(dir); err != nil {
 		return false
 	}
 	if _, err := os.Stat(filepath.Join(dir, "node_modules", "hyperframes", "bin", "hyperframes.mjs")); err != nil {
@@ -315,7 +385,7 @@ func healthy(ctx context.Context, run Runner, env []string, npm, dir, pin string
 
 // stage builds and verifies the new tree under dir/.install-staging. On any failure the
 // staging directory is removed and the live install has not been touched.
-func stage(ctx context.Context, run Runner, env []string, npm, dir, pin string, pkg, lock []byte) error {
+func stage(ctx context.Context, run Runner, env []string, npm, dir string, pkg []byte, floor string) error {
 	st := filepath.Join(dir, stagingDirName)
 	if err := os.RemoveAll(st); err != nil {
 		return fmt.Errorf("clearing a stale staging dir %s: %w", st, err)
@@ -327,28 +397,30 @@ func stage(ctx context.Context, run Runner, env []string, npm, dir, pin string, 
 		_ = os.RemoveAll(st)
 		return err
 	}
-	for name, b := range map[string][]byte{"package.json": pkg, "package-lock.json": lock} {
-		if err := os.WriteFile(filepath.Join(st, name), b, 0o644); err != nil {
-			return clean(fmt.Errorf("writing %s: %w", name, err))
-		}
+	if err := os.WriteFile(filepath.Join(st, "package.json"), pkg, 0o644); err != nil {
+		return clean(fmt.Errorf("writing package.json: %w", err))
 	}
-	if out, err := run(ctx, st, env, npm, "ci", "--ignore-scripts", "--no-audit", "--no-fund"); err != nil {
-		return clean(fmt.Errorf("npm ci (hyperframes %s) failed; the live install is unchanged: %v%s", pin, err, tail(out)))
+	if out, err := run(ctx, st, env, npm, "install", "--ignore-scripts", "--no-audit", "--no-fund"); err != nil {
+		return clean(fmt.Errorf("npm install (newest hyperframes) failed; the live install is unchanged: %v%s", err, tail(out)))
+	}
+	v, err := InstalledVersion(st)
+	if err != nil {
+		return clean(fmt.Errorf("npm install produced no readable node_modules/hyperframes/package.json; the live install is unchanged: %w", err))
+	}
+	if !AtLeast(v, floor) {
+		return clean(fmt.Errorf("npm resolved hyperframes %s, below the floor %s in setup/floors.json; the live install is unchanged", v, floor))
 	}
 	if out, err := run(ctx, st, env, npm, "audit", "signatures"); err != nil {
-		return clean(fmt.Errorf("npm audit signatures FAILED for the new hyperframes %s tree (registry signatures or provenance did not verify, or the registry was unreachable); refusing to swap it in, the live install is unchanged: %v%s", pin, err, tail(out)))
-	}
-	if v, err := InstalledVersion(st); err != nil || v != pin {
-		return clean(fmt.Errorf("npm ci produced hyperframes %q, not %s", v, pin))
+		return clean(fmt.Errorf("npm audit signatures FAILED for the new hyperframes %s tree (registry signatures or provenance did not verify, or the registry was unreachable); refusing to swap it in, the live install is unchanged: %v%s", v, err, tail(out)))
 	}
 	return nil
 }
 
 // swapIn moves the verified staging tree into place: the live node_modules (if any) and
-// its package files become the rollback copy, then the new tree and package files take
+// its package.json become the rollback copy, then the new tree and package.json take
 // their place. A rename that fails (a render holding files open on Windows) leaves the
 // live install as it was. Returns the rollback tree's path ("" when there was none).
-func swapIn(dir string, pkg, lock []byte) (string, error) {
+func swapIn(dir string, pkg []byte) (string, error) {
 	st := filepath.Join(dir, stagingDirName)
 	live := filepath.Join(dir, "node_modules")
 	prev := filepath.Join(dir, prevDirName)
@@ -356,21 +428,31 @@ func swapIn(dir string, pkg, lock []byte) (string, error) {
 	if err := os.RemoveAll(prev); err != nil {
 		return "", fmt.Errorf("clearing the old rollback copy %s: %w", prev, err)
 	}
-	oldFiles := map[string][]byte{}
-	for _, name := range []string{"package.json", "package-lock.json"} {
-		if b, err := os.ReadFile(filepath.Join(dir, name)); err == nil {
-			oldFiles[name] = b
+	// The .prev files a rollback restores are this swap's own: one left by an earlier swap (an old installer's
+	// lockfile among them) must never come back as the live package.json or package-lock.json.
+	for _, name := range []string{"package.json.prev", "package-lock.json.prev"} {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return "", fmt.Errorf("clearing the old rollback file %s: %w", name, err)
 		}
 	}
+	oldPkg, readErr := os.ReadFile(filepath.Join(dir, "package.json"))
 	kept := ""
 	if _, err := os.Stat(live); err == nil {
 		if err := renameRetry(live, prev); err != nil {
 			return "", fmt.Errorf("cannot move the live install aside (is a composition rendering?); nothing changed: %w", err)
 		}
 		kept = prev
-		for name, b := range oldFiles {
-			_ = os.WriteFile(filepath.Join(dir, name+".prev"), b, 0o644)
+		if readErr == nil {
+			_ = os.WriteFile(filepath.Join(dir, "package.json.prev"), oldPkg, 0o644)
 		}
+	}
+	// A lockfile an older installer left is a pin set for the tree being replaced: keep it as
+	// package-lock.json.prev and take it out of the live directory.
+	lockPath := filepath.Join(dir, "package-lock.json")
+	oldLock, lockErr := os.ReadFile(lockPath)
+	if lockErr == nil {
+		_ = os.WriteFile(lockPath+".prev", oldLock, 0o644)
+		_ = os.Remove(lockPath)
 	}
 	restore := func(cause error) error {
 		if kept != "" {
@@ -379,18 +461,19 @@ func swapIn(dir string, pkg, lock []byte) (string, error) {
 				return fmt.Errorf("%v; restoring the previous tree also failed: %v", cause, err)
 			}
 		}
-		for name, b := range oldFiles {
-			_ = os.WriteFile(filepath.Join(dir, name), b, 0o644)
+		if readErr == nil {
+			_ = os.WriteFile(filepath.Join(dir, "package.json"), oldPkg, 0o644)
+		}
+		if lockErr == nil {
+			_ = os.WriteFile(lockPath, oldLock, 0o644)
 		}
 		return fmt.Errorf("%v; the previous install is back", cause)
 	}
 	if err := renameRetry(filepath.Join(st, "node_modules"), live); err != nil {
 		return "", restore(fmt.Errorf("moving the new tree into place failed: %w", err))
 	}
-	for name, b := range map[string][]byte{"package.json": pkg, "package-lock.json": lock} {
-		if err := os.WriteFile(filepath.Join(dir, name), b, 0o644); err != nil {
-			return "", restore(fmt.Errorf("writing %s: %w", name, err))
-		}
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), pkg, 0o644); err != nil {
+		return "", restore(fmt.Errorf("writing package.json: %w", err))
 	}
 	return kept, nil
 }
@@ -408,7 +491,7 @@ func renameRetry(from, to string) error {
 	return err
 }
 
-// rollback puts the previous tree and package files back after a swapped-in tree failed
+// rollback puts the previous tree and package.json back after a swapped-in tree failed
 // its checks.
 func rollback(dir string) error {
 	live := filepath.Join(dir, "node_modules")

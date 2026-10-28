@@ -1,4 +1,4 @@
-// render/templates-catalog.mjs — a read-only catalog of the ComfyUI workflow templates a node
+// render/templates-catalog.mjs — a catalog of the ComfyUI workflow templates a node
 // carries: the `comfyui-workflow-templates` package ComfyUI itself pins, a checkout of the upstream
 // repository, or a `pip download` extract of a candidate version.
 //
@@ -1192,7 +1192,7 @@ function summarizeLicenses(catalog, rows, local) {
 // A model file is USABLE by a template only if ComfyUI would offer it to the loader that reads it,
 // and that is a question about directories, not file names. A `VAELoader` lists the vae class and
 // nothing else: the same file sitting in text_encoders/ is on disk and invisible. So readiness is
-// decided the way ComfyUI 0.37.0's folder_paths.py, utils/extra_config.py and main.py decide it:
+// decided the way ComfyUI's folder_paths.py, utils/extra_config.py and main.py decide it:
 //
 // - every model class has default directories under <comfy>/models, and three classes read two:
 //   text_encoders also reads clip/, diffusion_models also reads unet/, controlnet also reads
@@ -1209,21 +1209,19 @@ function summarizeLicenses(catalog, rows, local) {
 //   exactly those strings, so a file in a subfolder or under another case is not the file a
 //   template names.
 //
-// The table below is that version's. A snapshot records the node's ComfyUI version and hashes of
-// folder_paths.py and utils/extra_config.py (main.py is not hashed: it holds far more than the
-// few lines that matter, so a change confined to it is not seen), and readiness says when a
-// node's files are not the ones the table was checked against.
+// A snapshot records the node's ComfyUI version and hashes of folder_paths.py and
+// utils/extra_config.py (main.py is not hashed: it holds far more than the few lines that matter,
+// so a change confined to it is not seen). The reference hashes are not kept in this file: the
+// harness records them on the node, in COMFYUI_RULE_FILE_RECORD beside the checkout, when it
+// registers or refreshes that checkout (the record-rules verb below), and readiness says when the
+// node's files are no longer the ones recorded. No record reads as "not recorded", never a refusal.
 
 const PT_EXTS = [".ckpt", ".pt", ".pt2", ".bin", ".pth", ".safetensors", ".pkl", ".sft"];
 const classSpec = (dirs, exts = PT_EXTS) => ({ dirs, exts });
-export const COMFYUI_CLASS_TABLE_VERSION = "0.37.0";
-// The two rule files of the ComfyUI release the table below was checked against (the v0.37.0 tag), hashed the way snapshotNode hashes
-// them: SHA-256 of the text with CRLF turned into LF.
-export const COMFYUI_RULE_FILES = Object.freeze({
-  version: COMFYUI_CLASS_TABLE_VERSION,
-  folder_paths_sha256: "b748be5d1e068ad673f6c4de069fb6b7b723405c40ae3c3c44465d416f7df2db",
-  extra_config_sha256: "ebb923e58956587acf5196e3a76ae3c576196f2f498e5933ce9416fca1ddaf9e",
-});
+// The record's file name, in the ComfyUI folder beside the launch markers (.offload-launch*.json).
+export const COMFYUI_RULE_FILE_RECORD = ".offload-rule-files.json";
+// The two rule files, by their path under the ComfyUI folder and the snapshot key that carries each hash.
+const RULE_FILES = [["folder_paths.py", "folder_paths_sha256"], ["utils/extra_config.py", "extra_config_sha256"]];
 const CLASS_TABLE = {
   checkpoints: classSpec(["checkpoints"]),
   configs: classSpec(["configs"], [".yaml"]),
@@ -1677,26 +1675,26 @@ export function summarizeReadiness(catalog, results) {
   };
 }
 
-// checkRules: does the node run the ComfyUI rules the class table reproduces? The rule-file hashes
-// decide (a tree can be commits past a release and still report its version); a snapshot without
-// them is judged by its version string when it has one and is unverified when it has neither.
-// Advisory: the node is scored either way, and this says by which rules.
+// checkRules: are the node's ComfyUI rule files still the ones the harness recorded when it registered
+// or refreshed the checkout (record-rules)? The rule-file hashes decide (a tree can be commits past a
+// release and still report its version). A node with no record is "not recorded" (ok: null), never a
+// refusal. Advisory: the node is scored either way, and this says by which rules.
 export function checkRules(snapshot) {
   const node_version = snapshot?.comfyui_version ?? null;
-  const base = { table_version: COMFYUI_RULE_FILES.version, node_version };
+  const base = { node_version };
   const files = snapshot?.comfy_files;
-  if (files && typeof files === "object") {
-    const differs = [["folder_paths.py", "folder_paths_sha256"], ["utils/extra_config.py", "extra_config_sha256"]]
-      .filter(([, key]) => files[key] !== COMFYUI_RULE_FILES[key]).map(([label]) => label);
-    if (differs.length === 0) return { ok: true, ...base, differs, reason: null };
-    const many = differs.length > 1;
-    const seen = node_version ? ` (the node reports ${node_version})` : "";
-    return { ok: false, ...base, differs, reason: `${differs.join(" and ")} ${many ? "differ" : "differs"} from the ComfyUI ${base.table_version} file${many ? "s" : ""} the directory rules were checked against${seen}` };
+  const recorded = snapshot?.comfy_rule_files_recorded;
+  if (!recorded || typeof recorded !== "object") {
+    return { ok: null, ...base, differs: [], reason: "not recorded: this node has no record of its ComfyUI rule files from when the harness registered it" };
   }
-  if (node_version !== null && node_version !== base.table_version) {
-    return { ok: false, ...base, differs: [], reason: `the node reports ComfyUI ${node_version}; the directory rules were checked against ${base.table_version}` };
+  if (!files || typeof files !== "object") {
+    return { ok: null, ...base, differs: [], reason: "the snapshot carries no rule-file hashes, so the ComfyUI rules it ran cannot be checked" };
   }
-  return { ok: null, ...base, differs: [], reason: "the snapshot carries no rule-file hashes, so the ComfyUI rules it ran cannot be checked" };
+  const differs = RULE_FILES.filter(([, key]) => files[key] !== recorded[key]).map(([label]) => label);
+  if (differs.length === 0) return { ok: true, ...base, differs, reason: null };
+  const many = differs.length > 1;
+  const seen = node_version ? ` (the node reports ${node_version})` : "";
+  return { ok: false, ...base, differs, reason: `${differs.join(" and ")} ${many ? "differ" : "differs"} from the file${many ? "s" : ""} recorded when the harness registered this ComfyUI${seen}` };
 }
 
 // nodeReadiness: a catalog can only speak for a node that carries the same templates package.
@@ -1809,6 +1807,31 @@ function parseLaunchArgs(rawArgs) {
   return out;
 }
 
+// ruleFileHashes: the SHA-256 of each ComfyUI rule file's text (null when it cannot be read). The files are compared
+// across operating systems, so line endings are normalised first: the same file is CRLF on a Windows node and LF on a
+// Linux one.
+function ruleFileHashes(dir, io) {
+  const out = {};
+  for (const [label, key] of RULE_FILES) {
+    let text = null;
+    try { text = io.readText(joinPath(dir, label)); } catch { text = null; }
+    out[key] = text === null ? null : createHash("sha256").update(text.replace(/\r\n/g, "\n")).digest("hex");
+  }
+  return out;
+}
+
+// readRuleFileRecord: what record-rules wrote beside the checkout, as the snapshot's hash keys, or null when there is no
+// readable record.
+function readRuleFileRecord(dir, io) {
+  let parsed;
+  try { parsed = JSON.parse(io.readText(joinPath(dir, COMFYUI_RULE_FILE_RECORD))); } catch { return null; }
+  const files = parsed?.comfyui_rule_files;
+  if (!files || typeof files !== "object") return null;
+  const out = {};
+  for (const [label, key] of RULE_FILES) out[key] = typeof files[label] === "string" ? files[label] : null;
+  return out;
+}
+
 // snapshotNode: everything readiness needs to know about one node, read from disk and nothing
 // else: the ComfyUI version, hashes of the two ComfyUI files whose rules the readiness check
 // reproduces, how it was launched (a launch record's flags can move the models or add yaml files),
@@ -1818,9 +1841,6 @@ export function snapshotNode({ comfyDir, io = nodeIo }) {
   const dir = normalizePath(comfyDir);
   const read = (p) => { try { return io.readText(p); } catch { return null; } };
   const hash = (p) => { try { return io.exists(p) ? io.sha256(p) : null; } catch { return null; } };
-  // The two ComfyUI rule files are compared across operating systems, so hash their text with line
-  // endings normalised: the same file is CRLF on a Windows node and LF on a Linux one.
-  const textHash = (p) => { const t = read(p); return t === null ? null : createHash("sha256").update(t.replace(/\r\n/g, "\n")).digest("hex"); };
   const comfyui_version = /__version__\s*=\s*["']([^"']+)["']/.exec(read(joinPath(dir, "comfyui_version.py")) ?? "")?.[1] ?? null;
   let launch = null;
   const record = read(joinPath(dir, ".offload-launch.json"));
@@ -1851,7 +1871,8 @@ export function snapshotNode({ comfyDir, io = nodeIo }) {
     schema_version: 1,
     comfy_dir: dir,
     comfyui_version,
-    comfy_files: { folder_paths_sha256: textHash(joinPath(dir, "folder_paths.py")), extra_config_sha256: textHash(joinPath(dir, "utils/extra_config.py")) },
+    comfy_files: ruleFileHashes(dir, io),
+    comfy_rule_files_recorded: readRuleFileRecord(dir, io),
     launch,
     package: located
       ? { site_packages: located.sitePackages, templates_dir: located.templatesDir, versions: readPackageVersions(located.sitePackages, io), stamp: stampFor({ templatesDir: located.templatesDir, basis: "installed-package", io }) }
@@ -1887,15 +1908,16 @@ function parseArgs(argv) {
 
 const USAGE = `usage: templates-catalog <verb> [options]
 
-Lists and classifies the ComfyUI workflow templates a node carries. It is read-only: it never runs
-a template, downloads a model, installs a package or changes a config. The only file it writes is
-the one named by --out.
+Lists and classifies the ComfyUI workflow templates a node carries. It never runs
+a template, downloads a model, installs a package or changes a config. The only files it writes are
+the one named by --out and, for record-rules, the rule-file record.
 
 verbs:
   summary    counts, each labelled with the package it was computed on
   list       the templates; FLUX-family ones are hidden unless --include-hidden, and so are paid API ones, except that --kind api lists them without --include-hidden
   catalog    the full catalog as JSON
   snapshot   one node's package versions, API node ids, model directories and model files, as JSON
+  record-rules  record the hashes of a ComfyUI folder's two rule files (--comfy-dir DIR) in .offload-rule-files.json there; run when a checkout is registered or refreshed
   readiness  what each node (--snapshot FILE, repeatable, or LABEL=FILE) could run: --mode directory-aware | basename-only | both
   diff       what a candidate package (--candidate-dir DIR) adds, removes and changes, and which templates it would break on each --snapshot node
 
@@ -2022,7 +2044,7 @@ export async function main(argv, { io = nodeIo, out = (s) => process.stdout.writ
   const verb = positional[0];
   if (flags.help || verb === "help") { out(USAGE); return 0; }
   if (verb === undefined) { err(USAGE); return 2; }
-  const verbs = { summary: verbSummary, list: verbList, catalog: verbCatalog, snapshot: verbSnapshot, readiness: verbReadiness, diff: verbDiff };
+  const verbs = { summary: verbSummary, list: verbList, catalog: verbCatalog, snapshot: verbSnapshot, "record-rules": verbRecordRules, readiness: verbReadiness, diff: verbDiff };
   const run = Object.hasOwn(verbs, verb) ? verbs[verb] : undefined;
   if (!run) { err(`unknown verb "${verb}"\n${USAGE}`); return 2; }
   try {
@@ -2074,6 +2096,28 @@ async function verbSnapshot(flags, io, out, err) {
   const snapshot = snapshotNode({ comfyDir: flags["comfy-dir"], io });
   if (typeof flags.label === "string") snapshot.label = flags.label;
   return emit(JSON.stringify(snapshot), flags, io, out, err);
+}
+
+// record-rules: run when the harness registers or refreshes a ComfyUI checkout. Writes {comfyui_rule_files: {file: sha256}}
+// to COMFYUI_RULE_FILE_RECORD in the ComfyUI folder, hashed the way snapshotNode hashes them; readiness compares later
+// snapshots with it.
+async function verbRecordRules(flags, io, out, err) {
+  if (typeof flags["comfy-dir"] !== "string") { err("give --comfy-dir\n"); return 2; }
+  const dir = normalizePath(flags["comfy-dir"]);
+  if (!io.list(dir)) { err(`cannot read ${flags["comfy-dir"]}\n`); return 2; }
+  const hashes = ruleFileHashes(dir, io);
+  const unreadable = RULE_FILES.filter(([, key]) => hashes[key] === null).map(([label]) => label);
+  if (unreadable.length > 0) { err(`not a ComfyUI tree: ${flags["comfy-dir"]} (cannot read ${unreadable.join(", ")})\n`); return 2; }
+  let versionText = "";
+  try { versionText = io.readText(joinPath(dir, "comfyui_version.py")); } catch { versionText = ""; }
+  const record = {
+    schema_version: 1,
+    comfyui_version: /__version__\s*=\s*["']([^"']+)["']/.exec(versionText)?.[1] ?? null,
+    comfyui_rule_files: Object.fromEntries(RULE_FILES.map(([label, key]) => [label, hashes[key]])),
+    recorded_at: new Date().toISOString(),
+  };
+  io.writeText(joinPath(dir, COMFYUI_RULE_FILE_RECORD), `${JSON.stringify(record, null, 2)}\n`);
+  return emit(JSON.stringify(record), flags, io, out, err);
 }
 
 // --snapshot FILE or --snapshot LABEL=FILE, repeatable. A file without a label is named after itself.

@@ -3,7 +3,7 @@
 ## Purpose
 
 How `offload_run_graph` takes a caller-supplied ComfyUI graph plus a Node Manifest, makes the
-environment real (node packs from admitted repositories, model files present), runs the graph, and returns
+environment real (node packs from allowlisted repositories, model files present), runs the graph, and returns
 node-addressed outputs — or a typed Defer explaining precisely what it could not satisfy.
 
 This is the generic primitive that lets a workflow repository own graph authoring while the harness
@@ -25,14 +25,14 @@ environment.
 ## Step-by-step flow
 
 1. **Parse the manifest.** Normalized to `schema_version`, `workflow`, `comfyui_min_version`,
-   `node_packs[{name, repo, commit}]`, and `models[{path, source_url, sha256}]`. `repo` and `commit`
-   are required per pack; `name` is derived from the repository when absent. Only `path` is required
+   `node_packs[{name, repo}]`, and `models[{path, source_url, sha256}]`. `repo`
+   is required per pack; `name` is derived from the repository when absent. A `commit` on a pack is accepted and not read. Only `path` is required
    per model — `sha256` defaults to null.
 
-1a. **Refuse any pack that is not admitted.** A pack makes the node clone its repository and install its requirements, which is
+1a. **Refuse any pack that is not on the allowlist.** A pack makes the node clone its repository and install its requirements, which is
    the caller's code running on the node, so a pack is taken only when its `repo` is a row of
-   `render/node-packs.json` (an exact string, the row's directory name or the one the repository gives it); the commit that
-   was checked out is recorded at install, not compared with a literal (ADR 0099). A fleet node refuses an unadmitted pack at the door (`400` naming the pack, before a job or a temp file exists:
+   `render/node-packs.json` (exact string, and the row's directory name or the one the repository gives
+   it). A fleet node refuses an unlisted pack at the door (`400` naming the pack, before a job or a temp file exists:
    `mediacap.CheckManifestNodePacks`), and the satisfier refuses again before the first tooling probe, model download or git
    command with the typed defer `NODE_PACK_NOT_ALLOWED` (`ref` = the pack). The table holds the packs the shipped graph builders
    need; a workflow that needs another adds a reviewed row to the file and to its Go copy.
@@ -70,17 +70,22 @@ environment.
    `source_url` → `MODEL_DOWNLOAD_FAILED`. Models downloaded without a declared hash are reported as
    `unverified_models` in the success envelope rather than silently trusted.
 
-5. **Clone or check out each node pack** from its admitted repository (the commit is recorded). A pack is considered changed by
-   comparing git HEAD before and after — a same-commit checkout is correctly a no-op. Packs are placed
-   *before* dependency resolution, because the unified resolve reads their on-disk requirements.
+5. **Clone each node pack the node does not hold yet** at the head of its repository's default branch. A pack already on
+   disk is used as it is: a render request never moves an installed pack, so a caller holding only the render bearer
+   cannot make a node fetch and run whatever an upstream pushed a minute ago. Moving a pack to a newer commit is the
+   operator's update (`git -C custom_nodes/<name> pull --ff-only`, or the fleet's update tooling). The commit a pack is at
+   is recorded beside it in `custom_nodes/<name>.installed.json` (`{repo, commit, installed_at}`, rewritten only when the
+   commit changes), and the dependency marker is keyed on it, so a pack the operator moved is re-resolved on the next
+   request that names it. A fresh clone is a change; an installed pack is not. Packs are placed *before* dependency
+   resolution, because the unified resolve reads their on-disk requirements.
 
 6. **Resolve and install dependencies once**, for all packs together, under host-pin constraints that
    prevent anything moving `torch`, `torchvision`, `torchaudio`, or `numpy`. The resolve runs on
    every satisfy EXCEPT the proven re-run: it is skipped only when no checkout moved AND a
-   **persisted marker** proves this exact requirement set was already resolved+checked successfully.
+   **persisted marker** proves this exact set of pack commits was already resolved+checked successfully.
    `uv` resolves; `python -m pip` installs. The marker (`<venv>/.offload-deps-satisfied` — it
-   attests venv state, so it lives inside the venv and dies with it; holding the requirement set
-   key `name@commit|…`), written ONLY after a fully successful resolve+check — "git didn't move this
+   attests venv state, so it lives inside the venv and dies with it; holding the pack-set
+   key `name@commit|…`, built from the commits the checkout stage reports), written ONLY after a fully successful resolve+check — "git didn't move this
    run" alone proves nothing: a prior run that checked packs out and failed before installing must
    still resolve. A tripwire re-checks the held host versions afterward with full local versions; the cheap
    `pip check` coherence gate always runs. Failure → `VENV_INCOHERENT`. See
@@ -90,7 +95,7 @@ environment.
    after a long batch was misreported as venv incoherence): if a satisfier subprocess (git, uv,
    pip) fails to *start*, it is retried once after 500 ms, then defers **`SATISFIER_SPAWN_FAILED`**
    — never `VENV_INCOHERENT`, because "the check could not run" says nothing about the venv. One
-   deliberate, narrow fail-open: when the requirement set is unchanged AND the satisfied-marker proves it
+   deliberate, narrow fail-open: when the pack set is unchanged AND the satisfied-marker proves it
    was previously resolved+checked, a coherence check whose subprocess fails to spawn yields a
    `warning` (stderr `SATISFY WARN`) instead of a defer. Anything unproven fails closed. The git
    checkout stage is deliberately NOT retried — a retry would recompute its HEAD-before against its
@@ -149,7 +154,8 @@ a `diffusion_models` file under `models/unet` and a `text_encoders` file under `
 
 ## Data and state changes
 
-Node packs cloned into ComfyUI's custom-nodes directory from admitted repositories; Python packages installed
+Node packs cloned into ComfyUI's custom-nodes directory at the head of their default branch, each with a
+`<name>.installed.json` record of the commit it got; Python packages installed
 into its virtual environment (additively); model files and `.sha-ok` sentinels written under the
 ComfyUI tree; outputs written to `out_dir`. Successful renders also record a VRAM footprint
 observation.
@@ -222,8 +228,8 @@ access for pack clones and model downloads.
 ## Security and privacy notes
 
 This is a **trusted-caller interface**: it executes caller-supplied graphs and installs
-caller-specified code from caller-specified repositories at caller-specified commits. Pinning to exact
-commits is what makes it auditable; it is not a sandbox. Do not expose it to an untrusted caller.
+code from repositories the node allowlists (`render/node-packs.json`, no commit is read from the caller). The allowlist and
+the recorded commit are what make it auditable; it is not a sandbox. Do not expose it to an untrusted caller.
 
 ## Observability and debugging
 

@@ -1,5 +1,7 @@
 # Browse lane (offload_browse + agent `browse`) Implementation Plan
 
+2026-10-28: the exact pins and `uv.lock` this plan describes were replaced by floors and install-time resolution (ADR 0099); the mechanism below is history.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 >
 > **Superseded 2026-10-18 by the no-more-testing rule (AGENTS.md, Testing rule):** skip every step below that writes a test, proves red-first, runs a mutation check, runs a review round or runs a gate beyond CI. The check is one real run of the change.
@@ -7,7 +9,7 @@
 **Goal:** Let an MCP caller and the coding-agent seat drive the operator's own, already-running
 Chromium browser toward a natural-language goal, as an explicit opt-in lane.
 
-**Architecture:** The harness spawns a Python sidecar (newest dependencies, floors only) (`setup/browse/runner.py`, built on
+**Architecture:** The harness spawns a Python sidecar on floor-only dependencies, newest at install (`setup/browse/runner.py`, built on
 browser-use's `jev-ultrafast` agent loop and `browser-harness` CDP client) with a scrubbed environment.
 The sidecar owns the browser; the harness owns every model call. Over a JSON-lines stdio protocol
 the sidecar asks the harness for (a) a typed decision, which the harness proxies to a configured
@@ -57,9 +59,9 @@ diagnostic tail only.
 
 | File | Responsibility |
 |---|---|
-| `setup/browse/runner.py` | Sidecar: browser resolution, deny filter, host check, capture + redaction, jev-ultrafast loop with harness-backed `post_json`/`field_text`. Pure helpers importable without the browser dependencies. |
+| `setup/browse/runner.py` | Sidecar: browser resolution, deny filter, host check, capture + redaction, jev-ultrafast loop with harness-backed `post_json`/`field_text`. Pure helpers importable without the sidecar's deps. |
 | `setup/browse/test_runner.py` | stdlib `unittest` for the pure helpers and the protocol. |
-| `setup/browse/pyproject.toml` | Dependencies: `browser-harness` and `jev-ultrafast`, floors only (`>=`), the newest at install; no lockfile (ADR 0099). |
+| `setup/browse/pyproject.toml` | Floors: `browser-harness>=0.1.13`, `jev-ultrafast` from its git default branch; newest at install, no lockfile (the pins and `uv.lock` this plan first named are gone; ADR 0099). |
 | `setup/browse/install.ps1` | Opt-in install into `<OFFLOAD_HOME>/browse` (`uv sync`), prints the config keys. |
 | `internal/config/config.go` | `browse_*` keys, `agent_allow_browse`, `BrowseConfigured()`, load warning. |
 | `internal/core/types.go` | `TaskBrowse`. |
