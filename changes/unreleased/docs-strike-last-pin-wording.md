@@ -10,5 +10,9 @@
   version; the installed build; the size the installer recorded. The vendored HyperFrames kit and the ContextBench port
   name the commit they were taken from as their source commit (provenance, not a pin; the kit test still checks the
   same hashes).
+- **Engine build instructions.** `setup/SETUP-AGENT.md` told an agent to build audio.cpp "from the v0.9.1 tag (the
+  measured release)" and named sd.cpp master-945 and audio.cpp v0.9.1 as "the measured releases"; it now says to take
+  the newest release of each, keeps the measured ones as a record, and asks to check the ACE-Step prefill patch against
+  the tag being built (`patch -p1 --dry-run`). `docs/systems/media-generation.md` says the same.
 - **Also.** A llama-swap swap on a node that stops its scheduled task first no longer logs "no running process found"
   after ending the task: it says no process was left after ending the task.
