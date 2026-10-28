@@ -39,6 +39,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/forecastclient"
 	"github.com/dmmdea/offload-harness/internal/gbnf"
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
@@ -946,6 +947,35 @@ func (p *Pipeline) visionModelFor(t core.TaskType) string {
 	return p.cfg.VisionModel
 }
 
+// visionRunOrigin is a vision record's Origin: the door, then whom the work is for. A node's
+// call for another box names the asker and the job; a call on its own box names the parent
+// process, which for a CLI call is the script that loops it (on 2026-10-28 finding that
+// script took a walk of the process table).
+func visionRunOrigin(req core.Request) string {
+	door := req.Door
+	if door == "" {
+		door = string(req.Task)
+	}
+	if req.Requester != "" || req.FleetJobID != "" {
+		return strings.TrimSpace(fmt.Sprintf("%s for %s %s", door, req.Requester, req.FleetJobID))
+	}
+	return fmt.Sprintf("%s, parent pid %d", door, os.Getppid())
+}
+
+// visionRunGoal is a vision record's Goal: the question when the task asks one, else the
+// name of the file it reads (never an inline data URI).
+func visionRunGoal(req core.Request) string {
+	if q, ok := req.Params["question"].(string); ok && strings.TrimSpace(q) != "" {
+		return q
+	}
+	for _, src := range []string{req.Image, req.Video} {
+		if src != "" && !strings.HasPrefix(src, "data:") {
+			return string(req.Task) + " " + filepath.Base(src)
+		}
+	}
+	return string(req.Task)
+}
+
 // visionPlaced is the documentary placement of a vision call on a composite
 // box (placement row 3: ocr → the single layer's ocr seat, everything else →
 // the pair's vision seat), with Seat = the alias that actually ran so the
@@ -1081,6 +1111,12 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 		p.recordDefer(req.Task, meta, len(req.Input), reason)
 		return core.Deferf(reason, "", meta)
 	}
+
+	// The call is on its seat from here to its return: registered (gpuactivity.KindVision), so
+	// `gpu status`, `offload_status` and a node's health name it and who asked for it. A cache
+	// hit and a lease defer above never reach the seat and are not registered.
+	act := gpuactivity.Start(p.cfg.GPULockPath, p.cfg.StateDir, gpuactivity.Run{Seat: meta.Model, Kind: gpuactivity.KindVision, Origin: visionRunOrigin(req), Goal: visionRunGoal(req)})
+	defer act.End()
 
 	// F49: a COLD vision seat is loaded BEFORE the request is sent, not inside it. The seat
 	// unloads after its idle ttl, and llama-swap holds the first request open for the whole

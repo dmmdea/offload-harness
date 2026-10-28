@@ -220,6 +220,11 @@ type NodeView struct {
 	// (W-31) reads it to tell "busy" from "loaded-idle". 0 = none, or a node
 	// too old to publish it — the pre-0.127 reading either way.
 	JobsAdmitting int
+	// VisionCallsRunning is health `vision_calls_running`: single-shot vision calls other processes
+	// on the node have on a seat (a CLI loop, an MCP server's offload_vqa), outside its job store.
+	// Status adds it to the node's in_flight; no placement rule reads it. 0 = none, or a node too old
+	// to publish it.
+	VisionCallsRunning int
 	// SeatLoaded / SeatStarting mirror health `seat_loaded`/`seat_starting`
 	// (0.127): what the node's last /running read said about the agent seat.
 	// POINTERS: nil is UNKNOWN (the read never happened, or failed), and must
@@ -658,6 +663,7 @@ type healthWire struct {
 	// the zero value — 0/nil/false — which the gate/placement code reads as
 	// UNKNOWN, never as a limit or a verdict.
 	JobsAdmitting        int      `json:"jobs_admitting"`
+	VisionCallsRunning   int      `json:"vision_calls_running"`
 	SeatLoaded           *bool    `json:"seat_loaded"`
 	SeatStarting         *bool    `json:"seat_starting"`
 	LeaseExclusive       bool     `json:"lease_exclusive"`
@@ -751,6 +757,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		Local:          false,
 
 		JobsAdmitting:        w.JobsAdmitting,
+		VisionCallsRunning:   w.VisionCallsRunning,
 		SeatLoaded:           w.SeatLoaded,
 		SeatStarting:         w.SeatStarting,
 		LeaseExclusive:       w.LeaseExclusive,

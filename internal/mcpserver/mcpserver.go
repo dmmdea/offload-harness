@@ -1378,6 +1378,11 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 		inFlight, verdict := nodeVerdict(r.view)
 		n["in_flight"] = inFlight
 		n["verdict"] = verdict
+		if r.view.VisionCallsRunning > 0 {
+			// The part of in_flight that is no job of the node: say it, so a busy node with
+			// jobs_running 0 is not unexplained.
+			n["vision_calls_running"] = r.view.VisionCallsRunning
+		}
 		// Register A-103: did the node's boot-time GPU power profile take. One short token per node ("ok", "skipped"
 		// or "unknown"), so the brief form carries it too; the reason follows only when it is news (a node that
 		// applies no profile reads a bare "unknown"). Absent on a node too old to publish it, which is unknown.
@@ -1478,7 +1483,9 @@ func (s *Server) pinsView() map[string]any {
 // it, including the whole admission phase (cordon, swap pre-flight, cold
 // load, coherence probe) where the card may still be idle; jobs_admitting is
 // exactly that subset, so subtracting it is what turns "a worker is nominally
-// busy" into "a card is actually generating".
+// busy" into "a card is actually generating". vision_calls_running is added: a
+// vision call another process on the node has on a seat (a CLI loop, an MCP
+// server) is in that registry too, and is no job of the node's store.
 //
 // verdict vocabulary: busy (in_flight > 0) | held-idle (a lease is held —
 // exclusive, draining, or a plain reservation the node itself calls busy —
@@ -1490,6 +1497,7 @@ func nodeVerdict(v delegate.NodeView) (inFlight int, verdict string) {
 	if inFlight < 0 {
 		inFlight = 0
 	}
+	inFlight += v.VisionCallsRunning
 	switch {
 	case inFlight > 0:
 		return inFlight, "busy"
