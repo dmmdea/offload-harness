@@ -217,6 +217,16 @@ type Params struct {
 	// any vLLM seat is set (the lane seat or an extra one): Render refuses an incomplete one,
 	// because an entry rendered from it names no seat directory and no address.
 	VLLMRuntime vllmseat.Runtime
+
+	// OmitE4B removes the offload-e4b workhorse entry: its model block, its matrix var
+	// and its set membership (the __E4B_LEAD__ / __E4B_AND__ tokens render empty). It is
+	// the INVERTED-polarity gate of the include_* family: false (absent) renders every
+	// template exactly as before, so no existing tier moves. It comes from the tier's
+	// omit_e4b field and exists for a card the E4B cannot load at all (the 3 GB band:
+	// 3,100 MiB at 16K on the reference 6 GB node, measured 2026-07-26), where the
+	// tier's resident_tier is gemma4-e2b. Refused with AltCPULlamaBin (the CPU seat
+	// family mirrors the workhorse) and on a template that carries neither token.
+	OmitE4B bool
 }
 
 // seatAnchors is the TEMPLATE's own declaration of which residency roles it can
@@ -330,6 +340,12 @@ func Render(tmpl string, p Params) (string, error) {
 	if !p.IncludeQ3635B {
 		var err error
 		if out, err = dropQ3635B(out); err != nil {
+			return "", err
+		}
+	}
+	if p.OmitE4B {
+		var err error
+		if out, err = dropE4B(out); err != nil {
 			return "", err
 		}
 	}
@@ -559,7 +575,23 @@ func Render(tmpl string, p Params) (string, error) {
 		}
 		eg2and = " & eg2"
 	}
+	// The workhorse's set membership: `e4b | ` opening a swappable alternation and
+	// ` & e4b` inside a residents conjunction. Both render their literal unless the tier
+	// omits the E4B, in which case a template that carries neither token would keep a
+	// bare `e4b` var the drop above removed, a config llama-swap rejects at startup:
+	// refuse by name instead.
+	e4bLead, e4bAnd := "e4b | ", " & e4b"
+	if p.OmitE4B {
+		if !strings.Contains(out, "__E4B_LEAD__") && !strings.Contains(out, "__E4B_AND__") {
+			return "", fmt.Errorf("this tier sets omit_e4b but the target serving template carries no "+
+				"__E4B_LEAD__ / __E4B_AND__ set token, so the `e4b` var it removes would stay referenced in a set "+
+				"(a config llama-swap rejects at startup) — tokenize the template's e4b set membership, or drop omit_e4b from the tier")
+		}
+		e4bLead, e4bAnd = "", ""
+	}
 	for from, to := range map[string]string{
+		"__E4B_LEAD__":          e4bLead,
+		"__E4B_AND__":           e4bAnd,
 		"__EG2_AND__":           eg2and,
 		"__M26_ALT__":           m26alt,
 		"__M26_AND__":           m26and,
@@ -692,6 +724,12 @@ func (p Params) validate() error {
 	}
 	if len(p.Seats) > 0 && p.Home == "" && seatsNeedHome(p.Seats, p.RknpuHome) {
 		missing = append(missing, "install home (a media seat names a path under "+tokenHome+" or "+tokenRknpuHome+")")
+	}
+	// The CPU seat family mirrors the workhorse (altCPUSeats) and refuses a template
+	// without it; a tier that omits the E4B therefore has no CPU twin to render.
+	if p.OmitE4B && p.AltCPULlamaBin != "" {
+		missing = append(missing, "a workhorse for the CPU seat family (omit_e4b and --llama-bin-cpu are both set, "+
+			"but the CPU family mirrors offload-e4b — drop one)")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("serving template needs: %s", strings.Join(missing, ", "))
@@ -1520,6 +1558,21 @@ const modelQ3635B = "qwen3.6-35b-a3b-agent"
 // Q3827B strip. Its set membership is handled by the __Q3635B_ALT__ token.
 func dropQ3635B(tmpl string) (string, error) {
 	return dropModel(tmpl, modelQ3635B)
+}
+
+// modelE4B is the offload-e4b workhorse entry every template defines. Unlike the gated
+// entries above it is PRESENT by default and removed only by the tier's omit_e4b.
+const modelE4B = "offload-e4b"
+
+// dropE4B removes the workhorse entry — the same strip as the gated agent seats, in
+// the other polarity. Its set membership is handled by the __E4B_LEAD__ / __E4B_AND__
+// tokens. The entry's `gemma4-e4b` alias goes with the block, so a config bound to
+// the alias routes nowhere: the tier's config_seed names the resident E2B instead.
+func dropE4B(tmpl string) (string, error) {
+	if !definesModel(tmpl, modelE4B) {
+		return "", fmt.Errorf("this tier sets omit_e4b but the target serving template defines no `%s` entry to omit", modelE4B)
+	}
+	return dropModel(tmpl, modelE4B)
 }
 
 // modelEG2 is the second memory-stack embedder: EmbeddingGemma-2 Q8_0, with its multimodal

@@ -675,6 +675,18 @@ function Resolve-ProfileParams {
     elseif ($moeMode -eq 'n_cpu_moe') { $moeStr = "--n-cpu-moe $([int]$p.n_cpu_moe) -ngl 999" }
   }
 
+  # omit_e4b (the 3GB band): the tier drops the offload-e4b workhorse entry AND its GGUF download.
+  # STRICT bool like the include_* gates ([bool]'false' is $true in PowerShell): only a JSON true
+  # omits, absent/null keeps the workhorse, anything else is a malformed profile and fails loud.
+  $omitVal = $p.omit_e4b
+  if ($null -ne $omitVal -and -not ($omitVal -is [bool])) {
+    throw "profile '$ProfileId': omit_e4b must be a JSON boolean, got '$omitVal' ($($omitVal.GetType().Name)) - fix setup/templates/profiles.json"
+  }
+  $omitE4B = ($omitVal -is [bool] -and $omitVal)
+  if ($omitE4B -and $p.resident_tier -ne 'gemma4-e2b') {
+    throw "profile '$ProfileId': omit_e4b drops the workhorse, so resident_tier must be gemma4-e2b (got '$($p.resident_tier)')"
+  }
+
   return @{
     known         = $true
     ctx           = "$($p.ctx_size)"
@@ -686,6 +698,7 @@ function Resolve-ProfileParams {
     dual          = [bool]$p.dual_resident
     resident_tier = $p.resident_tier
     include_26b   = $include
+    omit_e4b      = $omitE4B
     moe_26b       = $moeStr
     moe_mode      = $moeMode
     notes         = $p.notes
@@ -1578,7 +1591,15 @@ $manifestComponents['llama-swap'] = $SWAP_TAG
 # ---------------------------------------------------------------------------
 # $pp (resolved above the artifact steps) decides the 26B: it is fetched only when the
 # yaml Step 6 renders will serve it (include_26b after the RAM gate).
-$modelKeys = @('model-e4b', 'model-embed')
+# The E4B workhorse is in every download set EXCEPT on a tier that omits it (omit_e4b: the 3GB
+# band, whose card cannot load it) - the renderer drops its entry on the same flag, so the
+# download set and the served roster stay in step (the include_26b rule, inverted).
+$modelKeys = @('model-embed')
+if ([bool]$pp.omit_e4b) {
+  Write-Host "SKIP  model: gemma-4-E4B (profile '$profileId' omits the workhorse: omit_e4b; resident is $($pp.resident_tier))" -ForegroundColor DarkGray
+} else {
+  $modelKeys = @('model-e4b') + $modelKeys
+}
 $modelKeys += @(Get-FamilyModelKeys -WithFamily $withFamily -Include26B ([bool]$pp.include_26b))
 if ($withFamily -and -not $pp.include_26b) {
   Write-Host "SKIP  model: gemma-4-26B (profile '$profileId' drops the 26B: moe_26b=$($pp.moe_mode), ram_tier=$ramTier)" -ForegroundColor DarkGray
