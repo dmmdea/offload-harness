@@ -114,19 +114,21 @@ $PINNED = @{
   # API at pin time, e.g. https://huggingface.co/api/models/<repo>/tree/main?recursive=true
   # (no model bytes downloaded to pin). 'name' = local filename (the template contract); for
   # embeddinggemma the source file is capital-M but we save it lowercase-m to match.
+  # E4B/E2B re-pinned 2026-10-28 from the HF tree API: unsloth re-uploaded both GGUFs (2,016 bytes
+  # larger, new LFS oids), so the previous pins failed the size check on a fresh install.
   'model-e4b' = @{
     url  = 'https://huggingface.co/unsloth/gemma-4-E4B-it-qat-GGUF/resolve/main/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf'
     name = 'gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf'
-    size = 4215693760
-    sha  = 'b3052f962d6449b4eb2075733c068bdec1c51eadb7b237e6c3157bfbb7b1dae0'
-    version = 'b3052f96'
+    size = 4215695776
+    sha  = 'df0fd4ee07072c607c29a0a1cb4f98918426cca12f45a2776bdd6ee6d09a4de3'
+    version = 'df0fd4ee'
   }
   'model-e2b' = @{
     url  = 'https://huggingface.co/unsloth/gemma-4-E2B-it-qat-GGUF/resolve/main/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf'
     name = 'gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf'
-    size = 2620368960
-    sha  = 'cd4526493dccbfd6791bee8822e37e30340074d1d4d9aada52ce09afefd6a33a'
-    version = 'cd452649'
+    size = 2620370976
+    sha  = 'e531007218dfab990486a5de7676a6932d6ea8dea233d1f698d7c21cf8a16889'
+    version = 'e5310072'
   }
   'model-26b' = @{
     url  = 'https://huggingface.co/unsloth/gemma-4-26B-A4B-it-qat-GGUF/resolve/main/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf'
