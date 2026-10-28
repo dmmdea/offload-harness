@@ -47,7 +47,12 @@
   attestation result is reported and ratchets (a once-attested publisher that stops attesting is rejected); the npm
   version must be a semver; a `--repoint` backup keeps the yaml's file mode and the gate's job file carries no seat
   environment; a lock older than three hours is taken over; timeouts, out-of-memory answers and busy seats are
-  inconclusive (rolled back, retried), never a rejection.
+  inconclusive (rolled back, retried), never a rejection. The post-flip watch loads the seat through the GPU-lease
+  fence (`modelaffinity.AwaitModelRoute`), so a render that took the cards after the gate never gets a model loaded
+  onto them; the gate's own side-port requests live in `internal/update/sideport.go`, admitted by the fence lint.
+  With no `--home` and no `$OFFLOAD_HOME`, the install root is the folder above the running binary's `bin` when it
+  holds the installer's `installed.json`, else `~/offload-stack` when that holds one; no root found is exit 2, never a
+  fresh install in a guessed folder.
 - **Not in this change.** The installers and the fleet registry rows.
 - **Known gap.** After a rejected llama build the gate's `gpu reserve` wrapper still warms the old seat back and the next
   flip unloads it again; a "no warm-back on reject" option belongs to `gpu reserve` (follow-up).

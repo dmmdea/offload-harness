@@ -12,6 +12,7 @@ import (
 
 	"llamaswap-pp-cli/pkg/llamaswap"
 
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -175,9 +176,16 @@ func (e *Env) WatchFirstLoad(ctx context.Context, live string) (note string, err
 		return "first load not watched: llama-swap is not answering", nil
 	}
 	timeout := e.Config.Gate.PostFlipTimeoutOr()
-	base := swapclient.BaseURL(e.Endpoint)
 	started := time.Now()
-	r := chat(ctx, base, seat.ID, readyPrompt, 16, false, timeout)
+	// The watch runs after the gate released its GPU lease, so a render may hold the cards by now. The completion that
+	// loads the seat goes through the fence (modelaffinity.AwaitModelRoute): it waits, up to the post-flip timeout,
+	// for the fence to lift or the seat to be resident, and never loads a model onto a fenced card. Still fenced at
+	// the deadline is soft: rolled back, not rejected, retried next run.
+	chatURL, ferr := modelaffinity.AwaitModelRoute(ctx, e.Endpoint, seat.ID, "/v1/chat/completions", started.Add(timeout))
+	if ferr != nil {
+		return "", softError{fmt.Errorf("seat %s was not loaded through llama-swap: %w", seat.ID, ferr)}
+	}
+	r := chat(ctx, chatURL, seat.ID, readyPrompt, 16, false, timeout)
 	if r.Err != "" {
 		err := fmt.Errorf("seat %s did not answer a completion through llama-swap within %s: %s", seat.ID, timeout, r.Err)
 		if r.Soft {
@@ -199,7 +207,12 @@ func (e *Env) WatchFirstLoad(ctx context.Context, live string) (note string, err
 	}
 	hctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	if req, herr := http.NewRequestWithContext(hctx, http.MethodGet, base+"/upstream/"+seat.ID+"/health", nil); herr == nil {
+	// The seat is resident now, so the fence lets this through at once.
+	healthURL, uerr := modelaffinity.AwaitUpstream(hctx, e.Endpoint, seat.ID, "/health", time.Now().Add(15*time.Second))
+	if uerr != nil {
+		return fmt.Sprintf("first load watched: seat %s answered through llama-swap in %.0f s (its /health was not read: %v)", seat.ID, time.Since(started).Seconds(), uerr), nil
+	}
+	if req, herr := http.NewRequestWithContext(hctx, http.MethodGet, healthURL, nil); herr == nil {
 		if resp, derr := localClient().Do(req); derr == nil {
 			_ = resp.Body.Close()
 			if resp.StatusCode >= 500 {

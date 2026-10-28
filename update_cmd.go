@@ -4,6 +4,7 @@ import (
 	"context"
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -36,7 +37,7 @@ func runUpdate(args []string) error {
 	noGate := fs.Bool("no-gate", false, "skip the side-port smoke gate (the GPU lease and the measured comparison with the previous llama build); the offline self-check and the post-flip watch still run")
 	gateChild := fs.String("gate-child", "", "internal: run the smoke measurement from this job file; started by the smoke gate under the GPU lease")
 	gateResult := fs.String("gate-result", "", "internal: where --gate-child writes its verdict")
-	home := fs.String("home", "", "the install root (default $OFFLOAD_HOME, else ~/offload-stack)")
+	home := fs.String("home", "", "the install root (default $OFFLOAD_HOME, else the folder above this binary's bin/ when it holds installed.json, else ~/offload-stack when it holds one)")
 	if err := fs.Parse(args); err != nil {
 		return &exitCodeError{code: 2, msg: "update: " + err.Error()}
 	}
@@ -71,17 +72,11 @@ func runUpdate(args []string) error {
 	} else {
 		fmt.Fprintln(os.Stderr, "update: config "+cfgPath)
 	}
-	root := *home
-	if root == "" {
-		root = os.Getenv("OFFLOAD_HOME")
+	root, rerr := updateRoot(*home)
+	if rerr != nil {
+		return &exitCodeError{code: 2, msg: "update: " + rerr.Error()}
 	}
-	if root == "" {
-		h, err := os.UserHomeDir()
-		if err != nil {
-			return &exitCodeError{code: 2, msg: "update: no install root: " + err.Error()}
-		}
-		root = filepath.Join(h, "offload-stack")
-	}
+	fmt.Fprintln(os.Stderr, "update: install root "+root)
 	logf := func(f string, a ...any) { fmt.Fprintf(os.Stderr, f+"\n", a...) }
 	env, err := update.NewEnv(root, fc, cfg.Endpoint, floorsJSON, os.Stdout, logf)
 	if err != nil {
@@ -162,6 +157,38 @@ func runUpdateRepoint(env *update.Env, yamlPath string, opts update.Options) err
 
 // updateConfigPath is the config the update verb reads: an explicit --config, else $LOCAL_OFFLOAD_CONFIG, else the
 // operator's own ~/.local-offload/config.json; the current directory's config.json is never a candidate here.
+// updateRoot is the install root the verb works on: --home, else $OFFLOAD_HOME, else the folder above the running
+// binary when the binary sits in <root>/bin beside the installer's installed.json (the installers' layout, and how the
+// fleet registry calls the verb: over ssh, with no environment), else ~/offload-stack when it holds an installed.json.
+// A root that cannot be found is an error: the verb never starts a fresh install in a guessed folder (with the
+// variable unset, an earlier build put a second llama under the user profile, on the system drive).
+func updateRoot(flagHome string) (string, error) {
+	if flagHome != "" {
+		return flagHome, nil
+	}
+	if v := strings.TrimSpace(os.Getenv("OFFLOAD_HOME")); v != "" {
+		return v, nil
+	}
+	holdsManifest := func(dir string) bool {
+		_, err := os.Stat(filepath.Join(dir, "installed.json"))
+		return err == nil
+	}
+	if exe, err := os.Executable(); err == nil {
+		if real, rerr := filepath.EvalSymlinks(exe); rerr == nil {
+			exe = real
+		}
+		if bin := filepath.Dir(exe); strings.EqualFold(filepath.Base(bin), "bin") && holdsManifest(filepath.Dir(bin)) {
+			return filepath.Dir(bin), nil
+		}
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		if d := filepath.Join(h, "offload-stack"); holdsManifest(d) {
+			return d, nil
+		}
+	}
+	return "", errors.New("no install root: pass --home or set OFFLOAD_HOME (no installed.json beside this binary's bin folder or in ~/offload-stack); nothing was changed")
+}
+
 func updateConfigPath(flagPath string) string {
 	home, _ := os.UserHomeDir()
 	return config.ResolvePath(flagPath, os.Getenv("LOCAL_OFFLOAD_CONFIG"), home, func(p string) bool {

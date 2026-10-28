@@ -458,7 +458,9 @@ type chatResult struct {
 	Soft bool
 }
 
-func chat(ctx context.Context, base, model, prompt string, maxTokens int, noCache bool, timeout time.Duration) chatResult {
+// chat sends one completion to url: the gate's side-port server (sideChatURL) or llama-swap's route as the fence
+// returned it (WatchFirstLoad). It never builds a llama-swap route itself.
+func chat(ctx context.Context, url, model, prompt string, maxTokens int, noCache bool, timeout time.Duration) chatResult {
 	body := map[string]any{"model": model, "messages": []map[string]string{{"role": "user", "content": prompt}},
 		"max_tokens": maxTokens, "temperature": 0, "stream": false}
 	if noCache {
@@ -467,7 +469,7 @@ func chat(ctx context.Context, base, model, prompt string, maxTokens int, noCach
 	b, _ := json.Marshal(body)
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	req, err := http.NewRequestWithContext(cctx, http.MethodPost, base+"/v1/chat/completions", bytes.NewReader(b))
+	req, err := http.NewRequestWithContext(cctx, http.MethodPost, url, bytes.NewReader(b))
 	if err != nil {
 		return chatResult{Err: err.Error()}
 	}
@@ -658,7 +660,7 @@ func measure(ctx context.Context, label, dir string, seat *Seat, port int, loadT
 	s.LoadS = time.Since(start).Seconds()
 
 	// One fixed completion: the answer must exist.
-	r := chat(ctx, base, seat.ID, readyPrompt, 32, false, 3*time.Minute)
+	r := chat(ctx, sideChatURL(base), seat.ID, readyPrompt, 32, false, 3*time.Minute)
 	if r.Err != "" {
 		s.Fault, s.Bad = "completion failed: "+r.Err, !r.Soft
 		return s
@@ -672,7 +674,7 @@ func measure(ctx context.Context, label, dir string, seat *Seat, port int, loadT
 	// Three timed runs of the fixed long prompt, median taken (a tiny prompt's rates are noise).
 	var pre, dec []float64
 	for i := 0; i < 3; i++ {
-		t := chat(ctx, base, seat.ID, timedPrompt(), 64, true, 3*time.Minute)
+		t := chat(ctx, sideChatURL(base), seat.ID, timedPrompt(), 64, true, 3*time.Minute)
 		if t.Err != "" {
 			s.Fault, s.Bad = "timed completion failed: "+t.Err, !t.Soft
 			return s

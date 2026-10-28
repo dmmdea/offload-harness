@@ -40,6 +40,7 @@ local-offload update [--component llama|llama-swap|whisper|sdcpp|hyperframes|all
 | `--channel` | `nightly` (default: the newest complete `b<N>`) or `release` (the build `nightly-tag.txt` names); `update.channel` in `config.json` sets it per node |
 | `--no-gate` | skips the side-port smoke gate (see Gate); prints that it did. The offline self-check and the post-flip watch still run |
 | `--live` | the live path of the one selected component, for a box whose layout is not `<home>/<component>` |
+| `--home` | the install root `<home>`. Default: `$OFFLOAD_HOME`, else the folder above the running binary when it sits in `<home>/bin` beside the installer's `installed.json` (how the installers lay a node out, and how the fleet registry calls the verb over ssh with no environment), else `~/offload-stack` when it holds an `installed.json`. No root found is exit 2 with nothing changed: the verb never starts a fresh install in a guessed folder. It prints the root it chose |
 
 Exit codes: **0** no-op, updated, skipped (no prebuilt for this node), inconclusive (a lease or a busy seat: try
 again) or busy (another run holds `update.lock`); **1** a candidate was rejected or rolled back (loud, with the reason);
@@ -182,7 +183,10 @@ under the generation table.
 **Post-flip watch.** After the flip llama-swap is asked through its own API to unload (with drain) the seats that run
 from the live path, never a kill. The verb then sends one short completion for the same seat through llama-swap
 (which loads it on the new build), checks that llama-swap lists the seat running from the live path and that the
-seat's `/health` through llama-swap is not failing. A failure within `update.gate.post_flip_timeout` rolls back with
+seat's `/health` through llama-swap is not failing. The watch runs after the gate released its GPU lease, so both
+requests go through the fence (`modelaffinity.AwaitModelRoute` and `AwaitUpstream`): while a render holds the cards
+the load waits for the fence to lift, never loads onto a fenced card, and a fence still up at the timeout is
+inconclusive. The gate's own side-port requests are not llama-swap's and need no fence (`internal/update/sideport.go`). A failure within `update.gate.post_flip_timeout` rolls back with
 the reason "post-flip load failed". Nothing to watch (no endpoint, no chat seat, llama-swap down) is a note.
 
 A failure that says nothing about the build is **inconclusive**, not a rejection: a timeout, an out-of-memory answer
