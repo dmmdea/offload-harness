@@ -679,7 +679,8 @@ Last stdout line: `{"installed":true,"backend":"...","home":"...","next":"run se
 
 **What it lays down** under `$OFFLOAD_HOME` (default `$HOME\offload-stack`):
 `llama\llama-server.exe`, `llama-swap\llama-swap.exe`, `models\*.gguf`, `harness\local-offload.exe`,
-`harness\local-agent.exe`, rendered `llama-swap.yaml`, `installed.json` (version manifest),
+`harness\local-agent.exe`, `harness\render\*.mjs` (the render runners every relative `render/*.mjs`
+binding resolves to, the way `install.sh` ships them in `<prefix>/bin/render`), rendered `llama-swap.yaml`, `installed.json` (version manifest),
 `install.log` (full transcript). The harness config is copied to `$HOME\.local-offload\config.json`
 (not overwritten if present — prints SKIP). The harness's **data** (cache, ledger, media, delegation
 log, pipeline jobs) is NOT left under the user profile on the OS drive: a fresh config gets

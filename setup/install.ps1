@@ -1993,6 +1993,23 @@ Step 'build local-offload.exe' `
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
   }
 $manifestComponents['local-offload'] = $repoVersion
+# Step 7a: the render runners beside the harness exe. The shipped defaults are
+# "render/*.mjs", resolved against the EXECUTABLE's directory (gpugen.ResolveScript),
+# so they must ship beside it - exactly what install.sh does for $PREFIX/bin/render.
+# Without this, every media route the config binds (generate_image on the sd.cpp tiers,
+# compose_video wherever Step 7b installs hyperframes) reported BOUND-BUT-MISSING on a
+# fresh Windows install (<node-g>, 2026-10-28). Always refreshed, never SKIPped: a stale
+# runner beside a new exe is the same drift class as a stale exe beside a new profiles.json.
+$renderSrc = Join-Path $repoRoot 'render'
+$renderDst = Join-Path $harnessDir 'render'
+Step 'render runners -> harness\render' { $false } {
+  if (-not (Test-Path $renderSrc)) { throw "no render/ directory at $renderSrc - every media route would report BOUND-BUT-MISSING" }
+  New-Item -ItemType Directory -Force -Path $renderDst | Out-Null
+  Copy-Item -Path (Join-Path $renderSrc '*') -Destination $renderDst -Recurse -Force
+  $runnerCount = @(Get-ChildItem $renderDst -Filter '*.mjs' -File | Where-Object { $_.Name -notlike '*.test.mjs' }).Count
+  if ($runnerCount -lt 1) { throw "render tree copied but no runner (*.mjs) landed in $renderDst" }
+  Write-Host "      $runnerCount runners in $renderDst (relative render/*.mjs bindings resolve here)" -ForegroundColor DarkGray
+}
 # local-agent has no --version verb, so its rebuild gate uses the manifest version
 # idiom instead (same staleness class, same fix shape as every pinned component).
 Step 'build local-agent.exe' `
