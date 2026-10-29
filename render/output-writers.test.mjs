@@ -29,7 +29,7 @@ const ALLOWED = {
   "compose-hyperframes.mjs": [{ writeFileSync: 4, cpSync: 2, renameSync: 1 }, "work-dir files (the template project, the batch rows) and the result JSON's own temp+rename; the delivery move is moveInto -> copyAtomic"],
   "gpu-lock.mjs": [{ writeFileSync: 1 }, "the lease's unload marker"],
   "igpu-engine.mjs": [{ writeFileSync: 1, renameSync: 1 }, "the owner file; deliverFile, the staged-partial rename the other lanes share"],
-  "manifest-satisfy.mjs": [{ writeFileSync: 3, createWriteStream: 1 }, "node-pack and model installs (sha-gated bookkeeping and downloads), not a render output"],
+  "manifest-satisfy.mjs": [{ writeFileSync: 3, createWriteStream: 1, renameSync: 1 }, "node-pack and model installs (publisher-digest-gated bookkeeping; a download goes to a .part file and is renamed into place only once verified), not a render output"],
   "templates-catalog.mjs": [{ writeFileSync: 1 }, "the dev tool that writes the template catalog"],
 };
 

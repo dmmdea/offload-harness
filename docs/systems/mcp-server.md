@@ -1240,8 +1240,8 @@ size and the modification time in `<file>.tofu`, beside the file wherever ComfyU
 size and modification time trusts the record without hashing (a 20 GB file takes minutes to hash on every run). A file whose
 size or time moved is hashed again, and only the recorded hash passes: another hash is refused as `MODEL_SHA_MISMATCH`, naming
 both hashes and the record to delete. The first sighting of a large file pays the hash once. A model whose annotation does
-declare a sha256 is left to the satisfier's own check. The record is not the `.sha-ok` sentinel (which means "matched a declared
-hash") and never makes a model with a declared hash skip its check. The limits: bytes replaced under an unchanged size and time are not seen,
+declare a sha256 is left to the satisfier's own check. The record is not the `.sha-ok` sentinel (which means "matched the digest the publisher
+publishes") and never makes a model with a declared hash skip its check. The limits: bytes replaced under an unchanged size and time are not seen,
 and a record is the first sighting's word for a file, not a statement about where it came from. A record that cannot be read or
 written refuses the model as `MODEL_TOFU_RECORD` (a read-only model directory cannot be trusted this way).
 

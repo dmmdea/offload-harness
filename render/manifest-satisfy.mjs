@@ -69,8 +69,116 @@ export function modelCandidates(relPath, comfyDir, extraRoots) {
   return [...new Set(out)];
 }
 
+// publisherDigest: what the PUBLISHER of a model file says it is, read at run time (ADR 0099 section 3). A hash the manifest
+// carries is a caller's claim about one build and authenticates nothing; the digest the host publishes for the file at that
+// address is the one a download is checked against.
+//
+//   Hugging Face resolve URL   X-Linked-ETag (the LFS sha256) and X-Linked-Size from a HEAD that is not followed; failing that,
+//                              lfs.oid and lfs.size from the tree API listing of the file's folder. A file that is not in LFS has
+//                              no sha256 there: its answer carries the size only.
+//   GitHub release asset URL   `digest` ("sha256:...") and size of the asset in the release API.
+//   any other host             nothing: no request is made.
+//
+// Returns {oid, size, via}: oid is a lower-case sha256 hex or null; size is bytes or null; via names where they came from. When
+// the publisher could not be asked (network, timeout, 429, 5xx) it returns {unreachable: true, reason} instead, so a caller can
+// tell "no digest published" from "could not ask". It never throws.
+const PUBLISHER_TIMEOUT_MS = 20_000;
+const SHA256_HEX = /^[0-9a-f]{64}$/;
+
+function hexOrNull(v) {
+  const s = String(v ?? "").trim().replace(/^W\//, "").replace(/^"+|"+$/g, "").replace(/^sha256:/i, "").toLowerCase();
+  return SHA256_HEX.test(s) ? s : null;
+}
+function intOrNull(v) {
+  if (v === null || v === undefined || v === "") return null;
+  const n = Number(v);
+  return Number.isSafeInteger(n) && n >= 0 ? n : null;
+}
+const transient = (status) => status === 408 || status === 429 || status >= 500;
+
+function hfTarget(u) {
+  const host = u.hostname.toLowerCase();
+  if (host !== "huggingface.co" && host !== "hf.co") return null;
+  const m = /^\/(datasets\/)?([^/]+\/[^/]+)\/resolve\/([^/]+)\/(.+)$/.exec(u.pathname);
+  return m ? { kind: m[1] ? "datasets" : "models", repo: m[2], rev: m[3], file: m[4] } : null;
+}
+
+async function hfDigest(t, fetchImpl) {
+  const signal = () => AbortSignal.timeout(PUBLISHER_TIMEOUT_MS);
+  const kindPath = t.kind === "datasets" ? "datasets/" : "";
+  // 1. HEAD, not followed: the redirect to the CDN carries the LFS digest in the hub's own headers.
+  let headReason = "";
+  try {
+    const r = await fetchImpl(`https://huggingface.co/${kindPath}${t.repo}/resolve/${t.rev}/${t.file}`, { method: "HEAD", redirect: "manual", headers: { "accept-encoding": "identity" }, signal: signal() });
+    const oid = hexOrNull(r.headers.get("x-linked-etag"));
+    if (oid) return { oid, size: intOrNull(r.headers.get("x-linked-size")), via: "x-linked-etag" };
+    // A plain 200 with no linked ETag is a file that is not in LFS: the hub holds no sha256 for it, so the tree listing would not either.
+    if (r.status === 200) return { oid: null, size: intOrNull(r.headers.get("content-length")), via: "head (not an LFS file)" };
+    headReason = `HEAD answered ${r.status}`;
+  } catch (e) { headReason = "HEAD failed: " + String(e && e.message || e); }
+  // 2. The tree API listing of the folder the file sits in.
+  try {
+    const i = t.file.lastIndexOf("/");
+    const dir = i >= 0 ? "/" + t.file.slice(0, i) : "";
+    const full = decodeURIComponent(t.file);
+    const r = await fetchImpl(`https://huggingface.co/api/${t.kind}/${t.repo}/tree/${t.rev}${dir}?limit=1000`, { headers: { accept: "application/json" }, signal: signal() });
+    if (!r.ok) return transient(r.status) ? { unreachable: true, reason: `${headReason}; tree API answered ${r.status}` } : { oid: null, size: null, via: `${headReason}; tree API answered ${r.status}` };
+    const rows = await r.json();
+    const row = Array.isArray(rows) ? rows.find((x) => x && x.type === "file" && x.path === full) : null;
+    if (!row) return { oid: null, size: null, via: "tree API (file not listed)" };
+    return { oid: hexOrNull(row.lfs && row.lfs.oid), size: intOrNull((row.lfs && row.lfs.size) ?? row.size), via: "tree API" };
+  } catch (e) { return { unreachable: true, reason: `${headReason}; tree API failed: ${String(e && e.message || e)}` }; }
+}
+
+async function githubDigest(u, fetchImpl) {
+  const m = /^\/([^/]+)\/([^/]+)\/releases\/(?:download\/([^/]+)|latest\/download)\/([^/]+)$/.exec(u.pathname);
+  if (!m) return null;
+  const [, owner, repo, tag, file] = m;
+  try {
+    const api = `https://api.github.com/repos/${owner}/${repo}/releases/` + (tag ? `tags/${tag}` : "latest");
+    const r = await fetchImpl(api, { headers: { accept: "application/vnd.github+json", "user-agent": "offload-harness" }, signal: AbortSignal.timeout(PUBLISHER_TIMEOUT_MS) });
+    // 403 is the unauthenticated rate limit: the publisher could not be asked, which is not the same as no digest.
+    if (!r.ok) return transient(r.status) || r.status === 403 ? { unreachable: true, reason: `release API answered ${r.status}` } : { oid: null, size: null, via: `release API answered ${r.status}` };
+    const j = await r.json();
+    const want = decodeURIComponent(file);
+    const a = Array.isArray(j && j.assets) ? j.assets.find((x) => x && x.name === want) : null;
+    if (!a) return { oid: null, size: null, via: "release API (asset not listed)" };
+    return { oid: hexOrNull(a.digest), size: intOrNull(a.size), via: "release API digest" };
+  } catch (e) { return { unreachable: true, reason: "release API failed: " + String(e && e.message || e) }; }
+}
+
+export async function publisherDigest(url, { fetchImpl = fetch } = {}) {
+  let u;
+  try { u = new URL(url); } catch { return { oid: null, size: null, via: "not a URL" }; }
+  if (u.protocol !== "https:") return { oid: null, size: null, via: "not https" };
+  const hf = hfTarget(u);
+  if (hf) return hfDigest(hf, fetchImpl);
+  if (u.hostname.toLowerCase() === "github.com") {
+    const g = await githubDigest(u, fetchImpl);
+    if (g) return g;
+  }
+  return { oid: null, size: null, via: "this host publishes no digest the node reads" };
+}
+
+// satisfyModels: bring every manifest model onto disk, complete and checked against the PUBLISHER's digest.
+//
+// Per entry: the publisher is asked for the file's sha256 and size (publisherDigest). A file already on disk is kept when its
+// .sha-ok record ({oid, size, mtime}) still matches the file's size and modification time and the publisher's oid; otherwise it is
+// hashed once, adopted when it matches, and replaced by a fresh download when it does not (or when its size is not the
+// publisher's). A download goes to `<dest>.part`, is checked for size and sha256, and is renamed onto the destination only then; a
+// mismatch deletes the .part and is retried once, and a second mismatch defers MODEL_SHA_MISMATCH naming both digests, so a
+// partial file never sits at the destination. `sha256` on the entry is an optional assertion: when the publisher publishes a
+// digest and the two differ the entry defers naming both, and the publisher's always counts; when the publisher publishes none,
+// the assertion is checked as given and the file is still listed as unverified. A publisher that cannot be reached leaves a file
+// with a still-valid record in place with a warning; with no record the file is listed as unverified (never deleted).
 export async function satisfyModels(models, deps) {
-  const { comfyDir, exists, download, sha256, sentinelOk, writeSentinel, extraRoots = {} } = deps;
+  const { comfyDir, exists, download, sha256, extraRoots = {} } = deps;
+  const publisher = deps.publisherDigest || (async () => ({ oid: null, size: null }));
+  const statFile = deps.statFile || (() => ({ size: 0, mtimeMs: 0 }));
+  const readSentinel = deps.readSentinel || (() => null);
+  const writeSentinel = deps.writeSentinel || (() => {});
+  const renameFile = deps.rename || (() => {});
+  const removeFile = deps.remove || (() => {});
   // FIRST, before any file is looked for, hashed or fetched: every entry must land under models/<class>/ and come, if
   // from anywhere, over https from a listed host (node-packs.json). The path is joined onto the ComfyUI directory and
   // the source is fetched into it before ComfyUI starts, so an entry the caller chose freely is a file the caller
@@ -86,6 +194,11 @@ export async function satisfyModels(models, deps) {
   // outlast it; that stretch reads held-stalled until the next beat.
   const beat = typeof deps.beat === "function" ? deps.beat : () => {};
   const unverified = [];
+  const warnings = [];
+  // A sentinel that cannot be written (a read-only model tree) costs the next run one hash, not this one its file.
+  const record = (p, rec, why) => {
+    try { writeSentinel(p, rec); } catch (e) { warnings.push(`${why}: could not write ${p}.sha-ok (${String(e.message || e)}); the next run hashes it again`); }
+  };
   for (const m of models || []) {
     beat(`manifest: checking ${m.path}`);
     const rel = normalizeModelPath(m.path);
@@ -95,44 +208,94 @@ export async function satisfyModels(models, deps) {
     // extra_model_paths.yaml) otherwise reads as MISSING and is re-downloaded to C: — 15GB
     // per run for a big GGUF, which is exactly what the scene-swap consumer hit live.
     const found = modelCandidates(rel, comfyDir, extraRoots).find((p) => exists(p)) || null;
+    if (!found && !m.source_url) return defer("MODEL_DOWNLOAD_FAILED", m.path, "missing on disk and no source_url");
+
+    let pub = { oid: null, size: null };
+    if (m.source_url) {
+      beat(`manifest: reading the publisher's digest for ${m.path}`);
+      try { pub = await publisher(m.source_url); }
+      catch (e) { pub = { unreachable: true, reason: String(e && e.message || e) }; }
+    }
+    const assertion = typeof m.sha256 === "string" && m.sha256 !== "" ? m.sha256.toLowerCase() : null;
+    if (assertion && pub.oid && assertion !== pub.oid) {
+      return defer("MODEL_SHA_MISMATCH", m.path, `the manifest asserts sha256 ${assertion} but the publisher publishes ${pub.oid}; the publisher's digest is the one that counts, so nothing was downloaded`);
+    }
+    const want = { oid: pub.oid || assertion || null, size: pub.size ?? null };
+    const authentic = !!pub.oid;              // the digest came from the publisher, not from the caller or from nowhere
+
+    let target = abs;
+    let gotOid = null;
     if (found) {
-      if (!m.sha256) continue;            // present but unverifiable — trust on-disk
-      if (sentinelOk(found)) continue;    // already verified once
-      // Present, sha pinned, but no .sha-ok sidecar: the hand/curl-provisioned case. Hash it
-      // ONCE and adopt it by writing the sentinel. Previously this failed the skip gate and
-      // fell into the download branch, re-fetching a file that was already byte-correct.
-      try {
-        const got = await sha256(found);
-        if (got === m.sha256) { writeSentinel(found, got); continue; }
-        // Wrong bytes: replaceable only if we have a source. Otherwise name the REAL problem
-        // (a mismatching file) instead of the misleading "missing on disk".
-        if (!m.source_url) return defer("MODEL_SHA_MISMATCH", m.path, `want ${m.sha256} got ${got}`);
-      } catch (e) {
-        return defer("MODEL_DOWNLOAD_FAILED", m.path, "present-file verify failed: " + String(e.message || e));
+      target = found;
+      let st, rec;
+      try { st = statFile(found); rec = readSentinel(found); }
+      catch (e) { return defer("MODEL_DOWNLOAD_FAILED", m.path, "present-file verify failed: " + String(e.message || e)); }
+      const recFits = !!rec && rec.size === st.size && rec.mtime === st.mtimeMs;
+      let stale = false;
+      if (want.size !== null && st.size !== want.size) {
+        stale = true;                          // a truncated or different file: no need to read it
+      } else if (pub.unreachable && recFits && (!assertion || rec.oid === assertion)) {
+        warnings.push(`${m.path}: the publisher could not be reached (${pub.reason}); kept the file because its earlier verification (sha256 ${rec.oid}) still matches its size and modification time`);
+        continue;
+      } else if (!want.oid) {
+        unverified.push(m.path);               // nothing published to check it against: kept, and reported
+        continue;
+      } else if (recFits && rec.oid === want.oid) {
+        if (!authentic) unverified.push(m.path);
+        continue;                              // verified before, and unchanged since
+      } else {
+        // No fresh record: hash it ONCE and adopt it when it is the published build.
+        try { gotOid = await sha256(found); }
+        catch (e) { return defer("MODEL_DOWNLOAD_FAILED", m.path, "present-file verify failed: " + String(e.message || e)); }
+        if (gotOid === want.oid) {
+          record(found, { oid: gotOid, size: st.size, mtime: st.mtimeMs }, m.path);
+          if (!authentic) unverified.push(m.path);
+          continue;
+        }
+        stale = true;
+      }
+      if (stale && !m.source_url) {
+        // Wrong bytes and nowhere to get the right ones: name the REAL problem instead of "missing on disk".
+        return defer("MODEL_SHA_MISMATCH", m.path, gotOid !== null ? `want ${want.oid} got ${gotOid}` : `want ${want.size} bytes got ${st.size} bytes`);
       }
     }
-    if (!m.source_url) return defer("MODEL_DOWNLOAD_FAILED", m.path, "missing on disk and no source_url");
-    beat(`manifest: downloading ${m.path}`);
-    try { await download(m.source_url, abs); }
-    catch (e) { return defer("MODEL_DOWNLOAD_FAILED", m.path, String(e.message || e)); }
-    beat(`manifest: downloaded ${m.path}`);
-    if (m.sha256) {
-      // Guard the post-download hash read AND the sentinel write: an FS failure here
-      // must defer typed, not escape as an untyped process crash (the sentinel write
-      // was previously outside any try — a fresh download that failed to write its
-      // .sha-ok sidecar took the whole run down).
-      try {
-        const got = await sha256(abs);
-        if (got !== m.sha256) return defer("MODEL_SHA_MISMATCH", m.path, `want ${m.sha256} got ${got}`);
-        writeSentinel(abs, got);
-      } catch (e) {
-        return defer("MODEL_DOWNLOAD_FAILED", m.path, "post-download verify/sentinel failed: " + String(e.message || e));
-      }
-    } else {
-      unverified.push(m.path);           // downloaded, UNVERIFIED — reported as data
+
+    if (pub.unreachable && !want.oid) {
+      // Not read, so not checkable: a file fetched now could be cut short and be trusted from then on. Retryable.
+      return defer("MODEL_DOWNLOAD_FAILED", m.path, `the publisher could not be reached to read the file's digest (${pub.reason}); not downloading a file that cannot be checked`);
     }
+    // Download beside the destination, check, then rename. The destination never holds a partial file.
+    const part = target + ".part";
+    let gotSize = null, gotHash = null, bad = true;
+    for (let attempt = 0; attempt < 2 && bad; attempt++) {
+      beat(`manifest: downloading ${m.path}`);
+      try { await download(m.source_url, part); }
+      catch (e) { try { removeFile(part); } catch { /* best effort */ } return defer("MODEL_DOWNLOAD_FAILED", m.path, String(e.message || e)); }
+      beat(`manifest: downloaded ${m.path}`);
+      try {
+        gotSize = statFile(part).size;
+        gotHash = want.oid ? await sha256(part) : null;
+      } catch (e) {
+        try { removeFile(part); } catch { /* best effort */ }
+        return defer("MODEL_DOWNLOAD_FAILED", m.path, "post-download verify failed: " + String(e.message || e));
+      }
+      bad = (want.size !== null && gotSize !== want.size) || (want.oid !== null && gotHash !== want.oid);
+      if (bad) { try { removeFile(part); } catch { /* best effort */ } }
+    }
+    if (bad) {
+      return defer("MODEL_SHA_MISMATCH", m.path,
+        `${authentic ? "the publisher publishes" : "the manifest asserts"} sha256 ${want.oid ?? "(none)"} and ${want.size ?? "an unknown number of"} bytes; the download (retried once) was sha256 ${gotHash ?? "(not hashed)"} and ${gotSize} bytes; the partial file was deleted`);
+    }
+    try { renameFile(part, target); }
+    catch (e) { try { removeFile(part); } catch { /* best effort */ } return defer("MODEL_DOWNLOAD_FAILED", m.path, "could not move the verified download into place: " + String(e.message || e)); }
+    if (want.oid) {
+      let mtime = 0;
+      try { mtime = statFile(target).mtimeMs; } catch { /* the record then fails to fit and the next run hashes once */ }
+      record(target, { oid: gotHash, size: gotSize, mtime }, m.path);
+    }
+    if (!authentic) unverified.push(m.path);   // downloaded, not authenticated against the publisher: reported as data
   }
-  return { ok: true, unverified };
+  return { ok: true, unverified, ...(warnings.length ? { warnings } : {}) };
 }
 
 function versionBelow(have, min) {
@@ -364,7 +527,8 @@ export async function satisfyManifest(manifest, deps) {
     try { writeDepsMarker(packsKey); } catch { /* marker is an optimization; never fail satisfy */ }
   }
 
-  return { ok: true, changed, unverified: models.unverified, packsKey, ...(warning ? { warning } : {}) };
+  const notes = [warning, ...(models.warnings || [])].filter(Boolean);
+  return { ok: true, changed, unverified: models.unverified, packsKey, ...(notes.length ? { warning: notes.join("; ") } : {}) };
 }
 
 import { spawn as nodeSpawn } from "node:child_process";
@@ -377,7 +541,7 @@ function track(c) {
   c.once("close", () => SATISFY_LIVE.delete(c)); c.once("error", () => SATISFY_LIVE.delete(c));
   return c;
 }
-import { existsSync, writeFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { existsSync, writeFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, renameSync } from "node:fs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { createHash } from "node:crypto";
 import { createReadStream, createWriteStream } from "node:fs";
@@ -626,8 +790,19 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
       try { writeFileSync(join(dirname(dirname(comfyPy)), ".offload-deps-satisfied"), key); }
       catch { /* optimization only — never fail satisfy over the marker */ }
     },
-    sentinelOk: (p) => existsSync(p + ".sha-ok"),
-    writeSentinel: (p, h) => writeFileSync(p + ".sha-ok", h),
+    // The record that a file was checked against the publisher's digest: JSON {oid, size, mtime} beside the file. A record that is
+    // not that shape (the bare hash older runs wrote) reads as none, so the file is hashed once more and the record rewritten.
+    readSentinel: (p) => {
+      try {
+        const j = JSON.parse(readFileSync(p + ".sha-ok", "utf8"));
+        return j && typeof j === "object" && typeof j.oid === "string" && Number.isFinite(j.size) && Number.isFinite(j.mtime) ? j : null;
+      } catch { return null; }
+    },
+    writeSentinel: (p, rec) => writeFileSync(p + ".sha-ok", JSON.stringify(rec)),
+    statFile: (p) => { const st = statSync(p); return { size: st.size, mtimeMs: st.mtimeMs }; },
+    rename: (from, to) => renameSync(from, to),
+    remove: (p) => rmSync(p, { force: true }),
+    publisherDigest,
     download: async (url, dest) => {
       const r = await fetch(url); if (!r.ok) throw new Error(`${r.status}`);
       mkdirSync(dirname(dest), { recursive: true });
@@ -636,6 +811,12 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
       // any model over ~2GB (Qwen-Image-Edit GGUF ~14GB, RealVisXL 6.94GB) could never download.
       // Streaming has no size limit; pipeline closes both streams and rejects on any error.
       await pipeline(Readable.fromWeb(r.body), createWriteStream(dest));
+      // A body cut short without an error would leave a short file: when the server said how long it is (and did not compress it),
+      // the bytes on disk must be that long. (satisfyModels also checks the size and sha256 the publisher publishes.)
+      const want = Number(r.headers.get("content-length"));
+      if (!r.headers.get("content-encoding") && Number.isSafeInteger(want) && want > 0 && statSync(dest).size !== want) {
+        throw new Error(`download ended after ${statSync(dest).size} of ${want} bytes`);
+      }
     },
     sha256: (p) => new Promise((res, rej) => {
       const h = createHash("sha256"); const s = createReadStream(p);
@@ -742,8 +923,8 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
 // Most template annotations carry no hash, so a model file the template run meets has nothing to be checked against. Trust on first use
 // keeps the one guarantee that is left: the first run that meets the file hashes it and records the hash (and the file's size and
 // modification time) in a record beside the file, `<file>.tofu`; a later run refuses a file whose hash is not the recorded one. It is a
-// separate record from the `.sha-ok` sentinel on purpose: the sentinel means "matched the hash a manifest PINNED", and a trusted-on-first-
-// use hash is no pin, so it must never make a pinned model skip its own check.
+// separate record from the `.sha-ok` sentinel on purpose: the sentinel means "matched the digest the publisher publishes", and a trusted-on-first-
+// use hash is no publisher digest, so it must never make a model skip its own check.
 //
 // A file whose size and modification time are the recorded ones is trusted without hashing it again (a 20 GB file takes minutes to hash on
 // every run); a file whose either moved is hashed again, and only the same hash passes. The limit is the usual one of a stat cache: bytes

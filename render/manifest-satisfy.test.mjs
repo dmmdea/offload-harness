@@ -12,29 +12,43 @@ import { buildCompileCmd, buildInstallCmd, buildClonePackCmd, makeEnsurePack } f
 
 const base = {
   comfyDir: "C:/ComfyUI",
-  exists: () => false, sentinelOk: () => false, writeSentinel: () => {},
-  download: async () => {}, sha256: async () => "HASH",
+  exists: () => false, readSentinel: () => null, writeSentinel: () => {},
+  download: async () => {}, sha256: async () => "hash",
 };
+// The publisher publishes sha256 "hash"; a record {oid, size, mtime} for a file whose stat is the stub's (size 0, mtime 0).
+const published = async () => ({ oid: "hash", size: null });
+const recorded = () => ({ oid: "hash", size: 0, mtime: 0 });
 
-test("present + sentinel-ok model is skipped", async () => {
-  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }],
-    { ...base, exists: () => true, sentinelOk: () => true });
+test("present model with a fresh verification record is skipped", async () => {
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "hash" }],
+    { ...base, exists: () => true, readSentinel: recorded, publisherDigest: published });
   assert.deepEqual(r, { ok: true, unverified: [] });
 });
 
-test("missing model with matching sha downloads + verifies", async () => {
-  let dl = 0;
-  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }],
-    { ...base, download: async () => { dl++; }, sha256: async () => "HASH" });
-  assert.equal(dl, 1); assert.equal(r.ok, true);
+test("missing model downloads to .part, verifies against the publisher, renames into place and records it", async () => {
+  const log = [];
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: null }],
+    { ...base, publisherDigest: published,
+      download: async (u, d) => { log.push(["download", d]); },
+      rename: (a, b) => { log.push(["rename", a, b]); },
+      writeSentinel: (p, rec) => { log.push(["record", p, rec]); } });
+  const dest = join("C:/ComfyUI", "models/checkpoints/x.safetensors");
+  assert.deepEqual(log, [["download", dest + ".part"], ["rename", dest + ".part", dest], ["record", dest, { oid: "hash", size: 0, mtime: 0 }]]);
+  assert.deepEqual(r, { ok: true, unverified: [] });
 });
 
-test("sha mismatch DEFERs MODEL_SHA_MISMATCH", async () => {
-  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "WANT" }],
-    { ...base, sha256: async () => "GOT" });
+test("a download that is not the publisher's file is deleted, fetched once more, then DEFERs MODEL_SHA_MISMATCH naming both digests", async () => {
+  let dl = 0; const removed = []; const renamed = [];
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: null }],
+    { ...base, publisherDigest: async () => ({ oid: "want", size: null }), sha256: async () => "got",
+      download: async () => { dl++; }, remove: (p) => removed.push(p), rename: (a, b) => renamed.push([a, b]) });
   assert.equal(r.ok, false);
   assert.equal(r.defer.code, "MODEL_SHA_MISMATCH");
   assert.equal(r.defer.ref, "models/checkpoints/x.safetensors");
+  assert.match(r.defer.detail, /want/); assert.match(r.defer.detail, /got/);
+  assert.equal(dl, 2, "retried once");
+  assert.equal(removed.length, 2, "each bad .part deleted");
+  assert.deepEqual(renamed, [], "nothing was moved onto the destination");
 });
 
 test("null-sha model downloads and is reported unverified", async () => {
@@ -104,11 +118,12 @@ test("model present ONLY under an extra root is NOT re-downloaded", async () => 
   // The exact CMP defect: file lives on V:, absent from C: — must be seen as present.
   const onV = join("V:/m/unet", "x.gguf");
   let dl = 0;
-  const r = await satisfyModels([{ path: "models/unet/x.gguf", source_url: "https://huggingface.co/x/y", sha256: "HASH" }], {
+  const r = await satisfyModels([{ path: "models/unet/x.gguf", source_url: "https://huggingface.co/x/y", sha256: "hash" }], {
     ...base,
     extraRoots: { unet: ["V:/m/unet"] },
     exists: (p) => p === onV,
-    sentinelOk: (p) => p === onV,
+    readSentinel: (p) => (p === onV ? recorded() : null),
+    publisherDigest: published,
     download: async () => { dl++; },
   });
   assert.equal(dl, 0, "must not download a model already present on the extra root");
@@ -122,41 +137,42 @@ test("model present ONLY under an extra root is NOT re-downloaded", async () => 
 
 test("present pinned-sha file WITHOUT a sentinel is adopted, not re-downloaded", async () => {
   let dl = 0, wrote = null;
-  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }], {
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "hash" }], {
     ...base,
     exists: () => true,
-    sentinelOk: () => false,          // pre-provisioned: no sidecar
-    sha256: async () => "HASH",       // but the bytes are correct
+    readSentinel: () => null,         // pre-provisioned: no record
+    publisherDigest: published,
+    sha256: async () => "hash",       // but the bytes are the published ones
     download: async () => { dl++; },
-    writeSentinel: (p, h) => { wrote = [p, h]; },
+    writeSentinel: (p, rec) => { wrote = [p, rec]; },
   });
   assert.equal(dl, 0, "a byte-correct present file must be adopted, never re-downloaded");
-  assert.deepEqual(wrote, [join("C:/ComfyUI", "models/checkpoints/x.safetensors"), "HASH"], "adoption writes the sentinel");
+  assert.deepEqual(wrote, [join("C:/ComfyUI", "models/checkpoints/x.safetensors"), { oid: "hash", size: 0, mtime: 0 }], "adoption writes the record");
   assert.equal(r.ok, true);
 });
 
 test("adoption writes the sentinel BESIDE the file it actually found (extra root)", async () => {
   const onV = join("V:/m/vae", "v.safetensors");
   let wrote = null;
-  await satisfyModels([{ path: "models/vae/v.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }], {
+  await satisfyModels([{ path: "models/vae/v.safetensors", source_url: "https://huggingface.co/x/y", sha256: "hash" }], {
     ...base,
     extraRoots: { vae: ["V:/m/vae"] },
     exists: (p) => p === onV,
-    sentinelOk: () => false,
-    sha256: async () => "HASH",
-    writeSentinel: (p, h) => { wrote = [p, h]; },
+    publisherDigest: published,
+    sha256: async () => "hash",
+    writeSentinel: (p, rec) => { wrote = [p, rec]; },
   });
-  assert.deepEqual(wrote, [onV, "HASH"], "sentinel must land next to the V: file, not the C: path");
+  assert.deepEqual(wrote, [onV, { oid: "hash", size: 0, mtime: 0 }], "sentinel must land next to the V: file, not the C: path");
 });
 
 test("present file whose hash MISMATCHES the pin is re-downloaded", async () => {
   let dl = 0, calls = 0;
-  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "WANT" }], {
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "want" }], {
     ...base,
     exists: () => true,
-    sentinelOk: () => false,
+    publisherDigest: async () => ({ oid: "want", size: null }),
     // 1st call = the present file (wrong bytes); 2nd = the post-download verify (correct).
-    sha256: async () => (++calls === 1 ? "GOT" : "WANT"),
+    sha256: async () => (++calls === 1 ? "got" : "want"),
     download: async () => { dl++; },
   });
   assert.equal(dl, 1, "a corrupt/wrong present file must be replaced");
@@ -164,8 +180,8 @@ test("present file whose hash MISMATCHES the pin is re-downloaded", async () => 
 });
 
 test("present mismatching file with NO source_url DEFERs MODEL_SHA_MISMATCH", async () => {
-  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "", sha256: "WANT" }], {
-    ...base, exists: () => true, sentinelOk: () => false, sha256: async () => "GOT",
+  const r = await satisfyModels([{ path: "models/checkpoints/x.safetensors", source_url: "", sha256: "want" }], {
+    ...base, exists: () => true, sha256: async () => "got",
   });
   assert.equal(r.ok, false);
   assert.equal(r.defer.code, "MODEL_SHA_MISMATCH", "must name the real problem, not 'missing on disk'");
@@ -174,8 +190,8 @@ test("present mismatching file with NO source_url DEFERs MODEL_SHA_MISMATCH", as
 const okDeps = {
   comfyDir: "C:/ComfyUI",
   retryDelayMs: 1,          // never pay the production 500ms sleep in tests
-  exists: () => true, sentinelOk: () => true, writeSentinel: () => {},
-  download: async () => {}, sha256: async () => "HASH",
+  exists: () => true, readSentinel: recorded, publisherDigest: published, writeSentinel: () => {},
+  download: async () => {}, sha256: async () => "hash",
   satisfierAvailable: () => true, comfyVersion: async () => "0.23.5",
   resolveDeps: async () => {}, ensurePack: async () => ({ changed: false }),
   pipCheck: async () => ({ ok: true }),
@@ -186,7 +202,7 @@ const okDeps = {
 const M = parseManifest({
   comfyui_min_version: "0.23.0",
   node_packs: [{ name: "A", repo: "r" }],
-  models: [{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }],
+  models: [{ path: "models/checkpoints/x.safetensors", source_url: "https://huggingface.co/x/y", sha256: "hash" }],
 });
 
 test("fully satisfied → ok, no change", async () => {
@@ -235,7 +251,7 @@ test("empty manifest (no packs) skips the satisfier entirely — no cm-cli", asy
 });
 
 test("models-only manifest satisfies without the pack satisfier present", async () => {
-  const mo = parseManifest({ node_packs: [], models: [{ path: "models/checkpoints/y.safetensors", source_url: "https://huggingface.co/x/y", sha256: "HASH" }] });
+  const mo = parseManifest({ node_packs: [], models: [{ path: "models/checkpoints/y.safetensors", source_url: "https://huggingface.co/x/y", sha256: "hash" }] });
   const r = await satisfyManifest(mo, { ...okDeps, satisfierAvailable: () => false });
   assert.equal(r.ok, true);
 });
@@ -545,13 +561,16 @@ function realDeps() {
   return { dir, deps };
 }
 
-test("defaultSatisfyDeps.writeSentinel writes the sidecar (no require in ESM)", () => {
+test("defaultSatisfyDeps.writeSentinel writes the sidecar as JSON and readSentinel reads it back (no require in ESM)", () => {
   const { dir, deps } = realDeps();
   try {
     const model = join(dir, "model.safetensors");
-    deps.writeSentinel(model, "deadbeef");
+    deps.writeSentinel(model, { oid: "deadbeef", size: 3, mtime: 1.5 });
     assert.ok(existsSync(model + ".sha-ok"), "sentinel sidecar written");
-    assert.equal(readFileSync(model + ".sha-ok", "utf8"), "deadbeef");
+    assert.deepEqual(JSON.parse(readFileSync(model + ".sha-ok", "utf8")), { oid: "deadbeef", size: 3, mtime: 1.5 });
+    assert.deepEqual(deps.readSentinel(model), { oid: "deadbeef", size: 3, mtime: 1.5 });
+    writeFileSync(model + ".sha-ok", "deadbeef");   // the bare hash older runs wrote
+    assert.equal(deps.readSentinel(model), null, "an old-format record reads as none");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -567,6 +586,7 @@ test("defaultSatisfyDeps.download streams the body to disk (no >2GB Buffer cap)"
   const origFetch = globalThis.fetch;
   globalThis.fetch = async () => ({
     ok: true,
+    headers: new Headers({ "content-length": String(bytes.length) }),
     body: new ReadableStream({ start(c) { c.enqueue(bytes); c.close(); } }),
   });
   try {
@@ -877,10 +897,11 @@ function spyDeps(extra = {}) {
     deps: {
       comfyDir: "/opt/comfy",
       exists: (p) => { calls.push(["exists", p]); return false; },
-      sentinelOk: () => { calls.push(["sentinelOk"]); return false; },
+      readSentinel: () => { calls.push(["readSentinel"]); return null; },
+      publisherDigest: async (u) => { calls.push(["publisherDigest", u]); return { oid: null, size: null }; },
       writeSentinel: note("writeSentinel"),
       download: async (url, dest) => { calls.push(["download", url, dest]); },
-      sha256: async () => "HASH",
+      sha256: async () => "hash",
       ...extra,
     },
   };
@@ -907,7 +928,7 @@ for (const c of modelCases) {
 
 test("satisfyModels refuses a hostile entry even when the file is already on disk (no adoption, no sentinel)", async () => {
   const { calls, deps } = spyDeps({ exists: () => true });
-  const r = await satisfyModels([{ path: "custom_nodes/evil/__init__.py", source_url: "", sha256: "HASH" }], deps);
+  const r = await satisfyModels([{ path: "custom_nodes/evil/__init__.py", source_url: "", sha256: "hash" }], deps);
   assert.equal(r.defer.code, "MODEL_NOT_ALLOWED");
   assert.deepEqual(calls, []);
 });
@@ -941,7 +962,7 @@ test("satisfyManifest refuses a hostile model before the tooling probe, the vers
   });
   const r = await satisfyManifest(m, {
     ...okDeps,
-    exists: mark("exists", false), sentinelOk: mark("sentinelOk", false),
+    exists: mark("exists", false), readSentinel: mark("readSentinel", null),
     download: async () => { called.push("download"); },
     satisfierAvailable: mark("satisfierAvailable", true),
     comfyVersion: async () => { called.push("comfyVersion"); return "0.23.5"; },
