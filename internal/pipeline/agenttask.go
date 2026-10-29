@@ -187,11 +187,13 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		}
 		w.AdmissionNote = admitNote
 		w.CoherenceNote = coherenceNote
+		// The ledger's tok_per_s column (empty on agent rows until 0.115.21): the calibrated seat rate, else the
+		// observed decode rate (0.131.1). The fallback used to sit inside the SeatTokS > 0 branch, where it could
+		// never fire, so rows with no calibrated sample stayed empty.
 		if w.SeatTokS > 0 {
-			meta.TokPerSec = w.SeatTokS // the ledger's tok_per_s column, empty on agent rows until 0.115.21
-			if meta.TokPerSec == 0 {
-				meta.TokPerSec = w.ObservedTokS // 0.131.1: the observed rate when no calibrated sample exists
-			}
+			meta.TokPerSec = w.SeatTokS
+		} else if w.ObservedTokS > 0 {
+			meta.TokPerSec = w.ObservedTokS
 		}
 		meta.LatencyMs = w.WallMs
 		meta.TokensOut = w.TokensOut
