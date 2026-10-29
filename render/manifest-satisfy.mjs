@@ -286,8 +286,20 @@ export async function satisfyModels(models, deps) {
       return defer("MODEL_SHA_MISMATCH", m.path,
         `${authentic ? "the publisher publishes" : "the manifest asserts"} sha256 ${want.oid ?? "(none)"} and ${want.size ?? "an unknown number of"} bytes; the download (retried once) was sha256 ${gotHash ?? "(not hashed)"} and ${gotSize} bytes; the partial file was deleted`);
     }
+    // A stale file is replaced where it was found (an extra root stays on its data drive), but never destroyed:
+    // the previous bytes move to <file>.prev, one generation, as the update verb keeps them (ADR 0099 section 4).
+    const prev = found ? target + ".prev" : null;
+    if (prev) {
+      try { renameFile(target, prev); }
+      catch (e) { try { removeFile(part); } catch { /* best effort */ } return defer("MODEL_DOWNLOAD_FAILED", m.path, `could not set the previous file aside as ${prev}, so it was left untouched: ` + String(e.message || e)); }
+    }
     try { renameFile(part, target); }
-    catch (e) { try { removeFile(part); } catch { /* best effort */ } return defer("MODEL_DOWNLOAD_FAILED", m.path, "could not move the verified download into place: " + String(e.message || e)); }
+    catch (e) {
+      try { removeFile(part); } catch { /* best effort */ }
+      if (prev) { try { renameFile(prev, target); } catch { /* the previous bytes stay in .prev, named below */ } }
+      return defer("MODEL_DOWNLOAD_FAILED", m.path, "could not move the verified download into place: " + String(e.message || e) + (prev ? `; the previous file was restored from ${prev}` : ""));
+    }
+    if (prev) warnings.push(`${m.path}: replaced a stale file with the publisher's build; the previous file is kept as ${prev}`);
     if (want.oid) {
       let mtime = 0;
       try { mtime = statFile(target).mtimeMs; } catch { /* the record then fails to fit and the next run hashes once */ }

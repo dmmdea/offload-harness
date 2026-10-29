@@ -14,7 +14,8 @@
   nothing can check.
 - **Files already on disk.** `<file>.sha-ok` is now JSON `{oid, size, mtime}`. A file whose size and modification time are the
   recorded ones and whose oid is the publisher's is kept without being read; a changed size or time, or a publisher that moved
-  to a newer build, hashes it once and replaces it when it differs. A record in the older format (a bare hash) reads as none,
+  to a newer build, hashes it once and replaces it when it differs. The replacement lands where the file was found (an extra
+  model root stays on its own drive), and the previous file is kept as `<file>.prev`, one generation, never deleted. A record in the older format (a bare hash) reads as none,
   so each such file is hashed once more. With the publisher unreachable a file with a fitting record is kept and the result
   carries a warning; one with no record is listed unverified and never deleted.
 - **The caller's `sha256`** is an optional assertion: when it differs from a published digest the entry defers naming both,

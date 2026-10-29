@@ -80,7 +80,8 @@ environment.
    bare hash) reads as none, so the file is hashed once more.
 
    **A download** goes to `<file>.part`, is checked for size and sha256 against the publisher, and only then renamed onto the destination, so a
-   partial file never sits there and an interrupted download is not trusted by the next run. A mismatch deletes the `.part` and is retried once;
+   partial file never sits there and an interrupted download is not trusted by the next run. A replaced stale file is not destroyed: it is
+   renamed to `<file>.prev` (one generation) in the folder where it was found, and the result carries a warning naming it. A mismatch deletes the `.part` and is retried once;
    a second mismatch defers `MODEL_SHA_MISMATCH` naming the digest wanted and the one got. A missing model whose publisher could not be asked
    for a digest (and that the manifest asserts none for) is not downloaded: it defers `MODEL_DOWNLOAD_FAILED`, which is retryable. No
    `source_url` and not on disk → `MODEL_DOWNLOAD_FAILED`. Models whose digest did not come from the publisher are reported as
