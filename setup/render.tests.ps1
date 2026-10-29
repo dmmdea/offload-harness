@@ -389,7 +389,7 @@ foreach ($case in @(@('ampere-6', 'min'), @('ampere-6', 'high'))) {
   if ($eg2Functional -match '(?m)^\s{4}residents?:\s*"[^"]*\beg2\b[^"]*"') { Ok "$pid2/$band eg2 is a member of the stack's residency set" } else { Bad "$pid2/$band eg2 not in the residency set" }
   if ($eg2Functional -notmatch '(?m)^\s{4}(interactive|text):.*\beg2\b') { Ok "$pid2/$band eg2 is never a swappable alternative" } else { Bad "$pid2/$band eg2 leaked into the swappable set" }
   if ($r.yaml -notmatch '__EG2_')                               { Ok "$pid2/${band}: no unsubstituted EG2 token" } else { Bad "$pid2/$band left __EG2_*__" }
-  if ($eg2Functional -notmatch '(?m)^\s{2}embeddinggemma:' -and $eg2Functional -notmatch '(?m)^\s{4}emb:' -and $eg2Functional -notmatch '(?m)^\s{4}residents?:\s*"[^"]*emb') { Ok "$pid2/$band renders without the embeddinggemma (300M) entry (omit_embeddinggemma)" } else { Bad "$pid2/$band still renders the 300M embedder" }
+  if ($eg2Functional -notmatch '(?m)^\s{2}embeddinggemma:' -and $eg2Functional -notmatch '(?m)^\s{4}emb:' -and $eg2Functional -notmatch '(?m)^\s{4}residents?:\s*"[^"]*\bemb\b') { Ok "$pid2/$band renders without the embeddinggemma (300M) entry (omit_embeddinggemma)" } else { Bad "$pid2/$band still renders the 300M embedder" }
 }
 # The TEXT-ONLY replicas (embeddinggemma2_projector false): the entry renders in the stack's residency
 # set exactly as on the authority, minus its one `--mmproj <GGUF>` argument. Every other flag of the
