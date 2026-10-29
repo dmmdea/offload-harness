@@ -179,7 +179,11 @@ For `llama` the gate is `SmokeGate` (`internal/update/smokegate.go`); every othe
 1. It takes the node's GPU lease the way `gpu reserve --wait --drain --unload-seat` does (the verb re-runs itself as
    the wrapped command of that wrapper, so the queue, drain, unload, heartbeat, warm-back and release are the
    binary's own). A lease or drain that does not complete within `update.gate.lease_wait` is **inconclusive**: nothing
-   changes, exit 0, the next run tries again. It is never recorded as a rejection.
+   changes, exit 0, the next run tries again. It is never recorded as a rejection. `update` takes its own lease for the
+   gate, so it is run bare. Run inside `gpu reserve`, it works only when that reserve was given `--drain --unload-seat`:
+   the gate then measures under the caller's lease (it logs "running under the caller's GPU lease"). Under a lease that
+   did not drain and unload, the gate answers inconclusive at once instead of queueing behind its own parent for
+   `lease_wait`, and says what to change.
 2. It picks the node's seat: among the chat seats of the rendered llama-swap yaml that run from the live path
    (embedding and reranking seats cannot chat), a resident one (`ttl` 0 or below), else the one with the smallest
    model file. The seat's own command line is used, macros expanded, with `--host 127.0.0.1 --port <side port>`.

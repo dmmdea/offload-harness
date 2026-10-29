@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/winexec"
 	"gopkg.in/yaml.v3"
 )
@@ -164,6 +165,22 @@ func (g *SmokeGate) Run(ctx context.Context, in GateInput) GateResult {
 		return GateResult{Verdict: GateInconclusive, Reason: "temp file: " + err.Error()}
 	}
 
+	// Already inside a lease (`gpu reserve ... -- local-offload update`): a second reserve would queue behind its own
+	// parent for the whole lease_wait and end inconclusive, so the gate either measures under the caller's lease or
+	// says at once what to change.
+	if held, ok := callerLease(); ok {
+		if !held.Exclusive || held.Draining {
+			return GateResult{Verdict: GateInconclusive, Reason: fmt.Sprintf("update runs inside the GPU lease of epoch %d, which did not drain and unload the seats, and a second lease would only queue behind it; "+
+				"run `update` without the `gpu reserve` wrapper (the gate takes its own lease), or wrap it with `gpu reserve --drain --unload-seat -- local-offload update`; nothing changed", held.Epoch)}
+		}
+		g.logf("gate: running under the caller's GPU lease (epoch %d); seats were drained and unloaded by it", held.Epoch)
+		args := []string{"update", "--gate-child", jobPath, "--gate-result", resPath}
+		if g.ConfigPath != "" {
+			args = append(args, "--config", g.ConfigPath)
+		}
+		return g.runGateProcess(ctx, args, resPath, "the caller's GPU lease ended or the measurement could not start (the gate never ran)")
+	}
+
 	wait := g.Cfg.LeaseWaitOr()
 	args := []string{"gpu", "reserve", "--class", "text", "--for", (2*g.Cfg.LoadTimeoutOr() + 20*time.Minute).String(),
 		"--reason", "update smoke gate: llama " + id, "--origin", "local-offload update",
@@ -173,6 +190,27 @@ func (g *SmokeGate) Run(ctx context.Context, in GateInput) GateResult {
 	}
 	args = append(args, "--", g.Self, "update", "--gate-child", jobPath, "--gate-result", resPath)
 	g.logf("gate: taking the GPU lease (waiting up to %s, seats drained and unloaded), then measuring %s against the previous generation on side port %d", wait, id, port)
+	return g.runGateProcess(ctx, args, resPath, "the GPU lease was not obtained within "+wait.String()+" or the seats could not be drained (the gate never ran)")
+}
+
+// callerLease is the live GPU lease this process runs under (GPU_LEASE_EPOCH, threaded down by `gpu reserve`, equals the
+// epoch of a live lease in GPU_LEASE_DIR), if any. A variable that names no live lease is not an inheritance.
+func callerLease() (gpulease.Info, bool) {
+	dir := strings.TrimSpace(os.Getenv("GPU_LEASE_DIR"))
+	if dir == "" {
+		return gpulease.Info{}, false
+	}
+	for _, l := range gpulease.InspectLeases(dir) {
+		if gpulease.Inherited(l) {
+			return l, true
+		}
+	}
+	return gpulease.Info{}, false
+}
+
+// runGateProcess runs this binary with args (the environment is inherited), forwards its lines to the log and reads the
+// verdict from resPath. neverRan is the reason given when no verdict file exists and the measurement never started.
+func (g *SmokeGate) runGateProcess(ctx context.Context, args []string, resPath, neverRan string) GateResult {
 	cmd := winexec.CommandContext(ctx, g.Self, args...)
 	tail := &lineTail{logf: g.logf}
 	cmd.Stdout, cmd.Stderr = tail, tail
@@ -181,7 +219,7 @@ func (g *SmokeGate) Run(ctx context.Context, in GateInput) GateResult {
 
 	raw, rerr := os.ReadFile(resPath)
 	if rerr != nil {
-		why := "the GPU lease was not obtained within " + wait.String() + " or the seats could not be drained (the gate never ran)"
+		why := neverRan
 		if _, serr := os.Stat(resPath + ".started"); serr == nil {
 			why = "the lease-held measurement stopped before it had an answer"
 		}
