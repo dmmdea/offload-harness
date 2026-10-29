@@ -72,6 +72,15 @@ are unloaded first through llama-swap (with drain), because Windows will not ren
 Exactly two generations are kept, current and previous; everything else, and every rejected candidate, is deleted at
 once.
 
+A build placed by hand is adopted the same way. Point `update.paths.<component>` (or `--live` once) at the directory
+the seat already runs from, and the next `update --component <c>` migrates that directory and puts the newest build
+behind a junction in its place; the yaml keeps its path, so nothing is re-rendered. The tier profiles render the stt
+seat at `<home>/build/whisper.cpp/build/bin`, and on a Windows node that is where whisper-server was copied by hand:
+with `update.paths.whisper` set to that directory the verb owns it (measured 2026-10-28 on `<node-g>`: the copy
+hashed identical to upstream b5454, moved to `bin-versions/unknown-20261028`, and the junction now points at
+`bin-versions/b5454`; a fresh transcription read back correctly). A Linux GPU node keeps its source-built whisper,
+because the publisher ships no Linux GPU build to adopt.
+
 **llama-swap has two layouts, decided once** in `internal/update/layout.go` (`layoutOf`); everything around the swap
 (preflight, staging, self-check, drain, daemon stop, restart, verification, rollback) is the same code for both:
 
