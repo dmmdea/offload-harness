@@ -71,7 +71,7 @@ test("buildSdAnimateArgs: VACE with the depth directory as --control-video and t
   assert.equal(at("--fps"), String(OUTPUT_FPS));
   assert.equal(at("-s"), "9");
   assert.equal(at("--backend"), "vulkan0");
-  for (const f of ["--diffusion-fa", "--vae-tiling", "-v"]) assert.ok(a.includes(f));
+  for (const f of ["--flash-attn", "off,diffusion=on", "--vae-tiling", "-v"]) assert.ok(a.includes(f));
   assert.ok(a.indexOf("--extra-flag") > a.indexOf("-v"));
   assert.equal(a[a.length - 2], "-o");
   assert.equal(a[a.length - 1], "/t/o.webm");

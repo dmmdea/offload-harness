@@ -110,6 +110,8 @@ const SD_HEALTHY = [
   { file: "sdcpp945-video-healthy.log", shape: "master-945", head: /^\} --- main\.cpp:699$/m, diffusion: "Wan2.2-TI2V-5B" },
   { file: "sdcpp945-video-tae.log", shape: "master-945", head: /^\} --- main\.cpp:699$/m, diffusion: "Wan2.2-TI2V-5B" },
   { file: "sdcpp945-vace-healthy.log", shape: "master-945", head: /^\} --- main\.cpp:699$/m, diffusion: "Wan2.1-VACE-1.3B" },
+  // master-1024: every module also prints a small host-side buffer on the CPU after its device buffer (not a placement)
+  { file: "sdcpp1024-video-healthy.log", shape: "master-1024", head: /compute buffer size: 8\.34 MB\(RAM\) on CPU .* --- ggml_runner\.cpp:1014$/m, diffusion: "Wan2.2-TI2V-5B" },
 ];
 
 test("scanLog: each real healthy sd.cpp log passes, master-929 and master-945 alike (device line + a diffusion-stage compute buffer on Vulkan)", () => {

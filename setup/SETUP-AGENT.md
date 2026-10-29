@@ -257,7 +257,7 @@ The sd.cpp files go to `<OFFLOAD_HOME>/models/flux3-klein/` (the seeds' paths): 
 2,497,281,664 B, `Qwen3VL-4B-Instruct-Q8_0.gguf`
 4,280,406,144 B) and the same `flux2-vae.safetensors`. The download verifies each file against the oid and size the Hub
 publishes.
-sd.cpp must be master-968 or later (the floor in `setup/floors.json`; the Windows installer takes the newest complete
+sd.cpp must be master-1000 or later (the floor in `setup/floors.json`; the Windows installer takes the newest complete
 release, which is past it; `amd-gcn`'s seed names its own sd.cpp build directory). The fast upsampler seat for a ComfyUI node is BFL's PUP as a GGUF,
 `unsloth/flux-3-image-klein-pup-GGUF` (`main`), served by llama-swap (hand-wired: no
 tier renders it yet).
