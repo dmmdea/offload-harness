@@ -836,10 +836,10 @@ test("satisfyManifest takes a manifest that names only allowlisted packs", async
   assert.ok(calls.includes("ensurePack"));
 });
 
-test("makeEnsurePack refuses a pack that is not allowlisted before it asks git anything, and never builds a clone command", async () => {
+test("makeEnsurePack refuses a pack that is not allowlisted before it asks git anything, and never builds a clone command", async (t) => {
   const touched = [];
   // A directory of its own: the first clone below records the pack beside it.
-  const comfyDir = mkdtempSync(join(tmpdir(), "offload-ensure-"));
+  const comfyDir = scratchDir(t, "offload-ensure-");
   const ep = makeEnsurePack({
     comfyDir,
     exists: (d) => { touched.push(["exists", d]); return false; },
@@ -853,16 +853,14 @@ test("makeEnsurePack refuses a pack that is not allowlisted before it asks git a
   assert.deepEqual(touched, [], "the clone command was built or run for a pack that is not allowlisted");
   const r = await ep(VHS);
   assert.equal(r.changed, true);
-  assert.ok(touched.some((t) => t[0] === "buildClone"), "an allowlisted pack is cloned");
-  rmSync(comfyDir, { recursive: true, force: true });
+  assert.ok(touched.some((x) => x[0] === "buildClone"), "an allowlisted pack is cloned");
 });
 
-test("a refusal from the checkout stage is the same typed defer, not a broken venv", async () => {
-  const comfyDir = mkdtempSync(join(tmpdir(), "offload-ensure-"));
+test("a refusal from the checkout stage is the same typed defer, not a broken venv", async (t) => {
+  const comfyDir = scratchDir(t, "offload-ensure-");
   const ep = makeEnsurePack({ comfyDir, exists: () => false, gitHead: async () => "h", gitRun: async () => {} });
   const r = await satisfyManifest(parseManifest({ node_packs: [VHS], models: [] }), { ...realPolicy, ensurePack: (p) => ep({ ...p, name: "ComfyUI-Manager" }) });
   assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED");
-  rmSync(comfyDir, { recursive: true, force: true });
 });
 
 // --- a model lands under models/<class>/ and nowhere else ---------------------------------------------------------
