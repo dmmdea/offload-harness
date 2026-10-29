@@ -42,7 +42,7 @@ const (
 func gatedWarn(t *testing.T, in26B, inQ38, inQ354B, inQ359B, inQ3827B, inMimo9B bool, dir, target string) string {
 	t.Helper()
 	var buf bytes.Buffer
-	warnMissingGatedModelsTo(in26B, inQ38, inQ354B, inQ359B, inQ3827B, inMimo9B, false, false, false, dir, target, &buf)
+	warnMissingGatedModelsTo(gatedModelSet{Include26B: in26B, IncludeQ38: inQ38, IncludeQ354B: inQ354B, IncludeQ359B: inQ359B, IncludeQ3827B: inQ3827B, IncludeMimo9B: inMimo9B}, dir, target, &buf)
 	return buf.String()
 }
 
@@ -50,7 +50,7 @@ func gatedWarn(t *testing.T, in26B, inQ38, inQ354B, inQ359B, inQ3827B, inMimo9B 
 func gatedWarnQ3635B(t *testing.T, inQ3635B bool, dir, target string) string {
 	t.Helper()
 	var buf bytes.Buffer
-	warnMissingGatedModelsTo(false, false, false, false, false, false, inQ3635B, false, false, dir, target, &buf)
+	warnMissingGatedModelsTo(gatedModelSet{IncludeQ3635B: inQ3635B}, dir, target, &buf)
 	return buf.String()
 }
 
@@ -59,7 +59,7 @@ func gatedWarnQ3635B(t *testing.T, inQ3635B bool, dir, target string) string {
 func gatedWarnEG2(t *testing.T, inEG2, inProjector bool, dir, target string) string {
 	t.Helper()
 	var buf bytes.Buffer
-	warnMissingGatedModelsTo(false, false, false, false, false, false, false, inEG2, inProjector, dir, target, &buf)
+	warnMissingGatedModelsTo(gatedModelSet{IncludeEG2: inEG2, IncludeEG2Projector: inProjector}, dir, target, &buf)
 	return buf.String()
 }
 
