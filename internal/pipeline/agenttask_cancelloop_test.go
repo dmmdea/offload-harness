@@ -32,8 +32,8 @@ import (
 func TestRunAgentTaskLoopCancelIsBudget(t *testing.T) {
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
-		loop: func(int64) string {
-			time.Sleep(3 * time.Second) // well past the cancellation below
+		loopCtx: func(ctx context.Context, _ int64) string {
+			holdUntilHungUp(ctx, 3*time.Second) // well past the cancellation below
 			return doneChat("too late")
 		},
 	}

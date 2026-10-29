@@ -54,9 +54,9 @@ func busySeatFake(loopHold time.Duration, busy *atomic.Bool) (*agentFake, *atomi
 			}
 			return fmt.Sprintf("vllm:num_requests_running 4\nvllm:num_requests_waiting 1\nvllm:iteration_tokens_total_count %d\nvllm:generation_tokens_total %d\nvllm:prompt_tokens_total 5000\n", steps.Load(), 100+steps.Load())
 		},
-		loop: func(n int64) string {
+		loopCtx: func(ctx context.Context, n int64) string {
 			if n == 1 {
-				time.Sleep(loopHold)
+				holdUntilHungUp(ctx, loopHold)
 			}
 			return doneChat("answered after waiting its turn")
 		},
@@ -128,12 +128,12 @@ func TestRunAgentTaskHoldsARequestWhoseEngineWorksForOthers(t *testing.T) {
 	var busy atomic.Bool
 	busy.Store(true)
 	fake, base := busySeatFake(0, &busy)
-	inner := fake.loop
-	fake.loop = func(n int64) string {
+	inner := fake.loopCtx
+	fake.loopCtx = func(ctx context.Context, n int64) string {
 		if n == 1 {
 			hold.wait(heldFor)
 		}
-		return inner(n)
+		return inner(ctx, n)
 	}
 	srv := fake.server(t)
 	defer srv.Close()
@@ -206,8 +206,11 @@ func TestRunAgentTaskWithoutASeatAddressKeepsTheOldRule(t *testing.T) {
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
 		running:   func(int64) string { return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x"}]}` },
-		loop:      func(int64) string { time.Sleep(6 * time.Second); return doneChat("never read") },
-		repack:    func(int64) string { return `{"answer":"x"}` },
+		loopCtx: func(ctx context.Context, _ int64) string {
+			holdUntilHungUp(ctx, 6*time.Second)
+			return doneChat("never read")
+		},
+		repack: func(int64) string { return `{"answer":"x"}` },
 	}
 	srv := fake.server(t)
 	defer srv.Close()
@@ -317,7 +320,10 @@ func TestRunAgentTaskStallsAThrashingEngine(t *testing.T) {
 			n := steps.Add(1)
 			return fmt.Sprintf("vllm:num_requests_running 4\nvllm:num_requests_waiting 3\nvllm:iteration_tokens_total_count %d\nvllm:generation_tokens_total 100\nvllm:prompt_tokens_total 5000\nvllm:num_preemptions_total %d\nvllm:kv_cache_usage_perc 0.98\n", n, n)
 		},
-		loop:   func(int64) string { time.Sleep(6 * time.Second); return doneChat("never read") },
+		loopCtx: func(ctx context.Context, _ int64) string {
+			holdUntilHungUp(ctx, 6*time.Second)
+			return doneChat("never read")
+		},
 		repack: func(int64) string { return `{"answer":"x"}` },
 	}
 	srv := fake.server(t)

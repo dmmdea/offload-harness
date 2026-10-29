@@ -68,7 +68,7 @@ func TestNoteTierCallIdleWindow(t *testing.T) {
 // exactly these first-call load timeouts.
 func TestColdSwapFirstCallTimeoutDoesNotTripBreaker(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(5 * time.Second) // longer than the client budget: every call times out
+		holdUntilHungUp(r.Context(), 5*time.Second) // longer than the client budget: every call times out
 	}))
 	defer srv.Close()
 

@@ -156,8 +156,8 @@ func TestRunAgentTaskWarmUpIsBoundedByTheAdmissionBudget(t *testing.T) {
 		loop:      func(int64) string { return doneChat("The answer is 42.") },
 		repack:    func(int64) string { return `{"answer":"42"}` },
 		running:   func(int64) string { return `{"running":[]}` },
-		upstreamModels: func(int64) string {
-			time.Sleep(5 * time.Second) // longer than the 3 s admission budget
+		upstreamModelsCtx: func(ctx context.Context, _ int64) string {
+			holdUntilHungUp(ctx, 5*time.Second) // longer than the 3 s admission budget
 			return `{"object":"list","data":[]}`
 		},
 	}

@@ -66,14 +66,14 @@ func loadingSeatFake(load time.Duration) *agentFake {
 			}
 			return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x"}]}`
 		},
-		loop: func(n int64) string {
+		loopCtx: func(ctx context.Context, n int64) string {
 			if n == 1 {
 				hold := load
 				if hold < 0 {
 					hold = 8 * time.Second // "forever" for the test: far past its ceiling
 				}
 				loadingUntil.Store(time.Now().Add(hold).UnixNano())
-				time.Sleep(hold)
+				holdUntilHungUp(ctx, hold)
 			}
 			return doneChat("answered once the seat had loaded")
 		},
@@ -139,8 +139,8 @@ func TestRunAgentTaskReadySeatSilentIsStillAPrefillStall(t *testing.T) {
 		running: func(int64) string {
 			return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x"}]}`
 		},
-		loop: func(int64) string {
-			time.Sleep(8 * time.Second)
+		loopCtx: func(ctx context.Context, _ int64) string {
+			holdUntilHungUp(ctx, 8*time.Second)
 			return doneChat("never read")
 		},
 		repack: func(int64) string { return `{"answer":"x"}` },
@@ -230,9 +230,9 @@ func TestRunAgentTaskSeatAbsentWithNothingLoadingIsAPrefillStall(t *testing.T) {
 			}
 			return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x"}]}`
 		},
-		loop: func(int64) string {
+		loopCtx: func(ctx context.Context, _ int64) string {
 			gone.Store(true)
-			time.Sleep(8 * time.Second)
+			holdUntilHungUp(ctx, 8*time.Second)
 			return doneChat("never read")
 		},
 		repack: func(int64) string { return `{"answer":"x"}` },
@@ -269,9 +269,9 @@ func TestRunAgentTaskSilenceAfterReadyDefersAtThePostReadyBound(t *testing.T) {
 			}
 			return `{"running":[{"model":"` + agentTestSeat + `","state":"ready","cmd":"x"}]}`
 		},
-		loop: func(int64) string {
+		loopCtx: func(ctx context.Context, _ int64) string {
 			loadingUntil.Store(time.Now().Add(500 * time.Millisecond).UnixNano())
-			time.Sleep(10 * time.Second) // loads for 0.5 s, then ready and silent
+			holdUntilHungUp(ctx, 10*time.Second) // loads for 0.5 s, then ready and silent
 			return doneChat("never read")
 		},
 		repack: func(int64) string { return `{"answer":"x"}` },
