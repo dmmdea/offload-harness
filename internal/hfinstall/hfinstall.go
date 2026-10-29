@@ -258,38 +258,10 @@ func Install(ctx context.Context, o Options) (Result, error) {
 		}
 		return res, err
 	}
-	if out, err := run(ctx, dir, env, npm, "rebuild", "esbuild"); err != nil {
-		return fail(fmt.Errorf("npm rebuild esbuild failed: %v%s", err, tail(out)))
-	}
-	var browser struct {
-		OK          bool   `json:"ok"`
-		Class       string `json:"class"`
-		Detail      string `json:"detail"`
-		BrowserPath string `json:"browser_path"`
-	}
-	if err := runnerOp(ctx, run, env, o.Node, o.Runner, dir, "browser", &browser); err != nil {
-		return fail(err)
-	}
-	if !browser.OK {
-		return fail(fmt.Errorf("hyperframes browser ensure failed: %s: %s", browser.Class, browser.Detail))
-	}
-	res.BrowserPath = browser.BrowserPath
-	var version struct {
-		OK      bool   `json:"ok"`
-		Class   string `json:"class"`
-		Detail  string `json:"detail"`
-		Version string `json:"version"`
-		AtFloor bool   `json:"at_floor"`
-	}
-	if err := runnerOp(ctx, run, env, o.Node, o.Runner, dir, "version", &version); err != nil {
-		return fail(err)
-	}
-	if !version.OK || !version.AtFloor {
-		return fail(fmt.Errorf("the runner's version check did not pass after the install: %s %s", version.Class, version.Detail))
-	}
-	got, err := InstalledVersion(dir)
-	if err != nil {
-		return fail(err)
+	browserPath, got, verr := Verify(ctx, run, o.Node, npm, o.Runner, dir)
+	res.BrowserPath = browserPath
+	if verr != nil {
+		return fail(verr)
 	}
 	res.Version = got
 	if o.ManifestPath != "" {
@@ -302,6 +274,56 @@ func Install(ctx context.Context, o Options) (Result, error) {
 		}
 	}
 	return res, nil
+}
+
+// Verify checks an install whose node_modules are in place under dir: `npm rebuild esbuild`
+// (the one postinstall the CLI needs), then the runner's own `browser` op (ensure + path, under
+// its scrubbed env, so the browser is the one THIS release resolves) and its `version` op (ok
+// and at_floor). It returns the browser path the release resolved and the installed version.
+// run nil = exec; npm empty = "npm". Install runs it on a swapped-in tree; `update` runs it on
+// the staged generation before that generation can go live.
+func Verify(ctx context.Context, run Runner, node, npm, runner, dir string) (browserPath, version string, err error) {
+	if run == nil {
+		run = execRun
+	}
+	if npm == "" {
+		npm = "npm"
+	}
+	env := envWithNodeFirst(node)
+	if out, err := run(ctx, dir, env, npm, "rebuild", "esbuild"); err != nil {
+		return "", "", fmt.Errorf("npm rebuild esbuild failed: %v%s", err, tail(out))
+	}
+	var browser struct {
+		OK          bool   `json:"ok"`
+		Class       string `json:"class"`
+		Detail      string `json:"detail"`
+		BrowserPath string `json:"browser_path"`
+	}
+	if err := runnerOp(ctx, run, env, node, runner, dir, "browser", &browser); err != nil {
+		return "", "", err
+	}
+	if !browser.OK {
+		return "", "", fmt.Errorf("hyperframes browser ensure failed: %s: %s", browser.Class, browser.Detail)
+	}
+	browserPath = browser.BrowserPath
+	var ver struct {
+		OK      bool   `json:"ok"`
+		Class   string `json:"class"`
+		Detail  string `json:"detail"`
+		Version string `json:"version"`
+		AtFloor bool   `json:"at_floor"`
+	}
+	if err := runnerOp(ctx, run, env, node, runner, dir, "version", &ver); err != nil {
+		return browserPath, "", err
+	}
+	if !ver.OK || !ver.AtFloor {
+		return browserPath, "", fmt.Errorf("the runner's version check did not pass after the install: %s %s", ver.Class, ver.Detail)
+	}
+	version, err = InstalledVersion(dir)
+	if err != nil {
+		return browserPath, "", err
+	}
+	return browserPath, version, nil
 }
 
 // RecordInstalled writes {version, installed_at} under components.hyperframes.current of the

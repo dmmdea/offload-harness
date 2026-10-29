@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/hfinstall"
@@ -75,8 +76,10 @@ func runInstallHyperframes(args []string) error {
 		if !samePath(cfg.HyperframesDir, res.Dir) {
 			notes = append(notes, fmt.Sprintf("hyperframes_dir in the config is %q; this install is %q", cfg.HyperframesDir, res.Dir))
 		}
-		if !samePath(cfg.HyperframesBrowserPath, res.BrowserPath) {
-			notes = append(notes, fmt.Sprintf("hyperframes_browser_path in the config is %q; HyperFrames' own browser is at %q", cfg.HyperframesBrowserPath, res.BrowserPath))
+		// "auto" follows whatever browser the installed release resolves, so there is nothing to compare;
+		// an explicit path binds one file and is flagged when it is not the release's own browser.
+		if !cfg.HyperframesBrowserAuto() && !samePath(cfg.HyperframesBrowserPath, res.BrowserPath) {
+			notes = append(notes, fmt.Sprintf("hyperframes_browser_path in the config is %q; HyperFrames' own browser is at %q - set it to %q so the config follows the installed release instead of one browser version", cfg.HyperframesBrowserPath, res.BrowserPath, config.BrowserAuto))
 		}
 	}
 	if *asJSON {

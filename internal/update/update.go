@@ -50,6 +50,10 @@ type Env struct {
 	HTTP     *http.Client
 	GitHub   string
 	NPM      string
+	// HFNode and HFRunner drive the HyperFrames browser refresh in stageNPM: the node executable and the resolved
+	// render/compose-hyperframes.mjs. HFRunner empty = compose_script is unset, the browser is not refreshed.
+	HFNode   string
+	HFRunner string
 	Gate     Gate
 	Deps     nodeswap.Deps
 	Out      io.Writer

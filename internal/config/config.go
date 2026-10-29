@@ -1087,9 +1087,14 @@ type Config struct {
 	// HyperFrames' own state (~/.hyperframes, the managed Chrome cache) lives in
 	// <dir>/home — the runner gives the CLI that directory as HOME.
 	HyperframesDir string `json:"hyperframes_dir,omitempty"`
-	// HyperframesBrowserPath is the pinned chrome-headless-shell the installer's
-	// `browser ensure` step downloaded (HYPERFRAMES_BROWSER_PATH). Explicit because
-	// the CLI's own resolution prefers a NEWER build in ~/.cache/puppeteer over its pin.
+	// HyperframesBrowserPath is the chrome-headless-shell the runner hands HyperFrames
+	// (HYPERFRAMES_BROWSER_PATH). "auto" (BrowserAuto, what the installers write) is the
+	// managed chrome-headless-shell that HyperFrames' installed release resolves at render
+	// time under <hyperframes_dir>/home (fetched on first use when the release wants a
+	// newer one), kept current by `install hyperframes` and `update`. An explicit path
+	// binds that one file and never follows a release; it stays valid for operators who
+	// want a specific browser. Explicit because the CLI's own resolution prefers a NEWER
+	// build in ~/.cache/puppeteer over the managed one.
 	HyperframesBrowserPath string `json:"hyperframes_browser_path,omitempty"`
 	// ComposeTimeoutSec bounds one composition end to end (lint + check + render +
 	// verify + snapshots). Default 1800.
@@ -3706,6 +3711,16 @@ func (c Config) ImageRouteConfigured() bool {
 // both key on this instead of ImageRouteConfigured alone.
 func (c Config) ImageGenAdvertisable() bool {
 	return c.ImageRouteConfigured() || len(c.ImageGenFamilies) > 0
+}
+
+// BrowserAuto is the hyperframes_browser_path value that means "the managed browser of
+// the installed HyperFrames release, resolved at render time" rather than a file path.
+const BrowserAuto = "auto"
+
+// HyperframesBrowserAuto reports whether hyperframes_browser_path is "auto" (any case,
+// surrounding space ignored): not a file binding, so nothing path-like applies to it.
+func (c Config) HyperframesBrowserAuto() bool {
+	return strings.EqualFold(strings.TrimSpace(c.HyperframesBrowserPath), BrowserAuto)
 }
 
 // ComposeRouteConfigured reports whether THIS box serves compose_video: the

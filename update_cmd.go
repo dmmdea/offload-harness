@@ -92,6 +92,15 @@ func runUpdate(args []string) error {
 		return &exitCodeError{code: 2, msg: "update: " + err.Error()}
 	}
 
+	// HyperFrames: the staged generation refreshes the browser through the render runner when compose_script is set.
+	if cfg.ComposeScript != "" {
+		if runner, rerr := gpugen.ResolveScript(cfg.ComposeScript); rerr != nil {
+			logf("update: hyperframes browser refresh off: compose_script: %v", rerr)
+		} else {
+			env.HFNode, env.HFRunner = cfg.NodePath, runner
+		}
+	}
+
 	if sg, ok := env.Gate.(*update.SmokeGate); ok {
 		sg.ConfigPath = cfgPath
 	}

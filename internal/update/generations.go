@@ -17,6 +17,7 @@ import (
 
 	"llamaswap-pp-cli/pkg/llamaswap"
 
+	"github.com/dmmdea/offload-harness/internal/hfinstall"
 	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
@@ -464,7 +465,84 @@ func (e *Env) stageNPM(ctx context.Context, def *compDef, live string, cand *Can
 			return fmt.Errorf("carrying the browser cache over: %w", err)
 		}
 	}
+	return e.refreshHFBrowser(ctx, npm, gen)
+}
+
+// refreshHFBrowser makes the staged generation run against the browser ITS release resolves: the runner's
+// `browser` op (ensure + path) and `version` op run on gen with HOME at gen/home (the runner derives home
+// from --hyperframes-dir), so a release that moved to a newer Chrome fetches it here, before the generation
+// can go live, and a failure rejects the stage with the live generation untouched. Browser versions the new
+// release no longer resolves are then pruned from gen's own cache; the previous generation keeps its copy.
+func (e *Env) refreshHFBrowser(ctx context.Context, npm, gen string) error {
+	if e.HFRunner == "" {
+		e.logf("hyperframes: the browser was not refreshed because compose_script is unset (run `local-offload install hyperframes` to fetch the browser the new release wants)")
+		return nil
+	}
+	node := e.HFNode
+	if node == "" {
+		node = "node"
+	}
+	e.logf("hyperframes: refreshing the browser the staged release resolves")
+	bctx, cancel := context.WithTimeout(ctx, 20*time.Minute)
+	defer cancel()
+	browserPath, version, err := hfinstall.Verify(bctx, nil, node, npm, e.HFRunner, gen)
+	if err != nil {
+		return fmt.Errorf("browser refresh: %w", err)
+	}
+	removed, err := pruneHFBrowsers(filepath.Join(gen, "home", ".cache", "hyperframes", "chrome"), browserPath)
+	if err != nil {
+		return fmt.Errorf("pruning old browsers from the staged cache: %w", err)
+	}
+	e.logf("hyperframes %s: browser %s%s", version, browserPath, orNoneRemoved(removed))
 	return nil
+}
+
+func orNoneRemoved(removed []string) string {
+	if len(removed) == 0 {
+		return ""
+	}
+	return " (pruned " + strings.Join(removed, ", ") + ")"
+}
+
+// pruneHFBrowsers removes, under chromeRoot (the cache/hyperframes/chrome tree under the generation's home dir, laid out as
+// <kind>/<version>/...), every version directory that does not contain keep. Nothing is removed when keep is
+// not inside chromeRoot (a browser outside the managed cache, so nothing here is known to be unused).
+func pruneHFBrowsers(chromeRoot, keep string) ([]string, error) {
+	inside := func(dir string) bool {
+		rel, err := filepath.Rel(dir, keep)
+		if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return false
+		}
+		return true
+	}
+	if !inside(chromeRoot) {
+		return nil, nil
+	}
+	kinds, err := os.ReadDir(chromeRoot)
+	if err != nil {
+		return nil, err
+	}
+	var removed []string
+	for _, k := range kinds {
+		if !k.IsDir() {
+			continue
+		}
+		vers, err := os.ReadDir(filepath.Join(chromeRoot, k.Name()))
+		if err != nil {
+			return removed, err
+		}
+		for _, v := range vers {
+			vd := filepath.Join(chromeRoot, k.Name(), v.Name())
+			if !v.IsDir() || inside(vd) {
+				continue
+			}
+			if err := os.RemoveAll(vd); err != nil {
+				return removed, err
+			}
+			removed = append(removed, k.Name()+"/"+v.Name())
+		}
+	}
+	return removed, nil
 }
 
 // rollback returns a component to its previous generation, on the operator's word (not a failure: nothing is rejected).
