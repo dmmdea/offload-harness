@@ -19,9 +19,11 @@ import (
 // name the weight files. ForGraph reads those names with the reader the node door already uses (mediacap.ScanGraph), finds each
 // under the box's model roots (mediacap.ModelFileSizes, the lookup the door's own held-by-name check makes) and declares the sum.
 //
-// It declares a figure only when it can stand behind all of it. A graph it cannot read, one that names no weight file, ONE file
+// It declares a figure only when it can stand behind all of it. A graph it cannot read, ONE file
 // it cannot find or size, or a weight-like name the scan did not list, is not sized at all, and the caller keeps the class default exactly as before: a size that is not
-// known must never shrink a declaration.
+// known must never shrink a declaration. A graph that names no weight file at all (an API-format graph with a node, and no weight-like
+// name anywhere in it) is not that case: nothing is left to load but the ComfyUI process, and it is declared the measured process floor
+// (ProcessFloor: 3 GiB touched, 4 GiB of commit stated), not the class default of the largest family the box binds.
 
 // maxGraphBytes bounds the graph document ForGraphFile reads. A ComfyUI API-format graph is a few KiB, and a fleet node's dispatch
 // body is 1 MiB at most; a larger file is not a graph worth a read on every lease.
@@ -35,16 +37,29 @@ const graphDetailFiles = 8
 // estimate's own rule (fitToCard): in full when together the files do not fit the card (or the card is not known), and 0 when
 // they fit, because a set that fits streams nothing from RAM. The figure is an estimate from the files' sizes, not a measurement.
 //
-// ok is false, and the caller keeps the media class default, when graph is not a JSON object, names no weight file, or names one
-// that does not resolve under the box's model roots (or is empty), or when the document holds a weight-like name the sizing did not
+// A graph that names no weight file is the ProcessFloor, ok true. ok is false, and the caller keeps the media class default, when graph is
+// not a JSON object (or holds no node), or names a weight file that does not resolve under the box's model roots (or is empty), or when the document holds a weight-like name the sizing did not
 // cover (unsizedWeight: another extension, a nested widget object, a list). Facts.Stat sizes the files when set, as for every estimate.
 //
 // LIMIT: a weight is recognised by its extension (the scan's six and otherWeightExts) and a graph can name one by another, or load
 // a file whose name is built at run time; such a graph is sized by the files that were seen, an estimate that can be low.
 func ForGraph(graph []byte, f Facts) (Need, bool) {
 	files, err := mediacap.ScanGraph(graph)
-	if err != nil || len(files.Models) == 0 {
+	if err != nil {
 		return Need{}, false
+	}
+	if len(files.Models) == 0 {
+		// A graph that names no weight file loads nothing a file size could say; what it holds is the ComfyUI process (ProcessFloor). Only a
+		// document that is an API-format graph (a node with a class_type) and holds no weight-like name anywhere (unsizedWeight: another
+		// extension, a nested object, a list) and no node of a weight-loader class (hasWeightLoader: its file may be fed by a link or built at run
+// time) is given the floor: a UI-format workflow, a name the scan did not list or a loader that names nothing keeps the class default.
+		if !hasGraphNode(graph) || hasWeightLoader(graph) {
+			return Need{}, false
+		}
+		if _, doubt := unsizedWeight(graph, map[string]bool{}); doubt {
+			return Need{}, false
+		}
+		return ProcessFloor("the graph"), true
 	}
 	stat := f.Stat
 	if stat == nil {
@@ -89,6 +104,46 @@ func ForGraphFile(path string, f Facts) (Need, bool) {
 		return Need{}, false
 	}
 	return ForGraph(raw, f)
+}
+
+// hasGraphNode reports whether the document is an API-format graph: a JSON object with at least one entry that is a node (an object with a class_type).
+func hasGraphNode(graph []byte) bool {
+	var nodes map[string]json.RawMessage
+	if json.Unmarshal(graph, &nodes) != nil {
+		return false
+	}
+	for _, raw := range nodes {
+		var n struct {
+			Class string `json:"class_type"`
+		}
+		if json.Unmarshal(raw, &n) == nil && n.Class != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// hasWeightLoader reports whether a node's class is one that loads a weight file (a class_type with "loader", "checkpoint" or "lora" in it, or
+// "load" with "model"): a graph with such a node and no weight file named for it has a file the scan did not see (fed by a link, or built
+// at run time), so it is not the process floor. The class names of the input loaders (LoadImage, LoadVideo, LoadAudio) carry none of those.
+func hasWeightLoader(graph []byte) bool {
+	var nodes map[string]json.RawMessage
+	if json.Unmarshal(graph, &nodes) != nil {
+		return true
+	}
+	for _, raw := range nodes {
+		var n struct {
+			Class string `json:"class_type"`
+		}
+		if json.Unmarshal(raw, &n) != nil {
+			continue
+		}
+		c := strings.ToLower(n.Class)
+		if strings.Contains(c, "loader") || strings.Contains(c, "checkpoint") || strings.Contains(c, "lora") || (strings.Contains(c, "load") && strings.Contains(c, "model")) {
+			return true
+		}
+	}
+	return false
 }
 
 // readBoundedFile reads the regular file at path, at most maxGraphBytes of it: the read ForGraphFile and ForManifestFile share. A path

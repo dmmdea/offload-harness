@@ -211,18 +211,17 @@ func TestAGraphThatCannotBeReadKeepsTheClassDefault(t *testing.T) {
 	}
 }
 
-// (4) A graph that names no weight file has nothing to sum: a figure of 0 would be a declaration that the graph needs no host
-// RAM, which the lease does not know. It is the class default.
+// (4) A graph that names no weight file has nothing to sum, and a figure of 0 would declare that it needs no host RAM, which the lease
+// does not know: an API-format graph with no loader node at all is the measured ComfyUI process floor (3 GiB, 4 GiB of commit stated), and
+// any doubt (no node, a loader that names no file, a loader fed by a link) is the class default.
 func TestAGraphThatNamesNoLoaderKeepsTheClassDefault(t *testing.T) {
 	f := sparseTree(t, map[string]int64{"checkpoints/ck.safetensors": 6 * mib})
 	want := ClassDefault(f)
 	for name, graph := range map[string]string{
 		"an empty object": `{}`,
-		"nodes without a file": `{"1":{"class_type":"EmptyLatentImage","inputs":{"width":512}},
-			"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"model.safetensors","images":["1",0]}}}`,
-		"only an input image":    `{"1":{"class_type":"LoadImage","inputs":{"image":"photo.png"}}}`,
 		"a loader fed by a link": `{"1":{"class_type":"UNETLoader","inputs":{"unet_name":["9",0]}}}`,
 		"a builtin vae":          `{"1":{"class_type":"VAELoader","inputs":{"vae_name":"builtin"}}}`,
+		"a weight under another extension": `{"1":{"class_type":"SaveImage","inputs":{"filename_prefix":"x","thing":"w.onnx"}}}`,
 	} {
 		if n, ok := ForGraph([]byte(graph), f); ok {
 			t.Errorf("%s: sized as %v", name, n)
@@ -231,6 +230,21 @@ func TestAGraphThatNamesNoLoaderKeepsTheClassDefault(t *testing.T) {
 		got := Resolve(Request{Class: gpulease.ClassMedia, Args: graphCall("comfy-render.mjs", "--graph", p)}, f)
 		if got != want {
 			t.Errorf("%s: Resolve = %v, want the class default %v", name, got, want)
+		}
+	}
+	// the floor: nodes that name no weight file, run as a render helper's --graph or as render/comfy-run-graph.mjs --graph
+	for name, graph := range map[string]string{
+		"nodes without a file": `{"1":{"class_type":"EmptyLatentImage","inputs":{"width":512}},
+			"2":{"class_type":"SaveImage","inputs":{"filename_prefix":"model.safetensors","images":["1",0]}}}`,
+		"only an input image": `{"1":{"class_type":"LoadImage","inputs":{"image":"photo.png"}}}`,
+		"a small gif graph":   `{"1":{"class_type":"VHS_LoadImages","inputs":{"directory":"in"}},"2":{"class_type":"VHS_VideoCombine","inputs":{"images":["1",0],"format":"image/gif"}}}`,
+	} {
+		p := writeGraph(t, graph)
+		for _, args := range [][]string{graphCall("comfy-render.mjs", "--graph", p), graphCall("comfy-run-graph.mjs", "--graph", p, "--manifest", "m.json")} {
+			got := Resolve(Request{Class: gpulease.ClassMedia, Args: args}, f)
+			if got.GiB != 3 || got.CommitGiB != 4 || !got.CommitStated || got.Source != SourceMeasured {
+				t.Errorf("%s (%s): Resolve = %v, want the process floor of 3 GiB with 4 GiB of commit stated", name, args[1], got)
+			}
 		}
 	}
 }

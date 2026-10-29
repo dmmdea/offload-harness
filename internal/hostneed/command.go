@@ -17,15 +17,16 @@ type RenderCall struct {
 	Flags  map[string]string
 }
 
-// helperRoute maps the render helpers to the route whose files they load. comfy-run-graph.mjs is
-// deliberately absent: it takes the graph as a positional argument, not a flag, so its wrapped command is not read here. The
-// same helpers run in --graph mode (comfy-render, comfy-video) post the caller's own graph, handled in Estimate.
+// helperRoute maps the render helpers to the route whose files they load. comfy-run-graph.mjs has a route of its own
+// (RouteRunGraph): it reads `--graph FILE` or `--template NAME --manifest FILE` as flags, and what it loads is what that graph or manifest
+// names, never a family's files. The same helpers run in --graph mode (comfy-render, comfy-video) post the caller's own graph, handled in Estimate.
 var helperRoute = map[string]Route{
-	"comfy-generate.mjs": RouteImage,
-	"comfy-render.mjs":   RouteImage,
-	"comfy-edit.mjs":     RouteEdit,
-	"comfy-inpaint.mjs":  RouteInpaint,
-	"comfy-video.mjs":    RouteVideo,
+	"comfy-generate.mjs":  RouteImage,
+	"comfy-render.mjs":    RouteImage,
+	"comfy-edit.mjs":      RouteEdit,
+	"comfy-inpaint.mjs":   RouteInpaint,
+	"comfy-video.mjs":     RouteVideo,
+	"comfy-run-graph.mjs": RouteRunGraph,
 }
 
 // boolFlags take no value in the helpers' own parsers (comfy-render.mjs BOOL_FLAGS, comfy-video.mjs,
@@ -83,6 +84,14 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 	// loads is what the graph's own loaders name: when the lease can read the graph and size every file
 	// they name, that sum is the need (ForGraphFile); otherwise the call is not sized and the media
 	// class default stands in, as it always did.
+	if c.Route == RouteRunGraph {
+		// A template run carries no graph file: what it loads is the model files of its runtime manifest (manifest.go). Both flags is a
+		// contradiction the runner defers, so the template reading is the one that applies only when --graph is absent.
+		if !c.RunsOwnGraph() && strings.TrimSpace(c.Flags["template"]) != "" {
+			return ForManifestFile(c.Flags["manifest"], f)
+		}
+		return ForGraphFile(c.Flags["graph"], f)
+	}
 	if c.RunsOwnGraph() {
 		return ForGraphFile(c.Flags["graph"], f)
 	}

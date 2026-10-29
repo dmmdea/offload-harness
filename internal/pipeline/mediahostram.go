@@ -56,6 +56,9 @@ const (
 // order the media path always had) or after the clear (the F82 order).
 type hostRAMDeferral struct {
 	declared float64
+	// commit is the commit the estimate states beside declared (hostneed.Need.CommitStated), 0 when it states none: the lease then takes
+	// the working set as its commit. It follows declared through gate and later.
+	commit float64
 	defers   bool
 	// unload is the GPU_LEASE_UNLOAD_MODELS entry read for a lease that defers ("" = a whole-node call, or a card call whose
 	// roster could not be read: the runner's rule, every model off the memory stack). The grant hands the same one to the runner.
@@ -74,6 +77,35 @@ func (d hostRAMDeferral) gate() float64 {
 func (d hostRAMDeferral) later() float64 {
 	if d.defers {
 		return d.declared
+	}
+	return 0
+}
+
+// gateLoad is the two figures the grant compares to the host for this call: the working set, and its commit, stated when the estimate stated one.
+func (d hostRAMDeferral) gateLoad() gpuprobe.HostLoad {
+	return hostLoadOf(d.gate(), d.gateCommit())
+}
+
+// hostLoadOf is the host load a figure and the commit stated beside it (0 = none stated) declare: the one figure stands in for an unstated commit.
+func hostLoadOf(gib, commit float64) gpuprobe.HostLoad {
+	if commit > 0 && gib > 0 {
+		return gpuprobe.HostLoad{TouchGiB: gib, CommitGiB: commit, CommitStated: true}
+	}
+	return gpuprobe.HostLoad{TouchGiB: gib, CommitGiB: gib}
+}
+
+// gateCommit is the stated commit the grant compares: nothing for a call that defers, as gate.
+func (d hostRAMDeferral) gateCommit() float64 {
+	if d.defers {
+		return 0
+	}
+	return d.commit
+}
+
+// laterCommit is the stated commit asked of the host after the clear.
+func (d hostRAMDeferral) laterCommit() float64 {
+	if d.defers {
+		return d.commit
 	}
 	return 0
 }
@@ -104,11 +136,17 @@ type mediaClearRead struct {
 //
 // maxAge 0 reads fresh (the grant); above 0 a reading younger than that is reused (the probe).
 func (p *Pipeline) hostRAMDeferral(ctx context.Context, m *gpulease.Manager, declared float64, ids []string, cards []gpuprobe.Card, maxAge time.Duration) hostRAMDeferral {
-	d := hostRAMDeferral{declared: declared}
+	return p.hostRAMDeferralLoad(ctx, m, declared, 0, ids, cards, maxAge)
+}
+
+// hostRAMDeferralLoad is hostRAMDeferral for a call whose estimate states its commit (commit above 0): the host is asked for the same
+// two figures the grant will ask, the commit stated and so judged against the commit limit.
+func (p *Pipeline) hostRAMDeferralLoad(ctx context.Context, m *gpulease.Manager, declared, commit float64, ids []string, cards []gpuprobe.Card, maxAge time.Duration) hostRAMDeferral {
+	d := hostRAMDeferral{declared: declared, commit: commit}
 	if declared <= 0 || m == nil || strings.TrimSpace(p.cfg.Endpoint) == "" {
 		return d
 	}
-	chk := m.HostRAMCheckLoad(gpuprobe.HostLoad{TouchGiB: declared, CommitGiB: declared})
+	chk := m.HostRAMCheckLoad(hostLoadOf(declared, commit))
 	switch {
 	case chk.OK, chk.Impossible:
 		return d

@@ -154,7 +154,6 @@ func TestReserveNamesTheUnrecognisedWrapperWhenItDeclaresTheClassDefault(t *test
 	for name, args := range map[string][]string{
 		"a python driver":                         {"python", "driver.py"},
 		"a driver script path":                    {"pwsh", "-File", "scripts/render-all.ps1", "--clip", "7"},
-		"a helper that sizes nothing (run-graph)": strings.Fields("node render/comfy-run-graph.mjs wf.json"),
 	} {
 		lines, need := reserveSays(t, false, 0, gpulease.ClassMedia, args, cfg)
 		if need.Source != hostneed.SourceClassDefault || need.GiB < 32 {
@@ -170,7 +169,7 @@ func TestReserveNamesTheUnrecognisedWrapperWhenItDeclaresTheClassDefault(t *test
 func TestReserveNamesTheGraphWhenARecognisedHelperRunsOne(t *testing.T) {
 	cfg := classDefaultBox(t) // its model tree holds neither file hintGraph names
 	notHeld := graphPath(t, hintGraph)
-	noLoader := graphPath(t, `{"1":{"class_type":"EmptyLatentImage","inputs":{"width":512}}}`)
+	noLoader := graphPath(t, `{"1":{"class_type":"UNETLoader","inputs":{"unet_name":["9",0]}}}`) // a loader that names no file: not the process floor
 	notAGraph := graphPath(t, "not a graph")
 	for _, c := range []struct {
 		name   string
@@ -184,6 +183,7 @@ func TestReserveNamesTheGraphWhenARecognisedHelperRunsOne(t *testing.T) {
 		// a graph the lease CAN read, whose files it cannot size: still the class default, and the line says the graph was the reason
 		{"a graph that names files the box does not hold", gpulease.ClassMedia, append(strings.Fields("node render/comfy-render.mjs out.png"), "--graph", notHeld), "comfy-render.mjs"},
 		{"a graph that names no loader", gpulease.ClassMedia, append(strings.Fields("node render/comfy-render.mjs out.png"), "--graph", noLoader), "comfy-render.mjs"},
+		{"run-graph --graph a graph that names files the box does not hold", gpulease.ClassMedia, append(strings.Fields("node render/comfy-run-graph.mjs"), "--graph", notHeld, "--manifest", "m.json"), "comfy-run-graph.mjs"},
 		{"a file that is not a graph", gpulease.ClassText, append(strings.Fields("node render/comfy-video.mjs out.mp4"), "--graph", notAGraph), "comfy-video.mjs"},
 	} {
 		lines, need := reserveSays(t, false, 0, c.class, c.args, cfg)

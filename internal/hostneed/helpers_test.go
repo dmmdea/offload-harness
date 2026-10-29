@@ -13,7 +13,7 @@ import (
 // The names are exactly the files ParseRenderCall recognises, sorted, and the ones that are deliberately absent
 // (an arbitrary graph, a wrapper) are not among them. The list is a copy: changing it changes nothing here.
 func TestRenderHelpersAreExactlyTheFilesParseRenderCallRecognises(t *testing.T) {
-	want := []string{"comfy-edit.mjs", "comfy-generate.mjs", "comfy-inpaint.mjs", "comfy-render.mjs", "comfy-video.mjs"}
+	want := []string{"comfy-edit.mjs", "comfy-generate.mjs", "comfy-inpaint.mjs", "comfy-render.mjs", "comfy-run-graph.mjs", "comfy-video.mjs"}
 	got := RenderHelpers()
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("RenderHelpers = %v, want %v", got, want)
@@ -23,7 +23,7 @@ func TestRenderHelpersAreExactlyTheFilesParseRenderCallRecognises(t *testing.T) 
 			t.Errorf("%s is listed as a render helper but a wrapped command naming it is not recognised", name)
 		}
 	}
-	for _, name := range []string{"comfy-run-graph.mjs", "comfy-animate.mjs", "driver.py", "render-all.ps1"} {
+	for _, name := range []string{"comfy-animate.mjs", "driver.py", "render-all.ps1"} {
 		if _, ok := ParseRenderCall([]string{"node", "render/" + name}); ok {
 			t.Errorf("%s is recognised, so it belongs in the list", name)
 		}

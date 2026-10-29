@@ -238,6 +238,8 @@ type laneReading struct {
 	// since is the arrival time of the place in line the call resumes, zero for a new arrival (placeSince).
 	since  time.Time
 	askRAM float64
+	// askCommit is the commit the call's estimate states beside askRAM (0 = none: the one figure stands in for it); only the graph lane sets it.
+	askCommit float64
 
 	reasons []string
 	holders []core.LaneHolder
@@ -366,8 +368,9 @@ func anyHeld(held map[string]bool, ids []string) bool {
 // hostRAMFor puts the call's declared need, for the cards it would run on, to the node's host-RAM verdict.
 func (r *laneReading) hostRAMFor(ctx context.Context, need mediaNeed, ids []string) {
 	// The figure the grant compares: 0 when the call defers it until its own unload has run (hostRAMDeferral).
-	gate := r.p.hostRAMDeferral(ctx, r.m, r.p.declaredRAM(ctx, need, r.cards, ids), ids, r.cards, mediaClearReadTTL).gate()
-	if chk := r.m.HostRAMCheck(gate); !chk.OK {
+	gib, commit := r.p.declaredLoad(ctx, need, r.cards, ids)
+	d := r.p.hostRAMDeferralLoad(ctx, r.m, gib, commit, ids, r.cards, mediaClearReadTTL)
+	if chk := r.m.HostRAMCheckLoad(d.gateLoad()); !chk.OK {
 		r.hostRAM = chk.Why
 		r.block(chk.Why)
 	}
@@ -379,7 +382,7 @@ func (r *laneReading) wholeNode() {
 	r.slots(nil)
 	r.leasesIn(nil)
 	r.callersAhead(nil, r.placeSince())
-	if chk := r.m.HostRAMCheck(r.askRAM); !chk.OK {
+	if chk := r.m.HostRAMCheckLoad(hostLoadOf(r.askRAM, r.askCommit)); !chk.OK {
 		r.hostRAM = chk.Why
 		r.block(chk.Why)
 	}

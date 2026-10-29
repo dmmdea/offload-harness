@@ -151,7 +151,6 @@ func TestATemplateTheLaneCannotSizeKeepsTheClassDefault(t *testing.T) {
 	for name, params := range map[string]map[string]any{
 		"a file among them the box does not hold": tpl(`{"models":[{"path":"` + tplCkpt + `"},{"path":"models/loras/not_on_this_box.safetensors"}]}`),
 		"a manifest that is not JSON":             tpl(`not json`),
-		"a manifest that names no model":          tpl(`{"models":[]}`),
 		"a manifest with no models key":           tpl(`{"workflow":"x"}`),
 		"a model whose path is null":              tpl(`{"models":[{"path":null},{"path":"` + tplCkpt + `"}]}`),
 		"a path that is not models/class/name":    tpl(`{"models":[{"path":"checkpoints/qwen_image_fp8.safetensors"}]}`),
@@ -162,6 +161,10 @@ func TestATemplateTheLaneCannotSizeKeepsTheClassDefault(t *testing.T) {
 		if got := graphRAM(p.cfg, params)(16); got != want {
 			t.Errorf("%s: declared %v, want the class default %v", name, got, want)
 		}
+	}
+	// a manifest whose models list is present and empty loads no weight file: the ComfyUI process floor, its commit stated
+	if got := graphRAM(p.cfg, tpl(`{"models":[]}`))(16); got.GiB != 3 || got.CommitGiB != 4 || !got.CommitStated || got.Source != hostneed.SourceMeasured {
+		t.Errorf("a manifest that names no model: declared %v, want the process floor of 3 GiB with 4 GiB of commit stated", got)
 	}
 	if got := graphRAM(p.cfg, good)(16); got == want {
 		t.Errorf("the control: a manifest of two files the box holds must not be the class default %v", want)

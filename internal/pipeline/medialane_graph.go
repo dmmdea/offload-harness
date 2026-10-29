@@ -66,7 +66,9 @@ func (p *Pipeline) graphLaneFree(ctx context.Context, req core.Request) core.Lan
 	// Every read below goes through a view that prunes nothing: the question must not change the state it asks about.
 	r := &laneReading{p: p, m: m.ReadOnly(), cards: table, token: token}
 	// What the call declares on its largest card: if the host refuses that, it refuses the call.
-	r.askRAM = p.hostRAMDeferral(ctx, r.m, p.declaredRAM(ctx, need, table, nil), nil, table, mediaClearReadTTL).gate()
+	gib, commit := p.declaredLoad(ctx, need, table, nil)
+	d := p.hostRAMDeferralLoad(ctx, r.m, gib, commit, nil, table, mediaClearReadTTL)
+	r.askRAM, r.askCommit = d.gate(), d.gateCommit()
 	r.wholeNode()
 	return r.verdict()
 }
