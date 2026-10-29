@@ -31,6 +31,11 @@ const FragmentDir = "changes/unreleased"
 // ChangelogFile is the one file the tool edits, relative to the repository root.
 const ChangelogFile = "CHANGELOG.md"
 
+// ArchiveDir holds the releases moved out of ChangelogFile verbatim (CHANGELOG-<newest>-to-<oldest>.md, split
+// 2026-10-29 when the file passed GitHub's render limit), relative to the repository root, with forward slashes. The
+// tool never writes there; Combined reads it so the prose gates see the same history they read before the split.
+const ArchiveDir = "docs/changelog"
+
 const unreleasedHeading = "## [Unreleased]"
 
 var (
@@ -496,9 +501,10 @@ func checkTree(root string, allowLegacy bool) []string {
 	return problems
 }
 
-// Combined returns CHANGELOG.md of root with its fragments spliced in as a preview, for the tests that read the
-// changelog's prose: a fragment is changelog text from the day it is written, and a gate that read only CHANGELOG.md
-// would see it first on the release branch. With no fragments it is the file's own text.
+// Combined returns CHANGELOG.md of root with its fragments spliced in as a preview, followed by the archived releases
+// of ArchiveDir (newest file first), for the tests that read the changelog's prose: a fragment is changelog text from
+// the day it is written, and a gate that read only CHANGELOG.md would see it first on the release branch; an archived
+// release is the same history it was before the split. With no fragments and no archive it is the file's own text.
 func Combined(root string) (string, error) {
 	raw, err := os.ReadFile(filepath.Join(root, ChangelogFile))
 	if err != nil {
@@ -508,5 +514,59 @@ func Combined(root string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return Splice(string(raw), frags, nil)
+	text, err := Splice(string(raw), frags, nil)
+	if err != nil {
+		return "", err
+	}
+	archive, err := readArchive(filepath.Join(root, filepath.FromSlash(ArchiveDir)))
+	if err != nil {
+		return "", err
+	}
+	return text + archive, nil
+}
+
+// readArchive is the text of every CHANGELOG-<newest>-to-<oldest>.md file of dir, newest first, each preceded by a
+// line break; a dir that does not exist holds nothing. The order comes from the first version in the name, compared
+// numerically (a byte sort would put 0.26 after 0.189).
+func readArchive(dir string) (string, error) {
+	names, err := filepath.Glob(filepath.Join(dir, "CHANGELOG-*.md"))
+	if err != nil {
+		return "", err
+	}
+	sort.SliceStable(names, func(i, j int) bool { return versionLess(archiveNewest(names[j]), archiveNewest(names[i])) })
+	var b strings.Builder
+	for _, name := range names {
+		raw, err := os.ReadFile(name)
+		if err != nil {
+			return "", err
+		}
+		b.WriteString("\n")
+		b.Write(raw)
+	}
+	return b.String(), nil
+}
+
+// archiveNewest is the first version in an archive file's name (CHANGELOG-<newest>-to-<oldest>.md) as three numbers.
+func archiveNewest(name string) [3]int {
+	var v [3]int
+	base := strings.TrimPrefix(filepath.Base(name), "CHANGELOG-")
+	for i, part := range strings.SplitN(strings.SplitN(base, "-to-", 2)[0], ".", 3) {
+		for _, c := range part {
+			if c < '0' || c > '9' {
+				break
+			}
+			v[i] = v[i]*10 + int(c-'0')
+		}
+	}
+	return v
+}
+
+// versionLess reports whether a is the older version.
+func versionLess(a, b [3]int) bool {
+	for i := range a {
+		if a[i] != b[i] {
+			return a[i] < b[i]
+		}
+	}
+	return false
 }

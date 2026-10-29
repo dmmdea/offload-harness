@@ -3,7 +3,6 @@ package main
 import (
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"testing"
 
@@ -35,53 +34,10 @@ func TestTheChangelogTreeRulesHoldOnTheRealTree(t *testing.T) {
 // that wrote it, and not first on the release branch after the assembly.
 func docText(root, name string) (string, error) {
 	if name == changelog.ChangelogFile {
-		// Releases archived under docs/changelog/ (verbatim, newest file first) are the same history the
-		// checks read before the split, so they are appended after the live file.
-		text, err := changelog.Combined(root)
-		if err != nil {
-			return "", err
-		}
-		names, _ := filepath.Glob(filepath.Join(root, "docs", "changelog", "CHANGELOG-*.md"))
-		sort.Slice(names, func(i, j int) bool { return versionAfter(archiveNewest(names[i]), archiveNewest(names[j])) })
-		for _, n := range names {
-			raw, err := os.ReadFile(n)
-			if err != nil {
-				return "", err
-			}
-			text += "\n" + string(raw)
-		}
-		return text, nil
+		return changelog.Combined(root) // the live file, its fragments, then the archived releases
 	}
 	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
 	return string(raw), err
-}
-
-// archiveNewest orders the archive files newest first from the first version in the name
-// (CHANGELOG-<newest>-to-<oldest>.md): a string sort would put 0.26 after 0.189.
-func archiveNewest(name string) [3]int {
-	var v [3]int
-	base := strings.TrimPrefix(filepath.Base(name), "CHANGELOG-")
-	for i, part := range strings.SplitN(strings.SplitN(base, "-to-", 2)[0], ".", 3) {
-		if i < 3 {
-			for _, c := range part {
-				if c < '0' || c > '9' {
-					break
-				}
-				v[i] = v[i]*10 + int(c-'0')
-			}
-		}
-	}
-	return v
-}
-
-// versionAfter reports whether a sorts after b (a is the newer version).
-func versionAfter(a, b [3]int) bool {
-	for i := range a {
-		if a[i] != b[i] {
-			return a[i] > b[i]
-		}
-	}
-	return false
 }
 
 // writeFixtureTree writes files (slash-separated paths relative to root) under root.
