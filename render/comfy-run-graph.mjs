@@ -168,6 +168,8 @@ export async function runGraphFlow(args, deps) {
     // Fetch every output file to outDir; build the envelope (with width/height per file).
     const envelope = { outputs: {}, image_path: null, unverified_models: sat.unverified || [] };
     if (tofuFirstSeen.length > 0) envelope.tofu_first_seen = tofuFirstSeen;
+    // A satisfy warning (a fail-open coherence check, or venv conflicts that predate this run) travels in the result, not only on stderr.
+    if (sat.warning) envelope.warnings = [sat.warning];
     for (const [nodeId, files] of Object.entries(outputs)) {
       envelope.outputs[nodeId] = [];
       for (const f of files) {

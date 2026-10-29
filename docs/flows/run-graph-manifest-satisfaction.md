@@ -95,7 +95,11 @@ environment.
    key `name@commit|…`, built from the commits the checkout stage reports), written ONLY after a fully successful resolve+check — "git didn't move this
    run" alone proves nothing: a prior run that checked packs out and failed before installing must
    still resolve. A tripwire re-checks the held host versions afterward with full local versions; the cheap
-   `pip check` coherence gate always runs. Failure → `VENV_INCOHERENT`. See
+   `pip check` coherence gate always runs. Failure → `VENV_INCOHERENT`, with pip's own lines in the detail. A failure whose
+   lines were all there before this satisfy (its baseline is read before the checkout) does not defer: the venv is no
+   worse than it was, and a conflict between two packs' own requirements can never be resolved here (a Windows node,
+   2026-10-29: albumentations 2.0.8 requires exactly albucore 0.0.24, albumentationsx needs a newer one). The run goes on and
+   the result carries `warnings` naming the lines. See
    [ADR 0007](../architecture/decisions/0007-host-torch-pinned-additive-provisioning.md).
 
    **Spawn failures are classified apart** (live report 2026-07-20: a transient `spawn UNKNOWN`

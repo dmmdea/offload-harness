@@ -341,17 +341,26 @@ export async function satisfyManifest(manifest, deps) {
       // Reject the commit only when pip check now reports lines the baseline did not have. A conflict that was there before
       // this satisfy, or a check that could not run again, is not a verdict on the pack. A drift of a protected package
       // is not a pip check line and stays the pack's.
-      let own = true, note = "";
+      // A conflict that was there before this satisfy and that it did not add does not defer the run either: the venv is
+      // no worse than it was, and a conflict between two packs' own requirements can never be resolved here (a Windows node,
+      // 2026-10-29: transparent-background needs albumentations 2.0.8, which requires exactly albucore 0.0.24, while
+      // comfyui_controlnet_aux needs albumentationsx and a newer albucore). The run goes on with a warning naming the lines.
+      let own = true, note = "", lines = [], preexisting = false;
       if (pipBaseline && /^pip check reported/.test(String(pc.reason || ""))) {
         try {
           const post = await deps.pipCheckText();
-          if (!pipCheckGained(pipBaseline.out, post.out).length) { own = false; note = " (the same conflicts were there before this install; not held against the pack)"; }
+          lines = String(post.out || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+          if (!pipCheckGained(pipBaseline.out, post.out).length) { own = false; preexisting = lines.length > 0; note = " (the same conflicts were there before this install; not held against the pack)"; }
         } catch { own = false; }
       }
-      await discardFresh(fresh, { reject: own, reason: String(pc.reason || "venv coherence check failed") });
-      return defer("VENV_INCOHERENT", "pip-check", String(pc.reason || "") + note);
+      const shown = lines.length ? ": " + lines.slice(0, 5).join("; ") + (lines.length > 5 ? `; and ${lines.length - 5} more` : "") : "";
+      if (!preexisting) {
+        await discardFresh(fresh, { reject: own, reason: String(pc.reason || "venv coherence check failed") });
+        return defer("VENV_INCOHERENT", "pip-check", String(pc.reason || "") + note + shown);
+      }
+      warning = "pip check reports conflicts this satisfy did not add (they were there before it ran)" + shown;
     }
-    // Record success — the ONLY writer of the marker, after resolve+check both passed.
+    // Record success — the ONLY writer of the marker, after resolve+check passed (or found only conflicts that predate it).
     try { writeDepsMarker(packsKey); } catch { /* marker is an optimization; never fail satisfy */ }
   }
 
