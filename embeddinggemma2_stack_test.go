@@ -413,8 +413,10 @@ func TestEmbeddingGemma2RendersOnExactlyTheTiersThatCarryItOnEveryOSTheyRenderOn
 					t.Errorf("%s %s ram %s: the eg2 var / evict row presence does not follow the flag", id, goos, ram)
 				}
 				// (rk3588 serves from the NPU and renders no embedder of either kind.)
-				if profiles[id].Backend != "rk3588" && !servedAliases(res.Config)["embeddinggemma"] {
-					t.Errorf("%s %s ram %s: the embeddinggemma (300M) entry must stay on every tier", id, goos, ram)
+				// A tier that sets omit_embeddinggemma renders without it, and its aliases are served by embeddinggemma2.
+				served := servedAliases(res.Config)
+				if wantEmb := !profiles[id].OmitEmbeddingGemma; profiles[id].Backend != "rk3588" && served["embeddinggemma"] != wantEmb {
+					t.Errorf("%s %s ram %s: the embeddinggemma (300M) entry served = %v, want %v (omit_embeddinggemma)", id, goos, ram, served["embeddinggemma"], wantEmb)
 				}
 				if err := renderGate(res); err != nil {
 					t.Errorf("%s %s ram %s: the write gate refuses the render: %v", id, goos, ram, err)
@@ -602,12 +604,18 @@ func installedMemoryStack(t *testing.T, id, goos, ram string) []string {
 // embeddinggemma FIRST (EmbedModel() falls back to MemoryStack[0]). It covers the text-only replicas too:
 // a projector-off entry is as much a stack member as the authority's.
 func TestAFreshInstallOfATierThatRendersEmbeddingGemma2KeepsItResident(t *testing.T) {
+	profiles, _, _ := fleetCapProfiles(t)
 	for _, id := range eg2Tiers {
 		for _, goos := range []string{"linux", "windows"} {
 			for _, ram := range []string{"min", "high"} {
 				got := installedMemoryStack(t, id, goos, ram)
-				if strings.Join(got, ",") != "embeddinggemma,bge-reranker-v2-m3,embeddinggemma2" {
-					t.Errorf("%s %s ram %s: a fresh install's memory_stack = %v, want [embeddinggemma bge-reranker-v2-m3 embeddinggemma2]", id, goos, ram, got)
+				want := "embeddinggemma,bge-reranker-v2-m3,embeddinggemma2"
+				if profiles[id].OmitEmbeddingGemma {
+					// the tier renders no 300M entry, so the keep-set names none and EmbedModel() falls to embeddinggemma2
+					want = "embeddinggemma2,bge-reranker-v2-m3"
+				}
+				if strings.Join(got, ",") != want {
+					t.Errorf("%s %s ram %s: a fresh install's memory_stack = %v, want [%s]", id, goos, ram, got, want)
 				}
 			}
 		}

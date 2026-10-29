@@ -165,8 +165,14 @@ confusion:
   set (`emb & rer & eg2`, or `emb & eg2` where a template has no reranker, or the one `resident` set of an
   all-resident template): resident beside the swappable seats, never swapped by them, with the stack's evict
   cost. With the flag off the entry, its matrix var and its evict row are all stripped. The `embeddinggemma`
-  (300M) entry stays on every template: the harness's own embed lane and callers of `text-embedding` /
-  `local-embed` keep using it. Footprint measured on the reference 6 GB node: 1,196 MiB loaded, 1,466 MiB after
+  (300M) entry renders on every template unless the tier sets `omit_embeddinggemma` (ampere-6 does: the
+  render drops the entry, its `emb` var, its evict row and its place in the residents set, and hands its
+  `text-embedding` / `local-embed` aliases to `embeddinggemma2`; the tier's seeded `memory_stack` is
+  `[embeddinggemma2, bge-reranker-v2-m3]`, so `EmbedModel()` falls to `embeddinggemma2`). Without the flag
+  the harness's own embed lane and callers of `text-embedding` / `local-embed` keep using the 300M. On the 6 GB
+  reference box the three-model support tier (464 + 350 + 1,216 MiB) left neither heavy seat able to load
+  (cudaMalloc out of memory); without the 300M, 4,283 MiB stayed free beside it. The harness kNN pre-filter is off
+  by default (`knn_prefilter_enabled` false). `omit_embeddinggemma` requires `include_embeddinggemma2`. Footprint measured on the reference 6 GB node: 1,196 MiB loaded, 1,466 MiB after
   image embeds, 1,536 MiB after a short video with the projector; 460 MiB loaded and 482 MiB at peak text-only, at
   `--ubatch-size 2048`. On a text-only box the memory stack's `MEM0_MEDIA_EMBEDDER=off` (memory stack 1.35.1)
   makes offline media search a clean 400. It needs llama.cpp

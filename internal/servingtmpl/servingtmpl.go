@@ -115,8 +115,8 @@ type Params struct {
 	// from the tier's include_embeddinggemma2 field and defaults to false; no RAM gate (it is
 	// VRAM-resident: 1,196 MiB loaded, 1,466 MiB after image embeds on the reference 6 GB node
 	// with the projector, 460 MiB loaded and 482 MiB at peak without it).
-	// The embeddinggemma (300M) entry stays on every template regardless: the harness's own
-	// embed lane and unknown callers of its aliases keep using it.
+	// The embeddinggemma (300M) entry renders on every template unless the tier sets
+	// OmitEmbed300M: the harness's own embed lane and unknown callers of its aliases keep using it.
 	IncludeEG2 bool
 	// EG2TextOnly renders the embeddinggemma2 entry WITHOUT its multimodal projector: the one
 	// `--mmproj <path>` argument is removed and every other flag stays as measured (the strip is
@@ -227,6 +227,18 @@ type Params struct {
 	// tier's resident_tier is gemma4-e2b. Refused with AltCPULlamaBin (the CPU seat
 	// family mirrors the workhorse) and on a template that carries neither token.
 	OmitE4B bool
+	// OmitEmbed300M removes the embeddinggemma (300M) entry from the render: its model block, its
+	// matrix var, its evict_costs row and its membership in the residents set; its generic
+	// aliases (text-embedding, local-embed) move to the embeddinggemma2 entry, so a caller of
+	// them still gets an embedder. INVERTED polarity like OmitE4B: false (absent) renders every
+	// template as before. It comes from the tier's omit_embeddinggemma field and exists for a
+	// card the whole support tier does not fit beside its heavy seats: on the 6 GB reference box
+	// the 300M (464 MiB), the reranker and embeddinggemma2 (1,216 MiB with its projector) held
+	// together left neither heavy seat able to load (cudaMalloc out of memory), and removing the
+	// 300M freed 4,283 MiB beside the rest. Nothing there used it: the memory stack embeds with
+	// embeddinggemma2 and the kNN pre-filter is off by default. Requires IncludeEG2 (the
+	// embedder the aliases move to) and a template whose residents set names `emb`.
+	OmitEmbed300M bool
 }
 
 // seatAnchors is the TEMPLATE's own declaration of which residency roles it can
@@ -369,6 +381,15 @@ func Render(tmpl string, p Params) (string, error) {
 			if out, err = retargetEG2Bin(out, own); err != nil {
 				return "", err
 			}
+		}
+	}
+	// The 300M embedder leaves AFTER the embeddinggemma2 edits (the alias hand-over rewrites that
+	// entry's head, and the projector strip and the build retarget read its body as the template
+	// wrote it) and BEFORE substitution (the set it leaves is written with tokens).
+	if p.OmitEmbed300M {
+		var err error
+		if out, err = dropEmbed300M(out); err != nil {
+			return "", err
 		}
 	}
 	// Seats go in AFTER the 26B removal and BEFORE substitution: after, so a seat
@@ -730,6 +751,10 @@ func (p Params) validate() error {
 	if p.OmitE4B && p.AltCPULlamaBin != "" {
 		missing = append(missing, "a workhorse for the CPU seat family (omit_e4b and --llama-bin-cpu are both set, "+
 			"but the CPU family mirrors offload-e4b — drop one)")
+	}
+	if p.OmitEmbed300M && !p.IncludeEG2 {
+		missing = append(missing, "the embeddinggemma2 entry (omit_embeddinggemma removes the 300M embedder and hands its "+
+			"aliases to embeddinggemma2, so the tier must also set include_embeddinggemma2 or it would serve no embedder)")
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("serving template needs: %s", strings.Join(missing, ", "))
@@ -1749,9 +1774,72 @@ func dropEG2(tmpl string) (string, error) {
 	return evictRowEG2.ReplaceAllString(out, ""), nil
 }
 
+// modelEmbed300M is the first memory-stack embedder: EmbeddingGemma 300M, rendered on every template
+// unless the tier sets omit_embeddinggemma.
+const modelEmbed300M = "embeddinggemma"
+
+// embed300MNamed reads a functional line as naming the 300M embedder: its id not continued by another
+// identifier character, so embeddinggemma2 and the embeddinggemma-2 GGUF paths are not it.
+var embed300MNamed = regexp.MustCompile(`embeddinggemma([^A-Za-z0-9-]|$)`)
+
+var (
+	embed300MAliases = regexp.MustCompile(`(?m)^ {2}` + modelEmbed300M + `:[ \t]*\n {4}aliases:[ \t]*(\[[^\]\n]*\])[ \t]*\n`)
+	evictRowEmb      = regexp.MustCompile(`(?m)^ {4}emb:[ \t]*[0-9]+[ \t]*\n`)
+	residentsEmb     = regexp.MustCompile(`(?m)^(\s+residents:\s*")emb(?:[ \t]*&[ \t]*)?`)
+	embVarRef        = regexp.MustCompile(`\bemb\b`)
+)
+
+// dropEmbed300M removes the embeddinggemma (300M) entry, its `emb` matrix var, its evict_costs row and
+// its place in the residents set, and gives its aliases to the embeddinggemma2 entry. The set is
+// edited as the template writes it: `"emb & rer__EG2_AND__..."` loses its first member, and the
+// Windows shape `"emb__EG2_AND__..."` is left opening on an operator that the token pass renders and
+// leadingSetOperator strips. Refuses a template that does not carry both entries, one whose residents
+// set does not open on `emb`, and any `emb` still referenced afterwards (a config llama-swap rejects
+// at startup).
+func dropEmbed300M(tmpl string) (string, error) {
+	if !definesModel(tmpl, modelEmbed300M) || !definesModel(tmpl, modelEG2) {
+		return "", fmt.Errorf("this tier sets omit_embeddinggemma but the target serving template does not define both the `%s` "+
+			"entry it removes and the `%s` entry that takes its aliases — drop omit_embeddinggemma from the tier or add the entries", modelEmbed300M, modelEG2)
+	}
+	if !residentsEmb.MatchString(tmpl) {
+		return "", fmt.Errorf("this tier sets omit_embeddinggemma but the target serving template's residents set does not open on the `emb` var, " +
+			"so the 300M embedder's membership cannot be removed")
+	}
+	aliases := ""
+	if m := embed300MAliases.FindStringSubmatch(tmpl); m != nil {
+		aliases = m[1]
+	}
+	out := residentsEmb.ReplaceAllString(tmpl, "$1")
+	out, err := dropModelWith(out, modelEmbed300M, func(l string) bool { return embed300MNamed.MatchString(l) })
+	if err != nil {
+		return "", err
+	}
+	out = evictRowEmb.ReplaceAllString(out, "")
+	for _, l := range strings.Split(out, "\n") {
+		if t := strings.TrimSpace(l); t != "" && !strings.HasPrefix(t, "#") && embVarRef.MatchString(l) {
+			return "", fmt.Errorf("the `emb` var is still referenced after removing %s (%q) — a config llama-swap would reject", modelEmbed300M, t)
+		}
+	}
+	if aliases != "" {
+		head := "  " + modelEG2 + ":\n"
+		if strings.Count(out, head) != 1 {
+			return "", fmt.Errorf("cannot hand the 300M embedder's aliases to %s: its entry head is not unique in the template", modelEG2)
+		}
+		out = strings.Replace(out, head, head+"    aliases: "+aliases+"\n", 1)
+	}
+	return out, nil
+}
+
 // dropModel removes one model block AND the matrix var naming it, with a
 // post-check that nothing functional still references it.
 func dropModel(tmpl, model string) (string, error) {
+	return dropModelWith(tmpl, model, func(l string) bool { return strings.Contains(l, model) })
+}
+
+// dropModelWith is dropModel with the caller's own test for a line that still names the model, for
+// a model whose id is the prefix of another entry's (embeddinggemma and embeddinggemma2: a plain
+// substring test reads the survivor as a dangling reference).
+func dropModelWith(tmpl, model string, names func(line string) bool) (string, error) {
 	lines := strings.Split(tmpl, "\n")
 	var out []string
 	skipping := false
@@ -1792,7 +1880,7 @@ func dropModel(tmpl, model string) (string, error) {
 	// prose as a dangling reference refused a perfectly good config. This only surfaced
 	// once the RAM gate started dropping the 26B on that template.
 	for _, l := range strings.Split(res, "\n") {
-		if t := strings.TrimSpace(l); t != "" && !strings.HasPrefix(t, "#") && strings.Contains(l, model) {
+		if t := strings.TrimSpace(l); t != "" && !strings.HasPrefix(t, "#") && names(l) {
 			return "", fmt.Errorf("%s still referenced after removal (%q) — a config llama-swap would reject",
 				model, strings.TrimSpace(l))
 		}

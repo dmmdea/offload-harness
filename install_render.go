@@ -79,6 +79,12 @@ type servingProfile struct {
 	// polarity on purpose — absent = false = every existing tier renders as before.
 	// The tier's resident_tier must then be gemma4-e2b (omitE4BDefect refuses otherwise).
 	OmitE4B bool `json:"omit_e4b"`
+	// OmitEmbeddingGemma drops the embeddinggemma (300M) entry from the render, hands its generic
+	// aliases to embeddinggemma2 and leaves it out of the residents set. INVERTED polarity like
+	// omit_e4b: absent = false = every existing tier renders as before. It needs
+	// include_embeddinggemma2 (the embedder that takes over). The tier's config_seed.memory_stack
+	// drops the name too, so the keep-set and the warm-back name only entries the box serves.
+	OmitEmbeddingGemma bool `json:"omit_embeddinggemma"`
 	// ResidentTier is read here only for that check; the seed half (internal/tierseed)
 	// is what acts on it.
 	ResidentTier string `json:"resident_tier"`
@@ -128,7 +134,7 @@ type servingProfile struct {
 	// Windows download set. Default false; true on ampere-6 (the memory authority's card, where it
 	// was measured, WITH the projector) and on ampere-8 and blackwell-3x16 as text-only replicas.
 	// No RAM gate. REQUIRES the llama.cpp floor of the gemma-embedding2 architecture (setup/floors.json). The
-	// embeddinggemma (300M) entry stays regardless.
+	// embeddinggemma (300M) entry renders regardless unless the tier sets omit_embeddinggemma.
 	IncludeEmbeddingGemma2 bool `json:"include_embeddinggemma2"`
 	// EmbeddingGemma2Projector says whether the embeddinggemma2 entry carries the multimodal
 	// projector (--mmproj) and whether the installer downloads the projector GGUF. A pointer so
@@ -707,6 +713,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		VLLMSeat:          seat, ExtraVLLMSeats: extras, VLLMRuntime: seatRT,
 		DisplayLayer: displayLayerOf(layers),
 		OmitE4B:      p.OmitE4B,
+		OmitEmbed300M: p.OmitEmbeddingGemma,
 	}
 	rendered, err := servingtmpl.Render(tmpl, params)
 	if err != nil {

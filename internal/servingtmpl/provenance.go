@@ -185,6 +185,8 @@ type ParamsBasis struct {
 	// OmitE4B is omitted when false, so every tier that keeps its workhorse hashes as it
 	// did before the field existed (the 3 GB band is the only tier that sets it).
 	OmitE4B bool `json:"omit_e4b,omitempty"`
+	// OmitEmbed300M is omitted when false, so every tier that keeps the 300M embedder hashes as it did.
+	OmitEmbed300M bool `json:"omit_embeddinggemma,omitempty"`
 }
 
 // BasisOf projects a Params into its hashed mirror.
@@ -198,7 +200,7 @@ func BasisOf(p Params) ParamsBasis {
 		Seats: p.Seats, Home: p.Home, GOOS: p.GOOS, RknpuHome: p.RknpuHome, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
 		Backend: p.Backend, AltCPULlamaBin: p.AltCPULlamaBin, DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat: p.VLLMSeat, ExtraVLLMSeats: p.ExtraVLLMSeats, VLLMRuntime: p.VLLMRuntime,
-		OmitE4B: p.OmitE4B,
+		OmitE4B: p.OmitE4B, OmitEmbed300M: p.OmitEmbed300M,
 	}
 }
 
@@ -216,7 +218,7 @@ func (b ParamsBasis) Params() Params {
 		Seats: b.Seats, Home: b.Home, GOOS: b.GOOS, RknpuHome: b.RknpuHome, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
 		Backend: b.Backend, AltCPULlamaBin: b.AltCPULlamaBin, DisableCUDAGraphs: b.DisableCUDAGraphs,
 		VLLMSeat: b.VLLMSeat, ExtraVLLMSeats: b.ExtraVLLMSeats, VLLMRuntime: b.VLLMRuntime,
-		OmitE4B: b.OmitE4B,
+		OmitE4B: b.OmitE4B, OmitEmbed300M: b.OmitEmbed300M,
 	}
 }
 

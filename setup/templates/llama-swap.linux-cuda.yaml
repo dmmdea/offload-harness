@@ -73,6 +73,15 @@ models:
   # is strong on BOTH task shapes — 67% extraction recall vs the e4b incumbent's 50%,
   # and 4/5 on search+reason where the higher-scoring 2B collapses to 1/5. 3681 MiB at
   # ctx 32768 q8_0, so it fits a 6GB card beside the resident support tier.
+  # CEILING MEASURED 2026-10-29 on the 6 GB reference box (RTX 3050), beside the support tier
+  # (reranker + embeddinggemma2 with its projector, the 300M omitted) on a 29,914-token
+  # prompt, q8_0 K and V: ctx 49152 loads and leaves 216 MiB free after the prompt; ctx 57344
+  # leaves 40 MiB; ctx 65536 does NOT load (its compute buffer, 380 MiB at the default ubatch and
+  # 318 MiB at --ubatch-size 256, no longer fits), and a q4_0 V cache lets 65536 load with
+  # 120 MiB free but changes the cache the bake-off measured. So the window this entry
+  # renders (the tier's ctx_size, 32768) is inside the measured fit; a node that wants more window raises the tier's ctx_size
+  # to no more than 49152 and keeps q8_0 K and V. With the 300M embedder AND the other two support
+  # models resident, neither heavy seat (this one or the E4B media seat) loaded at all.
   #
   # Flags are written EXPLICITLY instead of via ${common} for one measured reason:
   # ${common} pins `--reasoning off`, and every score this seat was chosen on was
@@ -233,10 +242,15 @@ models:
   # render (servingtmpl dropEG2Projector): every other flag stays, --ubatch-size 2048 included (the stack's
   # hot budget is 1,900 tokens; a smaller ubatch returns HTTP 500 on long memories). The projector's
   # filename stays below so the gated-weight contract test keeps pinning it against install.ps1.
-  # No aliases: the memory stack selects the id. The
-  # embeddinggemma (300M) entry above stays on every template for the harness's own embed lane
-  # (kNN pre-filter, judge) and for callers of text-embedding / local-embed; retiring it is a
-  # later release. Like that entry it bypasses ${common} (an embedder: no --jinja, no reasoning
+  # No aliases: the memory stack selects the id (a tier that sets omit_embeddinggemma gets the
+  # 300M entry's generic aliases here, handed over at render). The embeddinggemma (300M) entry
+  # above renders on every tier that does not set omit_embeddinggemma, for the callers of
+  # text-embedding / local-embed and for a tier whose memory_stack still names it. A tier that
+  # sets it (ampere-6) renders without it: the memory authority and the wiki embed with this
+  # entry, the harness kNN pre-filter is off by default (knn_prefilter_enabled false) and, when an
+  # operator turns it on, embeds with this entry through MemoryStack[0] (config EmbedModel()), and
+  # on the 6 GB reference box the 300M's 464 MiB beside the reranker and this entry left neither
+  # heavy seat able to load. Like that entry it bypasses ${common} (an embedder: no --jinja, no reasoning
   # flag). Flags are the measured configuration; MEASURED on the reference 6 GB node: 1,196 MiB
   # loaded, 1,466 MiB peak after image embeds, 1,536 MiB after a short video; without the
   # projector 460 MiB loaded and 482 MiB peak at --ubatch-size 2048. REQUIRES llama.cpp >= b11452 (the gemma-embedding2 architecture,

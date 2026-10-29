@@ -385,12 +385,11 @@ foreach ($case in @(@('ampere-6', 'min'), @('ampere-6', 'high'))) {
   $eg2Cmd = ([regex]::Match($r.yaml, '(?ms)^\s{2}embeddinggemma2:.*?(?=^\s{2}\S|\Z)')).Value
   if ($eg2Cmd -match 'embeddinggemma-2-Q8_0\.gguf' -and $eg2Cmd -match '--mmproj\s+\S*mmproj-embeddinggemma-2-Q8_0\.gguf') { Ok "$pid2/$band embeddinggemma2 reads the model and its projector" } else { Bad "$pid2/$band embeddinggemma2 model or projector missing" }
   if ($eg2Cmd -match '--embeddings' -and $eg2Cmd -match '--ctx-size 4096' -and $eg2Cmd -match '--batch-size 4096' -and $eg2Cmd -match '--ubatch-size 2048') { Ok "$pid2/$band embeddinggemma2 carries the measured embedding sizing" } else { Bad "$pid2/$band embeddinggemma2 sizing moved" }
-  if ($eg2Cmd -notmatch 'aliases:')                             { Ok "$pid2/$band embeddinggemma2 has no aliases (the memory stack selects the id)" } else { Bad "$pid2/$band embeddinggemma2 grew an alias" }
   if ($eg2Functional -match '(?m)^\s{4}eg2:\s*embeddinggemma2\s*$' -and $eg2Functional -match '(?m)^\s{4}eg2:\s*1000\s*$') { Ok "$pid2/$band eg2 var and evict cost present" } else { Bad "$pid2/$band eg2 var or evict cost missing" }
   if ($eg2Functional -match '(?m)^\s{4}residents?:\s*"[^"]*\beg2\b[^"]*"') { Ok "$pid2/$band eg2 is a member of the stack's residency set" } else { Bad "$pid2/$band eg2 not in the residency set" }
   if ($eg2Functional -notmatch '(?m)^\s{4}(interactive|text):.*\beg2\b') { Ok "$pid2/$band eg2 is never a swappable alternative" } else { Bad "$pid2/$band eg2 leaked into the swappable set" }
   if ($r.yaml -notmatch '__EG2_')                               { Ok "$pid2/${band}: no unsubstituted EG2 token" } else { Bad "$pid2/$band left __EG2_*__" }
-  if ($eg2Functional -match '(?m)^\s{2}embeddinggemma:')        { Ok "$pid2/$band keeps the embeddinggemma (300M) entry" } else { Bad "$pid2/$band lost the 300M embedder" }
+  if ($eg2Functional -notmatch '(?m)^\s{2}embeddinggemma:' -and $eg2Functional -notmatch '(?m)^\s{4}emb:' -and $eg2Functional -notmatch '(?m)^\s{4}residents?:\s*"[^"]*\bemb\b') { Ok "$pid2/$band renders without the embeddinggemma (300M) entry (omit_embeddinggemma)" } else { Bad "$pid2/$band still renders the 300M embedder" }
 }
 # The TEXT-ONLY replicas (embeddinggemma2_projector false): the entry renders in the stack's residency
 # set exactly as on the authority, minus its one `--mmproj <GGUF>` argument. Every other flag of the
