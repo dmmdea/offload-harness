@@ -1,4 +1,4 @@
-import subprocess, json, sys, re, platform, datetime, shutil, os
+import subprocess, json, sys, re, platform, datetime, shutil
 ff = sys.argv[1] if len(sys.argv) > 1 else "ffmpeg"
 def run(*a):
     p = subprocess.run([ff, "-hide_banner", *a], capture_output=True, text=True, errors="replace")

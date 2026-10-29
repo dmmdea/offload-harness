@@ -75,7 +75,6 @@ def selftest():
             return e
         raise AssertionError("expected %s" % kind.__name__)
 
-    good = b"the previous good render"
     with tempfile.TemporaryDirectory() as d:
         out = os.path.join(d, "a.png")
 

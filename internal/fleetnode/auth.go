@@ -118,6 +118,13 @@ func (s *Server) authorizeLane(w http.ResponseWriter, r *http.Request, label, no
 // constant-time over the digests. The scheme name is matched case-
 // insensitively per RFC 7235; the token bytes are exact.
 func bearerOK(r *http.Request, token string) bool {
+	// No configured token means no bearer can be right: "Bearer " with nothing after it hashes equal to the
+	// empty string, so without this line an empty token would ACCEPT an empty bearer, and every door that calls
+	// this directly would depend on its own admissibility check having run first. The tokenless-loopback doors
+	// never reach here (holdsBearer and authorizeLane short-circuit on an empty token).
+	if token == "" {
+		return false
+	}
 	const scheme = "Bearer "
 	auth := r.Header.Get("Authorization")
 	if len(auth) < len(scheme) || !strings.EqualFold(auth[:len(scheme)], scheme) {
