@@ -109,13 +109,13 @@ const (
 	// headless Chrome in software GL + ffmpeg, deterministic frame by frame. CPU-class:
 	// NO GPU lease and no withGpuSlot (ADR 0026), only its own in-process slot. Its own
 	// branch in pipeline.Run — it shells out to render/compose-hyperframes.mjs, the
-	// only door to the pinned, env-scrubbed CLI (ADR 0059). Returns {video_path |
+	// only door to the env-scrubbed CLI (ADR 0059). Returns {video_path |
 	// frames_dir, duration_sec, fps, frames, width, height, has_alpha, has_audio,
 	// codec, render_ms, lint, check, snapshots}.
 	TaskComposeVideo TaskType = "compose_video"
 	// TaskBrowse drives the operator's own, already-running Chromium browser toward a
 	// natural-language goal (ADR 0060). OPT-IN: its own branch in pipeline.Run spawns
-	// the pinned sidecar (setup/browse/runner.py) over a stdio protocol; the harness
+	// the sidecar (setup/browse/runner.py) over a stdio protocol; the harness
 	// proxies the sidecar's typed choices to a LOOPBACK decision endpoint and writes its
 	// field values on the local seat with a grammar. No GPU lease, its own slot. Returns
 	// {status, model_done, final{url,title,text}, actions, steps, decisions, text_calls,

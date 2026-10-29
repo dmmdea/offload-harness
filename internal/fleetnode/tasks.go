@@ -89,7 +89,7 @@ func taskConfiguredIn(v *mediaView, taskType string, loopbackListener bool) bool
 		// task this node can run right now. Never advertised or admitted on a tokenless node.
 		return cfg.MediaInputsAdmissible() && anyMediaTaskConfigured(v, loopbackListener)
 	case ComposeTask:
-		// The composition lane: the runner, the pinned install and the pinned browser
+		// The composition lane: the runner, the install and the browser
 		// all bound — config.ComposeRouteConfigured, the pipeline's own gate.
 		return cfg.ComposeRouteConfigured()
 	case ComposeProjectTask:

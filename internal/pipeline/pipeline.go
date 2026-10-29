@@ -584,7 +584,7 @@ func (p *Pipeline) Run(ctx context.Context, req core.Request) (res core.Result) 
 	if req.Task == core.TaskComposeVideo {
 		return p.runComposeVideo(ctx, req, meta, start)
 	}
-	// browse drives the operator's own browser through the pinned sidecar (browse.go,
+	// browse drives the operator's own browser through the sidecar (browse.go,
 	// ADR 0060): opt-in, loopback decision endpoint only, no GPU lease, its own slot.
 	if req.Task == core.TaskBrowse {
 		return p.runBrowse(ctx, req, meta, start)

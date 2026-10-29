@@ -13,11 +13,11 @@
     "test": "bun test"
   },
   "dependencies": {
-    "@opencode-ai/plugin": "^1.18.21"
+    "@opencode-ai/plugin": "latest"
   },
   "devDependencies": {
     "@types/bun": "latest",
-    "typescript": "~5.9.3"
+    "typescript": "latest"
   },
   "engines": {
     "bun": ">=1.0.0"

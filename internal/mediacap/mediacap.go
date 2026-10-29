@@ -297,7 +297,7 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 	)
 
 	// --- compose_video (ADR 0059): a CPU-class route with FOUR things to be true —
-	// the runner, the pinned project-local HyperFrames install, the pinned Chrome and
+	// the runner, the project-local HyperFrames install, the pinned Chrome and
 	// ffmpeg+ffprobe. The pipeline gate is config.ComposeRouteConfigured (all three
 	// keys set), so a runner bound without its install is the middle verdict, not
 	// "not configured": that box defers every composition and nothing else says why.
@@ -339,7 +339,7 @@ func composeRoute(cfg config.Config, exeDir string) (Route, bool) {
 	entry := filepath.Join(cfg.HyperframesDir, "node_modules", "hyperframes", "bin", "hyperframes.mjs")
 	bindings := []binding{
 		{key: "compose_script", value: cfg.ComposeScript, kind: scriptBinding},
-		{key: "hyperframes_dir (pinned CLI)", value: entry, kind: fileBinding},
+		{key: "hyperframes_dir (project-local CLI)", value: entry, kind: fileBinding},
 	}
 	// "auto" is not a file: the runner resolves the managed browser of the installed
 	// release at render time, so only an explicit path is checked for existence here.

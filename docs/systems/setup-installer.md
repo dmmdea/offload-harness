@@ -171,7 +171,7 @@ confusion:
   `--ubatch-size 2048`. On a text-only box the memory stack's `MEM0_MEDIA_EMBEDDER=off` (memory stack 1.35.1)
   makes offline media search a clean 400. It needs llama.cpp
   b11452 or newer (the `gemma-embedding2` architecture); on Windows `install.ps1` resolves the newest complete build (far past that floor; b11490 is the build it was proven on) and downloads the two
-  GGUFs (309,855,456 and 554,821,024 bytes) for a tier that carries the projector and the model alone for a text-only
+  GGUFs (size and oid verified against the Hub) for a tier that carries the projector and the model alone for a text-only
   tier, with no RAM gate (`Get-GatedModelKeys -IncludeEmbeddingGemma2Projector`). A node whose main build is older keeps
   it for its other seats and runs this one entry from a second build (0.177.0, `--llama-bin-eg2`; see "A second llama.cpp
   build for the embeddinggemma2 entry" under "Serving config on Linux" below), and `install render` refuses a build it

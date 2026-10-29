@@ -138,8 +138,9 @@ together with a third licence state, `conditional`, and its status was flipped w
    | host RAM | by arm, from the model guide's table: Coder 32 GB; Q2_0 and IQ2_XS 48 GB; IQ3_XXS and IQ3_S 64 GB, and for IQ3_S the guide calls 96 GB or more the comfortable pick | to be hard-coded only by the predicate change, with `source` and `verified_at` |
 
    None of these is a constant yet. The predicate change hard-codes a floor only with its `source` and `verified_at`. The spike
-   pin is release v0.1.44.1, the newest tag at the 2026-10-14 re-read; pin re-read at spike time, because a project that ships
-   this often may have tagged another by then, and the engine archive's hash is recorded then. An earlier fetch of the project's
+   takes the newest release at spike time (v0.1.44.1 was the newest at the 2026-10-14 re-read, and a project that ships this
+   often may have tagged another by then), verifies the engine archive against the publisher's digest, and records the tag it ran
+   (ADR 0099: floors never pins). An earlier fetch of the project's
    page returned a stale version, which is why a re-read comes before any constant.
 
 6. **The default checkpoint reverses the shape 0.115.4 removed, under the later rule, and only if it is measured to fit it.**
@@ -228,7 +229,7 @@ together with a third licence state, `conditional`, and its status was flipped w
   seat stays unshipped, the weights of every arm that does not graduate are removed, and the promotion record is the closure,
   with its reopen trigger (a release that changes where expert compute runs, or an operator request).
 - The risks are known and are measured rather than argued: the project is days old and pre-1.0; its defaults can change answers
-  between releases, so every arm pins a tag; concurrency is one and there is no grammar or logprobs, so the decision-margin gate
+  between releases, so every arm records the tag it ran and arms that are compared run the same release; concurrency is one and there is no grammar or logprobs, so the decision-margin gate
   is inert and re-pack exhaustion is the open question; a first load that pins 35 to 55 GB can freeze the host for one to three
   minutes, so the spike runs when nobody is working at the box; and a resident reload against `ttl: 300` means an idle unload
   costs a cold start, whose price is recorded and not assumed.

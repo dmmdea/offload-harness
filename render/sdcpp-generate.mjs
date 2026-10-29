@@ -17,7 +17,7 @@
 //        [--model PATH] [--model-kind checkpoint|diffusion] [--vae PATH]
 //        [--clip-l PATH] [--clip-g PATH] [--t5xxl PATH] [--llm PATH]
 //        [--extra TOKEN]... [--transparent 1] [--no-lock]
-// Env:   SDCPP_BIN (required) — the sd-cli.exe from the pinned win-vulkan release.
+// Env:   SDCPP_BIN (required) — the sd-cli.exe from the newest win-vulkan release the installer resolved.
 //        GPU_LOCK / GPU_LOCK_WAIT_MS — the shared single-slot lock (gpu-lock.mjs).
 //
 // Alpha (D5, ADR 0058): stable-diffusion.cpp's qwen-image-2.1 VAE emits RGBA
@@ -72,7 +72,7 @@ export function parseArgs(argv) {
   return { pos, flags, extra };
 }
 
-// buildSdArgs maps our generic surface to the sd.cpp CLI (pinned-release flag
+// buildSdArgs maps our generic surface to the sd.cpp CLI (flag
 // names — see header). Pure; unit-tested without spawning anything. transparent
 // wraps the prompt in the official RGBA template — sd.cpp has no CLI flag for
 // alpha; the model reads it from the prompt wording alone (header comment).

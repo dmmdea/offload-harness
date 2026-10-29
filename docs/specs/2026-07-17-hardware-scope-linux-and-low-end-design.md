@@ -306,9 +306,9 @@ is good practice; the README does not inherit it.
 
 ```bash
 # 1. The llama.cpp build these numbers were measured on (any newer build reproduces them or beats them), Linux Vulkan
-gh release download b9934 --repo ggml-org/llama.cpp \
-  --pattern 'llama-b9934-bin-ubuntu-vulkan-x64.tar.gz'
-tar xzf llama-b9934-bin-ubuntu-vulkan-x64.tar.gz && cd llama-b9934
+gh release download --repo ggml-org/llama.cpp \
+  --pattern 'llama-*-bin-ubuntu-vulkan-x64.tar.gz'
+tar xzf llama-*-bin-ubuntu-vulkan-x64.tar.gz && cd llama-b*/
 export LD_LIBRARY_PATH=$PWD
 
 # 2. The model as published when measured (2620368960 bytes then; verify against the publisher's current size)
