@@ -70,7 +70,6 @@ func TestAManifestTheLeaseCannotSizeIsNotSized(t *testing.T) {
 	for name, paths := range map[string][]string{
 		"a file the box does not hold, beside one it does": {manifestCkpt, manifestClip},
 		"a file of no length":                              {manifestCkpt, "models/checkpoints/empty.safetensors"},
-		"an empty list":                                    {},
 		"a blank path":                                     {manifestCkpt, ""},
 		"no class":                                         {"models/qwen_image_fp8.safetensors"},
 		"not under models":                                 {"checkpoints/qwen_image_fp8.safetensors"},
@@ -81,6 +80,10 @@ func TestAManifestTheLeaseCannotSizeIsNotSized(t *testing.T) {
 		if n, ok := ForManifestModels(paths, f); ok {
 			t.Errorf("%s: sized as %v, want no figure (the class default)", name, n)
 		}
+	}
+	// a manifest whose models list is present and empty is a template that loads no weight file: the ComfyUI process floor
+	if n, ok := ForManifestModels([]string{}, f); !ok || n.GiB != 3 || n.CommitGiB != 4 || !n.CommitStated || n.Source != SourceMeasured {
+		t.Errorf("an empty list: %v %v, want the process floor", n, ok)
 	}
 	if want := ClassDefault(f); want.Source != SourceClassDefault || want.GiB < 30 {
 		t.Fatalf("the control: the class default of this box is Krea 2's documented 32.8 GiB, got %v", want)

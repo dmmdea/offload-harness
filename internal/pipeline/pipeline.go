@@ -3889,15 +3889,16 @@ func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, 
 // reclaim rule needs both a stale heartbeat and an expired window, so a missed tick
 // inside the declared window is harmless.
 func (p *Pipeline) acquireWholeNode(ctx context.Context, reason string, ttl, wait time.Duration, resume string) ([]string, func(), error) {
-	return p.acquireWholeNodeWith(ctx, reason, ttl, wait, resume, 0)
+	return p.acquireWholeNodeWith(ctx, reason, ttl, wait, resume, 0, 0)
 }
 
-// acquireWholeNodeWith is acquireWholeNode for a call that declares hostRAMGiB of host RAM: the grant
+// acquireWholeNodeWith is acquireWholeNode for a call that declares hostRAMGiB of host RAM (and, above 0, commitGiB of stated commit,
+// judged against the commit limit; 0 = the one figure stands in for the commit): the grant
 // admits it against the available memory and the commit charge against physical RAM (the one figure, no commit stated;
 // gpulease/hostram.go) and keeps the call in the queue while the host is short. When the host is short and a model its own
 // unload takes is resident, the call is compared to the host AFTER the pipeline has unloaded it, under the lease (the F82 order;
 // mediahostram.go): the memory the render frees is not counted as held against it.
-func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl, wait time.Duration, resume string, hostRAMGiB float64) ([]string, func(), error) {
+func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl, wait time.Duration, resume string, hostRAMGiB, commitGiB float64) ([]string, func(), error) {
 	noop := func() {}
 	start := time.Now()
 
@@ -3943,7 +3944,7 @@ func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl,
 	// A render whose own unload frees the host memory it declares is not compared to the host in the grant (the F82 order,
 	// mediahostram.go): it takes the node declaring nothing, clears, and only then asks the host. Decided before the wait is
 	// measured, because it reads llama-swap.
-	d := p.hostRAMDeferral(ctx, m, hostRAMGiB, nil, nil, 0)
+	d := p.hostRAMDeferralLoad(ctx, m, hostRAMGiB, commitGiB, nil, nil, 0)
 	// Spend only what is LEFT of the window on the machine-wide lease, so the two waits
 	// compose into the one budget the caller asked for rather than doubling it.
 	remaining := wait - time.Since(start)
@@ -3954,6 +3955,7 @@ func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl,
 	// leaves one, so on any other host it names nothing and the call is what it always was.
 	lease, err := m.Acquire(gpulease.ClassMedia, gpulease.Options{
 		Reason: reason, Origin: "pipeline", TTL: ttl, Wait: remaining, ResumeToken: resume, HostRAMGiB: d.gate(), HostRAMWaitGiB: d.later(),
+		HostRAMCommitGiB: d.gateCommit(), HostRAMWaitCommitGiB: d.laterCommit(),
 	})
 	if err != nil {
 		var held *gpulease.ErrHeld

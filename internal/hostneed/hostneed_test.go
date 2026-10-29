@@ -248,7 +248,7 @@ func TestParseRenderCall(t *testing.T) {
 		{"a bool flag does not swallow the next flag", strings.Fields("node render/comfy-render.mjs o.png p --no-lock --family qwen-image --ckpt x.gguf"), true, RouteImage, map[string]string{"no-lock": "true", "family": "qwen-image", "ckpt": "x.gguf"}},
 		{"video", strings.Fields("node render/comfy-video.mjs o.mp4 s.png prompt --model hunyuan --fast"), true, RouteVideo, map[string]string{"model": "hunyuan", "fast": "true"}},
 		{"inpaint", strings.Fields("node render/comfy-inpaint.mjs --batch j.jsonl --family qwen --unet u.safetensors"), true, RouteInpaint, map[string]string{"family": "qwen", "unet": "u.safetensors"}},
-		{"run-graph runs an arbitrary graph, so it is not recognised", strings.Fields("node render/comfy-run-graph.mjs --graph g.json"), false, "", nil},
+		{"run-graph reads its graph and manifest as flags", strings.Fields("node render/comfy-run-graph.mjs --graph g.json --manifest m.json"), true, RouteRunGraph, map[string]string{"graph": "g.json", "manifest": "m.json"}},
 		{"an unrelated command", strings.Fields("python bench.py --family krea2"), false, "", nil},
 		{"no command", nil, false, "", nil},
 	}

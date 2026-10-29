@@ -22,7 +22,9 @@
 //     takes the class default.
 //     A helper run with `--graph <file>` posts the caller's own workflow and is sized by the weight files that
 //     graph's own loaders name (graph.go ForGraphFile): their sizes summed, by the same fit rule, when the graph can be read
-//     and every file it names resolves; any other graph takes the class default below.
+//     and every file it names resolves; any other graph takes the class default below. A graph that names NO weight file is the ComfyUI
+//     process floor (ProcessFloor: 3 GiB touched, 4 GiB of commit stated, measured), not the class default. render/comfy-run-graph.mjs
+//     is read the same way: its `--graph FILE`, or its `--template NAME --manifest FILE` (manifest.go).
 //  3. The media class default: the largest of the ComfyUI render families THIS BOX has bound (an sd.cpp binding counts nothing here, the
 //     pipeline's sd.cpp lanes add the weights they park themselves, ForSdcpp; its own
 //     imagegen_*, gen_edit_*, videogen_* bindings), so a 32 GiB node is not held to the numbers of a
@@ -89,10 +91,33 @@ type Need struct {
 	// CardOnly marks the 0 a measured card-only recipe earns (the image and edit placement, estimatePlaced). A 0 is otherwise the silent default of a
 	// declaration; this one is said wherever a figure is, with its Detail, because nothing can correct it afterwards (calibratedRAM leaves 0 alone).
 	CardOnly bool
+	// CommitGiB is the commit the need is charged, beside the working set GiB, and CommitStated says it is a figure the estimate stands behind
+	// (the ComfyUI process floor, ProcessFloor): it is then admitted against the OS commit limit like a stated --ram-commit, not against
+	// physical RAM as the working set standing in for it is. Not stated, CommitGiB is 0 and the commit is the working set (gpu_hostram.go).
+	CommitGiB    float64
+	CommitStated bool
 }
 
 func (n Need) String() string {
+	if n.CommitStated {
+		return fmt.Sprintf("%.1f GiB host RAM and %.1f GiB commit (%s: %s)", n.GiB, n.CommitGiB, n.Source, n.Detail)
+	}
 	return fmt.Sprintf("%.1f GiB host RAM (%s: %s)", n.GiB, n.Source, n.Detail)
+}
+
+// The host memory the ComfyUI process itself holds for a graph that loads no weight file, measured on a Windows node with a small
+// VHS GIF graph: 2.63 GiB private (the process) and 3.64 GiB of system commit raised. Rounded up to whole GiB.
+const (
+	processFloorGiB       = 3.0
+	processFloorCommitGiB = 4.0
+)
+
+// ProcessFloor is the need of a graph that names no weight file: the ComfyUI process alone (Python, torch and the node packs), measured and not
+// derived from any file. The commit is stated, so it is judged against the commit limit and not against the physical RAM a working set is.
+// what names the document ("the graph", "the template's manifest") in the detail.
+func ProcessFloor(what string) Need {
+	return Need{GiB: processFloorGiB, CommitGiB: processFloorCommitGiB, CommitStated: true, Source: SourceMeasured,
+		Detail: fmt.Sprintf("%s names no weight file, so this is the ComfyUI process floor (measured 2.63 GiB private and 3.64 GiB of system commit for a small graph, rounded up)", what)}
 }
 
 // Route is one of the render routes whose model files are known.
@@ -105,6 +130,8 @@ const (
 	RouteVideo   Route = "video"
 	RouteAnimate Route = "animate"
 	RouteMusic   Route = "music"
+	// RouteRunGraph is render/comfy-run-graph.mjs, which runs a graph or a template and is sized by what that document names (ForGraphFile, ForManifestFile).
+	RouteRunGraph Route = "run-graph"
 )
 
 // defaultStat is what Facts.Stat falls back to when a caller leaves it nil: nil here too means os.Stat

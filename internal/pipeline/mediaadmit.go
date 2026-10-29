@@ -181,7 +181,7 @@ func (p *Pipeline) calibratedRAM(n hostneed.Need, k footKey) hostneed.Need {
 	if runs == 0 {
 		runs = hp.Runs // a store written before the window existed: its maxima over its runs
 	}
-	return hostneed.Need{GiB: declared, Source: hostneed.SourceMeasured,
+	return hostneed.Need{GiB: declared, Source: hostneed.SourceMeasured, CommitGiB: max(n.CommitGiB, declared), CommitStated: n.CommitStated,
 		Detail: fmt.Sprintf("the resident memory of %s/%s renders measured %.1f GiB at the %dth percentile of the last %d runs (%d recorded, the largest %.1f GiB), above the %.1f GiB their model files add up to%s",
 			k.family, k.task, hp.ResidentGiB, fleetnode.HostPeakPercentile, runs, hp.Runs, hp.MaxResidentGiB, n.GiB, clamp)}
 }
@@ -233,8 +233,16 @@ func classDefaultRAM(cfg config.Config) func(float64) hostneed.Need {
 // is one the caller already tried and could not read, so it is not read again). Said once per
 // distinct answer in the log, the way a fallback to the whole node is.
 func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpuprobe.Card, ids []string) float64 {
+	gib, _ := p.declaredLoad(ctx, need, cards, ids)
+	return gib
+}
+
+// declaredLoad is declaredRAM with the commit beside it: commit is the figure the estimate STATES (the ComfyUI process floor of a graph
+// that names no weight file, hostneed.Need.CommitStated), admitted against the OS commit limit like a stated --ram-commit; 0 when the
+// estimate states none, and then the lease takes the working set as its commit as it always did.
+func (p *Pipeline) declaredLoad(ctx context.Context, need mediaNeed, cards []gpuprobe.Card, ids []string) (gib, commit float64) {
 	if need.RAM == nil && need.RAMPair == nil {
-		return 0
+		return 0, 0
 	}
 	if cards == nil {
 		if t, _, err := p.alloc.CardTable(ctx, p.cfg); err == nil {
@@ -258,7 +266,10 @@ func (p *Pipeline) declaredRAM(ctx context.Context, need mediaNeed, cards []gpup
 		}
 		planNoteKeyed(key, "declaring host RAM: "+n.String())
 	}
-	return n.GiB
+	if n.CommitStated && n.GiB > 0 {
+		return n.GiB, n.CommitGiB
+	}
+	return n.GiB, 0
 }
 
 // askRAMFor is the host RAM a call declares against the cards its PLAN names, for the readers that need the figure before the
@@ -701,7 +712,8 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	if place != nil {
 		stopKeep = keepPlace(place.m, place.tok.ID)
 	}
-	env, release, err := p.acquireWholeNodeWith(ctx, reason, ttl, wait, need.Token, p.declaredRAM(ctx, need, readTable, nil))
+	wholeGiB, wholeCommit := p.declaredLoad(ctx, need, readTable, nil)
+	env, release, err := p.acquireWholeNodeWith(ctx, reason, ttl, wait, need.Token, wholeGiB, wholeCommit)
 	stopKeep()
 	if err != nil {
 		return mediaGrant{}, withTableNote(p.wholeNodeBusy(err, reason, ttl, start, place, need.Resumable), tableNote)
@@ -1007,7 +1019,8 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		if d, ok := deferrals[key]; ok {
 			return d
 		}
-		d := p.hostRAMDeferral(ctx, m, p.declaredRAM(ctx, need, cards, ids), ids, cards, 0)
+		gib, commit := p.declaredLoad(ctx, need, cards, ids)
+		d := p.hostRAMDeferralLoad(ctx, m, gib, commit, ids, cards, 0)
 		deferrals[key] = d
 		return d
 	}
@@ -1016,13 +1029,14 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		// nothing in the grant; the figure travels as HostRAMWaitGiB and is admitted after the clear.
 		d := deferralFor(ids)
 		return gpulease.Options{Reason: reason, Origin: "pipeline", TTL: ttl, Devices: ids, ResumeToken: tokenID,
-			HostRAMGiB: d.gate(), HostRAMWaitGiB: d.later()}
+			HostRAMGiB: d.gate(), HostRAMWaitGiB: d.later(), HostRAMCommitGiB: d.gateCommit(), HostRAMWaitCommitGiB: d.laterCommit()}
 	}
 	// tokenOptsFor is optsFor for an answer that leaves a place in line: the place keeps the DECLARED figure, so it still reads
 	// as waiting only on host RAM for the callers behind it.
 	tokenOptsFor := func(ids []string) gpulease.Options {
 		o := optsFor(ids)
 		o.HostRAMGiB, o.HostRAMWaitGiB = deferralFor(ids).declared, 0
+		o.HostRAMCommitGiB, o.HostRAMWaitCommitGiB = deferralFor(ids).commit, 0
 		return o
 	}
 	// refuseFor turns the end of the wait after the clear into the answer the grant gave for a host that stayed short: the

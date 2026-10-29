@@ -27,9 +27,16 @@ import (
 // that declares one number has always been held to). A commit is declared beside the working set it goes with, so it needs a
 // declaration above 0 (--ram given or estimated); it says on out when it differs from the working set. A job whose commit is smaller
 // than its working set (mapped files count in the working set and not in the commit) cannot say so by leaving it unset:
-// --ram-commit below --ram is taken as stated, but unset is never below it.
+// --ram-commit below --ram is taken as stated, but unset is never below it. With no --ram-commit, a need that carries a commit
+// of its own (hostneed.Need.CommitStated: the measured process floor of a graph that names no weight file) declares that commit,
+// stated, so it is judged against the commit limit like one the operator stated.
 func resolveReserveHostLoad(given bool, commitGiB float64, need hostneed.Need, out io.Writer) (gpuprobe.HostLoad, error) {
 	if !given {
+		if need.CommitStated && need.CommitGiB > 0 && need.GiB > 0 {
+			// An estimate that stands behind its own commit (the ComfyUI process floor of a graph that names no weight file) is stated
+			// like a --ram-commit: judged against the OS commit limit, not the physical RAM a standing-in working set is.
+			return gpuprobe.HostLoad{TouchGiB: need.GiB, CommitGiB: need.CommitGiB, CommitStated: true}, nil
+		}
 		return gpuprobe.HostLoad{TouchGiB: need.GiB, CommitGiB: need.GiB}, nil
 	}
 	if commitGiB <= 0 {
@@ -126,7 +133,9 @@ func classDefaultHint(need hostneed.Need, cmdArgs []string, call hostneed.Render
 	case !recognised:
 		why = "the wrapped command is not a recognised render helper (" + strings.Join(hostneed.RenderHelpers(), ", ") + "), so its weights are not sized"
 	case call.RunsOwnGraph():
-		why = call.Script + " runs its own --graph, and the lease could not size the weight files that graph names (it is not a readable ComfyUI API-format graph, it names no weight file, or a file it names is not in the ComfyUI model tree)"
+		why = call.Script + " runs its own --graph, and the lease could not size the weight files that graph names (it is not a readable ComfyUI API-format graph, or a file it names is not in the ComfyUI model tree; a graph that names no weight file is sized as the ComfyUI process floor)"
+	case call.Route == hostneed.RouteRunGraph:
+		why = call.Script + " was given no --graph and no --template with a readable --manifest, or the model files that manifest names are not in the ComfyUI model tree yet, so what it loads is not read"
 	default:
 		why = "the weight files " + call.Script + " names could not be sized (a named file is not in the ComfyUI model tree and its family has no documented size)"
 	}

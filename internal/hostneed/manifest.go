@@ -24,7 +24,8 @@ import (
 // ComfyUI graph loads, read from the manifest and not from a document.
 //
 // It declares a figure only when it can stand behind all of it, as ForGraph does: an empty list, an entry that is not `models/<class>/<name>`
-// (a null path included), or ONE file it cannot find or size is not sized at all, and the caller keeps the class default. There is no walk
+// (a null path included), or ONE file it cannot find or size is not sized at all, and the caller keeps the class default. A manifest whose
+// `models` list is present and empty is a template that loads no weight file: it is the ComfyUI process floor (ProcessFloor), as a graph that names none is. There is no walk
 // for a weight the list did not name, because the list is the set the gate, the licence check and the satisfier read, and an override cannot
 // add a file to it. There is no Go-side backstop for an incomplete list (the class default kept when the manifest says so): the manifest has
 // no field that could say so, and the runner's check above stops a run on a list that is short before anything is posted; a new field would
@@ -51,7 +52,10 @@ func ForManifestModels(paths []string, f Facts) (Need, bool) {
 		}
 	}
 	if len(names) == 0 {
-		return Need{}, false
+		if paths == nil { // no list at all is a manifest the lease could not read as one, not a template that loads no model
+			return Need{}, false
+		}
+		return ProcessFloor("the template's runtime manifest"), true
 	}
 	stat := f.Stat
 	if stat == nil {
@@ -91,6 +95,9 @@ func ForManifestFile(path string, f Facts) (Need, bool) {
 		} `json:"models"`
 	}
 	if json.Unmarshal(raw, &doc) != nil {
+		return Need{}, false
+	}
+	if doc.Models == nil { // no `models` list: not the shape of a runtime manifest
 		return Need{}, false
 	}
 	paths := make([]string, 0, len(doc.Models))
