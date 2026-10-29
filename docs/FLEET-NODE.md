@@ -945,7 +945,7 @@ The rule is one rule for every route that does work or returns a result. Three c
   node's disk) and the weight-file rows (`image_recipes`, `media_recipes`). A holder of the bearer, and any caller of a loopback
   node with no token, reads the whole answer.
 - **A run-graph manifest names only allowlisted node packs.** The bearer lets a caller run renders, not code. A manifest's
-  `node_packs` makes the node `git clone` each repository, update it to the head of its default branch and pip-install the pack's requirements, so
+  `node_packs` makes the node `git clone` each repository it does not hold yet (at the head of its default branch; an installed pack is never moved by a render) and pip-install the pack's requirements, so
   a pack is taken only when its `repo` is a row of `render/node-packs.json` (exact string, and the row's directory name or the one
   the repository gives it; a `commit` a manifest names is not read, and the node records the one it got). Anything else is refused `400`, naming the pack,
   before a job, a temp file or a lease exists (`buildRunGraph`), and again by the runner's satisfier before its first git

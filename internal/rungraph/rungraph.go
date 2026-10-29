@@ -38,6 +38,9 @@ type Envelope struct {
 	UnverifiedModels []string             `json:"unverified_models"`
 	// TofuFirstSeen names the model files a template run recorded for the first time (trust on first use). Absent on a graph run.
 	TofuFirstSeen []string `json:"tofu_first_seen,omitempty"`
+	// Warnings carries what the satisfy let through but the caller should see (venv conflicts that predate the run, a
+	// coherence check that could not start on a proven-satisfied set). Absent when there is none.
+	Warnings []string `json:"warnings,omitempty"`
 	// Typed DEFER (fix #4): the mjs now exits 0 and writes {deferred,code,ref,detail} to the
 	// result on any handled failure, so the code reaches the Go side as data (not a lost
 	// stderr line). runRunGraph turns Deferred==true into a pipeline defer carrying Code+Detail.

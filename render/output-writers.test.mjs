@@ -25,6 +25,7 @@ const ALLOWED = {
   "comfy-inpaint.mjs": [{ writeFileSync: 1, appendFileSync: 2 }, "the --results JSONL, as in comfy-generate.mjs"],
   "comfy-lifecycle.mjs": [{ writeFileSync: 1, createWriteStream: 1, renameSync: 2 }, "ComfyUI's console log, its rotation and its archive"],
   "comfy-ownership.mjs": [{ writeFileSync: 4, renameSync: 2 }, "launch-owner marker files (the renames are already temp+rename: the owner stamp and stampLaunchFamily's family stamp)"],
+  "comfy-packs-update.mjs": [{ writeFileSync: 1 }, "the requirements file a venv restore hands to pip, in a temp folder of its own removed in a finally; not a render output"],
   "compose-hyperframes.mjs": [{ writeFileSync: 4, cpSync: 2, renameSync: 1 }, "work-dir files (the template project, the batch rows) and the result JSON's own temp+rename; the delivery move is moveInto -> copyAtomic"],
   "gpu-lock.mjs": [{ writeFileSync: 1 }, "the lease's unload marker"],
   "igpu-engine.mjs": [{ writeFileSync: 1, renameSync: 1 }, "the owner file; deliverFile, the staged-partial rename the other lanes share"],

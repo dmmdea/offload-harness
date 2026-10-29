@@ -153,16 +153,14 @@ function versionBelow(have, min) {
 //
 // ORDER NOTE (live finding 2026-07-17): packs are cloned/checked out BEFORE the deps
 // resolve — the unified `uv pip compile` reads each pack's on-disk requirements.txt,
-// so the files must exist first. (The original design resolved via `cm-cli install
-// --uv <refs>`, but the installed cm-cli has no --uv flag; uv is driven directly now,
-// which the resolve-only spike already proved live.) "Unified, never sequential
-// per-pack" is unchanged — one compile over ALL packs' requirements at once.
+// so the files must exist first. uv is driven directly. "Unified, never sequential
+// per-pack": one compile over ALL packs' requirements at once.
 // isSpawnFailure: was this error the SUBPROCESS FAILING TO START (vs the subprocess running
 // and reporting a real problem)? Node's child_process surfaces these via the "error" event
 // with a syscall of "spawn ..." and codes like ENOENT/EACCES/UNKNOWN. The distinction is
 // load-bearing: a spawn failure says nothing about the venv, so reporting it as
 // VENV_INCOHERENT (live CMP report 2026-07-20, "spawn UNKNOWN" after a long batch) sends the
-// operator chasing healthy torch pins.
+// operator chasing a healthy torch install.
 export function isSpawnFailure(e) {
   if (!e || typeof e !== "object") return false;
   if (typeof e.syscall === "string" && e.syscall.startsWith("spawn")) return true;
@@ -182,10 +180,45 @@ export async function runRetryOnSpawn(fn, { delayMs = 500 } = {}) {
   }
 }
 
+// NETWORK / BUSY: the messages of a command that failed because the network or the card was not there, not because of what it
+// was asked to install. Shared with the update script (comfy-packs-update.mjs), so both classify the same way.
+export const NETWORK = /could not resolve host|name or service not known|temporary failure in name resolution|connection (timed out|refused|reset|aborted)|network is unreachable|no route to host|failed to connect|unable to access|\b(ssl|tls)\b|timed out|max retries exceeded|connectionerror|read timed out|remote end hung up/i;
+export const BUSY = /out of memory|CUDA error: (busy|out of memory)|device or resource busy/i;
+
+// isTransientFailure: a failure that says nothing about the pack, only that the machine could not do the work just now
+// (a subprocess that failed to start, a lost network, a timeout, a busy or full card). It is never held against a commit.
+export function isTransientFailure(e) {
+  if (isSpawnFailure(e)) return true;
+  const msg = String((e && e.message) || e || "");
+  return NETWORK.test(msg) || BUSY.test(msg);
+}
+
+// freezeDigest: a short sha256 of a `pip freeze` text (sorted, trimmed, comment lines dropped). A rejection stores it, so a
+// rejection written against one venv is not held against a venv that has changed since.
+export function freezeDigest(text) {
+  const lines = String(text || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).sort();
+  return lines.length ? createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16) : "";
+}
+
+// pipCheckGained: the lines of a `pip check` output that were not in the baseline.
+export function pipCheckGained(baselineText, nowText) {
+  const had = new Set(String(baselineText || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
+  return String(nowText || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !had.has(l));
+}
+
 export async function satisfyManifest(manifest, deps) {
   const {
     satisfierAvailable, comfyVersion, resolveDeps, ensurePack, pipCheck,
   } = deps;
+  // beat (optional) keeps the lease's progress file moving through the pack leg: a clone, a uv compile and a pip install
+  // are quiet stretches, and satisfyModels beats only for models.
+  const beat = typeof deps.beat === "function" ? deps.beat : () => {};
+  // discardFreshPacks (optional): undo what THIS satisfy created when a later step fails, so a failed first install leaves
+  // no half pack on disk (see defaultSatisfyDeps).
+  const discardFresh = async (fresh, opts) => {
+    if (!fresh.length || typeof deps.discardFreshPacks !== "function") return;
+    try { await deps.discardFreshPacks(fresh, opts); } catch { /* best effort: the typed defer matters more */ }
+  };
 
   const hasPacks = (manifest.node_packs || []).length > 0;
 
@@ -228,7 +261,7 @@ export async function satisfyManifest(manifest, deps) {
       : defer("VENV_INCOHERENT", ref, String(e.message || e));
 
   const retryOpts = { delayMs: deps.retryDelayMs ?? 500 };
-  // The durable "this exact pin-set was resolved+checked successfully" marker. Injectable;
+  // The durable "this exact pack set was resolved+checked successfully" marker. Injectable;
   // production reads/writes a sidecar under custom_nodes. Read is fail-safe (null on error).
   const readDepsMarker = deps.readDepsMarker || (() => null);
   const writeDepsMarker = deps.writeDepsMarker || (() => {});
@@ -243,50 +276,107 @@ export async function satisfyManifest(manifest, deps) {
     //    (fresh clone / moved checkout) and misreport changed=false for a pack that just
     //    changed (adversarial-review repro, 2026-07-22). A git spawn failure defers typed —
     //    the caller can re-run the whole satisfy, which IS idempotent at this level.
+    // The venv as pip check sees it BEFORE this satisfy clones or installs anything: a conflict that is already there is
+    // not the new pack's doing, so only lines pip check gains afterwards count against a fresh pack (below).
+    let pipBaseline = null;
+    if (typeof deps.pipCheckText === "function") { try { pipBaseline = await deps.pipCheckText(); } catch { pipBaseline = null; } }
     const keyParts = [];
+    const fresh = [];   // packs this satisfy cloned: the only directories it may remove again
     for (const pack of manifest.node_packs) {
       let res;
+      beat(`manifest: checking out ${pack.name}`);
       try { res = await ensurePack(pack); }
       catch (e) {
-        // The checkout stage refuses a pack off the allowlist too (makeEnsurePack): the same typed answer, never "the venv is broken".
-        if (e && e.code === "NODE_PACK_NOT_ALLOWED") return defer(e.code, e.ref || pack.name, e.detail || String(e.message || e));
+        await discardFresh(fresh, { reject: false, reason: "" });
+        // The checkout stage refuses a pack off the allowlist too (makeEnsurePack), and refuses one whose newest commit
+        // failed an earlier install: the same typed answer, never "the venv is broken".
+        if (e && (e.code === "NODE_PACK_NOT_ALLOWED" || e.code === "NODE_PACK_REJECTED")) return defer(e.code, e.ref || pack.name, e.detail || String(e.message || e));
         return spawnOrVenv(e, pack.name);
       }
       if (res.changed) changed = true;
+      if (res.fresh) fresh.push({ pack, commit: res.commit || "" });
       keyParts.push(`${pack.name}@${res.commit || ""}`);
+      beat(`manifest: ${pack.name} checked out`);
     }
     packsKey = keyParts.sort().join("|");
     // 2. ONE unified resolve+install over all packs' on-disk requirements (under the
     //    host-torch constraints env), never per-pack pip. Skipped ONLY when nothing moved
-    //    AND the persisted marker proves this exact pin-set was already resolved+checked
+    //    AND the persisted marker proves this exact pack set was already resolved+checked
     //    successfully — "git didn't move this run" alone is NOT that proof: a prior run
     //    that checked packs out and then failed before installing leaves changed=false
     //    forever (adversarial-review finding, 2026-07-22).
     const alreadySatisfied = !changed && readDepsMarker() === packsKey && packsKey !== "";
     if (!alreadySatisfied) {
+      beat("manifest: resolving and installing pack requirements");
       try { await runRetryOnSpawn(() => resolveDeps(manifest.node_packs), retryOpts); }
-      catch (e) { return spawnOrVenv(e, "uv-resolve"); }
+      catch (e) {
+        // A subprocess that would not start, a lost network, a timeout or a busy card says nothing about the pack: the
+        // directory this satisfy cloned is removed again, the commit is NOT recorded as rejected, and the defer is retryable.
+        const transient = isTransientFailure(e);
+        await discardFresh(fresh, { reject: !transient, reason: "dependency resolve or install failed: " + String(e.message || e) });
+        const out = spawnOrVenv(e, "uv-resolve");
+        if (transient && !isSpawnFailure(e)) out.defer.detail = "retryable (network or busy, not held against the pack): " + out.defer.detail;
+        return out;
+      }
     }
     // 3. The cheap coherence check always runs. If its subprocess cannot even START:
     //    fail OPEN with a warning ONLY for a proven-satisfied unchanged env (the marker,
     //    not just an idle git); anything else fails closed.
     let pc;
+    beat("manifest: checking the venv is coherent");
     try { pc = await runRetryOnSpawn(() => pipCheck(), retryOpts); }
     catch (e) {
-      if (!isSpawnFailure(e)) return defer("VENV_INCOHERENT", "pip-check", String(e.message || e));
-      if (!alreadySatisfied) return defer("SATISFIER_SPAWN_FAILED", "pip-check", String(e.message || e));
-      warning = "coherence check skipped (its subprocess failed to spawn: " + String(e.message || e) + "); pin-set unchanged and previously satisfied, trusting it";
+      if (!isSpawnFailure(e)) {
+        await discardFresh(fresh, { reject: !isTransientFailure(e), reason: "venv coherence check failed: " + String(e.message || e) });
+        return defer("VENV_INCOHERENT", "pip-check", String(e.message || e));
+      }
+      if (!alreadySatisfied) {
+        await discardFresh(fresh, { reject: false, reason: "" });
+        return defer("SATISFIER_SPAWN_FAILED", "pip-check", String(e.message || e));
+      }
+      warning = "coherence check skipped (its subprocess failed to spawn: " + String(e.message || e) + "); pack set unchanged and previously satisfied, trusting it";
       pc = { ok: true };
     }
-    if (!pc.ok) return defer("VENV_INCOHERENT", "pip-check", pc.reason);
-    // Record success — the ONLY writer of the marker, after resolve+check both passed.
+    if (!pc.ok) {
+      // Reject the commit only when pip check now reports lines the baseline did not have. A conflict that was there before
+      // this satisfy, or a check that could not run again, is not a verdict on the pack. A drift of a protected package
+      // is not a pip check line and stays the pack's.
+      // A conflict that was there before this satisfy and that it did not add does not defer the run either: the venv is
+      // no worse than it was, and a conflict between two packs' own requirements can never be resolved here (a Windows node,
+      // 2026-10-29: transparent-background needs albumentations 2.0.8, which requires exactly albucore 0.0.24, while
+      // comfyui_controlnet_aux needs albumentationsx and a newer albucore). The run goes on with a warning naming the lines.
+      let own = true, note = "", lines = [], preexisting = false;
+      if (pipBaseline && /^pip check reported/.test(String(pc.reason || ""))) {
+        try {
+          const post = await deps.pipCheckText();
+          lines = String(post.out || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+          if (!pipCheckGained(pipBaseline.out, post.out).length) { own = false; preexisting = lines.length > 0; note = " (the same conflicts were there before this install; not held against the pack)"; }
+        } catch { own = false; }
+      }
+      const shown = lines.length ? ": " + lines.slice(0, 5).join("; ") + (lines.length > 5 ? `; and ${lines.length - 5} more` : "") : "";
+      if (!preexisting) {
+        await discardFresh(fresh, { reject: own, reason: String(pc.reason || "venv coherence check failed") });
+        return defer("VENV_INCOHERENT", "pip-check", String(pc.reason || "") + note + shown);
+      }
+      warning = "pip check reports conflicts this satisfy did not add (they were there before it ran)" + shown;
+    }
+    // Record success — the ONLY writer of the marker, after resolve+check passed (or found only conflicts that predate it).
     try { writeDepsMarker(packsKey); } catch { /* marker is an optimization; never fail satisfy */ }
   }
 
-  return { ok: true, changed, unverified: models.unverified, ...(warning ? { warning } : {}) };
+  return { ok: true, changed, unverified: models.unverified, packsKey, ...(warning ? { warning } : {}) };
 }
 
 import { spawn as nodeSpawn } from "node:child_process";
+
+// SATISFY_LIVE: the children run(), runOut() and pipCheckText() have in flight, so a caller's signal handler can stop a
+// pip or uv that is still writing the venv before it restores that venv (comfy-packs-update's killLive).
+export const SATISFY_LIVE = new Set();
+function track(c) {
+  SATISFY_LIVE.add(c);
+  c.once("close", () => SATISFY_LIVE.delete(c)); c.once("error", () => SATISFY_LIVE.delete(c));
+  return c;
+}
 import { existsSync, writeFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { createHash } from "node:crypto";
@@ -299,8 +389,6 @@ import { pipeline } from "node:stream/promises";
 // Unified resolve: ONE `uv pip compile` across ALL packs' requirements files at once
 // (cross-pack conflict detection — the ecosystem's documented failure mode is
 // last-writer-wins sequential pip), then ONE constrained install of the lock.
-// (cm-cli was the original vehicle, but the installed cm-cli has no --uv flag —
-// live finding 2026-07-17; uv is driven directly, as the spike proved.)
 export function buildCompileCmd(reqPaths, { uvExe, comfyPy, lockPath }) {
   return [uvExe, "pip", "compile", "--python", comfyPy, ...reqPaths, "-o", lockPath];
 }
@@ -319,23 +407,24 @@ export function buildClonePackCmd(pack, { comfyDir }) {
 // Live finding 2026-07-17: the scene-swap packs' unified lock resolved torch 2.11.0+cu128
 // → 2.13.0 — installing it as-resolved would REPLACE ComfyUI's CUDA torch and break the
 // existing video/image render path. Pack provisioning must be ADDITIVE around the host's
-// CUDA stack: every pip/uv the satisfier spawns runs under a constraints file pinning
-// these packages (PIP_CONSTRAINT is honored by pip, UV_CONSTRAINT by uv). A resolve that
-// cannot satisfy a pack within the host pins fails loud → typed VENV_INCOHERENT defer,
+// CUDA stack: every pip/uv the satisfier spawns runs under a constraints file holding
+// these packages where they are (PIP_CONSTRAINT is honored by pip, UV_CONSTRAINT by uv). The constraints
+// are read from the live venv on each run and discarded after the step; none is stored. A
+// resolve that cannot satisfy a pack within them fails loud → typed VENV_INCOHERENT defer,
 // never a silently replaced torch.
-const HOST_PINNED = ["torch", "torchvision", "torchaudio", "numpy"];
+const HOST_PROTECTED = ["torch", "torchvision", "torchaudio", "numpy"];
 
 // publicPin: strip a PEP 440 local-version suffix ("torch 2.11.0+cu128" →
 // "torch 2.11.0") for the CONSTRAINTS FILE — local builds live on the PyTorch
-// index, not PyPI, so a resolver given the +cu128 pin finds "no version exists"
+// index, not PyPI, so a resolver given the +cu128 line finds "no version exists"
 // (live finding 2026-07-17). PEP 440: the installed +cu128 build SATISFIES the
 // public 2.11.0 requirement, so pip neither reinstalls nor upgrades it; the post-install
-// TRIPWIRE still compares the full local-version pins, guarding the exact build.
+// TRIPWIRE still compares the full local-version lines, guarding the exact build.
 export function publicPin(line) {
   return line.replace(/\+[A-Za-z0-9.]+$/, "");
 }
 
-// buildHostConstraints: extract the protected packages' pinned lines from `pip freeze`
+// buildHostConstraints: extract the protected packages' lines from `pip freeze`
 // output (local-version suffixes like +cu128 preserved). Pure; unit-tested.
 export function buildHostConstraints(freezeText) {
   return String(freezeText || "")
@@ -343,13 +432,13 @@ export function buildHostConstraints(freezeText) {
     .map((l) => l.trim())
     .filter((l) => {
       const eq = l.indexOf("==");
-      return eq > 0 && HOST_PINNED.includes(l.slice(0, eq).trim().toLowerCase());
+      return eq > 0 && HOST_PROTECTED.includes(l.slice(0, eq).trim().toLowerCase());
     });
 }
 
 async function run(cmd, opts = {}) {
   return new Promise((resolve, reject) => {
-    const c = nodeSpawn(cmd[0], cmd.slice(1), { stdio: "pipe", ...opts, windowsHide: true });
+    const c = track(nodeSpawn(cmd[0], cmd.slice(1), { stdio: "pipe", ...opts, windowsHide: true }));
     let err = "";
     c.stderr.on("data", (d) => (err += d));
     c.on("error", reject);
@@ -360,7 +449,7 @@ async function run(cmd, opts = {}) {
 // runOut: like run() but resolves with trimmed stdout (used to read `git rev-parse HEAD`).
 async function runOut(cmd, opts = {}) {
   return new Promise((resolve, reject) => {
-    const c = nodeSpawn(cmd[0], cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"], ...opts, windowsHide: true });
+    const c = track(nodeSpawn(cmd[0], cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"], ...opts, windowsHide: true }));
     let out = "", err = "";
     c.stdout.on("data", (d) => (out += d));
     c.stderr.on("data", (d) => (err += d));
@@ -369,18 +458,67 @@ async function runOut(cmd, opts = {}) {
   });
 }
 
-// recordPackInstall: write the commit a pack is at, and when it got there, beside the pack
+// readPackRecord: the pack's record beside it, or null when there is none or it does not parse.
+export function readPackRecord(pack,{ comfyDir, read = (p) => readFileSync(p, "utf8") }) {
+  try { return JSON.parse(read(`${comfyDir}/custom_nodes/${pack.name}.installed.json`)); } catch { return null; }
+}
+
+// recordPackInstall: write what a pack is at, and when it got there, beside the pack
 // (custom_nodes/<name>.installed.json: ComfyUI loads only directories and .py files from custom_nodes, so the
-// record is inert there). A record that already names this commit is left alone, so installed_at stays the time the
-// pack reached it. A record the node cannot write never fails the install.
-export function recordPackInstall(pack, commit, { comfyDir, write = writeFileAtomic, read = (p) => readFileSync(p, "utf8"), now = () => new Date().toISOString() }) {
+// record is inert there). Schema 2: {schema, repo, commit, installed_at, checked_at, previous, rejected}. `repo` is the
+// origin the checkout itself reports (`origin`), else the manifest's string; `previous` is the commit and time the pack
+// held before this one (null when it never held another); `rejected` is the commits an earlier install of this pack
+// failed on, kept as they were. A record that already says schema 2 and names this commit and repo is left alone, so
+// installed_at stays the time the pack reached it. It is a record of what is installed, not an instruction to install it.
+// A record the node cannot write never fails the install.
+export function recordPackInstall(pack, commit, { comfyDir, write = writeFileAtomic, read = (p) => readFileSync(p, "utf8"), now = () => new Date().toISOString(), origin = null }) {
   try {
     const path = `${comfyDir}/custom_nodes/${pack.name}.installed.json`;
-    let held = null;
-    try { held = JSON.parse(read(path)); } catch { held = null; }
-    if (held && held.commit === commit && held.repo === pack.repo) return;
-    write(`${comfyDir}/custom_nodes/${pack.name}.installed.json`, JSON.stringify({ repo: pack.repo, commit, installed_at: now() }, null, 2) + "\n");
+    const held = readPackRecord(pack, { comfyDir, read });
+    const repo = origin || pack.repo;
+    if (held && held.schema === 2 && held.commit === commit && held.repo === repo) return;
+    const same = !!(held && held.commit === commit);
+    const stamp = now();
+    const rec = {
+      schema: 2,
+      repo,
+      commit,
+      installed_at: same && held.installed_at ? held.installed_at : stamp,
+      checked_at: stamp,
+      previous: same ? (held.previous || null)
+        : (held && held.commit ? { commit: held.commit, installed_at: held.installed_at || null } : null),
+      rejected: held && Array.isArray(held.rejected) ? held.rejected : [],
+    };
+    write(path, JSON.stringify(rec, null, 2) + "\n");
   } catch { /* the record is informational */ }
+}
+
+// rejectPackInstall: a pack this satisfy cloned did not survive the install, so its directory is gone: the record now says
+// that nothing is installed and, when `commit` is given, names the commit that failed, so a later request does not clone
+// and fail on the same one.
+export function rejectPackInstall(pack, commit, reason, { comfyDir, write = writeFileAtomic, read = (p) => readFileSync(p, "utf8"), now = () => new Date().toISOString(), origin = null, freeze = "" }) {
+  try {
+    const path = `${comfyDir}/custom_nodes/${pack.name}.installed.json`;
+    const held = readPackRecord(pack, { comfyDir, read });
+    const rejected = held && Array.isArray(held.rejected) ? held.rejected.filter((r) => r && r.commit !== commit) : [];
+    const stamp = now();
+    if (commit) rejected.push({ commit, reason: String(reason || "").slice(0, 300), ts: stamp, ...(freeze ? { freeze } : {}) });
+    write(path, JSON.stringify({ schema: 2, repo: origin || pack.repo, commit: null, installed_at: null, checked_at: stamp, previous: null, rejected }, null, 2) + "\n");
+  } catch { /* the record is informational */ }
+}
+
+// currentPacksKey: the sorted `name@commit` key of the packs a manifest names, as they are on disk now (an absent pack
+// has an empty commit). It is the same key satisfyManifest builds after its checkout stage, so a cache that holds the
+// key it stored can tell that a pack was moved, replaced or deleted since.
+export async function currentPacksKey(packs, { comfyDir, exists = existsSync, gitHead }) {
+  const parts = [];
+  for (const pack of packs || []) {
+    const dir = `${comfyDir}/custom_nodes/${pack.name}`;
+    let commit = "";
+    if (exists(dir)) { try { commit = await gitHead(dir); } catch { commit = ""; } }
+    parts.push(`${pack.name}@${commit}`);
+  }
+  return parts.sort().join("|");
 }
 
 // makeEnsurePack: build the per-pack "clone if absent, report changed" step from injectable primitives so it is
@@ -389,11 +527,16 @@ export function recordPackInstall(pack, commit, { comfyDir, write = writeFileAto
 // moving one to a newer commit is the operator's update (`git -C custom_nodes/<name> pull --ff-only`, or the fleet's
 // update tooling), so a caller holding only the render bearer cannot make a node fetch and run whatever an upstream
 // pushed a minute ago. The commit the pack is at is returned and recorded (recordPackInstall); the dependency marker
-// is keyed on it, so a pack the operator moved is re-resolved on the next request that names it.
-export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd, record = (pack, commit) => recordPackInstall(pack, commit, { comfyDir }) }) {
+// and the run-graph cache are keyed on it, so a pack the operator moved is re-resolved on the next request that names it.
+// `fresh` marks a pack this call cloned. An absent pack whose record lists rejected commits is cloned only when the
+// repository's newest commit (`lsRemoteHead`, null when it cannot be read) is not one of them: a commit that already
+// failed an install is not cloned and failed again, and a newer one is a fresh candidate. A rejection that carries the digest of the
+// venv's `pip freeze` it was written against (`freeze`) is ignored once the venv's digest (`freezeHash`, "" when unreadable) differs: a
+// venv that has been fixed since is not locked out of the commit.
+export function makeEnsurePack({ comfyDir, freezeHash = async () => "", exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd, gitOrigin = async () => null, lsRemoteHead = async () => null, readRecord = (pack) => readPackRecord(pack, { comfyDir }), record = (pack, commit, extra) => recordPackInstall(pack, commit, { comfyDir, ...extra }) }) {
   return async (pack) => {
     // The last stop before git: the directory, the clone and the checkout all come from the pack, so a pack that is
-    // not pinned is refused before any of them is looked at (satisfyManifest has refused it already; this is for a
+    // not allowlisted is refused before any of them is looked at (satisfyManifest has refused it already; this is for a
     // caller that reaches the checkout stage another way).
     const refusal = packAllowed(pack);
     if (refusal) {
@@ -401,30 +544,49 @@ export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun,
     }
     const dir = `${comfyDir}/custom_nodes/${pack.name}`;
     const existed = exists(dir);
-    if (!existed) await gitRun(buildClone(pack, { comfyDir }));
+    if (!existed) {
+      const held = readRecord(pack);
+      const held_rejected = held && Array.isArray(held.rejected) ? held.rejected.filter((r) => r && r.commit) : [];
+      let venv = null;   // the venv's digest, read once and only when a rejection carries one
+      if (held_rejected.some((r) => r.freeze)) { try { venv = await freezeHash(); } catch { venv = ""; } }
+      const rejected = held_rejected.filter((r) => !r.freeze || !venv || r.freeze === venv).map((r) => r.commit);
+      if (rejected.length) {
+        let head = null;
+        try { head = await lsRemoteHead(pack.repo); } catch { head = null; }
+        if (head && rejected.includes(head)) {
+          throw Object.assign(new Error(`node pack ${pack.name} not installed: its newest commit failed an earlier install`), {
+            code: "NODE_PACK_REJECTED", ref: pack.name,
+            detail: `the newest commit of ${pack.repo} (${head}) failed an earlier install on this node and is not cloned again; a newer commit is tried when the repository moves`,
+          });
+        }
+      }
+      await gitRun(buildClone(pack, { comfyDir }));
+    }
     const commit = await gitHead(dir);
-    record(pack, commit);
-    return { changed: !existed, commit };
+    let origin = null;
+    try { origin = await gitOrigin(dir); } catch { origin = null; }
+    record(pack, commit, { origin });
+    return { changed: !existed, commit, fresh: !existed };
   };
 }
 
-export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
-  // Host pins are captured ONCE, lazily, at the first python-touching step
+export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
+  // Host constraints are captured ONCE, lazily, at the first python-touching step
   // (resolveDeps — ensurePack before it is git-only), so the tripwire below always
   // compares against the pre-install state. resolveDeps writes the constraints file
   // from them before any pip/uv spawns, and removes it when the step ends.
-  let hostPinsP = null;
+  let hostConstraintsP = null;
   // A REJECTED promise must not stay memoized: ??= treats it as present, so a transient
   // spawn failure in `pip freeze` would make every retry re-await the same stale rejection
   // (adversarial-review finding, 2026-07-22). Clear the memo on rejection so a retry
   // actually re-spawns.
-  const hostPins = () => (hostPinsP ??= ((async () => ({
-    pins: buildHostConstraints(await runOut([comfyPy, "-m", "pip", "freeze"])),
-  }))()).catch((e) => { hostPinsP = null; throw e; }));
+  const hostConstraints = () => (hostConstraintsP ??= ((async () => ({
+    held: buildHostConstraints(await runOut([comfyPy, "-m", "pip", "freeze"])),
+  }))()).catch((e) => { hostConstraintsP = null; throw e; }));
   return {
     comfyDir,
     // The pack satisfier's hard tool is uv (unified resolve); derived from the venv
-    // python's Scripts dir. cmCli is accepted for compat but no longer load-bearing.
+    // python's Scripts dir.
     satisfierAvailable: () => existsSync(comfyPy) && existsSync(join(dirname(comfyPy), "uv.exe")),
     comfyVersion: async () => {
       try { const r = await fetch(`${api}/system_stats`); const j = await r.json(); return j?.system?.comfyui_version || j?.comfyui_version || null; }
@@ -440,7 +602,18 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
       } catch { return {}; }
     })(),
     exists: (p) => existsSync(p),
-    // Durable "this exact pin-set was resolved+checked successfully" marker. Written only
+    // pip check as text: {code, out}, whatever the exit code (the baseline and the delta of satisfyManifest). Rejects only when pip could not start.
+    pipCheckText: () => new Promise((resolve, reject) => {
+      const c = track(nodeSpawn(comfyPy, ["-m", "pip", "check"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
+      let out = "";
+      c.stdout.on("data", (d) => (out += d));
+      c.stderr.on("data", (d) => (out += d));
+      c.on("error", reject);
+      c.on("close", (code) => resolve({ code: code === null ? -1 : code, out }));
+    }),
+    // The digest of this venv's `pip freeze --all`; "" when it cannot be read (an unreadable venv never invalidates a rejection).
+    freezeHash: async () => { try { return freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { return ""; } },
+    // Durable "this exact pack set was resolved+checked successfully" marker. Written only
     // after a fully successful resolve+check; read fail-safe. It attests VENV state, so it
     // lives INSIDE the venv (beside the interpreter's home): a wiped/recreated venv takes
     // the claim down with it. The other wipe case needs no marker help — deleting pack dirs
@@ -469,15 +642,15 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
       s.on("data", (d) => h.update(d)); s.on("end", () => res(h.digest("hex"))); s.on("error", rej);
     }),
     resolveDeps: async (packs) => {
-      // Runs AFTER ensurePack (packs on disk at their pins): gather every pack's
-      // requirements.txt, ONE uv compile (UV_CONSTRAINT pins the host CUDA stack),
+      // Runs AFTER ensurePack (packs on disk): gather every pack's
+      // requirements.txt, ONE uv compile (UV_CONSTRAINT holds the host CUDA stack),
       // ONE constrained pip install of the lock. Packs with no requirements file
       // are import-only — nothing to install.
       const reqPaths = packs
         .map((p) => join(comfyDir, "custom_nodes", p.name, "requirements.txt"))
         .filter((p) => existsSync(p));
       if (!reqPaths.length) return;
-      const { pins } = await hostPins();
+      const { held } = await hostConstraints();
       const uvExe = join(dirname(comfyPy), "uv.exe");
       // The constraints file and the unified lock are scratch for THIS step: they live in a folder of
       // their own that is removed when the step ends, however it ends. (They were pid-named files in
@@ -485,11 +658,11 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
       const scratch = mkdtempSync(join(tmpdir(), "offload-satisfy-"));
       try {
         let env = {};
-        if (pins.length) {
+        if (held.length) {
           const p = join(scratch, "host-constraints.txt");
-          // Constraints file carries the PUBLIC pins (local +cuXXX builds don't exist
-          // on PyPI → unresolvable); the tripwire compares the FULL pins.
-          writeFileSync(p, pins.map(publicPin).join("\n") + "\n");
+          // Constraints file carries the PUBLIC lines (local +cuXXX builds don't exist
+          // on PyPI → unresolvable); the tripwire compares the FULL lines.
+          writeFileSync(p, held.map(publicPin).join("\n") + "\n");
           env = { PIP_CONSTRAINT: p, UV_CONSTRAINT: p };
         }
         const lockPath = join(scratch, "pack-lock.txt");
@@ -504,10 +677,33 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
       exists: existsSync,
       gitHead: (dir) => runOut(["git", "-C", dir, "rev-parse", "HEAD"]),
       gitRun: (cmd) => run(cmd),
+      gitOrigin: (dir) => runOut(["git", "-C", dir, "remote", "get-url", "origin"]),
+      freezeHash: async () => { try { return freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { return ""; } },
+      lsRemoteHead: async (repo) => {
+        const out = await runOut(["git", "ls-remote", "--", repo, "HEAD"]);
+        const sha = out.split(/\s+/)[0] || "";
+        return /^[0-9a-f]{40}$/.test(sha) ? sha : null;
+      },
     }),
+    // The key of the packs a manifest names as they are on disk now (comfy-run-graph's cache test).
+    packsKey: (packs) => currentPacksKey(packs, { comfyDir, gitHead: (dir) => runOut(["git", "-C", dir, "rev-parse", "HEAD"]) }),
+    // Undo what a failed satisfy created: remove ONLY the directories it cloned itself (never a pack that was already
+    // there), and, when the failure is the pack's own (`reject`), record the commit so it is not cloned and failed again.
+    discardFreshPacks: async (fresh, { reject, reason }) => {
+      let freeze = "";
+      if (reject) { try { freeze = freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { freeze = ""; } }
+      for (const { pack, commit } of fresh) {
+        const dir = join(comfyDir, "custom_nodes", pack.name);
+        if (checkNodePack(pack)) continue;   // a name the table does not give is never a path to remove
+        let origin = null;
+        try { origin = await runOut(["git", "-C", dir, "remote", "get-url", "origin"]); } catch { origin = null; }
+        try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* best effort */ }
+        rejectPackInstall(pack, reject ? commit : null, reason, { comfyDir, origin, freeze });
+      }
+    },
     // Returns { ok: true } or { ok: false, reason } — the reason is surfaced in the
-    // VENV_INCOHERENT defer detail so a consuming workflow can tell host-pin DRIFT
-    // (which pinned package moved) from an ordinary dependency CONFLICT, instead of an
+    // VENV_INCOHERENT defer detail so a consuming workflow can tell host constraint DRIFT
+    // (which protected package moved) from an ordinary dependency CONFLICT, instead of an
     // opaque "conflicting installed dependencies".
     pipCheck: async () => {
       try {
@@ -521,13 +717,13 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }) {
           return { ok: false, reason: "pip check reported conflicting installed dependencies: " + String(e.message || e) };
         }
         // Tripwire (belt + suspenders under the constraints env): if provisioning moved a
-        // HOST_PINNED package anyway, that venv would break the existing render path —
+        // HOST_PROTECTED package anyway, that venv would break the existing render path —
         // report incoherent (→ typed VENV_INCOHERENT defer), never a silent torch swap.
-        const { pins } = await hostPins();
-        if (pins.length) {
+        const { held } = await hostConstraints();
+        if (held.length) {
           const now = buildHostConstraints(await runOut([comfyPy, "-m", "pip", "freeze"]));
-          if ([...pins].sort().join("|") !== [...now].sort().join("|")) {
-            const detail = "host-pin drift — a pinned package moved during provisioning: expected [" + pins.join(", ") + "] got [" + now.join(", ") + "]";
+          if ([...held].sort().join("|") !== [...now].sort().join("|")) {
+            const detail = "host constraint drift — a protected package moved during provisioning: expected [" + held.join(", ") + "] got [" + now.join(", ") + "]";
             console.error(detail);
             return { ok: false, reason: detail };
           }

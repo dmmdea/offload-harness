@@ -179,7 +179,7 @@ const okDeps = {
   satisfierAvailable: () => true, comfyVersion: async () => "0.23.5",
   resolveDeps: async () => {}, ensurePack: async () => ({ changed: false }),
   pipCheck: async () => ({ ok: true }),
-  // These tests use stand-in packs ("r", "c"): the pinned-pack allowlist is exercised, with the real table,
+  // These tests use stand-in packs ("r", "c"): the pack allowlist is exercised, with the real table,
   // in the tests at the end of this file and in node-packs.test.mjs.
   packAllowed: () => null,
 };
@@ -209,10 +209,10 @@ test("DEFER VENV_INCOHERENT when pip check fails", async () => {
   assert.equal(r.defer.code, "VENV_INCOHERENT");
 });
 
-test("VENV_INCOHERENT surfaces the pipCheck reason (host-pin drift is actionable, not opaque)", async () => {
-  // A pack that moved a host-pinned package (e.g. torch) must report WHICH package drifted in
+test("VENV_INCOHERENT surfaces the pipCheck reason (host constraint drift is actionable, not opaque)", async () => {
+  // A pack that moved a protected host package (e.g. torch) must report WHICH package drifted in
   // the defer detail — a consuming workflow can't act on a generic "conflicting dependencies".
-  const drift = "host-pin drift — a pinned package moved during provisioning: expected [torch==2.11.0] got [torch==2.13.0]";
+  const drift = "host constraint drift — a protected package moved during provisioning: expected [torch==2.11.0] got [torch==2.13.0]";
   const r = await satisfyManifest(M, { ...okDeps, pipCheck: async () => ({ ok: false, reason: drift }) });
   assert.equal(r.defer.code, "VENV_INCOHERENT");
   assert.equal(r.defer.detail, drift);
@@ -245,7 +245,7 @@ test("models-only manifest satisfies without the pack satisfier present", async 
 // and relabeled VENV_INCOHERENT: "the check could not run" reported as "your venv is broken",
 // pointing the operator at healthy torch pins. Spawn failures must be classified distinctly
 // (SATISFIER_SPAWN_FAILED), retried once for the python-touching steps (CMP's was transient
-// after a long batch), and - for a pin-set the persisted marker proves was already satisfied -
+// after a long batch), and - for a pack set the persisted marker proves was already satisfied -
 // must not fail a previously-coherent env at all.
 
 const spawnErr = () => Object.assign(new Error("spawn UNKNOWN"), { code: "UNKNOWN", syscall: "spawn" });
@@ -353,11 +353,11 @@ test("unchanged packs WITH a matching marker skip the resolve (the common re-run
     pipCheck: async () => { checked = true; return { ok: true }; },
   });
   assert.equal(r.ok, true);
-  assert.equal(resolved, false, "pin-set unchanged AND proven satisfied - nothing to resolve");
+  assert.equal(resolved, false, "pack set unchanged AND proven satisfied - nothing to resolve");
   assert.equal(checked, true, "the cheap coherence check still runs");
 });
 
-test("a STALE marker (different pin-set) does not authorize the skip", async () => {
+test("a STALE marker (different pack set) does not authorize the skip", async () => {
   let resolved = false;
   await satisfyManifest(M, {
     ...okDeps,
@@ -365,7 +365,7 @@ test("a STALE marker (different pin-set) does not authorize the skip", async () 
     readDepsMarker: () => "A@OLD-COMMIT",
     resolveDeps: async () => { resolved = true; },
   });
-  assert.equal(resolved, true, "marker for a different pin-set proves nothing about this one");
+  assert.equal(resolved, true, "marker for a different pack set proves nothing about this one");
 });
 
 test("the marker is written ONLY after resolve+check both succeed", async () => {
@@ -375,7 +375,7 @@ test("the marker is written ONLY after resolve+check both succeed", async () => 
     ensurePack: async () => ({ changed: true }),
     writeDepsMarker: (k) => { wrote = k; },
   });
-  assert.equal(wrote, M_KEY, "success writes the pin-set key");
+  assert.equal(wrote, M_KEY, "success writes the pack-set key");
   wrote = null;
   await satisfyManifest(M, {
     ...okDeps,
@@ -434,7 +434,7 @@ test("PRODUCTION pipCheck rethrows a real child_process spawn failure (not {ok:f
   const deps = defaultSatisfyDeps({
     comfyDir: "C:/ComfyUI",
     comfyPy: "C:/definitely/not/a/real/python-interpreter.exe",
-    api: "http://127.0.0.1:1", cmCli: "",
+    api: "http://127.0.0.1:1",
   });
   await assert.rejects(() => deps.pipCheck(), (e) => isSpawnFailure(e),
     "a spawn-level failure must propagate as a throw that classifies as a spawn failure");
@@ -522,7 +522,7 @@ test("buildHostConstraints is case-insensitive on the package name", () => {
   assert.deepEqual(buildHostConstraints("Torch==2.13.0\nNumPy==2.4.6"), ["Torch==2.13.0", "NumPy==2.4.6"]);
 });
 
-test("buildHostConstraints returns [] for empty / no-match / non-pinned input", () => {
+test("buildHostConstraints returns [] for empty / no-match / non-protected input", () => {
   assert.deepEqual(buildHostConstraints(""), []);
   assert.deepEqual(buildHostConstraints(null), []);
   assert.deepEqual(buildHostConstraints("requests==2.32.0\ntorch @ file:///wheel"), []);
@@ -541,7 +541,7 @@ test("publicPin strips a PEP 440 local-version suffix, leaves public pins alone"
 // real closures.
 function realDeps() {
   const dir = mkdtempSync(join(tmpdir(), "satisfy-real-"));
-  const deps = defaultSatisfyDeps({ comfyDir: dir, comfyPy: join(dir, "python"), api: "http://127.0.0.1:0", cmCli: "" });
+  const deps = defaultSatisfyDeps({ comfyDir: dir, comfyPy: join(dir, "python"), api: "http://127.0.0.1:0" });
   return { dir, deps };
 }
 
@@ -583,7 +583,7 @@ test("defaultSatisfyDeps.download streams the body to disk (no >2GB Buffer cap)"
 // Production leak: the host-constraints file and the pack lock `resolveDeps` writes were pid-named files in the OS temp dir
 // that nothing removed, so every provisioning run left two behind. They now live in a folder of the step's own that goes
 // when the step ends, however it ends. The real glue runs here against stub executables for the venv python (it answers
-// `pip freeze` with a host-pinned torch) and for uv (it writes the lock it is asked for at `-o`, then exits as told), with
+// `pip freeze` with a torch the host holds) and for uv (it writes the lock it is asked for at `-o`, then exits as told), with
 // the OS temp dir pointed at a private folder.
 async function resolveInPrivateTemp(t, { uvExit }) {
   const bin = scratchDir(t, "satisfy-bin-");
@@ -599,7 +599,7 @@ async function resolveInPrivateTemp(t, { uvExit }) {
   const saved = { TEMP: process.env.TEMP, TMP: process.env.TMP, TMPDIR: process.env.TMPDIR };
   t.after(() => { for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; } });
   process.env.TEMP = process.env.TMP = process.env.TMPDIR = priv;
-  const deps = defaultSatisfyDeps({ comfyDir: comfy, comfyPy: py, api: "http://127.0.0.1:0", cmCli: "" });
+  const deps = defaultSatisfyDeps({ comfyDir: comfy, comfyPy: py, api: "http://127.0.0.1:0" });
   const outcome = await deps.resolveDeps([{ name: "PackA" }]).then(() => "resolved", (e) => e);
   const compile = JSON.parse(readFileSync(uvLog, "utf8").trim().split("\n")[0]).argv; // uv pip compile ... -o <lock>
   const lock = compile[compile.indexOf("-o") + 1];
@@ -750,7 +750,7 @@ test("tofu: the default deps keep the record in <file>.tofu, notice a changed fi
   const file = join(dir, "models/vae/v.safetensors");
   mkdirSync(join(dir, "models/vae"), { recursive: true });
   writeFileSync(file, "weights one");
-  const deps = { ...defaultSatisfyDeps({ comfyDir: dir, comfyPy: join(dir, "py"), api: "http://127.0.0.1:1", cmCli: "" }), tofu: defaultTofuDeps() };
+  const deps = { ...defaultSatisfyDeps({ comfyDir: dir, comfyPy: join(dir, "py"), api: "http://127.0.0.1:1" }), tofu: defaultTofuDeps() };
   const first = await verifyTofuModels([TOFU_MODEL], deps);
   assert.deepEqual(first.first_seen, ["models/vae/v.safetensors"]);
   assert.ok(existsSync(file + ".tofu"), "the record is beside the file");
@@ -779,7 +779,7 @@ test("modelCandidates: a diffusion_models path is also looked for under unet, an
   ]);
 });
 
-// --- the pinned-pack allowlist (the real table; no stand-in policy) ---
+// --- the pack allowlist (the real table; no stand-in policy) ---
 // A manifest that names a pack makes the node clone its repository and pip-install its requirements, so it
 // runs the caller's code. Only a pack whose repository is in render/node-packs.json is taken;
 // anything else is refused before the first git command, whatever the models and the tooling say.
@@ -803,7 +803,7 @@ function spies() {
   };
 }
 
-test("satisfyManifest refuses an unpinned pack before anything is downloaded, cloned or installed", async () => {
+test("satisfyManifest refuses a pack that is not allowlisted before anything is downloaded, cloned or installed", async () => {
   const { calls, deps } = spies();
   const m = parseManifest({ node_packs: [HOSTILE], models: [{ path: "models/checkpoints/x.safetensors", source_url: "https://example.invalid/x", sha256: null }] });
   const r = await satisfyManifest(m, deps);
@@ -822,39 +822,43 @@ test("satisfyManifest refuses a listed repository under another directory name",
   }
 });
 
-test("satisfyManifest refuses the whole manifest when one of its packs is unpinned", async () => {
+test("satisfyManifest refuses the whole manifest when one of its packs is not allowlisted", async () => {
   const { calls, deps } = spies();
   const r = await satisfyManifest(parseManifest({ node_packs: [VHS, HOSTILE], models: [] }), deps);
   assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED");
-  assert.deepEqual(calls, [], "the pinned pack was not checked out ahead of the refusal");
+  assert.deepEqual(calls, [], "the allowlisted pack was not checked out ahead of the refusal");
 });
 
-test("satisfyManifest takes a manifest that names only pinned packs", async () => {
+test("satisfyManifest takes a manifest that names only allowlisted packs", async () => {
   const { calls, deps } = spies();
   const r = await satisfyManifest(parseManifest({ node_packs: [VHS], models: [] }), deps);
   assert.equal(r.ok, true, JSON.stringify(r));
   assert.ok(calls.includes("ensurePack"));
 });
 
-test("makeEnsurePack refuses an unpinned pack before it asks git anything, and never builds a clone command", async () => {
+test("makeEnsurePack refuses a pack that is not allowlisted before it asks git anything, and never builds a clone command", async (t) => {
   const touched = [];
+  // A directory of its own: the first clone below records the pack beside it.
+  const comfyDir = scratchDir(t, "offload-ensure-");
   const ep = makeEnsurePack({
-    comfyDir: "C:/ComfyUI",
+    comfyDir,
     exists: (d) => { touched.push(["exists", d]); return false; },
     gitHead: async () => { touched.push(["gitHead"]); return "h"; },
     gitRun: async (cmd) => { touched.push(["gitRun", cmd]); },
     buildClone: (...a) => { touched.push(["buildClone", a]); return ["git", "clone"]; },
     record: () => {},
+    readRecord: () => null,
   });
   await assert.rejects(() => ep(HOSTILE), (e) => e.code === "NODE_PACK_NOT_ALLOWED" && /payload/.test(e.message));
-  assert.deepEqual(touched, [], "the clone command was built or run for a pack that is not pinned");
+  assert.deepEqual(touched, [], "the clone command was built or run for a pack that is not allowlisted");
   const r = await ep(VHS);
   assert.equal(r.changed, true);
-  assert.ok(touched.some((t) => t[0] === "buildClone"), "a pinned pack is cloned");
+  assert.ok(touched.some((x) => x[0] === "buildClone"), "an allowlisted pack is cloned");
 });
 
-test("a refusal from the checkout stage is the same typed defer, not a broken venv", async () => {
-  const ep = makeEnsurePack({ comfyDir: "C:/ComfyUI", exists: () => false, gitHead: async () => "h", gitRun: async () => {} });
+test("a refusal from the checkout stage is the same typed defer, not a broken venv", async (t) => {
+  const comfyDir = scratchDir(t, "offload-ensure-");
+  const ep = makeEnsurePack({ comfyDir, exists: () => false, gitHead: async () => "h", gitRun: async () => {} });
   const r = await satisfyManifest(parseManifest({ node_packs: [VHS], models: [] }), { ...realPolicy, ensurePack: (p) => ep({ ...p, name: "ComfyUI-Manager" }) });
   assert.equal(r.defer && r.defer.code, "NODE_PACK_NOT_ALLOWED");
 });

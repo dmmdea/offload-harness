@@ -514,10 +514,9 @@ sha-verified when a hash is given (`sha256: null` downloads are reported in
 `path/type/kind/width/height`); every failure is a **typed defer**
 (`SATISFIER_UNAVAILABLE`, `VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`,
 `EXTERNAL_COMFY_NEEDS_PACKS`, …) so callers branch on `code`, never parse prose.
-Prerequisites (provisioned by `install.ps1`): **uv** (the pack satisfier's unified-resolve
-tool — the hard requirement) + ComfyUI-Manager + GitPython in the
-ComfyUI venv; set Manager `network_mode = offline` in `<comfy>/user/__manager/config.ini`
-(its first-start registry fetch otherwise slows every cold start).
+Prerequisite (provisioned by `install.ps1`): **uv** in the ComfyUI venv (the pack satisfier's
+unified-resolve tool, the hard requirement) and git on PATH. ComfyUI-Manager and GitPython are not
+used by run-graph and `install.ps1` no longer installs them.
 
 ### Generative inpainting (inpaint-image) ✅
 

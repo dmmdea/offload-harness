@@ -330,11 +330,10 @@ both. Field-measured traps (<node-e>, 2026-08-22):
 `offload_run_graph` self-provisions a workflow's node manifest against the ComfyUI install.
 Packs are cloned (the head of the repository's default branch; the commit it got is recorded in `custom_nodes/<name>.installed.json`) via **git**, then ALL packs' deps are
 resolved in **one `uv pip compile`** (under the host-torch constraints) and installed as one
-lock — so **`uv` in the ComfyUI venv is the REQUIRED satisfier tool** (live finding
-2026-07-17: the installed cm-cli has no `--uv` flag, so uv is driven directly).
-`install.ps1` provisions the full set — ComfyUI-Manager clone + GitPython (cm-cli's own
-import) + **`pip install uv`** — as part of the run-graph deps step, guarded to skip when
-present. It runs only when a ComfyUI install is discoverable — override with
+lock — so **`uv` in the ComfyUI venv is the REQUIRED satisfier tool** (uv is driven directly;
+ComfyUI-Manager and GitPython are not used and are not installed for it).
+`install.ps1` provisions **`pip install uv`** as part of the run-graph deps step, guarded to
+skip when present. It runs only when a ComfyUI install is discoverable — override with
 `$env:COMFY_DIR` (default `C:/ComfyUI`) / `$env:COMFY_PY`.
 
 `comfy-cli` is an **optional convenience only** — run-graph does **not** depend on it.

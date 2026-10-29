@@ -90,11 +90,11 @@ func TestNodePackRowsMatchTheRunnersFile(t *testing.T) {
 	if len(file.Packs) == 0 {
 		t.Fatal("render/node-packs.json lists no pack")
 	}
-	var fromFile []NodePackPin
+	var fromFile []AllowedNodePack
 	for _, p := range file.Packs {
-		fromFile = append(fromFile, NodePackPin{Name: p.Name, Repo: p.Repo})
+		fromFile = append(fromFile, AllowedNodePack{Name: p.Name, Repo: p.Repo})
 	}
-	got := NodePackPins()
+	got := AllowedNodePacks()
 	if len(got) != len(fromFile) {
 		t.Fatalf("the node's table has %d rows, render/node-packs.json has %d", len(got), len(fromFile))
 	}
@@ -107,12 +107,12 @@ func TestNodePackRowsMatchTheRunnersFile(t *testing.T) {
 
 // Every pack the doctor tells an operator to install is a pack the manifest door would take.
 func TestNodePackRowsCoverEveryPackTheDoctorNames(t *testing.T) {
-	pinned := map[string]bool{}
-	for _, p := range NodePackPins() {
-		pinned[p.Repo] = true
+	allowed := map[string]bool{}
+	for _, p := range AllowedNodePacks() {
+		allowed[p.Repo] = true
 	}
 	for name, np := range nodePacks {
-		if !pinned[np.url] {
+		if !allowed[np.url] {
 			t.Errorf("%s (%s) is a pack the doctor names and has no allowlist row", name, np.url)
 		}
 	}

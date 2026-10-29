@@ -18,23 +18,23 @@ import (
 //
 // The match is exact (see render/node-packs.mjs): the string compared is the one `git clone` would be given.
 
-// NodePackPin is one pack a manifest may name: the directory it installs under and the repository to clone.
-type NodePackPin struct {
+// AllowedNodePack is one pack a manifest may name: the directory it installs under and the repository to clone.
+type AllowedNodePack struct {
 	Name string
 	Repo string
 }
 
-// nodePackPins mirrors render/node-packs.json, row for row. MultiGPU is listed twice, upstream (archived) and the
+// allowedNodePacks mirrors render/node-packs.json, row for row. MultiGPU is listed twice, upstream (archived) and the
 // private mirror (routeneeds.go).
-var nodePackPins = []NodePackPin{
+var allowedNodePacks = []AllowedNodePack{
 	{"ComfyUI-VideoHelperSuite", "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite"},
 	{"ComfyUI-MultiGPU", "https://github.com/pollockjj/ComfyUI-MultiGPU"},
 	{"ComfyUI-MultiGPU", multiGPUMirrorURL},
 	{"ComfyUI-GGUF", "https://github.com/city96/ComfyUI-GGUF"},
 }
 
-// NodePackPins returns the allowlisted packs.
-func NodePackPins() []NodePackPin { return append([]NodePackPin(nil), nodePackPins...) }
+// AllowedNodePacks returns the allowlisted packs.
+func AllowedNodePacks() []AllowedNodePack { return append([]AllowedNodePack(nil), allowedNodePacks...) }
 
 // NodePackRefusedError is a manifest's refusal: it names a pack whose repository this node does not allowlist.
 type NodePackRefusedError struct {
@@ -141,10 +141,10 @@ func checkNodePack(i int, raw json.RawMessage) error {
 	if repo == "" {
 		return refuse("the pack names no repository")
 	}
-	var row *NodePackPin
-	for k := range nodePackPins {
-		if nodePackPins[k].Repo == repo {
-			row = &nodePackPins[k]
+	var row *AllowedNodePack
+	for k := range allowedNodePacks {
+		if allowedNodePacks[k].Repo == repo {
+			row = &allowedNodePacks[k]
 			break
 		}
 	}

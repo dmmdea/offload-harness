@@ -22,9 +22,9 @@ import { packNameFromRepo } from "./manifest.mjs";
 const DIRNAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const REPO = /^https:\/\/github\.com\/[A-Za-z0-9._-]+\/[A-Za-z0-9._-]+$/;
 
-// loadPinnedPacks: the rows of a table file, each reduced to {name, repo}; a row that is not a plain directory name
+// loadAllowedPacks: the rows of a table file, each reduced to {name, repo}; a row that is not a plain directory name
 // and an https GitHub repository is dropped, and an unreadable file is an empty table.
-export function loadPinnedPacks(url = new URL("./node-packs.json", import.meta.url)) {
+export function loadAllowedPacks(url = new URL("./node-packs.json", import.meta.url)) {
   try {
     const file = JSON.parse(readFileSync(url, "utf8"));
     const rows = [];
@@ -39,7 +39,7 @@ export function loadPinnedPacks(url = new URL("./node-packs.json", import.meta.u
   }
 }
 
-export const PINNED_NODE_PACKS = loadPinnedPacks();
+export const ALLOWED_NODE_PACKS = loadAllowedPacks();
 
 // What a pack is called in a refusal: its name, else the name its repository gives it, else its place in the list.
 function label(pack) {
@@ -54,7 +54,7 @@ function label(pack) {
 // the typed defer {code, ref, detail} naming it. The directory name is the row's, or the one parseManifest derives
 // from the repository when the manifest gives none (the mirror clones into its own name); nothing else, so a name
 // cannot point the clone anywhere but beside the other packs.
-export function checkNodePack(pack, pins = PINNED_NODE_PACKS) {
+export function checkNodePack(pack, rows = ALLOWED_NODE_PACKS) {
   const refuse = (why) => ({
     code: "NODE_PACK_NOT_ALLOWED",
     ref: label(pack),
@@ -62,7 +62,7 @@ export function checkNodePack(pack, pins = PINNED_NODE_PACKS) {
   });
   if (!pack || typeof pack !== "object") return refuse("the pack is not an object");
   if (typeof pack.repo !== "string") return refuse("the pack names no repository");
-  const row = pins.find((p) => p.repo === pack.repo);
+  const row = rows.find((p) => p.repo === pack.repo);
   if (!row) return refuse(`${JSON.stringify(pack.repo)} is not an allowlisted repository`);
   if (pack.name !== undefined && pack.name !== row.name && pack.name !== packNameFromRepo(row.repo)) {
     return refuse(`the directory name ${JSON.stringify(pack.name)} is not ${row.name}`);
@@ -98,7 +98,7 @@ export function loadModelHosts(url = new URL("./node-packs.json", import.meta.ur
   }
 }
 
-export const PINNED_MODEL_HOSTS = loadModelHosts();
+export const ALLOWED_MODEL_HOSTS = loadModelHosts();
 
 // normalizeModelPath: the path the check reads and the satisfier joins, backslashes read as separators.
 export function normalizeModelPath(path) {
@@ -128,7 +128,7 @@ function modelSourceProblem(source, hosts) {
 // checkModelEntry: null when entry ({path, source_url?}) lands under models/<class>/ and is fetched, if at all, over
 // https from a listed host, else the typed defer {code, ref, detail} naming the entry. It never throws: an entry whose
 // path or source is not a string is a refusal.
-export function checkModelEntry(entry, hosts = PINNED_MODEL_HOSTS) {
+export function checkModelEntry(entry, hosts = ALLOWED_MODEL_HOSTS) {
   const refuse = (ref, why) => ({
     code: "MODEL_NOT_ALLOWED",
     ref,

@@ -70,6 +70,10 @@ versions. The order of 2026-10-28 made the harness unpinnable on purpose.
    node packs are admitted by repository with the commit recorded at install; the vendored llama-swap schema is refreshed
    from upstream by `go generate`; lockfiles go (npm and uv verify against their registries at install, with
    `--ignore-scripts`).
+   *Amendment 2026-10-28:* an installed node pack is moved only by `update --component comfy-packs`, never by a render: it
+   takes the newest head of the pack's default branch, resolves all packs together under the host-torch constraints, gates the
+   move on `pip check` and ComfyUI's own import pass, and undoes a failed move in git and in pip, recording the commit in the
+   pack's `rejected[]` (docs/systems/update.md, "Node packs").
 7. **The lint.** One root test, `no_version_pins_test.go`, fails when an installer, a render script, a dependency manifest or
    an accelerator recipe carries a release tag, a build number, a 40- or 64-hex digest, an `==` requirement or an exact
    version in a dependency map, naming file and line. `setup/floors.json` is the one place a build number may appear. The

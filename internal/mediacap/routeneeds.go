@@ -373,7 +373,7 @@ type nodePack struct {
 }
 
 // pollockjj/ComfyUI-MultiGPU archives 2026-09-30 (issue #223, no successor endorsed).
-// The head of upstream is v2.6.4's last code commit; the mirror's head adds one local fix already carried by the
+// The head of upstream is its last code commit; the mirror's default branch carries one local fix already carried by the
 // fleet ("fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM", the first-stage fix for upstream
 // issue #220's libcudart.so-on-Windows crash). Mirrored (private) at dmmdea/ComfyUI-MultiGPU-mirror since upstream
 // becomes read-only; the mirror is the repository to install from. No commit is named: the node installs the head

@@ -255,7 +255,7 @@ it before executing the graph, or defers explaining what it could not satisfy.
 
 ## Node Pack
 
-A ComfyUI custom-node repository named in a Node Manifest and admitted by `render/node-packs.json`; the node installs the default branch's head and records the commit taken in `custom_nodes/<name>.installed.json`. Packs supply the node
+A ComfyUI custom-node repository named in a Node Manifest and admitted by `render/node-packs.json`; the node clones the default branch's head when it holds no copy and records the commit it is at, with the repository it came from and the commit before it, in `custom_nodes/<name>.installed.json`. Packs supply the node
 classes a graph references.
 
 ## Op

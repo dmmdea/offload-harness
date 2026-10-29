@@ -104,7 +104,7 @@ Platform: the existing Go harness (1.27) plus the PowerShell and bash installers
 | stable-diffusion.cpp | GitHub releases, `leejet/stable-diffusion.cpp` | max `master-<N>-<sha7>` by `<N>` | `sd-master-<sha7>-bin-win-{cuda12,vulkan,cpu}-x64.zip` + `cudart-sd-bin-win-cu12-x64.zip` / Linux Ubuntu zips (cpu, vulkan) | `assets[].digest` |
 | HyperFrames | npm registry `dist-tags.latest` | newest | tarball | `dist.integrity` (npm verifies) |
 | ComfyUI | git tags `v*` sorted by version | newest tag, checked out detached; the Windows portable from the newest release object | git / `.7z` | commit sha / `assets[].digest` |
-| ComfyUI node packs | the allowlisted repositories in `render/node-packs.json` | HEAD of the default branch at install time, commit recorded | git | commit sha recorded |
+| ComfyUI node packs | the allowlisted repositories in `render/node-packs.json` | HEAD of the default branch at install time, commit recorded; an installed pack is moved only by `update --component comfy-packs` (operator or sweep, under the GPU lease), never by a render; gated on `pip check` and `main.py --quick-test-for-ci`, rolled back in git and pip on failure | git | commit sha recorded (the git commit id is the content digest) |
 | models (GGUF, safetensors, bin) | HF tree API `?recursive=true` at `main` | the file at `main`; re-fetched only when the remote `lfs.oid` differs from the recorded one | resolve URL | `lfs.oid` (sha256) + `size`, or `X-Linked-ETag` on the 302 |
 | Timestral, Coral, RKNPU artifacts | HF `main` / GitHub HEAD | newest | files | `lfs.oid` / digest |
 | OpenSpec CLI | npm `dist-tags.latest` | newest | tarball | `dist.integrity` |

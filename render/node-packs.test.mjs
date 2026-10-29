@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { PINNED_NODE_PACKS, loadPinnedPacks, checkNodePack, PINNED_MODEL_HOSTS, loadModelHosts, checkModelEntry, normalizeModelPath } from "./node-packs.mjs";
+import { ALLOWED_NODE_PACKS, loadAllowedPacks, checkNodePack, ALLOWED_MODEL_HOSTS, loadModelHosts, checkModelEntry, normalizeModelPath } from "./node-packs.mjs";
 import { NODE_PACKS } from "./comfy-nodes.mjs";
 
 const VHS = "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite";
@@ -35,7 +35,7 @@ test("node-packs.json: every pack the MISSING_NODE hints send an operator to is 
 });
 
 test("the module reads the file: its table is the file's rows", () => {
-  assert.deepEqual(PINNED_NODE_PACKS.map((p) => [p.name, p.repo]), file.packs.map((p) => [p.name, p.repo]));
+  assert.deepEqual(ALLOWED_NODE_PACKS.map((p) => [p.name, p.repo]), file.packs.map((p) => [p.name, p.repo]));
 });
 
 test("checkNodePack admits an allowlisted repository and refuses everything else, with the pack named", () => {
@@ -61,7 +61,7 @@ test("checkNodePack admits an allowlisted repository and refuses everything else
 });
 
 test("an unreadable table is an empty one: every pack is refused", () => {
-  const rows = loadPinnedPacks(new URL("./no-such-node-packs.json", import.meta.url));
+  const rows = loadAllowedPacks(new URL("./no-such-node-packs.json", import.meta.url));
   assert.deepEqual([...rows], []);
   assert.ok(checkNodePack({ name: "ComfyUI-VideoHelperSuite", repo: VHS }, rows));
 });
@@ -74,7 +74,7 @@ const cases = JSON.parse(readFileSync(new URL("./testdata/manifest-model-cases.j
 test("node-packs.json lists the hosts a model may be fetched from, and the module reads them", () => {
   assert.ok(Array.isArray(file.model_hosts) && file.model_hosts.length > 0, "the table lists no model_hosts");
   for (const h of file.model_hosts) assert.match(h, /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/, `${h} is not a plain lower-case host name`);
-  assert.deepEqual([...PINNED_MODEL_HOSTS], file.model_hosts);
+  assert.deepEqual([...ALLOWED_MODEL_HOSTS], file.model_hosts);
 });
 
 for (const c of cases) {
