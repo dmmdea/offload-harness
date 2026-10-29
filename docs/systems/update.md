@@ -287,7 +287,8 @@ A lease that is not granted never starts the command: nothing changed, exit 0 by
 The channel is the head of each pack's default branch (`git ls-remote <origin> HEAD`), because the allowlisted publishers
 tag and release nothing; the git commit id is the content digest and `render/node-packs.json` is the trust boundary. A
 render request never runs this: it clones an absent pack and uses an installed one as it is. Per installed pack whose
-`origin` is a row of that file:
+`origin` is a row of that file (one trailing `/` and one trailing `.git` are ignored on both sides of the comparison;
+nothing else is, so case, scheme and host must match exactly):
 
 1. The head is the checkout's HEAD, or is listed in the pack's `rejected[]`: nothing to do, `checked_at` is written.
 2. A tree with modified tracked files, or whose HEAD is not an ancestor of the remote head (local commits, a branch of its

@@ -152,6 +152,12 @@ export function defaultUpdateDeps({ comfyDir, comfyPy, api, dryRun = false, roll
   };
 }
 
+// sameRepoUrl: an installed pack's origin matches an allowlist row when the two are equal after one trim, one trailing "/"
+// and one trailing ".git" are dropped from each (git clone leaves the suffix the operator typed). No case folding, no
+// scheme or host rewriting: node-packs.json is a trust boundary. The raw origin stays what ls-remote and fetch use.
+const repoKey = (u) => String(u).trim().replace(/\/$/, "").replace(/\.git$/, "");
+const sameRepoUrl = (rowRepo, origin) => origin !== "" && repoKey(rowRepo) === repoKey(origin);
+
 const short = (s) => (s ? String(s).slice(0, 12) : "");
 const tail = (s, n = 300) => String(s || "").trim().slice(-n);
 
@@ -229,7 +235,7 @@ export async function updatePacks(deps) {
     if (!SHA.test(head)) { entry(dirName, { action: "skipped", code: "NOT_A_CHECKOUT", detail: "not a git checkout (or its HEAD cannot be read); left alone" }); continue; }
     const or = await git(dir, ["remote", "get-url", "origin"]);
     const origin = or.code === 0 ? or.out.trim() : "";
-    const row = d.rows.find((r) => r.repo === origin && nameOk(r, dirName));
+    const row = d.rows.find((r) => sameRepoUrl(r.repo, origin) && nameOk(r, dirName));
     if (!row) { entry(dirName, { action: "skipped", installed: head, code: "ORIGIN_NOT_ALLOWED", detail: `origin ${origin || "(none)"} is not a row of node-packs.json; left alone` }); continue; }
     items.push({ pack: { name: dirName, repo: origin }, dir, head, origin, e: null });
   }
