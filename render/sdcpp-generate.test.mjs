@@ -40,7 +40,7 @@ test("buildSdArgs: diffusion model-kind maps to --diffusion-model, companions + 
   const s = a.join(" ");
   assert.match(s, /--diffusion-model D:\/m\/z_image_turbo-Q8_0\.gguf/);
   assert.doesNotMatch(s, /(^| )-m /); // diffusion kind must NOT also pass -m
-  // pinned-release spellings: underscores in clip flags, -p/-n/-W/-H/-s, --cfg-scale,
+  // sd.cpp CLI spellings at or above the floor: underscores in clip flags, -p/-n/-W/-H/-s, --cfg-scale,
   // --sampling-method, -o output last
   assert.match(s, /--vae D:\/m\/ae\.safetensors/);
   assert.match(s, /--clip_l D:\/m\/clip_l\.st/);

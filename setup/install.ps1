@@ -2603,7 +2603,7 @@ Step 'harness config -> ~/.local-offload/config.json' `
                    else        { 'no python found (install Python 3 + pip install pillow, or set edit_python)' }
       Write-Host "      host tools: edit_image stays unbound - $whyNoEdit" -ForegroundColor Yellow
     }
-    # Composition lane (Step 7b): bind the three compose keys when the pinned install
+    # Composition lane (Step 7b): bind the three compose keys when the HyperFrames install
     # and browser are in place; otherwise un-bind the tier's compose_script so the
     # route reads NOT CONFIGURED instead of BOUND-BUT-MISSING.
     $hfDir = ''; $hfBrowser = ''

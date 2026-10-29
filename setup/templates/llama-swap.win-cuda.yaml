@@ -176,7 +176,7 @@ models:
   # Rendered only when the tier sets include_qwen36_35b AND the box's RAM tier is low, mid or high.
   # Flags are LITERALS (the measured configuration), the zero host prompt cache is deliberate
   # and the model is a THINKING one (no --reasoning flag). `--load-mode none` needs llama.cpp
-  # >= b10964 (it replaced --no-mmap): install.ps1's pinned build must be at or above that
+  # >= b10964 (it replaced --no-mmap): the installed build must meet the qwen3.6-35b-a3b-agent floor in setup/floors.json
   # for this entry to start. `--threads` is kept although the other entries of this file
   # leave it to the default, because the spilled experts run on those threads. It claims
   # `agent-seat`; qwen3.5-4b-agent hands the alias off (the Q354B_AGENT_ALIAS token).

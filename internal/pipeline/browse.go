@@ -2,7 +2,7 @@ package pipeline
 
 // browse.go — the opt-in browse lane (ADR 0060).
 //
-// A pinned Python sidecar (setup/browse/runner.py: browser-use's jev-ultrafast loop over
+// A Python sidecar (setup/browse/runner.py: browser-use's jev-ultrafast loop over
 // browser-harness/CDP) drives the operator's own, already-running Chromium browser toward
 // a natural-language goal. The split of responsibilities is the point of the design:
 //

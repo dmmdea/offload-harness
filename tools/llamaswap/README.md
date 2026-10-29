@@ -354,7 +354,7 @@ Thin wrappers over the proxy's own routes.
 
 - **`llamaswap-pp-cli server health`** - Liveness of the llama-swap proxy itself (plain "OK"). This says NOTHING about any model being loaded or ready — a green /health with an empty /running is the normal idle state. For per-model readiness use upstream health.
 
-- **`llamaswap-pp-cli version drift`** - Compares the llama-swap surface this CLI was verified against (`v249`) with the live server, and reports **which backend actually answered**. llama.cpp's own `llama-server` has shipped a native model-swapping router mode since Dec 2025 that serves a similarly shaped `/models`; pointing this CLI's admin commands at one produces 404s that look like faults, and the detector names it instead. Exit 25 when the server is older than the verified surface (a finding, not an error). Read-only.
+- **`llamaswap-pp-cli version drift`** - Compares the llama-swap release recorded in the vendored schema snapshot (`internal/lsconfig/schema/snapshot.json`) with the live server, and reports **which backend actually answered**. llama.cpp's own `llama-server` has shipped a native model-swapping router mode since Dec 2025 that serves a similarly shaped `/models`; pointing this CLI's admin commands at one produces 404s that look like faults, and the detector names it instead. Exit 25 when the server is older than the verified surface (a finding, not an error). Read-only.
 
 - **`llamaswap-pp-cli server version`** - Returns {version, commit, build_date}. The capability gate for everything else: per-model unload routes need v24x+, /api/hardware needs v247+, profiles/selectors need v241+. Cache this and gate optional commands on it instead of guessing from 404s.
 

@@ -424,7 +424,7 @@ foreach ($case in @(@('blackwell-16', 'mid'), @('volta-16', 'mid'), @('blackwell
 }
 # OFFLOAD_EG2_LLAMA_BIN (install render --llama-bin-eg2): a second llama.cpp build for the embeddinggemma2
 # entry ALONE, for a node whose main build is older than b11452 and cannot load that entry. install.ps1
-# installs one pinned tag for every node it installs, so this is an opt-in override, never a default; the
+# installs the newest complete build, so this is an opt-in override for a hand-kept older build, never a default; the
 # renderer moves the entry's cmd path and nothing else, and a Windows build needs no loader macro.
 Write-Host "== OFFLOAD_EG2_LLAMA_BIN: the embeddinggemma2 entry on its own llama.cpp build =="
 $mainFwd = (Join-Path $work 'llama').Replace('\', '/')
@@ -452,7 +452,7 @@ if ((Get-ModelCmd $afterR.yaml 'embeddinggemma2') -match [regex]::Escape("$mainF
 # The renderer's b11452 floor check cannot read a build from a directory whose name states none, and says so in
 # a `note:` line on stdout. install.ps1 must RELAY it to the console (its filter once passed only WARNING and
 # indented lines, so the note was printed and dropped) when the operator chose the build, and must NOT raise it
-# for its own build (<home>/llama never states one; the pinned tag is held above the floor by a Go test), where
+# for its own build (<home>/llama never states one; the installed build is resolved at run time and floor-checked), where
 # it would be a false alarm on every embeddinggemma2 tier.
 $nameless = Join-Path $work 'llama-new'
 New-Item -ItemType Directory -Force -Path $nameless | Out-Null

@@ -626,7 +626,7 @@ var compactKeep = []compactKeepEntry{
 	},
 	{
 		Tools:    []string{"offload_browse"},
-		Sentence: "A pinned sidecar (browser-use jev-ultrafast over browser-harness/CDP) opens a background tab in the operator's already-running, logged-in Chromium browser, observes the page as an indexed element table, and executes one CLICK / TYPE_TEXT / SELECT / SCROLL / WAIT per decision.",
+		Sentence: "A sidecar (browser-use jev-ultrafast over browser-harness/CDP) opens a background tab in the operator's already-running, logged-in Chromium browser, observes the page as an indexed element table, and executes one CLICK / TYPE_TEXT / SELECT / SCROLL / WAIT per decision.",
 		Why:      "the run happens in the operator's already-running, logged-in browser: the privilege boundary behind the SAFETY and allow_hosts rules",
 	},
 	{

@@ -278,10 +278,10 @@ any flag the Go side sends.
 system 3.14 is too new — `uv venv .tts-venv --python 3.11` works; note a uv venv ships no pip,
 so install with `uv pip install --python .tts-venv/Scripts/python.exe …` throughout).
 `chatterbox-tts` pulls CPU torch, so force the CUDA build matched to the GPU: pre-Blackwell
-cards take `torch==2.6.0 torchaudio==2.6.0 --index-url .../cu124`; Blackwell (RTX 50xx, sm_120)
-needs `torch==2.7.0 torchaudio==2.7.0 --index-url .../cu128` — cu124 ships no sm_120 kernels.
-One trap: setuptools must be present AND <81 (`setuptools==80.9.0`) — perth, the watermarker
-dep, imports `pkg_resources` (removed in setuptools 81+, absent from uv venvs), and without it
+cards install `torch` and `torchaudio` with no version from the `.../cu124` index; Blackwell (RTX 50xx, sm_120)
+installs them from the `.../cu128` index — cu124 ships no sm_120 kernels.
+One trap: setuptools must be present and must still ship `pkg_resources` — perth, the watermarker
+dep, imports it (upstream removed it in setuptools 81, and uv venvs do not carry it), and without it
 `perth.PerthImplicitWatermarker` silently resolves to `None` → `TypeError: 'NoneType' object
 is not callable` at model init. The worker sets `HF_HUB_DISABLE_SYMLINKS=1` (Windows blocks
 symlinks without Developer Mode).

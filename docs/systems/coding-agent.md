@@ -1067,7 +1067,7 @@ score is not comparable with one from this bench.
 ### The `browse` tool (opt-in, 0.141.0, ADR 0060)
 
 `browse` (`url`, `goal`, `max_actions`, `security_risk`) drives the operator's own running,
-logged-in Chromium browser toward a natural-language goal through the browse lane's pinned sidecar
+logged-in Chromium browser toward a natural-language goal through the browse lane's sidecar
 ([browse-lane.md](browse-lane.md)). It is off by default and is granted only when the lane is
 configured (`browse_python`, `browse_script` and a loopback `browse_decision_url`). The policy broker
 has the action kind `browse`, with the start URL's lowercased host as the subject, so a `--rules`

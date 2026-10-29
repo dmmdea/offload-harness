@@ -4,7 +4,7 @@
 
 The browse lane lets an MCP caller (`offload_browse`) and the coding-agent seat (the `browse` tool)
 drive the operator's own, already-running, logged-in Chromium browser toward a natural-language goal.
-It is opt-in and off by default. A pinned Python sidecar owns the browser; the harness owns every model
+It is opt-in and off by default. A Python sidecar owns the browser; the harness owns every model
 call, every limit and every door. The decision is recorded in
 [ADR 0060](../architecture/decisions/0060-opt-in-browse-lane-drives-the-operators-browser.md).
 
@@ -314,7 +314,7 @@ telemetry, and prints one JSON line with the `browse_python` and `browse_script`
 
 ## Dependencies
 
-Python 3.12 and `uv`; the two locked pins; a Chromium-family browser with remote debugging allowed;
+Python 3.12 and `uv`; the sidecar's floors (`browser-harness>=0.1.13`) and `jev-ultrafast` from its default branch; a Chromium-family browser with remote debugging allowed;
 the loopback decision endpoint; the local agent seat (for grammar-constrained field values).
 
 ## Downstream effects

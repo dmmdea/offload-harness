@@ -15,7 +15,7 @@
 # J1 invariants (frontier floor, 2026-07-24):
 #   * llama.cpp win-vulkan build must be >= Mar-2026 (the AMD scalar-FA Wave32 +
 #     graphics-queue tuning that makes this tier competitive landed Feb–Mar 2026).
-#     The installer's pinned tag is the frontier snapshot and satisfies this.
+#     The installer takes the newest complete build, which satisfies this.
 #   * --flash-attn is EXPLICITLY on/off from the profile, never auto: a silent
 #     FA-off then fails quantized-V (q8_0) loads on Gemma.
 #   * GGML_VK_VISIBLE_DEVICES=0 pins ONE Vulkan device deterministically (multi-ICD

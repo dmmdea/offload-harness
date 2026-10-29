@@ -853,8 +853,8 @@ type Config struct {
 	// path the runner env carries NO COMFY_DIR and gpugen skips the post-run ComfyUI
 	// /free (there is nothing to free) — same shape the TTS path proved.
 	ImageGenEngine string `json:"imagegen_engine,omitempty"`
-	// SdcppBin is the absolute path to the sd.cpp CLI (sd-cli.exe from the pinned
-	// win-vulkan release). Required when ImageGenEngine is "sdcpp"; empty = defer.
+	// SdcppBin is the absolute path to the sd.cpp CLI (sd-cli.exe from the newest
+	// win-vulkan release the installer resolved). Required when ImageGenEngine is "sdcpp"; empty = defer.
 	SdcppBin string `json:"sdcpp_bin,omitempty"`
 	// SdcppScript is the Node runner (default "render/sdcpp-generate.mjs", resolved
 	// against the executable dir like every render script).
@@ -1081,8 +1081,8 @@ type Config struct {
 	// to the HyperFrames CLI (env allowlist, --json on every call, subcommand
 	// allowlist, typed COMPOSE-FAIL classes).
 	ComposeScript string `json:"compose_script,omitempty"`
-	// HyperframesDir holds the pinned project-local install
-	// (<dir>/node_modules/hyperframes, from setup/hyperframes' lockfile). Never a
+	// HyperframesDir holds the project-local install
+	// (<dir>/node_modules/hyperframes, the newest npm release at install, no lockfile). Never a
 	// global npm install: a global HyperFrames self-upgrades in a detached process.
 	// HyperFrames' own state (~/.hyperframes, the managed Chrome cache) lives in
 	// <dir>/home — the runner gives the CLI that directory as HOME.
@@ -1114,7 +1114,7 @@ type Config struct {
 	ComposeQuality string `json:"compose_quality,omitempty"`
 	// --- browse lane (offload_browse / agent `browse`; ADR 0060) ---
 	// An OPT-IN lane that drives the operator's own, already-running Chromium
-	// browser toward a natural-language goal. A pinned Python sidecar
+	// browser toward a natural-language goal. A Python sidecar
 	// (setup/browse/runner.py: browser-use's jev-ultrafast loop over
 	// browser-harness/CDP) owns the browser; the harness owns every model call.
 	// Every key defaults EMPTY: the lane is NOT CONFIGURED until browse_python,
@@ -3724,7 +3724,7 @@ func (c Config) HyperframesBrowserAuto() bool {
 }
 
 // ComposeRouteConfigured reports whether THIS box serves compose_video: the
-// runner, the pinned install and the pinned browser are ALL bound. One predicate
+// runner, the HyperFrames install and the browser are ALL bound. One predicate
 // for the pipeline gate and the fleet advertisement, so health never promises a
 // composition lane dispatch would defer.
 func (c Config) ComposeRouteConfigured() bool {
