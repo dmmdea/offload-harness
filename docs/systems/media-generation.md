@@ -508,7 +508,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
 | Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
 | ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec`; launch profile `comfy_cuda_device`, `comfy_dynamic_vram` (`on`/`off`/`""`), `comfy_extra_args` |
-| Composition (HyperFrames) | `compose_script` (`render/compose-hyperframes.mjs`), `hyperframes_dir` (the install), `hyperframes_browser_path` (HyperFrames' own chrome-headless-shell), `compose_timeout_sec` (1800), `compose_workers` (`""`/`auto` or 1-24), `compose_cache_dir` (`""` = `<media_dir>/.compose-cache`), `compose_quality` (`high`); `ffmpeg_path` (ffprobe beside it). All three route keys empty = NOT CONFIGURED; the installer binds them |
+| Composition (HyperFrames) | `compose_script` (`render/compose-hyperframes.mjs`), `hyperframes_dir` (the install), `hyperframes_browser_path` (`auto` = the managed chrome-headless-shell of the installed HyperFrames release, resolved at render time; or one explicit file), `compose_timeout_sec` (1800), `compose_workers` (`""`/`auto` or 1-24), `compose_cache_dir` (`""` = `<media_dir>/.compose-cache`), `compose_quality` (`high`); `ffmpeg_path` (ffprobe beside it). All three route keys empty = NOT CONFIGURED; the installer binds them |
 
 Hardware profiles seed these. The single-card 16 GB tiers (`blackwell-16`, `ampere-16`, `volta-16`)
 and the 8 GB tiers' RAM layer bind **HiDream-O1** via `imagegen_family` — the official graph for that
@@ -2776,8 +2776,14 @@ an editor; the overlay itself is silent.
   `node_modules.prev`), verified by the registry's integrity field; the runner requires only the
   floor in `setup/floors.json`. `npm audit signatures` is fatal on failure.
   `npm rebuild esbuild` runs the one postinstall the CLI needs. `browser ensure` fetches the CLI's
-  own chrome-headless-shell from `storage.googleapis.com`, and `hyperframes_browser_path` binds it
-  explicitly, because the CLI's own lookup prefers a newer build in `~/.cache/puppeteer`. That
+  own chrome-headless-shell from `storage.googleapis.com`, and `hyperframes_browser_path` is `auto`: the
+  runner asks the installed release for its managed browser (`browser path` under the harness-owned HOME, then
+  `browser ensure` and `browser path` again when that file is not on disk) on every render and hands the answer to the
+  CLI as `HYPERFRAMES_BROWSER_PATH`, so a release that wants a newer Chrome never runs against an old one and no
+  config value names a Chrome version. `local-offload update` runs the same `browser`/`version` ops on the staged
+  generation before it can go live and prunes the browsers that release no longer resolves from the staged cache (the
+  previous generation keeps its own for rollback). An explicit path still binds one file, which matters because the
+  CLI's own lookup prefers a newer build in `~/.cache/puppeteer`. The render result carries `browser_path` and `chrome_version`. That
   `ensure` spawn alone carries the node flag `--dns-result-order=ipv4first` (not env — the allowlist
   above stays exact): plain `dns.lookup`'s default order can hand back an unreachable IPv6 address
   first with no fast failover, hanging the download on a box with a dead IPv6 route to that host even

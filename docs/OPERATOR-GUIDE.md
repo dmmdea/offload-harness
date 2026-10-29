@@ -780,8 +780,14 @@ so the installer prints the three keys instead. To bind by hand:
 ```json
 "compose_script": "render/compose-hyperframes.mjs",
 "hyperframes_dir": "D:/offload-stack/hyperframes",
-"hyperframes_browser_path": "<the path `node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>` prints as browser_path>"
+"hyperframes_browser_path": "auto"
 ```
+
+`"auto"` (what the installers write) means the managed chrome-headless-shell that the installed HyperFrames
+release resolves at render time under `<hyperframes_dir>/home`; `local-offload install hyperframes` and
+`local-offload update` refresh it, and a render fetches it on first use if the release wants a newer one. An
+explicit file path (what `node render/compose-hyperframes.mjs browser --hyperframes-dir <dir>` prints as
+`browser_path`) binds that one browser and does not follow a release.
 
 `ffmpeg_path` must name an ffmpeg with ffprobe beside it. `local-offload doctor` then reports
 `compose_video CONFIGURED` with the template list, and `local-offload acceptance` runs the installed

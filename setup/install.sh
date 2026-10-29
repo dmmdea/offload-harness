@@ -446,8 +446,9 @@ else
   else
     (cd "$HF_DIR" && npm audit signatures) || die "npm audit signatures FAILED for the hyperframes install — registry signature or provenance check did not pass; refusing to bind the compose lane"
   fi
-  HF_SEED="$(jq -n --arg dir "$HF_DIR" --arg browser "$HF_BROWSER" \
-    '{compose_script: "render/compose-hyperframes.mjs", hyperframes_dir: $dir, hyperframes_browser_path: $browser}')"
+  # "auto": the managed browser of the installed release, resolved at render time (never one Chrome version's path)
+  HF_SEED="$(jq -n --arg dir "$HF_DIR" \
+    '{compose_script: "render/compose-hyperframes.mjs", hyperframes_dir: $dir, hyperframes_browser_path: "auto"}')"
   say "hyperframes: $HF_ID, chrome-headless-shell $(printf '%s' "$HF_JSON" | jq -r .chrome_version) at $HF_BROWSER"
 fi
 

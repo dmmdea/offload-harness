@@ -780,7 +780,7 @@ Assert ($HYPERFRAMES_MIN_NODE -eq 22)                     'HyperFrames engines f
 $hfOk = Get-HyperframesSeed -Installed $true -HyperframesDir 'D:\stack\hyperframes' -BrowserPath 'D:\stack\hyperframes\chrome\chs.exe'
 Assert ($hfOk.compose_script -eq 'render/compose-hyperframes.mjs')    'installed -> compose_script bound to the relative runner'
 Assert ($hfOk.hyperframes_dir -eq 'D:/stack/hyperframes')             'installed -> hyperframes_dir with forward slashes'
-Assert ($hfOk.hyperframes_browser_path -eq 'D:/stack/hyperframes/chrome/chs.exe') 'installed -> the pinned browser path'
+Assert ($hfOk.hyperframes_browser_path -eq 'auto') 'installed -> hyperframes_browser_path is auto (no versioned Chrome path)'
 $hfSkip = Get-HyperframesSeed -Installed $false -HyperframesDir '' -BrowserPath ''
 Assert ($hfSkip.compose_script -eq '' -and $null -eq $hfSkip.PSObject.Properties['hyperframes_dir']) 'skipped -> compose_script un-bound, nothing else written'
 $hfNoBrowser = Get-HyperframesSeed -Installed $true -HyperframesDir 'D:\x' -BrowserPath ''

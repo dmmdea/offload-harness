@@ -785,7 +785,8 @@ failure. What the step does:
    through the harness runner. The env is scrubbed and HyperFrames' state lands in
    `<dir>/home`. It downloads HyperFrames' own chrome-headless-shell from Chrome for Testing
    (about 270 MB on disk on win64; the harness does not compare its build) and prints its path.
-6. Seeds `compose_script`, `hyperframes_dir` and `hyperframes_browser_path` into a **fresh**
+6. Seeds `compose_script`, `hyperframes_dir` and `hyperframes_browser_path` (`auto`: the managed browser of
+   the installed release, resolved at render time, never one Chrome version's path) into a **fresh**
    config. An existing config is never rewritten; the installer prints the three keys to add by
    hand.
 

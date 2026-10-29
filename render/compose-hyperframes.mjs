@@ -79,7 +79,8 @@ export const FORCED_ENV = Object.freeze({
 // canonical upper-case name once; POSIX names are case-sensitive and match exactly.
 //   opts.ffmpeg / opts.ffprobe  absolute binaries (HYPERFRAMES_FFMPEG_PATH / _FFPROBE_PATH) — pinned so
 //                               an ffmpeg.exe planted in the cwd can never win (ffBinaries.ts scans cwd first)
-//   opts.browser                the chrome-headless-shell HyperFrames fetched (HYPERFRAMES_BROWSER_PATH)
+//   opts.browser                the chrome-headless-shell HyperFrames fetched (HYPERFRAMES_BROWSER_PATH); the
+//                               render op resolves --browser auto to this path first (resolveManagedBrowser)
 //   opts.extractCacheDir        HYPERFRAMES_EXTRACT_CACHE_DIR (#4060: frames cache off the system drive)
 //   opts.tempDir                TEMP/TMP override (Windows renders stage every frame under os.tmpdir())
 //   opts.home                   harness-owned HOME: HyperFrames' own state (~/.hyperframes, ~/.cache/hyperframes)
@@ -780,6 +781,60 @@ async function probe(ctx, ffprobe, target, env, deadline) {
   return doc;
 }
 
+// resolveManagedBrowser asks the installed HyperFrames release for ITS managed chrome-headless-shell, under
+// the harness-owned HOME of this install. ensureFirst:true (the `browser` op, the installer step) runs
+// `browser ensure` and then `browser path`. ensureFirst:false (the render op with --browser auto) runs
+// `browser path` first and fetches (`browser ensure`, then `browser path` again) only when the printed
+// path is not on disk, so a release that moved to a newer Chrome fetches it once and a warm cache costs
+// one quick process. Returns { browserPath, managed, chrome_version } or throws ComposeError.
+async function resolveManagedBrowser(ctx, parentEnv, deadline, log, { ensureFirst = false } = {}) {
+  const env = buildChildEnv(parentEnv, { home: ctx.home });
+  const cwd = mkdtempSync(join(tmpdir(), "offload-compose-b-"));
+  const pathOf = async () => {
+    const pth = await browserCli(ctx, "path", { cwd, env, deadline, log });
+    if (pth.code !== 0) throw new ComposeError(pth.timedOut ? "TIMEOUT" : "BROWSER_MISSING", `browser path exit ${pth.code}: ${tailText(pth.text)}`);
+    return String(pth.stdout).trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop() || "";
+  };
+  const ensure = async () => {
+    // --dns-result-order=ipv4first (node flag, not env: the child env stays the
+    // allowlisted PASSTHROUGH_ENV_KEYS set): browser ensure downloads chrome-
+    // headless-shell from storage.googleapis.com, and plain dns.lookup's default
+    // "verbatim" order can hand back an IPv6 address first with no fast failover
+    // on a box with a dead IPv6 route — a real hang measured on <node-f> (wave
+    // session 5d227d30 §5a: curl's happy-eyeballs recovered in ~3s; the bare
+    // download hung 7+ minutes). "ensure" only — path/lint/check/render/snapshot
+    // touch no network.
+    const ens = await browserCli(ctx, "ensure", { cwd, env, deadline, log, nodeArgs: ["--dns-result-order=ipv4first"] });
+    if (ens.code !== 0) {
+      const e = failFrom("browser ensure", ens);
+      throw new ComposeError(e.cls === "TIMEOUT" ? "TIMEOUT" : "BROWSER_MISSING", e.detail);
+    }
+  };
+  try {
+    let browserPath;
+    if (ensureFirst) {
+      await ensure();
+      browserPath = await pathOf();
+    } else {
+      browserPath = await pathOf();
+      if (!browserPath || !existsSync(browserPath)) {
+        log(`compose: the managed browser is not on disk yet (${browserPath || "no path printed"}); running browser ensure`);
+        await ensure();
+        browserPath = await pathOf();
+      }
+    }
+    if (!browserPath || !existsSync(browserPath)) {
+      throw new ComposeError("BROWSER_MISSING", `browser path printed "${browserPath}", which does not exist`);
+    }
+    const managedRoot = join(ctx.home, ".cache", "hyperframes", "chrome");
+    const managed = resolve(browserPath).toLowerCase().startsWith(managedRoot.toLowerCase() + sep);
+    const vm = /(\d+\.\d+\.\d+\.\d+)/.exec(browserPath);
+    return { browserPath, managed, chrome_version: vm ? vm[1] : "" };
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+}
+
 export async function runCompose(argv, { log = (s) => process.stdout.write(s + "\n"), parentEnv = process.env } = {}) {
   const started = Date.now();
   const { op, flags: f } = parseCli(argv);
@@ -811,36 +866,9 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
   }
 
   if (op === "browser") {
-    const env = buildChildEnv(parentEnv, { home: ctx.home });
-    const cwd = mkdtempSync(join(tmpdir(), "offload-compose-b-"));
     const deadline = Date.now() + numberOr(f["timeout-sec"], 900) * 1000;
-    try {
-      // --dns-result-order=ipv4first (node flag, not env: the child env stays the
-      // allowlisted PASSTHROUGH_ENV_KEYS set): browser ensure downloads chrome-
-      // headless-shell from storage.googleapis.com, and plain dns.lookup's default
-      // "verbatim" order can hand back an IPv6 address first with no fast failover
-      // on a box with a dead IPv6 route — a real hang measured on <node-f> (wave
-      // session 5d227d30 §5a: curl's happy-eyeballs recovered in ~3s; the bare
-      // download hung 7+ minutes). "ensure" only — path/lint/check/render/snapshot
-      // touch no network.
-      const ens = await browserCli(ctx, "ensure", { cwd, env, deadline, log, nodeArgs: ["--dns-result-order=ipv4first"] });
-      if (ens.code !== 0) {
-        const e = failFrom("browser ensure", ens);
-        throw new ComposeError(e.cls === "TIMEOUT" ? "TIMEOUT" : "BROWSER_MISSING", e.detail);
-      }
-      const pth = await browserCli(ctx, "path", { cwd, env, deadline, log });
-      if (pth.code !== 0) throw new ComposeError("BROWSER_MISSING", `browser path exit ${pth.code}: ${tailText(pth.text)}`);
-      const browserPath = String(pth.stdout).trim().split(/\r?\n/).map((s) => s.trim()).filter(Boolean).pop() || "";
-      if (!browserPath || !existsSync(browserPath)) {
-        throw new ComposeError("BROWSER_MISSING", `browser path printed "${browserPath}", which does not exist`);
-      }
-      const managedRoot = join(ctx.home, ".cache", "hyperframes", "chrome");
-      const managed = resolve(browserPath).toLowerCase().startsWith(managedRoot.toLowerCase() + sep);
-      const vm = /(\d+\.\d+\.\d+\.\d+)/.exec(browserPath);
-      return { ok: true, op, browser_path: browserPath, managed, chrome_version: vm ? vm[1] : "", home: ctx.home };
-    } finally {
-      rmSync(cwd, { recursive: true, force: true });
-    }
+    const r = await resolveManagedBrowser(ctx, parentEnv, deadline, log, { ensureFirst: true });
+    return { ok: true, op, browser_path: r.browserPath, managed: r.managed, chrome_version: r.chrome_version, home: ctx.home };
   }
 
   // ---- render ----
@@ -850,9 +878,14 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
   if (!ffmpeg) throw new ComposeError("FFMPEG_MISSING", `ffmpeg "${f.ffmpeg || "ffmpeg"}" not found (no such file, and not on PATH)`);
   const ffprobe = f.ffprobe ? resolveBinary(f.ffprobe, parentEnv) : (siblingFfprobe(ffmpeg) || resolveBinary("ffprobe", parentEnv));
   if (!ffprobe) throw new ComposeError("FFMPEG_MISSING", `ffprobe "${f.ffprobe || "ffprobe (next to ffmpeg)"}" not found`);
-  const browser = f.browser || "";
+  let browser = f.browser || "";
+  let browserInfo = null;
+  if (browser.toLowerCase() === "auto") {
+    browserInfo = await resolveManagedBrowser(ctx, parentEnv, deadline, log, { ensureFirst: false });
+    browser = browserInfo.browserPath;
+  }
   if (!browser || !existsSync(browser)) {
-    throw new ComposeError("BROWSER_MISSING", `chrome-headless-shell not found at "${browser}" (hyperframes_browser_path; run the installer's \`browser ensure\` step)`);
+    throw new ComposeError("BROWSER_MISSING", `chrome-headless-shell not found at "${browser}" (hyperframes_browser_path: "auto" resolves the managed browser of the installed HyperFrames at render time, or give the file path; run the installer's \`browser ensure\` step)`);
   }
   const variables = readVariables(f["variables-file"]);
 
@@ -1015,6 +1048,8 @@ export async function runCompose(argv, { log = (s) => process.stdout.write(s + "
       lint: lintSummary,
       check: checkSummary,
       snapshots,
+      browser_path: browser,
+      chrome_version: browserInfo ? browserInfo.chrome_version : ((/(\d+\.\d+\.\d+\.\d+)/.exec(browser) || [])[1] || ""),
       template_duration_variable: templateManifest.duration_variable || undefined,
     };
     return result;

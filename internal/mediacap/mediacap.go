@@ -30,6 +30,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -334,14 +337,26 @@ func composeRoute(cfg config.Config, exeDir string) (Route, bool) {
 		}
 	}
 	entry := filepath.Join(cfg.HyperframesDir, "node_modules", "hyperframes", "bin", "hyperframes.mjs")
-	r := fileRoute(name, engine, exeDir,
-		binding{key: "compose_script", value: cfg.ComposeScript, kind: scriptBinding},
-		binding{key: "hyperframes_dir (pinned CLI)", value: entry, kind: fileBinding},
-		binding{key: "hyperframes_browser_path", value: cfg.HyperframesBrowserPath, kind: fileBinding},
-		binding{key: "ffmpeg_path", value: cfg.FFmpegPath, kind: binaryBinding},
-	)
+	bindings := []binding{
+		{key: "compose_script", value: cfg.ComposeScript, kind: scriptBinding},
+		{key: "hyperframes_dir (pinned CLI)", value: entry, kind: fileBinding},
+	}
+	// "auto" is not a file: the runner resolves the managed browser of the installed
+	// release at render time, so only an explicit path is checked for existence here.
+	if !cfg.HyperframesBrowserAuto() {
+		bindings = append(bindings, binding{key: "hyperframes_browser_path", value: cfg.HyperframesBrowserPath, kind: fileBinding})
+	}
+	bindings = append(bindings, binding{key: "ffmpeg_path", value: cfg.FFmpegPath, kind: binaryBinding})
+	r := fileRoute(name, engine, exeDir, bindings...)
 	if r.State != Configured {
 		return r, true
+	}
+	if cfg.HyperframesBrowserAuto() {
+		found := "none downloaded yet; the first composition fetches it"
+		if p := newestManagedBrowser(cfg.HyperframesDir); p != "" {
+			found = p
+		}
+		r.Detail += "; browser=auto (" + found + ")"
 	}
 	probe, ok := resolveFfprobeBinding(cfg.FFmpegPath)
 	if !ok {
@@ -364,6 +379,52 @@ func composeRoute(cfg config.Config, exeDir string) (Route, bool) {
 		}
 	}
 	return r, true
+}
+
+var chromeVersionRe = regexp.MustCompile(`\d+(?:\.\d+)*`)
+
+// newestManagedBrowser returns the newest chrome-headless-shell in the managed cache the
+// runner gives HyperFrames (the cache/hyperframes/chrome tree under the install's home dir: <kind>/<version>/
+// [<platform dir>/]chrome-headless-shell[.exe]), "" when none is downloaded yet. Newest is
+// by the numeric version in the version directory's name.
+func newestManagedBrowser(hfDir string) string {
+	root := filepath.Join(hfDir, "home", ".cache", "hyperframes", "chrome")
+	var found []string
+	for _, exe := range []string{"chrome-headless-shell", "chrome-headless-shell.exe"} {
+		for _, pat := range []string{filepath.Join("*", "*", exe), filepath.Join("*", "*", "*", exe)} {
+			m, _ := filepath.Glob(filepath.Join(root, pat))
+			found = append(found, m...)
+		}
+	}
+	versionOf := func(p string) []int {
+		rel, err := filepath.Rel(root, p)
+		if err != nil {
+			return nil
+		}
+		parts := strings.Split(filepath.ToSlash(rel), "/")
+		if len(parts) < 2 {
+			return nil
+		}
+		var v []int
+		for _, n := range strings.Split(chromeVersionRe.FindString(parts[1]), ".") {
+			i, _ := strconv.Atoi(n)
+			v = append(v, i)
+		}
+		return v
+	}
+	sort.Slice(found, func(i, j int) bool {
+		a, b := versionOf(found[i]), versionOf(found[j])
+		for k := 0; k < len(a) && k < len(b); k++ {
+			if a[k] != b[k] {
+				return a[k] > b[k]
+			}
+		}
+		return found[i] < found[j]
+	})
+	if len(found) == 0 {
+		return ""
+	}
+	return found[0]
 }
 
 // composeTemplates lists the vetted templates shipped beside the runner: directories

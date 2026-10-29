@@ -1677,7 +1677,7 @@ function Get-HyperframesSeed {
     return [pscustomobject][ordered]@{
       compose_script           = 'render/compose-hyperframes.mjs'
       hyperframes_dir          = $HyperframesDir.Replace('\', '/')
-      hyperframes_browser_path = $BrowserPath.Replace('\', '/')
+      hyperframes_browser_path = 'auto'   # the managed browser of the installed release, resolved at render time; never one Chrome version's path
     }
   }
   return [pscustomobject]@{ compose_script = '' }
@@ -2658,7 +2658,7 @@ if (-not $script:dataHomeChoice -and (Test-Path $cfgDest)) {
 if ($hfResult -and (Test-Path $cfgDest)) {
   $cfgNow = Get-Content -Raw $cfgDest | ConvertFrom-Json
   if (-not $cfgNow.PSObject.Properties['hyperframes_dir'] -or -not $cfgNow.hyperframes_dir) {
-    Write-Host "NOTE  compose lane installed but $cfgDest predates it - add: compose_script=render/compose-hyperframes.mjs, hyperframes_dir=$($hfResult.dir.Replace('\','/')), hyperframes_browser_path=$($hfResult.browser.Replace('\','/'))" -ForegroundColor Yellow
+    Write-Host "NOTE  compose lane installed but $cfgDest predates it - add: compose_script=render/compose-hyperframes.mjs, hyperframes_dir=$($hfResult.dir.Replace('\','/')), hyperframes_browser_path=auto" -ForegroundColor Yellow
   }
 }
 
