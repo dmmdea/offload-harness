@@ -6,6 +6,52 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.204.3] - 2026-10-28 - sd.cpp video and animate lanes run on every build from master-1000, and a short fast clip decodes with the full VAE
+
+### Changed - the last version-pin wording is gone from the CLI help, the OpenSpec rules, a Proposed ADR and the notices
+
+- **The gap.** After ADR 0099 some text still described pins the harness no longer has. `install forecast` help said
+  "the pinned timestral package" (it installs the head of the default branch and checks the weights against the
+  publisher's digest). The OpenSpec project rules told a change that third-party software enters with a "pinned version
+  and sha256", the opposite of `docs/systems/security.md`. Proposed ADR 0089 (Strata) asked its spike for a pinned
+  release tag. Two `servingtmpl` comments, the doctor's model-bindings legend and an `install_render.go` comment said
+  "pinned build" or "pinned download" for the installed build and the recorded download size.
+- **What it says now.** The newest release, checked against the publisher's digest at install time, never a pinned
+  version; the installed build; the size the installer recorded. The vendored HyperFrames kit and the ContextBench port
+  name the commit they were taken from as their source commit (provenance, not a pin; the kit test still checks the
+  same hashes).
+- **Engine build instructions.** `setup/SETUP-AGENT.md` told an agent to build audio.cpp "from the v0.9.1 tag (the
+  measured release)" and named sd.cpp master-945 and audio.cpp v0.9.1 as "the measured releases"; it now says to take
+  the newest release of each, keeps the measured ones as a record, and asks to check the ACE-Step prefill patch against
+  the tag being built (`patch -p1 --dry-run`). `docs/systems/media-generation.md` says the same.
+- **Also.** A llama-swap swap on a node that stops its scheduled task first no longer logs "no running process found"
+  after ending the task: it says no process was left after ending the task.
+
+### Fixed - the sd.cpp video and animate lanes run on every build from master-1000 on
+
+- **The gap.** From master-1000, stable-diffusion.cpp prints, right after each module's compute buffer on the device, a
+  small one on the CPU for the same module (`taehv compute buffer size: 35.50 MB(VRAM) on Vulkan0`, then
+  `taehv compute buffer size: 0.76 MB(RAM) on CPU`). The CPU-placement guard failed every video and animate run on such a
+  build with `CPU_PLACEMENT`, although no op runs on the CPU: with `GGML_SCHED_DEBUG=2` the measured master-1024 FastWan
+  run had 10 graph splits, all on Vulkan0, and the parameters on Vulkan0. A node therefore kept older builds for its video
+  lanes beside a newer one for its image lanes.
+- **What it does.** A CPU compute buffer is read as that host-side companion only when the same module already printed a
+  compute buffer on the device in the run and the CPU one is no larger; a module whose only compute buffer is on the CPU,
+  whose CPU line comes first, or whose CPU buffer is the larger still fails `CPU_PLACEMENT`. The real master-1024 log is a
+  new healthy fixture (`render/testdata/sdcpp1024-video-healthy.log`). The video and animate runners pass
+  `--flash-attn off,diffusion=on` instead of `--diffusion-fa`, which master-1000 deprecated, and the sd.cpp floor in
+  `setup/floors.json` rises from 968 to 1000, the first build with that flag.
+
+### Fixed - a short `fast` clip no longer decodes through the tiny autoencoder
+
+- **The gap.** On `<node-f>` (FastWan 832x480, 3 steps, seed 42, 2026-10-28), a 9-frame clip (3 latent frames) decoded
+  through `taew2_2` into blocks of false colour over the subject, on master-945 and master-1024 alike. The full VAE
+  decoded the same latents clean (141.8 s against 1.6 s), and 49 frames decoded clean through the tiny one (8.1 s).
+- **What it does.** The video and animate runners pass `--taesd` only from 17 frames (`TAE_MIN_FRAMES` in
+  `render/igpu-engine.mjs`, the shortest clip measured clean, SSIM 0.95 against the full VAE). A shorter `fast` clip
+  decodes with the full VAE, and the runner says so on stderr. The runner comments that still said "pin bump" or
+  "pinned CLI" now say an engine update and the installed CLI.
+
 ## [0.204.2] - 2026-10-28 - update takes over what each node runs, as it is laid out
 
 ### Fixed - `update` adopts the nodes as they are: sd.cpp's `sd-cli`, a build family per component, repoint of unnumbered and source-tree directories, the root from any installer layout
