@@ -133,14 +133,14 @@ type BuildConfig struct {
 // is false when --allow-shell was requested but the OS cage is unavailable here
 // (fail-closed); Notes are human-readable capability lines the caller can log.
 type BuildResult struct {
-	Loop         *Loop
-	Tools        []Tool
-	Policy       *Policy
-	Worktree     string // resolved RW worktree (empty if no write/shell/run)
+	Loop          *Loop
+	Tools         []Tool
+	Policy        *Policy
+	Worktree      string // resolved RW worktree (empty if no write/shell/run)
 	ShellGranted  bool
 	RunGranted    bool
 	BrowseGranted bool
-	Notes        []string
+	Notes         []string
 	// Audit is the run's trail (nil when none is attached); EndAudit closes a chained run.
 	Audit *AuditLog
 }
@@ -452,7 +452,15 @@ func Build(cfg BuildConfig) (*BuildResult, error) {
 	// The system prompt advertises only what was actually granted — ShellGranted,
 	// not the raw flag, so a cage-refused shell is never advertised to the model. A
 	// SystemPromptOverride (P6 flywheel replay of a candidate prompt) replaces it.
-	sys := SystemPrompt(cfg.AllowWrite, cfg.AllowOverwrite, cfg.AllowFetch, res.ShellGranted, res.RunGranted, cfg.AllowSearch, cfg.AllowGitHub)
+	sys := SystemPrompt(PromptCaps{
+		AllowWrite:     cfg.AllowWrite,
+		AllowOverwrite: cfg.AllowOverwrite,
+		AllowFetch:     cfg.AllowFetch,
+		AllowShell:     res.ShellGranted,
+		RunGranted:     res.RunGranted,
+		AllowSearch:    cfg.AllowSearch,
+		AllowGitHub:    cfg.AllowGitHub,
+	})
 	if res.BrowseGranted {
 		sys += "\n- browse: drive the operator's own browser toward a goal (start url + goal with every value to type). " +
 			"Publish/send/delete/pay-class controls are refused. A done status is a claim: read final.text before relying on it."
