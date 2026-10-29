@@ -6,10 +6,6 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
-### Fixed
-
-- `update --component comfy-packs` no longer skips an installed pack as `ORIGIN_NOT_ALLOWED` when its git origin ends in `.git` (or `/`): the origin and the `node-packs.json` row are compared after one trailing `/` and one trailing `.git` are dropped, nothing else is normalised, and fetches still use the origin as the checkout reports it.
-
 ## [0.205.0] - 2026-10-29 - No version pins left in the harness: ComfyUI packs update to latest, models verified against the publisher, HyperFrames browser auto, the 6 GB tier fits its seats
 
 ### Changed - the last "pinned" wording and version ranges are gone, and a guard keeps them out
