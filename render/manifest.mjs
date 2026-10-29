@@ -21,6 +21,8 @@ export function parseManifest(input) {
   });
   const models = (m.models || []).map((x, i) => {
     if (!x.path) throw new Error(`model #${i} missing path`);
+    // `sha256` is an optional assertion by the caller: the publisher's own digest is what a download is checked against, and an
+    // assertion that differs from it defers (satisfyModels in manifest-satisfy.mjs). It never overrides the publisher.
     // `trust` is the template run path's: "tofu" asks for trust on first use of a file that declares no hash (verifyTofuModels in
     // manifest-satisfy.mjs). It is carried only when given, so a manifest that names none parses to what it always did.
     return { path: x.path, source_url: x.source_url || "", sha256: x.sha256 ?? null, ...(typeof x.trust === "string" && x.trust !== "" ? { trust: x.trust } : {}) };
@@ -34,11 +36,12 @@ export function parseManifest(input) {
 }
 
 // manifestHash: identifies a provisioned ENVIRONMENT. Sorted so pack/model order never
-// changes the hash; only the pack repos + model path/sha matter (source_url is irrelevant
-// to what's on disk). A pack is identified by its repository: the commit is whatever the node recorded at install.
+// changes the hash; only the pack repos + model path and source_url matter. A model is identified by where it lives and where it
+// comes from, never by a hash the caller supplies (the publisher's digest decides what the bytes must be). A pack is identified by
+// its repository: the commit is whatever the node recorded at install.
 export function manifestHash(manifest) {
   const m = manifest.schema_version ? manifest : parseManifest(manifest);
   const packs = m.node_packs.map((p) => p.repo).sort();
-  const models = m.models.map((x) => `${x.path}#${x.sha256 || ""}`).sort();
+  const models = m.models.map((x) => `${x.path}#${x.source_url || ""}`).sort();
   return createHash("sha256").update(JSON.stringify({ packs, models })).digest("hex").slice(0, 16);
 }

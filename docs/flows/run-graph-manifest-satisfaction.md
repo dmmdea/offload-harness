@@ -27,7 +27,8 @@ environment.
 1. **Parse the manifest.** Normalized to `schema_version`, `workflow`, `comfyui_min_version`,
    `node_packs[{name, repo}]`, and `models[{path, source_url, sha256}]`. `repo`
    is required per pack; `name` is derived from the repository when absent. A `commit` on a pack is accepted and not read. Only `path` is required
-   per model — `sha256` defaults to null.
+   per model — `sha256` defaults to null and is an optional assertion: it is never what a file is checked against (step 4), and it is not part of the cache key
+   (`manifestHash` keys a model on its `path` and `source_url`).
 
 1a. **Refuse any pack that is not on the allowlist.** A pack makes the node clone its repository and install its requirements, which is
    the caller's code running on the node, so a pack is taken only when its `repo` is a row of
@@ -61,13 +62,29 @@ environment.
    dirs); it is fail-safe — anything unparseable yields no extra roots, i.e. the old comfyDir-only
    behavior.
 
-   Given the file is found: no declared sha256 → trust it. A `.sha-ok` sentinel → already verified,
-   skip. **Present with a declared sha but no sentinel** (the hand- or `curl`-provisioned case) → hash
-   it **once** and, if it matches, *adopt* it by writing the sentinel beside the file that was
-   actually found. If it mismatches and a `source_url` exists the file is replaced; with no
-   `source_url` it defers `MODEL_SHA_MISMATCH` — naming the real problem rather than the misleading
-   "missing on disk". Otherwise download from `source_url`, verify, and write the sentinel. No
-   `source_url` → `MODEL_DOWNLOAD_FAILED`. Models downloaded without a declared hash are reported as
+   **The publisher's digest.** A model with a `source_url` is checked against what its publisher says the file is, read at run time
+   (`publisherDigest` in `render/manifest-satisfy.mjs`, [ADR 0099](../architecture/decisions/0099-frontier-updates-floors-never-pins.md)
+   section 3): for a Hugging Face `resolve` URL the `X-Linked-ETag` (the LFS sha256) and `X-Linked-Size` of a HEAD that is not followed,
+   else the tree API's `lfs.oid` and size; for a GitHub release asset the release API's `digest` and size; any other host publishes
+   nothing the node reads. A Hugging Face file that is not in LFS has a size but no sha256. The manifest's own `sha256`, when given, is an
+   assertion: if it differs from a published digest the entry defers `MODEL_SHA_MISMATCH` naming both, and the publisher's digest always
+   counts; when the publisher publishes none, the assertion is checked as given and the file is still listed in `unverified_models`.
+
+   **A file that is already there.** Its `<file>.sha-ok` record, JSON `{oid, size, mtime}`, is fresh when the file's size and modification time
+   are the recorded ones and the oid is the publisher's current one: the file is kept without being read. Otherwise its size is compared with the
+   publisher's (a different size is a truncated or other file and is replaced without hashing), then it is hashed **once**; the published
+   build is *adopted* by writing the record beside the file that was found, anything else is replaced by a fresh download (so a newer
+   published build replaces an older one), and with no `source_url` it defers `MODEL_SHA_MISMATCH`, naming the real problem rather than the
+   misleading "missing on disk". When the publisher cannot be reached a file whose record still fits its size and time is kept and the result
+   carries a warning saying so; a file with no such record is kept and listed in `unverified_models`, never deleted. A record in the older format (a
+   bare hash) reads as none, so the file is hashed once more.
+
+   **A download** goes to `<file>.part`, is checked for size and sha256 against the publisher, and only then renamed onto the destination, so a
+   partial file never sits there and an interrupted download is not trusted by the next run. A replaced stale file is not destroyed: it is
+   renamed to `<file>.prev` (one generation) in the folder where it was found, and the result carries a warning naming it. A mismatch deletes the `.part` and is retried once;
+   a second mismatch defers `MODEL_SHA_MISMATCH` naming the digest wanted and the one got. A missing model whose publisher could not be asked
+   for a digest (and that the manifest asserts none for) is not downloaded: it defers `MODEL_DOWNLOAD_FAILED`, which is retryable. No
+   `source_url` and not on disk → `MODEL_DOWNLOAD_FAILED`. Models whose digest did not come from the publisher are reported as
    `unverified_models` in the success envelope rather than silently trusted.
 
 5. **Clone each node pack the node does not hold yet** at the head of its repository's default branch. A pack already on
@@ -229,7 +246,8 @@ access for pack clones and model downloads.
 1. Provisioning is additive and never moves the protected host packages.
 2. Packs are placed before dependency resolution.
    The run-graph cache (`.offload-owned.json`) holds the manifest hash and the sorted `name@commit` key of the packs on disk
-   when it was written; it skips this satisfy only when both still match.
+   when it was written; it skips this satisfy only when both still match. The hash covers each model's `path` and `source_url` and no
+   caller hash, so a run whose manifest is unchanged does not read the publisher again until the cache is invalidated.
 3. The node-class gate runs after ComfyUI is up, not before.
 4. Failures are typed Defers, not crashes.
    Model presence is resolved across ComfyUI's full search path, so the harness and ComfyUI agree on

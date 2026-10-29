@@ -509,7 +509,8 @@ publishes none, is skipped by name, so a fleet part-way through an upgrade takes
 is satisfied BEFORE ComfyUI starts (a pack is taken only from a repository listed in `render/node-packs.json`, and a model only under `models/<class>/` from a listed https host; anything else is refused before the first clone or download): packs cloned at the head of their default branch (the commit each got is recorded beside it in `custom_nodes/<name>.installed.json`) with all deps
 resolved **together** (uv) under **host-torch constraints** (provisioning never replaces the
 installed CUDA torch — an unsatisfiable pack set defers instead), models downloaded and
-sha-verified when a hash is given (`sha256: null` downloads are reported in
+verified against the digest the publisher publishes (Hugging Face LFS, GitHub release assets; a `sha256` in the manifest is only an
+optional assertion, and a model whose host publishes no digest is reported in
 `unverified_models[]`). Results are node-addressed (`outputs.<node_id>[]` with
 `path/type/kind/width/height`); every failure is a **typed defer**
 (`SATISFIER_UNAVAILABLE`, `VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`,

@@ -23,8 +23,10 @@ import (
 //     in render/node-packs.json (model_hosts).
 //
 // The checks are written to be the same in render/node-packs.mjs checkModelEntry, and one table of paths and sources
-// (render/testdata/manifest-model-cases.json) drives both tests. They do not require a sha256: the entry carries its own
-// hash, so a hash the caller supplies authenticates nothing, and a model without one is reported unverified as before.
+// (render/testdata/manifest-model-cases.json) drives both tests. They do not require a sha256: a hash the caller supplies
+// pins one build and authenticates nothing against the publisher, so it is only an optional assertion (the node checks a download
+// against the digest the publisher publishes, and defers when the two differ); a model whose host publishes no digest is reported
+// unverified.
 
 // ManifestModelRefusedError is a manifest's refusal for a models[] entry the node will not provision.
 type ManifestModelRefusedError struct {

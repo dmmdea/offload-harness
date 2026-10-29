@@ -82,7 +82,8 @@ export function checkNodePack(pack, rows = ALLOWED_NODE_PACKS) {
 //   - its source_url, when it has one, is https://<host>/<rest> with a plain DNS host name (no user name, port,
 //     bracket or IP-literal form) that is, or is a subdomain of, a host of node-packs.json (model_hosts).
 // internal/mediacap/manifestmodels.go makes the same checks, and render/testdata/manifest-model-cases.json drives both
-// tests. No sha256 is required: the entry carries its own hash, so a hash the caller supplies authenticates nothing.
+// tests. No sha256 is required: a hash the caller supplies pins one build and authenticates nothing against the publisher, so it is
+// only an optional assertion; the digest the publisher publishes for the file is what a download is checked against (satisfyModels).
 const HOST = /^[a-z0-9][a-z0-9.-]*\.[a-z]{2,}$/;
 const SOURCE = /^https:\/\/([A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)(\/[^\x00-\x20\x7f\\]*)?$/;
 
