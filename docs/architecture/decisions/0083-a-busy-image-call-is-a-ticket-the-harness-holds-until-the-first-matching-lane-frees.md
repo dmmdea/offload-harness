@@ -342,5 +342,5 @@ the live acceptance in the CHANGELOG entry of this change (A9) is the first live
 
 ## Related docs
 
-- [ADR 0082](0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md), [ADR 0077](0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md), [ADR 0039](0039-a-held-card-is-a-place-in-line.md)
+- [ADR 0082](0082-a-media-call-overflows-to-the-fleet.md), [ADR 0077](0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md), [ADR 0039](0039-a-held-card-is-a-place-in-line.md)
 - [Media generation](../../systems/media-generation.md), [GPU lease](../../systems/gpu-lease.md), [Operator guide](../../OPERATOR-GUIDE.md)

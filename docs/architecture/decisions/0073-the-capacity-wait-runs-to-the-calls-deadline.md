@@ -127,7 +127,7 @@ call deadline instead of a fixed TTL)", and listed the wait under "Not solved he
    2026-10-10, register C16: the wait no longer ENDS at the bound below; it gives the slot up and runs on to the horizon.
    See the Amendment at the end of the decisions.)* A call runs
    `runConcurrency` (4) subtasks at a time and a waiting subtask holds its slot. *(Amended by
-   [0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md):
+   [0076](0076-a-calls-width-is-sized-from-its-deal.md):
    the 4 is the floor of a width that follows the call's deal. The rule below is stated in terms of
    `callDeadline.unstarted()`, not of the number, and holds at any width.)* If every subtask waited to the horizon,
    four of them on a saturated fleet would hold all four slots for the rest of the call: the other four of an

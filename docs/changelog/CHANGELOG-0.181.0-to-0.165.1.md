@@ -2637,7 +2637,7 @@ fixture-modelled; the entry above replaces it with the positive guard pinned to 
 ### A call is as wide as its deal, and a research call is one deal (fleet-first, track R3; ADR 0076)
 
 - **A call is as wide as its deal, and a research call is one deal ([ADR
-  0076](docs/architecture/decisions/0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md);
+  0076](docs/architecture/decisions/0076-a-calls-width-is-sized-from-its-deal.md);
   the diagnosis' F01).** One call never had more than four jobs in flight: the semaphore in `RunWith` was the constant
   `runConcurrency = 4`, so a joint deal that committed two subtasks to each of four nodes of four slots ran one at a
   time on each, and `RunBatched` cut a 12-page `offload_research` call into chunks of eight that ran strictly one after

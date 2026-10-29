@@ -151,7 +151,7 @@ jobs), so every old/new pairing of node and delegator prices a new job at the sa
 
 ## Amendment (2026-10-07): the width of a call, and the idle seat's line
 
-Two things this ADR says about a call's width changed with [ADR 0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md).
+Two things this ADR says about a call's width changed with [ADR 0076](0076-a-calls-width-is-sized-from-its-deal.md).
 The Consequences' "`runConcurrency` sibling subtasks" were four goroutines whatever the joint deal (decision 4) had committed to the
 nodes, so a deal that gave each of four nodes two subtasks ran one at a time on each. The call is now as wide as its deal:
 `dealParallelism()` sums what the deal committed to each place, counting a remote that publishes `max_concurrent_jobs` by what it

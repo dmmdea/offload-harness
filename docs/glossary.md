@@ -176,7 +176,7 @@ bf16 build from an int8 one, catches a truncated copy, and tells two same-named 
 but it does not see a change confined to the stretch between two sampled blocks (about a sixty-third of the file). A file not hashed yet is published `pending` and the
 family has no digest and no match until it is. Node-local keys (which card, timeouts, scripts, `reserve_vram`, the pool keys) are not in it, and an
 sd.cpp binding has none. A node publishes its recipes in `/fleet/health` `image_recipes[]`, a delegator matches the `digest`
-strictly, and the node re-checks it at admission (412 on a mismatch). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
+strictly, and the node re-checks it at admission (412 on a mismatch). See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet.md).
 
 ## Leak gate
 
@@ -244,7 +244,7 @@ A video, animation or audio call that carries `node` (an id, as a node's `/fleet
 the call is refused by a word (`node_unknown`, `node_is_self`, `node_lacks_route`, `node_lacks_media_job`, `node_lacks_model`,
 `node_below_min_vram`) before anything is sent. It reads the node's `media_recipes[]` rows, which list the weight files of each family a binding
 names with their size on the node (-1: not there) and are not an identity. See
-[ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md)
+[ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet.md)
 Amendment 3.
 
 ## Nightshift
@@ -276,7 +276,7 @@ come last by convention, but the validator does not enforce ordering.
 A media call leaving its own busy lane for an idle node of the fleet: an `auto` image call, or a whole-node `run_graph`, on a machine
 that has the lane and a fleet asks its pipeline whether the lane is free (`core.LaneProber`, a read-only relaxation of the real
 admission) and, when it is not, is sent to a node whose Image recipe matches (a graph: that holds the files it names, has one card and
-the card size asked for). Not a substitute: a call no node matches becomes a Ticket. See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md).
+the card size asked for). Not a substitute: a call no node matches becomes a Ticket. See [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet.md).
 
 ## Ticket
 

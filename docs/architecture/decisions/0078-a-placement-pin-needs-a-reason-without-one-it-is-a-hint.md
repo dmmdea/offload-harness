@@ -28,7 +28,7 @@ A benchmark has to run on the seat it measures, and credentials must not leave t
 decision with a reason can be recorded, counted and audited, where one without is only a way to leave most of the fleet idle.
 This ADR changes what a `local` or `remote` route means; it touches no eligibility rule, and it amends what
 [ADR 0063](0063-placement-holds-instead-of-sleeping-or-refusing.md) and
-[ADR 0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md)
+[ADR 0076](0076-a-calls-width-is-sized-from-its-deal.md)
 say of `route=local`, and decision 6 of [ADR 0040](0040-vision-work-travels-to-a-node-with-an-idle-card.md), each noted where the
 text is.
 
@@ -76,7 +76,7 @@ reasons are for the surfaces where a session decides.
    own browser, which is why the door admits it only on `route: local`, and a hint could have placed it on another node's. The grant is
    the reason, so a bare `local` on such a call is a pin under the implied reason `locality`, and its rows and results say so.
 
-4. **A reasonless `local` is a hint, placed as `auto` places it ([ADR 0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md)).**
+4. **A reasonless `local` is a hint, placed as `auto` places it ([ADR 0076](0076-a-calls-width-is-sized-from-its-deal.md)).**
    The idle local seat wins the first `room` subtasks of its run-cap line; the overflow goes through the unchanged `remoteEligible`
    gate, the backlog gate and the headroom count to the remotes with room, and with none to the capacity wait. A call that fits the
    seat's line stays local and reads no node's health, which is what the caller hinted. A seat a text lease reserves or a lease
@@ -108,7 +108,7 @@ reasons are for the surfaces where a session decides.
    The fallback is the seat, never a lease. A seat a text lease reserves or a lease fences, and one another vLLM seat occupies, is
    never a fallback: the subtask waits in line for it or for a node, and a wait that ends with nothing placed defers naming the
    holder. Nor is a seat whose run-cap line is full or that is loading, in the deal and in the gate case. With no remote able to run
-   the contract at all, though, the seat's own run-cap line is the only queue there is ([ADR 0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md);
+   the contract at all, though, the seat's own run-cap line is the only queue there is ([ADR 0076](0076-a-calls-width-is-sized-from-its-deal.md);
    `replacementNode` and `awaitCapacity` say the same), so a full or loading seat takes the subtask at once, behind its in-flight
    work, exactly as route `auto` does ("queued-local beats ineligible-remote"), and only a lease, a fence or an occupant, the three
    things that loading the seat would break, hold it back. A contract that names a layer this box does not declare is not the
@@ -268,7 +268,7 @@ Code: `internal/delegate/pinline.go` (`admitPinnedLocal`), `runner.localRunLine`
 
 - [../../systems/fleet-node.md](../../systems/fleet-node.md), "Placement routes and the retry" and "A placement pin needs a reason"
 - [../../OPERATOR-GUIDE.md](../../OPERATOR-GUIDE.md), "Delegate subtasks across fleet nodes"
-- [0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md),
+- [0076-a-calls-width-is-sized-from-its-deal.md](0076-a-calls-width-is-sized-from-its-deal.md),
   the placement a local hint gets
 - [0063-placement-holds-instead-of-sleeping-or-refusing.md](0063-placement-holds-instead-of-sleeping-or-refusing.md), the headroom
   count, the process gate and the capacity wait the hints use

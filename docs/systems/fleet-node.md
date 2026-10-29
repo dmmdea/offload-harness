@@ -844,7 +844,7 @@ than the reserve keeps starting its subtasks). One consequence to know: a subtas
 are leases that outlast the call holds the call until the horizon, then ends as the holder-naming deferral (the holder and the
 soonest end are in it); the lease wait is not shortened by a guess at when the holder will release.
 
-**How wide a call is, and how a list of pages is dealt ([ADR 0076](../architecture/decisions/0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md)).** A call's semaphore was the constant
+**How wide a call is, and how a list of pages is dealt ([ADR 0076](../architecture/decisions/0076-a-calls-width-is-sized-from-its-deal.md)).** A call's semaphore was the constant
 `runConcurrency` (4) whatever the joint deal had committed: four nodes of four slots could be dealt two subtasks each and ran one at a
 time on each, and `RunBatched` cut a 12-page `offload_research` call into chunks of eight that ran one after the other, so a page of the
 second chunk waited for the slowest page of the first. The call is now as wide as its deal (`dealParallelism`, never below four), the sum
