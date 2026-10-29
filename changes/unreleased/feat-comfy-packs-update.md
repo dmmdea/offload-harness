@@ -20,3 +20,4 @@
   `--dry-run` and `--resolve` list each pack, the head its repository names and what would happen, and change nothing.
 - **Docs.** `docs/systems/update.md` ("Node packs"), ADR 0099 section 6 (one amendment line) and the node-pack row of the
   frontier-updates spec.
+- **Rollback state on disk.** Before the first move the run writes `custom_nodes/.packs-update-journal.json` (the `pip freeze --all` and `pip check` baselines and each pack's from/to); the next start undoes a killed run from it first, SIGINT, SIGTERM and SIGBREAK run the same undo, and a pass or a finished undo deletes it. Every reset is `git reset --keep` after a fresh `git status`: a pack edited meanwhile stays where it is, is reported `kept` as `DIRTY_AT_UNDO` and the run exits 2. A quick test that exits non-zero without naming a moved pack in an `(IMPORT FAILED)` line is inconclusive (nothing rejected, exit 0, `QUICK_TEST_NO_PACK_NAMED`).

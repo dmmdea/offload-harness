@@ -295,24 +295,43 @@ render request never runs this: it clones an absent pack and uses an installed o
    into packs). If a ComfyUI answers on its port the run is `refused` (exit 0, nothing changed): the pack set cannot change
    under a live instance.
 3. The exact commit is fetched and `FETCH_HEAD` must be it; what is gated is what is promoted.
-4. `pip freeze --all` and `pip check` are taken as the baseline, and `git merge --ff-only` moves the pack.
+4. `pip freeze --all` and `pip check` are taken as the baseline and, with each moved pack's `{name, dir, from, to}`, written
+   atomically to `custom_nodes/.packs-update-journal.json` before the first `git merge --ff-only` moves a pack (the journal is
+   updated as packs move).
 5. One unified resolve over every installed allowlisted pack, under the host-torch constraints read from the live venv
    (the satisfier's own `resolveDeps`, so conflicts between packs surface).
 6. Gate: `pip check` no worse than the baseline, the host constraints (torch, torchvision, torchaudio, numpy) unmoved, and
    `python main.py --quick-test-for-ci` in the ComfyUI directory exiting 0 with no `(IMPORT FAILED)` line for a moved pack in
    its "Import times for custom nodes" block.
 7. Pass: `custom_nodes/<name>.installed.json` (schema 2) gets the new commit and `previous` = the commit held before, and
-   the venv's `.offload-deps-satisfied` marker is written. Fail: `git reset --hard` to the previous commit, the pip snapshot
+   the venv's `.offload-deps-satisfied` marker is written, and the journal is deleted. Fail: `git reset --keep` to the previous
+   commit (see below), the pip snapshot
    put back with `--no-deps` (only the packages that differ), freeze and `pip check` required to equal the baseline, the
-   failed commit appended to `rejected[]` of the pack that failed (all moved packs when nothing names one), exit 1. A
+   failed commit appended to `rejected[]` of the pack that failed (all moved packs when nothing names one) together with a short
+   sha256 of the venv's `pip freeze` (a rejection is ignored once the freeze has changed, so a fixed venv is not locked out
+   of the commit), exit 1, and the journal is deleted. A
    pack moved in the same run whose own import was fine is put back too but not marked rejected, and is tried again alone
    next run. A restore that does not reach the baseline is exit 2 and says which packages differ.
 
 A remote that cannot be read (including a private mirror without credentials), a fetch that failed, a quick test that timed
 out or found the card busy, and a resolve that lost the network are **inconclusive**: whatever moved is moved back, nothing
-is marked rejected, exit 0, and the next run tries again. A rollback is an operator decision and marks nothing rejected,
+is marked rejected, exit 0, and the next run tries again. A quick test that exits non-zero while its output names no moved pack in an `(IMPORT FAILED)` line (code
+`QUICK_TEST_NO_PACK_NAMED`) is inconclusive too: it says nothing about the pack. A rollback is an operator decision and marks nothing rejected,
 so a later update moves the pack forward again to the repository's head. `--dry-run` runs `ls-remote` and the
 tree checks but fetches nothing, so a head it has not seen reads `update-available` and the ancestor test is made at fetch.
+
+**A run that was killed.** The journal is the rollback state on disk. A start that finds one undoes it first: each listed pack
+that still sits at the commit the run moved it to goes back to `from`, the pip baseline is restored and `pip freeze` is
+required to equal it, the report says what was recovered (`notes[]`), and then the run plans as usual. A pack that sits at
+neither commit (someone moved it since) is left alone. `--dry-run` only reports the journal. SIGINT, SIGTERM and SIGBREAK
+(where the OS delivers them) run the same undo and end the run with exit 2; a hard kill leaves the file for the next start.
+The script detects and logs; it never refuses to run because of it.
+
+**Edits made while a run is under way.** Every reset (the undo, the journal recovery and `--rollback`) first re-reads
+`git status --porcelain --untracked-files=no` and uses `git reset --keep`, never the hard form. A pack with tracked
+modifications at that moment is not touched: it is reported `kept` with code `DIRTY_AT_UNDO` naming the pack, stays at the
+commit it holds, is not marked rejected, the rest is put back and the venv restored, and the run ends exit 2 (the journal
+then lists only that pack, so the next start looks at it again).
 
 ## ADR 0085 notice
 

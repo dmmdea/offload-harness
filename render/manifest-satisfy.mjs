@@ -180,6 +180,32 @@ export async function runRetryOnSpawn(fn, { delayMs = 500 } = {}) {
   }
 }
 
+// NETWORK / BUSY: the messages of a command that failed because the network or the card was not there, not because of what it
+// was asked to install. Shared with the update script (comfy-packs-update.mjs), so both classify the same way.
+export const NETWORK = /could not resolve host|name or service not known|temporary failure in name resolution|connection (timed out|refused|reset|aborted)|network is unreachable|no route to host|failed to connect|unable to access|\b(ssl|tls)\b|timed out|max retries exceeded|connectionerror|read timed out|remote end hung up/i;
+export const BUSY = /out of memory|CUDA error: (busy|out of memory)|device or resource busy/i;
+
+// isTransientFailure: a failure that says nothing about the pack, only that the machine could not do the work just now
+// (a subprocess that failed to start, a lost network, a timeout, a busy or full card). It is never held against a commit.
+export function isTransientFailure(e) {
+  if (isSpawnFailure(e)) return true;
+  const msg = String((e && e.message) || e || "");
+  return NETWORK.test(msg) || BUSY.test(msg);
+}
+
+// freezeDigest: a short sha256 of a `pip freeze` text (sorted, trimmed, comment lines dropped). A rejection stores it, so a
+// rejection written against one venv is not held against a venv that has changed since.
+export function freezeDigest(text) {
+  const lines = String(text || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !l.startsWith("#")).sort();
+  return lines.length ? createHash("sha256").update(lines.join("\n")).digest("hex").slice(0, 16) : "";
+}
+
+// pipCheckGained: the lines of a `pip check` output that were not in the baseline.
+export function pipCheckGained(baselineText, nowText) {
+  const had = new Set(String(baselineText || "").split(/\r?\n/).map((l) => l.trim()).filter(Boolean));
+  return String(nowText || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l && !had.has(l));
+}
+
 export async function satisfyManifest(manifest, deps) {
   const {
     satisfierAvailable, comfyVersion, resolveDeps, ensurePack, pipCheck,
@@ -250,6 +276,10 @@ export async function satisfyManifest(manifest, deps) {
     //    (fresh clone / moved checkout) and misreport changed=false for a pack that just
     //    changed (adversarial-review repro, 2026-07-22). A git spawn failure defers typed —
     //    the caller can re-run the whole satisfy, which IS idempotent at this level.
+    // The venv as pip check sees it BEFORE this satisfy clones or installs anything: a conflict that is already there is
+    // not the new pack's doing, so only lines pip check gains afterwards count against a fresh pack (below).
+    let pipBaseline = null;
+    if (typeof deps.pipCheckText === "function") { try { pipBaseline = await deps.pipCheckText(); } catch { pipBaseline = null; } }
     const keyParts = [];
     const fresh = [];   // packs this satisfy cloned: the only directories it may remove again
     for (const pack of manifest.node_packs) {
@@ -280,8 +310,13 @@ export async function satisfyManifest(manifest, deps) {
       beat("manifest: resolving and installing pack requirements");
       try { await runRetryOnSpawn(() => resolveDeps(manifest.node_packs), retryOpts); }
       catch (e) {
-        await discardFresh(fresh, { reject: !isSpawnFailure(e), reason: "dependency resolve or install failed: " + String(e.message || e) });
-        return spawnOrVenv(e, "uv-resolve");
+        // A subprocess that would not start, a lost network, a timeout or a busy card says nothing about the pack: the
+        // directory this satisfy cloned is removed again, the commit is NOT recorded as rejected, and the defer is retryable.
+        const transient = isTransientFailure(e);
+        await discardFresh(fresh, { reject: !transient, reason: "dependency resolve or install failed: " + String(e.message || e) });
+        const out = spawnOrVenv(e, "uv-resolve");
+        if (transient && !isSpawnFailure(e)) out.defer.detail = "retryable (network or busy, not held against the pack): " + out.defer.detail;
+        return out;
       }
     }
     // 3. The cheap coherence check always runs. If its subprocess cannot even START:
@@ -292,7 +327,7 @@ export async function satisfyManifest(manifest, deps) {
     try { pc = await runRetryOnSpawn(() => pipCheck(), retryOpts); }
     catch (e) {
       if (!isSpawnFailure(e)) {
-        await discardFresh(fresh, { reject: true, reason: "venv coherence check failed: " + String(e.message || e) });
+        await discardFresh(fresh, { reject: !isTransientFailure(e), reason: "venv coherence check failed: " + String(e.message || e) });
         return defer("VENV_INCOHERENT", "pip-check", String(e.message || e));
       }
       if (!alreadySatisfied) {
@@ -303,8 +338,18 @@ export async function satisfyManifest(manifest, deps) {
       pc = { ok: true };
     }
     if (!pc.ok) {
-      await discardFresh(fresh, { reject: true, reason: String(pc.reason || "venv coherence check failed") });
-      return defer("VENV_INCOHERENT", "pip-check", pc.reason);
+      // Reject the commit only when pip check now reports lines the baseline did not have. A conflict that was there before
+      // this satisfy, or a check that could not run again, is not a verdict on the pack. A drift of a protected package
+      // is not a pip check line and stays the pack's.
+      let own = true, note = "";
+      if (pipBaseline && /^pip check reported/.test(String(pc.reason || ""))) {
+        try {
+          const post = await deps.pipCheckText();
+          if (!pipCheckGained(pipBaseline.out, post.out).length) { own = false; note = " (the same conflicts were there before this install; not held against the pack)"; }
+        } catch { own = false; }
+      }
+      await discardFresh(fresh, { reject: own, reason: String(pc.reason || "venv coherence check failed") });
+      return defer("VENV_INCOHERENT", "pip-check", String(pc.reason || "") + note);
     }
     // Record success — the ONLY writer of the marker, after resolve+check both passed.
     try { writeDepsMarker(packsKey); } catch { /* marker is an optimization; never fail satisfy */ }
@@ -433,13 +478,13 @@ export function recordPackInstall(pack, commit, { comfyDir, write = writeFileAto
 // rejectPackInstall: a pack this satisfy cloned did not survive the install, so its directory is gone: the record now says
 // that nothing is installed and, when `commit` is given, names the commit that failed, so a later request does not clone
 // and fail on the same one.
-export function rejectPackInstall(pack, commit, reason, { comfyDir, write = writeFileAtomic, read = (p) => readFileSync(p, "utf8"), now = () => new Date().toISOString(), origin = null }) {
+export function rejectPackInstall(pack, commit, reason, { comfyDir, write = writeFileAtomic, read = (p) => readFileSync(p, "utf8"), now = () => new Date().toISOString(), origin = null, freeze = "" }) {
   try {
     const path = `${comfyDir}/custom_nodes/${pack.name}.installed.json`;
     const held = readPackRecord(pack, { comfyDir, read });
     const rejected = held && Array.isArray(held.rejected) ? held.rejected.filter((r) => r && r.commit !== commit) : [];
     const stamp = now();
-    if (commit) rejected.push({ commit, reason: String(reason || "").slice(0, 300), ts: stamp });
+    if (commit) rejected.push({ commit, reason: String(reason || "").slice(0, 300), ts: stamp, ...(freeze ? { freeze } : {}) });
     write(path, JSON.stringify({ schema: 2, repo: origin || pack.repo, commit: null, installed_at: null, checked_at: stamp, previous: null, rejected }, null, 2) + "\n");
   } catch { /* the record is informational */ }
 }
@@ -467,8 +512,10 @@ export async function currentPacksKey(packs, { comfyDir, exists = existsSync, gi
 // and the run-graph cache are keyed on it, so a pack the operator moved is re-resolved on the next request that names it.
 // `fresh` marks a pack this call cloned. An absent pack whose record lists rejected commits is cloned only when the
 // repository's newest commit (`lsRemoteHead`, null when it cannot be read) is not one of them: a commit that already
-// failed an install is not cloned and failed again, and a newer one is a fresh candidate.
-export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd, gitOrigin = async () => null, lsRemoteHead = async () => null, readRecord = (pack) => readPackRecord(pack, { comfyDir }), record = (pack, commit, extra) => recordPackInstall(pack, commit, { comfyDir, ...extra }) }) {
+// failed an install is not cloned and failed again, and a newer one is a fresh candidate. A rejection that carries the digest of the
+// venv's `pip freeze` it was written against (`freeze`) is ignored once the venv's digest (`freezeHash`, "" when unreadable) differs: a
+// venv that has been fixed since is not locked out of the commit.
+export function makeEnsurePack({ comfyDir, freezeHash = async () => "", exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd, gitOrigin = async () => null, lsRemoteHead = async () => null, readRecord = (pack) => readPackRecord(pack, { comfyDir }), record = (pack, commit, extra) => recordPackInstall(pack, commit, { comfyDir, ...extra }) }) {
   return async (pack) => {
     // The last stop before git: the directory, the clone and the checkout all come from the pack, so a pack that is
     // not allowlisted is refused before any of them is looked at (satisfyManifest has refused it already; this is for a
@@ -481,7 +528,10 @@ export function makeEnsurePack({ comfyDir, exists = existsSync, gitHead, gitRun,
     const existed = exists(dir);
     if (!existed) {
       const held = readRecord(pack);
-      const rejected = held && Array.isArray(held.rejected) ? held.rejected.map((r) => r && r.commit).filter(Boolean) : [];
+      const held_rejected = held && Array.isArray(held.rejected) ? held.rejected.filter((r) => r && r.commit) : [];
+      let venv = null;   // the venv's digest, read once and only when a rejection carries one
+      if (held_rejected.some((r) => r.freeze)) { try { venv = await freezeHash(); } catch { venv = ""; } }
+      const rejected = held_rejected.filter((r) => !r.freeze || !venv || r.freeze === venv).map((r) => r.commit);
       if (rejected.length) {
         let head = null;
         try { head = await lsRemoteHead(pack.repo); } catch { head = null; }
@@ -534,6 +584,17 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
       } catch { return {}; }
     })(),
     exists: (p) => existsSync(p),
+    // pip check as text: {code, out}, whatever the exit code (the baseline and the delta of satisfyManifest). Rejects only when pip could not start.
+    pipCheckText: () => new Promise((resolve, reject) => {
+      const c = nodeSpawn(comfyPy, ["-m", "pip", "check"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      let out = "";
+      c.stdout.on("data", (d) => (out += d));
+      c.stderr.on("data", (d) => (out += d));
+      c.on("error", reject);
+      c.on("close", (code) => resolve({ code: code === null ? -1 : code, out }));
+    }),
+    // The digest of this venv's `pip freeze --all`; "" when it cannot be read (an unreadable venv never invalidates a rejection).
+    freezeHash: async () => { try { return freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { return ""; } },
     // Durable "this exact pack set was resolved+checked successfully" marker. Written only
     // after a fully successful resolve+check; read fail-safe. It attests VENV state, so it
     // lives INSIDE the venv (beside the interpreter's home): a wiped/recreated venv takes
@@ -599,6 +660,7 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
       gitHead: (dir) => runOut(["git", "-C", dir, "rev-parse", "HEAD"]),
       gitRun: (cmd) => run(cmd),
       gitOrigin: (dir) => runOut(["git", "-C", dir, "remote", "get-url", "origin"]),
+      freezeHash: async () => { try { return freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { return ""; } },
       lsRemoteHead: async (repo) => {
         const out = await runOut(["git", "ls-remote", "--", repo, "HEAD"]);
         const sha = out.split(/\s+/)[0] || "";
@@ -610,13 +672,15 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
     // Undo what a failed satisfy created: remove ONLY the directories it cloned itself (never a pack that was already
     // there), and, when the failure is the pack's own (`reject`), record the commit so it is not cloned and failed again.
     discardFreshPacks: async (fresh, { reject, reason }) => {
+      let freeze = "";
+      if (reject) { try { freeze = freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { freeze = ""; } }
       for (const { pack, commit } of fresh) {
         const dir = join(comfyDir, "custom_nodes", pack.name);
         if (checkNodePack(pack)) continue;   // a name the table does not give is never a path to remove
         let origin = null;
         try { origin = await runOut(["git", "-C", dir, "remote", "get-url", "origin"]); } catch { origin = null; }
         try { rmSync(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* best effort */ }
-        rejectPackInstall(pack, reject ? commit : null, reason, { comfyDir, origin });
+        rejectPackInstall(pack, reject ? commit : null, reason, { comfyDir, origin, freeze });
       }
     },
     // Returns { ok: true } or { ok: false, reason } — the reason is surfaced in the
