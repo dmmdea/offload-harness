@@ -359,6 +359,15 @@ export async function satisfyManifest(manifest, deps) {
 }
 
 import { spawn as nodeSpawn } from "node:child_process";
+
+// SATISFY_LIVE: the children run(), runOut() and pipCheckText() have in flight, so a caller's signal handler can stop a
+// pip or uv that is still writing the venv before it restores that venv (comfy-packs-update's killLive).
+export const SATISFY_LIVE = new Set();
+function track(c) {
+  SATISFY_LIVE.add(c);
+  c.once("close", () => SATISFY_LIVE.delete(c)); c.once("error", () => SATISFY_LIVE.delete(c));
+  return c;
+}
 import { existsSync, writeFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { createHash } from "node:crypto";
@@ -420,7 +429,7 @@ export function buildHostConstraints(freezeText) {
 
 async function run(cmd, opts = {}) {
   return new Promise((resolve, reject) => {
-    const c = nodeSpawn(cmd[0], cmd.slice(1), { stdio: "pipe", ...opts, windowsHide: true });
+    const c = track(nodeSpawn(cmd[0], cmd.slice(1), { stdio: "pipe", ...opts, windowsHide: true }));
     let err = "";
     c.stderr.on("data", (d) => (err += d));
     c.on("error", reject);
@@ -431,7 +440,7 @@ async function run(cmd, opts = {}) {
 // runOut: like run() but resolves with trimmed stdout (used to read `git rev-parse HEAD`).
 async function runOut(cmd, opts = {}) {
   return new Promise((resolve, reject) => {
-    const c = nodeSpawn(cmd[0], cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"], ...opts, windowsHide: true });
+    const c = track(nodeSpawn(cmd[0], cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"], ...opts, windowsHide: true }));
     let out = "", err = "";
     c.stdout.on("data", (d) => (out += d));
     c.stderr.on("data", (d) => (err += d));
@@ -586,7 +595,7 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
     exists: (p) => existsSync(p),
     // pip check as text: {code, out}, whatever the exit code (the baseline and the delta of satisfyManifest). Rejects only when pip could not start.
     pipCheckText: () => new Promise((resolve, reject) => {
-      const c = nodeSpawn(comfyPy, ["-m", "pip", "check"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+      const c = track(nodeSpawn(comfyPy, ["-m", "pip", "check"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
       let out = "";
       c.stdout.on("data", (d) => (out += d));
       c.stderr.on("data", (d) => (out += d));

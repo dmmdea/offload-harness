@@ -39,7 +39,7 @@ import { pathToFileURL } from "node:url";
 import { ALLOWED_NODE_PACKS } from "./node-packs.mjs";
 import { packNameFromRepo } from "./manifest.mjs";
 import { comfyUp, comfyApi, resolveComfyDir, resolveComfyPy } from "./comfy-lifecycle.mjs";
-import { defaultSatisfyDeps, recordPackInstall, readPackRecord, buildHostConstraints, NETWORK, BUSY, freezeDigest } from "./manifest-satisfy.mjs";
+import { defaultSatisfyDeps, recordPackInstall, readPackRecord, buildHostConstraints, NETWORK, BUSY, freezeDigest, SATISFY_LIVE } from "./manifest-satisfy.mjs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
@@ -118,7 +118,8 @@ export function sameFreeze(a, b) {
 
 // exec: run a command to its end. Never rejects: {code, out, err, timedOut, spawnError}.
 const LIVE = new Set();
-export function killLive() { for (const c of LIVE) { try { c.kill(); } catch { /* already gone */ } } }
+// killLive stops this script's children and the pip/uv children of the satisfy it called, before an undo touches the venv.
+export function killLive() { for (const c of [...LIVE, ...SATISFY_LIVE]) { try { c.kill(); } catch { /* already gone */ } } }
 export function exec(cmd, { cwd, env, timeoutMs = 0 } = {}) {
   return new Promise((resolve) => {
     let out = "", err = "", timedOut = false, done = false;
