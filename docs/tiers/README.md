@@ -16,7 +16,7 @@ a Windows class.
 | [amd-rdna3](amd-rdna3.md) | vulkan | 16384 | f16 | offload-e4b | `gpu` | `sdcpp` (z-image-turbo) + stt/vision seat | — |
 | [amd-rdna3-dgpu](amd-rdna3-dgpu.md) | vulkan | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | `sdcpp` (z-image-turbo) + stt/vision seat | — |
 | [ampere-16](ampere-16.md) | cuda | 131072 | q8_0 | offload-e4b | dropped | comfyui (hidream-o1) + forecast/stt/vision seat | — |
-| [ampere-6](ampere-6.md) | cuda | 32768 | q8_0 | offload-e4b | dropped | `sdcpp` (sdxl-turbo) + forecast/stt/vision seat | [1](reports/ampere-6-node-c.md) |
+| [ampere-6](ampere-6.md) | cuda | 32768 | q8_0 | offload-e4b | dropped | `sdcpp` + forecast/stt/vision seat | [1](reports/ampere-6-node-c.md) |
 | [ampere-8](ampere-8.md) | cuda | 32768 | q8_0 | offload-e4b | dropped | yes + forecast/stt/vision seat | [1](reports/ampere-8-node-a.md) |
 | [blackwell-16](blackwell-16.md) | cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (hidream-o1) + forecast/stt/vision seat | [1](reports/blackwell-16-node-b.md) |
 | [blackwell-2x16](blackwell-2x16.md) | dual-blackwell | 131072 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + forecast/stt/vision seat | — |
@@ -27,7 +27,7 @@ a Windows class.
 | [blackwell-8](blackwell-8.md) | cuda | 16384 | q8_0 | offload-e4b | dropped | yes + forecast/ocr/stt/vision seat (+2 extra) | — |
 | [cpu](cpu.md) | cpu | 8192 | f16 | offload-e4b | `cpu_moe` | stt/vision seat | — |
 | [dual-gpu](dual-gpu.md) | dual-cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | forecast/stt/vision seat | — |
-| [maxwell-3](maxwell-3.md) | cuda | 32768 | f16 | gemma4-e2b | dropped | `sdcpp` (sdxl-turbo) + stt/vision seat | [1](reports/maxwell-3-node-g.md) |
+| [maxwell-3](maxwell-3.md) | cuda | 32768 | f16 | gemma4-e2b | dropped | `sdcpp` + stt/vision seat | [1](reports/maxwell-3-node-g.md) |
 | [rockchip-rk3588](rockchip-rk3588.md) | rk3588 | 8192 | f16 | qwen3.5-2b-npu | dropped | yes + rkllm seat | — |
 | [volta-16](volta-16.md) | cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (hidream-o1) + stt/vision seat | — |
 

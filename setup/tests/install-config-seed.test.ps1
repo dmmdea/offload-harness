@@ -472,7 +472,9 @@ foreach ($c in @(@('ampere-6', $true), @('ampere-8', $false), @('blackwell-3x16'
   $keys = @(Get-GatedModelKeys -IncludeQwen38 $false -IncludeQwen354B $false -IncludeEmbeddingGemma2 ([bool]$profiles.$t.include_embeddinggemma2) -IncludeEmbeddingGemma2Projector ([bool]$profiles.$t.embeddinggemma2_projector) -WithFamily $false)
   Assert (($keys -contains 'model-eg2') -and (($keys -contains 'model-eg2-mmproj') -eq $wantProj)) "tier $t downloads the projector iff it carries it (projector = $wantProj)"
   $ms = @(((Merge-ConfigSeed -ConfigText $tplText -Seed $profiles.$t.config_seed -OffloadHome 'D:\oh') | ConvertFrom-Json).memory_stack)
-  Assert (($ms -join ',') -eq 'embeddinggemma,bge-reranker-v2-m3,embeddinggemma2') "tier $t seeds the memory-stack keep-set with embeddinggemma2 (projector = $wantProj)"
+  # ampere-6 sets omit_embeddinggemma: it renders no 300M entry, so its keep-set names none and EmbedModel() falls to embeddinggemma2.
+  $wantMs = if ($profiles.$t.omit_embeddinggemma -eq $true) { 'embeddinggemma2,bge-reranker-v2-m3' } else { 'embeddinggemma,bge-reranker-v2-m3,embeddinggemma2' }
+  Assert (($ms -join ',') -eq $wantMs) "tier $t seeds the memory-stack keep-set with embeddinggemma2 (projector = $wantProj)"
 }
 
 # --- The 26B download follows the resolved include_26b (<node-e> parity audit, 2026-09-23) --
