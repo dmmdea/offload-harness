@@ -59,7 +59,7 @@ import { withGpuSlot } from "./gpu-lock.mjs";
 import { resolveFfmpeg, resolveFfprobe } from "./audio-qa.mjs";
 import {
   parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
-  installLifecycle, makeDeadline, normalizeFrames, floorFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
+  installLifecycle, makeDeadline, normalizeFrames, floorFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir, taeArgs, TAE_MIN_FRAMES,
   vulkanDeviceFromBackend, refuseRelativeBinary, ensureOutDir, engineExitError, failAndExit,
 } from "./igpu-engine.mjs";
 import { checkClip, convertDepthFrames, countVideoFrames, trimDecision } from "./igpu-qa.mjs";
@@ -122,8 +122,8 @@ export function buildSdAnimateArgs({ outFile, ref, depthDir, prompt, flags, extr
   if (finiteNum(flags["flow-shift"]) !== undefined) a.push("--flow-shift", String(finiteNum(flags["flow-shift"])));
   a.push("-W", String(p.width), "-H", String(p.height), "--video-frames", String(p.frames), "--fps", String(OUTPUT_FPS));
   if (finiteNum(flags.seed) !== undefined) a.push("-s", String(Math.round(finiteNum(flags.seed))));
-  a.push("--backend", flags.backend, "--diffusion-fa", "--vae-tiling", "--vae-tile-overlap", String(vaeTileOverlap(flags)), "-v");
-  if (flags.tae) a.push("--taesd", flags.tae);
+  a.push("--backend", flags.backend, "--flash-attn", "off,diffusion=on", "--vae-tiling", "--vae-tile-overlap", String(vaeTileOverlap(flags)), "-v");
+  a.push(...taeArgs(flags.tae, p.frames));
   for (const e of extra) a.push(e);
   a.push("-o", outFile);
   return a;
@@ -197,6 +197,9 @@ async function main() {
     if (n < 5) throw new Error(`the driver clip yields only ${frames.length} frame(s) at ${DRIVER_FPS} fps; at least 5 are needed`);
     if (n !== p.frames) console.error(`sdcpp-animate: driver gave ${frames.length} frames; rendering ${n} (4k+1) instead of ${p.frames}`);
     const finalFlags = { ...flags, frames: String(n) };
+    if (flags.tae && n < TAE_MIN_FRAMES) {
+      console.error(`sdcpp-animate: ${n} frames is below the ${TAE_MIN_FRAMES} the tiny autoencoder decodes cleanly; decoding with the full VAE`);
+    }
 
     const webm = join(outTmp.dir, "out.webm");
     await withGpuSlot({ noLock: flags["no-lock"], comfyManaged: false }, async () => {

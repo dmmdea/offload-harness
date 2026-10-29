@@ -115,8 +115,9 @@ test("sdcpp-video main: the argv reaches the engine, the mp4 lands (creating its
     assert.equal(at(call.argv, "-s"), "7");
     assert.equal(at(call.argv, "--video-frames"), "5");
     assert.equal(at(call.argv, "--vae-tile-overlap"), "0.25", "the measured best tile overlap is the default");
-    assert.ok(call.argv.includes("--vae-tiling") && call.argv.includes("-v") && call.argv.includes("--diffusion-fa"));
-    assert.equal(at(call.argv, "--taesd"), tae, "--tae reaches sd-cli as --taesd");
+    assert.ok(call.argv.includes("--vae-tiling") && call.argv.includes("-v") && call.argv.includes("--flash-attn"));
+    assert.ok(!call.argv.includes("--taesd"), "5 frames is below TAE_MIN_FRAMES (17): the full VAE decodes, never the tiny one");
+    assert.match(r.stderr, /5 frames is below the 17 the tiny autoencoder decodes cleanly; decoding with the full VAE/);
     assert.equal(at(call.argv, "--high-noise-diffusion-model"), hn);
     assert.equal(at(call.argv, "--high-noise-cfg-scale"), "1");
     assert.equal(at(call.argv, "--high-noise-steps"), "3");

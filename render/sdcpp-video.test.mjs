@@ -41,7 +41,7 @@ test("buildSdVideoArgs: the full I2V argv in the verified master-929 spelling", 
   assert.equal(at("--fps"), "24");
   assert.equal(at("-s"), "7");
   assert.equal(at("--backend"), "vulkan0");
-  for (const f of ["--diffusion-fa", "--vae-tiling", "-v"]) assert.ok(a.includes(f), `${f} must be present (-v feeds the CPU-placement guard)`);
+  for (const f of ["--flash-attn", "off,diffusion=on", "--vae-tiling", "-v"]) assert.ok(a.includes(f), `${f} must be present (-v feeds the CPU-placement guard)`);
   // extras land before the output, which is last
   assert.ok(a.indexOf("--some-extra-flag") > a.indexOf("-v"));
   assert.equal(a[a.length - 2], "-o");
@@ -114,6 +114,11 @@ test("buildSdVideoArgs: --vae-tile-overlap 0.25 by default (the measured best de
   const b = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags: { ...baseFlags, "vae-tile-overlap": "0.5", tae: "/m/taew2_2.safetensors" } });
   assert.equal(b[b.indexOf("--vae-tile-overlap") + 1], "0.5");
   assert.equal(b[b.indexOf("--taesd") + 1], "/m/taew2_2.safetensors");
+  // the tiny autoencoder broke 9-frame clips for real (<node-f> 2026-10-28): below 17 frames the full VAE decodes
+  const short = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags: { ...baseFlags, frames: "9", tae: "/m/taew2_2.safetensors" } });
+  assert.ok(!short.includes("--taesd"));
+  const at17 = buildSdVideoArgs({ outFile: "o.webm", still: "", prompt: "p", flags: { ...baseFlags, frames: "17", tae: "/m/taew2_2.safetensors" } });
+  assert.equal(at17[at17.indexOf("--taesd") + 1], "/m/taew2_2.safetensors");
   assert.equal(vaeTileOverlap({}), 0.25);
   assert.equal(vaeTileOverlap({ "vae-tile-overlap": "0" }), 0);
   for (const bad of ["1", "-0.1", "2"]) assert.throws(() => vaeTileOverlap({ "vae-tile-overlap": bad }), /\[0, 1\)/);

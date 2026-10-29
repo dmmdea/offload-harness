@@ -356,6 +356,16 @@ const GGML_DEVICE_LINE = /^\s*ggml_vulkan:\s*(\d+)\s*=\s*(.+?)\s*(?:\||$)/;
 const NO_VULKAN_DEVICE = /ggml_vulkan:\s*Found\s+0\s+Vulkan\s+devices|ggml_vulkan:\s*No\s+devices\s+found/i;
 // stable-diffusion.cpp: a compute buffer on a backend; the module name is one word. Read on the normalised text.
 const SD_COMPUTE_BUFFER = /^([\w.+-]+)\s+compute buffer size:.*?\bon\s+(\S+)/;
+// The size of a compute buffer line, in MB ("35.50 MB(VRAM)", "0.76 MB(RAM)"); undefined when the line states none.
+const SD_BUFFER_SIZE = /compute buffer size:\s*([\d.]+)\s*(KB|MB|GB|KiB|MiB|GiB)\b/i;
+function sdBufferMB(text) {
+  const m = SD_BUFFER_SIZE.exec(text);
+  if (!m) return undefined;
+  const v = Number(m[1]);
+  if (!Number.isFinite(v)) return undefined;
+  const unit = m[2].toUpperCase().replace("I", "");
+  return unit === "GB" ? v * 1024 : unit === "KB" ? v / 1024 : v;
+}
 // The auto-fit plan's line of the diffusion component, "DiT   params 5162 MiB, compute reserve 2048 MiB ->
 // compute Vulkan0, params Vulkan0" (the old shape's head eats its indentation, the new one keeps it). The
 // compute backend is group 1. Read on the normalised text; "-> compute CPU" is a placement (SD_CPU_SHAPES).
@@ -424,7 +434,7 @@ function buildEchoMatcher(echoes) {
 export function createLogGuard({ engine, echoes = [] }) {
   if (!GUARD_ENGINES.includes(engine)) throw new Error(`createLogGuard: unknown engine ${JSON.stringify(engine)} (want ${GUARD_ENGINES.join(", ")})`);
   const echo = buildEchoMatcher(echoes);
-  const st = { lineNo: 0, inBlock: false, device: false, diffusion: false, da3: false, audio: false };
+  const st = { lineNo: 0, inBlock: false, device: false, diffusion: false, da3: false, audio: false, sdDevice: new Map() };
   const evidence = [];
   const note = (s) => { if (evidence.length < 20) evidence.push(s); };
 
@@ -474,10 +484,26 @@ export function createLogGuard({ engine, echoes = [] }) {
       const cb = SD_COMPUTE_BUFFER.exec(text);
       if (cb) {
         const [, desc, on] = cb;
-        if (/^CPU\d*$/i.test(on)) return cpu(line);
-        if (/^Vulkan\d+$/i.test(on) && !isEcho && !SD_AUX_MODULE.test(desc)) {
-          st.diffusion = true;
-          note(`${desc} compute on ${on}`);
+        const mb = sdBufferMB(text);
+        if (/^CPU\d*$/i.test(on)) {
+          // From master-1000 the graph scheduler prints, right after a module's device buffer, a small host-side
+          // buffer on the CPU for the same module (0.15 to 8.34 MB beside 31 to 324 MB on Vulkan0 on the measured
+          // FastWan run) while every split of the graph runs on the device (GGML_SCHED_DEBUG=2: 10 splits, all
+          // Vulkan0). It is that companion only when the same module already printed a device buffer in this run
+          // and it is no larger than that buffer; a module whose only compute buffer is on the CPU is a placement.
+          const dev = st.sdDevice.get(desc);
+          if (!isEcho && dev !== undefined && mb !== undefined && mb <= dev) {
+            note(`${desc} host buffer ${mb} MB beside ${dev} MB on the device`);
+            return null;
+          }
+          return cpu(line);
+        }
+        if (/^Vulkan\d+$/i.test(on) && !isEcho) {
+          if (mb !== undefined) st.sdDevice.set(desc, mb);
+          if (!SD_AUX_MODULE.test(desc)) {
+            st.diffusion = true;
+            note(`${desc} compute on ${on}`);
+          }
         }
       }
       // the auto-fit plan puts the diffusion component on a device before anything is loaded: a second
@@ -978,6 +1004,18 @@ export function normalizeFrames(n, def = 49) {
   const down = Math.floor((v - 1) / 4) * 4 + 1;
   const up = down + 4;
   return v - down < up - v ? down : up;
+}
+
+// The tiny Wan autoencoder (sd-cli --taesd) breaks on very short clips. Measured on <node-f> 2026-10-28
+// (FastWan 832x480, 3 steps, seed 42, sd.cpp master-945 and master-1024 alike): 9 frames (3 latent frames)
+// decoded into blocks of false colour over the subject, while the full VAE decoded the same latents clean
+// (141.8 s against 1.6 s) and 49 frames decoded clean through the tiny one (8.1 s); 17 frames was measured
+// clean before (SSIM 0.95 against the full VAE). Below TAE_MIN_FRAMES the runners decode with the full VAE.
+export const TAE_MIN_FRAMES = 17;
+
+// taeArgs: the sd-cli flags for a bound tiny autoencoder at this frame count; none below TAE_MIN_FRAMES.
+export function taeArgs(tae, frames) {
+  return tae && frames >= TAE_MIN_FRAMES ? ["--taesd", tae] : [];
 }
 
 // floorFrames: the largest 4k+1 not above `available`, or 0 when fewer than 5 exist. Used

@@ -9,7 +9,7 @@
 //   common --backend <vulkan> --device <n> --seed <n> --metrics --log --out <wav>
 // (verified against audiocpp_cli --help and model_specs/chatterbox.json + ace_step.json;
 // --task takes `clon`, the CLI enum, not the model-spec word `clone`). The mapping lives
-// HERE: audio.cpp flag drift on a pin bump is fixed in this file, never in Go.
+// HERE: audio.cpp flag drift on an engine update is fixed in this file, never in Go.
 //
 // Usage: node render/audiocpp-generate.mjs [flags] -- <out.wav> "<text>"
 //        --kind voice|music --bin ABS --family F --model P --backend vulkan --device 0

@@ -8,8 +8,8 @@
 // THIS file owns the mapping to sd-cli's real flags (verified against the sd.cpp build the
 // installer resolved from the newest release, floor in setup/floors.json, `sd-cli --help`): --diffusion-model / --high-noise-diffusion-model / --vae / --t5xxl,
 // -i (the still), -p/-n, --cfg-scale, --steps, --sampling-method, --flow-shift, -W/-H,
-// --video-frames, --fps, -s, --backend, --diffusion-fa, --vae-tiling, -v, -o. sd.cpp flag
-// drift on a pin bump is fixed HERE, never in Go.
+// --video-frames, --fps, -s, --backend, --flash-attn off,diffusion=on, --vae-tiling, -v, -o. sd.cpp flag
+// drift on an engine update is fixed HERE, never in Go.
 //
 // Usage: node render/sdcpp-video.mjs [flags] -- <out.mp4> [<still>] "<prompt>"
 //        --sd-bin ABSOLUTE-PATH --model PATH [--high-noise-model PATH] --vae PATH --t5xxl PATH
@@ -27,7 +27,8 @@
 // --high-noise-model; sd-cli's own default there is cfg 7.0, which doubles the iGPU time of a
 // distilled recipe). Decode: --vae-tiling with --vae-tile-overlap 0.25 by default (measured best:
 // 17 frames, overlap 0.5 = 364 s, 0.25 = 299 s, untiled = 355 s); --tae PATH is the OPT-IN tiny
-// autoencoder (sd-cli --taesd; taew2_2 decodes 17 frames in 2.8 s, SSIM 0.95 vs the full VAE).
+// autoencoder (sd-cli --taesd; taew2_2 decodes 17 frames in 2.8 s, SSIM 0.95 vs the full VAE), used from
+// TAE_MIN_FRAMES (17) frames only: below that it breaks and the full VAE decodes (igpu-engine.mjs).
 //
 // Normalization (documented, tested):
 //   frames  -> the NEAREST 4k+1 (a tie goes up), minimum 5; default 49. The Wan family
@@ -55,7 +56,7 @@ import { withGpuSlot } from "./gpu-lock.mjs";
 import { resolveFfmpeg } from "./audio-qa.mjs";
 import {
   parseArgs, parseExtraArgs, refuseCpuBackend, refuseExtraArgs, runEngine, createLogGuard, checkTokenCap,
-  installLifecycle, makeDeadline, normalizeFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir,
+  installLifecycle, makeDeadline, normalizeFrames, normalizeSize, finiteNum, encodeMp4, makeTempDir, taeArgs, TAE_MIN_FRAMES,
   refuseRelativeBinary, ensureOutDir, engineExitError, failAndExit,
 } from "./igpu-engine.mjs";
 import { checkClip } from "./igpu-qa.mjs";
@@ -101,8 +102,8 @@ export function buildSdVideoArgs({ outFile, still, prompt, flags, extra = [] }) 
   }
   a.push("-W", String(p.width), "-H", String(p.height), "--video-frames", String(p.frames), "--fps", String(p.fps));
   if (finiteNum(flags.seed) !== undefined) a.push("-s", String(Math.round(finiteNum(flags.seed))));
-  a.push("--backend", flags.backend, "--diffusion-fa", "--vae-tiling", "--vae-tile-overlap", String(vaeTileOverlap(flags)), "-v");
-  if (flags.tae) a.push("--taesd", flags.tae);
+  a.push("--backend", flags.backend, "--flash-attn", "off,diffusion=on", "--vae-tiling", "--vae-tile-overlap", String(vaeTileOverlap(flags)), "-v");
+  a.push(...taeArgs(flags.tae, p.frames));
   for (const e of extra) a.push(e);
   a.push("-o", outFile);
   return a;
@@ -147,6 +148,9 @@ async function main() {
   const extra = refuseExtraArgs(parseExtraArgs(flags["extra-args"]), { engine: "sdcpp", key: "--extra-args" });
   const params = resolveParams(flags);
   checkTokenCap({ flags, width: params.width, height: params.height, frames: params.frames });
+  if (flags.tae && params.frames < TAE_MIN_FRAMES) {
+    console.error(`sdcpp-video: ${params.frames} frames is below the ${TAE_MIN_FRAMES} the tiny autoencoder decodes cleanly; decoding with the full VAE`);
+  }
   const bin = refuseRelativeBinary("--sd-bin", flags["sd-bin"]);
   vaeTileOverlap(flags);
   // the out dir is made (or refused) NOW: a render that ends in "cannot write the output" has spent minutes of GPU

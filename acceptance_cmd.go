@@ -62,7 +62,7 @@ func runAcceptance(args []string) error {
 	if cfg.ImageGenEngine == "sdcpp" {
 		rep.Add(acceptance.Runnable(ctx, "sdcpp", cfg.SdcppBin, "--help"))
 	}
-	// The composition lane (ADR 0059): run the pinned CLI as this identity, through the
+	// The composition lane (ADR 0059): run the installed CLI as this identity, through the
 	// runner — the same allowlisted env and --json every render uses — so a node whose
 	// install exists but cannot execute is caught here, not by the first composition.
 	if cfg.ComposeRouteConfigured() {
