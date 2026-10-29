@@ -6,6 +6,214 @@ Versioning: [SemVer](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.205.0] - 2026-10-29 - No version pins left in the harness: ComfyUI packs update to latest, models verified against the publisher, HyperFrames browser auto, the 6 GB tier fits its seats
+
+### Changed - the last "pinned" wording and version ranges are gone, and a guard keeps them out
+
+- **What changed.** The HyperFrames install, the browse sidecar, sd.cpp and llama.cpp were still described as pinned in
+  Go comments, docs and two client-visible strings, though ADR 0099 made every one of them "the newest complete build,
+  floored". The `offload_browse` tool description and its tools-profile sentence now say "a sidecar" instead of "a
+  pinned sidecar", and the compose binding label in route and doctor output reads `hyperframes_dir (project-local CLI)`
+  instead of `hyperframes_dir (pinned CLI)`. `integrations/opencode/package.json` takes `latest` for its two ranges, the
+  reproduction recipe in the hardware-scope spec downloads the newest llama.cpp release, and the chatterbox setup text in
+  `render/README.md` installs torch without a version. The llama-swap README no longer names the surface version the
+  CLI was verified against; it points at the vendored schema snapshot that carries it.
+- **The guard.** `no_version_pins_test.go` now also reads every tracked `package.json` (a dependency must be `latest`,
+  `*`, empty or a non-registry spec; an exact version, a `~` or `^` range and an x-range fail) and scans tracked live
+  text (`*.md`, `*.mjs`, `*.js`, non-test `*.go`, `*.ps1`, `*.sh`, `*.py`) for an install command that names a version:
+  `pip install` / `uv pip install` / `uv add` with `==`, `npm install` and `npx` with `@<digit>`, `git clone --branch v<digit>`
+  and `gh release download b<digits>`. History paths are skipped. A hit names `file:line` and says "ADR 0099: floors
+  never pins".
+- **Check.** `go test -run NoVersionPins .` fails on the old `package.json` ranges and the old recipe and passes on the
+  tree.
+
+### Added - `update --component comfy-packs` moves installed ComfyUI node packs to the newest head, behind an import gate, with rollback
+
+- **What it does.** The update verb gains a component that moves each installed, allowlisted ComfyUI node pack to the head of
+  its repository's default branch (the allowlisted publishers release and tag nothing, so the head is the one channel they
+  share). It resolves `git ls-remote` for the pack's origin, fetches that exact commit and checks `FETCH_HEAD`, takes
+  `pip freeze --all` as a snapshot, fast-forwards the pack, runs one unified resolve over all installed packs under the
+  host-torch constraints, and gates the result on `pip check`, the host constraints staying put, and
+  `python main.py --quick-test-for-ci` exiting 0 with no `(IMPORT FAILED)` line for a moved pack. A pass writes the
+  schema-2 record (`previous` = the commit held before) and the dependency marker. A failure resets the pack to its previous
+  commit, restores the pip snapshot with `--no-deps`, requires the freeze and `pip check` to equal the baseline, appends the
+  commit to `rejected[]` and exits 1. `--rollback comfy-packs` moves each pack back to its record's `previous` the same way,
+  gate included. The work is `render/comfy-packs-update.mjs`; `update_cmd.go` starts it with the node's `node_path`,
+  `comfy_dir` and render directory and relays its `--json` line and exit code.
+- **What it leaves alone.** A tree with modified tracked files, or whose HEAD is not an ancestor of the remote head (local
+  commits), is reported `kept` and never reset. A ComfyUI answering on its port makes the run `refused`. A remote that cannot
+  be read, a fetch error, a gate that timed out or found the card busy, and a resolve that lost the network are inconclusive:
+  everything is put back, nothing is marked rejected, exit 0. A render request still never moves an installed pack.
+- **How to run it.** Under the GPU lease wrapper, because the gate initializes torch:
+  `local-offload gpu reserve --wait <window> --drain --unload-seat --for <window> --reason "node packs" -- local-offload update --component comfy-packs --json`.
+  `--dry-run` and `--resolve` list each pack, the head its repository names and what would happen, and change nothing.
+- **Docs.** `docs/systems/update.md` ("Node packs"), ADR 0099 section 6 (one amendment line) and the node-pack row of the
+  frontier-updates spec.
+- **Rollback state on disk.** Before the first move the run writes `custom_nodes/.packs-update-journal.json` (the `pip freeze --all` and `pip check` baselines and each pack's from/to); the next start undoes a killed run from it first, SIGINT, SIGTERM and SIGBREAK run the same undo, and a pass or a finished undo deletes it. Every reset is `git reset --keep` after a fresh `git status`: a pack edited meanwhile stays where it is, is reported `kept` as `DIRTY_AT_UNDO` and the run exits 2. A quick test that exits non-zero without naming a moved pack in an `(IMPORT FAILED)` line is inconclusive (nothing rejected, exit 0, `QUICK_TEST_NO_PACK_NAMED`).
+
+### Fixed - the 6 GB tier's support tier no longer starves its two heavy seats, and two tiers stop seeding an image model the installer never installs
+
+- **The defect.** On the 6 GB reference box (RTX 3050) the support tier held embeddinggemma (300M, 464 MiB),
+  bge-reranker-v2-m3 (350 MiB) and embeddinggemma2 (1,216 MiB with its projector). With all three resident, both heavy
+  seats failed to load: `gemma4-e4b-vision` and `qwen3.5-4b-agent` died with a cudaMalloc out of memory. Nothing used the
+  300M: the memory authority and the wiki embed with embeddinggemma2, and the harness kNN pre-filter is off by default
+  (`knn_prefilter_enabled` false); the 300M was only loaded by the memory-stack warm-back.
+- **The fix.** A new tier flag `omit_embeddinggemma` (inverted polarity, absent = false, requires
+  `include_embeddinggemma2`) makes the render drop the 300M entry, its `emb` matrix var, its evict row and its place in
+  the residents set, and hand its `text-embedding` / `local-embed` aliases to embeddinggemma2 (`servingtmpl.Params.OmitEmbed300M`,
+  hashed into the render stamp only when set). ampere-6 sets it and seeds `memory_stack` as
+  `[embeddinggemma2, bge-reranker-v2-m3]`, so `EmbedModel()` falls to embeddinggemma2, the model a kNN index is built with
+  when an operator turns the pre-filter on. Every other tier renders as before: ampere-8 and blackwell-3x16 keep the 300M
+  because their recorded co-residency budgets count it and nothing there measured it removed.
+- **Measured.** With the 300M gone, 4,283 MiB stayed free beside the support tier and `gemma4-e4b-vision` loads and
+  answers (3,986 MiB). `qwen3.5-4b-agent` at ctx 65536 with q8_0 K and V still does not load (compute buffer 380 MiB at
+  the default ubatch, 318 MiB at ubatch 256). Beside the support tier on a 29,914-token prompt, ctx 49152 loads with 216
+  MiB free, ctx 57344 leaves 40 MiB, and ctx 65536 with a q4_0 V cache leaves 120 MiB but changes the cache the bake-off
+  measured. 49152 with q8_0 K and V is the ceiling; the tier's own `ctx_size` (32768) is inside it and is unchanged. The
+  template and the tier notes carry the figures.
+- **Image seed.** ampere-6 and maxwell-3 seeded `sdcpp_model` as the SDXL-Turbo Q4_0 file, which the installer excludes on
+  license grounds (non-commercial) and therefore never installs. Neither tier gets the Z-Image set the installer does fetch
+  (only amd-rdna3 tiers, or `OFFLOAD_WITH_MEDIA=1`), and that set does not fit 3 GB and was not measured on the 6 GB card, so
+  the seed now names no image model (`sdcpp_model`, `sdcpp_model_kind` and the SDXL-specific family, steps and cfg are
+  gone); the sd.cpp binary binding and ampere-6's flux3-klein family stay, and an operator binds a model they are licensed
+  to run.
+- **Docs.** The tier pages (regenerated), the setup installer page and the field docs in `setup/templates/profiles.json`
+  say the same.
+- **Check.** `install render --profile ampere-6` on linux and windows renders no `embeddinggemma` entry, the residents
+  set reads `rer & eg2` (linux) and `eg2` (windows), and the linux entry for embeddinggemma2 carries the handed-over aliases.
+
+### Fixed - HyperFrames always runs against the browser its installed release wants, not the Chrome version the config named
+
+- **The defect.** `hyperframes_browser_path` held the absolute path of one chrome-headless-shell version
+  (`.../win64-152.../chrome-headless-shell.exe`) and the runner exported it as `HYPERFRAMES_BROWSER_PATH`. `local-offload
+  update` moved HyperFrames to the newest npm release and carried the old browser cache over, but never ran
+  `browser ensure`, so a new release kept rendering against the old Chrome. The installers wrote the resolved versioned
+  path, which is the pin.
+- **`auto`.** `--browser auto` (config `hyperframes_browser_path: "auto"`, now what `install.ps1` and `install.sh`
+  write) makes `render/compose-hyperframes.mjs` ask the installed release for its managed browser at render time:
+  `browser path` under the harness-owned HOME, and when that file is not on disk `browser ensure` then `browser path`
+  again. The render result carries `browser_path` and `chrome_version`. An explicit path works as before.
+  `config.BrowserAuto` and `Config.HyperframesBrowserAuto()` name the value; `doctor`/`offload_status` report
+  `browser=auto (<newest downloaded browser, or "none downloaded yet; the first composition fetches it">)`, and
+  `install hyperframes` notes only an explicit path that differs from the release's own browser, suggesting `auto`.
+- **`update`.** The staged HyperFrames generation now runs the install check (`npm rebuild esbuild`, the runner's
+  `browser` and `version` ops) before it can go live, so the browser its release wants is fetched while the live
+  generation still serves; a failure rejects the stage and leaves the live generation untouched. Browser versions the
+  new release no longer resolves are then removed from the staged generation's own cache (the previous generation keeps
+  its copy for rollback). With `compose_script` unset the browser is not refreshed and `update` logs that.
+  `hfinstall.Verify` is the shared check; `Install` uses it unchanged.
+- **Docs.** The operator guide, the media-generation system page and the setup agent guide say the same.
+- **Check.** `render --browser auto` on a real install rendered a title card with the release's browser (chrome
+  152.0.7977.30); the `browser` op returned the same path.
+
+### Fixed - a manifest model is checked against what its publisher publishes, and a download never leaves a partial file
+
+- **The gap.** A run-graph manifest's `models[].sha256` was supplied by the caller. It pinned one build and authenticated
+  nothing against the publisher, a present file with no hash was trusted as it lay, and a download was streamed straight onto
+  its final path with no size check, so an interrupted download left a truncated file that every later run trusted.
+- **The publisher's digest.** `render/manifest-satisfy.mjs` reads it at run time (`publisherDigest`): for a Hugging Face
+  `resolve` URL the `X-Linked-ETag` and `X-Linked-Size` of an unfollowed HEAD, else the tree API's `lfs.oid` and size; for a
+  GitHub release asset the release API's `digest` and size. A Hugging Face file outside LFS carries a size only; any other
+  host publishes nothing the node reads. What cannot be checked against a publisher digest is listed in `unverified_models`.
+- **Downloads.** A model downloads to `<file>.part`, is checked for size and sha256, and is renamed onto the destination
+  only then. A mismatch deletes the `.part`, retries once, and then defers `MODEL_SHA_MISMATCH` naming both digests. A
+  download that ends short of the server's stated length fails instead of being kept. A missing model whose digest could not be
+  read (publisher unreachable, no caller assertion) defers `MODEL_DOWNLOAD_FAILED` (retryable) rather than fetching a file
+  nothing can check.
+- **Files already on disk.** `<file>.sha-ok` is now JSON `{oid, size, mtime}`. A file whose size and modification time are the
+  recorded ones and whose oid is the publisher's is kept without being read; a changed size or time, or a publisher that moved
+  to a newer build, hashes it once and replaces it when it differs. The replacement lands where the file was found (an extra
+  model root stays on its own drive), and the previous file is kept as `<file>.prev`, one generation, never deleted. A record in the older format (a bare hash) reads as none,
+  so each such file is hashed once more. With the publisher unreachable a file with a fitting record is kept and the result
+  carries a warning; one with no record is listed unverified and never deleted.
+- **The caller's `sha256`** is an optional assertion: when it differs from a published digest the entry defers naming both,
+  and it never overrides the publisher. `manifestHash` now keys a model on `path` and `source_url` only, so the first request
+  after the upgrade provisions (and so verifies) every manifest once.
+- **Docs.** The comments in `render/node-packs.mjs` and `internal/mediacap/manifestmodels.go`, the README, the operator guide,
+  `docs/systems/mcp-server.md` and `docs/flows/run-graph-manifest-satisfaction.md` say the same.
+
+### Fixed - node packs carry no pin text, the run-graph cache notices a moved pack, and the install record says where a pack came from
+
+- **The gap.** The 0.204.0 entry says no document describes a pin as policy any more, but `README.md` and the
+  `offload_run_graph` tool description and `manifest_path` schema (shown to every MCP client) still read "custom node
+  packs @ pinned commits via cm-cli". Nothing is pinned and cm-cli is not used: a pack is cloned from an allowlisted
+  repository at the head of its default branch, and the satisfier drives git and uv directly. Those texts, the allowlist
+  identifiers (`PINNED_NODE_PACKS`, `loadPinnedPacks`, `NodePackPin` and the like, now `ALLOWED_NODE_PACKS`,
+  `loadAllowedPacks`, `AllowedNodePack`), the "pin-set" and "host-pin drift" wording, and the dead `cmCli` argument now say
+  what the code does. The `VENV_INCOHERENT` detail for a moved host package now begins "host constraint drift"; callers
+  branch on `code`.
+- **The cache ignored a moved pack.** The run-graph cache skipped provisioning whenever the `.offload-owned.json` manifest
+  hash matched, and since 0.204.0 that hash holds no commit, so a pack an operator moved, replaced or deleted was never
+  resolved again while the marker matched, against `docs/flows/run-graph-manifest-satisfaction.md`. The marker now also
+  holds the sorted `name@commit` key of the packs on disk, read with one `git rev-parse HEAD` per named pack; the cache
+  applies only when the hash and the key both match. The first request after the upgrade provisions once.
+- **The install record.** `custom_nodes/<name>.installed.json` is now schema 2: `{schema, repo, commit, installed_at,
+  checked_at, previous, rejected}`, where `repo` is the origin the checkout reports, `previous` is the commit and time
+  the pack held before, and `rejected` lists commits an install failed on. It is a record of what is installed, not an
+  instruction. When the resolve, `pip check` or the host-constraint check fails in the same satisfy that cloned a pack,
+  that directory is removed again (a pack that was already there is never touched) and its commit is added to
+  `rejected`; a later request that finds the repository's newest commit there defers `NODE_PACK_REJECTED` instead of
+  cloning and failing again, and a newer commit is tried afresh. The pack leg now beats the lease progress file around
+  checkout, resolve and `pip check`.
+- **Installer.** `install.ps1` no longer clones ComfyUI-Manager or installs GitPython for run-graph, which uses neither; a
+  Manager clone failure used to abort the installer. `uv` stays required and `comfy-cli` stays optional.
+- **Docs.** The setup, operator, fleet-node, glossary, manifest-flow and media-generation pages say the same; the
+  MultiGPU archival note says the mirror's default branch carries the Windows/WDDM P2P fix.
+- **Tests.** The pack-checkout tests in `manifest-satisfy.test.mjs` wrote their record into the real ComfyUI directory of
+  the machine running them; they now use a temporary directory.
+- **Fewer false rejections.** A fresh pack whose install failed on the network, a timeout, a busy card or a subprocess that would not start is removed again but its commit is not added to `rejected` (the defer is retryable); `pip check` is read before the clone and a fresh pack is rejected only when it gains lines, and a `pip check` failure whose lines all predate the satisfy no longer defers the run: it goes on and the result carries `warnings` naming them (a conflict between two packs' own requirements, such as albumentations 2.0.8 against albumentationsx, used to defer every graph on the box); a `rejected` entry carries a short sha256 of the venv's `pip freeze` and is ignored once that has changed.
+
+### Fixed - `go test ./internal/pipeline/` no longer sits out the fake seats' simulated hangs
+
+- **The gap.** The package ran close to Go's default 10-minute package timeout (CI runs `go test ./...` with no
+  `-timeout`; a contended Windows run was killed at 10 minutes). Production timers were already compressed per test, but the
+  fake servers that model "the seat accepts the request and never answers" slept a fixed 3 to 10 seconds after the
+  pipeline under test had already given up, and `httptest.Server.Close` waits for every handler, so each such test paid the
+  whole simulated hang.
+- **What changed.** Test code only. The scripted llama fake gains `loopCtx` and `upstreamModelsCtx`, which are handed the
+  request's context, and the fixed sleeps that only simulate a hang (cold-load, silent-seat, busy-hold, ceiling, cancel,
+  admission and breaker tests) now wait with `holdUntilHungUp`, which returns the moment the client disconnects. The fake's
+  `repackDelay`, `chatFallbackDelay` and `propsDelay` hold the same way. Sleeps that model a real duration an assertion
+  depends on are unchanged, and no production timer or timeout moved.
+- **The 429 case.** `TestRunAgentTaskRepackWireFailuresAreInfrastructure` took 90 s in its rate-limiter case, because a 429
+  retries on the 90 s default contention budget. The test now sets `SeatContentionWaitSec` to 1; the class it asserts does not
+  depend on how long the retries ran. The default is unchanged.
+- **Also.** The fake's grammar lane answers 500 when a test never scripted `repack`, instead of panicking inside the
+  handler (seen in `TestRescueRepackRefusesAHollowObjectFromTheNode`).
+- **Docs.** No `docs/` page describes the pipeline test fakes, so none changed.
+
+### Fixed - `gpu reserve` for a ComfyUI run-graph declares what the graph loads, and a graph with no weight files declares the ComfyUI process floor, not the largest family's size
+
+- **The gap.** `gpu reserve --class media -- node render/comfy-run-graph.mjs --graph g --manifest m` was not recognised as a
+  render helper (the helper table left `comfy-run-graph.mjs` out, with a comment that it takes the graph positionally; it
+  parses `--graph`, `--manifest` and `--template` as flags). The call fell to the media class default, the largest ComfyUI
+  family the box binds, 32.9 GiB for a node that binds Wan 2.2, and a small graph was refused on a box whose commit charge was
+  high unless the operator passed `--ram`. The sizing itself also gave up on a graph that names no weight file
+  (`ForGraph`, `ForManifestModels`), so the run-graph lane's own admission fell to the same default.
+- **What changed.** `comfy-run-graph.mjs` is recognised (route `run-graph`): `--graph FILE` is sized by the weight files its loaders
+  name, and `--template NAME --manifest FILE` by the manifest's model files. A graph, or a manifest with an empty `models` list,
+  that names no weight file is the measured ComfyUI process floor: 3 GiB touched and 4 GiB of commit (a small VHS GIF graph
+  measured 2.63 GiB private and 3.64 GiB of system commit, rounded up), source `measured`. A graph with a loader node that names no
+  file, a graph with no node, a weight under another extension and a graph whose weights are not on disk yet keep the class default.
+- **Commit is stated.** The floor's 4 GiB is a stated commit (`Need.CommitGiB`, `Need.CommitStated`): the grant admits it against
+  the OS commit limit like a `--ram-commit`, not against physical RAM less the headroom as an unstated commit is. `gpu reserve`
+  (`resolveReserveHostLoad`), the pipeline's media admission, the whole-node acquire and the run-graph lane probe all carry it; an
+  operator's `--ram` or `--ram-commit` still wins. The class-default hint now names `comfy-run-graph.mjs` and no longer says a graph
+  that names no weight file takes the class default. Described in `docs/systems/gpu-lease.md` (what a lease declares).
+
+### Fixed - `update` run inside `gpu reserve` no longer waits out the lease queue behind its own parent
+
+- **The gap.** `local-offload gpu reserve --wait 30m --drain --for 20m -- local-offload update --component llama` hung.
+  The llama smoke gate takes its own lease (`gpu reserve --drain --unload-seat -- update --gate-child`), and that inner
+  reserve queued behind the outer lease its own parent held, for the whole `update.gate.lease_wait`. The update then
+  ended inconclusive with nothing changed. The house rule that every GPU job goes through `gpu reserve` sent every agent
+  into it.
+- **What it does.** The gate checks whether this process already runs under a live lease (`GPU_LEASE_EPOCH` equals the
+  epoch of a live lease in `GPU_LEASE_DIR`). When that lease drained the seat and cleared it (`--drain --unload-seat`),
+  the gate runs its measurement under it and logs "running under the caller's GPU lease (epoch N)". When it did not, the
+  gate answers inconclusive at once, saying to run `update` without the wrapper or to wrap it with
+  `--drain --unload-seat`. Outside a lease nothing changes. No other component's gate takes a lease.
+
 ## [0.204.3] - 2026-10-28 - sd.cpp video and animate lanes run on every build from master-1000, and a short fast clip decodes with the full VAE
 
 ### Changed - the last version-pin wording is gone from the CLI help, the OpenSpec rules, a Proposed ADR and the notices
