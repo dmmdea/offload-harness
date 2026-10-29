@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // ComfyPacks is the component that moves the installed ComfyUI node packs. It is not part of AllComponents and does not
@@ -54,7 +56,8 @@ func RunComfyPacks(ctx context.Context, r ComfyPacksRun) int {
 	if r.JSON {
 		args = append(args, "--json")
 	}
-	cmd := exec.CommandContext(ctx, node, args...)
+	// Hidden like every child (TestEveryChildProcessStartIsHidden); with a console it stays on it, so Ctrl-C reaches the script's undo.
+	cmd := winexec.CommandContext(ctx, node, args...)
 	cmd.Env = os.Environ()
 	if r.ComfyDir != "" {
 		cmd.Env = append(cmd.Env, "COMFY_DIR="+r.ComfyDir)
