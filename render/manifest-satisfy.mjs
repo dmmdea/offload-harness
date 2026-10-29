@@ -396,7 +396,7 @@ async function runOut(cmd, opts = {}) {
 }
 
 // readPackRecord: the pack's record beside it, or null when there is none or it does not parse.
-function readPackRecord(pack, { comfyDir, read = (p) => readFileSync(p, "utf8") }) {
+export function readPackRecord(pack,{ comfyDir, read = (p) => readFileSync(p, "utf8") }) {
   try { return JSON.parse(read(`${comfyDir}/custom_nodes/${pack.name}.installed.json`)); } catch { return null; }
 }
 

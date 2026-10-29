@@ -17,6 +17,7 @@ layout for directory components on top.
 ## Questions this doc answers
 
 - How do I update llama.cpp, llama-swap, whisper.cpp, stable-diffusion.cpp or HyperFrames on a node?
+- How do I move the installed ComfyUI node packs to the newest head of their repository, and what undoes a bad one?
 - What does the live path become, and why do my yamls and tasks not change?
 - What does a no-op cost, and what makes a candidate "complete"?
 - What happens when a build fails its checks, or fails after the flip?
@@ -26,7 +27,7 @@ layout for directory components on top.
 ## Usage
 
 ```
-local-offload update [--component llama|llama-swap|whisper|sdcpp|hyperframes|all] [--channel nightly|release]
+local-offload update [--component llama|llama-swap|whisper|sdcpp|hyperframes|comfy-packs|all] [--channel nightly|release]
                      [--dry-run] [--json] [--resolve <component>] [--rollback <component>]
                      [--repoint <yaml> --component llama [--from <dir>]...] [--live <path>] [--home <dir>] [--no-gate]
 ```
@@ -40,7 +41,7 @@ local-offload update [--component llama|llama-swap|whisper|sdcpp|hyperframes|all
 | `--from <dir>` | with `--repoint`: a llama build directory whose name carries no build number (`/opt/llama-vulkan`), rewritten like a build-named one; repeatable |
 | `--channel` | `nightly` (default: the newest complete `b<N>`) or `release` (the build `nightly-tag.txt` names); `update.channel` in `config.json` sets it per node |
 | `--no-gate` | skips the side-port smoke gate (see Gate); prints that it did. The offline self-check and the post-flip watch still run |
-| `--component` | one component, or `all` (the default). `all` updates what the node runs: a component with no record in `installed.json` and nothing at its live path is reported `not-installed` (exit 0, nothing written) and left alone. Naming it (`--component sdcpp`) is the only way the verb installs a component a node does not have |
+| `--component` | one component, or `all` (the default). `all` updates what the node runs: a component with no record in `installed.json` and nothing at its live path is reported `not-installed` (exit 0, nothing written) and left alone. Naming it (`--component sdcpp`) is the only way the verb installs a component a node does not have. `comfy-packs` is never part of `all`; see Node packs |
 | `--live` | the live path of the one selected component, for a box whose layout is not `<home>/<component>`. The verb records it, so later runs need neither the flag nor a config entry |
 | `--home` | the install root `<home>`. Default: `$OFFLOAD_HOME`, else `update.home` in `config.json`, else the nearest folder that holds the installer's `installed.json` among the running binary's folder and the three above it (the Linux installer's `<home>/bin`, the Windows installer's `<home>/harness`, a clone built inside the root; this is how the fleet registry's ssh call, with no environment, finds it), else `~/offload-stack` when it holds an `installed.json`. No root found is exit 2 with nothing changed: the verb never starts a fresh install in a guessed folder. It prints the root it chose and where that came from |
 
@@ -263,6 +264,56 @@ summary and never re-renders. Comment lines are left alone. It refuses (exit 2, 
 is not there: install or copy the build first. Run it on a
 copy when llama-swap runs with `-watch-config` (it reloads on every write), and swap the copy in at a quiet moment.
 
+## Node packs
+
+`--component comfy-packs` is the one component that does not use the generation layout and is not part of `all`. The
+work is `render/comfy-packs-update.mjs`, which the verb starts with the `node_path` and `comfy_dir` of the node's config
+and resolves beside `run_graph_script` (the render directory the binary already uses for run-graph). The verb takes no
+install root and no `update.lock`, and relays the script's report and exit code: with `--json` it prints the script's one
+JSON line (`{component, mode, dry_run, action, detail, exit, packs[], notes[]}`, one `packs[]` row per pack with
+`installed`, `resolved` and `action`) and not the array the other components print. `--resolve comfy-packs` and
+`--dry-run` are the same read-only run: they list each installed pack, the head its repository names and what would happen.
+`--rollback comfy-packs` moves each pack back to the `previous` commit of its record, gate included. Run it under the lease
+wrapper, because the gate starts ComfyUI's own import pass, which initializes torch (the verb does not take the lease
+itself):
+
+```
+local-offload gpu reserve --wait <window> --drain --unload-seat --for <window> --reason "node packs" -- \
+    local-offload update --component comfy-packs --json
+```
+
+A lease that is not granted never starts the command: nothing changed, exit 0 by the wrapper, run again later.
+
+The channel is the head of each pack's default branch (`git ls-remote <origin> HEAD`), because the allowlisted publishers
+tag and release nothing; the git commit id is the content digest and `render/node-packs.json` is the trust boundary. A
+render request never runs this: it clones an absent pack and uses an installed one as it is. Per installed pack whose
+`origin` is a row of that file:
+
+1. The head is the checkout's HEAD, or is listed in the pack's `rejected[]`: nothing to do, `checked_at` is written.
+2. A tree with modified tracked files, or whose HEAD is not an ancestor of the remote head (local commits, a branch of its
+   own), is reported `kept` and never touched, never reset. Untracked files do not count (Python writes `__pycache__`
+   into packs). If a ComfyUI answers on its port the run is `refused` (exit 0, nothing changed): the pack set cannot change
+   under a live instance.
+3. The exact commit is fetched and `FETCH_HEAD` must be it; what is gated is what is promoted.
+4. `pip freeze --all` and `pip check` are taken as the baseline, and `git merge --ff-only` moves the pack.
+5. One unified resolve over every installed allowlisted pack, under the host-torch constraints read from the live venv
+   (the satisfier's own `resolveDeps`, so conflicts between packs surface).
+6. Gate: `pip check` no worse than the baseline, the host constraints (torch, torchvision, torchaudio, numpy) unmoved, and
+   `python main.py --quick-test-for-ci` in the ComfyUI directory exiting 0 with no `(IMPORT FAILED)` line for a moved pack in
+   its "Import times for custom nodes" block.
+7. Pass: `custom_nodes/<name>.installed.json` (schema 2) gets the new commit and `previous` = the commit held before, and
+   the venv's `.offload-deps-satisfied` marker is written. Fail: `git reset --hard` to the previous commit, the pip snapshot
+   put back with `--no-deps` (only the packages that differ), freeze and `pip check` required to equal the baseline, the
+   failed commit appended to `rejected[]` of the pack that failed (all moved packs when nothing names one), exit 1. A
+   pack moved in the same run whose own import was fine is put back too but not marked rejected, and is tried again alone
+   next run. A restore that does not reach the baseline is exit 2 and says which packages differ.
+
+A remote that cannot be read (including a private mirror without credentials), a fetch that failed, a quick test that timed
+out or found the card busy, and a resolve that lost the network are **inconclusive**: whatever moved is moved back, nothing
+is marked rejected, exit 0, and the next run tries again. A rollback is an operator decision and marks nothing rejected,
+so a later update moves the pack forward again to the repository's head. `--dry-run` runs `ls-remote` and the
+tree checks but fetches nothing, so a head it has not seen reads `update-available` and the ancestor test is made at fetch.
+
 ## ADR 0085 notice
 
 A running MCP server keeps the harness image it started with. This verb updates engines and the llama-swap daemon, not
@@ -278,3 +329,4 @@ the harness executable; an MCP server started before an update keeps serving fro
 | floors | `setup/floors.json`, parsed by `internal/floors` |
 | single-file swap | `internal/nodeswap` (`Preflight` lets the verb refuse before it downloads) |
 | GitHub token | `GH_TOKEN`, `GITHUB_TOKEN`, else `gh auth token` (account via `OFFLOAD_UPDATE_GH_USER`); never stored |
+| node packs | `internal/update/comfypacks.go` (starts the script, relays its exit code), `render/comfy-packs-update.mjs` (the update, gate and rollback), `update_cmd.go` (`runUpdateComfyPacks`) |

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/update"
 )
 
@@ -26,7 +27,7 @@ var floorsJSON []byte
 func runUpdate(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	fs.String("config", "", "the node config (read for update.channel, update.paths, update.restart); a global --config is hoisted here")
-	comp := fs.String("component", "all", "llama|llama-swap|whisper|sdcpp|hyperframes|all")
+	comp := fs.String("component", "all", "llama|llama-swap|whisper|sdcpp|hyperframes|comfy-packs|all (comfy-packs is never part of all: run it under the GPU lease, docs/systems/update.md)")
 	channel := fs.String("channel", "", "nightly (default) or release; only llama.cpp has a release channel")
 	dry := fs.Bool("dry-run", false, "print the plan (installed, resolved, action) without downloading or changing anything")
 	asJSON := fs.Bool("json", false, "print the reports as JSON")
@@ -76,6 +77,9 @@ func runUpdate(args []string) error {
 		fmt.Fprintln(os.Stderr, "update: no config file (--config, $LOCAL_OFFLOAD_CONFIG, ~/.local-offload/config.json); built-in defaults")
 	} else {
 		fmt.Fprintln(os.Stderr, "update: config "+cfgPath)
+	}
+	if *comp == update.ComfyPacks || *resolve == update.ComfyPacks || *rollback == update.ComfyPacks {
+		return runUpdateComfyPacks(cfg, *comp, *resolve, *rollback, *dry, *asJSON)
 	}
 	root, rsrc, rerr := updateRoot(*home, fc.Home)
 	if rerr != nil {
@@ -130,6 +134,41 @@ func runUpdate(args []string) error {
 	}
 	if code != 0 {
 		return &exitCodeError{code: code, msg: fmt.Sprintf("update: %s", summarize(reports))}
+	}
+	return nil
+}
+
+// runUpdateComfyPacks is the comfy-packs component: render/comfy-packs-update.mjs (beside the run-graph runner, started
+// with the node executable the config names, on the ComfyUI directory it names) moves the installed node packs behind its
+// import gate. The verb relays its report and exit code and takes no install root: the packs live in the ComfyUI tree,
+// not in installed.json. The operator runs the verb under the GPU lease wrapper; the verb does not take the lease itself.
+func runUpdateComfyPacks(cfg config.Config, comp, resolve, rollback string, dry, asJSON bool) error {
+	for _, other := range []string{resolve, rollback} {
+		if other != "" && other != update.ComfyPacks {
+			return &exitCodeError{code: 2, msg: "update: comfy-packs cannot be combined with --resolve or --rollback of " + other}
+		}
+	}
+	if resolve != "" && rollback != "" {
+		return &exitCodeError{code: 2, msg: "update: --resolve and --rollback are separate runs"}
+	}
+	if comp != update.ComfyPacks && comp != "all" && comp != "" {
+		return &exitCodeError{code: 2, msg: "update: --component " + comp + " cannot be combined with comfy-packs"}
+	}
+	rg := cfg.RunGraphScript
+	if rg == "" {
+		rg = "render/comfy-run-graph.mjs"
+	}
+	script, err := gpugen.ResolveScript(update.ComfyPacksScript(rg))
+	if err != nil {
+		return &exitCodeError{code: 2, msg: "update: comfy-packs: " + err.Error()}
+	}
+	code := update.RunComfyPacks(context.Background(), update.ComfyPacksRun{
+		Node: cfg.NodePath, Script: script, ComfyDir: cfg.ComfyDir,
+		DryRun: dry, Resolve: resolve != "", Rollback: rollback != "", JSON: asJSON,
+		Stdout: os.Stdout, Stderr: os.Stderr,
+	})
+	if code != 0 {
+		return &exitCodeError{code: code, msg: fmt.Sprintf("update: comfy-packs exited %d (the report above says why)", code)}
 	}
 	return nil
 }
