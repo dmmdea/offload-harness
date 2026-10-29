@@ -1,0 +1,32 @@
+name: Feature request
+description: A capability the harness should have.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        The harness runs on a free local model and never falls back to the cloud (ADR 0001). A request that needs a hosted
+        model, or that turns a defer into a guess, is out of scope by design.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you are trying to do, and what happens today (a defer, a missing command, a slow path).
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: The proposal
+      description: What the harness would do, which tool or command would carry it, and what it would return.
+    validations:
+      required: true
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope
+      options:
+        - label: This can be done on a local model or local accelerator, with no cloud call in the default path.
+          required: true
+        - label: I searched the open issues and docs/ROADMAP.md and did not find it.
+          required: true

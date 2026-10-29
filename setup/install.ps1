@@ -268,9 +268,16 @@ function Expand-AssetName {
 function Get-GitHubToken {
   if ($null -ne $script:GhToken) { return $script:GhToken }
   $script:GhToken = ''
+  foreach ($k in 'GH_TOKEN', 'GITHUB_TOKEN') {
+    $v = [Environment]::GetEnvironmentVariable($k)
+    if ($v -and $v.Trim()) { $script:GhToken = $v.Trim(); return $script:GhToken }
+  }
   if (Get-Command gh -ErrorAction SilentlyContinue) {
     try {
-      $t = @(& gh auth token --user dmmdea 2>$null)
+      $ghArgs = @('auth', 'token')
+      $ghUser = "$env:OFFLOAD_UPDATE_GH_USER".Trim()
+      if ($ghUser) { $ghArgs += @('--user', $ghUser) }
+      $t = @(& gh @ghArgs 2>$null)
       if ($LASTEXITCODE -eq 0 -and $t.Count -gt 0 -and $t[0]) { $script:GhToken = "$($t[0])".Trim() }
     } catch { $script:GhToken = '' }
   }

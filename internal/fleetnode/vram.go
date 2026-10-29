@@ -1,6 +1,6 @@
 // Package fleetnode implements the node side of fleet-dispatcher CONTRACT.md
 // v2: health / ack-then-poll dispatch / job status, with measured VRAM
-// footprints. See docs/superpowers/specs/2026-07-17-fleet-node-server-design.md.
+// footprints. See the private development record (2026-07-17).
 //
 // vram.go is the two-source VRAM sampler's portable half: the nvidia-smi
 // global snapshot (feeds /fleet/health every 2s) and the pure helper

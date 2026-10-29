@@ -6,15 +6,15 @@ date: "2026-08-27"
 # 0027 — FreeToken is the big-MoE opt-in engine on the blackwell-2x16 tier
 
 - Status: **Accepted** (operator-approved 2026-08-27)
-- Deciders: operator, on measured evidence from the 2026-08-27 nightshift
-- Related: ADR 0018 (media lease), ADR 0025 (model residency), `docs/ROADMAP.md`
-  nightshift + round-2 sections, mem0 `b7799371` / `18ac82da` / `af2fa8b9`
+- Deciders: operator, on measured evidence from the 2026-08-27 [nightshift](../../glossary.md#nightshift)
+- Related: ADR 0018 (media lease), ADR 0025 (model residency), [`docs/ROADMAP-2026-08-26-frozen.md`](../../ROADMAP-2026-08-26-frozen.md)
+  (ROUND 2 and NIGHTSHIFT 2026-08-27 sections)
 
 ## Context
 
 The tier's serving engine (llama.cpp via llama-swap) covers every roster seat, but
 models materially larger than pooled VRAM have never had a usable home here. The
-prior answer for the >RAM class was colibri (mem0: "colibri only >RAM engine"), and
+prior answer for the >RAM class was colibri (the operator's note: colibri is the only engine usable above RAM), and
 the >VRAM-but-fits-RAM MoE class simply went unserved: DeepSeek V4-Flash ran at
 12.56 t/s under `--n-cpu-moe` and was deleted for lack of consumers; Flash-Next
 measured 0.44–0.46× the incumbent the same way.

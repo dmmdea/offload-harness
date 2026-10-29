@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/dmmdea/offload-harness/security/policy
+    about: Please do not open a public issue for a vulnerability. SECURITY.md says how to report one privately.
+  - name: Read the documentation first
+    url: https://github.com/dmmdea/offload-harness/blob/main/docs/README.md
+    about: How each part works, the flows that cross systems, the decision record and the glossary.

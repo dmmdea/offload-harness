@@ -11,7 +11,7 @@
 // structural here — the chain walk in Run is bounded, the confhead gate
 // excludes the escalation tier, and attemptReasoning has no escalation gate —
 // there is no "escalate tool" in this codebase to remove; verified by grep,
-// recorded in the nightshift-4 notes.)
+// recorded in the private development record (2026-08-14).)
 //
 // WHAT. When a request climbs past the entry tier, the CALLEE tier's input is
 // re-packed FROM THE ORIGINAL SOURCE against that tier's own budget:

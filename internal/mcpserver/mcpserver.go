@@ -3450,7 +3450,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// nosemgrep note: Loop.Run returns a VALUE-type Result (zero value on error, never nil —
 	// internal/agent/loop.go), so res.Steps / res.Effects on the error path below cannot
 	// nil-deref. The deferred-ledger access is deliberate (see its own comment). This silences
-	// a trailofbits invalid-usage-of-modified-variable false positive that clean-ship's ad-hoc
+	// a trailofbits invalid-usage-of-modified-variable false positive that the release gate's ad-hoc
 	// scan re-flags on every touch of this file (semgrep is not in CI).
 	res, rerr := built.Loop.Run(cctx, in.Goal) //nosemgrep: trailofbits.go.invalid-usage-of-modified-variable.invalid-usage-of-modified-variable
 	if rerr != nil {

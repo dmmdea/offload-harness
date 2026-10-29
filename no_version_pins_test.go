@@ -250,7 +250,7 @@ func TestInstallCommandsCarryNoVersionPins(t *testing.T) {
 	isHistory := func(rel string) bool {
 		switch {
 		case strings.HasPrefix(rel, "docs/architecture/decisions/"), strings.HasPrefix(rel, "changes/"),
-			strings.HasPrefix(rel, "runs/"), rel == "CHANGELOG.md", rel == "no_version_pins_test.go":
+			strings.HasPrefix(rel, "docs/changelog/"), rel == "CHANGELOG.md", rel == "no_version_pins_test.go":
 			return true
 		case strings.HasPrefix(rel, "docs/ROADMAP-") && strings.Contains(rel, "frozen"):
 			return true

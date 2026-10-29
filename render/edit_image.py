@@ -1,5 +1,5 @@
 # render/edit_image.py - deterministic PIL edit pipeline for offload_edit_image.
-# Contract (docs/superpowers/specs/2026-07-16-edit-media-tools-design.md):
+# Contract (the private development record, 2026-07-16):
 #   stdin:  JSON {"image": <path>, "ops": [<op>...], "out": <path>}
 #   stdout: JSON {"out": <path>, "width": W, "height": H, "ops_applied": N}
 #   exit:   0 ok | 2 bad arguments (caller surfaces the message) | 3 defer-class

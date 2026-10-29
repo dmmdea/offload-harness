@@ -122,9 +122,37 @@ Installing the stack is its own runbook: [../setup/SETUP-AGENT.md](../setup/SETU
 
 ## Engineering process
 
-The dated working record — design specs, implementation plans, and run/benchmark evidence ledgers —
-lives in the **private development repository**, not here. Public releases carry the changelog and
-these docs; the reasoning behind them stays in the development record.
+Some dated design specs and plans are published here, under `specs/` and `superpowers/`, when they explain a
+shipped change. The full dated working record, including run and benchmark evidence, stays in the **private
+development repository**. Public releases carry the changelog and these docs; the rest of the reasoning behind
+them stays in the development record.
+
+The published ones are immutable dated records (see [specs/README.md](specs/README.md) and
+[superpowers/README.md](superpowers/README.md)):
+
+**Design specs**
+
+- [2026-07-17-hardware-scope-linux-and-low-end-design.md](specs/2026-07-17-hardware-scope-linux-and-low-end-design.md)
+- [2026-07-26-ampere-6-tier-design.md](specs/2026-07-26-ampere-6-tier-design.md)
+- [2026-08-16-multi-node-agent-delegation.md](specs/2026-08-16-multi-node-agent-delegation.md)
+- [2026-10-28-frontier-updates-design.md](specs/2026-10-28-frontier-updates-design.md)
+- [2026-10-28-maxwell-3-tier-design.md](specs/2026-10-28-maxwell-3-tier-design.md)
+
+**Plans**
+
+- [2026-08-22-hailo-8l-accelerator-tier.md](superpowers/plans/2026-08-22-hailo-8l-accelerator-tier.md)
+- [2026-09-03-fleet-overview.md](superpowers/plans/2026-09-03-fleet-overview.md)
+- [2026-09-09-composite-tier.md](superpowers/plans/2026-09-09-composite-tier.md)
+- [2026-09-14-write-door.md](superpowers/plans/2026-09-14-write-door.md)
+- [2026-09-28-browse-lane.md](superpowers/plans/2026-09-28-browse-lane.md)
+- [2026-10-28-frontier-updates.md](superpowers/plans/2026-10-28-frontier-updates.md)
+- [2026-10-28-maxwell-3-tier.md](superpowers/plans/2026-10-28-maxwell-3-tier.md)
+
+**Earlier specs (superpowers/specs)**
+
+- [2026-09-03-fleet-overview-spec.md](superpowers/specs/2026-09-03-fleet-overview-spec.md)
+- [2026-09-04-coral-edgetpu-accelerator-design.md](superpowers/specs/2026-09-04-coral-edgetpu-accelerator-design.md)
+- [2026-09-09-three-card-composite-tier-design.md](superpowers/specs/2026-09-09-three-card-composite-tier-design.md)
 
 ## Historical reports
 

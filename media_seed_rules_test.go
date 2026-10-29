@@ -126,7 +126,7 @@ func TestMediaScriptsResolveNextToTheBinary(t *testing.T) {
 // measured, kept, and served on <node-b> — and seeded by no tier:
 //   - edit: Qwen-Image-Edit-2511 Q5_1 + the lightning8 preset, "frontier confirmed ≥16GB edit
 //     primitive" (2026-08-14-seat-frontier-leg0-1-2-notes.md:323).
-//   - inpaint: RealVisXL_V5.0_fp16 held its seat (2026-08-19-nightshift8-notes.md:201).
+//   - inpaint: RealVisXL_V5.0_fp16 held its seat (private development record, 2026-08-19).
 //   - animate: WAN-Animate-2 int8 on ONE 16 GB card, 15.9 GB, 81 frames @480x854 (register F-18);
 //     operator 2026-08-27: "route WAN-Animate as a media capability".
 func TestSixteenGBComfyTiersSeedTheMeasuredEditInpaintAnimateRoutes(t *testing.T) {

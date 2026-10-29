@@ -84,3 +84,10 @@ workbook itself is not committed. The burst window (3 minutes) and the repeat ru
 same Xid in 5 or more bursts on one GPU within 24 hours, Xid 31 and 45 excepted) applied
 in internal/gpuactivity/faults.go are taken from NVSentinel's health-events-analyzer
 rules; the Go code is written for this repository and no NVSentinel source code was copied.
+
+FFmpeg trac wiki extracts (skill/ffmpeg/reference/trac-2026-09-01/):
+The 14 plain-text files there are extracts of pages from the FFmpeg trac wiki
+(https://trac.ffmpeg.org/wiki), credited to the FFmpeg trac wiki contributors and licensed
+under CC BY-SA as stated by the FFmpeg wiki. They remain under that license and are not
+relicensed under this repository's Apache-2.0 license. ATTRIBUTION.md in that directory lists
+each file with its source page.

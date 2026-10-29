@@ -34,7 +34,7 @@ pinned, floors live in `go.mod` and `setup/floors.json`).
 - **Match the existing style.** Run `gofmt` (or `go fmt ./...`) before committing.
 - **No new tests.** A change carries none; see "Testing rule" below.
 - **Conventional-ish commit messages.** Prefix with the kind of change — `feat:`, `fix:`,
-  `docs:`, `test:`, `refactor:`, `chore:` — followed by a short imperative summary.
+  `docs:`, `refactor:`, `chore:` — followed by a short imperative summary.
 - **No cloud calls in the cascade.** The cascade never calls a cloud model and holds no cloud
   credentials by design — on low confidence it returns a structured defer and the caller does the
   task. Please keep it that way. (`offload_nim` is the single, explicit, caller-invoked remote model
@@ -146,6 +146,10 @@ conflict on the changelog, and the `## [Unreleased]` block of `CHANGELOG.md` sta
 anything is written there). The format, the rules and the recovery steps are in
 [`changes/README.md`](changes/README.md); `go run ./cmd/changelog check` runs the same rules the tests do.
 
+`CHANGELOG.md` holds the recent releases; older entries are archived verbatim under
+[`docs/changelog/`](docs/changelog/README.md) so the file GitHub renders stays under its size limit. The archive is
+history: never edit it, and never move the `## [Unreleased]` block or the newest entries out of `CHANGELOG.md`.
+
 There are two ways a change reaches `main`, and the changelog takes part in the release step of both:
 
 * **A direct pull request to `main` that is also a release.** Add your fragment, bump the version in
@@ -171,8 +175,8 @@ version carriers and the top of the changelog.
 **missing** a merged feature passes every one of them, so nothing in this repo used to notice work
 disappearing. In 0.123.x a branch was rebuilt by replaying its trees onto an older base and merged:
 its first parent was the release before it, its tree was not, and six files from two merged,
-reviewed, tested pull requests vanished in one commit with CI green (register H-51; the repair is
-0.123.2).
+reviewed, tested pull requests vanished in one commit with CI green (register H-51 — a maintainer-side incident tag, see the
+[glossary](docs/glossary.md); the repair is 0.123.2).
 
 `scripts/check-deletions.sh` (run by the CI `build` job, and exercised by
 `TestDeletionGuardRefusesAnUndeclaredDeletion`) now reads what a change **lost**. It runs twice, for

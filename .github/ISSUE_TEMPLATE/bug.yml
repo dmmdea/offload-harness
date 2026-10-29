@@ -1,0 +1,48 @@
+name: Bug report
+description: Something the harness does that its docs say it should not do.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. A defer (`{"deferred": true, ...}`) is a result, not a bug: the local model declined the task.
+        A bug is a crash, a wrong answer the docs promise is right, or a documented command that does not behave as documented.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Output of `local-offload --version` (the README builds the same binary as `offload-harness`).
+      placeholder: local-offload 0.205.1
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and backend
+      description: Windows / Linux / macOS, and the backend the installer picked (CUDA, Vulkan, CPU) or how you serve the models.
+      placeholder: Windows 11, CUDA, llama-swap from setup/install.ps1
+    validations:
+      required: true
+  - type: textarea
+    id: doctor
+    attributes:
+      label: doctor output
+      description: Paste the output of `local-offload doctor`. Remove hostnames or paths you do not want public.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: The command you ran and its full output
+      description: The exact CLI command or MCP call, and everything it printed (stderr included).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected instead
+      description: Name the README section, doc page or help text that promises it.
+    validations:
+      required: true

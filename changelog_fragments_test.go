@@ -34,7 +34,7 @@ func TestTheChangelogTreeRulesHoldOnTheRealTree(t *testing.T) {
 // that wrote it, and not first on the release branch after the assembly.
 func docText(root, name string) (string, error) {
 	if name == changelog.ChangelogFile {
-		return changelog.Combined(root)
+		return changelog.Combined(root) // the live file, its fragments, then the archived releases
 	}
 	raw, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(name)))
 	return string(raw), err

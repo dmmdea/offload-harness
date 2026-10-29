@@ -8,7 +8,7 @@
 #   profile   — one of the arch-class ids the installer (H2) keys a template off
 #   ram_tier  — high|mid|low|min  (drives the 26B RAM gate)
 # The full 12-config matrix lives in
-#   docs/superpowers/plans/2026-07-11-agent-capabilities-and-hardware-matrix.md
+#   the private development record (2026-07-11)
 #
 # Run modes:
 #   detect.ps1            -> normal detection, JSON on the last line, exit 0/1
