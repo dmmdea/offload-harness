@@ -40,6 +40,15 @@ const agentTestSeat = "seat-x"
 type agentFake struct {
 	rosterIDs []string
 	loop      func(n int64) string // returns the raw chat-completions response body
+	// loopCtx, when set, answers the loop in place of loop and is handed the
+	// request's context, which ends when the client hangs up. A fake that models
+	// a seat holding a request past the bound under test waits with
+	// holdUntilHungUp, so it returns the moment the pipeline stops waiting and
+	// srv.Close does not sit out the whole simulated hang.
+	loopCtx func(ctx context.Context, n int64) string
+	// upstreamModelsCtx is upstreamModels with the request's context, for the
+	// same reason as loopCtx.
+	upstreamModelsCtx func(ctx context.Context, n int64) string
 	// loopStatus, when set, is the HTTP status the n-th LOOP completion
 	// answers with (0 = 200, as every older test gets); the body is still
 	// f.loop(n), which is how llama.cpp answers a refused tool call: a 500
@@ -346,6 +355,10 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 						w.WriteHeader(st)
 					}
 				}
+				if f.loopCtx != nil {
+					_, _ = w.Write([]byte(f.loopCtx(r.Context(), n)))
+					return
+				}
 				_, _ = w.Write([]byte(f.loop(n)))
 				return
 			}
@@ -364,7 +377,7 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				}
 				if f.chatFallback != nil {
 					if f.chatFallbackDelay > 0 {
-						time.Sleep(f.chatFallbackDelay)
+						holdUntilHungUp(r.Context(), f.chatFallbackDelay)
 					}
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write([]byte(f.chatFallback(n)))
@@ -408,7 +421,7 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 				return
 			}
 			if f.repackDelay > 0 {
-				time.Sleep(f.repackDelay)
+				holdUntilHungUp(r.Context(), f.repackDelay)
 			}
 			status := f.repackStatus
 			if f.repackStatusFor != nil {
@@ -425,6 +438,12 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			if f.repackEmptyChoices {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(`{"choices":[],"usage":{"prompt_tokens":10,"completion_tokens":0}}`))
+				return
+			}
+			if f.repack == nil {
+				// A test that never scripted the grammar lane reached it anyway: answer 500
+				// so the caller sees a seat failure, not a panic inside the handler.
+				http.Error(w, "agentFake: repack is not scripted for this test", http.StatusInternalServerError)
 				return
 			}
 			content, _ := json.Marshal(f.repack(n))
@@ -445,7 +464,7 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 			}
 			if f.props != nil && r.URL.Path == "/upstream/"+f.seat()+"/props" {
 				if f.propsCNT.Add(1) == 1 && f.propsDelay > 0 {
-					time.Sleep(f.propsDelay)
+					holdUntilHungUp(r.Context(), f.propsDelay)
 				}
 				w.Header().Set("Content-Type", "application/json")
 				_ = json.NewEncoder(w).Encode(f.props)
@@ -462,6 +481,11 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 						return
 					}
 				}
+				if f.upstreamModelsCtx != nil {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(f.upstreamModelsCtx(r.Context(), n)))
+					return
+				}
 				if f.upstreamModels != nil {
 					w.Header().Set("Content-Type", "application/json")
 					_, _ = w.Write([]byte(f.upstreamModels(n)))
@@ -477,6 +501,22 @@ func (f *agentFake) server(t *testing.T) *httptest.Server {
 	// verdict the test earned here must not outlive it (coherence_isolation_test.go).
 	t.Cleanup(func() { forgetCoherenceOf(srv.URL) })
 	return srv
+}
+
+// holdUntilHungUp simulates a seat that keeps a request for d, and ends the
+// hold the moment the client disconnects (the pipeline gave up, its own
+// context ended). It reports whether the full duration elapsed with the client
+// still there. A fixed time.Sleep in its place outlives the run under test, and
+// httptest's Close then waits the rest of it out.
+func holdUntilHungUp(ctx context.Context, d time.Duration) bool {
+	tm := time.NewTimer(d)
+	defer tm.Stop()
+	select {
+	case <-tm.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 func doneChat(content string) string {
@@ -706,8 +746,8 @@ func TestRunAgentTaskSilentSeatIsAStallNotABudgetDefer(t *testing.T) {
 	defer restore()
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
-		loop: func(int64) string {
-			time.Sleep(8 * time.Second) // far past any prefill allowance a test prompt earns
+		loopCtx: func(ctx context.Context, _ int64) string {
+			holdUntilHungUp(ctx, 8*time.Second) // far past any prefill allowance a test prompt earns
 			return doneChat("never read")
 		},
 		repack: func(int64) string { return `{"answer":"x"}` },
@@ -741,8 +781,8 @@ func TestRunAgentTaskCeilingIsABudgetDefer(t *testing.T) {
 	defer restore()
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
-		loop: func(int64) string {
-			time.Sleep(4 * time.Second) // past the 2 s ceiling, inside the 60 s stall floor
+		loopCtx: func(ctx context.Context, _ int64) string {
+			holdUntilHungUp(ctx, 4*time.Second) // past the 2 s ceiling, inside the 60 s stall floor
 			return doneChat("past the ceiling")
 		},
 		repack: func(int64) string { return `{"answer":"x"}` },
@@ -1249,7 +1289,9 @@ func TestRunAgentTaskRepackWireFailuresAreInfrastructure(t *testing.T) {
 			srv := fake.server(t)
 			defer srv.Close()
 
-			res := agentTestPipeline(t, srv.URL).Run(context.Background(), agentTestRequest(t, testContract()))
+			p := agentTestPipeline(t, srv.URL)
+			p.cfg.SeatContentionWaitSec = 1 // the 429 case retries on this budget (90 s by default); the class does not depend on how long
+			res := p.Run(context.Background(), agentTestRequest(t, testContract()))
 			wire := decodeWire(t, res)
 
 			if !wire.Deferred {
