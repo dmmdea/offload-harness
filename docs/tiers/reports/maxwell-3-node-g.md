@@ -2,7 +2,8 @@
 2026-10-28 right after the install (install.ps1 at feat/maxwell-3-tier 39f3c0c7: tier classified, llama-swap
 served by the boot task on 11436, the render runners placed by Step 7a). Scrubbed: host name and user path.
 The agent lane is the resident E2B by design (no agent_model entry); the sd.cpp binary, the sdxl-turbo weights
-and whisper-server are placed by the operator on this tier, as its page says. The hyperframes browser cache path is
+and whisper-server were placed by the operator at install time, as its page says; `local-offload update` has kept
+both binaries current since (whisper-server through `update.paths.whisper`). The hyperframes browser cache path is
 elided to `<browser cache>`: its `home/.cache` segment reads as a home directory to the identity lint. -->
 
 # local-offload capability report
