@@ -24,8 +24,8 @@ six items, which this ADR names and refers to below by name:
 
 **What Strata is.** The following is as read from the project's public documentation on 2026-10-13. A re-read of the
 install guide, the model guide, the details page and the releases page on 2026-10-14 confirmed the hardware floors and the
-release pin recorded in Decision item 5 and the KV-cache placement stated below; the rest is not yet re-verified, and the spike
-re-reads it before anything is pinned. Strata is an MIT-licensed local inference engine (a C++/CUDA/HIP core and a Python
+KV-cache placement stated below; the rest is not yet re-verified, and the spike re-reads it before anything is
+installed. Strata is an MIT-licensed local inference engine (a C++/CUDA/HIP core and a Python
 server), not a model and not an agent runtime. It serves one large MoE family, Qwen3.8-Flash-Next (125B parameters, 6B active)
 in several quantizations and derivatives, and since its 0.1.44 release Qwen3.6-35B-A3B. Attention and the dense layers live on
 the cards. The KV cache lives in VRAM below 64K of context; at 64K and more the default setup keeps the context's KV cache in
@@ -97,8 +97,8 @@ together with a third licence state, `conditional`, and its status was flipped w
 
 3. **Two shapes, one per phase.**
    - **The spike** takes ADR 0027's shape: hand-launched, under `local-offload gpu reserve` with `--devices` and `--ram`
-     declared and an honest `--for`, outside llama-swap and the cascade, on a pinned release tag whose engine archive hash is
-     recorded, with `--data-dir` and every installer write (settings file, venv, caches, weights) relocated by environment to a
+     declared and an honest `--for`, outside llama-swap and the cascade, on the newest release (never a pinned tag, ADR 0099), its engine archive
+     checked against the publisher's digest and the release id recorded with each measurement, with `--data-dir` and every installer write (settings file, venv, caches, weights) relocated by environment to a
      data drive, or the spike closes without it (there is no junction). `idle_unload_s=300` is set on every arm, because the
      spike has no llama-swap timer and a manual unload after each run fails if the session dies. `STRATA_IQ_MT_MIN=1` and
      `--adapt-every 100000` are set on every arm for reproducibility, and `--kv-streaming off` on the arm that is measured

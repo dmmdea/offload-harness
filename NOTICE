@@ -22,12 +22,12 @@ no upstream source code was copied.
 
 Compose templates adapted from hyperframes-student-kit (render/compose-templates):
 stat-card, section-title, callout-label and checklist-card are adapted from card
-designs in hyperframes-student-kit, pinned at commit 0d30152, which is licensed
+designs in hyperframes-student-kit at commit 0d30152, which is licensed
 under the MIT License with an additional use permission for its style library
 and templates. Each template is a rewrite in CSS keyframes of the card's layout
 and motion; no upstream source file was copied. The kit's licence texts are kept
 verbatim in render/compose-templates/_third_party/hyperframes-student-kit/, whose
-PROVENANCE.md records the source repository, the pinned commit, and what was
+PROVENANCE.md records the source repository, the source commit, and what was
 taken and what was not.
 
 ComfyUI workflow template fixtures (render/testdata/templates-catalog/):
@@ -41,14 +41,14 @@ The four task generators (kv_store, log_triage, needle_retention, sudoku_sketchp
 the four graders, the standalone-marker and operation-rendering rules, and the table of
 published levels are ported to Go from ContextBench
 (https://github.com/RulinShao/ContextBench), licensed under the Apache License,
-Version 2.0, pinned at commit fb533c18c78a82d3f1b2047a9c1700735cf829ae. The operation
+Version 2.0, ported from commit fb533c18c78a82d3f1b2047a9c1700735cf829ae. The operation
 mix is ported: the logic, the data tables (word lists, level knobs) and the texts of the
 streamed operations (sentinel lines, headers, request and move wording) are carried over,
 byte for byte where the stream is concerned, so that a seed produces the same task
 stream; the Go code and comments are written for this repository. Each ported file names
 the upstream file it comes from. The upstream's documentation, instruction scaffolds and
 dataset are not copied, and no upstream data is committed. The upstream repository has
-no NOTICE file at the pinned commit, its source files carry no copyright header, and its
+no NOTICE file at that commit, its source files carry no copyright header, and its
 LICENSE carries only the unfilled appendix line ("Copyright [yyyy] [name of copyright owner]").
 
 Search-results compaction rung (internal/agent/rung_search.go):

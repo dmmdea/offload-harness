@@ -9,7 +9,7 @@ ik is genuinely **faster on prompt-processing** (the result that *almost* justif
 **Actionable takeaway (no ik needed):** mainline `--n-cpu-moe 24` lifts the live 26B-A4B escalation tier's token-gen ~**+11%** (15.4 → 17.2 t/s) for free, grammar intact — worth adopting after a quick verify.
 
 ## Setup (all non-mutating)
-- `~/ik_llama.cpp` cloned + built CUDA, pinned commit **`11c9935c`** (2026-06-16), `sm_86`, flags `-DGGML_CUDA=ON -DGGML_NATIVE=ON -DCMAKE_CUDA_ARCHITECTURES=86-real -DLLAMA_CURL=OFF -DGGML_SCHED_MAX_COPIES=1`.
+- `~/ik_llama.cpp` cloned + built CUDA at commit **`11c9935c`** (2026-06-16), `sm_86`, flags `-DGGML_CUDA=ON -DGGML_NATIVE=ON -DCMAKE_CUDA_ARCHITECTURES=86-real -DLLAMA_CURL=OFF -DGGML_SCHED_MAX_COPIES=1`.
 - Baseline = the exact mainline tree the live config uses: `~/llama.cpp-mtp` (`c34b922`). Built its `llama-bench` (additive; live `llama-server` untouched).
 - A/B on scratch ports 18080/18081; `llama-bench` -p512 -n128 -r3 (median of 3), `GGML_CUDA_DISABLE_GRAPHS=1` on both, flash-attn on both, identical offload split. Grammar gate = the harness's own 4 GBNF tasks (summarize/classify/extract/triage) via its real `grammar`-field path, ik vs mainline serving the same model.
 

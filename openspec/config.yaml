@@ -20,8 +20,9 @@ context: |
   - No new tests: a change carries none, CI as it stands is the gate and the check is one real run of the change
     (red-first tests and mutation proofs are superseded 2026-10-18; AGENTS.md, Testing rule).
   - Docs change in the same PR; system pages keep their Purpose and Source map sections (CI runs TestDocsLint).
-  - Third-party software enters only through the admission checks in docs/systems/security.md (pinned version and
-    sha256, telemetry off, data off the system drive).
+  - Third-party software enters only through the admission checks in docs/systems/security.md (the newest release,
+    checked against the publisher's digest at install time and never a pinned version (ADR 0099); telemetry off;
+    data off the system drive).
 
 rules:
   proposal:

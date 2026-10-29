@@ -22,7 +22,7 @@ import (
 
 // autoSlots is what llama-server serves when --parallel is negative or "auto": llama.cpp's server.cpp
 // sets n_parallel to 4 when the value is negative. A config that STATES -1 or auto therefore states a
-// slot count; only a config that states nothing leaves the count to the pinned build's default, which
+// slot count; only a config that states nothing leaves the count to the installed build's default, which
 // this file cannot read.
 const autoSlots = 4
 
@@ -64,7 +64,7 @@ func SeatParallel(text, alias string) (slots int, ok bool) {
 // SeatParallelWhy is SeatParallel with the reason an unknown is unknown, as one operator-facing
 // clause (empty when slots is known): the config does not parse, no entry answers to the alias (or two
 // claim it), the entry is not a llama.cpp one (no llama-server in its command), or it states no slot
-// count. An entry with no flag is unknown on purpose, because what the pinned llama.cpp build then
+// count. An entry with no flag is unknown on purpose, because what the installed llama.cpp build then
 // defaults to is not something this file can read.
 func SeatParallelWhy(text, alias string) (slots int, why string) {
 	s, why := readSeatSlots(text, alias, false)

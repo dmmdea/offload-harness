@@ -345,7 +345,7 @@ Usage:
   local-offload delegate --contract file.json [--route auto|spread|local|remote] [--read-root DIR] [--remote http://node:18811]...   place delegation-contract subtasks on this box or tailnet fleet nodes (needs agent_delegation_enabled; remotes default to delegate_remotes)
   local-offload fleet-serve [--listen ADDR] [--listen-trusted-network] [--node-id NAME]   join the fleet-dispatcher fleet (health/dispatch/jobs on :18811; docs/FLEET-NODE.md)
   local-offload forecast-serve --forecast-dir DIR --model DIR --port N [--host 127.0.0.1] [--device cuda] [--max-row-patches N]   run the Timestral forecast server a forecast seat of llama-swap launches (python child bound to this process; loopback only)
-  local-offload install forecast [--home DIR] [--models DIR] [--ref SHA] [--torch-backend auto] [--json]   build the forecast lane: venv, torch, the pinned timestral package, the hash-verified weights and the server file (uv required; never loads the model)
+  local-offload install forecast [--home DIR] [--models DIR] [--ref SHA] [--torch-backend auto] [--json]   build the forecast lane: venv, torch, the newest timestral package, the newest weights checked against the publisher's digest, and the server file (uv required; never loads the model)
   local-offload fleet-measure            prime the fleet footprint store: one minimal render per configured task, then print the recorded entries
   local-offload fleet-ui [--listen 127.0.0.1:18813] [--listen-trusted-network] [--interval 5s] [--remote URL]...   live overview page: node cards (GPU/VRAM/CPU/RAM graphs, seat, served models), cluster jobs + errors feed (docs/systems/fleet-overview.md)
   local-offload fleet-smoke [--remote URL]... [--timeout 120] [--json]   send one grounded one-step contract to EVERY node and print where each landed (node, seat, placement, wall, verdict); non-zero unless all PASS
@@ -4234,7 +4234,7 @@ func writeModelBindingsSection(w io.Writer, bindings []mediacap.Binding) int {
 	if len(bindings) == 0 {
 		return 0
 	}
-	fmt.Fprintln(w, "comfyui model bindings (each name must sit in the class directory its loader node opens; MISSING/MISPLACED = the graph is rejected at render time; INCOMPLETE = a file of this name is there but its size does not match the pinned download, e.g. a copy still in progress):")
+	fmt.Fprintln(w, "comfyui model bindings (each name must sit in the class directory its loader node opens; MISSING/MISPLACED = the graph is rejected at render time; INCOMPLETE = a file of this name is there but it is smaller than the size the installer recorded when it downloaded it, e.g. a copy still in progress):")
 	broken := 0
 	for _, b := range bindings {
 		mark := "OK  "

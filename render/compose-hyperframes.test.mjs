@@ -625,7 +625,7 @@ test("shipped templates: offline, deterministic, declared variables, a duration 
 });
 
 // --- the hyperframes-student-kit ports ----------------------------------------------------------
-// Four templates adapted from a community teaching kit at ONE pinned commit, kept under the kit's own
+// Four templates adapted from a community teaching kit at ONE source commit, kept under the kit's own
 // licences (MIT for its original material, plus its own use permission for the style library and
 // templates). The kit is a reference, never an install: nothing here runs its scripts or its CLI.
 // These tests are the contract of the port: what ships, what must NOT survive the port (creator
@@ -770,7 +770,7 @@ test("kit ports: CSS animation is finite, nothing waits on a timer, and every @f
   }
 });
 
-test("kit ports: each README names its source card at the pinned kit commit and points at the retained licence texts", () => {
+test("kit ports: each README names its source card at the source kit commit and points at the retained licence texts", () => {
   for (const [name, want] of Object.entries(KIT_PORTS)) {
     const readme = readFileSync(join(TEMPLATES_DIR, name, "README.md"), "utf8");
     assert.ok(readme.includes(`adapted from hyperframes-student-kit @${KIT_COMMIT} card ${want.card}`), `${name}: provenance line`);
@@ -784,14 +784,14 @@ test("kit ports: each README names its source card at the pinned kit commit and 
 
 test("kit ports: the kit's MIT licence and use permission are kept verbatim under _third_party, which is never a template", (t) => {
   const dir = join(TEMPLATES_DIR, "_third_party", "hyperframes-student-kit");
-  // hashes of the two files as they sit at the pinned kit commit (LF); a CRLF checkout is folded first
+  // hashes of the two files as they sit at the source kit commit (LF); a CRLF checkout is folded first
   const sha = (f) => createHash("sha256").update(readFileSync(join(dir, f), "utf8").replace(/\r\n/g, "\n")).digest("hex");
   assert.equal(sha("LICENSE"), "263623d3ac61f5b09eeceec5af2395bb15e566d0507558f5b6c405f2ba132bd1");
   assert.equal(sha("PIPELINE-USE-PERMISSION.txt"), "51fc8998336079bd888662ac3ebc708ba05444a98b5ad26af757567f8125259d");
   assert.ok(!listTemplates(TEMPLATES_DIR).includes("_third_party"));
   const scratch = scratchDir(t, "compose-tp-");
   assert.throws(() => materializeTemplate(TEMPLATES_DIR, "_third_party", {}, scratch), (e) => e.cls === "BAD_INPUT");
-  assert.ok(/kit_commit|0d30152a82b9ceb93cfdd9bdbf46f0d5ab3cde86/.test(readFileSync(join(dir, "PROVENANCE.md"), "utf8")), "PROVENANCE.md pins the full kit commit");
+  assert.ok(/kit_commit|0d30152a82b9ceb93cfdd9bdbf46f0d5ab3cde86/.test(readFileSync(join(dir, "PROVENANCE.md"), "utf8")), "PROVENANCE.md names the full kit commit");
 });
 
 // --- captions-bar: word groups from a transcript, over transparency ------------------------------------
