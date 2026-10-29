@@ -1,7 +1,7 @@
 // wf-hidream-o1.mjs — build the HiDream-O1-Image API-format graph, matching the OFFICIAL
 // Comfy-Org workflow templates exactly (verified against the raw template JSONs + the
-// installed node sources, 2026-07-16 — see docs/superpowers/specs/2026-07-16-quality-first-
-// generation-design.md for the source trail).
+// installed node sources, 2026-07-16 — see the private development record (2026-07-16)
+// for the source trail).
 //
 // Why a dedicated graph (the generic SDXL-shaped KSampler graph is WRONG for O1):
 //   * O1 is an 8B PIXEL-SPACE DiT: EmptyHiDreamO1LatentImage produces its (B,3,H,W)

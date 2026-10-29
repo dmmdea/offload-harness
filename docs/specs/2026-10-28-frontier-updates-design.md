@@ -70,7 +70,7 @@ Anti-goals (what would make this a failure even if it works)
 - CI stays offline: `installer-windows` and `build` download nothing today. The resolver gets a seam
   (`OFFLOAD_RESOLVE=offline` with a fixture) so `setup/render.tests.ps1`, which dot-sources `install.ps1`, loads
   without the network.
-- GitHub API: 60 requests per hour unauthenticated. The resolver sends `gh auth token --user dmmdea` when `gh` is
+- GitHub API: 60 requests per hour unauthenticated. The resolver sends `gh auth token` (account via `OFFLOAD_UPDATE_GH_USER`) when `gh` is
   present, else no token, `per_page=10`, and caches ETags in `installed.json` so a repeat is a 304.
 - The 3-card reference box's hand-kept `C:/llama-swap/llama-swap.yaml` names `C:/llama.cpp-b<N>` directly and must never be
   re-rendered (operator doctrine in its header). The ampere-6 reference box's `config.yaml` names `llamacpp-b<N>/bin` and sets

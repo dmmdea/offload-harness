@@ -103,3 +103,7 @@ seat-contention-probe.json
 /.opencode/skills/openspec-*/
 /.opencode/commands/opsx-*
 /.opencode/command/opsx-*
+
+# Evaluation output (generated images from a scoring run), never source: 220 PNGs (363 MB) were tracked by
+# mistake in 0.9x and removed from the tree in 0.205.x; the files stay on the box that produced them.
+/runs/

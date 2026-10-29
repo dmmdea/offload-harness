@@ -2,7 +2,7 @@
 // deterministic image edits (PIL worker + GIMP design-file conversion) and ffmpeg
 // av operations. Everything here is CPU work — NO GPU lock, no llama-swap eviction;
 // these ops run in parallel with renders. Spec:
-// docs/superpowers/specs/2026-07-16-edit-media-tools-design.md.
+// the private development record (2026-07-16).
 package mediaops
 
 import (

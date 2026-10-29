@@ -1,0 +1,3 @@
+# Synthetic JWT-shaped test fixtures (not credentials); the generic-api-key rule flags their shape.
+tools/comfyui/internal/cliutil/jwtshape_test.go:generic-api-key:16
+tools/llamaswap/internal/cliutil/jwtshape_test.go:generic-api-key:16

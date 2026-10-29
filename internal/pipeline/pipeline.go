@@ -1999,7 +1999,7 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	// 3/3 text-stamped renders grounded correctly (qwen3vl on this stack) — text
 	// found, boxed, erased; zero wrong-region repaints. An oversized image defers
 	// cleanly on the vqa load limit. Evidence:
-	// docs/superpowers/evidence/2026-07-17-nightshift-run-graph.md.
+	// (measured 2026-07-17 in the private development record).
 	if mask == "" && paramBool(req.Params, "auto_text") {
 		// The detector's vqa row is an inner row of this call's row (plan D12):
 		// every exit below records through meta, so the job id rides on all of them.

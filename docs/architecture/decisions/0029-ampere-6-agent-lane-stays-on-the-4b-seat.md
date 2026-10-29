@@ -7,7 +7,7 @@ date: "2026-08-28"
 
 ## Context
 
-The 2026-08-27 nightshift measured gpt-oss-20b under FreeToken beating the
+The 2026-08-27 [nightshift](../../glossary.md#nightshift) measured gpt-oss-20b under FreeToken beating the
 ampere-6 tier's qwen3.5-4b agent seat 36/36 @712 s vs 32/36 @1368 s on a
 calibrated exact-answer instrument, and the operator approved adopting it for
 the agent/delegation lane. The same measurement carried a caveat: the agentic

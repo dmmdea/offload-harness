@@ -22,7 +22,7 @@
 //     - history polling with the dead-server watchdog + suspend/resume fence — a
 //       capability the CLI's `wait` deliberately lacks (it warns and retries to its
 //       timeout; the harness must abort in ~COMFY_DEAD_SEC seconds to RELEASE the
-//       GPU slot). Surfaced as a CLI gap in the 2026-08-14 nightshift-4 ledger.
+//       GPU slot). Surfaced as a CLI gap on 2026-08-14.
 //     - output retrieval: GET /view -> Buffer -> caller-named file. The CLI's `view`
 //       routes bytes through its structured-output pipeline; byte-exact binary
 //       delivery through it is unproven, so files are fetched raw.

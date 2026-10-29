@@ -247,6 +247,12 @@ names with their size on the node (-1: not there) and are not an identity. See
 [ADR 0082](architecture/decisions/0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md)
 Amendment 3.
 
+## Nightshift
+
+The maintainer's unattended overnight run of benchmarks, bakes and agents. ADRs and tier notes cite it as the
+date on which a figure was measured ("the 2026-08-27 nightshift"). The run notes themselves are not published,
+so the text beside the citation carries the meaning.
+
 ## Node Manifest
 
 The declaration accompanying a run-graph request: which ComfyUI custom node packs are required (from
@@ -374,6 +380,11 @@ reference box" with a tier id, or use the node letter ([STYLE.md](STYLE.md#priva
 
 A dated document keeps the era of its own date (rule V3): a sentence from August 2026 about the workstation
 names the tier the workstation was then, not the one it is now.
+
+## Register ids (H-51, LO-14, C-83, D-103 ...)
+
+The maintainer's incident and finding tags. Commit messages, CI step names and code comments use them as
+cross-references. There is no public register: the text beside each tag carries the meaning.
 
 ## Rigger
 

@@ -32,7 +32,7 @@ hosts the package names:
   into `~/.claude/skills` and every other agent's skills dir. The router skill claims to be the
   "mandatory entry point" for any video request.
 - **Cloud keys.** The CLI loads `./.env` from the cwd on every command (`cli.ts:63-99`). `capture`
-  prefers `OPENROUTER_API_KEY`, which the house reserves for Jev alone. `snapshot --describe` calls
+  prefers `OPENROUTER_API_KEY`, which is reserved for a different paid cloud tool, so the CLI would send content to a paid cloud API. `snapshot --describe` calls
   Gemini whenever a key is present.
 - **No sandbox.** Chrome launches with `--no-sandbox` and site isolation disabled
   (`browserManager.ts:857-963`).

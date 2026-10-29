@@ -2,7 +2,7 @@
 # Blackwell (sm_120) 16GB cards = 48.9 GB, Windows. Reference box IS the workstation:
 # RTX 5060 Ti @17:00.0 (device 0) + RTX 5070 Ti @65:00.0 (device 1, DISPLAY) +
 # RTX 5060 Ti @B5:00.0 (device 2), X299 / i9-10980XE, quad-channel DDR4-3400 128GB.
-# Shipped 0.113.32. Evidence: Benchmarks and Optimizations/2026-08-31-48gb-gates-NOTES.md.
+# Shipped 0.113.32. Evidence: operator benchmark notes, 2026-08-31.
 #
 # PLACEMENT LAW - THE THIRD CARD IS NOT A THIRD WORKER. Measured, operator-set:
 #   devices 0 and 2 (the 5060 Ti PAIR): every seat the harness serves by default.
@@ -136,10 +136,10 @@ models:
     ttl: 300
   # LONG-CONTEXT TWIN of the 27B (2026-09-10, operator: the third card buys CONTEXT and the
   # 3-card tier must register more than the 2-card tier). Same weights and pair pin, q8_0 KV,
-  # NO MTP drafter (q8_0 + MTP OOMs at MTP-context init, ledger G3 2026-09-01), no mmproj,
+  # NO MTP drafter (q8_0 + MTP OOMs at MTP-context init, measured 2026-09-01), no mmproj,
   # --ctx-size 262144 as a LITERAL (profile long_ctx_size), measured live on the reference box.
   # Swappable, ttl 300 like every seat. The composite tier routes window overflow here; the
-  # vLLM long layer (pp3, fp8 KV, 262,144 measured Nightshift 2 seat v7) ships with 0.116.0.
+  # vLLM long layer (pp3, fp8 KV, 262,144 measured 2026-08-27 seat bake v7) ships with 0.116.0.
   # FAN-OUT TWIN of the 27B (A-70, measured 2026-09-01 on the same 5060 Ti pair this
   # tier pins). Identical weights, pin and sampling; the ONLY difference is
   # `--parallel 8`.
