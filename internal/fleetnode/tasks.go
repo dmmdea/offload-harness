@@ -841,7 +841,7 @@ func buildRunGraph(cfg config.Config, payload json.RawMessage) (core.Request, fu
 		}
 		// A manifest that names a node pack makes this node clone its repository and install its requirements:
 		// the caller's code, run here. The bearer lets a caller run renders, not that, so a pack is taken only
-		// at a pinned repository and commit (mediacap.NodePackPins), refused here with the pack named, before a
+		// from an allowlisted repository (mediacap.AllowedNodePacks), refused here with the pack named, before a
 		// file is written, a job exists or a lease is taken. The runner refuses on the same table again
 		// (render/manifest-satisfy.mjs) for a manifest that reaches it another way.
 		if err := mediacap.CheckManifestNodePacks(in.Manifest); err != nil {

@@ -20,8 +20,8 @@
 // the same table for `doctor` (internal/mediacap/routeneeds.go); a class missing here is
 // still reported, just without the pack hint.
 // ComfyUI-MultiGPU archives upstream 2026-09-30 (issue #223, no successor endorsed).
-// The mirror's head is upstream v2.6.4's last code commit + one local Windows P2P/cudart
-// fix already carried by the fleet; mirrored privately at dmmdea/ComfyUI-MultiGPU-mirror. See
+// The mirror's default branch carries one local Windows P2P/cudart
+// fix already carried by the fleet, on top of upstream's last code commit; mirrored privately at dmmdea/ComfyUI-MultiGPU-mirror. See
 // docs/systems/media-generation.md "Archival".
 const MULTIGPU_ARCHIVAL_NOTE =
   " — ARCHIVED upstream 2026-09-30 (no successor); install from the mirror https://github.com/dmmdea/ComfyUI-MultiGPU-mirror";

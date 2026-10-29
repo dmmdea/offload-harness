@@ -53,6 +53,9 @@ export async function runGraphFlow(args, deps) {
     parseManifest = _parse, manifestHash = _hash,
     readOwner = _readOwner, writeOwner = _writeOwner,
     comfyUp, ensureComfy, killComfy, freeComfy, satisfy,
+    // packsKeyNow: the sorted `name@commit` key of the packs the manifest names, as they are on disk now. The cache holds the
+    // key it stored, so a pack an operator moved, replaced or deleted since is provisioned again instead of trusted.
+    packsKeyNow,
     // convert: a template run's step from a template name to the API graph, once ComfyUI is up ({ok, graph} or {ok:false, refusal}).
     // tofuCheck: trust on first use for the models that ask for it, on EVERY run (a cached one too): the cache says the environment
     // was provisioned, not that a file is still the one that was trusted. ({ok, first_seen[]} or {ok:false, defer}.)
@@ -79,9 +82,11 @@ export async function runGraphFlow(args, deps) {
   // Is a ComfyUI already answering that we did NOT start? (external instance)
   const wasUp = await comfyUp(api);
 
-  // Cache short-circuit: our marker records this exact env (manifest hash only — no pid).
+  // Cache short-circuit: our marker records this exact env (manifest hash + the commits the packs were at — no pid). The
+  // manifest hash holds no commit, so the pack key is what notices a pack that moved since.
   const owner = readOwner(comfyDir);
-  const cached = !!(owner && owner.manifestHash === wantHash);
+  const keyNow = packsKeyNow ? await packsKeyNow(m.node_packs || []) : null;
+  const cached = !!(owner && owner.manifestHash === wantHash && (keyNow === null || (owner.packs ?? "") === keyNow));
 
   // Satisfy = disk provisioning only (packs+models). No /object_info gate here — the
   // node-class check now lives in preflight, AFTER ComfyUI is up with the packs.
@@ -122,8 +127,8 @@ export async function runGraphFlow(args, deps) {
       catch (e) { return await writeDefer({ code: "COMFY_START_FAILED", ref: "", detail: String(e.message || e) }); }
     }
 
-    // Persist the ownership marker (manifest hash + unverified models — NO pid).
-    writeOwner(comfyDir, { manifestHash: wantHash, unverified: sat.unverified || [] });
+    // Persist the ownership marker (manifest hash + pack commits + unverified models — NO pid).
+    writeOwner(comfyDir, { manifestHash: wantHash, packs: cached ? (keyNow ?? "") : (sat.packsKey ?? ""), unverified: sat.unverified || [] });
 
     // A template becomes its API graph here, against the live /object_info of this ComfyUI. A refusal (an unknown node class, a ComfyUI
     // older than the template, an override that names nothing) is a typed defer, and the ComfyUI we started goes down with it.
@@ -256,8 +261,7 @@ async function main() {
   // cannot exist on Linux — advertised to the fleet, broken on arrival.
   const comfyPy = resolveComfyPy(comfyDir);
   const instance = resolveInstance({ api, env: process.env });
-  const cmCli = process.env.COMFY_CM_CLI || join(comfyDir, "custom_nodes/ComfyUI-Manager/cm-cli.py");
-  const satDeps = { ...defaultSatisfyDeps({ comfyDir, comfyPy, api, cmCli }), beat: (line) => leaseBeat(line, { force: true }) };
+  const satDeps = { ...defaultSatisfyDeps({ comfyDir, comfyPy, api }), beat: (line) => leaseBeat(line, { force: true }) };
 
   const run = () => runGraphFlow(
     { graph, manifest, outDir: flags["out-dir"] || ".", resultPath: flags.result || "run-graph-result.json", api, comfyDir, reserveVram, template, overrides, seed },
@@ -271,6 +275,7 @@ async function main() {
         free: () => deps.freeComfy(), systemArgv: fetchSystemArgv,
       }),
       satisfy: (mm) => satisfyManifest(mm, satDeps),
+      packsKeyNow: satDeps.packsKey,
       // Trust on first use for the models that ask for it (a template run's manifest does); a graph run's manifest asks for none.
       tofuCheck: (mm) => verifyTofuModels(mm.models, { ...satDeps, tofu: defaultTofuDeps() }),
       // A template becomes its API graph against THIS ComfyUI's own /object_info and version, which exist only once it is up.

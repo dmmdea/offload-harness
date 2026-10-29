@@ -1101,8 +1101,8 @@ the first-stage fix for upstream issue #220's `libcudart.so`-on-Windows crash; t
 `illegal memory access` in the int8 dispatch path itself, hit only when `compute_device` is a
 *non-default* CUDA device, remains open and unfixable upstream — this is why the pooled LTX-2.5
 seat keeps `compute cuda:0`). **Fallback source once upstream goes read-only:** private mirror
-`https://github.com/dmmdea/ComfyUI-MultiGPU-mirror` (full `git clone --mirror`, all branches/tags,
-plus the local fix). `render/comfy-nodes.mjs` (`NODE_PACKS`) and
+`https://github.com/dmmdea/ComfyUI-MultiGPU-mirror` (a full `git clone --mirror`, all branches/tags;
+its default branch carries the local fix). `render/comfy-nodes.mjs` (`NODE_PACKS`) and
 `internal/mediacap/routeneeds.go` (`nodePacks`/`packHint`) both carry the archival note in the
 operator-facing `MISSING_NODE` hint, so a box missing the pack is told where to get the
 patched code, not just the (soon read-only) upstream URL. Upstream and the mirror are each a row of

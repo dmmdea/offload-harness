@@ -74,12 +74,19 @@ environment.
    disk is used as it is: a render request never moves an installed pack, so a caller holding only the render bearer
    cannot make a node fetch and run whatever an upstream pushed a minute ago. Moving a pack to a newer commit is the
    operator's update (`git -C custom_nodes/<name> pull --ff-only`, or the fleet's update tooling). The commit a pack is at
-   is recorded beside it in `custom_nodes/<name>.installed.json` (`{repo, commit, installed_at}`, rewritten only when the
-   commit changes), and the dependency marker is keyed on it, so a pack the operator moved is re-resolved on the next
-   request that names it. A fresh clone is a change; an installed pack is not. Packs are placed *before* dependency
+   is recorded beside it in `custom_nodes/<name>.installed.json` (schema 2: `{schema, repo, commit, installed_at, checked_at,
+   previous, rejected}`; `repo` is the origin the checkout reports, `previous` the commit it held before, `rejected` the
+   commits an install of it failed on; rewritten only when the commit or repository changes). The dependency marker and the
+   run-graph cache are keyed on the commits, so a pack the operator moved, replaced or deleted is provisioned again on the next
+   request that names it. A fresh clone is a change; an installed pack is not. If a later step of the same satisfy fails
+   (resolve, `pip check`, the host-constraint tripwire), the directory this satisfy cloned is removed again and its commit is
+   appended to `rejected`; a later request that finds the repository's newest commit in `rejected` defers
+   `NODE_PACK_REJECTED` (ref: the pack) instead of cloning and failing again, and a newer commit is tried afresh. A pack that
+   was already on disk is never removed. Packs are placed *before* dependency
    resolution, because the unified resolve reads their on-disk requirements.
 
-6. **Resolve and install dependencies once**, for all packs together, under host-pin constraints that
+6. **Resolve and install dependencies once**, for all packs together, under host constraints (read from the installed
+   venv on each run and discarded after, never stored) that
    prevent anything moving `torch`, `torchvision`, `torchaudio`, or `numpy`. The resolve runs on
    every satisfy EXCEPT the proven re-run: it is skipped only when no checkout moved AND a
    **persisted marker** proves this exact set of pack commits was already resolved+checked successfully.
@@ -217,6 +224,8 @@ access for pack clones and model downloads.
 
 1. Provisioning is additive and never moves the protected host packages.
 2. Packs are placed before dependency resolution.
+   The run-graph cache (`.offload-owned.json`) holds the manifest hash and the sorted `name@commit` key of the packs on disk
+   when it was written; it skips this satisfy only when both still match.
 3. The node-class gate runs after ComfyUI is up, not before.
 4. Failures are typed Defers, not crashes.
    Model presence is resolved across ComfyUI's full search path, so the harness and ComfyUI agree on
@@ -255,7 +264,7 @@ Run the Node suites with `node --test render/*.test.mjs` from the repo root.
 
 ## Source map
 
-- [`render/manifest-satisfy.mjs`](../../render/manifest-satisfy.mjs) — satisfier, host pins, tripwire
+- [`render/manifest-satisfy.mjs`](../../render/manifest-satisfy.mjs) — satisfier, host constraints, tripwire
 - [`render/manifest.mjs`](../../render/manifest.mjs) — schema normalization and hashing
 - [`render/comfy-run-graph.mjs`](../../render/comfy-run-graph.mjs) — orchestration and envelope
 - [`render/template-run.mjs`](../../render/template-run.mjs) — a template by name, its conversion and overrides (template runs)

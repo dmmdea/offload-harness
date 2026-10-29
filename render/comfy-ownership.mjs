@@ -13,9 +13,11 @@ export function pidAlive(pid) {
 // writeOwner: persist the ownership marker. The run-graph flow keys ownership on
 // `manifestHash` (+ the downloaded `unverified` model list) and passes NO pid — the pid was
 // the ephemeral node process, never a stable ComfyUI-ownership signal. `pid` stays optional
-// for the legacy isOwnedByUs(pid-liveness) callers/tests below.
-export function writeOwner(dir, { pid, manifestHash, unverified = [] }) {
+// for the legacy isOwnedByUs(pid-liveness) callers/tests below. `packs` is the sorted `name@commit`
+// key of the node packs on disk when the marker was written (the manifest hash holds no commit).
+export function writeOwner(dir, { pid, manifestHash, packs, unverified = [] }) {
   const rec = { startedAt: Date.now(), manifestHash, unverified };
+  if (typeof packs === "string") rec.packs = packs;
   if (typeof pid === "number") rec.pid = pid;
   writeFileSync(p(dir), JSON.stringify(rec));
 }
