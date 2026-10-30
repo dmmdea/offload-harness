@@ -65,13 +65,26 @@ func TestPrintingPressManifestListsEveryTool(t *testing.T) {
 	}
 	readManifest(t, &manifest)
 
-	src, err := os.ReadFile(filepath.Join("internal", "mcpserver", "mcpserver.go"))
+	// mcpserver.go was split into mcpserver_*.go by topic; scrape every one of them.
+	files, err := filepath.Glob(filepath.Join("internal", "mcpserver", "mcpserver*.go"))
 	if err != nil {
-		t.Fatalf("read mcpserver.go: %v", err)
+		t.Fatalf("glob mcpserver source: %v", err)
 	}
-	registered := regexp.MustCompile(`(?m)^\s+Name:\s+"([a-z_]+)",`).FindAllStringSubmatch(string(src), -1)
+	var src strings.Builder
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		b, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read %s: %v", file, err)
+		}
+		src.Write(b)
+		src.WriteString("\n")
+	}
+	registered := regexp.MustCompile(`(?m)^\s+Name:\s+"([a-z_]+)",`).FindAllStringSubmatch(src.String(), -1)
 	if len(registered) == 0 {
-		t.Fatal("found no registered tool names in mcpserver.go — the scrape pattern needs updating")
+		t.Fatal("found no registered tool names in mcpserver*.go — the scrape pattern needs updating")
 	}
 
 	var want []string

@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -81,23 +82,33 @@ func TestSummarizeToolStampsItsDoor(t *testing.T) {
 // and nothing about that failure is visible in a passing test suite — which is
 // exactly how all 558 of them accumulated. So the source is the fixture.
 func TestEveryToolHandlerRequestCarriesADoor(t *testing.T) {
-	src, err := os.ReadFile("mcpserver.go")
+	// mcpserver.go was split into mcpserver_*.go by topic; scan every one of them.
+	files, err := filepath.Glob("mcpserver*.go")
 	if err != nil {
-		t.Fatalf("read source: %v", err)
+		t.Fatalf("glob source: %v", err)
 	}
-	lines := strings.Split(string(src), "\n")
 	found := 0
-	for i, ln := range lines {
-		if !strings.Contains(ln, "core.Request{") {
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
 			continue
 		}
-		found++
-		// A multi-line literal puts the fields on the following lines; a
-		// one-liner puts them here. Either way the door must be within the
-		// literal's first few lines.
-		window := strings.Join(lines[i:min(i+9, len(lines))], "\n")
-		if !strings.Contains(window, `Door: "offload_`) && !strings.Contains(window, `Door:  "offload_`) {
-			t.Errorf("mcpserver.go:%d builds a core.Request with no MCP-tool Door: %s", i+1, strings.TrimSpace(ln))
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read source: %v", err)
+		}
+		lines := strings.Split(string(src), "\n")
+		for i, ln := range lines {
+			if !strings.Contains(ln, "core.Request{") {
+				continue
+			}
+			found++
+			// A multi-line literal puts the fields on the following lines; a
+			// one-liner puts them here. Either way the door must be within the
+			// literal's first few lines.
+			window := strings.Join(lines[i:min(i+9, len(lines))], "\n")
+			if !strings.Contains(window, `Door: "offload_`) && !strings.Contains(window, `Door:  "offload_`) {
+				t.Errorf("%s:%d builds a core.Request with no MCP-tool Door: %s", file, i+1, strings.TrimSpace(ln))
+			}
 		}
 	}
 	if found == 0 {
