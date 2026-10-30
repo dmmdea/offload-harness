@@ -11,7 +11,6 @@ package main
 import (
 	"errors"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
@@ -161,10 +160,7 @@ func TestRunDelegateKeepsTheEightSubtaskCapWhenSomeAreRefused(t *testing.T) {
 // the engine, splice the refusals back among its results, and only then build the body.
 func TestTheCLIVerbsPrepareEachSubtaskOnItsOwnAndSpliceTheRefusals(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := parseMainSplit(t, fset)
 	for _, tc := range []struct {
 		verb   string
 		engine string

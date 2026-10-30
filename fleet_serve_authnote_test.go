@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 
@@ -38,11 +37,7 @@ func TestFleetServeStartupLineSaysWhichLanesAreOpen(t *testing.T) {
 // runFleetServe prints that line on every start: the old warning was printed only with --listen-trusted-network and
 // said the endpoints were unauthenticated, which stopped being true.
 func TestFleetServePrintsTheAuthLineOnEveryStart(t *testing.T) {
-	raw, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(raw)
+	src := mainSplitSource(t)
 	i := strings.Index(src, "func runFleetServe(")
 	if i < 0 {
 		t.Fatal("runFleetServe not found")

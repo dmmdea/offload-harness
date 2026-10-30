@@ -2,7 +2,6 @@ package main
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"testing"
 )
@@ -16,10 +15,7 @@ import (
 // before it marshals the body.
 func TestTheResearchVerbChecksItsQuotesAgainstThePages(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := parseMainSplit(t, fset)
 	var fn *ast.FuncDecl
 	for _, d := range f.Decls {
 		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "runResearch" && fd.Recv == nil {

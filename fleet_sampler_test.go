@@ -121,11 +121,7 @@ func TestTheLinuxGenericSourceIsTheOneTheSamplerChooserRoutesOn(t *testing.T) {
 // see: that it starts its sampler through startVRAMSampler, and that no second sampler start is left
 // in main.go to bypass the chooser (the diagnosis' defect was exactly such a branch).
 func TestFleetServeStartsItsSamplerThroughTheChooser(t *testing.T) {
-	b, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	src := string(b)
+	src := mainSplitSource(t)
 	if n := strings.Count(src, "sampler := startVRAMSampler(ctx, 2*time.Second, prov, uma, \"/sys/class/drm\", cfg.PrimaryGPUUUID)"); n != 1 {
 		t.Errorf("runFleetServe must start its sampler with startVRAMSampler(ctx, 2*time.Second, prov, uma, \"/sys/class/drm\", cfg.PrimaryGPUUUID) exactly once, found %d", n)
 	}

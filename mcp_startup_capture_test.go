@@ -10,7 +10,6 @@ package main
 // answers carry harness_build_sha256 of the image it runs).
 
 import (
-	"os"
 	"strings"
 	"testing"
 )
@@ -18,11 +17,7 @@ import (
 // funcBody is the text of the top-level function name in main.go, from its signature to its closing brace.
 func funcBody(t *testing.T, name string) string {
 	t.Helper()
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := strings.ReplaceAll(string(src), "\r\n", "\n")
+	text := mainSplitSource(t)
 	start := strings.Index(text, "\nfunc "+name+"(")
 	if start < 0 {
 		t.Fatalf("main.go has no %s", name)

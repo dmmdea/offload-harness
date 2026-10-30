@@ -2,7 +2,6 @@ package main
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"testing"
 )
@@ -14,10 +13,7 @@ import (
 // target cfg itself: a call whose value is dropped (`_ = fleetServeConfig(...)`) fixes nothing.
 func TestRunFleetServeAppliesItsNodeIDBeforeOpeningThePipeline(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := parseMainSplit(t, fset)
 	var fn *ast.FuncDecl
 	for _, d := range f.Decls {
 		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "runFleetServe" {

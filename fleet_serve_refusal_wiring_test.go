@@ -2,7 +2,6 @@ package main
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"testing"
 )
@@ -13,10 +12,7 @@ import (
 // the file, and a node that will not start cannot say which config to fix.
 func TestRunFleetServePassesTheConfigItReadToTheStartupRefusal(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := parseMainSplit(t, fset)
 	var calls []*ast.CallExpr
 	for _, d := range f.Decls {
 		fd, ok := d.(*ast.FuncDecl)
