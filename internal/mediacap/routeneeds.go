@@ -551,7 +551,7 @@ func objectInfoHas(client *http.Client, api, class string) (bool, error) {
 	}
 	var body map[string]json.RawMessage
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&body); err != nil {
-		return false, fmt.Errorf("unreadable /object_info: %v", err)
+		return false, fmt.Errorf("unreadable /object_info: %w", err)
 	}
 	_, ok := body[class]
 	return ok, nil

@@ -372,7 +372,7 @@ func SystemRAMGiB() (float64, error) {
 	m.Length = uint32(unsafe.Sizeof(m))
 	r, _, callErr := procGlobalMemoryStatusEx.Call(uintptr(unsafe.Pointer(&m)))
 	if r == 0 {
-		return 0, fmt.Errorf("GlobalMemoryStatusEx: %v", callErr)
+		return 0, fmt.Errorf("GlobalMemoryStatusEx: %w", callErr)
 	}
 	return float64(m.TotalPhys) / (1 << 30), nil
 }

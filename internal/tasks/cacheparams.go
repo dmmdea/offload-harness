@@ -78,7 +78,7 @@ func CacheParamsKey(p map[string]any) (string, error) {
 	}
 	for k, v := range p {
 		if err := checkKeyable(reflect.ValueOf(v), 1); err != nil {
-			return "", fmt.Errorf("%w: params[%q]: %v", ErrParamsNotKeyable, k, err)
+			return "", fmt.Errorf("%w: params[%q]: %w", ErrParamsNotKeyable, k, err)
 		}
 		if !utf8.ValidString(k) {
 			return "", fmt.Errorf("%w: a params key is not valid UTF-8", ErrParamsNotKeyable)

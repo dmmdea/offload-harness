@@ -153,14 +153,14 @@ func (r *AgentEnvRules) Validate() error {
 			continue
 		}
 		if _, err := regexp.Compile(p); err != nil {
-			errs = append(errs, fmt.Errorf("observation_strip[%d]: %v", i, err))
+			errs = append(errs, fmt.Errorf("observation_strip[%d]: %w", i, err))
 		}
 	}
 	for i, rw := range r.RewriteError {
 		if rw.Match == "" {
 			errs = append(errs, fmt.Errorf("rewrite_error[%d]: empty match", i))
 		} else if _, err := regexp.Compile(rw.Match); err != nil {
-			errs = append(errs, fmt.Errorf("rewrite_error[%d]: %v", i, err))
+			errs = append(errs, fmt.Errorf("rewrite_error[%d]: %w", i, err))
 		}
 		if strings.TrimSpace(rw.Text) == "" {
 			errs = append(errs, fmt.Errorf("rewrite_error[%d]: empty text (a rewrite must say something)", i))

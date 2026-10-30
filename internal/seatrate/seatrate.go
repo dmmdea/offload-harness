@@ -124,7 +124,7 @@ func Load(path string) (*Store, error) {
 	}
 	var on Store
 	if jerr := json.Unmarshal(data, &on); jerr != nil {
-		return s, fmt.Errorf("seatrate: %s is not readable (%v); starting empty", path, jerr)
+		return s, fmt.Errorf("seatrate: %s is not readable (%w); starting empty", path, jerr)
 	}
 	if on.Seats != nil {
 		s.Seats = on.Seats

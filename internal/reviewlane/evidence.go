@@ -237,7 +237,7 @@ func NewEvidence(diff, base, head string, handed []GateReceipt) (Evidence, error
 	for i, h := range handed {
 		r, rerr := normReceipt(h)
 		if rerr != nil {
-			return refuse(fmt.Errorf("%w: gate receipt %d: %v", ErrBadBinding, i+1, rerr))
+			return refuse(fmt.Errorf("%w: gate receipt %d: %w", ErrBadBinding, i+1, rerr))
 		}
 		switch {
 		case r.HeadSHA != "" && ev.HeadSHA != "" && !sameCommit(r.HeadSHA, ev.HeadSHA):

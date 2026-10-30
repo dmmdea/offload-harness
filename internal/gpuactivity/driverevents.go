@@ -374,7 +374,7 @@ func readKernelEvents(ctx context.Context, hours int) ([]DriverEvent, error) {
 	if jerr != nil {
 		dout, derr := runChild(ctx, "dmesg", "--time-format", "iso")
 		if derr != nil {
-			return nil, fmt.Errorf("journalctl: %v; dmesg: %v", jerr, derr)
+			return nil, fmt.Errorf("journalctl: %w; dmesg: %w", jerr, derr)
 		}
 		return ParseKernelLog(dout), &readIssue{msg: fmt.Sprintf("journalctl could not be read (%v), so only this boot's kernel ring buffer (dmesg) was read: a fault before the last reboot is not shown", jerr)}
 	}
@@ -434,7 +434,7 @@ func readDriverEvents(ctx context.Context, now time.Time) ([]DriverEvent, error)
 	defer tcancel()
 	out, terr := smiRun(tctx, "--query-gpu=index,uuid,pci.bus_id", "--format=csv,noheader")
 	if terr != nil {
-		tableErr := fmt.Errorf("%w (nvidia-smi: %v): %d driver event(s) in the last 24 h were not placed on cards", ErrCardTableUnreadable, terr, len(kept))
+		tableErr := fmt.Errorf("%w (nvidia-smi: %w): %d driver event(s) in the last 24 h were not placed on cards", ErrCardTableUnreadable, terr, len(kept))
 		if err != nil {
 			return kept, fmt.Errorf("%w; %w", err, tableErr)
 		}

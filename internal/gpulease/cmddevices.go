@@ -111,7 +111,7 @@ func fromVisibleDevices(raw string, pci bool, cards []gpuprobe.Card) ([]string, 
 		}
 		got, err := gpuprobe.ResolveCards(cards, []string{tok})
 		if err != nil {
-			return nil, fmt.Errorf("%w: CUDA_VISIBLE_DEVICES entry %q: %v", ErrDeviceUnresolved, tok, err)
+			return nil, fmt.Errorf("%w: CUDA_VISIBLE_DEVICES entry %q: %w", ErrDeviceUnresolved, tok, err)
 		}
 		ids = append(ids, got[0].LeaseID())
 	}

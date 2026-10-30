@@ -104,7 +104,7 @@ func stopProcessWindows(pid int) error {
 		if strings.Contains(strings.ToLower(msg), "not found") {
 			return nil
 		}
-		return fmt.Errorf("taskkill pid %d: %v (%s)", pid, err, msg)
+		return fmt.Errorf("taskkill pid %d: %w (%s)", pid, err, msg)
 	}
 	return nil
 }

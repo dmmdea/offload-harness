@@ -206,7 +206,7 @@ func parseComposeRequest(params map[string]any, cfg config.Config) (composeReque
 	if raw, ok := params["variables"]; ok && raw != nil {
 		b, err := json.Marshal(raw)
 		if err != nil {
-			return r, fmt.Errorf("variables: %v", err)
+			return r, fmt.Errorf("variables: %w", err)
 		}
 		if err := json.Unmarshal(b, &r.Variables); err != nil || r.Variables == nil {
 			return r, errors.New("variables must be a JSON object")

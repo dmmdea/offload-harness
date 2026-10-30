@@ -118,7 +118,7 @@ func buildPayload(id, tool string, args map[string]any) ([]byte, error) {
 	if ip, ok := a["image_path"].(string); ok && strings.TrimSpace(ip) != "" {
 		raw, err := os.ReadFile(ip)
 		if err != nil {
-			return nil, fmt.Errorf("image_path %q: %v (the file must exist on THIS box; its bytes travel to the node)", ip, err)
+			return nil, fmt.Errorf("image_path %q: %w (the file must exist on THIS box; its bytes travel to the node)", ip, err)
 		}
 		if len(raw) > core.AccelImageCap {
 			return nil, fmt.Errorf("image_path %q is %d bytes, cap %d for a forwarded call", ip, len(raw), core.AccelImageCap)

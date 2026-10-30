@@ -266,7 +266,7 @@ func (e *Env) migrate(ctx context.Context, def *compDef, st *State, live, vroot 
 	}
 	if lerr := makeLink(live, dir); lerr != nil {
 		if back := os.Rename(dir, live); back != nil {
-			return "", "", fmt.Errorf("%v; and moving it back failed: %v", lerr, back)
+			return "", "", fmt.Errorf("%w; and moving it back failed: %w", lerr, back)
 		}
 		return "", "", lerr
 	}
@@ -458,7 +458,7 @@ func (e *Env) stageNPM(ctx context.Context, def *compDef, live string, cand *Can
 	cmd := winexec.CommandContext(cctx, npm, "install", "--ignore-scripts", "--no-audit", "--no-fund", "--no-package-lock")
 	cmd.Dir = gen
 	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("npm install: %v: %s", err, truncate(strings.TrimSpace(string(out)), 300))
+		return fmt.Errorf("npm install: %w: %s", err, truncate(strings.TrimSpace(string(out)), 300))
 	}
 	if st, err := os.Stat(filepath.Join(live, "home")); err == nil && st.IsDir() {
 		if err := copyTree(filepath.Join(live, "home"), filepath.Join(gen, "home")); err != nil {

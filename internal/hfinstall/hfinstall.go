@@ -135,7 +135,7 @@ func AtLeast(have, floor string) bool {
 func Check(runner, dir string) error {
 	have, err := InstalledVersion(dir)
 	if err != nil {
-		return fmt.Errorf("cannot read the installed HyperFrames version under %s (%v) — every composition defers CLI_MISSING; run `local-offload install hyperframes`", dir, err)
+		return fmt.Errorf("cannot read the installed HyperFrames version under %s (%w) — every composition defers CLI_MISSING; run `local-offload install hyperframes`", dir, err)
 	}
 	if floor := FloorFor(runner); !AtLeast(have, floor) {
 		return fmt.Errorf("the install at %s holds hyperframes %s, below the floor %s in setup/floors.json — every composition defers CLI_MISSING; run `local-offload install hyperframes`", dir, have, floor)
@@ -234,7 +234,7 @@ func Install(ctx context.Context, o Options) (Result, error) {
 	if keep {
 		logf("hyperframes %s already installed in %s; re-verifying", have, dir)
 		if out, err := run(ctx, dir, env, npm, "audit", "signatures"); err != nil {
-			return res, fmt.Errorf("npm audit signatures FAILED on the installed tree (left unchanged): %v%s", err, tail(out))
+			return res, fmt.Errorf("npm audit signatures FAILED on the installed tree (left unchanged): %w%s", err, tail(out))
 		}
 	} else {
 		logf("npm install: hyperframes %s -> newest, staged in %s", orNone(have), filepath.Join(dir, stagingDirName))
@@ -251,10 +251,10 @@ func Install(ctx context.Context, o Options) (Result, error) {
 	fail := func(err error) (Result, error) {
 		if swapped {
 			if rerr := rollback(dir); rerr != nil {
-				return res, fmt.Errorf("%v; restoring the previous install also failed: %v", err, rerr)
+				return res, fmt.Errorf("%w; restoring the previous install also failed: %w", err, rerr)
 			}
 			res.Reinstalled, res.PreviousTree = false, ""
-			return res, fmt.Errorf("%v; the previous install was put back", err)
+			return res, fmt.Errorf("%w; the previous install was put back", err)
 		}
 		return res, err
 	}
@@ -291,7 +291,7 @@ func Verify(ctx context.Context, run Runner, node, npm, runner, dir string) (bro
 	}
 	env := envWithNodeFirst(node)
 	if out, err := run(ctx, dir, env, npm, "rebuild", "esbuild"); err != nil {
-		return "", "", fmt.Errorf("npm rebuild esbuild failed: %v%s", err, tail(out))
+		return "", "", fmt.Errorf("npm rebuild esbuild failed: %w%s", err, tail(out))
 	}
 	var browser struct {
 		OK          bool   `json:"ok"`
@@ -423,7 +423,7 @@ func stage(ctx context.Context, run Runner, env []string, npm, dir string, pkg [
 		return clean(fmt.Errorf("writing package.json: %w", err))
 	}
 	if out, err := run(ctx, st, env, npm, "install", "--ignore-scripts", "--no-audit", "--no-fund"); err != nil {
-		return clean(fmt.Errorf("npm install (newest hyperframes) failed; the live install is unchanged: %v%s", err, tail(out)))
+		return clean(fmt.Errorf("npm install (newest hyperframes) failed; the live install is unchanged: %w%s", err, tail(out)))
 	}
 	v, err := InstalledVersion(st)
 	if err != nil {
@@ -433,7 +433,7 @@ func stage(ctx context.Context, run Runner, env []string, npm, dir string, pkg [
 		return clean(fmt.Errorf("npm resolved hyperframes %s, below the floor %s in setup/floors.json; the live install is unchanged", v, floor))
 	}
 	if out, err := run(ctx, st, env, npm, "audit", "signatures"); err != nil {
-		return clean(fmt.Errorf("npm audit signatures FAILED for the new hyperframes %s tree (registry signatures or provenance did not verify, or the registry was unreachable); refusing to swap it in, the live install is unchanged: %v%s", v, err, tail(out)))
+		return clean(fmt.Errorf("npm audit signatures FAILED for the new hyperframes %s tree (registry signatures or provenance did not verify, or the registry was unreachable); refusing to swap it in, the live install is unchanged: %w%s", v, err, tail(out)))
 	}
 	return nil
 }
@@ -480,7 +480,7 @@ func swapIn(dir string, pkg []byte) (string, error) {
 		if kept != "" {
 			_ = os.RemoveAll(live)
 			if err := renameRetry(prev, live); err != nil {
-				return fmt.Errorf("%v; restoring the previous tree also failed: %v", cause, err)
+				return fmt.Errorf("%w; restoring the previous tree also failed: %w", cause, err)
 			}
 		}
 		if readErr == nil {
@@ -489,7 +489,7 @@ func swapIn(dir string, pkg []byte) (string, error) {
 		if lockErr == nil {
 			_ = os.WriteFile(lockPath, oldLock, 0o644)
 		}
-		return fmt.Errorf("%v; the previous install is back", cause)
+		return fmt.Errorf("%w; the previous install is back", cause)
 	}
 	if err := renameRetry(filepath.Join(st, "node_modules"), live); err != nil {
 		return "", restore(fmt.Errorf("moving the new tree into place failed: %w", err))
@@ -544,12 +544,12 @@ func runnerOp(ctx context.Context, run Runner, env []string, node, runner, dir, 
 	line := lastJSONLine(out)
 	if line == "" {
 		if err != nil {
-			return fmt.Errorf("hyperframes %s op failed: %v%s", op, err, tail(out))
+			return fmt.Errorf("hyperframes %s op failed: %w%s", op, err, tail(out))
 		}
 		return fmt.Errorf("hyperframes %s op printed no result%s", op, tail(out))
 	}
 	if jerr := json.Unmarshal([]byte(line), into); jerr != nil {
-		return fmt.Errorf("hyperframes %s op printed an unreadable result: %v", op, jerr)
+		return fmt.Errorf("hyperframes %s op printed an unreadable result: %w", op, jerr)
 	}
 	return nil
 }

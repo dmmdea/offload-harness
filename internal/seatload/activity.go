@@ -158,7 +158,7 @@ func ReadActivity(ctx context.Context, client *http.Client, endpoint, seat strin
 	status, body, err := getBody(ctx, client, seatBase+"/metrics")
 	if err != nil {
 		if remote && ctx.Err() == nil {
-			return act, fmt.Errorf("seat activity at %s: %w: %v", seatBase, ErrRemoteSeatUnreachable, err)
+			return act, fmt.Errorf("seat activity at %s: %w: %w", seatBase, ErrRemoteSeatUnreachable, err)
 		}
 		return act, fmt.Errorf("seat activity: %w", err)
 	}

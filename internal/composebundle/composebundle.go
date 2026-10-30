@@ -84,7 +84,7 @@ type ioWriter struct{ f *os.File }
 func (w ioWriter) Write(p []byte) (int, error) {
 	n, err := w.f.Write(p)
 	if err != nil {
-		err = fmt.Errorf("%w: %v", ErrIO, err)
+		err = fmt.Errorf("%w: %w", ErrIO, err)
 	}
 	return n, err
 }
@@ -249,11 +249,11 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 	lim = lim.withDefaults()
 	root, err := filepath.Abs(dir)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrIO, err)
+		return fmt.Errorf("%w: %w", ErrIO, err)
 	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
-		return fmt.Errorf("%w: %v", ErrIO, err)
+		return fmt.Errorf("%w: %w", ErrIO, err)
 	}
 	if len(entries) != 0 {
 		return fmt.Errorf("extract target %s is not empty", root)
@@ -305,7 +305,7 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 		switch hdr.Typeflag {
 		case tar.TypeDir:
 			if err := os.MkdirAll(dest, 0o755); err != nil {
-				return fmt.Errorf("%w: member %q: %v", ErrIO, hdr.Name, err)
+				return fmt.Errorf("%w: member %q: %w", ErrIO, hdr.Name, err)
 			}
 			continue
 		case tar.TypeReg, tar.TypeRegA:
@@ -317,14 +317,14 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 			return fmt.Errorf("the bundle has more than %d files", lim.MaxFiles)
 		}
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
-			return fmt.Errorf("%w: member %q: %v", ErrIO, hdr.Name, err)
+			return fmt.Errorf("%w: member %q: %w", ErrIO, hdr.Name, err)
 		}
 		f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
 		if err != nil {
 			if errors.Is(err, fs.ErrExist) {
 				return fmt.Errorf("member %q: %w", hdr.Name, err) // a duplicate member: the bundle's fault
 			}
-			return fmt.Errorf("%w: member %q: %v", ErrIO, hdr.Name, err)
+			return fmt.Errorf("%w: member %q: %w", ErrIO, hdr.Name, err)
 		}
 		// The caps count the bytes written, never the header's claim.
 		n, cerr := io.Copy(ioWriter{f}, io.LimitReader(tr, lim.MaxFileBytes+1))
@@ -333,7 +333,7 @@ func Extract(bundle []byte, dir string, lim Limits) error {
 			return fmt.Errorf("member %q: %w", hdr.Name, cerr)
 		}
 		if closeErr != nil {
-			return fmt.Errorf("%w: member %q: %v", ErrIO, hdr.Name, closeErr)
+			return fmt.Errorf("%w: member %q: %w", ErrIO, hdr.Name, closeErr)
 		}
 		if n > lim.MaxFileBytes {
 			return fmt.Errorf("member %q is over the %d-byte limit for one file", hdr.Name, lim.MaxFileBytes)

@@ -50,7 +50,7 @@ func vetGrant(check, release func() error) error {
 		return nil
 	}
 	if rerr := release(); rerr != nil {
-		return fmt.Errorf("gpulease: the grant no longer qualifies (%v) and releasing it failed, so the cards are still held: %w", cerr, rerr)
+		return fmt.Errorf("gpulease: the grant no longer qualifies (%w) and releasing it failed, so the cards are still held: %w", cerr, rerr)
 	}
 	return &ErrGrantRefused{Reason: cerr.Error()}
 }

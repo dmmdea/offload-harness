@@ -400,7 +400,7 @@ func ParseDigest(b []byte) (*DigestFile, error) {
 	dec.DisallowUnknownFields()
 	var df DigestFile
 	if err := dec.Decode(&df); err != nil {
-		return nil, fmt.Errorf("digest file: %v", err)
+		return nil, fmt.Errorf("digest file: %w", err)
 	}
 	if _, err := dec.Token(); err != io.EOF {
 		return nil, errors.New("digest file: data after the top-level value")

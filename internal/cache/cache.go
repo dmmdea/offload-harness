@@ -236,7 +236,7 @@ func (c *Cache) resolveLocked() {
 	sdb, serr := openWritable(sib, LockTimeout)
 	if serr != nil {
 		c.mode = ModeUnavailable
-		c.openErr = fmt.Errorf("%w; per-process fallback %s: %v", err, sib, serr)
+		c.openErr = fmt.Errorf("%w; per-process fallback %s: %w", err, sib, serr)
 		c.notifyLocked()
 		return
 	}

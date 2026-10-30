@@ -1006,7 +1006,7 @@ func setPartialAside(partial string) (string, error) {
 	prev := partial + ".prev"
 	_ = os.Remove(prev)
 	if err := os.Rename(partial, prev); err != nil {
-		return "", fmt.Errorf("an earlier batch left its record in %s and it could not be set aside as %s (%v); move it away and run again", partial, prev, err)
+		return "", fmt.Errorf("an earlier batch left its record in %s and it could not be set aside as %s (%w); move it away and run again", partial, prev, err)
 	}
 	return prev, nil
 }
@@ -1073,7 +1073,7 @@ func (r *ResultsFile) Close(rows []BatchRow) error {
 	}
 	_ = os.Remove(r.path + ".partial")
 	if r.werr != nil {
-		return fmt.Errorf("--results %s: a row could not be appended as its job finished (%v); the file written at the end is complete", r.path, r.werr)
+		return fmt.Errorf("--results %s: a row could not be appended as its job finished (%w); the file written at the end is complete", r.path, r.werr)
 	}
 	return nil
 }

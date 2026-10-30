@@ -925,10 +925,10 @@ func renameWithRetry(plan Plan, deps Deps, log *Logger, from, to string) error {
 	log.Printf("backup-old: rename failed (%v); diagnosing holders of %s", err, from)
 	holders, herr := deps.FindProcessesByExe(from)
 	if herr != nil {
-		return fmt.Errorf("rename failed (%v) and holder diagnosis also failed: %v", err, herr)
+		return fmt.Errorf("rename failed (%w) and holder diagnosis also failed: %w", err, herr)
 	}
 	if len(holders) == 0 {
-		return fmt.Errorf("rename failed (%v) and no CIM-visible process holds %s — likely an external handle (antivirus, Explorer preview); not stopping anything blind", err, from)
+		return fmt.Errorf("rename failed (%w) and no CIM-visible process holds %s — likely an external handle (antivirus, Explorer preview); not stopping anything blind", err, from)
 	}
 	mm, pm := mcpMatch(plan), procMatch(plan)
 	heldBy, heldKnown, lerr := leaseHolders(plan, deps)
@@ -958,12 +958,12 @@ func renameWithRetry(plan Plan, deps Deps, log *Logger, from, to string) error {
 		}
 	}
 	if len(stopped) == 0 {
-		return fmt.Errorf("rename failed (%v); holder(s) found but none is a stoppable idle mcp process: %s", err, strings.Join(left, "; "))
+		return fmt.Errorf("rename failed (%w); holder(s) found but none is a stoppable idle mcp process: %s", err, strings.Join(left, "; "))
 	}
 	log.Printf("backup-old: stopped idle mcp holder(s) %v (left running: %s); retrying rename", stopped, strings.Join(left, "; "))
 	deps.Sleep(time.Second)
 	if rerr := deps.RenameFile(from, to); rerr != nil {
-		return fmt.Errorf("rename still failed after stopping idle holder(s) %v: %v (also holding: %s)", stopped, rerr, strings.Join(left, "; "))
+		return fmt.Errorf("rename still failed after stopping idle holder(s) %v: %w (also holding: %s)", stopped, rerr, strings.Join(left, "; "))
 	}
 	return nil
 }
@@ -997,22 +997,22 @@ func installNewBinary(plan Plan, deps Deps, log *Logger, suffix string) error {
 		return renameErr
 	}
 	if deps.CopyFile == nil {
-		return fmt.Errorf("staged binary is on a different volume than the target (%v) and no cross-device copy fallback is wired", renameErr)
+		return fmt.Errorf("staged binary is on a different volume than the target (%w) and no cross-device copy fallback is wired", renameErr)
 	}
 	log.Printf("install-new: rename failed (%v) — %s and %s are on different volumes; copying instead", renameErr, plan.Staged, plan.Target)
 	srcHash, err := deps.Hash(plan.Staged)
 	if err != nil {
-		return fmt.Errorf("rename failed (%v) and re-hashing the staged binary for a cross-device copy also failed: %v", renameErr, err)
+		return fmt.Errorf("rename failed (%w) and re-hashing the staged binary for a cross-device copy also failed: %w", renameErr, err)
 	}
 	tmp := plan.Target + ".new-" + suffix
 	if err := deps.CopyFile(plan.Staged, tmp); err != nil {
 		_ = deps.RemoveAll(tmp)
-		return fmt.Errorf("cross-device copy of staged binary failed: %v (original rename error: %v)", err, renameErr)
+		return fmt.Errorf("cross-device copy of staged binary failed: %w (original rename error: %w)", err, renameErr)
 	}
 	gotHash, err := deps.Hash(tmp)
 	if err != nil {
 		_ = deps.RemoveAll(tmp)
-		return fmt.Errorf("hashing the cross-device copy failed: %v", err)
+		return fmt.Errorf("hashing the cross-device copy failed: %w", err)
 	}
 	if !strings.EqualFold(gotHash, srcHash) {
 		_ = deps.RemoveAll(tmp)
@@ -1020,7 +1020,7 @@ func installNewBinary(plan Plan, deps Deps, log *Logger, suffix string) error {
 	}
 	if err := deps.RenameFile(tmp, plan.Target); err != nil {
 		_ = deps.RemoveAll(tmp)
-		return fmt.Errorf("installing the verified cross-device copy failed: %v", err)
+		return fmt.Errorf("installing the verified cross-device copy failed: %w", err)
 	}
 	log.Printf("install-new: cross-device copy verified (sha256 %s) and installed at %s", gotHash, plan.Target)
 	return nil

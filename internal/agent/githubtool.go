@@ -142,7 +142,9 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 				FullName string `json:"full_name"`
 				HTMLURL  string `json:"html_url"`
 			}
-			_ = json.Unmarshal(data, &r)
+			if jerr := json.Unmarshal(data, &r); jerr != nil {
+				return fmt.Sprintf("github_create_repo HTTP %d but the response was unreadable: %v", status, jerr), nil
+			}
 			return fmt.Sprintf("created repo %s -> %s", r.FullName, r.HTMLURL), nil
 		},
 	}
@@ -225,7 +227,9 @@ func GitHubTools(pol *Policy, token, defaultRepo, worktreeRoot string) []Tool {
 					HTMLURL string `json:"html_url"`
 				} `json:"content"`
 			}
-			_ = json.Unmarshal(data, &res)
+			if jerr := json.Unmarshal(data, &res); jerr != nil {
+				return fmt.Sprintf("github_upload_file HTTP %d but the response was unreadable: %v", status, jerr), nil
+			}
 			return fmt.Sprintf("uploaded %s to %s -> %s", in.Path, repo+"/"+dest, res.Content.HTMLURL), nil
 		},
 	}

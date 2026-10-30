@@ -31,7 +31,7 @@ func makeLink(link, target string) error {
 	cmd.SysProcAttr.CmdLine = fmt.Sprintf(`cmd.exe /d /s /c "mklink /J "%s" "%s""`, link, target)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("mklink /J %s -> %s: %v (%s)", link, target, err, strings.TrimSpace(string(out)))
+		return fmt.Errorf("mklink /J %s -> %s: %w (%s)", link, target, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -68,7 +68,7 @@ func flipLink(link, target string) error {
 	if err := os.Rename(tmp, link); err != nil {
 		if had {
 			if rerr := os.Rename(parked, link); rerr != nil {
-				return fmt.Errorf("renaming %s into place: %v; putting the old junction back from %s ALSO failed: %v", tmp, err, parked, rerr)
+				return fmt.Errorf("renaming %s into place: %w; putting the old junction back from %s ALSO failed: %w", tmp, err, parked, rerr)
 			}
 		}
 		_ = os.Remove(tmp)
