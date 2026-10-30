@@ -35,7 +35,7 @@ import { familySignature } from "./comfy-family.mjs";
 import { comfyApi } from "./comfy-lifecycle.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
-import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, comfyUnusableClassLine } from "./comfy-submit.mjs";
 import {
   resolveFfmpeg, resolveFfprobe, assertFfmpegAvailable, measure, assessDeadAir,
   normalizeLoudness, rewireSeed, trimToSeconds, LOUDNESS_TARGET_LUFS, TRUE_PEAK_TARGET_DBTP,
@@ -264,5 +264,5 @@ async function main() {
 
 // Run only as the CLI entrypoint (argv[1] is this file); a test `import` skips this.
 if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
-  main().catch((e) => { console.error("MUSIC GEN FAILED:", e.message); process.exit(1); });
+  main().catch((e) => { console.error("MUSIC GEN FAILED:", e.message); const cl = comfyUnusableClassLine(e); if (cl) console.error(cl); process.exit(1); });
 }

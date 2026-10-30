@@ -1,0 +1,5 @@
+### Fixed - the video, music, inpaint and run-graph runners now report a dead ComfyUI to the ledger like the image runner
+
+- **What changed.** `comfy-video.mjs`, `comfy-music.mjs`, `comfy-inpaint.mjs` and `comfy-run-graph.mjs` print `IGPU_CLASS=comfy_unusable` after their `... FAILED:` line when the failure is a server-unusable error (the dead-server watchdog, the CUDA health probe, a `POST /prompt` that never answers). Exit codes and output JSON are unchanged. The rest of issue #72 was already in place: all four poll through the shared `pollOutputs` in `comfy-submit.mjs`, `POST /prompt` and `GET /view` carry `AbortSignal.timeout` (`SUBMIT_TIMEOUT_MS`, `VIEW_TIMEOUT_MS`), and the Go side files the class as `comfy_unusable` (the name `comfy_dead` was not used; a test pins that it is ignored).
+- **Why.** Only the image runner printed the class line, so a dead ComfyUI under the other lanes was filed as `other` in the ledger and analytics could not key on it.
+- **Check.** `node --test render/*.test.mjs`, `node --check` on the four scripts, and `go test ./internal/gpugen/ ./internal/pipeline/`. Details in `docs/systems/media-generation.md`.

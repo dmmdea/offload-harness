@@ -44,7 +44,7 @@ import { buildQwenInpaint, QWEN_INPAINT_PRESETS } from "./wf-qwen-inpaint.mjs";
 import { parseInpaintJobs, qwenRecipe, batchAbort } from "./inpaint-jobs.mjs";
 import { resultLine, batchExitCode, batchEndLine } from "./batch-jobs.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
-import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, comfyUnusableClassLine } from "./comfy-submit.mjs";
 
 const argv = process.argv.slice(2);
 const pos = []; const flags = {};
@@ -263,7 +263,7 @@ if (flags.batch) {
       console.error(batchEndLine(summary, resultsPath));
       process.exitCode = code;
     }
-  }).catch((e) => { console.error("INPAINT BATCH FAILED:", e.message); process.exit(1); });
+  }).catch((e) => { console.error("INPAINT BATCH FAILED:", e.message); const cl = comfyUnusableClassLine(e); if (cl) console.error(cl); process.exit(1); });
 } else {
   const job = {
     out, image: imagePath, mask: maskPath, prompt,
@@ -273,5 +273,5 @@ if (flags.batch) {
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"],
       family: INPAINT_FAMILY },
     () => renderJob(job),
-  ).catch((e) => { console.error("INPAINT FAILED:", e.message); process.exit(1); });
+  ).catch((e) => { console.error("INPAINT FAILED:", e.message); const cl = comfyUnusableClassLine(e); if (cl) console.error(cl); process.exit(1); });
 }

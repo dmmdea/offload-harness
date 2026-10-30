@@ -161,9 +161,14 @@ for it, and when the server never answers at all.
   `other`. An image `--batch` that meets a dead ComfyUI stops (C-83) and writes a row for every job: the one it stopped on
   (`comfy-render exited 3: ...`) and `not run: ComfyUI became unusable at job i/N (...)` for each later one. Those words name no class,
   so `batchErrClass` files the not-run rows (and the exit-3 row) with the batch's own typed class; a job that failed on its own
-  before the stop keeps the class its words give (`oom`, `timeout`). Only the image runner (`comfy-render.mjs`, through `comfy-generate.mjs`) prints the line today; the video, animate, music,
-  edit, inpaint, upscale and run-graph runners raise the same *server unusable* error but do not print it yet, so their failures
-  still read from the words of their message.
+  before the stop keeps the class its words give (`oom`, `timeout`). The image runner (`comfy-render.mjs`, through `comfy-generate.mjs`) prints the line, and so do the video, music, inpaint
+  and run-graph runners (`comfy-video.mjs`, `comfy-music.mjs`, `comfy-inpaint.mjs`, `comfy-run-graph.mjs`) when their top-level
+  failure is a *server unusable* error (item 1 of issue #72; their exit code stays 1 and the line is the only addition). They all poll
+  through the one shared `pollOutputs` in `comfy-submit.mjs`, so the dead-server watchdog, the health probe and the per-request abort
+  are the same code for each (item 4: that module is importable on its own, which is the seam for the poll loop). The animate, edit
+  and upscale runners raise the same error but do not print it yet, so their failures still read from the words of their message.
+  The class is named `comfy_unusable`, not `comfy_dead`: the allow-list in `gpugen.runnerClasses` is closed and a test pins that
+  `IGPU_CLASS=comfy_dead` is ignored, so analytics key on `comfy_unusable` (item 2).
 - **The bounds.** `POST /prompt` and `GET /view` passed no `AbortSignal` (the `/system_stats`, `/queue` and `/history` calls always
   did), so a ComfyUI that accepts the connection and never answers held the exclusive GPU slot. `rawSubmit` is bounded by
   `SUBMIT_TIMEOUT_MS` (120 s: the call validates and queues, it does not run) and `fetchView` by `VIEW_TIMEOUT_MS` (600 s), which
