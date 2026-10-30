@@ -13,9 +13,15 @@ import (
 func Validate(data []byte, schema map[string]any) error {
 	if len(schema) == 0 {
 		// Still confirm it is a JSON object.
-		var v any
+		var v map[string]any
 		if err := json.Unmarshal(data, &v); err != nil {
+			if _, ok := err.(*json.UnmarshalTypeError); ok {
+				return fmt.Errorf("not a JSON object: %w", err)
+			}
 			return fmt.Errorf("invalid json: %w", err)
+		}
+		if v == nil {
+			return fmt.Errorf("not a JSON object: null")
 		}
 		return nil
 	}

@@ -474,13 +474,10 @@ type Summary struct {
 	// input tokens the cloud never received AND the output tokens a local seat
 	// generated in its place (0.117.7; before that output was priced at zero,
 	// which is the expensive half on Opus). It is an estimate of avoided cloud
-	// pricing, NOT literal billed dollars saved (LO-12: the old est_dollar_saved
-	// name presented it as money in the bank).
-	EstValueKeptLocal float64 `json:"est_value_kept_local"`
-	// Deprecated: the same number under the old, misleading name — kept
-	// emitted for one release for consumers of the JSON; remove in v0.7.
-	EstDollarSaved float64        `json:"est_dollar_saved"`
-	ByTask         map[string]int `json:"by_task"`
+	// pricing, NOT literal billed dollars saved (LO-12: the old
+	// name for this field presented it as money in the bank).
+	EstValueKeptLocal float64        `json:"est_value_kept_local"`
+	ByTask            map[string]int `json:"by_task"`
 	// ExcludedNonProduction is how many JOBS the summary skipped per run class because they were test, bake or
 	// measurement traffic (register F48): the default views leave them out, and this says how many so nothing is
 	// hidden. Absent when nothing was skipped, and always absent when the summary included them
@@ -723,6 +720,5 @@ func SummarizeFileWith(path string, since int64, prices Prices, includeTraffic b
 	// avoided cloud pricing, never billed savings.
 	s.EstValueKeptLocal = float64(s.TokensSaved)/1_000_000*prices.InputPerMTok +
 		float64(s.TokensOut)/1_000_000*prices.OutputPerMTok
-	s.EstDollarSaved = s.EstValueKeptLocal // Deprecated alias; remove in v0.7
 	return s, sc.Err()
 }
