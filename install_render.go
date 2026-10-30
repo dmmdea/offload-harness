@@ -402,6 +402,22 @@ func warnMissingSeatModelsTo(seats []mediaseat.Seat, modelsDir, target string, w
 		"when called. Fetch these before relying on them:\n%s\n", len(missing), strings.Join(missing, "\n"))
 }
 
+// gatedModelSet names the flag-gated chat entries a render includes, one bool per
+// entry. It replaces nine positional bools whose order the compiler could not check.
+// IncludeQ3635B is the POST-RAM-GATE value and IncludeEG2Projector is false for a
+// text-only embedder entry (see warnMissingGatedModelsTo).
+type gatedModelSet struct {
+	Include26B          bool
+	IncludeQ38          bool
+	IncludeQ354B        bool
+	IncludeQ359B        bool
+	IncludeQ3827B       bool
+	IncludeMimo9B       bool
+	IncludeQ3635B       bool
+	IncludeEG2          bool
+	IncludeEG2Projector bool
+}
+
 // warnMissingGatedModels is warnMissingSeatModels' sibling for the flag-gated
 // chat entries: a tier setting include_26b / include_qwen38 renders the entry
 // into the roster whether or not its weights are on disk, and llama-swap lists
@@ -410,14 +426,14 @@ func warnMissingSeatModelsTo(seats []mediaseat.Seat, modelsDir, target string, w
 // contract (the same names install.ps1's $SOURCES table downloads to).
 // Same shape as the seat warning: a warning, never an error, and skipped when
 // rendering for another machine, where a local miss means nothing.
-func warnMissingGatedModels(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B, includeQ3635B, includeEG2, includeEG2Projector bool, modelsDir, target string) {
-	warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B, includeQ3635B, includeEG2, includeEG2Projector, modelsDir, target, os.Stderr)
+func warnMissingGatedModels(set gatedModelSet, modelsDir, target string) {
+	warnMissingGatedModelsTo(set, modelsDir, target, os.Stderr)
 }
 
 // warnMissingGatedModelsTo carries the body with an injectable sink so the warning
 // is testable (it had no coverage at all — 0.72.0 review finding I-2). The wrapper
 // above keeps every production call site unchanged.
-func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B, includeQ3827B, includeMimo9B, includeQ3635B, includeEG2, includeEG2Projector bool, modelsDir, target string, w io.Writer) {
+func warnMissingGatedModelsTo(set gatedModelSet, modelsDir, target string, w io.Writer) {
 	if modelsDir == "" || target != runtime.GOOS {
 		return
 	}
@@ -428,28 +444,28 @@ func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B
 			missing = append(missing, fmt.Sprintf("  %s (%s): %s", entry, label, full))
 		}
 	}
-	if include26B {
+	if set.Include26B {
 		check("gemma4-26b-a4b", "model", "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf")
 	}
-	if includeQ38 {
+	if set.IncludeQ38 {
 		check("qwen3.8-27b", "model", "Qwen3.8-27B-UD-Q4_K_XL.gguf")
 		check("qwen3.8-27b", "mmproj", "mmproj-Qwen3.8-27B-F16.gguf")
 	}
-	if includeQ354B {
+	if set.IncludeQ354B {
 		check("qwen3.5-4b-agent", "model", "Qwen3.5-4B-UD-Q4_K_XL.gguf")
 	}
-	if includeQ359B {
+	if set.IncludeQ359B {
 		check("qwen3.5-9b-agent", "model", "Qwen3.5-9B-UD-Q4_K_XL.gguf")
 	}
-	if includeQ3827B {
+	if set.IncludeQ3827B {
 		check("qwen38-27b-agent", "model", "Qwen3.8-27B-UD-IQ3_S.gguf")
 	}
-	if includeMimo9B {
+	if set.IncludeMimo9B {
 		check("mimo-9b-agent", "model", "MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf")
 	}
 	// includeQ3635B is the POST-RAM-GATE value (res.Params.IncludeQ3635B): a `min` box does
 	// not render the entry, so it must not be told to fetch 12.3 GiB for it.
-	if includeQ3635B {
+	if set.IncludeQ3635B {
 		check("qwen3.6-35b-a3b-agent", "model", "Qwen3.6-35B-A3B/Qwen3.6-35B-A3B-UD-IQ3_XXS.gguf")
 	}
 	// The second memory-stack embedder needs BOTH files when the entry carries its projector: a
@@ -457,9 +473,9 @@ func warnMissingGatedModelsTo(include26B, includeQ38, includeQ354B, includeQ359B
 	// 27B's mmproj above. A text-only entry (includeEG2Projector false, res.Params.EG2TextOnly) is
 	// started without --mmproj and the installer does not download the projector, so only the model
 	// is checked: warning about a file that tier never fetches would warn forever.
-	if includeEG2 {
+	if set.IncludeEG2 {
 		check("embeddinggemma2", "model", "embeddinggemma-2-Q8_0.gguf")
-		if includeEG2Projector {
+		if set.IncludeEG2Projector {
 			check("embeddinggemma2", "mmproj", "mmproj-embeddinggemma-2-Q8_0.gguf")
 		}
 	}
@@ -711,8 +727,8 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		AltCPULlamaBin:    req.AltLlamaBinCPU,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat:          seat, ExtraVLLMSeats: extras, VLLMRuntime: seatRT,
-		DisplayLayer: displayLayerOf(layers),
-		OmitE4B:      p.OmitE4B,
+		DisplayLayer:  displayLayerOf(layers),
+		OmitE4B:       p.OmitE4B,
 		OmitEmbed300M: p.OmitEmbeddingGemma,
 	}
 	rendered, err := servingtmpl.Render(tmpl, params)
@@ -793,7 +809,17 @@ func runInstallRender(args []string) error {
 
 	target := res.Params.GOOS
 	warnMissingSeatModels(res.Profile.MediaSeats, *modelsDir, target)
-	warnMissingGatedModels(res.Include26B, res.Profile.IncludeQwen38, res.Profile.IncludeQwen354B, res.Profile.IncludeQwen359B, res.Profile.IncludeQwen3827B, res.Profile.IncludeMimo9B, res.Params.IncludeQ3635B, res.Params.IncludeEG2, !res.Params.EG2TextOnly, *modelsDir, target)
+	warnMissingGatedModels(gatedModelSet{
+		Include26B:          res.Include26B,
+		IncludeQ38:          res.Profile.IncludeQwen38,
+		IncludeQ354B:        res.Profile.IncludeQwen354B,
+		IncludeQ359B:        res.Profile.IncludeQwen359B,
+		IncludeQ3827B:       res.Profile.IncludeQwen3827B,
+		IncludeMimo9B:       res.Profile.IncludeMimo9B,
+		IncludeQ3635B:       res.Params.IncludeQ3635B,
+		IncludeEG2:          res.Params.IncludeEG2,
+		IncludeEG2Projector: !res.Params.EG2TextOnly,
+	}, *modelsDir, target)
 
 	// The provenance stamp (K-02) rides on every rendered config from here on.
 	// It is prepended AFTER the rule audit so the audit sees exactly what a
