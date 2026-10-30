@@ -76,7 +76,7 @@ func TestUnloadSeatOnlyUnloadsIntersectingModels(t *testing.T) {
 
 	var owed string
 	out := captureStderr(t, func() {
-		if err := maintainSeatScoped(context.Background(), cfg, nil, false, time.Time{}, true, false, func(s string) { owed = s }, []string{leaseCard2ID}); err != nil {
+		if err := maintainSeat(context.Background(), cfg, maintainOpts{unload: true, owed: func(s string) { owed = s }, devices: []string{leaseCard2ID}}); err != nil {
 			t.Fatalf("maintainSeatScoped: %v", err)
 		}
 	})
@@ -115,7 +115,7 @@ func TestUnloadSeatLeavesAnAgentSeatOnAnotherCard(t *testing.T) {
 	cfg := scopedDrainConfig(t, srv.URL, "gemma-4-26b-agent") // the agent seat is the single layer's, on card 0
 
 	var owed string
-	if err := maintainSeatScoped(context.Background(), cfg, nil, false, time.Time{}, true, false, func(s string) { owed = s }, []string{leaseCard2ID}); err != nil {
+	if err := maintainSeat(context.Background(), cfg, maintainOpts{unload: true, owed: func(s string) { owed = s }, devices: []string{leaseCard2ID}}); err != nil {
 		t.Fatalf("maintainSeatScoped: %v", err)
 	}
 	if got := sortedCalls(f); strings.Join(got, ",") != "qwen3-vl-8b" {
@@ -135,7 +135,7 @@ func TestUnloadSeatOnAWholeNodeLeaseStillUnloadsEverythingButTheStack(t *testing
 	t.Cleanup(func() { maintenanceClient = old })
 	cfg := scopedDrainConfig(t, srv.URL, "agent-pool")
 
-	if err := maintainSeatScoped(context.Background(), cfg, nil, false, time.Time{}, true, false, nil, nil); err != nil {
+	if err := maintainSeat(context.Background(), cfg, maintainOpts{unload: true}); err != nil {
 		t.Fatalf("maintainSeatScoped: %v", err)
 	}
 	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool,gemma-4-26b-agent,qwen3-vl-8b" {
@@ -154,7 +154,7 @@ func TestUnloadSeatFailsClosedWhenTheCardTableCannotBeRead(t *testing.T) {
 	cardTableFn = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) {
 		return nil, "", context.DeadlineExceeded
 	}
-	if err := maintainSeatScoped(context.Background(), cfg, nil, false, time.Time{}, true, false, nil, []string{leaseCard2ID}); err != nil {
+	if err := maintainSeat(context.Background(), cfg, maintainOpts{unload: true, devices: []string{leaseCard2ID}}); err != nil {
 		t.Fatalf("maintainSeatScoped: %v", err)
 	}
 	if got := sortedCalls(f); strings.Join(got, ",") != "agent-pool,gemma-4-26b-agent" {
@@ -190,7 +190,7 @@ func TestDrainWaitsOnlyForIntersectingRuns(t *testing.T) {
 
 	// Only a run on card 0 (and a busy card-0 seat): a card-2 lease has nothing to wait for.
 	start := time.Now()
-	if err := maintainSeatScoped(context.Background(), cfg, nil, true, time.Now().Add(5*time.Second), false, false, nil, []string{leaseCard2ID}); err != nil {
+	if err := maintainSeat(context.Background(), cfg, maintainOpts{drain: true, deadline: time.Now().Add(5 * time.Second), devices: []string{leaseCard2ID}}); err != nil {
 		t.Fatalf("a drain with nothing on the leased cards must return, got %v", err)
 	}
 	if el := time.Since(start); el > time.Second {
@@ -206,7 +206,7 @@ func TestDrainWaitsOnlyForIntersectingRuns(t *testing.T) {
 		close(ended)
 	}()
 	start = time.Now()
-	if err := maintainSeatScoped(context.Background(), cfg, nil, true, time.Now().Add(10*time.Second), false, false, nil, []string{leaseCard2ID}); err != nil {
+	if err := maintainSeat(context.Background(), cfg, maintainOpts{drain: true, deadline: time.Now().Add(10 * time.Second), devices: []string{leaseCard2ID}}); err != nil {
 		t.Fatalf("drain: %v", err)
 	}
 	<-ended
@@ -449,7 +449,7 @@ func TestUnloadSeatTreatsAnUnplaceablePinAsOnTheLeasedCards(t *testing.T) {
 	cardTableFn = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return statusCards(), "", nil }
 	t.Cleanup(func() { cardTableFn = oldCards })
 	out := captureStderr(t, func() {
-		if err := maintainSeatScoped(context.Background(), loadCfgPath(path), nil, false, time.Time{}, true, false, nil, []string{leaseCard2ID}); err != nil {
+		if err := maintainSeat(context.Background(), loadCfgPath(path), maintainOpts{unload: true, devices: []string{leaseCard2ID}}); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -487,7 +487,7 @@ func TestUnloadSeatPlacesOtherResidentsByTheServingConfigPin(t *testing.T) {
 	}
 	cfg.ServingConfigPath = yamlPath
 	out := captureStderr(t, func() {
-		if err := maintainSeatScoped(context.Background(), cfg, nil, false, time.Time{}, true, false, nil, []string{leaseCard2ID}); err != nil {
+		if err := maintainSeat(context.Background(), cfg, maintainOpts{unload: true, devices: []string{leaseCard2ID}}); err != nil {
 			t.Fatalf("maintainSeatScoped: %v", err)
 		}
 	})
@@ -522,7 +522,7 @@ func TestUnloadSeatNeverFallsBackToTheTotalUnloadWhileASeatOnAnotherCardIsReside
 	maintenanceClient = srv.Client()
 	t.Cleanup(func() { maintenanceClient = old })
 	cfg := scopedDrainConfig(t, srv.URL, "agent-pool")
-	err := maintainSeatScoped(context.Background(), cfg, nil, false, time.Time{}, true, false, nil, []string{leaseCard2ID})
+	err := maintainSeat(context.Background(), cfg, maintainOpts{unload: true, devices: []string{leaseCard2ID}})
 	if f.bulkCalls != 0 {
 		t.Fatalf("GET /unload (total) ran %d time(s) beside a card-0 seat that has to stay", f.bulkCalls)
 	}
@@ -603,7 +603,7 @@ func TestScopedMaintainSaysWhenTheCardTableCannotBeRead(t *testing.T) {
 	}
 	t.Cleanup(func() { cardTableFn = oldCards })
 	out := captureStderr(t, func() {
-		if err := maintainSeatScoped(context.Background(), cfg, nil, false, time.Time{}, true, false, nil, []string{leaseCard2ID}); err != nil {
+		if err := maintainSeat(context.Background(), cfg, maintainOpts{unload: true, devices: []string{leaseCard2ID}}); err != nil {
 			t.Fatalf("maintainSeatScoped: %v", err)
 		}
 	})

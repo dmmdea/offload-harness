@@ -41,7 +41,7 @@ func unloadWith(t *testing.T, f *multiSeatSwap) unloadOutcome {
 		t.Fatal(err)
 	}
 	var out unloadOutcome
-	if err := maintainSeatReport(context.Background(), loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, nil, nil, &out); err != nil {
+	if err := maintainSeat(context.Background(), loadCfgPath(cfgPath), maintainOpts{unload: true, out: &out}); err != nil {
 		t.Fatalf("a foreign resident that will not go does not fail the unload (it is logged and the lease goes on): %v", err)
 	}
 	return out

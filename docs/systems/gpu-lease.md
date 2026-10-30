@@ -61,7 +61,7 @@ other on a single shared card.
 | `internal/gpulock` | the read-only vision gate; the held rule is `gpulease.InspectDir`'s, read through the caller's own narrowing (`WaitFreeScoped`: the vision pre-check passes the seat-narrowed reading the text gate uses) |
 | `internal/modelaffinity/gpuwait.go` | READ-ONLY: text admissions that would make llama-swap load a model wait out a `media` holder (ADR 0026); armed from `config.Load` via `LeaseDir` |
 | `internal/modelaffinity/upstream.go` | READ-ONLY: `AwaitUpstream`, the ONE builder of a llama-swap `/upstream/<model>/…` URL, and `AwaitModelRoute`, the builder for a model-dispatched route (`/v1/chat/completions`, `/v1/embeddings`, …) sent without `Admit` — every probe, tokenizer, warm-up, transcription, chat-lane forward and embedding passes the same fence as a generation (see "Probes pass the fence too") |
-| `gpu_drain.go` (`leaseScope`, `maintainSeatScoped`, `unloadModelsFor`), `internal/gpualloc/scope.go` (`LeaseScope.Locate`, `Judge`, `UnloadModels`), `internal/gpualloc/serving.go` (`servingState`), `internal/servingcfg` (`Load`, `PinsOf`, `Pins`: the one reader of the serving config's pins, shared with the load fence), `render/gpu-lock.mjs` (`parseUnloadModels`, `leaseDevices`) | plan P5 and F15: the drain waits for the runs on the leased cards, the unload takes the models placed on them or not placed at all and leaves the models placed on other cards (by `layers`, else by the serving config pin), and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
+| `gpu_drain.go` (`leaseScope`, `maintainSeat`, `unloadModelsFor`), `internal/gpualloc/scope.go` (`LeaseScope.Locate`, `Judge`, `UnloadModels`), `internal/gpualloc/serving.go` (`servingState`), `internal/servingcfg` (`Load`, `PinsOf`, `Pins`: the one reader of the serving config's pins, shared with the load fence), `render/gpu-lock.mjs` (`parseUnloadModels`, `leaseDevices`) | plan P5 and F15: the drain waits for the runs on the leased cards, the unload takes the models placed on them or not placed at all and leaves the models placed on other cards (by `layers`, else by the serving config pin), and the render lane unloads the list the wrapper exports (`GPU_LEASE_UNLOAD_MODELS`) |
 | `internal/modelaffinity/seatscope.go`, `scoper.go`, `seatyield.go` | the gate's per-seat reading (`SetSeatPins`, `ScopeToPins`, `SeatLease`, `CardsHeld`), the production wiring of the evidence rule (`InspectLease` for the load gate, which remembers what it sees; `PeekLease`, `ScopeInfo`, `ScopeFunc`, `ScopeLeases` for inspectors, which write nothing), and the seat race rule (`YieldIfFenced`) |
 | `internal/mcpserver` | registers the session this MCP server serves in the session registry at start and removes it at exit |
 | `internal/config` | `state_dir`, `gpu_lock_path`, `gpu_card_scoped_leases`, `gpu_legacy_scope_inference`, `gpu_comfy_order`, `gpu_host_ram_headroom_gib` (default 8, chosen and not measured; `Load` installs it process-wide, `gpulease.SetDefaultHostRAMHeadroom`), `gpu_hostram_hold_max_sec` (F82 hold bound: unset 600, chosen and not measured, `0` = no bound, a negative value or one above the 7-day ceiling `MaxGPUHostRAMHoldMaxSec` refused by name; a `*int` so unset and 0 differ; `GPUHostRAMHoldMax` clamps before it converts to a `Duration`), `agent_seat_host_ram_gib` (the host RAM the agent seat holds once loaded, for the warm-back; unset = `hostneed.DefaultSeatHostGiB`), `gpu_orphan_grace_min`, `gpu_max_term_min`, `gpu_max_total_min`, `gpu_on_overdue` (unset asks nobody; `request` asks an overdue lease's holder to yield; `hold`; installed at `Load` on every exit, an unrecognised value as `hold`); `ModelPins` (a model's device pins: `LayerPins`, the layers' reading, else the serving config's through `internal/servingcfg`), `serving_config_path` (the llama-swap yaml that places the models `layers` do not declare, for the unload list and the load fence) |
@@ -1354,7 +1354,7 @@ gate, so an inferred scope always keeps the display card.
 lease reads exactly as before.*
 
 **`--drain` and `--unload-seat` take the cards the lease holds.** `gpu reserve --devices|--cards ... --drain --unload-seat`
-(and the detached holder's `maintain` step) pass the lease's card ids to `maintainSeatScoped`. A seat is **on the leased
+(and the detached holder's `maintain` step) pass the lease's card ids to `maintainSeat`. A seat is **on the leased
 cards** when it is placed on them: by `layers`, else by its pin in the serving config (`LeaseScope.Locate`, resolved
 through the card table); a seat nothing places, whose pin the card table cannot resolve, or that is read while the card table
 cannot be, is on them (today's behaviour, the direction of every doubt). Then:
@@ -2371,7 +2371,7 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
 ### A lease that unloads the seat is compared to the host after the unload (F82)
 
 **The deadlock.** `gpu reserve --ram N --drain --unload-seat` compared its `N` to the host inside `Acquire`, and drained and
-unloaded the seat only after the lease was held (`detachMaintain`, `maintainSeatScoped`). When the memory it needed was the
+unloaded the seat only after the lease was held (`detachMaintain`, `maintainSeat`). When the memory it needed was the
 memory the seat held, the grant waited for commit that its own unload would have freed, and the unload ran only after the
 grant: a film lease that declared its host RAM waited about six hours while the 3-card vLLM seat held 67 GiB of the host's commit.
 It is the class of the DRAINING stamp ([The drain waits for runs](#the-drain-waits-for-runs-inside-the-queue-budget-0117-0-adr-0041),
@@ -2422,7 +2422,7 @@ seat for a wait it cannot shorten would only cost the seat's callers (`TestALeas
 
 | form | where the order is made | why it cannot deadlock |
 |---|---|---|
-| wrapper (`gpu reserve ... -- <cmd>`) | `runGPUReserve`: `maintainSeatReport`, then `awaitHostRAMBounded` (the wait under the hold bound) under the same heartbeat and the same cancel as the drain | the grant compares nothing; the wait runs after the unload |
+| wrapper (`gpu reserve ... -- <cmd>`) | `runGPUReserve`: `maintainSeat`, then `awaitHostRAMBounded` (the wait under the hold bound) under the same heartbeat and the same cancel as the drain | the grant compares nothing; the wait runs after the unload |
 | `--detach` | the parent: `detachMaintainReport`, then `awaitHostRAMBounded` against the held epoch (`Manager.AwaitHostRAM`). The hidden holder is started with `--ram 0 --ram-wait N` (`holdArgs`) | the holder compares nothing in its grant (`TestTheDetachedHolderOfAnUnloadSeatLeaseTakesItsCardsAndComparesNothing`); a wait that ends without the host's admission, **whatever ended it** (the hold bound, `--wait`, an impossible figure), **releases the lease** (`releaseAfterRAMWait`: what `gpu release --warm-seat --epoch N` does, except that the seat is warmed back only if the lease owes it, `autoReleaseWarmGuard`) and fails the parent non-zero with what ended the wait (`TestTheHoldBoundReleasesADetachedHoldToo`, `TestADetachedWaitThatWaitEndsAlsoReleasesTheLease`); and if the parent dies first, **the hidden holder releases the lease itself** from the end of the wait the record carries (`releaseHolderAtWaitEnd`), or, if it died during the drain or the unload, from the outer bound the parent stamped as soon as the holder had the lease ([below](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)) |
 | `gpu hold` (the hidden holder verb itself) | none: it has no drain and no unload of its own, only what the parent hands it | it declares exactly what it is given. `--ram N` is compared in its grant, as before; nothing frees host memory for it, so there is no unload to wait behind. The `--detach` parent passes the figure as `--ram-wait` instead |
 | `--devices` and `--cards` | the same two code paths; `--cards` allocates with a host term of 0 and the allocator's queue treats the request as one that declares nothing. `--devices` knows its cards before the grant and applies step 0 to them. `--cards` chooses its cards after the grant, so step 0 cannot be asked beforehand and it always defers: an allocation that lands on cards the unload does not reach holds them while the host is short, and the wait line (it says the drain and the unload are done, not that the seat was cleared) is true for it | `TestACardLeaseWithUnloadSeatIsNotHeldByTheHostRAMItsOwnUnloadFrees`, `TestACardsRequestWithUnloadSeatIsNotHeldByTheHostRAMItsOwnUnloadFrees` |
@@ -2735,7 +2735,7 @@ These callers stop with `StopForLease`. The media pipeline's routine release of 
 waiting line and the bound's failure then say `N unloads of other resident models failed (see above), so what the unload freed is not
 known` instead of claiming that nothing was resident or that the shortage is not the seat's.
 
-**The waiting line says when the unload freed nothing.** `maintainSeatReport` reports what the unload took down (`unloadOutcome`):
+**The waiting line says when the unload freed nothing.** `maintainSeat` reports what the unload took down (`unloadOutcome`):
 when the seat was not loaded, or sits on cards the lease does not hold, and nothing else resident was on the lease's cards, the line
 printed once when the wait begins says `the unload freed nothing on these cards (the seat was not loaded), so it did not shorten
 this wait`, and it names the bound (`hold bound 10m0s: --ram-hold-max, config gpu_hostram_hold_max_sec`). The bound still applies:
@@ -3512,7 +3512,7 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
 
   **Known limits.** The clear fires only if a `gpu status` run lands while the seat is loaded and no lease holds the
   card. The house idle ttl is 300 s, so after a seat loads that window is at most about five minutes; once the seat has
-  idled out, a stale marker survives with the seat cold (`maintainSeatScoped`'s `!wasLoaded` branch leaves the marker
+  idled out, a stale marker survives with the seat cold (`maintainSeat`'s `!wasLoaded` branch leaves the marker
   alone), and the next `--unload-seat` wrapper over that cold seat passes the skip-unless-owed check and warms it at
   release: the 2026-09-23 outcome (a 27B up on all the cards after a render), silently. Only a warm clears it by then
   (`gpu release --warm-seat` does, by loading the seat). What remains of the status race is the gap between the clear's
@@ -3556,7 +3556,7 @@ exclusive card, and three measurement rows read the seat's 10 GiB as their own f
 - **A drainer that loses its lease queues again instead of dying at the restamp (register C-59).** The wrapper form
   used to keep draining a card it no longer owned, die at the restamp with `stamping the lease after the drain:
   restamp: the lease is gone` (or `fenced out`), and never start its command. Now the drain's heartbeat ends the
-  drain the moment the lease is confirmed gone (`maintainSeatCtx` takes a context; the restamp comes before the
+  drain the moment the lease is confirmed gone (`maintainSeat` takes a context; the restamp comes before the
   unload, so a drain that lost its lease never reaches the unload), the reserve says `the lease was lost during the
   drain`, releases what is left, and takes its place in the line again with what remains of `--wait` (never under
   the 2-minute drain floor; `--wait 0` stays one try, and a card another holder has then fails with that holder

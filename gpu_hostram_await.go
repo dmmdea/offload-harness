@@ -76,7 +76,7 @@ func hostRAMLoadSplit(defers bool, load gpuprobe.HostLoad) (gate, later gpuprobe
 
 // unloadReachesLease says whether the unload that --unload-seat asks for can take down anything on the cards a lease holds
 // (lease ids; none = the whole node, or the cards an allocation has not chosen yet): the agent seat, or a model the roster
-// lists that is placed on those cards or placed nowhere. It is the question maintainSeatScoped answers when it runs, put
+// lists that is placed on those cards or placed nowhere. It is the question maintainSeat answers when it runs, put
 // before the grant from the same facts (the card table, the layers' pins, the serving config, the roster), and it
 // resolves doubt the way the unload does: a table that cannot be read, a model nothing places and a roster that cannot be
 // read all count as reaching, so only a lease whose every listed model is positively placed on other cards is told that its

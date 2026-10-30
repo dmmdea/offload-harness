@@ -743,8 +743,11 @@ func detachMaintainReport(m *gpulease.Manager, epoch uint64, cfg config.Config, 
 	if err != nil {
 		return err
 	}
-	return maintainSeatReport(context.Background(), cfg, func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) },
-		drain, deadline, unload, exclusive, markWarmOwed(m), devices, out)
+	return maintainSeat(context.Background(), cfg, maintainOpts{
+		restamp: func(fn func(*gpulease.Meta)) error { return m.Restamp(epoch, fn) },
+		drain:   drain, deadline: deadline, unload: unload, exclusive: exclusive,
+		owed: markWarmOwed(m), devices: devices, out: out,
+	})
 }
 
 // rosterIDsFn reads the llama-swap roster ids; a variable so a test needs no llama-swap.
@@ -777,32 +780,21 @@ func wrapperUnloadEnv(ctx context.Context, cfg config.Config, leaseIDs []string)
 	return unloadModelsEnv(models, known)
 }
 
-// maintainSeat is maintainSeatCtx for a caller that nothing cancels.
-func maintainSeat(cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string)) error {
-	return maintainSeatCtx(context.Background(), cfg, restamp, drain, deadline, unload, exclusive, owed)
-}
-
-// maintainSeatCtx runs the --drain / --unload-seat steps against the config's
-// seat: drain until deadline, then turn the DRAINING stamp into EXCLUSIVE when
-// the window asked for it (or just clear it), then unload. Errors are returned
-// as-is; the caller decides what to do with the lease. owed, when non-nil, is
-// told the seat's name after a successful unload: the warm-owed marker the
-// LAST releasing holder pays (register D-124).
-//
-// ctx ends the drain and the unload early. The wrapper form cancels it the
-// moment its lease is lost (register C-59): a drain that goes on waiting for a
-// card another holder has is the failure arriving hours late. The restamp
-// comes BEFORE the unload, so a lease that is already gone never gets as far
-// as clearing the seat under whoever holds the card now.
-func maintainSeatCtx(ctx context.Context, cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string)) error {
-	return maintainSeatScoped(ctx, cfg, restamp, drain, deadline, unload, exclusive, owed, nil)
-}
-
-// maintainSeatScoped is maintainSeatCtx for a lease that holds the cards in devices (lease ids):
-// the drain waits only for runs on those cards, and the unload takes only the seats that sit on
-// them (plan P5). nil devices is the whole node, exactly as before.
-func maintainSeatScoped(ctx context.Context, cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string), devices []string) error {
-	return maintainSeatReport(ctx, cfg, restamp, drain, deadline, unload, exclusive, owed, devices, nil)
+// maintainOpts is everything maintainSeat takes besides the context and the config. The zero value of every
+// field is the plain case: no restamp, no drain, no unload, no owed callback, the whole node, no outcome report.
+type maintainOpts struct {
+	restamp   restamper
+	drain     bool
+	deadline  time.Time
+	unload    bool
+	exclusive bool
+	// owed, when non-nil, is told the seat's name after a successful unload.
+	owed func(seat string)
+	// devices is the lease ids of the cards the lease holds: the drain waits only for runs on those cards, and the
+	// unload takes only the seats that sit on them (plan P5). nil is the whole node.
+	devices []string
+	// out, when non-nil, is told what the unload took down.
+	out *unloadOutcome
 }
 
 // unloadOutcome says what the unload step of a maintain took down on the lease's cards, for the caller that waits for the
@@ -833,8 +825,24 @@ func (u unloadOutcome) failedUnloadsText() string {
 	return fmt.Sprintf("%d unloads of other resident models failed (see above), so what the unload freed is not known", u.failed)
 }
 
-// maintainSeatReport is maintainSeatScoped that also tells the caller what the unload took down (out, when non-nil).
-func maintainSeatReport(ctx context.Context, cfg config.Config, restamp restamper, drain bool, deadline time.Time, unload, exclusive bool, owed func(seat string), devices []string, out *unloadOutcome) error {
+// maintainSeat runs the --drain / --unload-seat steps against the config's
+// seat: drain until deadline, then turn the DRAINING stamp into EXCLUSIVE when
+// the window asked for it (or just clear it), then unload. Errors are returned
+// as-is; the caller decides what to do with the lease. o.owed, when non-nil, is
+// told the seat's name after a successful unload: the warm-owed marker the
+// LAST releasing holder pays (register D-124).
+//
+// ctx ends the drain and the unload early. The wrapper form cancels it the
+// moment its lease is lost (register C-59): a drain that goes on waiting for a
+// card another holder has is the failure arriving hours late. The restamp
+// comes BEFORE the unload, so a lease that is already gone never gets as far
+// as clearing the seat under whoever holds the card now.
+//
+// o.devices narrows the step to a lease that holds the cards in it (lease ids): the drain waits only for runs on
+// those cards, and the unload takes only the seats that sit on them (plan P5). o.out, when non-nil, tells the caller
+// what the unload took down.
+func maintainSeat(ctx context.Context, cfg config.Config, o maintainOpts) error {
+	restamp, drain, deadline, unload, exclusive, owed, devices, out := o.restamp, o.drain, o.deadline, o.unload, o.exclusive, o.owed, o.devices, o.out
 	endpoint, model, err := seatTarget(cfg)
 	if err != nil {
 		return err

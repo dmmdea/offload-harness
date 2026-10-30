@@ -32,7 +32,7 @@ func TestMaintainSeatStopsAtOnceWhenItsContextIsCancelled(t *testing.T) {
 		cancel()
 	}()
 	start := time.Now()
-	err = maintainSeatCtx(ctx, loadCfgPath(cfgPath), holder.Restamp, true, time.Now().Add(time.Minute), true, true, nil)
+	err = maintainSeat(ctx, loadCfgPath(cfgPath), maintainOpts{restamp: holder.Restamp, drain: true, deadline: time.Now().Add(time.Minute), unload: true, exclusive: true})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("a cancelled drain must return the context's error, got %v", err)
 	}
