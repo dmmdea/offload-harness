@@ -27,7 +27,7 @@ func TestGenerateWaitsOutA429UsingTheContextBudget(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, "/v1/chat/completions", "m", 10*time.Second)
 	b := seatwait.NewBudget(5)
-	res, err := c.Generate(seatwait.WithBudget(context.Background(), b), "m", "sys", "user", "", 16, 0, 0)
+	res, err := c.Generate(seatwait.WithBudget(context.Background(), b), GenRequest{Model: "m", System: "sys", User: "user", MaxTokens: 16})
 	if err != nil || calls.Load() != 2 || res.Content == "" {
 		t.Fatalf("err=%v calls=%d content=%q", err, calls.Load(), res.Content)
 	}
@@ -45,7 +45,7 @@ func TestGenerateWithoutBudgetKeepsTheOldFailFastShape(t *testing.T) {
 	}))
 	defer srv.Close()
 	c := New(srv.URL, "/v1/chat/completions", "m", 10*time.Second)
-	_, err := c.Generate(context.Background(), "m", "sys", "user", "", 16, 0, 0)
+	_, err := c.Generate(context.Background(), GenRequest{Model: "m", System: "sys", User: "user", MaxTokens: 16})
 	var se *StatusError
 	if !errors.As(err, &se) || se.StatusCode != http.StatusTooManyRequests || calls.Load() != 1 {
 		t.Fatalf("want one attempt and a *StatusError 429: %T %v calls=%d", err, err, calls.Load())
@@ -62,7 +62,7 @@ func TestGenerateDoesNotRetryARealServerFault(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, "/v1/chat/completions", "m", 10*time.Second)
 	b := seatwait.NewBudget(30)
-	_, err := c.Generate(seatwait.WithBudget(context.Background(), b), "m", "sys", "user", "", 16, 0, 0)
+	_, err := c.Generate(seatwait.WithBudget(context.Background(), b), GenRequest{Model: "m", System: "sys", User: "user", MaxTokens: 16})
 	var se *StatusError
 	if !errors.As(err, &se) || se.StatusCode != http.StatusInternalServerError || calls.Load() != 1 || b.Spent() != 0 {
 		t.Fatalf("a CUDA OOM is not a wait: %v calls=%d spent=%v", err, calls.Load(), b.Spent())
@@ -83,7 +83,7 @@ func TestGenerateVisionWaitsOutA429Too(t *testing.T) {
 	defer srv.Close()
 	c := New(srv.URL, "/v1/chat/completions", "m", 10*time.Second)
 	b := seatwait.NewBudget(5)
-	res, err := c.GenerateVision(seatwait.WithBudget(context.Background(), b), "m", "sys", "what is this", []string{"data:image/png;base64,AAAA"}, "", 16, 0, 0)
+	res, err := c.GenerateVision(seatwait.WithBudget(context.Background(), b), VisionRequest{Model: "m", System: "sys", User: "what is this", ImageDataURIs: []string{"data:image/png;base64,AAAA"}, MaxTokens: 16})
 	if err != nil || calls.Load() != 2 || res.Content != "a cat" || b.Spent() != time.Second {
 		t.Fatalf("err=%v calls=%d content=%q spent=%v", err, calls.Load(), res.Content, b.Spent())
 	}

@@ -244,7 +244,7 @@ func (p *Pipeline) refinePrompt(ctx context.Context, raw string) (refined, note 
 	gen := p.refineGen
 	if gen == nil {
 		gen = func(gctx context.Context, model, system, user string, maxTokens int, temperature float64) (llamaclient.GenResult, error) {
-			return p.client.Generate(gctx, model, system, user, "", maxTokens, temperature, 0)
+			return p.client.Generate(gctx, llamaclient.GenRequest{Model: model, System: system, User: user, MaxTokens: maxTokens, Temperature: temperature})
 		}
 	}
 	gres, err := gen(rctx, p.cfg.ImageGenRefinerModel, refinerSystem, raw, refinerMaxTokens, refinerTemperature)

@@ -29,11 +29,11 @@ func TestGenerateReportsTheFinishReasonOnBothPaths(t *testing.T) {
 			}))
 			defer streamSrv.Close()
 
-			plain, err := New(jsonSrv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0)
+			plain, err := New(jsonSrv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64})
 			if err != nil {
 				t.Fatalf("JSON Generate: %v", err)
 			}
-			streamed, err := New(streamSrv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+			streamed, err := New(streamSrv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 			if err != nil {
 				t.Fatalf("streamed Generate: %v", err)
 			}

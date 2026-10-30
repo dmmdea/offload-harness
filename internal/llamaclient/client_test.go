@@ -38,7 +38,7 @@ func TestGenerateVision(t *testing.T) {
 
 	c := New(srv.URL, "/v1/chat/completions", "qwen3vl-4b", 5*time.Second)
 	dataURI := "data:image/png;base64,iVBORw0KGgo="
-	res, err := c.GenerateVision(context.Background(), "", "you are a vision model", "what is in this image?", []string{dataURI}, "root ::= [a-z ]+", 64, 0, 0)
+	res, err := c.GenerateVision(context.Background(), VisionRequest{System: "you are a vision model", User: "what is in this image?", ImageDataURIs: []string{dataURI}, Grammar: "root ::= [a-z ]+", MaxTokens: 64})
 	if err != nil {
 		t.Fatalf("GenerateVision: %v", err)
 	}
@@ -134,14 +134,7 @@ func TestGenerateVisionInterleaved(t *testing.T) {
 	dataURI1 := "data:image/png;base64,iVBORw0KGgo="
 	dataURI2 := "data:image/png;base64,iVBORw0KGgo="
 
-	res, err := c.GenerateVisionInterleaved(
-		context.Background(),
-		"", "system prompt",
-		[]string{"<0.0 seconds>", "<0.5 seconds>"},
-		[]string{dataURI1, dataURI2},
-		"the question",
-		"", 64, 0, 0,
-	)
+	res, err := c.GenerateVisionInterleaved(context.Background(), InterleavedRequest{System: "system prompt", FrameLabels: []string{"<0.0 seconds>", "<0.5 seconds>"}, ImageDataURIs: []string{dataURI1, dataURI2}, TrailingUser: "the question", MaxTokens: 64})
 	if err != nil {
 		t.Fatalf("GenerateVisionInterleaved: %v", err)
 	}
@@ -224,7 +217,7 @@ func TestGenerateTextContentIsString(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "/v1/chat/completions", "offload-e4b", 5*time.Second)
-	res, err := c.Generate(context.Background(), "", "sys", "hello", "", 32, 0, 0)
+	res, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hello", MaxTokens: 32})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}

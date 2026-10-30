@@ -35,7 +35,7 @@ func TestGenerateWithoutThinkingSendsChatTemplateKwargs(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "", "seat-thinky", 5*time.Second)
-	if _, err := c.Generate(context.Background(), "", "sys", "hi", `root ::= "{}"`, 64, 0, 0, WithoutThinking()); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", Grammar: `root ::= "{}"`, MaxTokens: 64}, WithoutThinking()); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 
@@ -70,7 +70,7 @@ func TestGenerateWithoutOptionOmitsChatTemplateKwargs(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "", "seat-thinky", 5*time.Second)
-	if _, err := c.Generate(context.Background(), "", "sys", "hi", `root ::= "{}"`, 64, 0, 0); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", Grammar: `root ::= "{}"`, MaxTokens: 64}); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 

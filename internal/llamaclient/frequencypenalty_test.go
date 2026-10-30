@@ -18,7 +18,7 @@ func TestGenerateWithFrequencyPenaltySendsItAndOnlyIt(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "", "seat-x", 5*time.Second)
-	if _, err := c.Generate(context.Background(), "", "sys", "hi", `root ::= "{}"`, 64, 0, 0, WithFrequencyPenalty(0.5)); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", Grammar: `root ::= "{}"`, MaxTokens: 64}, WithFrequencyPenalty(0.5)); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	var body map[string]any
@@ -41,7 +41,7 @@ func TestGenerateWithANonPositiveFrequencyPenaltyIsNoOption(t *testing.T) {
 		var raw string
 		srv := bodyCapture(t, &raw)
 		c := New(srv.URL, "", "seat-x", 5*time.Second)
-		_, err := c.Generate(context.Background(), "", "sys", "hi", "", 64, 0, 0, WithFrequencyPenalty(p))
+		_, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", MaxTokens: 64}, WithFrequencyPenalty(p))
 		srv.Close()
 		if err != nil {
 			t.Fatalf("Generate(%v): %v", p, err)

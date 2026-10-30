@@ -87,7 +87,7 @@ func (p *Pipeline) releaseUpsampler(ctx context.Context, model string) {
 func (p *Pipeline) upsamplePrompt(ctx context.Context, model, raw string) (caption, note string) {
 	uctx, cancel := context.WithTimeout(ctx, upsamplerTimeout)
 	defer cancel()
-	gres, err := p.client.Generate(uctx, model, flux3KleinT2ISystem, raw, "", upsamplerMaxTokens, 0, 0, llamaclient.WithoutThinking())
+	gres, err := p.client.Generate(uctx, llamaclient.GenRequest{Model: model, System: flux3KleinT2ISystem, User: raw, MaxTokens: upsamplerMaxTokens}, llamaclient.WithoutThinking())
 	if err != nil {
 		reason := "upsampler call failed: " + err.Error()
 		if errors.Is(err, context.DeadlineExceeded) || uctx.Err() == context.DeadlineExceeded {

@@ -96,7 +96,7 @@ func TestAgentSeatAndCascadeSeatDoNotThrashOneBase(t *testing.T) {
 	// this change it went straight through and llama-swap evicted the agent's
 	// model to serve it.
 	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
-	_, err := cascade.Generate(ctx, "cascade-seat", "", "summarize this", "", 8, 0, 0)
+	_, err := cascade.Generate(ctx, llamaclient.GenRequest{Model: "cascade-seat", User: "summarize this", MaxTokens: 8})
 	cancel()
 
 	var we *modelaffinity.WaitError
@@ -112,7 +112,7 @@ func TestAgentSeatAndCascadeSeatDoNotThrashOneBase(t *testing.T) {
 	// Drain the agent seat; the cascade seat must then get its switch.
 	close(hold)
 	<-done
-	if _, err := cascade.Generate(context.Background(), "cascade-seat", "", "summarize this", "", 8, 0, 0); err != nil {
+	if _, err := cascade.Generate(context.Background(), llamaclient.GenRequest{Model: "cascade-seat", User: "summarize this", MaxTokens: 8}); err != nil {
 		t.Fatalf("cascade never got its switch after the agent seat drained: %v", err)
 	}
 

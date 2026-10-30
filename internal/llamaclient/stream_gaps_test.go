@@ -21,7 +21,7 @@ func TestGenerateWithProgressEngineErrorFrameBeforeDoneIsABodyError(t *testing.T
 		sseWrite(w, answerFrames[1], `{"error":{"message":"EngineCore died","type":"server_error"}}`, `[DONE]`)
 	}))
 	defer srv.Close()
-	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	var be *BodyError
 	if !errors.As(err, &be) {
 		t.Fatalf("err = %v (%T), res = %+v: an engine error frame followed by [DONE] must be the wire's failure, not a result", err, err, res)
@@ -43,7 +43,7 @@ func TestGenerateWithProgressStreamCutAtTheCompletionBudgetIsTruncated(t *testin
 			`[DONE]`)
 	}))
 	defer srv.Close()
-	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,7 +65,7 @@ func TestGenerateWithProgressReasoningDeltasAreProgressNotContent(t *testing.T) 
 	}))
 	defer srv.Close()
 	var log progressLog
-	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(log.fn))
+	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(log.fn))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +88,7 @@ func TestGenerateWithProgressDecodesAFrameLargerThanTheScannerDefault(t *testing
 			`[DONE]`)
 	}))
 	defer srv.Close()
-	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	if err != nil || res.Content != big {
 		t.Fatalf("a 100 KB single frame: err=%v len(content)=%d", err, len(res.Content))
 	}
@@ -107,7 +107,7 @@ func TestGenerateWithProgressWithoutAUsageFrameCountsDeltasAndReadsTimings(t *te
 			`[DONE]`)
 	}))
 	defer srv.Close()
-	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -131,7 +131,7 @@ func TestGenerateWithProgressRetriesAsJSONOn422(t *testing.T) {
 		_, _ = w.Write([]byte(answerJSON))
 	}))
 	defer srv.Close()
-	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	if err != nil || res.Content != `{"answer":"42"}` {
 		t.Fatalf("res=%+v err=%v, want the JSON retry's answer after a 422", res, err)
 	}
@@ -146,7 +146,7 @@ func TestGenerateWithProgressReadsDataLinesWithNoSpaceAfterTheColon(t *testing.T
 		}
 	}))
 	defer srv.Close()
-	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	if err != nil || res.Content != `{"answer":"42"}` {
 		t.Fatalf("res=%+v err=%v", res, err)
 	}
@@ -174,7 +174,7 @@ func TestGenerateWithProgressJSONRetryCarriesNoStreamOptions(t *testing.T) {
 		_, _ = w.Write([]byte(answerJSON))
 	}))
 	defer srv.Close()
-	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	if err != nil || res.Content != `{"answer":"42"}` {
 		t.Fatalf("res=%+v err=%v, want the plain JSON retry answered", res, err)
 	}
@@ -190,7 +190,7 @@ func TestGenerateWithoutProgressIsNotResentOnA400(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"context length exceeded"}`))
 	}))
 	defer srv.Close()
-	_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0)
+	_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64})
 	var se *StatusError
 	if !errors.As(err, &se) || se.StatusCode != http.StatusBadRequest {
 		t.Fatalf("err = %v, want the 400", err)

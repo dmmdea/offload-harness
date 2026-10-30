@@ -43,7 +43,7 @@ func TestVLLMChatLogprobShapeDecodesIntoTopAlternatives(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "/v1/chat/completions", "qwen3.8-27b-vllm", 10*time.Second)
-	res, err := c.Generate(context.Background(), "", "classify", "ticket", "", 8, 0, 5)
+	res, err := c.Generate(context.Background(), GenRequest{System: "classify", User: "ticket", MaxTokens: 8, TopLogprobs: 5})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}

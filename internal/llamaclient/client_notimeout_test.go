@@ -26,14 +26,14 @@ func TestGenerateWithoutClientTimeoutOutlivesTheClientTimeout(t *testing.T) {
 	c := New(srv.URL, "", "m", 150*time.Millisecond)
 
 	// Without the option the client Timeout still applies, as before.
-	_, err := c.Generate(context.Background(), "", "", "hola", "", 16, 0, 0)
+	_, err := c.Generate(context.Background(), GenRequest{User: "hola", MaxTokens: 16})
 	var uerr *url.Error
 	if !errors.As(err, &uerr) || !uerr.Timeout() {
 		t.Fatalf("an option-free call must still hit the client timeout, got %v", err)
 	}
 
 	// With it the request runs to its answer, and the client is left untouched.
-	res, err := c.Generate(context.Background(), "", "", "hola", "", 16, 0, 0, WithoutClientTimeout())
+	res, err := c.Generate(context.Background(), GenRequest{User: "hola", MaxTokens: 16}, WithoutClientTimeout())
 	if err != nil || res.Content != "ok" {
 		t.Fatalf("WithoutClientTimeout: res=%+v err=%v, want the answer that arrived after the client timeout", res, err)
 	}
@@ -44,7 +44,7 @@ func TestGenerateWithoutClientTimeoutOutlivesTheClientTimeout(t *testing.T) {
 	// The context still bounds it: the caller's deadline ends the request.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
-	if _, err := c.Generate(ctx, "", "", "hola", "", 16, 0, 0, WithoutClientTimeout()); err == nil || ctx.Err() == nil {
+	if _, err := c.Generate(ctx, GenRequest{User: "hola", MaxTokens: 16}, WithoutClientTimeout()); err == nil || ctx.Err() == nil {
 		t.Fatalf("the context deadline must still end the call, got err=%v ctx=%v", err, ctx.Err())
 	}
 }

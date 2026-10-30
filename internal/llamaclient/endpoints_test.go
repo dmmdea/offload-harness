@@ -75,14 +75,14 @@ func TestSeatEndpointOverrideRoutesRequests(t *testing.T) {
 	c := New(defSrv.URL, "", "offload-e4b", 5*time.Second).
 		WithSeatEndpoints(map[string]string{"node-c-e4b": ovrSrv.URL})
 
-	if _, err := c.Generate(context.Background(), "", "sys", "hi", "", 16, 0, 0); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", MaxTokens: 16}); err != nil {
 		t.Fatalf("default-model Generate: %v", err)
 	}
 	if defaultHits.Load() != 1 || overrideHits.Load() != 0 {
 		t.Fatalf("default-model call: hits = (default %d, override %d), want (1, 0)", defaultHits.Load(), overrideHits.Load())
 	}
 
-	if _, err := c.Generate(context.Background(), "node-c-e4b", "sys", "hi", "", 16, 0, 0); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{Model: "node-c-e4b", System: "sys", User: "hi", MaxTokens: 16}); err != nil {
 		t.Fatalf("overridden-model Generate: %v", err)
 	}
 	if defaultHits.Load() != 1 || overrideHits.Load() != 1 {
@@ -103,7 +103,7 @@ func TestSeatEndpointOverrideRidesTheTailnetGuard(t *testing.T) {
 	c := New(defSrv.URL, "", "offload-e4b", 5*time.Second).
 		WithSeatEndpoints(map[string]string{"rogue-seat": "http://203.0.113.9:80"})
 
-	_, err := c.Generate(context.Background(), "rogue-seat", "sys", "hi", "", 16, 0, 0)
+	_, err := c.Generate(context.Background(), GenRequest{Model: "rogue-seat", System: "sys", User: "hi", MaxTokens: 16})
 	if err == nil {
 		t.Fatal("Generate against a public-IP override succeeded, want a dial-time refusal")
 	}
@@ -111,7 +111,7 @@ func TestSeatEndpointOverrideRidesTheTailnetGuard(t *testing.T) {
 		t.Errorf("refusal error = %q, want it to name the tailnet guard", err.Error())
 	}
 
-	if _, err := c.Generate(context.Background(), "", "sys", "hi", "", 16, 0, 0); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", MaxTokens: 16}); err != nil {
 		t.Fatalf("default seat must be unaffected by a rogue override on another seat: %v", err)
 	}
 	if defaultHits.Load() != 1 {

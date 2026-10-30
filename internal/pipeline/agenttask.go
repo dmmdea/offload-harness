@@ -2024,7 +2024,7 @@ func (p *Pipeline) repackStructuredWith(ctx context.Context, seat string, rawSch
 		// deadline from the wall the caller classifies a failure against.
 		attemptTimeout := repackAttemptDeadline(ctx, p.cfg, sent, limit-attempts+1)
 		attemptStart := time.Now()
-		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, seat, system, attemptUser, grammar, sent, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, attemptOpts...)...)
+		gres, gerr := p.repackClient(p.cfg.CompletionPath, attemptTimeout, gates).Generate(ctx, llamaclient.GenRequest{Model: seat, System: system, User: attemptUser, Grammar: grammar, MaxTokens: sent, Temperature: p.cfg.Temperature}, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, attemptOpts...)...)
 		// What the attempt generated counts whether or not it answered: a stream that
 		// died mid-body (a stall or the ceiling cutting a producing seat, a dropped
 		// connection) cost the seat its tokens and wrote something worth a clip.
@@ -2520,7 +2520,7 @@ func (p *Pipeline) repackViaChat(ctx context.Context, client *llamaclient.Client
 		notes = append(notes, repackNoRepeatNote)
 	}
 	user := repackUserPrompt("Extract these fields from the text as a JSON object", repackFieldList(names, props), notes, output)
-	gres, gerr := client.Generate(ctx, seat, system, user, "", budget, p.cfg.Temperature, 0, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
+	gres, gerr := client.Generate(ctx, llamaclient.GenRequest{Model: seat, System: system, User: user, MaxTokens: budget, Temperature: p.cfg.Temperature}, append([]llamaclient.GenOption{llamaclient.WithoutThinking()}, extra...)...)
 	if gerr != nil {
 		return nil, partialOf(gres, gerr), "", gerr
 	}

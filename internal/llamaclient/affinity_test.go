@@ -84,15 +84,15 @@ func TestEveryGenerationMethodParksBehindAForeignModel(t *testing.T) {
 		call func(c *Client, ctx context.Context) error
 	}{
 		{"Generate", func(c *Client, ctx context.Context) error {
-			_, err := c.Generate(ctx, "other-model", "", "hi", "", 8, 0, 0)
+			_, err := c.Generate(ctx, GenRequest{Model: "other-model", User: "hi", MaxTokens: 8})
 			return err
 		}},
 		{"GenerateVision", func(c *Client, ctx context.Context) error {
-			_, err := c.GenerateVision(ctx, "other-model", "", "hi", []string{"data:image/png;base64,AA=="}, "", 8, 0, 0)
+			_, err := c.GenerateVision(ctx, VisionRequest{Model: "other-model", User: "hi", ImageDataURIs: []string{"data:image/png;base64,AA=="}, MaxTokens: 8})
 			return err
 		}},
 		{"GenerateVisionInterleaved", func(c *Client, ctx context.Context) error {
-			_, err := c.GenerateVisionInterleaved(ctx, "other-model", "", []string{"f0"}, []string{"data:image/png;base64,AA=="}, "hi", "", 8, 0, 0)
+			_, err := c.GenerateVisionInterleaved(ctx, InterleavedRequest{Model: "other-model", FrameLabels: []string{"f0"}, ImageDataURIs: []string{"data:image/png;base64,AA=="}, TrailingUser: "hi", MaxTokens: 8})
 			return err
 		}},
 	}
@@ -106,7 +106,7 @@ func TestEveryGenerationMethodParksBehindAForeignModel(t *testing.T) {
 			done := make(chan struct{})
 			go func() {
 				defer close(done)
-				if _, err := c.Generate(context.Background(), "held-model", "", "hi", "", 8, 0, 0); err != nil {
+				if _, err := c.Generate(context.Background(), GenRequest{Model: "held-model", User: "hi", MaxTokens: 8}); err != nil {
 					t.Errorf("held Generate: %v", err)
 				}
 			}()
@@ -148,7 +148,7 @@ func TestGenerateProceedsOnceTheHeldModelDrains(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if _, err := c.Generate(context.Background(), "held-model", "", "hi", "", 8, 0, 0); err != nil {
+		if _, err := c.Generate(context.Background(), GenRequest{Model: "held-model", User: "hi", MaxTokens: 8}); err != nil {
 			t.Errorf("held Generate: %v", err)
 		}
 	}()
@@ -156,7 +156,7 @@ func TestGenerateProceedsOnceTheHeldModelDrains(t *testing.T) {
 
 	other := make(chan error, 1)
 	go func() {
-		_, err := c.Generate(context.Background(), "other-model", "", "hi", "", 8, 0, 0)
+		_, err := c.Generate(context.Background(), GenRequest{Model: "other-model", User: "hi", MaxTokens: 8})
 		other <- err
 	}()
 	time.Sleep(50 * time.Millisecond) // the parked call must not have reached the server
@@ -205,7 +205,7 @@ func TestGenerateSameModelStillOverlaps(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			if _, err := c.Generate(context.Background(), "same-model", "", "hi", "", 8, 0, 0); err != nil {
+			if _, err := c.Generate(context.Background(), GenRequest{Model: "same-model", User: "hi", MaxTokens: 8}); err != nil {
 				t.Errorf("Generate: %v", err)
 			}
 		}()
@@ -234,7 +234,7 @@ func TestGenerateOnAnotherBaseDoesNotPark(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		if _, err := c1.Generate(context.Background(), "held-model", "", "hi", "", 8, 0, 0); err != nil {
+		if _, err := c1.Generate(context.Background(), GenRequest{Model: "held-model", User: "hi", MaxTokens: 8}); err != nil {
 			t.Errorf("held Generate: %v", err)
 		}
 	}()
@@ -242,7 +242,7 @@ func TestGenerateOnAnotherBaseDoesNotPark(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	if _, err := c2.Generate(ctx, "other-model", "", "hi", "", 8, 0, 0); err != nil {
+	if _, err := c2.Generate(ctx, GenRequest{Model: "other-model", User: "hi", MaxTokens: 8}); err != nil {
 		close(s1.hold)
 		<-done
 		t.Fatalf("a call on a DIFFERENT base parked behind an unrelated one: %v", err)
