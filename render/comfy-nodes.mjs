@@ -21,10 +21,11 @@
 // still reported, just without the pack hint.
 // ComfyUI-MultiGPU archives upstream 2026-09-30 (issue #223, no successor endorsed).
 // The mirror's default branch carries one local Windows P2P/cudart
-// fix already carried by the fleet, on top of upstream's last code commit; mirrored privately at dmmdea/ComfyUI-MultiGPU-mirror. See
+// fix already carried by the fleet, on top of upstream's last code commit; mirrored privately at dmmdea/ComfyUI-MultiGPU-mirror
+// (a clone of this repository has no access to it: the public upstream is the fallback, both are rows of node-packs.json). See
 // docs/systems/media-generation.md "Archival".
 const MULTIGPU_ARCHIVAL_NOTE =
-  " — ARCHIVED upstream 2026-09-30 (no successor); install from the mirror https://github.com/dmmdea/ComfyUI-MultiGPU-mirror";
+  " — ARCHIVED upstream 2026-09-30 (no successor, still public and cloneable); the maintainer's mirror https://github.com/dmmdea/ComfyUI-MultiGPU-mirror is PRIVATE (it carries one local Windows P2P/cudart fix): install from it only with access to it, otherwise from the public upstream https://github.com/pollockjj/ComfyUI-MultiGPU";
 
 export const NODE_PACKS = Object.freeze({
   VHS_VideoCombine: "ComfyUI-VideoHelperSuite (https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)",

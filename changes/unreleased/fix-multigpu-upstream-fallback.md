@@ -1,0 +1,5 @@
+### Fixed - the ComfyUI-MultiGPU hint says the mirror is private and names the public upstream as the fallback
+
+- **What changed.** The `MISSING_NODE` hint for the ComfyUI-MultiGPU classes (`render/comfy-nodes.mjs`, `internal/mediacap/routeneeds.go`) no longer says "install from the mirror": it says the maintainer's mirror `dmmdea/ComfyUI-MultiGPU-mirror` is private (it carries one local Windows P2P/cudart fix) and that anyone without access installs the archived but public upstream `pollockjj/ComfyUI-MultiGPU`. `docs/systems/media-generation.md` ("ComfyUI-MultiGPU archival") says the same, and that the installer runs one `git clone` for the repository a manifest names, so the fallback is naming the upstream row (both are rows of `render/node-packs.json`).
+- **Why.** A public clone of this repository was sent to a repository it cannot read. The installer does not retry one repository after the other, so the prose was the only thing to fix without touching `render/manifest-satisfy.mjs`.
+- **Check.** `node --test render/node-packs.test.mjs` and `go test ./internal/mediacap/` pass; the hint text read back from `NODE_PACKS` names both URLs.
