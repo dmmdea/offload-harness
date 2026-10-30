@@ -47,20 +47,34 @@ func upscaleArgs(out, image string, params map[string]any, m UpscaleModel) []str
 	return args
 }
 
+// UpscaleRequest is everything Upscale takes besides the context. Image is the source
+// picture; the other fields mean what they do on GenerateRequest.
+type UpscaleRequest struct {
+	Node     string
+	Script   string
+	ComfyDir string
+	Out      string
+	Image    string
+	Params   map[string]any
+	Model    UpscaleModel
+	Timeout  time.Duration
+	ExtraEnv []string
+}
+
 // Upscale enlarges image with an ESRGAN-family model on the LOCAL ComfyUI (free).
 // Same lifecycle guards as Generate: gpugen tree-kill on timeout + deferred /free.
-func Upscale(ctx context.Context, node, script, comfyDir, out, image string, params map[string]any, m UpscaleModel, timeout time.Duration, extraEnv ...string) (string, error) {
-	env := []string{"COMFY_DIR=" + comfyDir}
-	if timeout > 0 {
-		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+func Upscale(ctx context.Context, req UpscaleRequest) (string, error) {
+	env := []string{"COMFY_DIR=" + req.ComfyDir}
+	if req.Timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(req.Timeout/time.Second)))
 	}
 	return gpugen.Generate(ctx, gpugen.Spec{
-		Exe:     node,
-		Script:  script,
-		Args:    upscaleArgs(out, image, params, m),
-		Env:     append(env, extraEnv...),
-		Out:     out,
-		Timeout: timeout,
+		Exe:     req.Node,
+		Script:  req.Script,
+		Args:    upscaleArgs(req.Out, req.Image, req.Params, req.Model),
+		Env:     append(env, req.ExtraEnv...),
+		Out:     req.Out,
+		Timeout: req.Timeout,
 	})
 }
 

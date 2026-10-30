@@ -106,21 +106,21 @@ func TestComfyLaunchReachesEveryRunnerAndTheFree(t *testing.T) {
 	dir := t.TempDir()
 
 	out := filepath.Join(dir, "gen.json")
-	if _, err := Generate(ctx, "node", script, dir, out, "p", nil, Model{Launch: launch}, 20*time.Second, nil); err != nil {
+	if _, err := Generate(ctx, GenerateRequest{Node: "node", Script: script, ComfyDir: dir, Out: out, Prompt: "p", Model: Model{Launch: launch}, Timeout: 20 * time.Second}); err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
 	check("Generate", read(out), 0)
 
 	before := frees.Load()
 	out = filepath.Join(dir, "edit.json")
-	if _, err := Edit(ctx, "node", script, dir, out, "in.png", "e", nil, EditModel{Launch: launch}, 20*time.Second); err != nil {
+	if _, err := Edit(ctx, EditRequest{Node: "node", Script: script, ComfyDir: dir, Out: out, Image: "in.png", Prompt: "e", Model: EditModel{Launch: launch}, Timeout: 20 * time.Second}); err != nil {
 		t.Fatalf("Edit: %v", err)
 	}
 	check("Edit", read(out), before)
 
 	before = frees.Load()
 	results := filepath.Join(dir, "batch.json")
-	if err := GenerateBatch(ctx, "node", script, dir, filepath.Join(dir, "jobs.jsonl"), results, Model{Launch: launch}, 20*time.Second); err != nil {
+	if err := GenerateBatch(ctx, BatchRequest{Node: "node", Script: script, ComfyDir: dir, JobsPath: filepath.Join(dir, "jobs.jsonl"), ResultsPath: results, Model: Model{Launch: launch}, Timeout: 20 * time.Second}); err != nil {
 		t.Fatalf("GenerateBatch: %v", err)
 	}
 	check("GenerateBatch", read(results), before)
