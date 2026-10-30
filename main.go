@@ -3761,6 +3761,17 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 			missing++
 		}
 	}
+	// The escalation head is one semantic verdict, not just an alias row: a cascade whose escalation_model is
+	// empty or the workhorse itself has nowhere to escalate to, so the confidence gate is inert. Informational
+	// for UNAVAILABLE (a deliberate single-model box is not a broken one); a BROKEN alias is already counted above.
+	switch {
+	case cfg.EscalationModel == "" || cfg.EscalationModel == cfg.Model:
+		fmt.Fprintf(w, "%-18s UNAVAILABLE  single-model cascade - the confidence gate is inert\n", "escalation:")
+	case !roster.Serves(cfg.EscalationModel):
+		fmt.Fprintf(w, "%-18s BROKEN  %s - not in the live /v1/models roster\n", "escalation:", cfg.EscalationModel)
+	default:
+		fmt.Fprintf(w, "%-18s OK    %s\n", "escalation:", cfg.EscalationModel)
+	}
 	if missing > 0 {
 		return fmt.Errorf("%d configured model alias(es) missing from %s/v1/models", missing, cfg.Endpoint)
 	}

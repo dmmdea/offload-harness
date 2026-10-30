@@ -176,7 +176,9 @@ answers "is this good enough, and if not, is it worth trying a bigger model?"
   from rows carrying `margin_scale: full`, passed through the openjev / gold-set gate; and re-measure
   the meta-router's mr-verifier CC1 ceilings afterwards — it reads `meta.margin` as a graded
   confidence, so the same number on a new scale silently moves its ceilings.
-- **Confhead gate.** A learned correctness head below its threshold escalates.
+- **Confhead gate.** A learned correctness head below its threshold escalates. On a single-model cascade
+  (`escalation_model` empty or equal to `model`) the gate is skipped and the call's ledger row carries
+  `feat.escalation_unavailable = 1`, so the gap is recorded rather than a silent same-weights escalation.
 
 An OK result returns immediately. A recoverable failure at a non-final Tier escalates. Infrastructure
 failures — connection refused, timeouts, 5xx — do **not** escalate, because a bigger model on a
