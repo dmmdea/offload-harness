@@ -54,7 +54,7 @@ func runBatchRunner(t *testing.T, exit int, rows *string) error {
 	// test run can never POST /free to a ComfyUI that happens to be running on the machine.
 	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer srv.Close()
-	return GenerateBatch(context.Background(), "node", script, dir, jobs, results, Model{Launch: ComfyLaunch{API: srv.URL}}, 20*time.Second)
+	return GenerateBatch(context.Background(), BatchRequest{Node: "node", Script: script, ComfyDir: dir, JobsPath: jobs, ResultsPath: results, Model: Model{Launch: ComfyLaunch{API: srv.URL}}, Timeout: 20 * time.Second})
 }
 
 func str(s string) *string { return &s }

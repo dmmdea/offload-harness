@@ -123,18 +123,34 @@ func (l ComfyLaunch) Env() []string {
 	return env
 }
 
+// GenerateRequest is everything Generate takes besides the context. Node is the node
+// executable ("" => "node"); Script is the absolute path to comfy-generate.mjs; ComfyDir
+// is exported as COMFY_DIR for the script. Params may carry negative (string) and
+// width/height/steps/seed (int-ish); Model carries the machine's image-model binding. A
+// per-request steps param overrides Model.Steps. ExtraEnv appends additional "K=V" entries
+// (LO-1: the pipeline threads a configured GPU_LOCK override so the runner contends on the
+// same lock the Go vision gate watches). Sampling, when non-nil, turns on gpugen's passive
+// per-render VRAM peak sampling (fleet footprints; nil = legacy path).
+type GenerateRequest struct {
+	Node     string
+	Script   string
+	ComfyDir string
+	Out      string
+	Prompt   string
+	Params   map[string]any
+	Model    Model
+	Timeout  time.Duration
+	Sampling *gpugen.Sampling
+	ExtraEnv []string
+}
+
 // Generate runs `node <script> <out> <prompt> [--negative ..] [--width ..] ...` and
-// returns out on success. node is the node executable ("" => "node"); script is the
-// absolute path to comfy-generate.mjs; comfyDir is exported as COMFY_DIR for the script.
-// params may carry negative (string) and width/height/steps/seed (int-ish); m carries
-// the machine's image-model binding. A per-request steps param overrides m.Steps.
-// extraEnv appends additional "K=V" entries (LO-1: the pipeline threads a configured
-// GPU_LOCK override so the runner contends on the same lock the Go vision gate
-// watches). samp, when non-nil, turns on gpugen's passive per-render VRAM peak
-// sampling (fleet footprints; nil = legacy path). A non-zero exit, a timeout, or a
-// missing/empty output file returns an error (the caller defers).
-func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, params map[string]any, m Model, timeout time.Duration, samp *gpugen.Sampling, extraEnv ...string) (string, error) {
-	args := buildArgs(out, prompt, params, m)
+// returns req.Out on success. A non-zero exit, a timeout, or a missing/empty output file
+// returns an error (the caller defers).
+func Generate(ctx context.Context, req GenerateRequest) (string, error) {
+	node, script, comfyDir, out := req.Node, req.Script, req.ComfyDir, req.Out
+	m, timeout := req.Model, req.Timeout
+	args := buildArgs(out, req.Prompt, req.Params, m)
 	// COMFY_WAIT_SEC aligns the render script's poll budget with the harness timeout
 	// (quality-first: a 2048 bf16 O1 render legitimately runs tens of minutes; the
 	// script must not give up before the Go timeout — which stays the hard stop).
@@ -147,13 +163,13 @@ func Generate(ctx context.Context, node, script, comfyDir, out, prompt string, p
 		Exe:      node,
 		Script:   script,
 		Args:     args,
-		Env:      append(env, extraEnv...),
+		Env:      append(env, req.ExtraEnv...),
 		Out:      out,
 		Timeout:  timeout,
 		ComfyAPI: m.Launch.API,
 		CardUUID: m.Launch.CardUUID,
 	}
-	samp.ApplyTo(&spec)
+	req.Sampling.ApplyTo(&spec)
 	return gpugen.Generate(ctx, spec)
 }
 
@@ -379,22 +395,36 @@ func sdcppArgs(out, prompt string, params map[string]any, m SdcppModel) []string
 	return args
 }
 
+// SdcppRequest is everything GenerateSdcpp takes besides the context (no ComfyDir: the
+// sd.cpp path has no ComfyUI coupling). Fields mean what they do on GenerateRequest.
+type SdcppRequest struct {
+	Node     string
+	Script   string
+	Out      string
+	Prompt   string
+	Params   map[string]any
+	Model    SdcppModel
+	Timeout  time.Duration
+	Sampling *gpugen.Sampling
+	ExtraEnv []string
+}
+
 // GenerateSdcpp renders via stable-diffusion.cpp (render/sdcpp-generate.mjs): a
 // spawn-per-job single binary under the same GPU lock — zero-warm by construction.
 // Same gpugen lifecycle guards as Generate (tree-kill on timeout, output-stat gate),
 // but NO ComfyUI coupling: the env carries no COMFY_DIR and SkipFreeComfy suppresses
 // the post-run /free (the seam the TTS path proved; audit seam 3).
-func GenerateSdcpp(ctx context.Context, node, script, out, prompt string, params map[string]any, m SdcppModel, timeout time.Duration, samp *gpugen.Sampling, extraEnv ...string) (string, error) {
+func GenerateSdcpp(ctx context.Context, req SdcppRequest) (string, error) {
 	spec := gpugen.Spec{
-		Exe:           node,
-		Script:        script,
-		Args:          sdcppArgs(out, prompt, params, m),
-		Env:           append([]string{"SDCPP_BIN=" + m.Bin}, extraEnv...),
-		Out:           out,
-		Timeout:       timeout,
+		Exe:           req.Node,
+		Script:        req.Script,
+		Args:          sdcppArgs(req.Out, req.Prompt, req.Params, req.Model),
+		Env:           append([]string{"SDCPP_BIN=" + req.Model.Bin}, req.ExtraEnv...),
+		Out:           req.Out,
+		Timeout:       req.Timeout,
 		SkipFreeComfy: true,
 	}
-	samp.ApplyTo(&spec)
+	req.Sampling.ApplyTo(&spec)
 	return gpugen.Generate(ctx, spec)
 }
 
@@ -583,40 +613,72 @@ func editArgs(out, image, prompt string, params map[string]any, m EditModel) []s
 	return args
 }
 
+// EditRequest is everything Edit takes besides the context. Image is the source picture;
+// the other fields mean what they do on GenerateRequest.
+type EditRequest struct {
+	Node     string
+	Script   string
+	ComfyDir string
+	Out      string
+	Image    string
+	Prompt   string
+	Params   map[string]any
+	Model    EditModel
+	Timeout  time.Duration
+	ExtraEnv []string
+}
+
 // Edit rewrites a whole image from a text instruction on the LOCAL ComfyUI (free),
 // with no mask. Same lifecycle guards as Generate.
-func Edit(ctx context.Context, node, script, comfyDir, out, image, prompt string, params map[string]any, m EditModel, timeout time.Duration, extraEnv ...string) (string, error) {
-	env := []string{"COMFY_DIR=" + comfyDir}
-	if timeout > 0 {
-		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+func Edit(ctx context.Context, req EditRequest) (string, error) {
+	env := []string{"COMFY_DIR=" + req.ComfyDir}
+	if req.Timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(req.Timeout/time.Second)))
 	}
-	env = append(env, m.Launch.Env()...)
+	env = append(env, req.Model.Launch.Env()...)
 	return gpugen.Generate(ctx, gpugen.Spec{
-		Exe:      node,
-		Script:   script,
-		Args:     editArgs(out, image, prompt, params, m),
-		Env:      append(env, extraEnv...),
-		Out:      out,
-		Timeout:  timeout,
-		ComfyAPI: m.Launch.API,
-		CardUUID: m.Launch.CardUUID,
+		Exe:      req.Node,
+		Script:   req.Script,
+		Args:     editArgs(req.Out, req.Image, req.Prompt, req.Params, req.Model),
+		Env:      append(env, req.ExtraEnv...),
+		Out:      req.Out,
+		Timeout:  req.Timeout,
+		ComfyAPI: req.Model.Launch.API,
+		CardUUID: req.Model.Launch.CardUUID,
 	})
+}
+
+// InpaintRequest is everything Inpaint takes besides the context. Image is the source
+// picture and Mask marks the region to re-render; the other fields mean what they do on
+// GenerateRequest.
+type InpaintRequest struct {
+	Node     string
+	Script   string
+	ComfyDir string
+	Out      string
+	Image    string
+	Mask     string
+	Prompt   string
+	Params   map[string]any
+	Model    InpaintModel
+	Timeout  time.Duration
+	ExtraEnv []string
 }
 
 // Inpaint re-renders ONLY the masked region of image on the LOCAL ComfyUI (free).
 // Same lifecycle guards as Generate: gpugen tree-kill on timeout + deferred /free.
-func Inpaint(ctx context.Context, node, script, comfyDir, out, image, mask, prompt string, params map[string]any, m InpaintModel, timeout time.Duration, extraEnv ...string) (string, error) {
-	env := []string{"COMFY_DIR=" + comfyDir}
-	if timeout > 0 {
-		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+func Inpaint(ctx context.Context, req InpaintRequest) (string, error) {
+	env := []string{"COMFY_DIR=" + req.ComfyDir}
+	if req.Timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(req.Timeout/time.Second)))
 	}
 	return gpugen.Generate(ctx, gpugen.Spec{
-		Exe:     node,
-		Script:  script,
-		Args:    inpaintArgs(out, image, mask, prompt, params, m),
-		Env:     append(env, extraEnv...),
-		Out:     out,
-		Timeout: timeout,
+		Exe:     req.Node,
+		Script:  req.Script,
+		Args:    inpaintArgs(req.Out, req.Image, req.Mask, req.Prompt, req.Params, req.Model),
+		Env:     append(env, req.ExtraEnv...),
+		Out:     req.Out,
+		Timeout: req.Timeout,
 	})
 }
 
@@ -632,7 +694,21 @@ func batchArgs(jobsPath, resultsPath string, m Model) []string {
 // The results file holds a row for every job then, exactly as after an exit 0.
 const BatchExitJobsFailed = 4
 
-// GenerateBatch renders every job in jobsPath (JSONL: {"prompt","out",...} per line)
+// BatchRequest is everything GenerateBatch takes besides the context. JobsPath is the JSONL
+// job list and ResultsPath the per-job result file; the other fields mean what they do on
+// GenerateRequest.
+type BatchRequest struct {
+	Node        string
+	Script      string
+	ComfyDir    string
+	JobsPath    string
+	ResultsPath string
+	Model       Model
+	Timeout     time.Duration
+	ExtraEnv    []string
+}
+
+// GenerateBatch renders every job in req.JobsPath (JSONL: {"prompt","out",...} per line)
 // through ONE warm ComfyUI session and writes one result line per job to resultsPath.
 // The results file is the gpugen success gate: the script exits 0, or BatchExitJobsFailed
 // when individual renders failed, with a complete results file (the caller reads per-job
@@ -640,24 +716,24 @@ const BatchExitJobsFailed = 4
 // errors here. So does a ComfyUI that became unusable mid-batch (register C-83) and a
 // full disk (0.178.0): the results file still holds a row per job, the later ones
 // "not run: ...", and the caller reads them on error too.
-// timeout bounds the WHOLE batch.
-func GenerateBatch(ctx context.Context, node, script, comfyDir, jobsPath, resultsPath string, m Model, timeout time.Duration, extraEnv ...string) error {
-	env := []string{"COMFY_DIR=" + comfyDir}
-	if timeout > 0 {
-		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
+// Timeout bounds the WHOLE batch.
+func GenerateBatch(ctx context.Context, req BatchRequest) error {
+	env := []string{"COMFY_DIR=" + req.ComfyDir}
+	if req.Timeout > 0 {
+		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(req.Timeout/time.Second)))
 	}
-	env = append(env, m.Launch.Env()...)
+	env = append(env, req.Model.Launch.Env()...)
 	_, err := gpugen.Generate(ctx, gpugen.Spec{
-		Exe:      node,
-		Script:   script,
-		Args:     batchArgs(jobsPath, resultsPath, m),
-		Env:      append(env, extraEnv...),
-		Out:      resultsPath,
-		Timeout:  timeout,
-		ComfyAPI: m.Launch.API,
-		CardUUID: m.Launch.CardUUID,
+		Exe:      req.Node,
+		Script:   req.Script,
+		Args:     batchArgs(req.JobsPath, req.ResultsPath, req.Model),
+		Env:      append(env, req.ExtraEnv...),
+		Out:      req.ResultsPath,
+		Timeout:  req.Timeout,
+		ComfyAPI: req.Model.Launch.API,
+		CardUUID: req.Model.Launch.CardUUID,
 	})
-	if err != nil && batchRanToTheEnd(err, resultsPath) {
+	if err != nil && batchRanToTheEnd(err, req.ResultsPath) {
 		return nil
 	}
 	return err

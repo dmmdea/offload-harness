@@ -1784,8 +1784,11 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	defer grant.Release()
 	// On a per-card instance the launch names the instance and the card (and blanks the index).
 	model.Launch = grant.launch(model.Launch)
-	outPath, gerr := imagegen.Generate(ctx, cfg.NodePath, script, cfg.ComfyDir, out, renderPrompt, req.Params, model, timeout,
-		p.footprintSampling(imgFamily, imgQuant, "image-gen"), grant.Env...)
+	outPath, gerr := imagegen.Generate(ctx, imagegen.GenerateRequest{
+		Node: cfg.NodePath, Script: script, ComfyDir: cfg.ComfyDir, Out: out, Prompt: renderPrompt,
+		Params: req.Params, Model: model, Timeout: timeout,
+		Sampling: p.footprintSampling(imgFamily, imgQuant, "image-gen"), ExtraEnv: grant.Env,
+	})
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
@@ -1953,8 +1956,11 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer grant.Release()
-	outPath, gerr := imagegen.GenerateSdcpp(ctx, cfg.NodePath, script, out, renderPrompt, req.Params, m, timeout,
-		p.footprintSampling(imgFamily, imgQuant, "image-gen"), grant.Env...)
+	outPath, gerr := imagegen.GenerateSdcpp(ctx, imagegen.SdcppRequest{
+		Node: cfg.NodePath, Script: script, Out: out, Prompt: renderPrompt,
+		Params: req.Params, Model: m, Timeout: timeout,
+		Sampling: p.footprintSampling(imgFamily, imgQuant, "image-gen"), ExtraEnv: grant.Env,
+	})
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return deferf("image generation failed: " + gerr.Error())
@@ -2045,8 +2051,11 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	}
 	defer grant.Release()
 	// Single-card route: the device pin applies (comfyLaunch), or the instance bound to the card.
-	outPath, gerr := imagegen.Inpaint(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, mask, prompt, req.Params, m, timeout,
-		append(grant.Env, grant.launch(comfyLaunch(p.cfg, true)).Env()...)...)
+	outPath, gerr := imagegen.Inpaint(ctx, imagegen.InpaintRequest{
+		Node: p.cfg.NodePath, Script: script, ComfyDir: p.cfg.ComfyDir, Out: out, Image: image, Mask: mask,
+		Prompt: prompt, Params: req.Params, Model: m, Timeout: timeout,
+		ExtraEnv: append(grant.Env, grant.launch(comfyLaunch(p.cfg, true)).Env()...),
+	})
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("inpaint failed: " + gerr.Error())
@@ -2144,8 +2153,11 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 	}
 	defer grant.Release()
 	// Single-card route: the device pin applies (comfyLaunch), or the instance bound to the card.
-	outPath, gerr := imagegen.Upscale(ctx, p.cfg.NodePath, script, p.cfg.ComfyDir, out, image, req.Params, imagegen.UpscaleModel{Model: model}, timeout,
-		append(grant.Env, grant.launch(comfyLaunch(p.cfg, true)).Env()...)...)
+	outPath, gerr := imagegen.Upscale(ctx, imagegen.UpscaleRequest{
+		Node: p.cfg.NodePath, Script: script, ComfyDir: p.cfg.ComfyDir, Out: out, Image: image,
+		Params: req.Params, Model: imagegen.UpscaleModel{Model: model}, Timeout: timeout,
+		ExtraEnv: append(grant.Env, grant.launch(comfyLaunch(p.cfg, true)).Env()...),
+	})
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("upscale failed: " + gerr.Error())
@@ -2335,7 +2347,10 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 	}
 	defer grant.Release()
 	m.Launch = grant.launch(m.Launch)
-	outPath, gerr := imagegen.Edit(ctx, cfg.NodePath, script, cfg.ComfyDir, out, image, prompt, req.Params, m, timeout, grant.Env...)
+	outPath, gerr := imagegen.Edit(ctx, imagegen.EditRequest{
+		Node: cfg.NodePath, Script: script, ComfyDir: cfg.ComfyDir, Out: out, Image: image, Prompt: prompt,
+		Params: req.Params, Model: m, Timeout: timeout, ExtraEnv: grant.Env,
+	})
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("generative edit failed: " + gerr.Error())
@@ -2718,7 +2733,10 @@ func (p *Pipeline) RunImageBatchWaiting(ctx context.Context, family string, jobs
 	}
 	defer grant.Release()
 	model.Launch = grant.launch(model.Launch)
-	gerr := imagegen.GenerateBatch(ctx, cfg.NodePath, script, cfg.ComfyDir, jobsPath, resultsPath, model, timeout, grant.Env...)
+	gerr := imagegen.GenerateBatch(ctx, imagegen.BatchRequest{
+		Node: cfg.NodePath, Script: script, ComfyDir: cfg.ComfyDir, JobsPath: jobsPath, ResultsPath: resultsPath,
+		Model: model, Timeout: timeout, ExtraEnv: grant.Env,
+	})
 
 	raw, _ := os.ReadFile(resultsPath) // best-effort even on gerr: partial results are real work
 	items := parseBatchResults(raw, norm)
