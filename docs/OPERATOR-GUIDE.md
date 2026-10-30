@@ -33,8 +33,11 @@ health:     OK
 model:             OK    offload-e4b
 triage_model:      OK    gemma4-e2b
 escalation_model:  OK    gemma4-26b-a4b
+escalation:        OK    gemma4-26b-a4b
 ...
 ```
+
+The `escalation:` line is the semantic verdict on the cascade: `UNAVAILABLE` when `escalation_model` is empty or equals `model` (a single-model cascade, so the confidence gate is inert), `BROKEN` when the alias is not in the live roster, `OK` otherwise.
 
 **Stop:** Ctrl-C the llama-swap window, or:
 
