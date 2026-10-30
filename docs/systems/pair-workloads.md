@@ -24,7 +24,7 @@ pending work on the node that runs it. Off by default; two config keys turn it o
 |---|---|
 | `internal/pairworkloads/pairworkloads.go` | the emitter: PAIR identity from `node-id.json` / `cluster/members.json`, `EngineFor`, `MethodFor`, frame building, `Send` / `Emit` / `EmitSync` (the post that returns when it has been attempted), the ledger observer (`AttachLedger`, `FromLedger`) |
 | `internal/delegate/pairevents.go` | `pairInflight` / `pairTerminal`: the delegation frames and the card identity pinned on `PlacedResult` |
-| `internal/delegate/run.go` | the call sites: `runRemote` (queued; running from the poll loop), `runLocal` (queued; running through `pairStartGate`), `attempt().finish` (terminal); `runner.pair` |
+| `internal/delegate/run_remote.go`, `internal/delegate/run.go`, `internal/delegate/run_runner.go` | the call sites: `runRemote` (queued; running from the poll loop; `run_remote.go`), `runLocal` (queued; running through `pairStartGate`; `run.go`), `attempt().finish` (terminal; `run.go`); `runner.pair` (`run_runner.go`) |
 | `gpu_leasecard.go` | the lease card: `leaseCardIdentity`, `newLeaseCard`, `running`, `finish`; wired into `runGPUReserve` (`gpu_cmd.go`) |
 | `internal/core/workmark.go` | `WithWorkingMark` / `MarkWorking`: the lane's "my work started" signal a call card turns running on |
 | `internal/pairworkloads/calls.go` | running cards for long tool calls: `Begin` (returns the call id), the per-task open-card queue the ledger observer `claim`s from (by call id first), and `CardOutcome`, the one place a finished call becomes a terminal state (*A held card is not a failure*) |
