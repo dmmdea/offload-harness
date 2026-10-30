@@ -2298,7 +2298,7 @@ died is still on the node under its job id; the next identical call from that ma
   `pipeline-jobs/` (`.owner`, the writer's process id), the `agent-local-` name prefix and
   `MaxRunLifetime`; `pipeline.RunAgentContract` writes it and the sweep reads it (leaf, standard
   library only)
-- [`internal/delegate/run.go`](../../internal/delegate/run.go) — the delegator: placement, re-placement, the
+- [`internal/delegate/run.go`](../../internal/delegate/run.go) (and its `run_*.go` siblings) — the delegator: placement, re-placement, the
   capacity wait, the spread deal, the dispatch and poll loop (ADR 0063)
 - [`internal/delegate/pin.go`](../../internal/delegate/pin.go) — the closed set of pin reasons, the intake check, a
   hint's route and clause, the pin accounting (ADR 0078)
