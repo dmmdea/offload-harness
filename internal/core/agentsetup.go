@@ -82,7 +82,7 @@ func ValidateAgentSetupActions(actions []AgentSetupAction) error {
 		}
 		var obj map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(raw), &obj); err != nil {
-			return fmt.Errorf("%w: action %d (%s): args must be a JSON object: %v", ErrAgentSetupActions, i, a.Tool, err)
+			return fmt.Errorf("%w: action %d (%s): args must be a JSON object: %w", ErrAgentSetupActions, i, a.Tool, err)
 		}
 	}
 	return nil

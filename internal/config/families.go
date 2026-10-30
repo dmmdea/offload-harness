@@ -443,7 +443,7 @@ func applyOverlay(base Config, name string, ov FamilyOverlay, kind overlayKind) 
 		f := v.Field(idx[k])
 		nv := reflect.New(f.Type())
 		if err := json.Unmarshal(ov[k], nv.Interface()); err != nil {
-			return base, "", false, fmt.Errorf("%s.%s: %v", where, k, err)
+			return base, "", false, fmt.Errorf("%s.%s: %w", where, k, err)
 		}
 		f.Set(nv.Elem())
 		if paths[k] && home != "" {

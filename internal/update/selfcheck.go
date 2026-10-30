@@ -138,7 +138,7 @@ func CheckFlags(ctx context.Context, stagedServer, yamlPath, live string) (strin
 	}
 	var cfg swapYAML
 	if err := yaml.Unmarshal(raw, &cfg); err != nil {
-		return "", fmt.Errorf("self-check: %s does not parse as yaml: %v", filepath.Base(yamlPath), err)
+		return "", fmt.Errorf("self-check: %s does not parse as yaml: %w", filepath.Base(yamlPath), err)
 	}
 	liveNorm := normPath(live)
 	flagModels := map[string][]string{}

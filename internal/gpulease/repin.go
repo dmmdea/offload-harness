@@ -139,7 +139,7 @@ func planUUIDRepin(raw string, held []string, cards []gpuprobe.Card) (Repin, boo
 	if _, err := strconv.Atoi(raw); err == nil {
 		r.Unresolved = fmt.Errorf("%w: COMFY_CARD_UUID=%q is an index, and an index counts cards in a different order than a lease does", ErrDeviceUnresolved, raw)
 	} else if got, err := gpuprobe.ResolveCards(cards, []string{raw}); err != nil {
-		r.Unresolved = fmt.Errorf("%w: COMFY_CARD_UUID=%q: %v", ErrDeviceUnresolved, raw, err)
+		r.Unresolved = fmt.Errorf("%w: COMFY_CARD_UUID=%q: %w", ErrDeviceUnresolved, raw, err)
 	} else {
 		r.From = []string{got[0].LeaseID()}
 		if containsLeaseID(held, r.From[0]) {

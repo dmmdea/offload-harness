@@ -390,7 +390,7 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 		// slot for another model): an alone call that dies that way reads as no speech.
 		switch {
 		case rerr != nil:
-			return Result{}, fmt.Errorf("%w: whisper-server %d: the answer was cut off mid-read (%v): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
+			return Result{}, fmt.Errorf("%w: whisper-server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
 		case resp.StatusCode >= 500 && len(bytes.TrimSpace(b)) == 0:
 			if call.ranAlone() {
 				return Result{}, fmt.Errorf("whisper-server %d (empty body) with nothing else of this process on the upstream: whisper.cpp exits on audio with no speech content (F-35): %w", resp.StatusCode, ErrUpstreamNoSpeech)
@@ -403,7 +403,7 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		// An answer cut off mid-read is a vanished upstream whatever its status, as above.
 		if errors.Is(err, io.ErrUnexpectedEOF) {
-			return Result{}, fmt.Errorf("%w: whisper-server %d: the answer was cut off mid-read (%v): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, err)
+			return Result{}, fmt.Errorf("%w: whisper-server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, err)
 		}
 		return Result{}, fmt.Errorf("sttclient: decode verbose_json: %w", err)
 	}
@@ -720,7 +720,7 @@ func (c *Client) TranscribeOAI(ctx context.Context, model, wavPath string) (Resu
 	// exits on it.
 	switch {
 	case rerr != nil:
-		return Result{}, fmt.Errorf("%w: transcriptions endpoint %d: the answer was cut off mid-read (%v): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
+		return Result{}, fmt.Errorf("%w: transcriptions endpoint %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
 	case resp.StatusCode >= 500 && len(bytes.TrimSpace(raw)) == 0:
 		return Result{}, fmt.Errorf("%w: transcriptions endpoint %d (empty body): it was unloaded, swapped, restarted or crashed under the call", ErrUpstreamVanished, resp.StatusCode)
 	case resp.StatusCode != http.StatusOK:

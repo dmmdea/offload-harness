@@ -48,7 +48,7 @@ func ExtractOne(raw string) (json.RawMessage, error) {
 			continue
 		}
 		if err := noDuplicateKeys(cand); err != nil {
-			return nil, fmt.Errorf("%w: %v", ErrNotOneObject, err)
+			return nil, fmt.Errorf("%w: %w", ErrNotOneObject, err)
 		}
 		return obj, nil
 	}

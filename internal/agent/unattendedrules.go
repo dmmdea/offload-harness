@@ -55,14 +55,14 @@ var unattendedRulesJSON []byte
 func UnattendedRules() ([]Rule, error) {
 	var rs []Rule
 	if err := json.Unmarshal(unattendedRulesJSON, &rs); err != nil {
-		return nil, fmt.Errorf("embedded unattended rule table: %v", err)
+		return nil, fmt.Errorf("embedded unattended rule table: %w", err)
 	}
 	if len(rs) == 0 {
 		return nil, fmt.Errorf("embedded unattended rule table is empty")
 	}
 	for _, r := range rs {
 		if err := r.validate(); err != nil {
-			return nil, fmt.Errorf("embedded unattended rule table: %v", err)
+			return nil, fmt.Errorf("embedded unattended rule table: %w", err)
 		}
 	}
 	return rs, nil

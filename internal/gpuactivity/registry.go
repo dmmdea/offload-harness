@@ -494,7 +494,7 @@ func (h *Handle) write() error {
 	}
 	_ = os.Remove(tmp)
 	if werr := os.WriteFile(h.path, b, 0o666); werr != nil {
-		return fmt.Errorf("gpuactivity: publishing run record: %w (in-place fallback: %v)", rerr, werr)
+		return fmt.Errorf("gpuactivity: publishing run record: %w (in-place fallback: %w)", rerr, werr)
 	}
 	return nil
 }

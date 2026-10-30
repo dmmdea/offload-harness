@@ -92,7 +92,7 @@ func (r Rule) validate() error {
 		return fmt.Errorf("rule %q: '**' is not supported (path.Match globs do not recurse) — use a slashless glob like %q to match a basename at any depth", r.Glob, path.Base(r.Glob))
 	}
 	if _, err := path.Match(r.Glob, "probe"); err != nil {
-		return fmt.Errorf("rule %q: bad glob: %v", r.Glob, err)
+		return fmt.Errorf("rule %q: bad glob: %w", r.Glob, err)
 	}
 	return nil
 }
@@ -183,11 +183,11 @@ func LoadRules(pathname string) ([]Rule, error) {
 	}
 	var rs []Rule
 	if err := json.Unmarshal(b, &rs); err != nil {
-		return nil, fmt.Errorf("rule table %s: %v", pathname, err)
+		return nil, fmt.Errorf("rule table %s: %w", pathname, err)
 	}
 	for _, r := range rs {
 		if err := r.validate(); err != nil {
-			return nil, fmt.Errorf("rule table %s: %v", pathname, err)
+			return nil, fmt.Errorf("rule table %s: %w", pathname, err)
 		}
 	}
 	return rs, nil

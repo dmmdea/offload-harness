@@ -118,7 +118,7 @@ func readContextEvents(ctx context.Context, now time.Time, window time.Duration)
 			}
 		}
 		if perr != nil {
-			return out, fmt.Errorf("the System log read stopped part way (%v), so older restarts may be missing", perr)
+			return out, fmt.Errorf("the System log read stopped part way (%w), so older restarts may be missing", perr)
 		}
 		return out, nil
 	case "linux":

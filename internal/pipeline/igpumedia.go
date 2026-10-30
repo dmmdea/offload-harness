@@ -187,7 +187,7 @@ func resolveEngineBin(key, bound string) (string, error) {
 	}
 	abs, err := filepath.Abs(p)
 	if err != nil {
-		return "", fmt.Errorf("%s=%s: %v", key, bound, err)
+		return "", fmt.Errorf("%s=%s: %w", key, bound, err)
 	}
 	return abs, nil
 }
@@ -198,7 +198,7 @@ func resolveEngineBin(key, bound string) (string, error) {
 func ensureOutDir(out string) error {
 	dir := filepath.Dir(out)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return fmt.Errorf("cannot create the output directory %s: %v", dir, err)
+		return fmt.Errorf("cannot create the output directory %s: %w", dir, err)
 	}
 	return nil
 }

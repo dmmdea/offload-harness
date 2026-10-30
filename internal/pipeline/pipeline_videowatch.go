@@ -218,7 +218,10 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			}
 			if res.OK {
 				var got map[string]string
-				_ = json.Unmarshal(res.Data, &got)
+				if jerr := json.Unmarshal(res.Data, &got); jerr != nil {
+					note.Deferred, note.Reason = true, "vision answer unreadable: "+jerr.Error()
+					break
+				}
 				note.Notes = strings.TrimSpace(got["answer"])
 				note.Frames = len(frames)
 				framesTotal += len(frames)

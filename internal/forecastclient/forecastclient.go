@@ -110,7 +110,7 @@ func (c *Client) Forecast(ctx context.Context, model string, payload []byte) (js
 	if resp.StatusCode != http.StatusOK {
 		switch {
 		case rerr != nil:
-			return nil, fmt.Errorf("%w: forecast server %d: the answer was cut off mid-read (%v): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
+			return nil, fmt.Errorf("%w: forecast server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
 		case resp.StatusCode >= 500 && len(bytes.TrimSpace(b)) == 0:
 			return nil, fmt.Errorf("%w: forecast server %d (empty body): it was unloaded, swapped, restarted or crashed under the call", ErrUpstreamVanished, resp.StatusCode)
 		case resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusRequestEntityTooLarge:
@@ -119,7 +119,7 @@ func (c *Client) Forecast(ctx context.Context, model string, payload []byte) (js
 		return nil, fmt.Errorf("forecast server %d: %s", resp.StatusCode, refusalDetail(resp.StatusCode, b))
 	}
 	if rerr != nil {
-		return nil, fmt.Errorf("%w: forecast server %d: the answer was cut off mid-read (%v): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
+		return nil, fmt.Errorf("%w: forecast server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
 	}
 	if !json.Valid(b) {
 		return nil, fmt.Errorf("forecastclient: the answer is not JSON (%d bytes)", len(b))

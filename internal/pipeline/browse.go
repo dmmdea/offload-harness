@@ -248,7 +248,7 @@ func parseBrowseRequest(params map[string]any, cfg config.Config) (browseRequest
 	for _, c := range capture {
 		cu, err := parseBrowseURL(c)
 		if err != nil {
-			return r, fmt.Errorf("capture prefix: %v", err)
+			return r, fmt.Errorf("capture prefix: %w", err)
 		}
 		if !browseHostAllowed(cu.Hostname(), r.AllowHosts) {
 			return r, fmt.Errorf("capture prefix host %q is not in allow_hosts", cu.Hostname())
@@ -404,7 +404,7 @@ func (s *browseSession) decide(body json.RawMessage) (json.RawMessage, error) {
 	}
 	resp, err := s.httpc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("decision endpoint unreachable: %v", err)
+		return nil, fmt.Errorf("decision endpoint unreachable: %w", err)
 	}
 	defer resp.Body.Close()
 	rb, err := io.ReadAll(io.LimitReader(resp.Body, browseMaxDecideBytes))
@@ -455,7 +455,7 @@ func (s *browseSession) text(context json.RawMessage) (string, error) {
 	}
 	gen, err := p.client.Generate(s.ctx, model, browseTextSystem, string(context), grammar, 512, 0, 0, opts...)
 	if err != nil {
-		return "", fmt.Errorf("local seat: %v", err)
+		return "", fmt.Errorf("local seat: %w", err)
 	}
 	var v struct {
 		Text string `json:"text"`

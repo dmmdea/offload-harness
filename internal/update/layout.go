@@ -275,7 +275,7 @@ func (l *genLink) migrate() error {
 	}
 	if lerr := makeLink(l.dir, l.newDir); lerr != nil {
 		if back := os.Rename(dst, l.dir); back != nil {
-			return fmt.Errorf("%v; and moving %s back failed: %v", lerr, dst, back)
+			return fmt.Errorf("%w; and moving %s back failed: %w", lerr, dst, back)
 		}
 		return lerr
 	}

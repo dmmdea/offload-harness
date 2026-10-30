@@ -829,7 +829,7 @@ func buildRunGraph(cfg config.Config, payload json.RawMessage) (core.Request, fu
 	}
 	var graphObj map[string]json.RawMessage
 	if err := json.Unmarshal(in.Graph, &graphObj); err != nil {
-		return core.Request{}, noop, fmt.Errorf("run-graph payload: graph must be a JSON object: %v", err)
+		return core.Request{}, noop, fmt.Errorf("run-graph payload: graph must be a JSON object: %w", err)
 	}
 	if len(graphObj) == 0 {
 		return core.Request{}, noop, fmt.Errorf("run-graph payload: graph must be a non-empty JSON object")
@@ -837,7 +837,7 @@ func buildRunGraph(cfg config.Config, payload json.RawMessage) (core.Request, fu
 	if !isAbsentJSON(in.Manifest) {
 		var manifestObj map[string]json.RawMessage
 		if err := json.Unmarshal(in.Manifest, &manifestObj); err != nil {
-			return core.Request{}, noop, fmt.Errorf("run-graph payload: manifest must be a JSON object: %v", err)
+			return core.Request{}, noop, fmt.Errorf("run-graph payload: manifest must be a JSON object: %w", err)
 		}
 		// A manifest that names a node pack makes this node clone its repository and install its requirements:
 		// the caller's code, run here. The bearer lets a caller run renders, not that, so a pack is taken only
@@ -1088,7 +1088,7 @@ func buildPipelineJob(ctx context.Context, cfg config.Config, taskType string, p
 	}
 	var jobSpec map[string]json.RawMessage
 	if err := json.Unmarshal(in.JobSpec, &jobSpec); err != nil {
-		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: job_spec must be a JSON object: %v", err)
+		return core.Request{}, noop, fmt.Errorf("pipeline-job payload: job_spec must be a JSON object: %w", err)
 	}
 	jobID, err := pipelineJobSpecID(jobSpec)
 	if err != nil {
@@ -1195,7 +1195,7 @@ func pipelineJobSpecID(jobSpec map[string]json.RawMessage) (string, error) {
 	}
 	var id string
 	if err := json.Unmarshal(raw, &id); err != nil {
-		return "", fmt.Errorf("job_spec.id must be a string: %v", err)
+		return "", fmt.Errorf("job_spec.id must be a string: %w", err)
 	}
 	if !pipelineJobIDPattern.MatchString(id) {
 		return "", fmt.Errorf("job_spec.id %q must match %s", id, pipelineJobIDPattern.String())
@@ -1221,14 +1221,14 @@ func pipelineBackgroundMode(jobSpec map[string]json.RawMessage) (mode string, ha
 	}
 	var bg map[string]json.RawMessage
 	if uerr := json.Unmarshal(raw, &bg); uerr != nil {
-		return "", false, fmt.Errorf("job_spec.background must be a JSON object: %v", uerr)
+		return "", false, fmt.Errorf("job_spec.background must be a JSON object: %w", uerr)
 	}
 	if _, has := bg["path"]; has {
 		return "", true, nil
 	}
 	if modeRaw, has := bg["mode"]; has {
 		if merr := json.Unmarshal(modeRaw, &mode); merr != nil {
-			return "", false, fmt.Errorf("job_spec.background.mode must be a string: %v", merr)
+			return "", false, fmt.Errorf("job_spec.background.mode must be a string: %w", merr)
 		}
 	}
 	return mode, false, nil

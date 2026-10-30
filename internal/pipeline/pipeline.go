@@ -4662,7 +4662,9 @@ func (p *Pipeline) runExtractImage(ctx context.Context, req core.Request, meta c
 	}
 	// 2. Pull the OCR text out of ocrRes.Data ({"text": "..."}).
 	var m map[string]string
-	_ = json.Unmarshal(ocrRes.Data, &m)
+	if jerr := json.Unmarshal(ocrRes.Data, &m); jerr != nil {
+		return done(core.Deferf("unreadable OCR result for extract_image: "+jerr.Error(), "", ocrRes.Meta))
+	}
 	ocrText := m["text"]
 	if strings.TrimSpace(ocrText) == "" {
 		return done(core.Deferf("empty OCR text for extract_image", "", ocrRes.Meta))

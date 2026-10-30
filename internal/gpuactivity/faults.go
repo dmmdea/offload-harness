@@ -519,7 +519,7 @@ func readLiveKernelEvents(ctx context.Context, now time.Time, window time.Durati
 		}
 	}
 	if perr != nil {
-		return kept, fmt.Errorf("the read stopped part way (%v), so older dumps may be missing", perr)
+		return kept, fmt.Errorf("the read stopped part way (%w), so older dumps may be missing", perr)
 	}
 	return kept, nil
 }

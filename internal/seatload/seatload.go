@@ -319,7 +319,7 @@ func Inflight(ctx context.Context, client *http.Client, endpoint, seat string) (
 			// The address is another machine's host and the seat's port: a
 			// loopback-bound seat there refuses every read. Say so, rather than
 			// leave a bare "connection refused" for the operator to decode.
-			return rd, fmt.Errorf("seat metrics at %s: %w: %v", seatBase, ErrRemoteSeatUnreachable, err)
+			return rd, fmt.Errorf("seat metrics at %s: %w: %w", seatBase, ErrRemoteSeatUnreachable, err)
 		}
 		return rd, fmt.Errorf("seat metrics: %w", err)
 	}

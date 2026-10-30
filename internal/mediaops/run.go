@@ -218,7 +218,7 @@ func RunMedia(ctx context.Context, cfg MediaConfig, req MediaRequest) (MediaResu
 		}
 		p, perr := ParseProbe(stderr)
 		if perr != nil {
-			return res, fmt.Errorf("probe %s: %v (%s)", req.In, perr, tail(stderr, 200))
+			return res, fmt.Errorf("probe %s: %w (%s)", req.In, perr, tail(stderr, 200))
 		}
 		res.Probe = &p
 		res.DurationSec = p.DurationSec
@@ -355,7 +355,7 @@ func runToOutNoStat(ctx context.Context, cfg MediaConfig, req MediaRequest) (Med
 		return res, err
 	}
 	if _, stderr, err := runCapture(ctx, cfg.Timeout, nil, nil, cfg.FFmpeg, args...); err != nil {
-		return res, fmt.Errorf("%s: %v (%s)", req.Op, err, tail(stderr, 200))
+		return res, fmt.Errorf("%s: %w (%s)", req.Op, err, tail(stderr, 200))
 	}
 	return res, nil
 }
