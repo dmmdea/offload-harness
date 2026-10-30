@@ -97,7 +97,7 @@ go build -o offload-harness .       # or: go build -o offload-harness.exe . on W
 
 Requires **Go 1.26+** and a running **llama.cpp server** (see [Serving the models](#serving-the-models)).
 
-On Windows, clone into a short path (for example `C:\src`) or run `git config --global core.longpaths true` first: two ADR file names under `docs/architecture/decisions/` are 145 characters long, and a clone whose path pushes them past 260 characters fails its checkout with `Filename too long`.
+On Windows, clone into a short path (for example `C:\src`) or run `git config --global core.longpaths true` first: the longest tracked path is about 130 characters, so a clone under a deep path can still push a file past 260 characters and fail its checkout with `Filename too long`.
 
 ## Usage (CLI)
 

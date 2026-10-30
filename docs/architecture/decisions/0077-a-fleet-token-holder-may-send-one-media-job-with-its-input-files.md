@@ -111,7 +111,7 @@ Three facts stood in the way.
   a file that begins like a PNG can still be malformed, and the decoder that opens it (ComfyUI's image loader, ffmpeg) is the
   boundary for that. The fleet token is held only by the operator's machines.
 - Some request fields cannot ride the fleet task and defer by name on a remote route instead of being dropped: `refine=false`
-  (image; **amended by [ADR 0082](0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md): it now travels, and a node that does not carry it is a named miss**),
+  (image; **amended by [ADR 0082](0082-a-media-call-overflows-to-the-fleet.md): it now travels, and a node that does not carry it is a named miss**),
   `tts_voice` (audio), `transformer` (video), a run-graph's `devices` (a card id names a card on the calling
   machine); a run-graph's `out_dir` is never sent (the node writes into its own media dir) but is honoured on the calling
   machine: the fetched outputs are written into it, created if missing. A `waiter_token` is not carried either, by design:
@@ -133,7 +133,7 @@ Three facts stood in the way.
 - **Keep the config-only advertisement and let the client retry.** A job sent to a node that cannot run it costs a queue
   place and a failed render before the client learns; the node already knows.
 
-## Amendment (2026-10-10, [ADR 0082](0082-a-media-call-overflows-to-the-fleet-when-its-own-lane-cannot-take-it-and-a-family-is-identified-by-its-recipe.md))
+## Amendment (2026-10-10, [ADR 0082](0082-a-media-call-overflows-to-the-fleet.md))
 
 Three sentences above change; nothing else does.
 

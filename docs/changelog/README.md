@@ -5,6 +5,7 @@ Older releases live here, moved verbatim and never edited (three lines in the 0.
 at move time because the pre-push leak scan reads a CGNAT literal and a home-path example as identity); each file is kept
 under GitHub's markdown render limit.
 Relative links inside archived entries are written from the repository root.
+Links to renamed files are repaired in place, so the archive keeps resolving.
 
 | File | Releases | Entries |
 |---|---|---|

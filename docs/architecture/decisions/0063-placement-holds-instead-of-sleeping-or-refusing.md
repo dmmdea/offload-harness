@@ -179,7 +179,7 @@ the seat and the overflow goes to the remotes that have headroom, to the capacit
 while no remote could run the contract at all. The per-Run bound the Context names (`runConcurrency`, four goroutines) is now the
 floor of a width that follows the deal, and `RunBatched` deals up to 16 subtasks as one deal; decision 7's process gate and decision
 6's headroom count are what keep a wider call inside each node's ceiling
-([ADR 0076](0076-a-calls-width-is-sized-from-its-deal-a-batch-of-up-to-16-is-one-deal-and-auto-counts-the-local-run-cap-line.md)).
+([ADR 0076](0076-a-calls-width-is-sized-from-its-deal.md)).
 
 ## Amendment (2026-10-07): `route=local` and `route=remote` here are the pins
 
