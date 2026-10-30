@@ -494,7 +494,7 @@ scores from another judge for the same reason, whatever scale they share.
 These two call `eval.BootstrapDeltaMean` directly with `B = 2000` and `seed = 42`, read their own interval and are **not
 migrated** by the gate; they stay as they are:
 
-- the `agent-trajectory-gate` verb (`runAgentTrajectoryGate` in `main.go`);
+- the `agent-trajectory-gate` verb (`runAgentTrajectoryGate` in `learn_cmd.go`);
 - the compaction A/B (`compeval.RunAB` in `internal/compeval/abtest.go`).
 
 New callers use the gate. `BootstrapDeltaMean` itself is unchanged, to the bit, and a test pins it.

@@ -260,7 +260,7 @@ aliases over it so the composite tier's placement guards read cards through the 
 that same 2-second sampler instead of the single-value query, and publishes the full breakdown as
 `gpu_devices[]` in health — additive, and **always present when nvidia-smi or linux-amdgpu is the resolved
 source, including a single-GPU box** (a one-element array; there is no single-GPU special case —
-`chooseSamplerKind` and `startVRAMSampler` in `main.go` are the exact routing decision, unit-tested in
+`chooseSamplerKind` (`fleet_serve_cmd.go`) and `startVRAMSampler` (`main.go`) are the exact routing decision, unit-tested in
 `fleet_verbs_test.go` and `fleet_sampler_test.go`; a linux-amdgpu row has an empty uuid and no utilisation). It is
 omitted on windows-generic, which has no per-adapter signal to enumerate, and on linux-meminfo, the SoC's one
 RAM pool with no cards. A new field is additive in practice too: the fleet-dispatcher decodes health with a
@@ -1844,7 +1844,7 @@ More shapes originate on the **delegator**, not the node:
   a week. Absence of evidence about the fleet is never evidence about the contract.
 
 `infrastructure` and `config` defers are counted into the delegator's `summary.infrastructure`
-and make `local-offload delegate` exit non-zero (`delegateExitErr` in `main.go`): a broken or
+and make `local-offload delegate` exit non-zero (`delegateExitErr` in `delegate_cmd.go`): a broken or
 misconfigured node must not read as a successful run. `contract` deliberately is not.
 `summary.infrastructure` also counts a **local placement taken while every configured remote was
 failing its health probe** (`route=auto`, local GPU busy): the placement is right and the work
@@ -2334,7 +2334,7 @@ died is still on the node under its job id; the next identical call from that ma
   with the command llama-swap spawned for each loaded seat
 - [`doctor_backends.go`](../../doctor_backends.go) — the `backends:` section and `--probe-completion` of `doctor`, and
   the tier-table reader the lane plan uses
-- [`main.go`](../../main.go) — `fleet-serve` / `fleet-measure` verbs
+- [`main.go`](../../main.go), [`fleet_serve_cmd.go`](../../fleet_serve_cmd.go) — `fleet-serve` / `fleet-measure` verbs
 
 ## Related docs
 
