@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -66,11 +65,7 @@ func TestPollLeaseNoteSaysWhichLeaseIsInForce(t *testing.T) {
 // is never run by a test, so the seam above proves nothing unless the verb goes
 // through it. A store built directly, beside it, would have no lease wiring at all.
 func TestServeBuildsItsJobStoreThroughNewFleetJobs(t *testing.T) {
-	src, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := strings.ReplaceAll(string(src), "\r\n", "\n")
+	text := mainSplitSource(t)
 	if !strings.Contains(text, "jobs := newFleetJobs(cfg)") {
 		t.Error("main.go's fleet-serve no longer builds its job store with newFleetJobs(cfg)")
 	}

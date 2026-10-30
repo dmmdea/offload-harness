@@ -21,6 +21,11 @@ func TestEveryDelegatorSurfaceWiresTheRescue(t *testing.T) {
 	fset := token.NewFileSet()
 	var seen int
 	var bad []string
+	// Two passes over the same files: the builders first, across the whole package, because a
+	// builder and its callers need not share a file (the root package's cliPinOptions lives in a
+	// split file of main.go, and its callers stayed in main.go); then every engine call.
+	var files []*ast.File
+	var dirs []string
 	err := filepath.WalkDir(".", func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -39,10 +44,19 @@ func TestEveryDelegatorSurfaceWiresTheRescue(t *testing.T) {
 		if perr != nil {
 			return nil
 		}
-		// An options BUILDER counts as wired when its own body returns a delegate.RunOptions literal
-		// carrying Rescue: agent_delegate builds its options in one pinned place (the roster guard,
-		// roster_remotes_test.go), and the guarantee here is the same, read one hop away.
-		builders := map[string]bool{}
+		files = append(files, f)
+		dirs = append(dirs, filepath.Dir(path))
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// An options BUILDER counts as wired when its own body returns a delegate.RunOptions literal
+	// carrying Rescue: agent_delegate builds its options in one pinned place (the roster guard,
+	// roster_remotes_test.go), and the guarantee here is the same, read one hop away. Builders are
+	// keyed by package directory and name, so a same-named helper in another package never vouches.
+	builders := map[string]bool{}
+	for i, f := range files {
 		for _, decl := range f.Decls {
 			fd, ok := decl.(*ast.FuncDecl)
 			if !ok || fd.Body == nil {
@@ -50,11 +64,14 @@ func TestEveryDelegatorSurfaceWiresTheRescue(t *testing.T) {
 			}
 			ast.Inspect(fd.Body, func(n ast.Node) bool {
 				if lit, ok := n.(*ast.CompositeLit); ok && isRunOptions(lit) && litHasRescue(lit) {
-					builders[fd.Name.Name] = true
+					builders[dirs[i]+"/"+fd.Name.Name] = true
 				}
 				return true
 			})
 		}
+	}
+	for i, f := range files {
+		dir := dirs[i]
 		ast.Inspect(f, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {
@@ -79,9 +96,9 @@ func TestEveryDelegatorSurfaceWiresTheRescue(t *testing.T) {
 			if c, ok := last.(*ast.CallExpr); ok {
 				switch fn := c.Fun.(type) {
 				case *ast.SelectorExpr:
-					has = builders[fn.Sel.Name]
+					has = builders[dir+"/"+fn.Sel.Name]
 				case *ast.Ident:
-					has = builders[fn.Name]
+					has = builders[dir+"/"+fn.Name]
 				}
 			}
 			if !has {
@@ -89,10 +106,6 @@ func TestEveryDelegatorSurfaceWiresTheRescue(t *testing.T) {
 			}
 			return true
 		})
-		return nil
-	})
-	if err != nil {
-		t.Fatal(err)
 	}
 	if seen < 4 {
 		t.Fatalf("found only %d delegate.RunWith/RunBatched call sites, want the four delegator surfaces: the scan is broken", seen)

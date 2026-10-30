@@ -316,7 +316,7 @@ Raw link: ~980 MB/s <node-b>→<node-c>, ~700 MB/s <node-c>→<node-b> (iperf3);
 | one binding: fields, defaults, validation (`ValidateKVCacheServer`, `privateHost`) | `internal/config/kvcacheserver.go` |
 | the LIST: legacy-object decode, seat selection, cross-binding rules (`ValidateKVCacheServers`) | `internal/config/kvcacheservers.go`, wired in `internal/config/config.go` (`Config.KVCacheServers`, `Config.VLLMSeats`, `load`) |
 | status report (`kvCacheServerView`, `kvCacheBindingView`) | `internal/mcpserver/mcpserver.go` (`handleStatus`) |
-| the per-seat gate (`writeCacheServerSection`) | `main.go` (`doctorRun`) |
+| the per-seat gate (`writeCacheServerSection`) | `doctor_cmd.go` (`doctorRun`) |
 | the render picks a binding by seat name (`applySeatBinding`) | `install_seatbinding.go`, flagged in `install_vllmseat.go` (`--config`) |
 | the seat's own half and the binding a tier derives (`ConfigBlock`, `ConfigBinding`, `Bindings`) | `internal/vllmseat/vllmseat.go` |
 | tests | `internal/config/kvcacheserver_test.go`, `internal/config/kvcacheservers_test.go`, `internal/mcpserver/status_test.go`, `doctor_cacheserver_test.go`, `install_seatbinding_test.go` |

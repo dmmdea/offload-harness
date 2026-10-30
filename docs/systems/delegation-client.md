@@ -100,7 +100,7 @@ then the shorter queue, and names every node it skipped when none can take the j
 |---|---|
 | `install_client.go` | `install client`: the config it writes, `hasLocalModel` |
 | `setup/install.sh`, `setup/install.tests.sh` | `--client`, `--remotes`, `--token-file`, and their dry-run tests |
-| `acceptance_cmd.go`, `main.go` (`doctorRun`) | the alias check and the endpoint health line that SKIP with no local model |
+| `acceptance_cmd.go`, `doctor_cmd.go` (`doctorRun`) | the alias check and the endpoint health line that SKIP with no local model |
 | `internal/delegate/run_localseat.go` (`localServesLayer`, `seatless`) | a view that names no agent seat is never a placement |
 | `internal/composeremote/` | `offload_compose_video`'s `route`: node choice, the template and project doors, fetching the outputs back |
 | `internal/composebundle/` | packing a project, and the extract and reference checks both sides run |

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"sync/atomic"
 	"testing"
@@ -21,10 +20,7 @@ import (
 // exactly like one that does until a twin outlives the operator's return.
 func TestFleetServeStartsAndStopsTheDisplayWatch(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := parseMainSplit(t, fset)
 	var fn *ast.FuncDecl
 	for _, d := range f.Decls {
 		if fd, ok := d.(*ast.FuncDecl); ok && fd.Name.Name == "runFleetServe" {

@@ -2,7 +2,6 @@ package main
 
 import (
 	"go/ast"
-	"go/parser"
 	"go/token"
 	"testing"
 )
@@ -14,10 +13,7 @@ import (
 // config (lease directory and orphan grace).
 func TestFleetServeWiresTheLeaseStanding(t *testing.T) {
 	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, "main.go", nil, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
+	f := parseMainSplit(t, fset)
 	var wired, literals int
 	ast.Inspect(f, func(n ast.Node) bool {
 		cl, ok := n.(*ast.CompositeLit)

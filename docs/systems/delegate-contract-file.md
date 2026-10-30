@@ -178,7 +178,7 @@ change to the flag help's `(fields: ...)` list fails the doc test below until th
 | piece | where |
 |---|---|
 | the verb, its flags and the `--contract` help | `runDelegate` in `main.go` |
-| the file reader (bare object or array, tolerant decode) | `parseContractFile` in `main.go` |
+| the file reader (bare object or array, tolerant decode) | `parseContractFile` in `delegate_cmd.go` |
 | the subtask object and its intake | `SubtaskSpec`, `PrepareContract` in `internal/delegate/intake.go` |
 | the subtask cap | `CheckSubtaskCount` in `internal/delegate/intake_batch.go` |
 | the contract fields and their json names | `AgentContract` in `internal/core/agentwire.go` |

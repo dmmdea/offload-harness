@@ -176,8 +176,8 @@ R1–R6 are MUST, R7–R9 SHOULD.
 | bare-client gate (G2) | `bare_http_client_lint_test.go`, `bare_http_client_allowlist_test.go` |
 | mutation proof harness (I5) | `scripts/mutation-check.sh`, `scripts/mutation-check.ps1`; self-test `scripts/mutation-check-selftest.sh`, `scripts/mutation-check-selftest.ps1` over `scripts/testdata/mutfixture` |
 | untrusted-content fences | `internal/agent/fetchtool.go` (`fenceUntrusted`), `internal/agent/browsetool.go`; the shared rules in `internal/untrusted`, applied to research bodies in `internal/mcpserver` (G13) |
-| fleet node listeners and the fleet bearer | `internal/fleetnode/server.go`, `main.go` (`fleetServeParams`) |
-| posture report | `main.go` (`doctor`) |
+| fleet node listeners and the fleet bearer | `internal/fleetnode/server.go`, `fleet_serve_cmd.go` (`fleetServeParams`) |
+| posture report | `doctor_cmd.go`, `main.go` (`doctor`) |
 
 ## Related
 
