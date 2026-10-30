@@ -1107,7 +1107,15 @@ the first-stage fix for upstream issue #220's `libcudart.so`-on-Windows crash; t
 *non-default* CUDA device, remains open and unfixable upstream — this is why the pooled LTX-2.5
 seat keeps `compute cuda:0`). **Fallback source once upstream goes read-only:** private mirror
 `https://github.com/dmmdea/ComfyUI-MultiGPU-mirror` (a full `git clone --mirror`, all branches/tags;
-its default branch carries the local fix). `render/comfy-nodes.mjs` (`NODE_PACKS`) and
+its default branch carries the local fix). **The mirror is private**: a clone of this repository without
+access to it cannot fetch it (git fails with an auth error), and falls back to the archived but still public
+upstream `https://github.com/pollockjj/ComfyUI-MultiGPU` (the same code minus the one local fix). The
+installer does this itself: `render/manifest-satisfy.mjs` (`makeEnsurePack`) clones the repository a manifest's
+`node_packs` entry names, and when that clone fails it clones the next `render/node-packs.json` row of the same
+name (the upstream, for the mirror) into the same `custom_nodes/ComfyUI-MultiGPU` directory with git's credential
+prompt off, logs one line naming the repository that failed and the one used, and records the repository it
+installed from in `custom_nodes/ComfyUI-MultiGPU.installed.json`; only when every row fails is the clone failure the typed
+defer. A pack already on disk is never touched, so the fleet's installs do not change. `render/comfy-nodes.mjs` (`NODE_PACKS`) and
 `internal/mediacap/routeneeds.go` (`nodePacks`/`packHint`) both carry the archival note in the
 operator-facing `MISSING_NODE` hint, so a box missing the pack is told where to get the
 patched code, not just the (soon read-only) upstream URL. Upstream and the mirror are each a row of

@@ -3,7 +3,7 @@
 // gate); this file starts with the models leg. All side-effecting deps are injected so
 // the whole satisfier is testable with zero network/disk.
 import { join, dirname } from "node:path";
-import { checkNodePack, checkModelEntry, normalizeModelPath } from "./node-packs.mjs";
+import { checkNodePack, checkModelEntry, normalizeModelPath, ALLOWED_NODE_PACKS } from "./node-packs.mjs";
 
 const defer = (code, ref, detail) => ({ ok: false, defer: { code, ref, detail } });
 
@@ -709,7 +709,11 @@ export async function currentPacksKey(packs, { comfyDir, exists = existsSync, gi
 // failed an install is not cloned and failed again, and a newer one is a fresh candidate. A rejection that carries the digest of the
 // venv's `pip freeze` it was written against (`freeze`) is ignored once the venv's digest (`freezeHash`, "" when unreadable) differs: a
 // venv that has been fixed since is not locked out of the commit.
-export function makeEnsurePack({ comfyDir, freezeHash = async () => "", exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd, gitOrigin = async () => null, lsRemoteHead = async () => null, readRecord = (pack) => readPackRecord(pack, { comfyDir }), record = (pack, commit, extra) => recordPackInstall(pack, commit, { comfyDir, ...extra }) }) {
+// A pack whose name has more than one allowlisted repository (ComfyUI-MultiGPU: the private mirror and the archived public
+// upstream) is cloned from the repository the manifest names; when that clone fails, the other rows of the same name are
+// tried in table order into the same directory, one log line names the repository that failed and the one used, and the
+// record names the repository installed. Only an allowlisted row is ever tried (`packRows`).
+export function makeEnsurePack({ comfyDir, packRows = ALLOWED_NODE_PACKS, log = (m) => console.error(m), freezeHash = async () => "", exists = existsSync, gitHead, gitRun, packAllowed = checkNodePack, buildClone = buildClonePackCmd, gitOrigin = async () => null, lsRemoteHead = async () => null, readRecord = (pack) => readPackRecord(pack, { comfyDir }), record = (pack, commit, extra) => recordPackInstall(pack, commit, { comfyDir, ...extra }) }) {
   return async (pack) => {
     // The last stop before git: the directory, the clone and the checkout all come from the pack, so a pack that is
     // not allowlisted is refused before any of them is looked at (satisfyManifest has refused it already; this is for a
@@ -720,6 +724,7 @@ export function makeEnsurePack({ comfyDir, freezeHash = async () => "", exists =
     }
     const dir = `${comfyDir}/custom_nodes/${pack.name}`;
     const existed = exists(dir);
+    let installed = pack;   // the pack as installed: its repo is the one the clone came from
     if (!existed) {
       const held = readRecord(pack);
       const held_rejected = held && Array.isArray(held.rejected) ? held.rejected.filter((r) => r && r.commit) : [];
@@ -736,12 +741,26 @@ export function makeEnsurePack({ comfyDir, freezeHash = async () => "", exists =
           });
         }
       }
-      await gitRun(buildClone(pack, { comfyDir }));
+      const own = packRows.find((r) => r.repo === pack.repo);   // the allowlisted row the manifest named
+      const candidates = [pack.repo, ...(own ? packRows.filter((r) => r.name === own.name && r.repo !== pack.repo).map((r) => r.repo) : [])];
+      let failed = null;   // the last repository whose clone failed
+      for (const repo of candidates) {
+        const cand = repo === pack.repo ? pack : { ...pack, repo };
+        try { await gitRun(buildClone(cand, { comfyDir })); } catch (e) {
+          if (repo === candidates[candidates.length - 1] && failed) e.message += ` (${failed.repo} failed first: ${failed.err.message})`;
+          if (repo === candidates[candidates.length - 1]) throw e;
+          failed = { repo, err: e };
+          continue;
+        }
+        if (failed) log(`node pack ${pack.name}: clone of ${failed.repo} failed; installed from ${repo} instead`);
+        installed = cand;
+        break;
+      }
     }
     const commit = await gitHead(dir);
     let origin = null;
     try { origin = await gitOrigin(dir); } catch { origin = null; }
-    record(pack, commit, { origin });
+    record(installed, commit, { origin });
     return { changed: !existed, commit, fresh: !existed };
   };
 }
@@ -869,7 +888,8 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
       comfyDir,
       exists: existsSync,
       gitHead: (dir) => runOut(["git", "-C", dir, "rev-parse", "HEAD"]),
-      gitRun: (cmd) => run(cmd),
+      // No credential prompt: a repository this node cannot read (the private MultiGPU mirror) fails at once, so the next candidate is tried.
+      gitRun: (cmd) => run(cmd, { env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" } }),
       gitOrigin: (dir) => runOut(["git", "-C", dir, "remote", "get-url", "origin"]),
       freezeHash: async () => { try { return freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { return ""; } },
       lsRemoteHead: async (repo) => {
