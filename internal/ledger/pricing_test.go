@@ -99,9 +99,6 @@ func TestEstValueKeptLocalPricesInputAndOutput(t *testing.T) {
 				t.Fatalf("EstValueKeptLocal = %v, want %v (input %d @ $%v/MTok + output %d @ $%v/MTok)",
 					s.EstValueKeptLocal, c.wantUSD, c.wantIn, c.prices.InputPerMTok, c.wantOut, c.prices.OutputPerMTok)
 			}
-			if s.EstDollarSaved != s.EstValueKeptLocal {
-				t.Fatalf("deprecated alias drifted: %v != %v", s.EstDollarSaved, s.EstValueKeptLocal)
-			}
 		})
 	}
 }

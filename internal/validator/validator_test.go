@@ -73,15 +73,19 @@ func TestValidateWithoutSchema(t *testing.T) {
 	}
 }
 
-// Documents a gap: the doc comment says the no-schema path "confirms it is a
-// JSON object", but the check unmarshals into `any`, so a bare scalar or array
-// is accepted. Pinned as-is — tightening it is a behaviour change that belongs
-// in its own PR.
-func TestValidateWithoutSchemaAcceptsNonObjects(t *testing.T) {
+// The no-schema path confirms the output is a JSON object: a bare scalar, an
+// array or null is rejected (issue #5); a plain object passes.
+func TestValidateWithoutSchemaRejectsNonObjects(t *testing.T) {
 	for _, data := range []string{`123`, `"a string"`, `[1,2,3]`, `null`} {
-		if err := Validate([]byte(data), nil); err != nil {
-			t.Errorf("Validate(%s, nil) = %v; the no-schema path currently accepts any valid JSON", data, err)
+		err := Validate([]byte(data), nil)
+		if err == nil {
+			t.Errorf("Validate(%s, nil) accepted a non-object", data)
+		} else if !strings.Contains(err.Error(), "not a JSON object") {
+			t.Errorf("Validate(%s, nil) = %v; want a not-a-JSON-object error", data, err)
 		}
+	}
+	if err := Validate([]byte(`{"a":1}`), nil); err != nil {
+		t.Errorf("Validate of a plain object = %v; want nil", err)
 	}
 }
 

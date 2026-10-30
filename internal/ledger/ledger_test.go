@@ -286,9 +286,7 @@ func TestTopDeferReasons(t *testing.T) {
 }
 
 // TestSummaryHonestValueLabel (LO-12): the summary carries the honest
-// est_value_kept_local key; the deprecated est_dollar_saved key is still
-// emitted with the SAME value for one release (math unchanged — only the
-// claim changed).
+// est_value_kept_local key (math unchanged — only the claim changed).
 func TestSummaryHonestValueLabel(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "ledger.jsonl")
 	l, _ := Open(p)
@@ -301,11 +299,8 @@ func TestSummaryHonestValueLabel(t *testing.T) {
 	if s.EstValueKeptLocal != 30.0 { // 2M tokens x $15/MTok
 		t.Fatalf("EstValueKeptLocal = %v, want 30.0", s.EstValueKeptLocal)
 	}
-	if s.EstDollarSaved != s.EstValueKeptLocal {
-		t.Fatalf("deprecated alias must carry the same value: %v != %v", s.EstDollarSaved, s.EstValueKeptLocal)
-	}
 	b, _ := json.Marshal(s)
-	for _, key := range []string{`"est_value_kept_local":30`, `"est_dollar_saved":30`} {
+	for _, key := range []string{`"est_value_kept_local":30`} {
 		if !strings.Contains(string(b), key) {
 			t.Errorf("summary JSON missing %s: %s", key, b)
 		}
