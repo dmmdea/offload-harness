@@ -4858,7 +4858,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 				// escalate to, so the gate below is skipped. Record the gap on the call's ledger row (one
 				// key, idempotent across attempts) so it is never a silent same-weights "escalation".
 				if !low && chHead != nil && len(chThr) > 0 && (p.cfg.EscalationModel == "" || p.cfg.EscalationModel == p.cfg.Model) && meta.Feat != nil {
-					meta.Feat["escalation_unavailable"] = 1
+					meta.Feat[core.FeatEscalationUnavailable] = 1
 				}
 				if !low && chHead != nil && len(chThr) > 0 && p.cfg.EscalationModel != "" && model != p.cfg.EscalationModel {
 					if tau, ok := chThr[string(req.Task)]; ok {

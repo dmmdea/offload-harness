@@ -13,6 +13,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
 )
 
@@ -269,8 +270,12 @@ func featOrder(feat map[string]float64) []string {
 			out = append(out, k)
 		}
 	}
-	// Any additional keys not in the canonical list.
+	// Any additional keys not in the canonical list, except the ledger markers (recorded
+	// conditions that featurize never emits at inference; a weight on one would read 0 live).
 	for k := range feat {
+		if core.IsLedgerMarker(k) {
+			continue
+		}
 		inKnown := false
 		for _, kk := range known {
 			if kk == k {

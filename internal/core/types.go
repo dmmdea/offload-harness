@@ -372,6 +372,12 @@ type Meta struct {
 	// "entry-inherited (<why>)" when the repack failed open to the entry
 	// packing. The fail-open must be observable, never inferred (TO-4 rule).
 	TierPack string `json:"tier_pack,omitempty"`
+	// Feat keys that are MARKERS, not features: written on the ledger row so a condition is
+	// recorded, never emitted by featurize at inference, so a trainer that learned a weight on
+	// one would read it as 0 on every live call and skew its scores. IsLedgerMarker names them;
+	// the router's feature order skips them. FeatEscalationUnavailable: the confidence gate had
+	// nowhere to escalate to (escalation_model empty or the workhorse itself).
+	//
 	// EscSource names WHICH gate sent this call up a tier. Closed set (see
 	// EscalationSource) so it aggregates; a free-text reason does not.
 	// Measured gap 2026-08-11: a SUCCESSFUL escalation recorded no reason at
@@ -563,4 +569,13 @@ const ErrClassNoNodeConfigured = "no_node_configured"
 // the reason is a sentence for a person.
 func CardHeld(errClass string) bool {
 	return errClass == ErrClassGPUBusy || errClass == ErrClassGPUQueued || errClass == ErrClassComposeBusy
+}
+
+// FeatEscalationUnavailable is the Feat marker written when the confidence gate is skipped
+// because the cascade has no escalation tier (see the Feat comment on Meta).
+const FeatEscalationUnavailable = "escalation_unavailable"
+
+// IsLedgerMarker reports whether a Feat key is a marker rather than a routing feature.
+func IsLedgerMarker(key string) bool {
+	return key == FeatEscalationUnavailable
 }
