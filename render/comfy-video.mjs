@@ -67,7 +67,7 @@ import { buildWan22I2V, chooseWanDecode, WAN_DECODE_MODES, WAN_DECODE_DEFAULT } 
 import { buildLtx25I2V } from "./wf-ltx25-i2v.mjs";
 import { buildH3AV } from "./wf-h3-av.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
-import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, comfyUnusableClassLine } from "./comfy-submit.mjs";
 import { planMulticard, checkComfyDevices, portNote, createOomWatch, MULTICARD_WAIT_SEC, wanGeometry, tiledSeamFrames, describeFrames } from "./wan-multicard.mjs";
 
 // BOOL_FLAGS take no value. --fast was missing from this list, so the parser took the
@@ -451,6 +451,8 @@ async function main() {
 if (process.argv[1] && /comfy-video\.mjs$/.test(process.argv[1])) {
   main().catch((e) => {
     console.error("VIDEO GEN FAILED:", e.message);
+    const classLine = comfyUnusableClassLine(e); // a dead ComfyUI: the class line internal/gpugen reads (D-38, issue #72)
+    if (classLine) console.error(classLine);
     // exitCode, not process.exit(): exiting while a fetch socket is still closing trips
     // Windows libuv's UV_HANDLE_CLOSING assertion (exit 0xc0000409), which buried the real
     // failure under a crash (reg3, 2026-09-22; render/preflight-graph.mjs has the same

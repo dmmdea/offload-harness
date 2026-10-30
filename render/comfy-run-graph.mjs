@@ -20,7 +20,7 @@ import { leaseBeat } from "./lease-progress.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
 import { allOutputsByNode } from "./comfy-output.mjs";
 import { readOwner as _readOwner, writeOwner as _writeOwner } from "./comfy-ownership.mjs";
-import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
+import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, comfyUnusableClassLine } from "./comfy-submit.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -342,5 +342,5 @@ async function pollHistoryShared(api, pid, cli) {
 
 // Only run main() when invoked directly (not when imported by the test).
 if (process.argv[1] && process.argv[1].endsWith("comfy-run-graph.mjs")) {
-  main().catch((e) => { console.error("RUN-GRAPH FAILED:", e.message); process.exit(1); });
+  main().catch((e) => { console.error("RUN-GRAPH FAILED:", e.message); const cl = comfyUnusableClassLine(e); if (cl) console.error(cl); process.exit(1); });
 }
