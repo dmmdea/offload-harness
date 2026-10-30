@@ -1240,7 +1240,7 @@ test("the shipped template list in the CLI help, the README, the operator guide,
   const shipped = listTemplates(TEMPLATES_DIR).sort();
   const ticked = (s) => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
   const lists = {
-    "the --template help (main.go)": /"a vetted template on this machine \(([^)]*)\)"/.exec(readRepo("main.go")),
+    "the --template help (generate_video_cmd.go)": /"a vetted template on this machine \(([^)]*)\)"/.exec(readRepo("generate_video_cmd.go")),
     "the README tool row": /a vetted template \(([^)]*)\)/.exec(readRepo("README.md")),
     "the operator guide": /The vetted templates are ([^.]*)\./.exec(readRepo("docs", "OPERATOR-GUIDE.md")),
     "the glossary entry": /`render\/compose-templates\/`: ([^.]*)\./.exec(readRepo("docs", "glossary.md")),
@@ -1249,7 +1249,7 @@ test("the shipped template list in the CLI help, the README, the operator guide,
   };
   for (const [where, m] of Object.entries(lists)) {
     assert.ok(m, `${where}: the sentence that lists the templates was not found`);
-    const listed = (where === "the --template help (main.go)" ? m[1].split(",").map((s) => s.trim()) : where === "the setup doctor line" ? m[1].split(",") : ticked(m[1]));
+    const listed = (where === "the --template help (generate_video_cmd.go)" ? m[1].split(",").map((s) => s.trim()) : where === "the setup doctor line" ? m[1].split(",") : ticked(m[1]));
     assert.deepEqual([...listed].sort(), shipped, `${where} must list exactly the shipped templates`);
   }
   assert.deepEqual(lists["the setup doctor line"][1].split(","), shipped, "the doctor prints them sorted");
