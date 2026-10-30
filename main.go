@@ -223,6 +223,9 @@ func main() {
 		err = runTraceCorpus(args)
 	case "version", "--version", "-v":
 		fmt.Println("local-offload", version)
+	case "--help", "-h", "help":
+		// A requested help is not a mistake: the usage goes to stdout and the exit is 0.
+		usageTo(os.Stdout)
 	default:
 		usage()
 		os.Exit(2)
@@ -297,8 +300,11 @@ loop:
 	return sub, args, true
 }
 
-func usage() {
-	fmt.Fprint(os.Stderr, `local-offload `+version+` — delegate grunt work to a free local model
+func usage() { usageTo(os.Stderr) }
+
+// usageTo prints the usage on w: stderr for a mistake (exit 2), stdout for a requested help (exit 0).
+func usageTo(w io.Writer) {
+	fmt.Fprint(w, `local-offload `+version+` — delegate grunt work to a free local model
 
 Usage:
   local-offload summarize <file|-> [--max-points N] [--json]
