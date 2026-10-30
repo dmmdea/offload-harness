@@ -1,5 +1,0 @@
-### Changed - internal/imagegen entry points take one request struct instead of 10-12 positional arguments
-
-- **What changed.** `Generate`, `GenerateSdcpp`, `Edit`, `Inpaint`, `GenerateBatch` and `Upscale` now take `(ctx, GenerateRequest | SdcppRequest | EditRequest | InpaintRequest | BatchRequest | UpscaleRequest)`, with fields named after the old parameters (`Node`, `Script`, `ComfyDir`, `Out`, `Prompt`, `Params`, `Model`, `Timeout`, `Sampling`, `ExtraEnv`, `Image`, `Mask`, `JobsPath`, `ResultsPath`). Every caller in `internal/pipeline` and the existing imagegen tests were converted. The subprocess command lines and environments are unchanged.
-- **Why.** Ten positional arguments, several of them adjacent strings (`out, image, mask, prompt`), made a swapped argument compile silently. Named fields make each call site say what it passes.
-- **Check.** `go build ./...`, then `go vet` and `go test` on `internal/imagegen`, `internal/pipeline` and the root package pass; the existing tests that capture the spawned command line and environment pass with only the call syntax changed.

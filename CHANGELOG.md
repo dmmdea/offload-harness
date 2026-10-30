@@ -7,6 +7,128 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.207.0] - 2026-10-29 - the two remaining file splits, six option-struct refactors and six fixes from the desloppify pass
+
+### Fixed - the video, music, inpaint and run-graph runners now report a dead ComfyUI to the ledger like the image runner
+
+- **What changed.** `comfy-video.mjs`, `comfy-music.mjs`, `comfy-inpaint.mjs` and `comfy-run-graph.mjs` print `IGPU_CLASS=comfy_unusable` after their `... FAILED:` line when the failure is a server-unusable error (the dead-server watchdog, the CUDA health probe, a `POST /prompt` that never answers). Exit codes and output JSON are unchanged. The rest of issue #72 was already in place: all four poll through the shared `pollOutputs` in `comfy-submit.mjs`, `POST /prompt` and `GET /view` carry `AbortSignal.timeout` (`SUBMIT_TIMEOUT_MS`, `VIEW_TIMEOUT_MS`), and the Go side files the class as `comfy_unusable` (the name `comfy_dead` was not used; a test pins that it is ignored).
+- **Why.** Only the image runner printed the class line, so a dead ComfyUI under the other lanes was filed as `other` in the ledger and analytics could not key on it.
+- **Check.** `node --test render/*.test.mjs`, `node --check` on the four scripts, and `go test ./internal/gpugen/ ./internal/pipeline/`. Details in `docs/systems/media-generation.md`.
+
+### Fixed - `local-offload --help`, `-h` and `help` print the usage on stdout and exit 0
+
+- **What changed.** A requested help (first argument `--help`, `-h` or `help`) now writes the usage to stdout and exits 0. A missing or unknown subcommand is unchanged: the usage goes to stderr and the exit is 2.
+- **Why.** Asking for help is not a usage error; exiting 2 made `local-offload --help` look like a failure to scripts and to anyone piping the text to a pager.
+- **Check.** Built the binary: `--help` and `help` exit 0, no arguments and `nosuchcmd` exit 2.
+
+### Fixed - a clone without access to the private ComfyUI-MultiGPU mirror installs the public upstream
+
+- **What changed.** `makeEnsurePack` (`render/manifest-satisfy.mjs`) now clones the repository a manifest's `node_packs` entry names and, when that clone fails, clones the next `render/node-packs.json` row of the same name into the same `custom_nodes/<pack>` directory (for ComfyUI-MultiGPU: the private mirror `dmmdea/ComfyUI-MultiGPU-mirror`, then the archived public upstream `pollockjj/ComfyUI-MultiGPU`). It logs one line naming the repository that failed and the one used, and the pack's `.installed.json` records the repository it was installed from. The node's clone runs with git's credential prompt off (`GIT_TERMINAL_PROMPT=0`, `GCM_INTERACTIVE=never`), so an unreadable private repository fails at once instead of waiting on a prompt. Only allowlisted rows are tried, and a pack already on disk is not touched, so the fleet (mirror first, already installed) behaves as before. The `MISSING_NODE` hint (`render/comfy-nodes.mjs`, `internal/mediacap/routeneeds.go`) and `docs/systems/media-generation.md` ("ComfyUI-MultiGPU archival") say the mirror is private and the upstream is the public fallback.
+- **Why.** A public clone of this repository was sent to a repository it cannot read, and the installer had no second try.
+- **Check.** `node --test render/*.test.mjs` passes; `makeEnsurePack` run against a first repository that cannot be cloned and the real upstream second installs from the second and logs the fallback line.
+
+### Fixed - two ADR files get short names so a clone checks out on Windows without core.longpaths
+
+- **What changed.** ADR 0076 and ADR 0082 were renamed from 143 and 145 characters to `0076-a-calls-width-is-sized-from-its-deal.md` and `0082-a-media-call-overflows-to-the-fleet.md`; the titles inside are unchanged, every link to them (ADRs, glossary, operator guide, fleet-node page, the decisions index and one archived changelog link) follows, and the README's Windows note now says the longest tracked path is about 130 characters.
+- **Why.** The two long names pushed a clone under an ordinary path past the 260-character Windows limit, so the checkout failed with `Filename too long` unless `core.longpaths` was set.
+- **Check.** `git ls-files | awk '{ print length($0) }' | sort -rn | head -1` prints 130; a grep for the old names returns nothing; the ADR, docs and deletion checks pass.
+
+### Fixed - a single-model cascade is now visible in doctor and on the ledger
+
+- **What changed.** `doctor` prints an `escalation:` line that reads `UNAVAILABLE` when `escalation_model` is empty or equals `model` (the confidence gate is inert), `BROKEN` when the alias is not in the live roster, and `OK` otherwise. The pipeline's confhead gate, when skipped for that reason, sets `feat.escalation_unavailable = 1` on the call's ledger row. The profile seeds already blank `escalation_model` for every tier that drops the 26B and serves no other escalation model, so `setup/templates/profiles.json` is unchanged.
+- **Why.** With no distinct escalation model the cascade could only "escalate" to the same weights, and nothing on the box or in the ledger said so (issue #8).
+- **Check.** `doctor` run against a config whose `escalation_model` equals its `model` prints the `UNAVAILABLE` line. Closes #8.
+
+### Fixed - the validator's no-schema path now requires a JSON object (issue #5)
+
+- **What changed.** `validator.Validate` with a nil or empty schema unmarshals into `map[string]any` and rejects `null`
+  with a "not a JSON object" error, so `123`, `"str"`, `[1,2,3]` and `null` no longer pass; a plain object still does.
+- **Why.** The doc comment said it confirmed a JSON object but it unmarshalled into `any`, so any valid JSON passed (#5).
+  Every caller in `internal/pipeline` turns a validation error into a retry or defer verdict, never a crash.
+- **Check.** `go test ./internal/validator/ ./internal/pipeline/`; the test that pinned the lax behaviour now asserts
+  scalars, arrays and null are rejected and an object passes.
+
+### Removed - the ledger summary's deprecated `est_dollar_saved` alias (issue #7)
+
+- **What changed.** `Summary.EstDollarSaved` and its `est_dollar_saved` JSON key are gone; `est_value_kept_local` carries
+  the same number and is unchanged.
+- **Why.** The alias was marked "remove in v0.7" and kept the misleading money-saved name alive (#7).
+- **Check.** `go test ./internal/ledger/`; the alias assertions in the ledger tests are deleted.
+
+### Fixed - returned errors keep their cause for errors.Is/As, and four malformed answers are no longer read as empty
+
+- **What changed.** (a) 84 `fmt.Errorf("...: %v", err)` sites under `internal/` that return or store the error now use `%w`, so a caller's `errors.Is` / `errors.As` reaches the cause (the message text is unchanged). Sites whose operand can be nil, is not an error, or is only logged keep `%v`. (b) A response that did not parse was read as empty in four places and the caller went on as if it were real: the GitHub `create_repo` and `upload_file` replies (internal/agent/githubtool.go) now say the answer was unreadable instead of printing an empty repo or URL; `extract_image` (internal/pipeline/pipeline.go) defers on an unreadable OCR result and `video_watch` (internal/pipeline/pipeline_videowatch.go) marks the window deferred instead of keeping an empty note. Each is reported the way that function already reports a failure; no new exit path.
+- **Why.** `%v` flattens the error to text, so wrapped sentinels (`ErrIO`, `ErrUpstreamVanished`, `ErrDeviceUnresolved`, ...) and OS errors could not be matched by callers; a discarded `json.Unmarshal` error hid a malformed answer behind a zero value.
+- **Check.** `go build ./...`, `go vet` and `go test` on every changed package, plus `go test . -run 'Changelog|Fragment|Version|Pins|Deletion'`.
+
+### Changed - internal/imagegen entry points take one request struct instead of 10-12 positional arguments
+
+- **What changed.** `Generate`, `GenerateSdcpp`, `Edit`, `Inpaint`, `GenerateBatch` and `Upscale` now take `(ctx, GenerateRequest | SdcppRequest | EditRequest | InpaintRequest | BatchRequest | UpscaleRequest)`, with fields named after the old parameters (`Node`, `Script`, `ComfyDir`, `Out`, `Prompt`, `Params`, `Model`, `Timeout`, `Sampling`, `ExtraEnv`, `Image`, `Mask`, `JobsPath`, `ResultsPath`). Every caller in `internal/pipeline` and the existing imagegen tests were converted. The subprocess command lines and environments are unchanged.
+- **Why.** Ten positional arguments, several of them adjacent strings (`out, image, mask, prompt`), made a swapped argument compile silently. Named fields make each call site say what it passes.
+- **Check.** `go build ./...`, then `go vet` and `go test` on `internal/imagegen`, `internal/pipeline` and the root package pass; the existing tests that capture the spawned command line and environment pass with only the call syntax changed.
+
+### Changed - `llamaclient` Generate, GenerateVision and GenerateVisionInterleaved take a request struct instead of eight to ten positional parameters
+
+- **What changed.** `Client.Generate(ctx, GenRequest{Model, System, User, Grammar, MaxTokens, Temperature, TopLogprobs}, opts...)`,
+  `Client.GenerateVision(ctx, VisionRequest{... ImageDataURIs ...}, opts...)` and
+  `Client.GenerateVisionInterleaved(ctx, InterleavedRequest{... FrameLabels, ImageDataURIs, TrailingUser ...}, opts...)`
+  replace the long positional lists, and every caller (`internal/pipeline`, `internal/backendchain`, the root affinity seam
+  test and the `internal/llamaclient` tests) is converted. The `GenOption` functional options are unchanged.
+- **Why.** Seven adjacent string, int and float arguments in a row (`"", "", "u", "", 64, 0, 0`) are easy to transpose and
+  unreadable at the call site; named fields make a swap a compile-visible edit.
+- **Check.** A pure refactor: the request bodies are built from the same values by the same code, and the existing
+  `internal/llamaclient` tests, which assert the bodies on httptest servers, pass unchanged apart from the call syntax.
+
+### Changed - one run-parameters struct under `delegate.RunWith`, and one `maintainSeat` with an options struct
+
+- **What changed.** `internal/delegate`: `runWith` took seven positional parameters that `RunWith` and `RunBatched` forwarded
+  one by one; it now takes one `runParams` value, and the exported `Run`, `RunWith` and `RunBatched` signatures are unchanged.
+  `gpu_drain.go`: `maintainSeat`, `maintainSeatCtx`, `maintainSeatScoped` and `maintainSeatReport` were four pass-through
+  wrappers that each added one argument; they are now one `maintainSeat(ctx, cfg, maintainOpts)`, and its two production
+  callers (`gpu reserve` and the detached holder's maintain step) and the existing tests that called the old names pass the
+  options struct. `docs/systems/gpu-lease.md` names the one function.
+- **Why.** Two desloppify findings: argument ladders where every rung only forwards, so a new argument had to be threaded
+  through each one. No behaviour changes: same drain, restamp and unload order, same ledger rows.
+- **Check.** `go build ./...`, `go vet` and `go test` on `./internal/delegate/` and the root package's drain and lease tests.
+
+### Changed - internal/delegate/run.go split into topical files of the same package
+
+- **What changed.** `internal/delegate/run.go` (8302 lines) is now 14 files of package `delegate` by pure declaration moves: `run.go` keeps the tunables, the `Run`/`RunBatched`/`RunWith` entry points, `attempt`/`runLocal` and the delegation log; the rest moved to `run_types.go`, `run_runner.go`, `run_placements.go`, `run_capacity.go`, `run_wait.go`, `run_replace.go`, `run_retry.go`, `run_localseat.go`, `run_deal.go`, `run_remote.go`, `run_dispatch.go`, `run_accept.go` and `run_probe.go`. No declaration was renamed, reordered inside a body or edited.
+- **Why.** An 8302-line file hid the delegation runner's parts (placement, capacity wait, retry, dealing, dispatch, acceptance, probing) behind one name. The `bare_http_client_allowlist`, the ledger writer list and the delegator-grades-through-`gradeAcceptance` source scan are keyed on `run.go`, so the declarations they read stayed there.
+- **Check.** The census tool (hashes every declaration's source with comments stripped) ran on `internal/delegate` before and after: `diff` of the two outputs is empty and both list 682 declarations. `go build ./...`, `go vet ./internal/delegate`, gofmt, and the delegate, fleetnode, ledger and root changelog/lint tests named for the moved code pass.
+
+### Changed - `internal/mcpserver/mcpserver.go` is split into topical files of the same package
+
+- **What changed.** The 5273-line `mcpserver.go` is now nine files by pure declaration moves: `mcpserver.go` keeps the server, construction, registration and result helpers; `mcpserver_status.go`, `mcpserver_text.go`, `mcpserver_media.go`, `mcpserver_agentrun.go`, `mcpserver_ask.go`, `mcpserver_review.go`, `mcpserver_delegate.go` and `mcpserver_research.go` hold the tool families. No declaration was renamed, edited or reordered inside a body; behaviour is identical.
+- **Why.** One file of 5273 lines hid the tool families from each other and made every change a merge hazard; the package now reads as a set of named parts, and `docs/systems/mcp-server.md` names them.
+- **Check.** Ran the declaration census (`census.go`, which hashes every declaration with comments stripped) on the package before and after: 319 declarations each and an empty diff. `go build ./...`, `go vet ./internal/mcpserver` and gofmt are clean.
+
+### Changed - internal/pipeline/pipeline.go (5999 lines) is split into topical files of the same package
+
+- **What changed.** The declarations of `internal/pipeline/pipeline.go` moved, unedited, into `pipeline_vision.go`, `pipeline_audio.go`, `pipeline_image.go`, `pipeline_imagebatch.go`, `pipeline_rungraph.go`, `pipeline_video.go`, `pipeline_gpu.go`, `pipeline_media.go`, `pipeline_attempt.go`, `pipeline_chain.go` and `pipeline_confidence.go`. `pipeline.go` keeps the `Pipeline` type, `New`, `Run` and the ledger writers (`entryFrom`, `callRowFrom`, `record*`, `RecordAccel`, `recordExtractImageCall`), 1077 lines.
+- **Why.** A 6000-line file hid the cascade's parts from anyone reading the package; each file now reads as one thing (a media door family, the attempt ladder, the model chain, the confidence gate). The ledger writers stay in `pipeline.go` because `internal/ledger`'s writer-file list names that file.
+- **Check.** No behaviour change: `census.go` hashes every declaration of the package with comments stripped, and `diff census-before.txt census-after.txt` is empty (873 declarations on both sides). `go build ./...`, `go vet ./internal/pipeline` and `gofmt -l` are clean.
+
+### Changed - the root package's `main.go` is split into topical files of the same package
+
+- **What changed.** `main.go` (5359 lines) keeps the entry point (`main`, `usage`, `hoistGlobalConfig`, the dispatch) plus the functions that source-scanning tests read by file name (`runTask`, `runFleetServe`, `startVRAMSampler`, `runMCP`, `runDelegate`, `runResearch`, `doctorRunChecked`). Its other declarations moved unchanged into `cli_support.go` (config loading, argument splitting, result printing), `task_cmd.go` (text, vision, speech, nim and forecast verbs), `generate_image_cmd.go`, `generate_video_cmd.go`, `generate_audio_cmd.go`, `delegate_cmd.go`, `fleet_serve_cmd.go`, `doctor_cmd.go`, `report_cmd.go` (ledger, models, eval, stats), `learn_cmd.go` (the self-learning offline verbs) and `confhead_cmd.go`. The file paths named in `docs/systems/` follow. No behaviour changes.
+- **Why.** A 5359-line file hid the package's structure and made every verb edit a merge-conflict magnet.
+- **Check.** A declaration census (every top-level declaration's source hash, comments stripped, sorted) taken before and after is byte-identical (`diff` prints nothing; 1002 declarations); `go build ./...` and `go vet .` are clean.
+
+### Changed - `agent.SystemPrompt` takes one `PromptCaps` struct instead of seven positional bools
+
+- **What changed.** `SystemPrompt(allowWrite, allowOverwrite, allowFetch, allowShell, runGranted, allowSearch, allowGitHub bool)`
+is now `SystemPrompt(caps PromptCaps)`, with one named field per former bool. The one production caller (`builder.go`) and the
+existing prompt tests name their fields; the prompt text is unchanged.
+- **Why.** A call site with seven bare bools could not be read, and two adjacent bools swapped silently.
+- **Check.** `go build ./...`, `go vet` and `go test` on `internal/agent` and `cmd/local-agent` pass with no test edited beyond the call syntax.
+
+### Changed - warnMissingGatedModels takes one gatedModelSet instead of nine positional bools
+
+- **What changed.** `warnMissingGatedModels` and `warnMissingGatedModelsTo` in `install_render.go` now take a `gatedModelSet` struct with nine named bool fields in place of nine positional bools; the one production caller and the three test helpers in `install_gatedmodels_test.go` are converted. The warning text and the per-model warning order are unchanged.
+- **Why.** Nine adjacent bools of the same type could be swapped at a call site without the compiler noticing, and the gate of one model would silently become the gate of another.
+- **Check.** `go build ./...`, `go vet .` and `go test . -run 'Gated|Render|Install|Changelog|Fragment'` pass with no change to any expected warning.
+
 ## [0.206.0] - 2026-10-29 - the repository reads as a public project, and three fixes from the desloppify pass
 
 ### Changed - the repository reads as a public project: a renderable changelog, a stranger-proof README, no evaluation images in the tree, and the maintainer's private vocabulary glossed or removed
