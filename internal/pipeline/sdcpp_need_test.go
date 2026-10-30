@@ -327,7 +327,18 @@ func TestTheThreeSdcppLanesAskForTheirOwnBytes(t *testing.T) {
 		}
 		return strings.ReplaceAll(string(b), "\r\n", "\n")
 	}
-	pl, ig := read("pipeline.go"), read("igpumedia.go")
+	// the image lane's builder moved out of pipeline.go with the split: scan pipeline.go and every pipeline_*.go
+	var pl string
+	files, gerr := filepath.Glob("pipeline*.go")
+	if gerr != nil {
+		t.Fatal(gerr)
+	}
+	for _, f := range files {
+		if !strings.HasSuffix(f, "_test.go") {
+			pl += read(f)
+		}
+	}
+	ig := read("igpumedia.go")
 	if !strings.Contains(pl, "p.sdcppImageNeed(cfg,") {
 		t.Error("the sd.cpp image lane no longer builds its need from its own files (sdcppImageNeed)")
 	}

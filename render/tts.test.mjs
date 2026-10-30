@@ -267,15 +267,15 @@ test("parseCli: a good command line yields the worker and its argv", () => {
 
 // ---- every flag the harness itself sends is accepted ------------------------------------------------------
 
-// The flags internal/pipeline/pipeline.go puts on a tts.mjs command line: the literals of the voice branch of
-// the audio route and of appendVoiceRecipe. Read from the source so a flag added there is judged here.
+// The flags internal/pipeline/pipeline_audio.go puts on a tts.mjs command line: the literals of the voice branch
+// of the audio route and of appendVoiceRecipe. Read from the source so a flag added there is judged here.
 function goVoiceLaneFlags() {
-  const src = readFileSync(join(HERE, "..", "internal", "pipeline", "pipeline.go"), "utf8");
+  const src = readFileSync(join(HERE, "..", "internal", "pipeline", "pipeline_audio.go"), "utf8");
   const from = src.indexOf('// CLI: tts.mjs <out> "<text>"');
   const to = src.indexOf("} else { // music", from);
   const recipe = src.indexOf("func appendVoiceRecipe(");
   const recipeEnd = recipe < 0 ? -1 : src.slice(recipe).search(/\r?\n\}\r?\n/);
-  assert.ok(from >= 0 && to > from, "the voice branch of pipeline.go moved: re-anchor goVoiceLaneFlags");
+  assert.ok(from >= 0 && to > from, "the voice branch of pipeline_audio.go moved: re-anchor goVoiceLaneFlags");
   assert.ok(recipe >= 0 && recipeEnd > 0, "appendVoiceRecipe moved: re-anchor goVoiceLaneFlags");
   const region = src.slice(from, to) + "\n" + src.slice(recipe, recipe + recipeEnd);
   return [...new Set([...region.matchAll(/"--([a-z][a-z-]*)"/g)].map((m) => m[1]))];
@@ -283,7 +283,7 @@ function goVoiceLaneFlags() {
 
 const valueFor = (k) => (k === "engine" ? "finetuned" : SIX_NAMES.includes(k) ? "0.5" : "x");
 
-test("the Go voice lane: every flag pipeline.go sends to tts.mjs is accepted, alone and together", () => {
+test("the Go voice lane: every flag pipeline_audio.go sends to tts.mjs is accepted, alone and together", () => {
   const sent = goVoiceLaneFlags();
   for (const must of ["engine", "model", "base-dir", "clone", "lang", "temperature", "cfg-weight", "exaggeration", "repetition-penalty"]) {
     assert.ok(sent.includes(must), `the scan of pipeline.go lost --${must}: ${sent.join(" ")}`);
