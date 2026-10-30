@@ -796,7 +796,7 @@ func runGPUReserve(args []string) (retErr error) {
 			mctx, cancelMaintain := context.WithCancel(context.Background())
 			stopRenew := renewWhile(lease, drainRenewEvery, func(error) { cancelMaintain() })
 			// A signal ends the drain at once (the OS gives a console close about five seconds): cancelling its
-			// context makes maintainSeatScoped stop; the goroutine ends with the context.
+			// context makes maintainSeat stop; the goroutine ends with the context.
 			go func() {
 				select {
 				case <-sw.Done():
@@ -805,7 +805,7 @@ func runGPUReserve(args []string) (retErr error) {
 				}
 			}()
 			var freed unloadOutcome
-			merr := maintainSeatReport(mctx, cfg, lease.Restamp, *drain, drainDeadline(*drainTimeout, queuedAt, *wait), *unload, exclusiveAfter, markWarmOwed(m), lease.Devices(), &freed)
+			merr := maintainSeat(mctx, cfg, maintainOpts{restamp: lease.Restamp, drain: *drain, deadline: drainDeadline(*drainTimeout, queuedAt, *wait), unload: *unload, exclusive: exclusiveAfter, owed: markWarmOwed(m), devices: lease.Devices(), out: &freed})
 			// F82: the seat is cleared; the host is asked now, still holding the cards, under the same heartbeat and
 			// the same cancel as the drain. A lease lost or a signal received during this wait is handled below like
 			// one during the drain. The wait is bounded (hold bound): at the bound the lease is released by the deferred

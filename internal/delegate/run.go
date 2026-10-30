@@ -803,7 +803,7 @@ func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subta
 			o.OnProgress = shiftedProgress(opts.OnProgress, len(all), len(subtasks))
 			chunkOpts = &o
 		}
-		res, sum, err := runWith(ctx, cfg, local, subtasks[start:end], route, remotes, chunkOpts, MaxBatchSubtasks)
+		res, sum, err := runWith(ctx, runParams{cfg: cfg, local: local, subtasks: subtasks[start:end], route: route, remotes: remotes, opts: chunkOpts, limit: MaxBatchSubtasks})
 		all = append(all, res...)
 		total = addSummary(total, sum)
 		total.Batches++
@@ -816,7 +816,7 @@ func RunBatched(ctx context.Context, cfg config.Config, local LocalRunner, subta
 		}
 	}
 	if len(subtasks) == 0 {
-		return runWith(ctx, cfg, local, subtasks, route, remotes, opts, MaxBatchSubtasks) // the "at least one subtask" error, unchanged
+		return runWith(ctx, runParams{cfg: cfg, local: local, subtasks: subtasks, route: route, remotes: remotes, opts: opts, limit: MaxBatchSubtasks}) // the "at least one subtask" error, unchanged
 	}
 	return all, total, nil
 }
@@ -838,13 +838,26 @@ func addSummary(a, b Summary) Summary {
 // RunWith is Run with caller-owned options (see RunOptions). It refuses more than MaxSubtasks (8) subtasks, which
 // is the bound of the MCP door (agent_delegate) and of the CLI verb; RunBatched is the entry that lifts it.
 func RunWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *RunOptions) ([]PlacedResult, Summary, error) {
-	return runWith(ctx, cfg, local, subtasks, route, remotes, opts, maxSubtasks)
+	return runWith(ctx, runParams{cfg: cfg, local: local, subtasks: subtasks, route: route, remotes: remotes, opts: opts, limit: maxSubtasks})
 }
 
-// runWith is RunWith with the subtask bound as a parameter: RunWith passes maxSubtasks and RunBatched
+// runParams is one call's arguments, threaded through the Run / RunWith / RunBatched ladder as a unit instead of
+// being forwarded one by one. limit is the subtask bound: RunWith passes maxSubtasks and RunBatched maxBatchSubtasks.
+type runParams struct {
+	cfg      config.Config
+	local    LocalRunner
+	subtasks []core.AgentContract
+	route    string
+	remotes  []string
+	opts     *RunOptions
+	limit    int
+}
+
+// runWith is RunWith with the subtask bound in its parameters: RunWith passes maxSubtasks and RunBatched
 // maxBatchSubtasks, so a research call's pages are one deal and the doors that cap a call at eight keep doing so
 // (ADR 0076). Nothing else about a call depends on the bound.
-func runWith(ctx context.Context, cfg config.Config, local LocalRunner, subtasks []core.AgentContract, route string, remotes []string, opts *RunOptions, limit int) ([]PlacedResult, Summary, error) {
+func runWith(ctx context.Context, rp runParams) ([]PlacedResult, Summary, error) {
+	cfg, local, subtasks, route, remotes, opts, limit := rp.cfg, rp.local, rp.subtasks, rp.route, rp.remotes, rp.opts, rp.limit
 	switch route {
 	case "":
 		route = "auto"

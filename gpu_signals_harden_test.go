@@ -394,7 +394,7 @@ func TestACancelledUnloadWithNoDebtCallbackReturnsTheErrorAndRecordsNothing(t *t
 	cfgPath, m := handoffFixture(t, f)
 	var err error
 	stderr := captureStderr(t, func() {
-		err = maintainSeatScoped(ctx, loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, nil, nil)
+		err = maintainSeat(ctx, loadCfgPath(cfgPath), maintainOpts{unload: true})
 	})
 	if err == nil {
 		t.Fatalf("a cancelled unload is an error\n%s", stderr)

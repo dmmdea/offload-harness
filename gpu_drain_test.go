@@ -413,7 +413,7 @@ func TestUnloadSeatAlsoUnloadsOtherResidentModels(t *testing.T) {
 	}
 
 	var owedSeat string
-	if err := maintainSeat(loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, func(seat string) { owedSeat = seat }); err != nil {
+	if err := maintainSeat(context.Background(), loadCfgPath(cfgPath), maintainOpts{unload: true, owed: func(seat string) { owedSeat = seat }}); err != nil {
 		t.Fatalf("maintainSeat: %v", err)
 	}
 	if owedSeat != "agent-pool" {
@@ -472,7 +472,7 @@ func unloadSeatRunErr(t *testing.T, f *multiSeatSwap, extraCfg string) (calls []
 	if err := os.WriteFile(cfgPath, []byte(cfg), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	err = maintainSeat(loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, nil)
+	err = maintainSeat(context.Background(), loadCfgPath(cfgPath), maintainOpts{unload: true})
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	still = map[string]bool{}
@@ -610,7 +610,7 @@ func TestUnloadSeatDegradesGracefullyWhenRunningIsUnreadable(t *testing.T) {
 	// treats an ambiguous /running the same as "assume loaded", so this must
 	// still succeed and still unload the agent seat itself.
 	var owedSeat string
-	if err := maintainSeat(loadCfgPath(cfgPath), nil, false, time.Time{}, true, false, func(seat string) { owedSeat = seat }); err != nil {
+	if err := maintainSeat(context.Background(), loadCfgPath(cfgPath), maintainOpts{unload: true, owed: func(seat string) { owedSeat = seat }}); err != nil {
 		t.Fatalf("an unreadable /running must not block the agent seat's own unload: %v", err)
 	}
 	if owedSeat != "agent-pool" {

@@ -122,7 +122,7 @@ func TestAFailedDrainClearsTheDrainingStamp(t *testing.T) {
 	old := maintenanceClient
 	maintenanceClient = srv.Client()
 	t.Cleanup(func() { maintenanceClient = old })
-	err = maintainSeat(loadCfgPath(cfgPath), holder.Restamp, true, time.Now().Add(60*time.Millisecond), true, true, nil)
+	err = maintainSeat(context.Background(), loadCfgPath(cfgPath), maintainOpts{restamp: holder.Restamp, drain: true, deadline: time.Now().Add(60 * time.Millisecond), unload: true, exclusive: true})
 	if err == nil || !strings.Contains(err.Error(), "did not finish") {
 		t.Fatalf("the drain must fail at its deadline, got %v", err)
 	}
