@@ -106,7 +106,7 @@ func TestFleetNodeLaneRidesTheChatDoor(t *testing.T) {
 		t.Error("a lane call must ride the tailnet-guarded client")
 	}
 
-	res, err := c.Generate(context.Background(), "gemma-4-e4b", "sys", "user", "", 32, 0, 0)
+	res, err := c.Generate(context.Background(), GenRequest{Model: "gemma-4-e4b", System: "sys", User: "user", MaxTokens: 32})
 	if err != nil {
 		t.Fatalf("Generate through the node lane: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestPlainSwapLaneKeepsItsOwnRoute(t *testing.T) {
 	if ep.token != "" {
 		t.Fatalf("token = %q, want no credential on a plain llama-swap lane", ep.token)
 	}
-	if _, err := c.Generate(context.Background(), "gemma-4-e4b", "sys", "user", "", 32, 0, 0); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{Model: "gemma-4-e4b", System: "sys", User: "user", MaxTokens: 32}); err != nil {
 		t.Fatalf("Generate through the swap lane: %v", err)
 	}
 	if chatHits.Load() != 1 {

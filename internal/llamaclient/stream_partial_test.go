@@ -45,7 +45,7 @@ func TestMidStreamDeathCarriesWhatTheStreamHadDelivered(t *testing.T) {
 					cancel()
 				}
 			}
-			_, err := New(srv.URL, "", "m", 5*time.Second).Generate(ctx, "", "", "u", "", 64, 0, 0, WithProgress(progress))
+			_, err := New(srv.URL, "", "m", 5*time.Second).Generate(ctx, GenRequest{User: "u", MaxTokens: 64}, WithProgress(progress))
 			var be *BodyError
 			if !errors.As(err, &be) {
 				t.Fatalf("err = %v (%T), want a *BodyError", err, err)

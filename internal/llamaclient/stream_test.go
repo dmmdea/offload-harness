@@ -80,11 +80,11 @@ func TestGenerateWithProgressStreamsAndDecodesLikeJSON(t *testing.T) {
 	defer jsonSrv.Close()
 
 	var log progressLog
-	streamed, err := New(streamSrv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "sys", "user", "", 64, 0, 0, WithProgress(log.fn))
+	streamed, err := New(streamSrv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{System: "sys", User: "user", MaxTokens: 64}, WithProgress(log.fn))
 	if err != nil {
 		t.Fatalf("streamed Generate: %v", err)
 	}
-	plain, err := New(jsonSrv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "sys", "user", "", 64, 0, 0)
+	plain, err := New(jsonSrv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{System: "sys", User: "user", MaxTokens: 64})
 	if err != nil {
 		t.Fatalf("JSON Generate: %v", err)
 	}
@@ -119,7 +119,7 @@ func TestGenerateWithoutProgressSendsTheHistoricalBody(t *testing.T) {
 		_, _ = w.Write([]byte(answerJSON))
 	}))
 	defer srv.Close()
-	if _, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 16, 0, 0); err != nil {
+	if _, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 16}); err != nil {
 		t.Fatal(err)
 	}
 	if _, has := body["stream_options"]; has || body["stream"] != false {
@@ -140,7 +140,7 @@ func TestGenerateWithProgressFallsBackToJSONWhenTheProxyIgnoresStream(t *testing
 	defer srv.Close()
 
 	var log progressLog
-	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(log.fn))
+	res, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(log.fn))
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestGenerateWithProgressMidStreamDeathIsABodyError(t *testing.T) {
 		}))
 		defer srv.Close()
 		var log progressLog
-		_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(log.fn))
+		_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(log.fn))
 		var be *BodyError
 		if !errors.As(err, &be) {
 			t.Fatalf("err = %v (%T), want a *BodyError", err, err)
@@ -193,7 +193,7 @@ func TestGenerateWithProgressMidStreamDeathIsABodyError(t *testing.T) {
 			sseWrite(w, answerFrames[1:3]...) // then a clean EOF: no finish_reason, no [DONE]
 		}))
 		defer srv.Close()
-		_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+		_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 		var be *BodyError
 		if !errors.As(err, &be) {
 			t.Fatalf("err = %v (%T), want a *BodyError", err, err)
@@ -204,7 +204,7 @@ func TestGenerateWithProgressMidStreamDeathIsABodyError(t *testing.T) {
 			sseWrite(w, answerFrames[1], `{"error":{"message":"EngineCore died","type":"server_error"}}`)
 		}))
 		defer srv.Close()
-		_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+		_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 		var be *BodyError
 		if !errors.As(err, &be) {
 			t.Fatalf("err = %v (%T), want a *BodyError", err, err)
@@ -249,14 +249,14 @@ func TestGenerateWithProgressSuppressesTheClientTimeout(t *testing.T) {
 
 	c := New(srv.URL, "", "m", 200*time.Millisecond)
 	var log progressLog
-	res, err := c.Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(log.fn))
+	res, err := c.Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(log.fn))
 	if err != nil || res.Content != "xxxxxxxx" {
 		t.Fatalf("streamed call: res=%+v err=%v, want the stream that outlived the client Timeout", res, err)
 	}
 	if n := len(log.get()); n != 8 {
 		t.Fatalf("progress events = %d, want 8", n)
 	}
-	if _, err := c.Generate(context.Background(), "", "", "u", "", 64, 0, 0); err == nil {
+	if _, err := c.Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}); err == nil {
 		t.Fatal("a plain call must still be cut by the client Timeout")
 	}
 }
@@ -282,7 +282,7 @@ func TestGenerateWithProgressRetriesAsJSONWhenTheServerRefusesStream(t *testing.
 	c := New(srv.URL, "", "m", 5*time.Second)
 
 	var log progressLog
-	res, err := c.Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(log.fn))
+	res, err := c.Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(log.fn))
 	if err != nil || res.Content != `{"answer":"42"}` {
 		t.Fatalf("first call: res=%+v err=%v, want the JSON retry's answer", res, err)
 	}
@@ -294,7 +294,7 @@ func TestGenerateWithProgressRetriesAsJSONWhenTheServerRefusesStream(t *testing.
 	}
 
 	// Remembered: the second call does not stream at all.
-	if _, err := c.Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {})); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {})); err != nil {
 		t.Fatalf("second call: %v", err)
 	}
 	if streamed.Load() != 1 || plain.Load() != 2 {
@@ -317,12 +317,12 @@ func TestGenerateWithProgressDoesNotRememberARefusalTheJSONRetryShares(t *testin
 	defer srv.Close()
 	c := New(srv.URL, "", "m", 5*time.Second)
 
-	_, err := c.Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	_, err := c.Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	var se *StatusError
 	if !errors.As(err, &se) || se.StatusCode != http.StatusBadRequest {
 		t.Fatalf("err = %v, want the request's own 400", err)
 	}
-	if _, err := c.Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {})); err == nil {
+	if _, err := c.Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {})); err == nil {
 		t.Fatal("second call must fail the same way")
 	}
 	if streamed.Load() != 2 {
@@ -340,7 +340,7 @@ func TestGenerateWithProgressIsNotStreamedWhenLogprobsAreAsked(t *testing.T) {
 		_, _ = w.Write([]byte(answerJSON))
 	}))
 	defer srv.Close()
-	if _, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 16, 0, 3, WithProgress(func(int) {})); err != nil {
+	if _, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 16, TopLogprobs: 3}, WithProgress(func(int) {})); err != nil {
 		t.Fatal(err)
 	}
 	if body["stream"] != false {

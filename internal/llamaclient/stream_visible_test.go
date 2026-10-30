@@ -56,7 +56,7 @@ func TestGenerateWithProgressLogsTheRefusalWhenTheJSONRetryFailsDifferently(t *t
 		_, _ = w.Write([]byte(`backend down`))
 	}))
 	defer srv.Close()
-	_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	_, err := New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	if err == nil || !strings.Contains(err.Error(), "503") {
 		t.Fatalf("err = %v, want the retry's own 503", err)
 	}
@@ -75,7 +75,7 @@ func TestGenerateWithProgressDoesNotLogARequestRefusedBothWays(t *testing.T) {
 		_, _ = w.Write([]byte(`{"error":"context length exceeded"}`))
 	}))
 	defer srv.Close()
-	_, _ = New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {}))
+	_, _ = New(srv.URL, "", "m", 5*time.Second).Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {}))
 	if strings.Contains(logged.String(), "the JSON retry then failed") {
 		t.Fatalf("log = %q, a request refused both ways is not a streaming refusal", logged.String())
 	}
@@ -99,7 +99,7 @@ func TestStreamRefusedForNamesTheSeatThatRefusedTheStream(t *testing.T) {
 	if c.StreamRefusedFor("m") {
 		t.Fatal("a seat that has not been asked is not a seat that refused")
 	}
-	if _, err := c.Generate(context.Background(), "", "", "u", "", 64, 0, 0, WithProgress(func(int) {})); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{User: "u", MaxTokens: 64}, WithProgress(func(int) {})); err != nil {
 		t.Fatal(err)
 	}
 	if !c.StreamRefusedFor("m") || !c.StreamRefusedFor("") {

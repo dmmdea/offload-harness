@@ -1028,7 +1028,7 @@ func (p *Pipeline) runVision(ctx context.Context, req core.Request, built tasks.
 	// the whole budget in reasoning_content and returns empty content; every
 	// vision task here is a describe/read/judge, never a reasoning step.
 	return p.runVisionGen(ctx, req, built, meta, start, "img:"+sha256hex(dataURI), true, func(gctx context.Context) (llamaclient.GenResult, error) {
-		return p.client.GenerateVision(gctx, model, built.System, built.User, []string{dataURI}, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+		return p.client.GenerateVision(gctx, llamaclient.VisionRequest{Model: model, System: built.System, User: built.User, ImageDataURIs: []string{dataURI}, Grammar: built.Grammar, MaxTokens: built.MaxTokens, Temperature: p.cfg.Temperature}, llamaclient.WithoutThinking())
 	})
 }
 
@@ -1297,7 +1297,7 @@ func (p *Pipeline) runVideoDescribe(ctx context.Context, req core.Request, built
 			log.Printf("video_describe: no stable content identity for %q (%s) — cache bypassed; result computed but not stored", req.Video, why)
 		}
 		res := p.runVisionGen(ctx, req, built, meta, start, extra, cacheable, func(gctx context.Context) (llamaclient.GenResult, error) {
-			return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+			return p.client.GenerateVisionInterleaved(gctx, llamaclient.InterleavedRequest{Model: p.cfg.VisionModel, System: built.System, FrameLabels: labels, ImageDataURIs: frames, TrailingUser: built.User, Grammar: built.Grammar, MaxTokens: built.MaxTokens, Temperature: p.cfg.Temperature}, llamaclient.WithoutThinking())
 		})
 		if res.OK || width <= 256 || !isContextOverflow(res.Reason) {
 			return res
@@ -4825,7 +4825,7 @@ func (p *Pipeline) attempt(ctx context.Context, req core.Request, built tasks.Bu
 
 	for i := 0; i < attempts; i++ {
 		meta.Retries = i
-		gen, gerr := p.client.Generate(actx, model, built.System, user, grammar, built.MaxTokens, p.cfg.Temperature, topLP, genOpts...)
+		gen, gerr := p.client.Generate(actx, llamaclient.GenRequest{Model: model, System: built.System, User: user, Grammar: grammar, MaxTokens: built.MaxTokens, Temperature: p.cfg.Temperature, TopLogprobs: topLP}, genOpts...)
 		if gerr != nil {
 			meta.LatencyMs = time.Since(start).Milliseconds()
 			meta.ErrClass = classifyErr(gerr)
@@ -5021,7 +5021,7 @@ func (p *Pipeline) attemptReasoningOn(ctx context.Context, model string, req cor
 	// The wrapped grammar emits a <think> span BEFORE the JSON, so the task's native token
 	// budget (classify=64, assess=128) would truncate the reasoning before any answer. Give the
 	// think span headroom on top of the original budget.
-	gen, gerr := p.client.Generate(ctx, model, built.System, built.User, grammar, built.MaxTokens+reasoningThinkBudget, p.cfg.Temperature, 0, genOpts...)
+	gen, gerr := p.client.Generate(ctx, llamaclient.GenRequest{Model: model, System: built.System, User: built.User, Grammar: grammar, MaxTokens: built.MaxTokens + reasoningThinkBudget, Temperature: p.cfg.Temperature}, genOpts...)
 	if gerr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = classifyErr(gerr)
@@ -5680,7 +5680,7 @@ func (p *Pipeline) maybeHeal(tier string) {
 	go func() {
 		hctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
-		_, _ = p.client.Generate(hctx, tier, "", "ok", "", 1, 0, 0) // tiny warmup
+		_, _ = p.client.Generate(hctx, llamaclient.GenRequest{Model: tier, User: "ok", MaxTokens: 1}) // tiny warmup
 	}()
 }
 

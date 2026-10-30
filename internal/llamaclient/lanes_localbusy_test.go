@@ -45,7 +45,7 @@ func TestWithLocalBusyRidesAResidentLane(t *testing.T) {
 		WithRemoteLanes(map[string]string{"gemma-4-e4b": lane.URL}, busy, busyFor, RosterResident())
 
 	// Control: no gate fires and no option is passed — the call stays home.
-	if _, err := c.Generate(context.Background(), "gemma-4-e4b", "s", "u", "", 16, 0, 0); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{Model: "gemma-4-e4b", System: "s", User: "u", MaxTokens: 16}); err != nil {
 		t.Fatalf("control Generate: %v", err)
 	}
 	if localChat.Load() != 1 || laneChat.Load() != 0 {
@@ -53,7 +53,7 @@ func TestWithLocalBusyRidesAResidentLane(t *testing.T) {
 	}
 
 	const why = "cascade seat guard: model=gemma-4-e4b evict=[qwen3.8-27b-vllm-3card]"
-	if _, err := c.Generate(context.Background(), "gemma-4-e4b", "s", "u", "", 16, 0, 0, WithLocalBusy(why)); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{Model: "gemma-4-e4b", System: "s", User: "u", MaxTokens: 16}, WithLocalBusy(why)); err != nil {
 		t.Fatalf("guarded Generate: %v", err)
 	}
 	if laneChat.Load() != 1 || localChat.Load() != 1 {
@@ -79,7 +79,7 @@ func TestWithLocalBusyNeverFallsThroughToThisBox(t *testing.T) {
 	busy, busyFor := quietGates()
 	c := New(local.URL, "", "gemma-4-e4b", 5*time.Second).
 		WithRemoteLanes(map[string]string{"gemma-4-e4b": lane.URL}, busy, busyFor, RosterResident())
-	_, err := c.Generate(context.Background(), "gemma-4-e4b", "s", "u", "", 16, 0, 0, WithLocalBusy("guard"))
+	_, err := c.Generate(context.Background(), GenRequest{Model: "gemma-4-e4b", System: "s", User: "u", MaxTokens: 16}, WithLocalBusy("guard"))
 	if !errors.Is(err, ErrLaneUnavailable) {
 		t.Fatalf("err = %v, want ErrLaneUnavailable", err)
 	}
@@ -100,7 +100,7 @@ func TestWithLocalBusyWithoutALaneIsRefused(t *testing.T) {
 	pin := laneServer(t, &pinChat, &pinRoster, e4bRoster)
 	defer pin.Close()
 	c := New(local.URL, "", "gemma-4-e4b", 5*time.Second)
-	if _, err := c.Generate(context.Background(), "gemma-4-e4b", "s", "u", "", 16, 0, 0, WithLocalBusy("guard")); !errors.Is(err, ErrLaneUnavailable) {
+	if _, err := c.Generate(context.Background(), GenRequest{Model: "gemma-4-e4b", System: "s", User: "u", MaxTokens: 16}, WithLocalBusy("guard")); !errors.Is(err, ErrLaneUnavailable) {
 		t.Fatalf("no lane table: err = %v, want ErrLaneUnavailable", err)
 	}
 	if localChat.Load() != 0 {
@@ -108,7 +108,7 @@ func TestWithLocalBusyWithoutALaneIsRefused(t *testing.T) {
 	}
 	pinned := New(local.URL, "", "gemma-4-e4b", 5*time.Second).WithSeatEndpoints(map[string]string{"gemma-4-e4b": pin.URL})
 	pinned.safeHTTP = pinned.http // the pin fake is loopback; the tailnet dial gate is not what is under test
-	if _, err := pinned.Generate(context.Background(), "gemma-4-e4b", "s", "u", "", 16, 0, 0, WithLocalBusy("guard")); err != nil {
+	if _, err := pinned.Generate(context.Background(), GenRequest{Model: "gemma-4-e4b", System: "s", User: "u", MaxTokens: 16}, WithLocalBusy("guard")); err != nil {
 		t.Fatalf("pinned seat: %v", err)
 	}
 	if pinChat.Load() != 1 || localChat.Load() != 0 {

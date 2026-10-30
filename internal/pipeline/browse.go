@@ -453,7 +453,7 @@ func (s *browseSession) text(context json.RawMessage) (string, error) {
 		grammar = ""
 		opts = append(opts, llamaclient.WithJSONSchema(gbnf.JSONSchema([]gbnf.Field{{Name: "text", Type: gbnf.TString}})), llamaclient.WithoutThinking())
 	}
-	gen, err := p.client.Generate(s.ctx, model, browseTextSystem, string(context), grammar, 512, 0, 0, opts...)
+	gen, err := p.client.Generate(s.ctx, llamaclient.GenRequest{Model: model, System: browseTextSystem, User: string(context), Grammar: grammar, MaxTokens: 512}, opts...)
 	if err != nil {
 		return "", fmt.Errorf("local seat: %v", err)
 	}

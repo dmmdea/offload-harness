@@ -49,7 +49,7 @@ func TestFleetLaneSkipsTheLocalLeaseWait(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	start := time.Now()
-	res, gerr := c.Generate(ctx, "gemma-4-e4b", "sys", "user", "", 32, 0, 0)
+	res, gerr := c.Generate(ctx, GenRequest{Model: "gemma-4-e4b", System: "sys", User: "user", MaxTokens: 32})
 	if gerr != nil {
 		t.Fatalf("Generate through the node lane under a local media lease: %v — the lane fired, then the send waited on THIS box's card (C-41c)", gerr)
 	}

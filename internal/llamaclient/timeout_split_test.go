@@ -21,7 +21,7 @@ func TestSplitBudgetKeepsTotalTimeout(t *testing.T) {
 	defer srv.Close()
 
 	c := New(srv.URL, "", "m", 10*time.Second)
-	res, err := c.Generate(context.Background(), "", "", "hola", "", 16, 0, 0)
+	res, err := c.Generate(context.Background(), GenRequest{User: "hola", MaxTokens: 16})
 	if err != nil {
 		t.Fatalf("slow-but-within-budget response must succeed: %v", err)
 	}

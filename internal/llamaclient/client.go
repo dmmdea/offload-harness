@@ -222,6 +222,47 @@ type chatResp struct {
 	} `json:"timings"`
 }
 
+// GenRequest is the per-call input of Generate: which model and prompt to send
+// and the sampling knobs. Model "" = the client default; Grammar "" = none;
+// TopLogprobs > 0 asks the server for per-token raw logprobs.
+type GenRequest struct {
+	Model       string
+	System      string
+	User        string
+	Grammar     string
+	MaxTokens   int
+	Temperature float64
+	TopLogprobs int
+}
+
+// VisionRequest is the per-call input of GenerateVision: GenRequest's fields
+// plus ImageDataURIs (each a full data:image/...;base64,... URI).
+type VisionRequest struct {
+	Model         string
+	System        string
+	User          string
+	ImageDataURIs []string
+	Grammar       string
+	MaxTokens     int
+	Temperature   float64
+	TopLogprobs   int
+}
+
+// InterleavedRequest is the per-call input of GenerateVisionInterleaved:
+// FrameLabels[i] is the text placed before ImageDataURIs[i], and TrailingUser
+// is the final text part.
+type InterleavedRequest struct {
+	Model         string
+	System        string
+	FrameLabels   []string
+	ImageDataURIs []string
+	TrailingUser  string
+	Grammar       string
+	MaxTokens     int
+	Temperature   float64
+	TopLogprobs   int
+}
+
 // Generate sends system+user as a chat request constrained by grammar (may be
 // empty) and returns the content plus telemetry. model overrides the client's
 // default (empty = use the default); this is how the family cascade routes to
@@ -235,7 +276,9 @@ type chatResp struct {
 // — used by the confidence gate to detect a genuinely uncertain decision.
 // opts are per-call knobs (thinking.go); passing none is the historical
 // behavior, byte-for-byte on the wire.
-func (c *Client) Generate(ctx context.Context, model, system, user, grammar string, maxTokens int, temperature float64, topLogprobs int, opts ...GenOption) (GenResult, error) {
+func (c *Client) Generate(ctx context.Context, req GenRequest, opts ...GenOption) (GenResult, error) {
+	model, system, user, grammar := req.Model, req.System, req.User, req.Grammar
+	maxTokens, temperature, topLogprobs := req.MaxTokens, req.Temperature, req.TopLogprobs
 	if model == "" {
 		model = c.model
 	}
@@ -423,7 +466,10 @@ func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model 
 // it); grammar may be empty. It shares decodeGenResult with Generate, so
 // telemetry/logprob handling is identical. CachePrompt is forced OFF on the
 // vision path (llama.cpp #17200: consecutive-image KV reuse can corrupt output).
-func (c *Client) GenerateVision(ctx context.Context, model, system, user string, imageDataURIs []string, grammar string, maxTokens int, temperature float64, topLogprobs int, opts ...GenOption) (GenResult, error) {
+func (c *Client) GenerateVision(ctx context.Context, req VisionRequest, opts ...GenOption) (GenResult, error) {
+	model, system, user, grammar := req.Model, req.System, req.User, req.Grammar
+	imageDataURIs := req.ImageDataURIs
+	maxTokens, temperature, topLogprobs := req.MaxTokens, req.Temperature, req.TopLogprobs
 	if model == "" {
 		model = c.model
 	}
@@ -471,7 +517,10 @@ func (c *Client) GenerateVision(ctx context.Context, model, system, user string,
 // tokens for temporal localization). frameLabels and imageDataURIs pair by index;
 // a missing/empty label is skipped for that image. Shares decodeGenResult; like
 // GenerateVision, CachePrompt is forced OFF (llama.cpp #17200).
-func (c *Client) GenerateVisionInterleaved(ctx context.Context, model, system string, frameLabels, imageDataURIs []string, trailingUser, grammar string, maxTokens int, temperature float64, topLogprobs int, opts ...GenOption) (GenResult, error) {
+func (c *Client) GenerateVisionInterleaved(ctx context.Context, req InterleavedRequest, opts ...GenOption) (GenResult, error) {
+	model, system, grammar := req.Model, req.System, req.Grammar
+	frameLabels, imageDataURIs, trailingUser := req.FrameLabels, req.ImageDataURIs, req.TrailingUser
+	maxTokens, temperature, topLogprobs := req.MaxTokens, req.Temperature, req.TopLogprobs
 	if model == "" {
 		model = c.model
 	}

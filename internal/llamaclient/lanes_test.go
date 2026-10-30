@@ -155,7 +155,7 @@ func TestCascadeRemoteLaneMovesWithBusy(t *testing.T) {
 
 	gen := func(step string) {
 		t.Helper()
-		if _, err := c.Generate(context.Background(), "", "sys", "hi", "", 16, 0, 0); err != nil {
+		if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", MaxTokens: 16}); err != nil {
 			t.Fatalf("%s: %v", step, err)
 		}
 	}
@@ -204,7 +204,7 @@ func TestCascadeRemoteLaneFailsClosedOnProbeError(t *testing.T) {
 		WithRemoteLanes(map[string]string{"offload-e4b": dead.URL},
 			func() bool { return true }, nil, RosterResident())
 
-	if _, err := c.Generate(context.Background(), "", "sys", "hi", "", 16, 0, 0); err != nil {
+	if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", MaxTokens: 16}); err != nil {
 		t.Fatalf("busy call with an unprobeable lane must still answer locally: %v", err)
 	}
 	if defaultHits.Load() != 1 || laneChat.Load() != 0 {

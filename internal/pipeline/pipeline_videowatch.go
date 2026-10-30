@@ -207,7 +207,7 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			// ParentJobID makes the row an inner row of this call's own row.
 			wmeta := core.Meta{Model: p.cfg.VisionModel, Door: req.Door, ParentJobID: jobID}
 			res := p.runVisionGen(ctx, req, built, wmeta, time.Now(), extra, cacheable, func(gctx context.Context) (llamaclient.GenResult, error) {
-				return p.client.GenerateVisionInterleaved(gctx, p.cfg.VisionModel, built.System, labels, frames, built.User, built.Grammar, built.MaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+				return p.client.GenerateVisionInterleaved(gctx, llamaclient.InterleavedRequest{Model: p.cfg.VisionModel, System: built.System, FrameLabels: labels, ImageDataURIs: frames, TrailingUser: built.User, Grammar: built.Grammar, MaxTokens: built.MaxTokens, Temperature: p.cfg.Temperature}, llamaclient.WithoutThinking())
 			})
 			tokIn += res.Meta.TokensIn
 			tokOut += res.Meta.TokensOut
@@ -299,7 +299,7 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 		}
 		system := "You are answering a question about a whole video from timestamped notes written by a vision model that watched it window by window. Answer using ONLY the notes. GROUP consecutive seconds that show the same thing into one span (e.g. '13-16s: engine bay close-up, title 212 HP') — never list every second. Cite spans for every claim, flag any window that has no notes (or truncated notes) as unverified, and keep it concise and concrete. If the notes do not settle the question, say what is missing."
 		user := "Question: " + paramStr(req.Params, "question") + "\n\nNotes (" + fmt.Sprintf("%d windows, %.1fs total", len(notes), duration) + "):\n" + sb.String() + "\nAnswer:"
-		gres, gerr := p.client.Generate(ctx, p.cfg.Model, system, user, "", videoWatchSynthMaxTokens, p.cfg.Temperature, 0, llamaclient.WithoutThinking())
+		gres, gerr := p.client.Generate(ctx, llamaclient.GenRequest{Model: p.cfg.Model, System: system, User: user, MaxTokens: videoWatchSynthMaxTokens, Temperature: p.cfg.Temperature}, llamaclient.WithoutThinking())
 		if gerr != nil || strings.TrimSpace(gres.Content) == "" {
 			why := "empty"
 			if gerr != nil {

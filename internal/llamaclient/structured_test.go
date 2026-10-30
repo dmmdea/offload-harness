@@ -30,7 +30,7 @@ func TestGenerateWithJSONSchemaSendsStructuredOutputsAndNoGrammar(t *testing.T) 
 		defer srv.Close()
 
 		c := New(srv.URL, "", "qwen3.8-27b-vllm", 5*time.Second)
-		if _, err := c.Generate(context.Background(), "", "sys", "hi", `root ::= "{}"`, 64, 0, 0, WithJSONSchema(schema)); err != nil {
+		if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", Grammar: `root ::= "{}"`, MaxTokens: 64}, WithJSONSchema(schema)); err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
 
@@ -58,7 +58,7 @@ func TestGenerateWithJSONSchemaSendsStructuredOutputsAndNoGrammar(t *testing.T) 
 		defer srv.Close()
 
 		c := New(srv.URL, "", "gemma-4-e4b", 5*time.Second)
-		if _, err := c.Generate(context.Background(), "", "sys", "hi", `root ::= "{}"`, 64, 0, 0); err != nil {
+		if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", Grammar: `root ::= "{}"`, MaxTokens: 64}); err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
 		if !strings.Contains(raw, `"grammar":"root ::= \"{}\""`) {
@@ -78,7 +78,7 @@ func TestGenerateWithJSONSchemaSendsStructuredOutputsAndNoGrammar(t *testing.T) 
 		defer srv.Close()
 
 		c := New(srv.URL, "", "gemma-4-e4b", 5*time.Second)
-		if _, err := c.Generate(context.Background(), "", "sys", "hi", `root ::= "{}"`, 64, 0, 0, WithJSONSchema(nil)); err != nil {
+		if _, err := c.Generate(context.Background(), GenRequest{System: "sys", User: "hi", Grammar: `root ::= "{}"`, MaxTokens: 64}, WithJSONSchema(nil)); err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
 		const want = `{"model":"gemma-4-e4b","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hi"}],"temperature":0,"max_tokens":64,"grammar":"root ::= \"{}\"","cache_prompt":true,"stream":false}`
@@ -104,11 +104,11 @@ func TestGenerateVisionWithJSONSchemaSendsStructuredOutputs(t *testing.T) {
 		send func(*Client) error
 	}{
 		{"GenerateVision", func(c *Client) error {
-			_, err := c.GenerateVision(context.Background(), "", "sys", "look", []string{uri}, `root ::= "{}"`, 64, 0, 0, WithJSONSchema(schema))
+			_, err := c.GenerateVision(context.Background(), VisionRequest{System: "sys", User: "look", ImageDataURIs: []string{uri}, Grammar: `root ::= "{}"`, MaxTokens: 64}, WithJSONSchema(schema))
 			return err
 		}},
 		{"GenerateVisionInterleaved", func(c *Client) error {
-			_, err := c.GenerateVisionInterleaved(context.Background(), "", "sys", []string{"<0.0 seconds>"}, []string{uri}, "look", `root ::= "{}"`, 64, 0, 0, WithJSONSchema(schema))
+			_, err := c.GenerateVisionInterleaved(context.Background(), InterleavedRequest{System: "sys", FrameLabels: []string{"<0.0 seconds>"}, ImageDataURIs: []string{uri}, TrailingUser: "look", Grammar: `root ::= "{}"`, MaxTokens: 64}, WithJSONSchema(schema))
 			return err
 		}},
 	} {
