@@ -277,14 +277,27 @@ func TestAgentRunUnknownProfileDeferCarriesTheSizing(t *testing.T) {
 // inside deferSized, which stamps the numbers on whatever deferral it is handed, and
 // once for the answer.
 func TestEveryAgentRunDeferralPastTheWallGateGoesThroughTheSizingStamp(t *testing.T) {
-	src, err := os.ReadFile("mcpserver.go")
+	// mcpserver.go was split into mcpserver_*.go by topic; search every one of them.
+	files, err := filepath.Glob("mcpserver*.go")
 	if err != nil {
-		t.Fatalf("read source: %v", err)
+		t.Fatalf("glob source: %v", err)
 	}
-	text := strings.ReplaceAll(string(src), "\r\n", "\n")
+	var all strings.Builder
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatalf("read source: %v", err)
+		}
+		all.Write(src)
+		all.WriteString("\n")
+	}
+	text := strings.ReplaceAll(all.String(), "\r\n", "\n")
 	start := strings.Index(text, "func (s *Server) handleAgentRun(")
 	if start < 0 {
-		t.Fatal("handleAgentRun not found in mcpserver.go")
+		t.Fatal("handleAgentRun not found in mcpserver*.go")
 	}
 	body := text[start:]
 	if end := strings.Index(body, "\n}\n"); end > 0 {

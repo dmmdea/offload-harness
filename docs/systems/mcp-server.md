@@ -1502,8 +1502,15 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
 
 ## Source map
 
-- [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go) — registration and
-  handlers
+- [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go) — server construction, session registration, tool registration and the result helpers
+- [`internal/mcpserver/mcpserver_status.go`](../../internal/mcpserver/mcpserver_status.go) — `offload_status` and its local, media, remote, KV-cache, fleet and seat views
+- [`internal/mcpserver/mcpserver_text.go`](../../internal/mcpserver/mcpserver_text.go) — the text and vision handlers and the route schema fragments
+- [`internal/mcpserver/mcpserver_media.go`](../../internal/mcpserver/mcpserver_media.go) — the media handlers (video, transcription, image, graph, SVG, audio, composition)
+- [`internal/mcpserver/mcpserver_agentrun.go`](../../internal/mcpserver/mcpserver_agentrun.go) — `offload_browse`, `offload_nim` and `offload_agent_run` with its admission and result-shaping helpers
+- [`internal/mcpserver/mcpserver_ask.go`](../../internal/mcpserver/mcpserver_ask.go) — `offload_ask`, its grading and its retry
+- [`internal/mcpserver/mcpserver_review.go`](../../internal/mcpserver/mcpserver_review.go) — `offload_review_diff` and the fleet dispatch and payload helpers
+- [`internal/mcpserver/mcpserver_delegate.go`](../../internal/mcpserver/mcpserver_delegate.go) — `offload_agent_delegate`, `offload_agent_rig` and the call deadline
+- [`internal/mcpserver/mcpserver_research.go`](../../internal/mcpserver/mcpserver_research.go) — `offload_research` and its wire types
 - [`internal/mcpserver/reviewdiffio.go`](../../internal/mcpserver/reviewdiffio.go) — the file seam of
   `offload_review_diff`'s `diff_path` branch (working directory, absolute path, confined read), so the refusals behind
   those calls are tested

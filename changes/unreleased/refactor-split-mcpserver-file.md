@@ -1,0 +1,5 @@
+### Changed - `internal/mcpserver/mcpserver.go` is split into topical files of the same package
+
+- **What changed.** The 5273-line `mcpserver.go` is now nine files by pure declaration moves: `mcpserver.go` keeps the server, construction, registration and result helpers; `mcpserver_status.go`, `mcpserver_text.go`, `mcpserver_media.go`, `mcpserver_agentrun.go`, `mcpserver_ask.go`, `mcpserver_review.go`, `mcpserver_delegate.go` and `mcpserver_research.go` hold the tool families. No declaration was renamed, edited or reordered inside a body; behaviour is identical.
+- **Why.** One file of 5273 lines hid the tool families from each other and made every change a merge hazard; the package now reads as a set of named parts, and `docs/systems/mcp-server.md` names them.
+- **Check.** Ran the declaration census (`census.go`, which hashes every declaration with comments stripped) on the package before and after: 319 declarations each and an empty diff. `go build ./...`, `go vet ./internal/mcpserver` and gofmt are clean.

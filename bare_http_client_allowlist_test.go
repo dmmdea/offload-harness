@@ -46,7 +46,7 @@ var bareClientAllowlist = map[string]struct {
 	"internal/llamaclient/lanes.go:Client.WithRemoteLanes":       {1, "configured: remote lanes from config"},
 	"internal/llamaclient/lanes.go:FleetLaneGates":               {1, "configured: fleet nodes from delegate_remotes (lane gates)"},
 	"internal/llamaclient/lanes.go:LocalSwapBusy":                {1, "configured: the local llama-swap /running"},
-	"internal/mcpserver/mcpserver.go:localSeatView":              {1, "configured: the local llama-swap (status view)"},
+	"internal/mcpserver/mcpserver_status.go:localSeatView":       {1, "configured: the local llama-swap (status view)"},
 	"internal/mediacap/routeneeds.go:LiveNodeChecker":            {1, "configured: fleet nodes from delegate_remotes (media route readiness)"},
 	"internal/modelaffinity/seatyield.go:<file-scope>":           {1, "configured: the local llama-swap /running and slots (the seat yield after a lease claim)"},
 	"internal/modelaffinity/upstream.go:upstreamResident":        {1, "configured: the local llama-swap /running (the upstream fence)"},
