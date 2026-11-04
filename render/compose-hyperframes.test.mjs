@@ -1236,12 +1236,12 @@ test("captions: the paces, breaks, holds, chunk caps and default cut quoted in t
 
 // The template list is hand-written in six more places than the tool description (which a Go test pins). Each
 // is read as the sentence it is, both ways: every shipped template is named, and nothing else is.
-test("the shipped template list in the CLI help, the README, the operator guide, the glossary and the doctor line is complete and names nothing else", () => {
+test("the shipped template list in the CLI help, the reference, the operator guide, the glossary and the doctor line is complete and names nothing else", () => {
   const shipped = listTemplates(TEMPLATES_DIR).sort();
   const ticked = (s) => [...s.matchAll(/`([^`]+)`/g)].map((m) => m[1]);
   const lists = {
     "the --template help (generate_video_cmd.go)": /"a vetted template on this machine \(([^)]*)\)"/.exec(readRepo("generate_video_cmd.go")),
-    "the README tool row": /a vetted template \(([^)]*)\)/.exec(readRepo("README.md")),
+    "the reference tool row": /a vetted template \(([^)]*)\)/.exec(readRepo("docs", "REFERENCE.md")),
     "the operator guide": /The vetted templates are ([^.]*)\./.exec(readRepo("docs", "OPERATOR-GUIDE.md")),
     "the glossary entry": /`render\/compose-templates\/`: ([^.]*)\./.exec(readRepo("docs", "glossary.md")),
     "the media doc's shipped list": /\(shipped: ([^)]*)\)/.exec(readRepo("docs", "systems", "media-generation.md")),
