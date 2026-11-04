@@ -1141,11 +1141,17 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       LogWarn ("no PROJECTED profile resolved (profile='{0}' src='{1}') - profile_measure records measure-on-target only" -f $active.profile, $active.profile_src)
     }
 
-    # gpu_count: live NVIDIA+AMD discrete-adapter count (matches detect.ps1), for the dual-GPU gate.
+    # gpu_count: live offload-GPU count by the detect.ps1 rule (NVIDIA + AMD adapters, minus an AMD iGPU
+    # beside a discrete card; the iGPU counts only when it is the box's only GPU), for the dual-GPU gate.
+    # A Ryzen desktop's 'AMD Radeon(TM) Graphics' next to an RTX 5080 said gpu_count=2 here (2026-11-04).
     $gpuCount = 0
     try {
-      $gpuCount = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
-                    Where-Object { $_.Name -match 'NVIDIA|AMD|Radeon' }).Count
+      $gpuNames = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue |
+                    ForEach-Object { $_.Name } | Where-Object { $_ -match 'NVIDIA|AMD|Radeon' })
+      $gpuDiscrete = @($gpuNames | Where-Object {
+                         -not (($_ -match 'AMD|Radeon') -and
+                               ($_ -imatch '\b\d{3}M\b' -or $_ -imatch '\bVega\s*\d+\b' -or $_ -imatch 'Graphics\s*$')) })
+      $gpuCount = if ($gpuDiscrete.Count -gt 0) { $gpuDiscrete.Count } elseif ($gpuNames.Count -gt 0) { 1 } else { 0 }
     } catch { $gpuCount = 0 }
 
     # Which resident-tier gguf to load for the ctx probe (the profile's resident tier, mapped to a file).
