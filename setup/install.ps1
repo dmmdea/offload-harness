@@ -2693,10 +2693,16 @@ if ($hfResult -and (Test-Path $cfgDest)) {
 # ---------------------------------------------------------------------------
 if ($env:COMFY_DIR) { $comfyDir = $env:COMFY_DIR } else { $comfyDir = 'C:/ComfyUI' }
 if ($env:COMFY_PY)  { $comfyPy  = $env:COMFY_PY }  else { $comfyPy  = Join-Path $comfyDir '.venv/Scripts/python.exe' }
-if (Test-Path $comfyDir) {
+# Discoverable means the venv's python answers, not that the directory exists: a box with a
+# bare or half-made C:/ComfyUI folder and no venv (the first fresh Windows install, an RTX 5080
+# desktop, 2026-11-04) reached Ensure-RunGraphDeps, which called the missing python.exe and
+# killed the install one step before the manifest and the verdict. Best-effort means SKIP.
+if ((Test-Path $comfyDir) -and (Test-Path $comfyPy)) {
   Write-Host "DO    run-graph deps (ComfyUI at $comfyDir)" -ForegroundColor Cyan
   $rgLog = Ensure-RunGraphDeps -ComfyPy $comfyPy -ComfyDir $comfyDir
   Write-Host "OK    run-graph deps: $rgLog" -ForegroundColor Green
+} elseif (Test-Path $comfyDir) {
+  Write-Host "SKIP  run-graph deps (a directory at $comfyDir but no venv python at $comfyPy; offload_run_graph will DEFER SATISFIER_UNAVAILABLE, not crash; set COMFY_PY to the ComfyUI python to enable)" -ForegroundColor DarkGray
 } else {
   Write-Host "SKIP  run-graph deps (no ComfyUI at $comfyDir; offload_run_graph will DEFER SATISFIER_UNAVAILABLE, not crash)" -ForegroundColor DarkGray
 }
