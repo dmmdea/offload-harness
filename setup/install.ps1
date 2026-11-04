@@ -2245,10 +2245,18 @@ function Resolve-HarnessExe {
   $repoRoot = Split-Path -Parent $scriptDir
   $tmpExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".exe")
   Push-Location $repoRoot
+  # `go build` writes "go: downloading <module>" to STDERR on a box whose module cache is
+  # cold (every fresh install), and under this file's $ErrorActionPreference='Stop' a
+  # stderr line merged by 2>&1 is a TERMINATING NativeCommandError: the first fresh Windows
+  # box (an RTX 5080 desktop, 2026-11-04) died here with the build still running. Only the
+  # exit code decides a build; stderr is its log.
+  $prevEapGo = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   try {
-    $buildOut = & go build -o $tmpExe . 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "cannot build the renderer from $repoRoot ($LASTEXITCODE): $($buildOut -join ' ')" }
-  } finally { Pop-Location }
+    $buildOut = @(& go build -o $tmpExe . 2>&1 | ForEach-Object { "$_" })
+    $goRc = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
+  if ($goRc -ne 0) { throw "cannot build the renderer from $repoRoot ($goRc): $($buildOut -join ' ')" }
   if (-not (Test-Path $tmpExe)) { throw "go build reported success but produced no $tmpExe" }
   return $tmpExe
 }
@@ -2415,10 +2423,15 @@ Step 'build local-offload.exe' `
   {
     if (-not (Test-Go126)) { throw "Go >=1.26 not on PATH - cannot build" }
     Push-Location $repoRoot
+    # Same stderr rule as Resolve-HarnessExe: a cold module cache prints to stderr; the exit
+    # code is the verdict. The build's lines go to the transcript, not the error stream.
+    $prevEapGo = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
-      & go build -o $harnessExe .
-      if ($LASTEXITCODE -ne 0) { throw "go build (harness) failed (exit $LASTEXITCODE)" }
-    } finally { Pop-Location }
+      & go build -o $harnessExe . 2>&1 | ForEach-Object { Write-Host "      go: $_" }
+      $goRc = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
+    if ($goRc -ne 0) { throw "go build (harness) failed (exit $goRc)" }
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
   }
 $manifestComponents['local-offload'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
