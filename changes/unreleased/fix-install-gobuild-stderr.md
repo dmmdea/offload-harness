@@ -11,5 +11,5 @@
   had a warm cache, which is why the installer's own runs never saw it. Found on the first fresh
   Windows install (an RTX 5080 desktop, 2026-11-04); the renderer call a few lines below already
   carried the same guard.
-- **Check.** Re-running `setup\install.ps1` on that box after the fix went through Step 6, Step 7 and
-  on to the final `{"installed":true,...}` line with the module cache still cold.
+- **Check.** Re-running `setup\install.ps1` on that box after the fix went through Step 6 and Step 7
+  and on to the final `{"installed":true,...}` line.
