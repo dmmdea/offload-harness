@@ -845,7 +845,7 @@ function Save-ComponentRecord {
   param([string]$Key, [hashtable]$Record)
   if ($RenderOnly) { return }
   $doc = $null
-  if (Test-Path -LiteralPath $manifestPath) { try { $doc = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json } catch { $doc = $null } }
+  if (Test-Path -LiteralPath $manifestPath) { try { $doc = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json } catch { $doc = $null } }
   if ($null -eq $doc) { $doc = [pscustomobject]@{} }
   Add-OrSet-Property -Object $doc -Name 'schema' -Value 2
   if (-not ($doc.PSObject.Properties['components'] -and $doc.components -is [psobject] -and -not ($doc.components -is [string]))) {
@@ -1951,7 +1951,7 @@ if (-not $RenderOnly) {
 $manifestPath = Join-Path $HOME_DIR 'installed.json'
 $manifestOld = $null
 if ((Test-Path $manifestPath) -and (-not $RenderOnly)) {
-  try { $manifestOld = Get-Content -Raw $manifestPath | ConvertFrom-Json } catch { $manifestOld = $null }
+  try { $manifestOld = Get-Content -Raw -Encoding UTF8 $manifestPath | ConvertFrom-Json } catch { $manifestOld = $null }
 }
 $manifestComponents = @{}   # populated as each component completes/confirms this run
 
