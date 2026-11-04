@@ -70,6 +70,13 @@ paths that set `big_ram` (RAM ≥ 120 GB), and `hwdetect` carries the same table
 | AMD, anything else | `amd-gcn` |
 | No usable GPU | `cpu` |
 
+The GPU count behind the multi-GPU rows is the count of **offload targets**: an AMD iGPU (APU graphics)
+sitting beside a discrete card is the desktop's display path and is not counted — an AM5 Ryzen desktop
+exposes `AMD Radeon(TM) Graphics` next to its NVIDIA card, and counting it classified an RTX 5080 box as
+`dual-gpu` (2026-11-04). The iGPU counts only when it is the box's only GPU; Intel iGPUs never count.
+`Get-OffloadGpuNames` holds the rule and the self-test covers the hybrid shapes; the Go twin takes
+nvidia-smi's row count, so it never saw the extra adapter.
+
 Sixteen bands. Linux adds one PowerShell has no row for: `hwdetect` (the Go classifier `install detect`
 runs) reads the device tree's root `compatible` when no NVIDIA or AMD adapter answered, and a board
 that names the RK3588 SoC (`rockchip,rk3588` on the vendor kernel, `rockchip,rk3588s` on mainline)

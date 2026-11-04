@@ -110,6 +110,31 @@ function Test-AmdIgpuName {
   return [bool]($Name -imatch '\b\d{3}M\b' -or $Name -imatch '\bVega\s*\d+\b' -or $Name -imatch 'Graphics\s*$')
 }
 
+# Which adapters are offload TARGETS, by name. An AMD iGPU (APU graphics) beside a
+# discrete card is the desktop's display path, not a second offload card: every AM5
+# Ryzen desktop exposes 'AMD Radeon(TM) Graphics' next to its NVIDIA card, and counting
+# it classified an RTX 5080 + Ryzen 9 9950X3D box as the heterogeneous `dual-gpu` tier
+# (which the CUDA installer refuses: no prebuilt covers sm_70 + sm_120) on 2026-11-04.
+# The iGPU counts only when it is the box's ONLY GPU: on an APU box it IS the target.
+# Intel iGPUs never count. Pure function - self-tested; the Go twin (hwdetect) takes
+# nvidia-smi's row count when the tool answers, so it never saw the extra adapter.
+# Returns the names as a comma-joined string (PS 5.1 unwraps a returned array, and
+# `return ,$x` inside a caller's @() still loses the shape); split with
+# Split-OffloadGpuNames to get the array back, empty string = no target.
+function Get-OffloadGpuNames {
+  param([string[]]$Names)
+  $all = @($Names | Where-Object { $_ -and ($_ -match 'NVIDIA|AMD|Radeon') })
+  $discrete = @($all | Where-Object { -not (($_ -match 'AMD|Radeon') -and (Test-AmdIgpuName -Name $_)) })
+  if ($discrete.Count -gt 0) { return ($discrete -join ',') }
+  if ($all.Count -gt 0) { return [string]$all[0] }
+  return ''
+}
+function Split-OffloadGpuNames {
+  param([string]$Joined)
+  if ([string]::IsNullOrEmpty($Joined)) { return @() }
+  return @($Joined -split ',')
+}
+
 # J1: classify an AMD Adrenalin (Radeon Software) version string against the known
 # deep-context Vulkan crash class (llama.cpp #17432 - present in 25.11.1 and older).
 # Returns a warning string for affected/unreadable versions, $null when the driver is
@@ -430,6 +455,24 @@ if ($SelfTest) {
   Assert-Igpu 'AMD Radeon RX 7900 XTX'        $false
   Assert-Igpu 'AMD Radeon RX 7700 XT'         $false
 
+  Write-Host '== offload GPU count (hybrid iGPU + discrete) =='
+  function Assert-GpuCount {
+    param([string]$Label, [string[]]$Names, [int]$Expected)
+    $got = @(Split-OffloadGpuNames -Joined (Get-OffloadGpuNames -Names $Names)).Count
+    if ($got -eq $Expected) { Write-Host "PASS count $Label -> $got" }
+    else { Write-Host "FAIL count $Label -> $got (expected $Expected)"; $script:fail++ }
+  }
+  # The 2026-11-04 defect: an AM5 desktop's iGPU beside its RTX 5080 made the box dual-gpu.
+  Assert-GpuCount 'RTX 5080 + Ryzen iGPU'      @('AMD Radeon(TM) Graphics', 'NVIDIA GeForce RTX 5080') 1
+  Assert-GpuCount 'RTX 3070 + 780M (laptop)'   @('NVIDIA GeForce RTX 3070 Laptop GPU', 'AMD Radeon(TM) 780M Graphics') 1
+  Assert-GpuCount '780M alone (APU box)'       @('AMD Radeon(TM) 780M Graphics') 1
+  Assert-GpuCount 'Vega 7 alone (APU box)'     @('AMD Radeon Vega 7 Graphics') 1
+  Assert-GpuCount '2x Blackwell 16GB'          @('NVIDIA GeForce RTX 5060 Ti', 'NVIDIA GeForce RTX 5070 Ti') 2
+  Assert-GpuCount '3x Blackwell + Intel iGPU'  @('Intel(R) UHD Graphics 630', 'NVIDIA GeForce RTX 5060 Ti', 'NVIDIA GeForce RTX 5070 Ti', 'NVIDIA GeForce RTX 5060 Ti') 3
+  Assert-GpuCount 'NVIDIA + discrete RX 7900'  @('NVIDIA GeForce RTX 5060 Ti', 'AMD Radeon RX 7900 XTX') 2
+  Assert-GpuCount 'Intel iGPU only'            @('Intel(R) Iris(R) Xe Graphics') 0
+  Assert-GpuCount 'no adapter'                 @() 0
+
   Write-Host '== unrecognized-NVIDIA fallback warning =='
   # A GPU that CIM reports as NVIDIA but whose name matches no arch regex ->
   # Get-GpuArch returns 'other', Get-Profile bands it into ampere-* by VRAM, and
@@ -511,10 +554,12 @@ if (-not $amd) { $amd = $amdAll | Select-Object -First 1 }
 # Detection contract: NVIDIA present = CIM name match OR nvidia-smi resolves.
 $nvidiaSmi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 
-# gpu_count = discrete NVIDIA + AMD/Radeon adapters (Intel iGPUs are NOT usable
-# offload targets and are excluded from the count). @() forces array semantics
-# so .Count is reliable even for a single match.
-$gpuCount = @($gpus | Where-Object { $_.Name -match 'NVIDIA|AMD|Radeon' }).Count
+# gpu_count = the offload TARGETS: discrete NVIDIA + discrete AMD/Radeon adapters; an
+# AMD iGPU beside a discrete card is not counted, and counts as the one GPU only when it
+# is alone (Get-OffloadGpuNames). Intel iGPUs are NOT usable offload targets and never
+# count. @() forces array semantics so .Count is reliable even for a single match.
+$offloadNames = @(Split-OffloadGpuNames -Joined (Get-OffloadGpuNames -Names @($gpus | ForEach-Object Name)))
+$gpuCount = @($offloadNames).Count
 
 $vendor = 'none'; $backend = 'cpu'; $gpuName = ''
 if ($nvidia) { $vendor = 'nvidia'; $backend = 'cuda';   $gpuName = $nvidia.Name }
@@ -567,8 +612,7 @@ if ($nvidiaSmi) {
   } catch { $gpuArchsAll = @() }
 }
 if (@($gpuArchsAll).Count -eq 0) {
-  $gpuArchsAll = @($gpus | Where-Object { $_.Name -match 'NVIDIA|AMD|Radeon' } |
-    ForEach-Object { Get-GpuArch -Name $_.Name })
+  $gpuArchsAll = @($offloadNames | ForEach-Object { Get-GpuArch -Name $_ })
 }
 # NB: use $profileId, not $profile — $profile is a PowerShell automatic variable.
 $sel       = Get-Profile -Vendor $vendor -Arch $gpuArch -VramGb $vramGB -GpuCount $gpuCount -RamGb $ramGB -ArchsAll $gpuArchsAll

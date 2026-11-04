@@ -80,7 +80,9 @@ Radeon Software version read from the registry; `null` off-AMD or unreadable), `
 
 The **`profile`** is the load-bearing new field: `install.ps1` keys the serving template + params
 (context, KV type, 26B placement) off it, and `selftest.ps1` measures against it. It is chosen from
-vendor + arch + VRAM band + GPU count + RAM tier (a heterogeneous NVIDIA pair → `dual-gpu`; RAM ≥
+vendor + arch + VRAM band + GPU count + RAM tier (the count is the offload targets: an AMD iGPU beside a
+discrete card is not a second GPU — an AM5 Ryzen desktop shows `AMD Radeon(TM) Graphics` next to its NVIDIA
+card and still bands by that card alone; the iGPU counts only when it is the box's only GPU; a heterogeneous NVIDIA pair → `dual-gpu`; RAM ≥
 ~56 GB passes the RAM gate of the `cpu` tier's 26B; no tier with a card puts experts in host RAM, because RAM is overflow only). An unrecognized NVIDIA card falls back to an `ampere-*` band
 by VRAM and **warns** — verify the template fits before relying on it. A profile id that `profiles.json` does not list (or none at all) renders the backend's off-matrix defaults: on CUDA that serves no 26B (no measurement says the card fits it, and RAM is overflow only), and a *fresh* `config.json` gets `escalation_model` and `reasoning_model` set to `""` to match, the outcome of every tier that drops the 26B. An existing `config.json` is never rewritten, so after re-running the installer over a yaml that 0.185.1 or earlier rendered for such a box (the re-run re-renders it without the 26B and without `--cpu-moe`), set those two keys to `""` by hand; `doctor` names them if you do not.
 
