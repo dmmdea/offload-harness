@@ -118,7 +118,7 @@ Renders default to each model's quality settings, so a video can take tens of mi
 - A busy card is a place in line. Renders, training and benchmarks queue on a [machine-wide lease](docs/systems/gpu-lease.md), and a media call can overflow to a free node with its input files in a hash-checked bundle:
 
   ```bash
-  local-offload gpu reserve --wait 8h --drain --unload-seat --for 2h --reason "training run" -- python train.py
+  local-offload gpu reserve --wait 8h --drain --unload-seat --for 2h \n    --reason "training run" -- python train.py
   ```
 
 - Idle models unload. Every rendered seat carries a five-minute TTL, so a model sitting idle gives the card back.
@@ -158,7 +158,7 @@ claude mcp add offload-harness --scope user -- /path/to/offload-harness mcp
 
 The help text, `doctor` and the setup scripts call this binary `local-offload`, which is the name the installer gives it. It is the same program under both names.
 
-| | |
+| Requirement | Detail |
 |---|---|
 | **GPU** | NVIDIA (CUDA) or AMD, including RDNA3 iGPUs (Vulkan). There are [tiers](docs/tiers/README.md) from a 3 GB card up to 72 GB and multi-card boxes, plus Rockchip RK3588 and a CPU fallback |
 | **OS** | Windows, Linux. macOS builds only |
