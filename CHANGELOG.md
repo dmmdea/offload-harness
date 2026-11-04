@@ -7,6 +7,54 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.207.1] - 2026-11-04 - Windows installer fixes from the first fresh hybrid-desktop install
+
+### Fixed - an AMD iGPU beside a discrete NVIDIA card no longer makes the box `dual-gpu`
+
+- **What it does.** `setup/detect.ps1` counts offload targets, not adapters: an AMD iGPU (APU graphics,
+  `Test-AmdIgpuName`) next to a discrete card is left out of `gpu_count` and of the per-adapter arch
+  list, and counts as the one GPU only when it is alone (an APU box). Intel iGPUs never counted and
+  still do not. The rule is `Get-OffloadGpuNames`, self-tested with the hybrid shapes (RTX 5080 +
+  Ryzen iGPU, laptop 3070 + 780M, 780M alone, 2x and 3x Blackwell with an Intel iGPU, NVIDIA + a
+  discrete RX 7900).
+- **Why.** Every AM5 Ryzen desktop exposes `AMD Radeon(TM) Graphics` beside its NVIDIA card. On an
+  RTX 5080 + Ryzen 9 9950X3D box the detector reported `gpu_count: 2` and the profile `dual-gpu`, the
+  heterogeneous sm_70 + sm_120 tier the CUDA installer refuses, instead of `blackwell-16`. The Go
+  twin (`hwdetect`) takes nvidia-smi's row count and was right; the PowerShell path counted every
+  AMD/Radeon adapter.
+- **Check.** `powershell -File setup\detect.ps1` on that box, after the fix: `profile: blackwell-16`,
+  `gpu_count: 1`, `gpu_archs: ["blackwell"]`; `setup\detect.ps1 -SelfTest` passes the new asserts.
+
+### Fixed - `install.ps1` no longer dies when `go build` prints "go: downloading" on a fresh box
+
+- **What it does.** Both Go builds in the Windows installer (the temporary renderer build in
+  `Resolve-HarnessExe` and Step 7's `local-offload.exe` build) run with `$ErrorActionPreference`
+  set to `Continue` for the native call and judge the build by its exit code; stderr lines go to the
+  transcript.
+- **Why.** On a box whose Go module cache is cold, which is every fresh install, `go build` writes
+  `go: downloading <module>` to stderr. Under the installer's `$ErrorActionPreference = 'Stop'` a
+  stderr line merged by `2>&1` is a terminating `NativeCommandError` in Windows PowerShell 5.1, so the
+  install aborted at Step 6 with a healthy build still running. Every box that had installed before
+  had a warm cache, which is why the installer's own runs never saw it. Found on the first fresh
+  Windows install (an RTX 5080 desktop, 2026-11-04); the renderer call a few lines below already
+  carried the same guard.
+- **Check.** Re-running `setup\install.ps1` on that box after the fix went through Step 6 and Step 7
+  and on to the final `{"installed":true,...}` line.
+
+### Fixed - the run-graph deps step skips a ComfyUI folder that has no venv instead of killing the install
+
+- **What it does.** Step 8b of `setup/install.ps1` (run-graph satisfier tooling, documented as best-effort)
+  now runs only when BOTH the ComfyUI directory and its venv python (`COMFY_PY`, default
+  `<comfy_dir>/.venv/Scripts/python.exe`) exist. A directory without the python prints a `SKIP` that
+  names the missing file and the `COMFY_PY` override.
+- **Why.** The step gated on the directory alone. A box with a bare or half-made `C:/ComfyUI` folder
+  and no venv reached `Ensure-RunGraphDeps`, which called the missing `python.exe`; under
+  `$ErrorActionPreference = 'Stop'` that `CommandNotFoundException` ended the install one step before the
+  version manifest and the final verdict were written, so `installed.json` carried components but no
+  `profile`. Found on the first fresh Windows install (an RTX 5080 desktop, 2026-11-04).
+- **Check.** Re-running the installer on that box printed the `SKIP` line and went on to the manifest
+  and the `{"installed":true,...}` verdict.
+
 ## [0.207.0] - 2026-10-29 - the two remaining file splits, six option-struct refactors and six fixes from the desloppify pass
 
 ### Fixed - the video, music, inpaint and run-graph runners now report a dead ComfyUI to the ledger like the image runner
