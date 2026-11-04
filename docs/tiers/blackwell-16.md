@@ -123,6 +123,7 @@ local-offload report --out capability-report.md
 Checked-in examples (real machines, read-only output):
 
 - [blackwell-16-node-b](reports/blackwell-16-node-b.md)
+- [blackwell-16-node-h](reports/blackwell-16-node-h.md)
 
 ---
 
