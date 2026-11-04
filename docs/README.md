@@ -112,6 +112,8 @@ where the code lives.
 Task-oriented operator documentation. These are canonical paths with inbound links from outside the
 repo — they keep their locations.
 
+- [REFERENCE.md](REFERENCE.md) — the long form of the README: every CLI verb, the MCP tool table, `local-agent` flags, core
+  config keys, serving flags, troubleshooting, the full security posture
 - [OPERATOR-GUIDE.md](OPERATOR-GUIDE.md) — start and stop the stack, chat, run an offload task, drive
   the coding agent, add a model, diagnose failures, update
 - [FLEET-NODE.md](FLEET-NODE.md) — running a fleet node (`fleet-serve` / `fleet-measure`), including

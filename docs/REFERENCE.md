@@ -1,0 +1,627 @@
+# Reference
+
+The long form of the [README](../README.md): every CLI verb, the MCP tool table, the `local-agent` flags, the core config keys, serving flags, troubleshooting and the full security posture. How each system works is in the [documentation index](README.md), and `local-offload --help` and `tools/list` are the authority on what your build has.
+
+## Installation
+
+**Build from source** (recommended):
+
+```bash
+git clone https://github.com/dmmdea/offload-harness.git
+cd offload-harness
+go build -o offload-harness .       # or: go build -o offload-harness.exe . on Windows
+```
+
+`go install github.com/dmmdea/offload-harness@latest` is **not** a supported path: the module carries a local `replace` for a vendored CLI (`tools/llamaswap`), which `go install pkg@version` refuses, and the published tags lag the source. Build from source.
+
+Requires **Go 1.26+** and a running **llama.cpp server** (see [Serving the models](#serving-the-models)).
+
+On Windows, clone into a short path (for example `C:\src`) or run `git config --global core.longpaths true` first: the longest tracked path is about 130 characters, so a clone under a deep path can still push a file past 260 characters and fail its checkout with `Filename too long`.
+
+### The setup runbook
+
+The agent route in the [README](../README.md#set-it-up) follows `setup/SETUP-AGENT.md`. That runbook is written **for an agent**: it runs three idempotent PowerShell scripts —
+`setup/detect.ps1` (pick the backend: CUDA / Vulkan / CPU) → `setup/install.ps1` (the newest complete llama.cpp +
+llama-swap builds, verified against the publisher, the Gemma-4 models, the Go build) → `setup/selftest.ps1` (a machine-readable
+receipt with a deep-context canary) — and branches on the JSON each one emits. It never pins a version (it resolves the newest complete build and verifies the publisher's digest; floors live in `setup/floors.json`, [ADR 0099](architecture/decisions/0099-frontier-updates-floors-never-pins.md)) and never installs CUDA/ROCm (the release binaries carry their own runtime; Vulkan uses
+the GPU driver).
+
+**Manual alternative** (same three steps):
+
+```powershell
+pwsh -NoProfile -File setup\detect.ps1
+pwsh -NoProfile -File setup\install.ps1
+pwsh -NoProfile -File setup\selftest.ps1
+```
+
+## Usage (CLI)
+
+```bash
+# Text — the four core tasks
+offload-harness summarize <file|-> [--max-points N] [--json]
+offload-harness classify  <file|-> --labels bug,feature,question [--json]
+offload-harness extract   <file|-> --schema fields.json [--json]
+offload-harness triage    <file|-> --question "Is this a refund request?" [--json]
+
+# Vision (image understanding)
+offload-harness vqa           image.png --question "What number is shown?" --json
+offload-harness ocr           scan.png --json
+offload-harness extract-image invoice.png --schema fields.json --json
+offload-harness assess-image  render.png --brief "a red sports car at sunset" --json
+
+# Speech-to-text (audio or video)
+offload-harness transcribe    clip.mp4 --language es --json
+offload-harness transcribe    noisy.m4a --language es --hq        # high-quality model for hard audio
+offload-harness transcribe    clip.mp4 --route auto --json        # a fleet node transcribes it when a render holds this box's whisper
+
+# Video understanding (samples frames from the head of the file)
+offload-harness video-describe clip.mp4 --question "What happens here?" --json
+# Watch a WHOLE video end to end (windowed sweep, 1 frame/s of the entire file, timestamped notes + answer)
+offload-harness video-watch reel.mp4 --question "List every shot; flag anything mirrored, upside-down or off the subject" --json
+
+# Generate (free, local GPU)
+offload-harness generate-image "a product photo of a coffee mug on white" --negative "people, text, watermark"
+offload-harness generate-image --batch jobs.jsonl   # N prompts through ONE warm ComfyUI session (checkpoint loads once); --family, --results, --resume; a held lane sends each job through the fleet (ADR 0083)
+offload-harness generate-image "a glass perfume bottle" --family qwen-image-2.1 --transparent   # a NAMED opt-in family (ADR 0058)
+offload-harness run-graph --graph wf.json --manifest m.json --out-dir out/   # arbitrary ComfyUI graph + self-provisioned node manifest
+offload-harness edit-image render.png --ops '[{"op":"mask_boxes","boxes":[{"x":620,"y":540,"width":820,"height":820}],"feather":6}]' --out mask.png   # build a white-on-black inpaint mask
+offload-harness edit-image render.png --ops '[{"op":"grade","levels":{"black":8,"white":248,"gamma":1.05},"wb":{"mode":"gray_world"}},{"op":"resize","width":1920},{"op":"finish"}]' --renditions '[{"width":1080,"format":"webp","suffix":"-ig"}]'   # grade -> resize -> delivery sharpen (+ export matrix)
+offload-harness edit-image template.xcf --ops '[{"op":"instantiate_design","set_text":{"Headline":"Hola Bogotá"},"replace_image":{"ProductShot":"D:/renders/watch.png"}},{"op":"resize","width":1080}]'   # GIMP template factory: new copy + swapped product, then PIL ops
+offload-harness inpaint-image render.png --mask mask.png --prompt "clean glossy dial, no writing"   # re-render ONLY the masked region (white = repaint)
+offload-harness generate-svg gauge '{"value":72,"max":100,"label":"Score","unit":"%"}'
+
+# Compose (free, local CPU — HyperFrames HTML/CSS motion graphics; no GPU lock)
+offload-harness compose-video --template title-card --variables '{"title":"Launch day","accent":"#22c55e"}'
+offload-harness compose-video --template lower-third --format webm --variables-file lt.json --snapshots 1,2.5   # alpha overlay
+offload-harness compose-video --html card.html --quality draft   # an inline single-file composition (trusted code only)
+
+# Remote escalation (explicit, opt-in — NVIDIA NIM; needs NVIDIA_API_KEY for the free hosted catalog)
+offload-harness nim --list-models                                            # browse available model ids
+offload-harness nim "Explain MoE routing in 3 bullets" --model nvidia/nemotron-3-ultra-550b-a55b --max-tokens 600
+offload-harness nim "Summarize this" --model meta/llama-3.3-70b-instruct --base http://127.0.0.1:8000/v1  # self-hosted NIM (keyless)
+offload-harness shadow-label --oracle nim   # judge queued shadow items against the REMOTE model instead of the local escalation tier
+                                            #   (classify/extract/summarize/triage; label rows carry "oracle":"nim"; E2B router counterfactual stays local; input text leaves the box)
+
+# Operate & inspect
+offload-harness mcp                      # run as an MCP server (stdio)
+offload-harness fleet-serve              # join the fleet-dispatcher fleet (health/dispatch/jobs on :18811)
+offload-harness fleet-measure            # prime the fleet footprint store (one minimal render per configured task)
+offload-harness ledger [--since DAYS]    # token-savings report; add --failures for the failure-class register instead
+offload-harness doctor                   # endpoint health, model aliases, derived media routes
+offload-harness report [--out FILE]      # read-only capability report (tier, serving, media routes) — Markdown, safe to send
+offload-harness acceptance               # the gate: exercise every bound capability AS THIS IDENTITY (non-zero = do not hand it work)
+                                         #   your tier is documented in docs/tiers/ — see docs/tiers/README.md
+setup/install.sh --dry-run               # Linux install: every decision printed, nothing changed
+offload-harness install detect           # what is this machine, and which hardware tier?
+offload-harness install render           # render this tier's llama-swap serving config (Linux included)
+offload-harness install volumes          # where should this machine install? (most free space, never the OS drive by default)
+offload-harness install hyperframes      # (re)install the newest HyperFrames for the composition lane: staged, verified, then swapped
+offload-harness install client           # a delegation client: no model, no lane; contracts, research and renders go to the fleet (docs/systems/delegation-client.md)
+offload-harness data status              # where this node keeps its data; on Windows, is any of it on the OS drive?
+offload-harness data migrate            # COPY the data tree to a data drive (dry run unless --apply; never a move, never a junction)
+offload-harness models                   # show configured models + serving flags
+offload-harness eval [--dir DIR]         # code-based quality eval (AURC, deferral-curve AUDC/QNC)
+offload-harness stats                    # per-task ledger telemetry
+```
+
+Input is a **file path** or `-` for stdin. Add `--json` for the full result object, `--select a,b,c` to keep only certain top-level fields, and `--compact` to minify. Configuration is read from `--config <path>` or `$LOCAL_OFFLOAD_CONFIG`.
+
+<details>
+<summary><b>Example: warm-batch image generation</b></summary>
+
+`generate-image --batch jobs.jsonl` renders every job through **one warm ComfyUI session** — the checkpoint loads once instead of once per image, and the teardown (free VRAM, release the GPU lock; the spawned ComfyUI is left to end itself once idle, [ADR 0097](architecture/decisions/0097-a-harness-launched-comfyui-ends-itself-once-idle.md)) runs at the **batch boundary**. One JSON object per line; `prompt` is required, everything else optional (`out`, `negative`, `width`, `height`, `steps`, `seed`, `refine` — a missing seed is minted, a missing out defaults under the media dir, and `"refine": false` opts one job out of a configured prompt refiner; `--refine=false` on the command opts out every job without its own value):
+
+```jsonl
+{"prompt":"a red vintage bicycle against a white brick wall","seed":4242,"out":"C:/renders/bike.png"}
+{"prompt":"a green apple on a slate table, studio light","seed":99}
+{"prompt":"a paper sailboat on a calm pond at golden hour"}
+```
+
+The result is a summary: `{"count":3,"succeeded":3,"failed":0,"items":[{"out":...,"seed":...,"ok":true,"ms":...},...]}`. A single failed render is recorded in its item and does not abort the batch, unless ComfyUI itself became unusable (it stopped answering, or a CUDA fault left it answering but unable to run a prompt): the batch then stops at that job, the jobs after it fail with an error that starts `not run: ComfyUI became unusable at job N/M`, and the command exits non-zero (0.158.1); a full output disk stops it the same way (0.178.0). A batch that ran every job and had a failed one exits **4** (0.178.0; it used to exit 0), a clean batch exits 0, and the summary's `items` keep reporting each job; every picture is written atomically, so a failed render leaves no file at its `out` path.
+
+</details>
+
+<details>
+<summary><b>Example: extract structured fields</b></summary>
+
+`fields.json` is a JSON Schema with a `properties` map:
+
+```json
+{ "properties": { "name": { "type": "string" }, "amount": { "type": "number" }, "date": { "type": "string" } } }
+```
+
+```bash
+offload-harness extract invoice.txt --schema fields.json --json
+# -> {"name":"...","amount":1240.50,"date":"2026-01-15"}   (values grounded in the input text)
+```
+
+A bare `{"field":"string"}` map has no usable properties and is deferred.
+
+</details>
+
+<details>
+<summary><b>Self-learning jobs (offline, inference-free)</b></summary>
+
+These run as a nightly batch over the ledger — pure Go statistics, **zero cloud tokens**:
+
+```bash
+offload-harness calibrate           # per-task conformal escalation thresholds  -> thresholds.json
+offload-harness health              # per-tier EWMA/Page-Hinkley/CUSUM + P95 timeouts -> tier_overrides.json
+offload-harness train-router        # logistic entry-tier router from input features -> router-weights.json
+offload-harness optimize            # mine verified-good calls into few-shot exemplar pools
+offload-harness audit-sample --hard # surface the hardest cases for human/agent review
+```
+
+See [How the cascade learns](#how-the-cascade-learns).
+
+</details>
+
+## Use as an MCP server
+
+Register the binary with your MCP client. The built-in defaults already encode the full cascade, so `--config` is only needed for non-default endpoints or paths.
+
+```bash
+claude mcp add offload-harness --scope user -- /path/to/offload-harness mcp
+```
+
+Or add it to your client's MCP config directly:
+
+```json
+{
+  "mcpServers": {
+    "offload-harness": {
+      "command": "/path/to/offload-harness",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Transport is **stdio**. Every tool returns the full result JSON — and a `{"deferred": true, ...}` defer is a *valid* result, signalling the agent to do that task itself.
+
+### Exposed MCP tools
+
+Which tools a box registers depends on its config. A box with the delegator role enabled adds `agent_delegate` and `offload_research`, a box that configured the browse lane adds `offload_browse`, and a box listing an accelerator adds its own: 11 for `hailo-8l`, 4 for `coral-edgetpu`, 3 for `rknpu`, shared names registered once ([ADR 0037](architecture/decisions/0037-a-capability-name-has-one-owner-per-box.md)). A box listing a device it lacks in `fleet_accelerators` adds that device's tools as forwarders to the fleet node that has it, image bytes travelling with the call ([ADR 0038](architecture/decisions/0038-accelerator-work-travels-to-the-box-that-has-the-device.md), 0.115.0). Read `tools/list`, never a written figure.
+
+| Tool | Arguments | What it does |
+|---|---|---|
+| `offload_status` | `section?` | **Capability discovery — call first when inspecting.** The LOCAL model roster (workhorse/agent/triage/escalation/reasoning/vision/ocr/stt/stt_hq/forecast/embed) + live served models from the local endpoint + this machine's media engines + the (only) remote surface. See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_summarize` | `text`, `max_points?` | Summarize text → `{summary, bullets}`, or defer. |
+| `offload_classify` | `text`, `labels[]` | Classify into one of the labels → `{label, confidence}`, or defer. |
+| `offload_extract` | `text`, `schema` | Extract schema-constrained fields → object, or defer. Values grounded in the input. |
+| `offload_triage` | `text`, `question` | Yes/no/unsure check → `{decision, reason}`, or defer. |
+| `offload_vqa` | `image`, `question` | Visual Q&A on a local image → `{answer}`, or defer. |
+| `offload_ocr` | `image`, `engine?` | Transcribe all text in an image → `{text}`, or defer. `engine:"npu"` selects the Hailo-8L PaddleOCR path on a box with the accelerator (explicit fast-batch path, never an automatic fallback); default is the GPU vision model. |
+| `offload_extract_image` | `image`, `schema` | OCR then extract grounded fields from the image → object, or defer. |
+| `offload_assess_image` | `image`, `brief?` | QA a render against exclusions → `{has_people, has_text, matches_brief, notes}`. |
+| `offload_video_describe` | `video`, `question` | Sample frames from the head of a local video and answer → `{answer}`, or defer. |
+| `offload_video_watch` | `video`, `question`, `window_sec?`, `fps?`, `max_frames?`, `frame_width?`, `start?`, `end?`, `synthesize?` | Watch a local video END TO END: fixed windows (default 8 s) sampled at `fps` (default 1/s of the whole file) through the vision seat with absolute timestamps, then one answer on the text seat → `{answer, duration_sec, windows_total, windows_deferred, frames_total, windows[{start,end,frames,notes}]}`; a window that defers is reported, the call defers only when every window did. |
+| `offload_transcribe` | `audio`, `language?`, `hq?`, `engine?`, `route?`, `select?` | Transcribe local audio/video → `{gist, segments[], srt_path, ...}`, or defer. `route` (`auto` default, `local`, `remote`): when a render holds this box's cards a fleet node transcribes the audio instead (same whisper family; the transcript files are written here). `engine:"npu"` = the accelerator's whisper-base fast preview where the platform runs it (Windows HailoRT 4.24 boxes return a typed platform-blocked defer). |
+| `offload_forecast` | `series`\|`series_path`, `prediction_length`, `target_columns?`, `past_covariate_columns?`, `known_covariate_columns?`, `quantiles?`, `past_covariates?`, `known_covariates?`, `out_path?`, `route?`, `select?` | Forecast time series on a free local model (Timestral-209M: zero-shot, probabilistic, 21 quantile levels) → `{shape, quantile_levels, median, quantiles{level:[...]}, ...}`, or defer. `series` is inline numbers; `series_path` is a local `.csv` (trailing rows with empty target cells are the horizon) or `.json`. A result of more than 2,000 numbers is written to `out_path` (default `<media_dir>/forecast-<sha8>.json`) and the answer keeps `result_path` and the first and last 8 median steps. `route` (`auto` default, `local`, `remote`): `auto` runs on this box's forecast model and, unlike the other media tools, FORWARDS to a fleet node when the box binds no model (an NPU, AMD or CPU-only machine) or its card is held. |
+| `offload_generate_image` | `prompt`, `negative?`, `width?`, `height?`, `steps?`, `seed?`, `out?`, `refine?`, `family?`, `transparent?`, `route?`, `remotes?`, `wait_s?` | Generate an image on the local GPU (ComfyUI; this machine's configured model at its highest-quality settings — e.g. HiDream-O1 bf16 via its official family graph at native 2048, or SDXL on smaller boxes) → `{image_path, width, height, seed, family, ...}` (width/height MEASURED from the file), or defer. See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_run_graph` | `graph_path`\|`graph_json`, `manifest_path?`\|`manifest_json?`, `out_dir?`, `reserve_vram?`, `min_vram_gb?`, `model_family?`, `route?`, `remotes?`, `wait_s?` | **Generic ComfyUI graph execution.** Run an arbitrary API-format graph in the same GPU-lock/zero-warm lifecycle, satisfying a per-workflow **node manifest** first (custom node packs cloned from allowlisted repositories at the head of their default branch, the commit each got recorded beside the pack; one unified uv resolve under host-torch constraints read from the installed venv; models downloaded to a `.part` file and checked for size and… See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_run_template` | `action` (`list`\|`get`\|`readiness`\|`run`), `template?`, list filters (`kind?`, `tag?`, `text?`, `license_class?`, `runnable?`, `reads_input?`, `limit?`, `offset?`), `overrides?`, `seed?`, `out_dir?`, `reserve_vram?`, `waiter_token?` | **Workflow templates.** `list`, `get` and `readiness` read the node's own installed ComfyUI templates package; `run` converts a template on this machine's ComfyUI and runs it through the `offload_run_graph` path. This release runs only a non-API template with no custom node pack and a permissive licence class: a paid-API template is `deferred:true` (class `api_paid`, never cloud), any other licence is refused with its class, a missing model or input file is refused with the exact list (it never downloads a model), a model with no published hash is trusted on first use, and every run stays on this machine's lane. |
+| `offload_generate_svg` | `kind`, `spec`, `out?` | Render a crisp data-viz SVG (`gauge` · `comparison-bar` · `chromatogram` · `icon`) — no model, no GPU. |
+| `offload_generate_audio` | `text`, `kind?`, `clone?`, `lang?`, `seconds?`, `seed?`, `out?`, `route?`, `remotes?` | Synthesize voice (Chatterbox TTS) or music (ACE-Step) on the local GPU → `{audio_path, ...}`, or defer. **Route ([ADR 0077](architecture/decisions/0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)):** `route` (`local`/`auto`/`remote`, default auto) and `remotes` place the job on a fleet node when this machine has no lane or you name one; a `clone` sample travels in a hash-checked bundle (`tts_voice` cannot), and the output comes back verified against the sha256 the node published (`meta.node`, `meta.placement`). |
+| `offload_generate_video` | `prompt`, `still?`, `model?`, `frames?`, `seed?`, `fast?`, `upscale?`, `out?`, `route?`, `remotes?` | Animate a still into a short clip (Wan 2.2 I2V two-stage; Hunyuan opt-in) on the local GPU → `{video_path, seed}` plus `license`/`commercial_use` when the family declares them, or defer. Quality-first: the NATIVE recipe is the default (tens of minutes); `fast:true` opts into the 8-step distill draft. See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_animate_character` | `ref`, `driver`, `prompt`, `motion_prompt?`, `frames?`, `seed?`, `out?`, `route?`, `remotes?` | Retarget a driver video's motion onto a reference character image (WAN-Animate-2 distilled, one 81-frame chunk, keeps the driver's audio) on the local GPU → `{video_path, seed}`, or defer. **Route ([ADR 0077](architecture/decisions/0077-a-fleet-token-holder-may-send-one-media-job-with-its-input-files.md)):** `route` (`local`/`auto`/`remote`, default auto) and `remotes` place the job on a fleet node when this machine has no lane or you name one; the `ref` and `driver` travel in a hash-checked bundle, and the output comes back verified against the sha256 the node published (`meta.node`, `meta.placement`). |
+| `offload_inpaint_image` | `image`, `mask`, `prompt`, `negative?`, `denoise?`, `grow_mask?`, `steps?`, `seed?`, `out?` | **Generative inpainting** — re-render ONLY the masked region of a local image from a prompt on the local ComfyUI (SDXL-family `inpaint_*` binding; mask is white-on-black, same size as the image, **white = repaint**) → `{image_path, seed}`, or defer. Removes gibberish text/objects/blemishes or replaces a region; diffusion cannot WRITE legible text — inpaint-to-clean, then add real type with `offload_edit_image`'s `text` op. |
+| `offload_upscale_image` | `image`, `scale?`, `width?`, `height?`, `method?`, `model?`, `out?` | **ESRGAN enlarge** — AI-upscale a local image on the local ComfyUI with this machine's `upscale_model` (falls back to `videogen_upscale_model`; e.g. `4x-UltraSharp.pth`) → `{image_path, model, width, height, factor}`, or defer. See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_edit_image` | `image`, `ops[]`, `out?`, `renditions?` | **Deterministic edit pipeline** (crop/resize/convert/composite/text via PIL; `mask_boxes{boxes,pad?,feather?,invert?}` replaces the working image with a white-on-black inpaint mask at its size — ready for `offload_inpaint_image`; `grade{levels?,curve?,wb?}` tone/color grade composed into ONE LUT per channel (single quantize, no banding); `lut_cube{path,strength?}` applies a `.cube` 3D LUT look… See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_edit_image_generative` | `image`, `prompt`, `negative?`, `preset?`, `steps?`, `cfg?`, `seed?`, `out?`, `family?`, `images?`, `transparent?` | **Maskless instruction edit** — rewrite a local image from a text instruction on the local ComfyUI (Qwen-Image-Edit class, `gen_edit_*` binding): "make it snowing heavily", "turn the leather into fur" — the model reads the source through its own vision encoder and re-renders the whole frame → `{image_path, seed}`, or defer. See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_media` | `op`, `in`/`inputs[]`, `out?`, op args | **One ffmpeg av op** — `trim` (stream-copy default), `concat`, `extract_frames`, `convert`, `mux_audio`, `probe` → op-specific JSON, or defer. CPU-only — never takes the GPU lock. |
+| `offload_compose_video` | `template`+`variables?` \| `html` \| `project_dir`, `composition?`, `format?`, `fps?`, `quality?`, `resolution?`, `workers?`, `strict?`, `snapshots?`, `out?` | **Designed motion graphics to video** with HyperFrames (project-local newest npm release, env-scrubbed; [ADR 0059](architecture/decisions/0059-external-cli-media-tool-runs-cpu-class-pinned-env-scrubbed.md), [ADR 0099](architecture/decisions/0099-frontier-updates-floors-never-pins.md)): a vetted template (`title-card`, `lower-third`, `stat-card`, `section-title`, `callout-label`, `checklist-card`, `captions-bar`) filled with typed variables, or a trusted inline/local composition → MP4 / WebM (VP9 alpha) / MOV (ProRes 4444 alpha) / GIF / PNG sequence. Gated by `lint` + `check` + an ffprobe measurement → `{video_path\|frames_dir, duration_sec, fps, frames, width, height, has_alpha, has_audio, codec, render_ms, lint, check, snapshots}`, or a typed defer (`BAD_INPUT`, `LINT_ERRORS`, `CHECK_FAILED`, `RENDER_FAILED`, …). CPU-class — software GL + CPU encode, never takes the GPU lock; local only, never cloud. `html`/`project_dir` are trusted code (Chrome runs without a sandbox); the fleet task accepts templates only. |
+| `offload_browse` | `url`, `goal`, `max_actions?`, `allow_hosts?`, `allow_labels?`, `capture?`, `route?` | **Opt-in browser lane** ([ADR 0060](architecture/decisions/0060-opt-in-browse-lane-drives-the-operators-browser.md); registered only when `browse_python`, `browse_script` and a loopback `browse_decision_url` are set). Drives your own running, logged-in Chromium browser toward a goal; typed choices come from the loopback decision endpoint you run (it may front a hosted model, so visible page text and element labels can leave the machine), field text from the local seat. Deny-listed controls (publish, send, pay, delete, ...) are never offered. `done` is a claim, not proof. See [docs/systems/browse-lane.md](systems/browse-lane.md). |
+| `offload_nim` | `prompt`, `model?`, `system?`, `base?`, `max_tokens?`, `temperature?`, `list_models?` | **Opt-in remote.** Call an NVIDIA NIM endpoint (hosted free catalog or self-hosted) → `{model, content, ...}`, or defer. Key from `$NVIDIA_API_KEY` (sent only to NVIDIA hosts); never ledgered. |
+| `agent_rig` | `seat`, `since?`, `node?` | **Seat rigger.** Classifies this box's delegation-log failures for one seat onto one failure axis each (seat infrastructure, call deadline, capacity, ...) so a seat can be tuned from evidence rather than anecdote. |
+| `agent_delegate` | `subtasks[]`, `route?`, `read_root?`, ... | **Opt-in (delegator role).** Fan out 1-8 self-contained read-and-reason contracts (goal, context docs, output schema, acceptance checks) across this box's agent seat and the fleet nodes; a result that fails its acceptance comes back as `failed_verification`, never as a success. |
+| `offload_research` | `goal`, `urls[]`, `questions?`, `output_schema?`, `route?` | **Opt-in (delegator role).** Fetches public pages delegator-side, strips them to text and hands one digest contract per page to the seats; the seats never touch the network. |
+| `agent_run` | `goal`, `read_root?`, `max_steps?`, `model?`, `timeout_sec?`, `profile?`, `judge?`, `context_class?`, `route?` | **Local read-only agent.** A local model plans and iterates over read-only tools (`list_dir`, `read_file`) + the `offload_*` cascade to do a bounded multi-step read-and-reason job → `{output, steps, stop_reason, tools, wall_estimate_sec?, min_turn_sec?, wall_note?, final_budget_fit?, budget_note?, effects?, effects_flagged?, judge_report?}`, or defer. See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_ask` | `question`, `paths[]`, `read_root?` | **One-call delegation.** Ask a bounded question ABOUT SPECIFIC FILES and a free local seat answers it — the one-call form of `agent_delegate`. You supply only question + paths; the harness builds the whole contract (goal, `{answer,evidence}` output schema, and an acceptance check anchored to distinctive tokens mined from the files themselves) and runs it on the local agent seat → `{answer, evidence, verified, acceptance, seat, steps, stop_reason, cache_hit}`, or defer. See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_review_diff` | `diff`\|`diff_path`, `task`, `max_findings?`, `read_root?`, `base_sha?`, `head_sha?`, `gate_receipts?` | **Clean-context review.** Review a code diff on a free local seat that sees ONLY the diff and the task statement, never this session's history — the isolation is the mechanism: a reviewer without the author's accumulated context catches defects the author's own judgement has stopped seeing → `{findings:[{severity,file,line,claim,why,also?}], reviewed_bytes, seat, steps, stop_reason, note?, salvaged?, dropped_ungrounded?, dropped_echo?, dropped_hollow?, dropped_duplicate?, truncated_by_cap?, outcome, outcome_reason?, evidence, trace_error?}`, or defer. See [docs/systems/mcp-server.md](systems/mcp-server.md). |
+| `offload_classify_image` | `image_path`, `domain?`, `top_k?` | Classify an image on the local accelerator → `{results:[{label,score}],best,model,domain}`; on the Coral Edge TPU `domain` = `imagenet` (default) \| `birds` \| `insects` \| `plants`, on the Rockchip RK3588 NPU (`rknpu`) ImageNet only (no `domain`); one owner per box, the first listed ([ADR 0037](architecture/decisions/0037-a-capability-name-has-one-owner-per-box.md)). *Accelerator-gated: registered only on a box listing `coral-edgetpu` or `rknpu`.* |
+| `offload_semantic_segment` | `image_path`, `out_path?` | Semantic segmentation (DeepLabV3 MNv2, 21 Pascal classes) on the local Coral Edge TPU; writes a per-pixel class-id PNG → `{mask_path,classes:[{class_id,label,pixels}],width,height}`. Not instance masks (see `offload_segment`). *Accelerator-gated (`coral-edgetpu`).* |
+| `offload_face_detect` | `image_path` | Detect faces on the local Hailo-8L NPU → `{faces:[{x,y,w,h,score,kps}],count}` with 5-landmark keypoints. *Accelerator-gated: registered only on a box listing `hailo-8l` ([docs/systems/accelerators.md](systems/accelerators.md)).* |
+| `offload_face_embed` | `image_path`, `max_faces?` | Face identity vectors (512-d ArcFace per face) on the local NPU — cosine similarity is the identity score → `{faces:[{…,embedding}],count}`. *Accelerator-gated.* |
+| `offload_object_detect` | `image_path`, `score_threshold?`, `size?` | Detect the 80 COCO classes on the local accelerator → `{objects:[{label,class_id,x,y,w,h,score}],count}` — YOLOv8s with on-chip NMS on `hailo-8l`, EfficientDet-Lite0/1/2 (`size`) on `coral-edgetpu`, an RKNN-compiled detector on `rknpu` (`size` is the Coral's); one owner per box, the first listed ([ADR 0037](architecture/decisions/0037-a-capability-name-has-one-owner-per-box.md)). *Accelerator-gated.* |
+| `offload_person_embed` | `image_path` | Person re-identification vectors (OSNet 512-d, works with no visible face) on the local NPU → `{people:[{x,y,w,h,score,embedding}],count}`. *Accelerator-gated.* |
+| `offload_depth` | `image_path`, `out_path?` | Preview-grade relative depth map (Depth-Anything-V2) on the local NPU; writes an 8-bit PNG (bright = near) → `{depth_path,min,max,mean}`. *Accelerator-gated.* |
+| `offload_enhance_low_light` | `image_path`, `out_path?` | Brighten an under-exposed frame (Zero-DCE) at the original resolution on the local NPU → `{enhanced_path,width,height}`. *Accelerator-gated.* |
+| `offload_image_embed` | `image_path` | Image embedding for similarity search / clustering on the local accelerator → `{embedding,dim,space}` — 512-d TinyCLIP on `hailo-8l`, 1280-d EfficientNet-EdgeTPU-S (`space:"efficientnet-edgetpu-s"`, not CLIP) on `coral-edgetpu`, a CLIP-class RKNN image tower on `rknpu` (its own `space`, comparable with neither); one owner per box ([ADR 0037](architecture/decisions/0037-a-capability-name-has-one-owner-per-box.md)). *Accelerator-gated.* |
+| `offload_pose` | `image_path`, `score_threshold?` | Human pose (YOLOv8s-pose, host-decoded raw head) on the local NPU: 17 named COCO keypoints per person → `{people:[{x,y,w,h,score,keypoints:{nose:{x,y,score},…}}],count}`. *Accelerator-gated.* |
+| `offload_segment` | `image_path`, `everything?`, `score_threshold?`, `out_path?` | Instance segmentation (YOLOv8s-seg 80 classes; `everything:true` = FastSAM class-agnostic) on the local NPU; writes an instance-id mask PNG → `{instances:[{label,class_id,x,y,w,h,score}],mask_path,count}`. *Accelerator-gated.* |
+| `offload_text_embed` | `text`, `space?` | Text embedding computed ON the local NPU in the SAME space as `offload_image_embed` (`tinyclip`, 512-d, default; `siglip2` 768-d pairs with the zero-shot siglip2 side) → `{embedding,dim,space}`. *Accelerator-gated.* |
+| `offload_zero_shot` | `image_path`, `labels`, `space?`, `template?` | Zero-shot classification: score an image against free-text labels, BOTH towers on the local NPU → `{results:[{label,similarity,prob}],best}`. *Accelerator-gated.* |
+
+> **Inputs stay local.** Images, audio, and video are accepted as a **local file path** or a `data:` URI — **never a remote URL**, so there is no network egress for media.
+
+The table is a summary; the authoritative list is the server's own `tools/list`, and every tool's full contract is in
+[docs/systems/mcp-server.md](systems/mcp-server.md).
+
+## The local coding agent
+
+Alongside the offload harness, the repo ships `local-agent` — a small agent loop that **plans with a
+local model and acts through tools confined to a workspace**. It is read-only by default; every
+mutating or networked capability is opt-in and gated by one policy broker.
+
+```bash
+go build -o local-agent ./cmd/local-agent
+local-agent --root . --base http://127.0.0.1:11436 --max-steps 4 "list the files and summarize README.md"
+```
+
+**Capabilities** (all `--allow-*` flags **OFF by default**):
+
+| Flag | Grants |
+|---|---|
+| *(default)* | `list_dir`, `read_file` (ranged), `search_files`, `summarize_file`, in-process `offload_*` — **no network, no writes**. |
+| `--allow-write` (+ `--allow-overwrite` / `--allow-delete`) | `write_file` / `edit_file` / `delete_file`, **worktree-scoped**. |
+| `--allow-fetch` + `--egress-host` | `web_fetch`, restricted to an **egress allowlist** (deny-all otherwise). |
+| `--allow-search` | `web_search` (DuckDuckGo, keyless). |
+| `--allow-run` | `run` — an **allowlisted program run directly** (no shell) inside the OS sandbox (Linux **and** Windows). See [Security](#security). |
+| `--allow-shell` | `run_shell` in an **OS sandbox** (**Linux only**; no network, FS-confined, syscall-limited). |
+| `--allow-github` | `github_api` / `create_repo` / `upload_file`; token from `$GITHUB_TOKEN`. |
+| `--allow-browse` (+ `--browse-hosts host1,host2`) | `browse` — drive your own running browser through the opt-in browse lane ([ADR 0060](architecture/decisions/0060-opt-in-browse-lane-drives-the-operators-browser.md)). `--browse-hosts` is required (the CLI always builds unattended). `agent_run` / `agent_delegate` take `allow_browse` + `browse_hosts` and are unattended the same way (node opt-in `agent_allow_browse`); only MCP `offload_browse` is attended. |
+
+**Built-in tools for reading code** (available by default, read-only):
+
+- **`search_files`** — a ripgrep-style regex search over the worktree (`os.Root`-confined). Output is grouped per file with line numbers and **hard-capped at 100 matches**; a `mode: "files"` variant returns only the paths that contain a match, and a `glob`/`path` narrows the search. It lets a small model *find* code by matching lines instead of reading whole files. Uses `rg` when it's on PATH, else a confined Go walk — identical output either way. The pattern is **case-sensitive**; `(?i)` prefixes it for a case-insensitive match, and a zero-match result says so explicitly and names that retry — a small planner that gets a bare "no matches" tends to retry with a *longer* query and then conclude the text is absent.
+- **Ranged `read_file`** — optional `offset` (1-indexed start line) + `limit` (lines, default 2000) read just a range as `cat -n`-numbered lines, with a continuation hint (`showing lines X–Y of TOTAL; use offset=Z to continue`) so the model can page a large file. A 256 KB byte backstop still applies.
+- **`summarize_file`** — digests a workspace file on the free local cascade **without pulling its bytes into the transcript** (the file-as-external-memory pattern). On an offload failure it returns a marker telling the model to `read_file` ranged instead, rather than erroring.
+
+**Working memory:** if `<worktree>/AGENT.md` exists it is loaded **once** at the start of a run as project facts/conventions (fenced as untrusted data). The `update_plan` tool writes a terse checklist to `<worktree>/.agent/plan.md`, which the loop **re-injects near the context tail every few steps** (not every step) so the plan survives a long task without wasting turns rewriting it. Both paths are fixed and `os.Root`-confined to the worktree.
+
+**Tool profiles** (`--profile`): a profile narrows the advertised tools to a curated subset and adds a tuned system prompt + a couple of worked few-shot exemplars — small local models pick tools better with fewer advertised. Ship profiles: `general` (default, all enabled tools), `edit`, `build` (adds the runner), `research` (web + `summarize_file`), `github`. A profile can only **narrow** the enabled set — it can never grant a tool the `--allow-*` flags didn't turn on.
+
+**Two-tier mode** (`--two-tier`): an architect/editor split following aider's one-shot handoff. The planning model (`--architect-model`, default `gemma4-26b-a4b`) drafts one complete, standalone plan using read/search tools only; a separate edit model (`--editor-model`, default `offload-e4b`) then executes that plan as its **sole** instruction — it never sees the original request or any history. On a single GPU this is exactly one cold model swap (plan-once, not per-step alternation). A degenerate/empty plan falls back to a single-model run of the original objective. `--two-tier` conflicts with any **non-default** `--profile` (two-tier sets the architect/editor toolsets itself); `--profile general` or an empty value coexists.
+
+**Context & compaction.** `--ctx-tokens` (default **0 = AUTO**) tells the loop the served window so transcript compaction budgets against it (derived input budget = `ctx-tokens − max-tokens − 512`). At the default it probes the endpoint for the model's live `n_ctx` and falls back to 8192 only when that is unanswerable; pass an explicit value to override the probe with the tier's served `--ctx-size`. The loop resends the full transcript each step, so when it would overflow, compaction keeps the protected preamble (system + exemplars + AGENT.md + objective) and recent turns, elides older tool-result bodies to markers, then drops whole older turns as intact assistant↔tool pairs. Every tool result is also centrally capped.
+
+**Policy broker & confinement.** A single deny→ask→allow broker is the only chokepoint to any tool,
+with an audit trail written **outside** the worktree (`agent-audit.jsonl` under the harness install root:
+config `home`, else `~/.local-offload`) so a run can't tamper with its own log. Writes never escape the `--worktree` (default `--root`) and never
+touch `.git`.
+
+**Circuit breaker.** `--max-same-tool` (default 8) caps calls to any one tool per run — the breaker
+for a model that loops instead of progressing (e.g. repeated reworded `web_search`). `--max-steps`
+(default 12) is a hard step budget owned in code, not the prompt.
+
+**`--max-tokens` (default 4096).** Planner tokens per completion; must be large enough for the biggest
+tool-call argument (a whole file's content) or the model's JSON gets cut off mid-string and the call
+fails. Don't lower it for write-heavy runs.
+
+**Serve mode + loopback guard.** `local-agent --serve` exposes the loop as an OpenAI-compatible HTTP
+endpoint (each request runs the full agent loop) so a chat GUI can drive it:
+
+```bash
+local-agent --serve --listen 127.0.0.1:18800 --base http://127.0.0.1:11436
+```
+
+The endpoint is **unauthenticated** and drives write/GitHub tools, so it is **loopback-only**: a
+non-loopback `--listen` is refused unless you pass `--listen-trusted-network` (which prints a loud
+warning). See `docs/OPERATOR-GUIDE.md` for the full flag reference and context-budget guidance.
+
+## Fleet node (multi-machine rendering)
+
+`fleet-serve` turns the box into a **fleet node** for the Fleet Dispatcher: three
+contract-fixed HTTP endpoints (`/fleet/health`, `/fleet/dispatch`, `/fleet/jobs/{id}`) that
+accept GPU render jobs and run them through the exact same pipeline, GPU lock, and
+zero-warm lifecycle as local calls. Health advertises **measured** per-model-family VRAM
+footprints, recorded passively during normal use and primed on a fresh box with
+`fleet-measure`. Loopback by default; production binding is the Tailscale address behind
+`--listen-trusted-network`. See **[`docs/FLEET-NODE.md`](FLEET-NODE.md)** for config
+keys, binding guidance, sampler modes, and the recommended MSI Afterburner companion setup.
+
+## Chat GUI (OpenWebUI, optional)
+
+`scripts/openwebui-stack.sh` is a **legacy, WSL-oriented** convenience script that brings up the agent server (`:18800`) and
+[OpenWebUI](https://github.com/open-webui/open-webui) (`:8081`) in one idempotent command. It expects a built `local-agent`
+binary (`LOCAL_AGENT_BIN`), a served model alias (`LOCAL_AGENT_MODEL`) and `open-webui` installed at `~/.local/bin`, and its
+default capability set turns **on** write, overwrite, search and GitHub (`LOCAL_AGENT_CAPS`) — read the variables at the top
+of the script before running it:
+
+```bash
+bash scripts/openwebui-stack.sh
+# -> stack UP — open http://localhost:8081
+```
+
+Then open `http://localhost:8081`, **create your account on first launch** (auth is ON by design),
+pick the advertised model, and chat — each message runs a full agent loop inside
+`~/local-agent-workspace`. Override the model/workspace/caps via the `LOCAL_AGENT_*` env vars documented
+at the top of the script.
+
+## How it works
+
+The pipeline is a confidence-gated cascade. A request enters at a small tier and only climbs when the result is genuinely uncertain; if every local tier is exhausted, it defers to the caller.
+
+```mermaid
+flowchart LR
+    A[Request] --> B[Cache + context-budget trim]
+    B --> C[Build prompt + GBNF grammar]
+    C --> D[Small tier<br/>llama.cpp + grammar]
+    D --> E[Parse → verify → schema-validate]
+    E --> F{Confidence gate}
+    F -->|pass| G[Accept ✓]
+    F -->|low margin /<br/>validation fail| H[Escalate to larger tier]
+    H --> E
+    F -->|all tiers fail /<br/>truncated input| I[Defer to caller ↩]
+    G --> J[Append to token ledger JSONL]
+```
+
+**The cascade.** Tasks enter at the tier sized to the job and escalate only on a validation failure *or* a low decision-confidence signal:
+
+- **triage / classify** → small fast tier (entry)
+- **summarize / extract** → mid workhorse tier
+- on failure or uncertainty → escalate to a larger near-frontier MoE tier
+- all local tiers fail → **defer** to the caller
+
+**Confidence-based escalation.** For triage/classify the harness requests per-token logprobs and computes a **class-mass margin** at the decision token (the raw pre-grammar distribution, aggregated by legal class so `Yes`/`yes` don't split). A margin below the threshold means the model was torn → escalate instead of accepting a coin-flip. Classify also keeps a self-reported confidence gate (defense in depth).
+
+**Reliable structured output.** The target model crashes on llama.cpp's `--json-schema` / `response_format`, so the harness instead enforces a **GBNF grammar** (generated per request, no external dependency) via the chat-completions `grammar` field, then forgivingly parses and schema-validates the result in Go. Extracted values must appear verbatim in the source text (grounding).
+
+**State.** The cache is [bbolt](https://github.com/etcd-io/bbolt) (single-writer); the token **ledger is append-only JSONL**, so a CLI run and the long-running MCP server can both append concurrently. If the MCP server holds the cache lock, a concurrent CLI run degrades to cache-less automatically rather than failing.
+
+### How the cascade learns
+
+The harness improves itself **offline and inference-free** — pure Go statistics over the ledger, spending **zero cloud tokens**:
+
+- **Conformal thresholds** (`calibrate`) — replaces a guessed margin gate with a per-task threshold that holds a chosen error rate.
+- **Entry-tier router** (`train-router`) — a tiny logistic model on cheap input features bumps the entry tier up when the small tier is predicted to fail, cutting wasted escalation.
+- **Health monitoring + circuit breakers** (`health`) — flags degrading tiers (EWMA / Page-Hinkley / CUSUM), sets P95 timeouts, and routes around a tier that is OOMing or timing out (infra only — never on a quality defer).
+- **Few-shot exemplars** (`optimize`) — harvests verified-good `(input, output)` pairs and BM25-selects them into the prompt (opt-in via `exemplar_shots`).
+- **Shadow-labeling flywheel** — optionally captures a fraction of live calls, replays them counterfactually through other tiers to generate training labels for the router and confidence head, then trains and calibrates them behind an adoption gate that only promotes a change when it **provably lowers error**.
+
+## Configuration
+
+Copy `config.example.json` and edit. Config is resolved in precedence order: `--config <path>` > `$LOCAL_OFFLOAD_CONFIG` > `./config.json` > `~/.local-offload/config.json` > built-in defaults. Running on built-in defaults is LOUD: every config-loading command prints a stderr warning (machine bindings — vision, media, cascade tiers — are inactive on defaults, and those calls defer) — including when an explicit `--config`/`$LOCAL_OFFLOAD_CONFIG` path does not exist or fails to parse — and `doctor` prints a `config:` line naming the file it ACTUALLY loaded, or `BUILT-IN DEFAULTS` with the reason. `local-agent` shares the same discovery and warning. A leading `~/` in any path-typed value expands to your home directory; an unknown key warns to stderr rather than being silently dropped. An explicit `--config`/`$LOCAL_OFFLOAD_CONFIG` file is the only config file read: no home or working-directory config is merged under it. One key is shadowed *inside* that file, by design: when it declares `layers`, the placement table picks the agent seat and `agent_model` applies only when a decision names none, so a copy repointed at a scratch engine must edit or drop its `layers` as well. Every config-loading verb (the MCP server behind `agent_delegate`/`agent_run`, `delegate`, `acceptance`, `report`) and `local-agent` print a stderr note, once per process and never on the MCP stdout, naming the file when its `agent_model` is not a seat of any of its layers, and a roster-miss defer on a placed seat names the layer that chose it.
+
+| Key | Default | Purpose |
+|---|---|---|
+| `endpoint` | `http://127.0.0.1:11436` | Base URL of the local llama.cpp server. |
+| `completion_path` | `/v1/chat/completions` | Chat-completions path. |
+| `model` | `offload-e4b` | Workhorse text tier (summarize / extract). |
+| `triage_model` | `gemma4-e2b` | Fast entry tier (triage / classify); empty = use `model`. |
+| `escalation_model` | `gemma4-26b-a4b` | Larger tier tried before deferring; empty = no escalation. |
+| `vision_model` | `""` | Local vision tier (VQA / OCR / image extract / assess). Opt-in: a tier earns it by declaring a `vision` media seat (or an `rkllm` seat with a vision encoder). Empty = the route defers rather than naming a seat nothing serves. |
+| `ocr_model` | `""` | Optional dedicated OCR tier routing **only** the `ocr` task (purpose-built OCR models beat a general VLM on dense text, but cannot answer VQA — so it is a separate binding, never a `vision_model` replacement). Deliberately unbound by default: empty = OCR rides `vision_model`, exactly as before. |
+| `stt_model` / `stt_model_hq` | `""` / `""` | Speech-to-text upstreams. Both opt-in: a tier earns `stt_model` by declaring an `stt` media seat (`media_seats` in the tier table), which renders the whisper seat AND this binding from one declaration. Empty = the route defers rather than naming a seat nothing serves. |
+| `stt_hq_api` | `""` | Protocol of the HQ upstream: `""`/`whisper` = whisper-server `/inference`; `openai` = llama-server's `/v1/audio/transcriptions` (mtmd STT like Qwen3-ASR — no timestamps: one full-span segment; language auto-detected; whisper knobs don't apply). |
+| `classify_min_confidence` | `0.88` | Self-reported confidence floor for classify (calibrated on production rows; a lower floor never fired). |
+| `confidence_margin_threshold` | `0.65` | Logprob decision margin gate (0 disables; per-task conformal thresholds override it). Calibrated on production rows. |
+| `max_input_chars` | `24000` | Inputs above this are trimmed; over-long inputs defer. |
+| `max_retries` | `1` | Retries before escalating. |
+| `cache_path` | `~/.local-offload/cache.db` | bbolt cache file. |
+| `ledger_path` | `~/.local-offload/ledger.jsonl` | Append-only token-savings ledger. |
+| `exemplar_shots` | `0` | Few-shot exemplars to inject (0 = off). |
+| `auto_heal` | `false` | Auto-warmup a tripped tier's circuit breaker. |
+| `opus_input_price_per_mtok` | `15.0` | Price used to value INPUT tokens kept out of the cloud. |
+| `opus_output_price_per_mtok` | `75.0` | Price used to value the tokens a local seat GENERATED. Output bills at 5x input on Opus; before 0.117.7 the ledger priced it at zero. |
+| `request_timeout_sec` | `120` | Per-request timeout. |
+
+These are the core cascade keys. The per-machine **media bindings** — `imagegen_*` (including the
+qwen-image preset knobs and the opt-in `imagegen_refiner_model` prompt refiner), `gen_edit_*`,
+`inpaint_*`, `videogen_*`, `voicegen_*`, the named license-tagged families (`imagegen_families`,
+`gen_edit_families` — [ADR 0058](architecture/decisions/0058-non-commercial-model-families-ship-only-as-named-license-tagged-opt-ins.md)), the ComfyUI launch profile (`comfy_cuda_device`,
+`comfy_dynamic_vram`, `comfy_extra_args`) and the composition lane's `compose_*` / `hyperframes_*`
+keys ([ADR 0059](architecture/decisions/0059-external-cli-media-tool-runs-cpu-class-pinned-env-scrubbed.md)) — are documented in
+[docs/systems/media-generation.md](systems/media-generation.md); the agent planner seat
+(`agent_model`, `agent_timeout_sec`) in
+[docs/systems/coding-agent.md](systems/coding-agent.md). `config.example.json` carries the full
+key set at its built-in defaults (strict JSON, generated by `go generate .`; the per-key rationale
+lives in the doc comments on `Config` in `internal/config/config.go`, since a JSON file cannot hold
+comments). It is generated on Windows, so `comfy_dir` (`C:/ComfyUI`) and the `render/*.mjs` media bindings describe a Windows
+box with ComfyUI; on Linux or macOS set `comfy_dir` to `""` after copying (the built-in default there), or leave the
+media rows for `doctor` to report as unbound.
+
+State (cache, ledger, learned weights, exemplars) defaults to `~/.local-offload/`.
+
+## Serving the models
+
+All tiers are served by a local **llama.cpp server** (multiplexed with a model-swapper so only one model occupies the GPU at a time). The harness talks to it over the standard chat-completions API. The text cascade fits comfortably on an 8 GB GPU.
+
+Verified **grammar-reliable** serving flags (per tier). These are **model-family, not vendor,
+requirements** — they carry over to every backend.
+
+```bash
+# common (all backends)
+--ctx-size 8192 --flash-attn on --cache-type-k f16 --cache-type-v f16 --jinja --reasoning off
+
+# --- NVIDIA (CUDA) ---
+# small entry tier:     --n-gpu-layers 99
+# workhorse tier:       --n-gpu-layers 99 --parallel 1
+# large MoE escalation: -ngl 99 --parallel 1   (the experts stay on the card; env GGML_CUDA_DISABLE_GRAPHS=1)
+
+# --- AMD / any Vulkan GPU (native Windows) ---
+# small entry tier:     -ngl 999
+# workhorse tier:       -ngl 999 --parallel 1
+# large MoE escalation: -ngl 999 --parallel 1   (full offload; if allocation fails the tier drops the 26B, RAM is overflow only)
+```
+
+The setup scripts render a ready-made [`setup/templates/llama-swap.win-vulkan.yaml`](../setup/templates/llama-swap.win-vulkan.yaml)
+(plus `-cuda` and `-cpu` variants) with these flags already wired.
+
+**Linux.** The installer is [`setup/install.sh`](../setup/install.sh): it expects a built llama.cpp, the GGUF files and `node`
+already on the box, then `offload-harness install detect` picks the tier and `install render` writes the llama-swap config
+from the `setup/templates/llama-swap.linux-*.yaml` templates (CUDA, Vulkan, CPU, RK3588). Start with `setup/install.sh --dry-run`;
+the full path is in [docs/systems/setup-installer.md](systems/setup-installer.md#the-linux-install-path-setupinstallsh).
+**macOS** builds the binary but ships no serving template or installer: bring your own llama.cpp (Metal) server that serves
+the three aliases.
+
+**AMD expectations** (community-measured; token generation is **memory-bandwidth-bound**, so more RAM
+does not make it faster):
+
+| Metric | Radeon 780M (Vulkan) | vs CPU |
+|---|---|---|
+| Token generation (workhorse) | ~19–25 t/s | ≈ +35% over CPU |
+| Prompt processing | — | ≈ 4× CPU |
+
+**Three research-anchored pitfalls to design around:**
+
+1. **Deep-context Vulkan crash on older AMD Adrenalin** (open, llama.cpp #17432) — an out-of-date
+   driver can device-lost when generating deep in the context window. **Keep the Adrenalin driver
+   current**; `setup/selftest.ps1` ships a depth-~7000 **canary** that reproduces it and names your
+   GPU + driver in the receipt.
+2. **The 2024 "garbled Vulkan output" bug is FIXED** (Dec 2024) — it is folklore now. Do not disable
+   Vulkan or chase workarounds for it on a current build.
+3. **Windows shared-GPU-memory ceiling is machine-specific** — rather than assume it, `selftest.ps1`
+   **measures real allocation on-device**; when the MoE tier won't fit it records a failed 26B tier
+   with advice (drop it, or pick a tier whose resident is not the 26B). It never moves the experts
+   to host RAM and never edits the yaml: the cards do the inference and RAM is overflow only.
+
+<details>
+<summary><b>Serving gotchas (load-bearing)</b></summary>
+
+- **`--reasoning off` is mandatory** — the model's thinking mode otherwise eats the short output budget and returns empty replies.
+- **No speculative draft (MTP)** — it 500-errors on the grammar field. Serve with flash-attention on, f16 KV, reasoning off.
+- **Never use `--json-schema` / `response_format`** — they crash the model; the harness passes a raw GBNF `grammar` field instead.
+- **Vision: use the Instruct build** of the VLM (the Thinking variant silently bypasses GBNF) and keep the multimodal projector at **F16** for OCR (Q8 hallucinates text).
+- **Speech-to-text: flash-attention OFF** server-side — it degrades non-English / noisy transcription; turbo is still 5–8× realtime.
+
+</details>
+
+## Requirements
+
+| | |
+|---|---|
+| **OS** | Linux, Windows · macOS builds, but has no installer or serving template (bring your own llama.cpp Metal server) |
+| **Go** | 1.26+ (to build) |
+| **GPU** | **NVIDIA (CUDA), ~8 GB VRAM** · **AMD Radeon incl. RDNA3 iGPUs (Vulkan)** · or **CPU-only** (slower). |
+| **RAM / disk** | 32 GB+ system RAM and a fast SSD recommended (model weights, MoE CPU offload) |
+| **External** | a running llama.cpp server; `ffmpeg` on PATH for audio/video; a whisper.cpp server for STT; ComfyUI for image generation (all optional per feature) |
+
+> **AMD APUs (e.g. Radeon 780M / gfx1103):** use the **native Windows Vulkan** backend — the setup
+> scripts select it automatically. **ROCm/HIP and WSL2 are neither required nor supported on
+> gfx1103** (AMD ships no compute kernels for it and cannot accelerate an iGPU through WSL2); Vulkan
+> is both supported and faster on this arch. See [Set up with your AI agent](../README.md#set-it-up).
+
+### Hardware expectations at a glance
+
+| Backend | Token-gen (workhorse tier) | Notes |
+|---|---|---|
+| NVIDIA RTX 3070 (CUDA) | ~70–83 t/s | First-class; verified on 8 GB. |
+| AMD Radeon 780M (Vulkan) | ~19–25 t/s | Community-measured; bandwidth-bound (see [Serving the models](#serving-the-models)). Normal — not a defect. |
+| CPU-only | < 8 t/s | Fallback; 26B MoE tier needs ≥48 GB RAM. |
+
+## Troubleshooting
+
+<details>
+<summary><b>Every call returns <code>deferred: true</code></b></summary>
+
+Check the endpoint with `offload-harness doctor`. The most common cause is the llama.cpp server not running or not reachable at `endpoint`. A defer is also normal for low-confidence, truncated, or over-long inputs — those are meant to go back to the caller.
+
+</details>
+
+<details>
+<summary><b>Empty or truncated model output</b></summary>
+
+You're almost certainly serving with reasoning mode on. Add `--reasoning off` to the llama.cpp server. Also confirm you are **not** passing `--json-schema` / `response_format` — both crash the model and break the grammar path.
+
+</details>
+
+<details>
+<summary><b>OCR or image fields look wrong</b></summary>
+
+Use the **Instruct** vision build (not Thinking) and keep the multimodal projector at **F16**. Validate dense documents before trusting them — fine-detail OCR on the server has a known accuracy regression for very small text.
+
+</details>
+
+<details>
+<summary><b>"cache unavailable (held by the MCP server?)"</b></summary>
+
+Expected. The bbolt cache is single-writer; when the long-running MCP server holds it, a concurrent CLI run continues cache-less. The JSONL ledger is unaffected — both can append.
+
+</details>
+
+## Tools
+
+`tools/` carries **printed CLIs** — standalone Go tools generated by
+[CLI Printing Press](https://github.com/mvanhorn/cli-printing-press) and vendored here as repo
+tooling. Each is its own Go module, so it stays out of the harness's dependency graph and out of a
+root `go build ./...`.
+
+| Tool | What it does |
+|---|---|
+| [`tools/comfyui/`](../tools/comfyui/) | `comfyui-pp-cli` — drive a local ComfyUI render server from the shell: submit graphs, read honest timings from the server's own execution timestamps, and keep runs, graphs, node schemas, and outputs in local SQLite so comparisons survive the restarts that tuning requires. Ships an MCP server (`comfyui-pp-mcp`) and an agent skill. |
+| [`tools/llamaswap/`](../tools/llamaswap/) | `llamaswap-pp-cli` — operate and inspect the llama-swap server that actually serves the cascade: what is loaded, what a swap cost, seat and model bindings, GGUF header facts read straight off the model files, and the config's own backup history. Ships an MCP server (`llamaswap-pp-mcp`), an agent skill, and an importable Go client at `pkg/llamaswap`. |
+
+Between them these cover both halves of what the harness talks to — ComfyUI for media, llama-swap for
+everything the cascade serves.
+
+Build one from its own directory (`cd tools/comfyui && go build ./...`) — the root module
+does not reach into it, and CI runs each tool's tests in its own job. Generated files are not hand-edited here; fixes go upstream and the tree is
+re-vendored. Some `llamaswap` tests are acceptance gates against a real deployment and `t.Skip` when
+the model volume or reference corpus is absent — that is expected on a bare machine. See
+**[`docs/systems/printed-clis.md`](systems/printed-clis.md)** for the adoption cycle and the
+layout contract.
+
+## Security
+
+The **offload harness** runs entirely **locally** — no cloud calls, no credentials, no media egress
+(inputs are local paths or `data:` URIs only). The one deliberate exception is the opt-in `nim`
+tool, which sends only to NVIDIA hosts and only when you set `$NVIDIA_API_KEY`.
+
+The **coding agent** (`local-agent`) is designed **safe-by-default** for a model driving real tools:
+
+- **Every capability is off by default.** All `-allow-*` flags (`write`, `overwrite`, `delete`,
+  `fetch`, `search`, `run`, `shell`, `github`, `browse`; browse also needs `--browse-hosts`) start OFF — the agent is read-only until you opt in.
+- **A tighten-only risk-rule table sits inside the policy broker.** Structural rules (action kind +
+  a path/host glob — never shell-command patterns, which the OS cage owns) can **deny or ask, never
+  allow**; a built-in floor denies secret-material paths (`.env*`, `*.pem`, `*.key`, `id_rsa*`,
+  `id_ed25519*`) whatever the flags say. Load a versioned JSON table with `--rules`; the audit trail
+  records which rule fired at what severity. Separately, every tool call is ledgered with an honest
+  **effect status** (`committed` / `failed` / `unknown` / `none`), and on unattended runs an
+  effectful call the model itself flags `security_risk: high` — or anything unrecognized, which
+  fails closed — is **parked** for operator review instead of executed. That parking is a
+  **backstop, not the gate**: measured on the production agent seats, the self-annotation is a
+  literal constant (83/83 emissions `low` across two seats and five arms, including every
+  destructive call; park-gate recall 0/81), so it is telemetry rather than a security control.
+  The gate that fires is the structural rule table, and since 0.55.0 an **unattended run loads a
+  built-in default table** (`internal/agent/unattended-rules.json`) when `--rules` is not given:
+  deletes and config/dependency-manifest writes queue for operator review; evidence files
+  (`*.jsonl`), model weights (`*.gguf`/`*.safetensors`) and worktree-root CI workflows hard-deny
+  on both write and delete, and lockfile/`go.sum` hand-edits hard-deny (lockfile *deletes* queue
+  like any other delete); ordinary source writes stay governed by the posture flags. The table
+  gates the write/delete tools only — file operations inside the shell/run cage are governed by
+  the OS cage, not by rules. `--rules <path>` replaces the default with your own table
+  (`examples/agent-rules.json` is an alternative starter that additionally queues source
+  overwrites and every fetch); `--rules off` is the explicit escape hatch back to the ungated
+  posture, which the builder then announces with an `UNGATED` note. That is the CLI/queue path
+  only — the MCP `agent_run` front door passes no write/delete/shell/fetch capability and is
+  unaffected.
+- **The runner (`--allow-run`) — honest posture.** The `run` tool is **OFF by default**. It runs an
+  **allowlisted program directly, with no shell** (`Argv = [command, args…]`, never `/bin/sh -c`), so
+  the executable allowlist (`go`, `gofmt`, `python`, `python3`, `pytest`, `npm`, `node`, `cargo`,
+  `git`) is the real control; the command must be a **bare name** that resolves on the trusted PATH
+  (a worktree-planted `go.exe` is refused). Every command is broker-gated and audited.
+  - **On Windows** the child is confined by a **Job Object** (kill-on-close, an active-process limit,
+    a per-process memory cap, and a wall-clock timeout) and a **low-integrity token**: the worktree is
+    *temporarily* relabeled low-integrity for the run (so the child can write it) and **reverted
+    afterward**, and writes outside the worktree are blocked by Mandatory Integrity Control. When the
+    cage cannot lower that label (it needs `WRITE_OWNER` on the folder, which a data drive's default
+    root ACL does not give its owner) the child cannot write the folder, and when it cannot restore it
+    the folder stays writable by other low-integrity processes; either way the run goes ahead and the
+    cage says so in `[sandbox]` lines at the start of stderr. A run whose exit status the cage cannot
+    read reports exit code `-1` and says so the same way, never `0`. **But
+    reads and network are NOT contained on native Windows** — the low-IL token restricts writes, not
+    reads or sockets — so the Windows cage is a **weaker boundary than Linux**. This matches every
+    shipping tool's stance on native Windows; an AppContainer network-deny layer is future work.
+  - **On Linux** `run` (and `run_shell`, `--allow-shell`, **Linux only**) route through the Landlock +
+    seccomp + user-namespace OS cage: no network, filesystem confined to the worktree, syscalls
+    limited. Inside it `.git` is read-only, so a command cannot plant a hook or aim git at a
+    directory of its own: a read-only tmpfs over a `.git` directory, and for a linked worktree
+    (`git worktree add`, where `.git` is a pointer file) a read-only bind of that file, which still
+    reads. Where the kernel refuses that mount, or `.git` is a symlink (which no mount can protect),
+    the run goes ahead and the cage says so in a `[sandbox]` line at the start of stderr.
+- **Prompt-injection defenses.** Untrusted web content pulled by `web_fetch` is **fenced** before it
+  reaches the planner, and fetch is **egress-allowlisted** (deny-all unless you name hosts with
+  `--egress-host`), so injected instructions can't redirect the agent to arbitrary endpoints.
+- **Worktree confinement + `.git` deny.** Writes are confined to the `--worktree` (default `--root`)
+  and the agent cannot write into `.git`. The policy-broker audit log lives **outside** the worktree
+  so a run can't rewrite its own trail.
+- **Loopback-only serve.** `local-agent --serve` is unauthenticated and drives write/GitHub tools, so
+  it refuses any non-loopback `--listen` unless you explicitly pass `--listen-trusted-network`.
+- **Least-privilege tokens.** GitHub tools read `$GITHUB_TOKEN` from the environment (a gitignored
+  env file, never the repo). Scope the token to only what the task needs.
+
+These map to the [OWASP Agentic Security Top-10](https://genai.owasp.org/) (excessive agency, tool
+misuse, prompt injection, insecure output handling). To report a vulnerability, please see
+`SECURITY.md` rather than opening a public issue.

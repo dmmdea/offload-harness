@@ -1551,4 +1551,4 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
 - [browse-lane.md](browse-lane.md)
 - [../architecture/decisions/0001-defer-never-cloud-fallback.md](../architecture/decisions/0001-defer-never-cloud-fallback.md)
 - [../OPERATOR-GUIDE.md](../OPERATOR-GUIDE.md)
-- [../../README.md](../../README.md) — full CLI and MCP tool tables
+- [../REFERENCE.md](../REFERENCE.md) — full CLI and MCP tool tables
