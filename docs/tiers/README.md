@@ -18,7 +18,7 @@ a Windows class.
 | [ampere-16](ampere-16.md) | cuda | 131072 | q8_0 | offload-e4b | dropped | comfyui (hidream-o1) + forecast/stt/vision seat | — |
 | [ampere-6](ampere-6.md) | cuda | 32768 | q8_0 | offload-e4b | dropped | `sdcpp` + forecast/stt/vision seat | [1](reports/ampere-6-node-c.md) |
 | [ampere-8](ampere-8.md) | cuda | 32768 | q8_0 | offload-e4b | dropped | yes + forecast/stt/vision seat | [1](reports/ampere-8-node-a.md) |
-| [blackwell-16](blackwell-16.md) | cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (hidream-o1) + forecast/stt/vision seat | [1](reports/blackwell-16-node-b.md) |
+| [blackwell-16](blackwell-16.md) | cuda | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (hidream-o1) + forecast/stt/vision seat | [2](reports/blackwell-16-node-b.md) |
 | [blackwell-2x16](blackwell-2x16.md) | dual-blackwell | 131072 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + forecast/stt/vision seat | — |
 | [blackwell-32](blackwell-32.md) | cuda-resident | 65536 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + forecast/stt/vision seat | — |
 | [blackwell-3x16](blackwell-3x16.md) | triple-blackwell | 131072 | q8_0 | gemma4-26b-a4b | `gpu` | comfyui (krea2) + forecast/ocr/stt/vision seat | — |

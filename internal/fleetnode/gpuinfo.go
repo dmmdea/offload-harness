@@ -11,6 +11,7 @@
 package fleetnode
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -218,6 +219,10 @@ func ReadInstalledInfo(path string) (InstalledInfo, error) {
 	if err != nil {
 		return InstalledInfo{}, err
 	}
+	// A manifest written by Windows PowerShell 5.1 (Set-Content -Encoding UTF8) starts with a UTF-8 BOM,
+	// which encoding/json rejects as "invalid character 'U+FEFF'"; the installer has written it BOM-less
+	// since 2026-11-04, and this keeps every earlier manifest readable.
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
 	var m InstalledInfo
 	if err := json.Unmarshal(b, &m); err != nil {
 		return InstalledInfo{}, fmt.Errorf("installed.json: %w", err)

@@ -845,7 +845,7 @@ function Save-ComponentRecord {
   param([string]$Key, [hashtable]$Record)
   if ($RenderOnly) { return }
   $doc = $null
-  if (Test-Path -LiteralPath $manifestPath) { try { $doc = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json } catch { $doc = $null } }
+  if (Test-Path -LiteralPath $manifestPath) { try { $doc = Get-Content -Raw -Encoding UTF8 -LiteralPath $manifestPath | ConvertFrom-Json } catch { $doc = $null } }
   if ($null -eq $doc) { $doc = [pscustomobject]@{} }
   Add-OrSet-Property -Object $doc -Name 'schema' -Value 2
   if (-not ($doc.PSObject.Properties['components'] -and $doc.components -is [psobject] -and -not ($doc.components -is [string]))) {
@@ -856,7 +856,10 @@ function Save-ComponentRecord {
     if ($SOURCES[$Key].dest -eq 'llama') { Add-OrSet-Property -Object $doc -Name 'llama_cpp_tag' -Value $Record.version }
     if ($Key -eq 'llama-swap') { Add-OrSet-Property -Object $doc -Name 'llama_swap_tag' -Value $Record.version }
   }
-  $doc | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath "$manifestPath.tmp" -Encoding UTF8
+  # BOM-less on purpose: Windows PowerShell 5.1's Set-Content -Encoding UTF8 writes a BOM (PowerShell 7 does not),
+  # and the Go readers of this manifest (report, the fleet node's health) reject "\ufeff" and report no tier at all.
+  # Same rule as the config write below: every file written for a Go consumer is BOM-less.
+  [System.IO.File]::WriteAllText("$manifestPath.tmp", (($doc | ConvertTo-Json -Depth 6) + "`n"), (New-Object System.Text.UTF8Encoding $false))
   Move-Item -Force -LiteralPath "$manifestPath.tmp" -Destination $manifestPath
 }
 
@@ -1948,7 +1951,7 @@ if (-not $RenderOnly) {
 $manifestPath = Join-Path $HOME_DIR 'installed.json'
 $manifestOld = $null
 if ((Test-Path $manifestPath) -and (-not $RenderOnly)) {
-  try { $manifestOld = Get-Content -Raw $manifestPath | ConvertFrom-Json } catch { $manifestOld = $null }
+  try { $manifestOld = Get-Content -Raw -Encoding UTF8 $manifestPath | ConvertFrom-Json } catch { $manifestOld = $null }
 }
 $manifestComponents = @{}   # populated as each component completes/confirms this run
 
@@ -2743,7 +2746,8 @@ if ($script:dataHomeChoice) {
   if ($manifestOld.PSObject.Properties['data_home_because']) { $manifest['data_home_because'] = $manifestOld.data_home_because }
 }
 # Replaced atomically (tmp + rename): an interrupted run never leaves a half-written manifest.
-$manifest | ConvertTo-Json -Depth 6 | Set-Content -Path "$manifestPath.tmp" -Encoding UTF8
+# BOM-less (see Write-ComponentRecord): PS 5.1's Set-Content -Encoding UTF8 writes a BOM the Go readers reject.
+[System.IO.File]::WriteAllText("$manifestPath.tmp", (($manifest | ConvertTo-Json -Depth 6) + "`n"), (New-Object System.Text.UTF8Encoding $false))
 Move-Item -Force -LiteralPath "$manifestPath.tmp" -Destination $manifestPath
 Show-GenerationTable
 if ($script:StagedComponents.Count -gt 0) {
