@@ -97,9 +97,10 @@ func TestTheAgentSeatEachRAMTierBindsIsTheOneItsRenderServes(t *testing.T) {
 	}
 }
 
-// TestNoOtherTierRendersTheSpillSeatOrAnNCPUMoESpill: the seat is ampere-6's alone tonight. Any other
-// tier, at any RAM tier, renders no spill seat and no `--n-cpu-moe` at all, so no other tier's roster,
-// seed or spec hash moved with this change.
+// TestNoOtherTierRendersTheSpillSeatOrAnNCPUMoESpill: the seat is ampere-6's alone. Any other tier,
+// at any RAM tier, renders no spill seat, and renders `--n-cpu-moe` only for its OWN measured 26B
+// partial spill (moe_26b n_cpu_moe with a declared n_cpu_moe_max, which the write gate bounds;
+// blackwell-16 since 2026-11-05) — never for the seat, never unmeasured.
 func TestNoOtherTierRendersTheSpillSeatOrAnNCPUMoESpill(t *testing.T) {
 	profiles, _, ids := fleetCapProfiles(t)
 	checked := 0
@@ -110,6 +111,7 @@ func TestNoOtherTierRendersTheSpillSeatOrAnNCPUMoESpill(t *testing.T) {
 		if profiles[id].IncludeQwen3635B {
 			t.Errorf("tier %s sets include_qwen36_35b: the seat is measured on ampere-6 only", id)
 		}
+		ownSpill := profiles[id].MoE26B == "n_cpu_moe" && profiles[id].NCPUMoEMax > 0
 		for _, goos := range []string{"linux", "windows"} {
 			if _, err := templateFor(goos, profiles[id].Backend); err != nil {
 				continue
@@ -122,8 +124,11 @@ func TestNoOtherTierRendersTheSpillSeatOrAnNCPUMoESpill(t *testing.T) {
 			}
 			checked++
 			body := nonCommentConfig(res.Config)
-			if strings.Contains(body, spillSeat) || strings.Contains(body, "--n-cpu-moe") {
-				t.Errorf("tier %s (%s) renders the spill seat or an --n-cpu-moe spill, which only ampere-6 may", id, goos)
+			if strings.Contains(body, spillSeat) {
+				t.Errorf("tier %s (%s) renders the spill seat, which only ampere-6 may", id, goos)
+			}
+			if !ownSpill && strings.Contains(body, "--n-cpu-moe") {
+				t.Errorf("tier %s (%s) renders an --n-cpu-moe spill without a measured 26B partial placement of its own", id, goos)
 			}
 		}
 	}

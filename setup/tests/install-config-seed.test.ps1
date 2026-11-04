@@ -85,6 +85,13 @@ foreach ($tier in @('blackwell-16','ampere-16','volta-16')) {
   if ($tier -eq 'ampere-16') {
     Assert ($s.agent_model -eq 'qwen3.5-4b-agent')                        "$tier binds the seat that can finish a DEFAULT contract (the 27B entry renders, but see ADR 0047)"
     Assert ($s.agent_profile -eq 'research')                              "$tier seeds the research profile"
+  } elseif ($tier -eq 'blackwell-16') {
+    # MEASURED 2026-11-05 (docs/tiers/reports/blackwell-16-node-h.md): the 26B is a partial spill (--n-cpu-moe 14)
+    # that the RAM gate drops on a min box, so the validated thinking-on 26B agent binds in config_seed_ram_low_up
+    # (28 GB and up, every box that keeps the 26B) and the base seed blanks agent_model EXPLICITLY: the lane follows
+    # the workhorse where the roster has no 26B, and nothing derives the dropped seat from resident_tier.
+    Assert ($s.PSObject.Properties['agent_model'] -and $s.agent_model -eq '') "$tier blanks agent_model in the base seed (explicit, so the dropped 26B is never derived)"
+    Assert ($profiles.$tier.config_seed_ram_low_up.agent_model -eq 'gemma-4-26b-agent') "$tier seats the validated thinking-on 26B agent on 28 GB and up (model KEY, not alias)"
   } else {
     Assert ($s.agent_model -eq 'gemma-4-26b-agent')                       "$tier seats the validated thinking-on 26B agent (model KEY, not alias)"
   }

@@ -63,9 +63,10 @@ func TestRenderGateExemptsOnlyTheCPUBackend(t *testing.T) {
 		t.Fatalf("the installer's own off-matrix render must pass the write gate with no exemption: %v", err)
 	}
 
-	// The flag in a table GPU tier's render is the defect: a backend with a card.
+	// The flag in a table GPU tier's render is the defect: a backend with a card. blackwell-16's 26B
+	// entries carry the measured `--n-cpu-moe 14 -ngl 999` (2026-11-05); the bare flag goes before that.
 	gpu := tierRender(t, "blackwell-16")
-	gpu.Config = withBareCPUMoe(t, gpu.Config, "-ngl 99 --parallel 1")
+	gpu.Config = withBareCPUMoe(t, gpu.Config, "-ngl 999 --parallel 1")
 	err := renderGate(gpu)
 	if err == nil {
 		t.Fatal("a table GPU tier whose render carries the bare --cpu-moe passed the write gate")
@@ -291,7 +292,7 @@ func TestAuditYAMLReadsTheExemptionFromTheStamp(t *testing.T) {
 
 	t.Run("a stamped table GPU tier is not exempt", func(t *testing.T) {
 		res := tierRender(t, "blackwell-16")
-		res.Config = withBareCPUMoe(t, res.Config, "-ngl 99 --parallel 1")
+		res.Config = withBareCPUMoe(t, res.Config, "-ngl 999 --parallel 1")
 		out, err := auditYAMLOn(t, stamp(t, res))
 		if err == nil || !strings.Contains(out, "cpu-moe (") {
 			t.Fatalf("a GPU tier's stamp exempts nothing; err=%v:\n%s", err, out)
@@ -303,7 +304,7 @@ func TestAuditYAMLReadsTheExemptionFromTheStamp(t *testing.T) {
 
 	t.Run("an unstamped GPU render is a violation that says it was judged as a GPU box", func(t *testing.T) {
 		res := tierRender(t, "blackwell-16")
-		cfg := withBareCPUMoe(t, res.Config, "-ngl 99 --parallel 1")
+		cfg := withBareCPUMoe(t, res.Config, "-ngl 999 --parallel 1")
 		out, err := auditYAMLOn(t, cfg)
 		if err == nil || !strings.Contains(out, "cpu-moe (") || !strings.Contains(out, "unstamped") {
 			t.Fatalf("an unstamped file is judged as a box with a card; err=%v:\n%s", err, out)
