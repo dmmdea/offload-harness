@@ -34,4 +34,4 @@ configure it, do send content off the box, and the README says so where they are
 - **The coding agent's `--allow-fetch`, `--allow-search` and `--allow-github`** flags reach the hosts you allow-list,
   DuckDuckGo, and GitHub with your token. They are off by default.
 
-See the [Security](README.md#security) section of the README for the agent's full posture.
+See the [Security](docs/REFERENCE.md#security) section of the reference for the agent's full posture.
