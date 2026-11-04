@@ -2245,10 +2245,18 @@ function Resolve-HarnessExe {
   $repoRoot = Split-Path -Parent $scriptDir
   $tmpExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".exe")
   Push-Location $repoRoot
+  # `go build` writes "go: downloading <module>" to STDERR on a box whose module cache is
+  # cold (every fresh install), and under this file's $ErrorActionPreference='Stop' a
+  # stderr line merged by 2>&1 is a TERMINATING NativeCommandError: the first fresh Windows
+  # box (an RTX 5080 desktop, 2026-11-04) died here with the build still running. Only the
+  # exit code decides a build; stderr is its log.
+  $prevEapGo = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   try {
-    $buildOut = & go build -o $tmpExe . 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "cannot build the renderer from $repoRoot ($LASTEXITCODE): $($buildOut -join ' ')" }
-  } finally { Pop-Location }
+    $buildOut = @(& go build -o $tmpExe . 2>&1 | ForEach-Object { "$_" })
+    $goRc = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
+  if ($goRc -ne 0) { throw "cannot build the renderer from $repoRoot ($goRc): $($buildOut -join ' ')" }
   if (-not (Test-Path $tmpExe)) { throw "go build reported success but produced no $tmpExe" }
   return $tmpExe
 }
@@ -2415,10 +2423,15 @@ Step 'build local-offload.exe' `
   {
     if (-not (Test-Go126)) { throw "Go >=1.26 not on PATH - cannot build" }
     Push-Location $repoRoot
+    # Same stderr rule as Resolve-HarnessExe: a cold module cache prints to stderr; the exit
+    # code is the verdict. The build's lines go to the transcript, not the error stream.
+    $prevEapGo = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
     try {
-      & go build -o $harnessExe .
-      if ($LASTEXITCODE -ne 0) { throw "go build (harness) failed (exit $LASTEXITCODE)" }
-    } finally { Pop-Location }
+      & go build -o $harnessExe . 2>&1 | ForEach-Object { Write-Host "      go: $_" }
+      $goRc = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
+    if ($goRc -ne 0) { throw "go build (harness) failed (exit $goRc)" }
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
   }
 $manifestComponents['local-offload'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
@@ -2680,10 +2693,16 @@ if ($hfResult -and (Test-Path $cfgDest)) {
 # ---------------------------------------------------------------------------
 if ($env:COMFY_DIR) { $comfyDir = $env:COMFY_DIR } else { $comfyDir = 'C:/ComfyUI' }
 if ($env:COMFY_PY)  { $comfyPy  = $env:COMFY_PY }  else { $comfyPy  = Join-Path $comfyDir '.venv/Scripts/python.exe' }
-if (Test-Path $comfyDir) {
+# Discoverable means the venv's python answers, not that the directory exists: a box with a
+# bare or half-made C:/ComfyUI folder and no venv (the first fresh Windows install, an RTX 5080
+# desktop, 2026-11-04) reached Ensure-RunGraphDeps, which called the missing python.exe and
+# killed the install one step before the manifest and the verdict. Best-effort means SKIP.
+if ((Test-Path $comfyDir) -and (Test-Path $comfyPy)) {
   Write-Host "DO    run-graph deps (ComfyUI at $comfyDir)" -ForegroundColor Cyan
   $rgLog = Ensure-RunGraphDeps -ComfyPy $comfyPy -ComfyDir $comfyDir
   Write-Host "OK    run-graph deps: $rgLog" -ForegroundColor Green
+} elseif (Test-Path $comfyDir) {
+  Write-Host "SKIP  run-graph deps (a directory at $comfyDir but no venv python at $comfyPy; offload_run_graph will DEFER SATISFIER_UNAVAILABLE, not crash; set COMFY_PY to the ComfyUI python to enable)" -ForegroundColor DarkGray
 } else {
   Write-Host "SKIP  run-graph deps (no ComfyUI at $comfyDir; offload_run_graph will DEFER SATISFIER_UNAVAILABLE, not crash)" -ForegroundColor DarkGray
 }
