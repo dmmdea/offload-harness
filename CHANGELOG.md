@@ -7,6 +7,62 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.207.2] - 2026-11-04 - blackwell-16 measured on an RTX 5080 desktop: the 26B partial spill, a BOM-free manifest, the hybrid GPU count
+
+### Fixed - `installed.json` is written without a BOM, and the Go readers tolerate one
+
+- **What it does.** Both manifest writes in `setup/install.ps1` (the per-component record and the final
+  version manifest) go through a BOM-less UTF-8 writer, the way the config write beside them already
+  did. `ReadInstalledInfo` (the reader behind `local-offload report` and the fleet node's health)
+  strips a leading BOM before decoding, so a manifest written by an earlier installer under Windows
+  PowerShell 5.1 still reads. The installer's own two reads of the manifest (the component record it
+  carries forward, the previous manifest on a re-run) decode UTF-8 explicitly: Windows PowerShell 5.1
+  reads a BOM-less file as the ANSI code page, so a `data_home` with a non-ASCII character would have
+  round-tripped as mojibake on every re-run.
+- **Why.** `Set-Content -Encoding UTF8` writes a BOM under Windows PowerShell 5.1 and none under
+  PowerShell 7. The reference boxes install under PowerShell 7; the first box installed under 5.1 (an
+  RTX 5080 desktop, 2026-11-04) got a manifest the Go side rejected with
+  `invalid character 'U+FEFF' looking for beginning of value`, so `local-offload report` printed
+  `hardware tier: UNKNOWN` on a box the installer had just classified `blackwell-16`, and the fleet
+  node's health carried no profile.
+- **Check.** On that box, the same manifest with the BOM removed: `report` prints
+  `hardware tier: blackwell-16`.
+
+### Fixed - the selftest's dual-GPU gate counts offload GPUs by the detect.ps1 rule
+
+- **What it does.** `setup/selftest.ps1` derives the `gpu_count` of its dual-GPU gate the way
+  `setup/detect.ps1` does since 0.207.1: NVIDIA and AMD adapters, minus an AMD iGPU beside a discrete
+  card; the iGPU counts only when it is the box's only GPU.
+- **Why.** The selftest counted every NVIDIA/AMD/Radeon adapter, so a Ryzen desktop's
+  `AMD Radeon(TM) Graphics` next to an RTX 5080 reported `gpu_count=2` in the receipt (2026-11-04).
+  The verdict `not-applicable-on-this-host` was right only because the profile is not dual-resident;
+  the count was wrong.
+- **Check.** The rule, run live on the three-card reference workstation (three discrete Blackwell
+  cards, Intel iGPU): `count=3`.
+
+### Changed - `blackwell-16` serves the 26B with `--n-cpu-moe 14`; the Blackwell CUDA-13 "cuBLAS fallback" warning is retired
+
+- **What it does.** The tier's 26B placement is `n_cpu_moe` with N=14 (`n_cpu_moe_max` 14), so
+  both 26B entries render `--n-cpu-moe 14 -ngl 999`: the top 14 expert layers in host RAM,
+  everything else on the card. `detect.ps1` no longer warns that a CUDA-13 build serves Blackwell
+  through a slow cuBLAS fallback, and the installer's build report says what was measured instead.
+  Because the RAM gate drops an `n_cpu_moe` 26B on a box under 28 GB of RAM, the tier's agent seat
+  now binds by RAM band: `config_seed_ram_low_up` names `gemma-4-26b-agent` on 28 GB and up (every
+  box that keeps the 26B), and the base seed leaves `agent_model` blank, so a smaller box runs the
+  agent lane on the workhorse instead of a seat its roster no longer serves. `tierseed.Resolve` applies
+  the same rule to a declared vLLM seat's llama.cpp fallback: a fallback that names the 26B agent seat
+  is not bound on a RAM band whose gate drops the 26B, so the seed layers decide the lane there.
+- **Why.** Measured 2026-11-05 on an RTX 5080 16 GB that is also the desktop's display card
+  (`docs/tiers/reports/blackwell-16-node-h.md`). Full GPU needs about 14.4 GB on the card and
+  spills whenever the desktop holds more than about 1.5 GB: 17 tok/s, against 139 tok/s once at a
+  near-empty card. N=14 keeps the seat at 9.1 GB on the card, 62.5 tok/s, and fits under the
+  heaviest desktop seen there (5.4 GB); N=8 (81 tok/s) and N=4 (121 tok/s) fit only lighter
+  desktops. The same run's llama-bench on the win-cuda-13.4 prebuilt b12110: E4B pp512 17694 tok/s,
+  tg128 212; E2B 34454 / 345. No fallback, so the 2026-07-15 finding on an earlier build is retired.
+- **Check.** On that box, both entries patched by hand to the rendered form and llama-swap
+  restarted while idle: one chat completion on `gemma4-26b-a4b` at the owner's desktop ran at
+  pp 472 / tg 58.2 tok/s with 10678 of 16303 MiB used, cold load included in 8.5 s.
+
 ## [0.207.1] - 2026-11-04 - Windows installer fixes from the first fresh hybrid-desktop install
 
 ### Fixed - an AMD iGPU beside a discrete NVIDIA card no longer makes the box `dual-gpu`
