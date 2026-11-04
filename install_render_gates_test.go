@@ -299,13 +299,16 @@ func vllmEntries(t *testing.T, cfg string) []string {
 // H-01's remaining rule at the write gate: `install render` refuses a config whose
 // `--n-cpu-moe` exceeds the tier's MEASURED spill (profiles.json `n_cpu_moe_max`), and refuses
 // a partial placement that names no N, because that one renders the every-expert `--cpu-moe`.
-// Nothing shipped declares a partial spill today, so this is a control: the gate is built and
-// can be made to fail, not merely assumed to pass.
+// blackwell-16 ships a measured partial spill (N=14, 2026-11-05), so the helper clears the table's
+// own fields first: every case below starts from exactly the placement it names, and the gate is
+// still shown to fail, not merely assumed to pass.
 func TestInstallRenderRefusesNCPUMoEAboveTheTiersMeasuredSpill(t *testing.T) {
 	render := func(moe string, n, max int) (renderResult, error) {
 		doc := tableDoc(t)
 		e := tierEntry(doc, "blackwell-16") // a CUDA tier that serves the 26B
 		e["moe_26b"] = moe
+		delete(e, "n_cpu_moe")
+		delete(e, "n_cpu_moe_max")
 		if n != 0 {
 			e["n_cpu_moe"] = n
 		}

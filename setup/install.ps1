@@ -1209,8 +1209,8 @@ function Test-YamlHasEveryExpertFlag {
 # Matrix (upstream reality):
 #   * win-cuda-12.4 prebuilt: NO sm_120 -> will not run Blackwell at all.
 #   * win-cuda-13.4 prebuilt (13.3 on older builds): SERVES Blackwell at full speed. Measured
-#     2026-11-05 on an RTX 5080 with b12110: E4B pp512 17694 tok/s / tg128 212, E2B 34454 / 345
-#     (llama-bench, -ngl 99 -fa 1). The 2026-07-15 finding of an MMQ-to-cuBLAS fallback (~5.6x
+#     2026-11-05 on an RTX 5080 with the newest prebuilt of that day: E4B pp512 17694 tok/s /
+#     tg128 212, E2B 34454 / 345 (llama-bench, -ngl 99 -fa 1). The 2026-07-15 finding of an MMQ-to-cuBLAS fallback (~5.6x
 #     slower prefill) was an earlier build and does not reproduce. Needs a CUDA-13 driver.
 #   * NO win-cuda-12.8 prebuilt exists; a source build vs a 12.8/12.9 toolkit
 #     (-DCMAKE_CUDA_ARCHITECTURES=120) is optional, not a speed fix. See setup/SETUP-AGENT.md,
@@ -1247,7 +1247,7 @@ function Select-CudaBuild {
   if ($ProfileId -match '^blackwell-') {
     if ($driverVer -and $driverVer -ge [version]'13.0') {
       $report = @(
-        "Blackwell (sm_120), $cudaDesc -> CUDA-13.4 prebuilt: SERVES at full speed (measured 2026-11-05 on an RTX 5080, b12110: E4B pp512 17694 tok/s, tg128 212; E2B 34454 / 345).",
+        "Blackwell (sm_120), $cudaDesc -> CUDA-13.4 prebuilt: SERVES at full speed (measured 2026-11-05 on an RTX 5080: E4B pp512 17694 tok/s, tg128 212; E2B 34454 / 345).",
         "A source build vs a CUDA 12.8/12.9 toolkit (-DCMAKE_CUDA_ARCHITECTURES=120) is optional, not a speed fix. See setup/SETUP-AGENT.md - Blackwell note." )
       if ($toolkitVer -and $toolkitVer -ge [version]'12.8' -and $toolkitVer -lt [version]'13.0') {
         $report += "Toolkit $CudaToolkit is installed - the optional source build is available on this box."

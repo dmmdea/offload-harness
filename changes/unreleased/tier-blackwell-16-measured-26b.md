@@ -4,6 +4,12 @@
   both 26B entries render `--n-cpu-moe 14 -ngl 999`: the top 14 expert layers in host RAM,
   everything else on the card. `detect.ps1` no longer warns that a CUDA-13 build serves Blackwell
   through a slow cuBLAS fallback, and the installer's build report says what was measured instead.
+  Because the RAM gate drops an `n_cpu_moe` 26B on a box under 28 GB of RAM, the tier's agent seat
+  now binds by RAM band: `config_seed_ram_low_up` names `gemma-4-26b-agent` on 28 GB and up (every
+  box that keeps the 26B), and the base seed leaves `agent_model` blank, so a smaller box runs the
+  agent lane on the workhorse instead of a seat its roster no longer serves. `tierseed.Resolve` applies
+  the same rule to a declared vLLM seat's llama.cpp fallback: a fallback that names the 26B agent seat
+  is not bound on a RAM band whose gate drops the 26B, so the seed layers decide the lane there.
 - **Why.** Measured 2026-11-05 on an RTX 5080 16 GB that is also the desktop's display card
   (`docs/tiers/reports/blackwell-16-node-h.md`). Full GPU needs about 14.4 GB on the card and
   spills whenever the desktop holds more than about 1.5 GB: 17 tok/s, against 139 tok/s once at a

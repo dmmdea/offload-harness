@@ -163,13 +163,32 @@ func TestNo26BAgentSeatOnRAMDroppable26B(t *testing.T) {
 	// cascade seat — the lint covers every name that resolves to those weights.
 	seats26B := map[string]bool{"gemma4-26b-a4b": true, "gemma-4-26b-agent": true, "gemma4-26b-agent": true, "26b-agent": true}
 	for id, sp := range doc.Profiles {
+		// The RAM bands on which the gate drops the 26B, by placement (moePlacement /
+		// Resolve-ProfileParams): n_cpu_moe on min only, cpu_moe on low and min, a dropped 26B
+		// everywhere, gpu nowhere. On each such band the seed layers that apply THERE (the base
+		// seed alone on min; plus config_seed_ram_low_up on low; plus config_seed_ram_mid_high on
+		// mid/high) must not route the agent lane to the 26B. blackwell-16 is the worked example
+		// (2026-11-05): a measured `--n-cpu-moe 14`, agent_model blank in the base seed and the
+		// 26B agent seat bound by the low-and-up overlay, so a min box follows the workhorse.
+		var bands []string
+		switch sp.MoE26B {
+		case "gpu":
+		case "n_cpu_moe":
+			bands = []string{"min"}
+		case "cpu_moe":
+			bands = []string{"min", "low"}
+		default:
+			bands = []string{"min", "low", "mid", "high"}
+		}
 		for _, goos := range []string{"linux", "windows"} {
-			cfg := effectiveConfig(t, seedProfiles[id], id, goos)
-			if agent := cfg.AgentPlannerModel(""); seats26B[agent] && sp.MoE26B != "gpu" {
-				t.Errorf("tier %s (%s): the resolved agent seat is %q but moe_26b is %q — on a low/min-RAM "+
-					"box the RAM gate drops the 26B from the served roster while agent_model still names it, "+
-					"and low/min RAM has no overlay to blank the seat. Pin the 26B (moe_26b \"gpu\") or seat a "+
-					"RAM-independent model.", id, goos, agent, sp.MoE26B)
+			for _, ram := range bands {
+				cfg := seededConfigFor(t, seedProfiles[id], id, goos, ram)
+				if agent := cfg.AgentPlannerModel(""); seats26B[agent] {
+					t.Errorf("tier %s (%s, ram %s): the resolved agent seat is %q but moe_26b %q drops the 26B "+
+						"from the served roster on this RAM band while agent_model still names it. Blank agent_model "+
+						"in the seed layer that applies here (config_seed on min, config_seed_ram_low_up on low) or "+
+						"seat a RAM-independent model.", id, goos, ram, agent, sp.MoE26B)
+				}
 			}
 		}
 	}

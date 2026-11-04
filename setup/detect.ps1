@@ -502,7 +502,7 @@ if ($os -ne 'windows') { Write-Error 'This detector targets Windows. Use the Lin
 #  - driver_version= the NVIDIA driver build
 #  - toolkit_cuda  = the installed CUDA Toolkit (nvcc), or null if no toolkit is present
 # Why it matters on Blackwell (sm_120): the CUDA-13 prebuilt serves at full speed (measured
-# 2026-11-05 on an RTX 5080, b12110: E4B pp512 17.7k tok/s, tg128 212; the 2026-07-15 finding
+# 2026-11-05 on an RTX 5080: E4B pp512 17.7k tok/s, tg128 212; the 2026-07-15 finding
 # of an MMQ-to-cuBLAS fallback, ~5.6x slower prefill, was an earlier build and does not
 # reproduce); the old CUDA-12.4 prebuilt has no sm_120 and won't run; a source build vs a
 # 12.8/12.9 toolkit is optional. The installer keys the build choice off these, not a fixed

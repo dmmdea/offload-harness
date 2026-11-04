@@ -131,13 +131,17 @@ if ($r.yaml -notmatch '(?m)^\s{2}gemma4-26b-a4b:')             { Ok 'ampere-8/lo
 if ($r.yaml -notmatch 'gemma4-26b-a4b')                        { Ok 'ampere-8/low 26B gone from group members too' } else { Bad 'ampere-8/low 26B removed from members' }
 if ($r.verdict -and (-not $r.verdict.include_26b))             { Ok 'ampere-8/low verdict include_26b=false' } else { Bad 'ampere-8/low verdict include_26b' }
 
-Write-Host "== blackwell-16 - ctx 32768 + 26B on GPU (-ngl 99, no --cpu-moe) =="
+Write-Host "== blackwell-16 - ctx 32768 + 26B measured partial spill (--n-cpu-moe 14 -ngl 999, never the bare --cpu-moe) =="
+# MEASURED 2026-11-05 on a display-card RTX 5080 (docs/tiers/reports/blackwell-16-node-h.md): full GPU needs
+# ~14.4 GB on the card and spills at any desktop over ~1.5 GB; N=14 keeps 9.1 GB on the card at 62.5 tok/s.
 $r = Invoke-Render -Backend 'cuda' -ProfileId 'blackwell-16' -RamTier 'mid' -BigRam $false
 $macro = Get-CommonMacro $r.yaml
 if ($macro -match '--ctx-size 32768')                          { Ok 'blackwell-16 ctx=32768' } else { Bad "blackwell-16 ctx (got: $macro)" }
 $b26 = Get-ModelCmd -Yaml $r.yaml -ModelKey 'gemma4-26b-a4b'
-if ($b26 -match '-ngl 99' -and $b26 -notmatch '--cpu-moe')     { Ok 'blackwell-16 26B on GPU (-ngl 99, no cpu-moe)' } else { Bad "blackwell-16 26B gpu (got: $b26)" }
-if ($r.verdict -and $r.verdict.moe_mode -eq 'gpu')             { Ok 'blackwell-16 verdict moe_mode=gpu' } else { Bad 'blackwell-16 moe_mode' }
+if ($b26 -match '--n-cpu-moe 14 -ngl 999' -and $b26 -notmatch '--cpu-moe') { Ok 'blackwell-16 26B carries the measured spill (--n-cpu-moe 14 -ngl 999, no bare cpu-moe)' } else { Bad "blackwell-16 26B placement (got: $b26)" }
+$b26a = Get-ModelCmd -Yaml $r.yaml -ModelKey 'gemma-4-26b-agent'
+if ($b26a -match '--n-cpu-moe 14 -ngl 999')                     { Ok 'blackwell-16 26B agent seat carries the same placement' } else { Bad "blackwell-16 26B agent placement (got: $b26a)" }
+if ($r.verdict -and $r.verdict.moe_mode -eq 'n_cpu_moe')       { Ok 'blackwell-16 verdict moe_mode=n_cpu_moe' } else { Bad 'blackwell-16 moe_mode' }
 # H4 Blackwell runtime env: every model block carries CUDA_VISIBLE_DEVICES=0 +
 # CUDA_MODULE_LOADING=LAZY. The 26B no longer carries GGML_CUDA_DISABLE_GRAPHS: on
 # sm_120 that flag cost 40-51% of generation for no recorded reason (2026-09-05,

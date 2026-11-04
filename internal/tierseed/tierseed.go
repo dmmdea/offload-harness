@@ -88,6 +88,12 @@ var vaeArgs = map[string]string{
 type Profile struct {
 	Backend    string         `json:"backend"`
 	ConfigSeed map[string]any `json:"config_seed"`
+	// MoE26B and Include26B mirror the serving table's 26B placement, so Resolve can tell on
+	// which RAM bands the render's gate drops the 26B (install_render.go moePlacement,
+	// install.ps1 Resolve-ProfileParams): a vLLM seat's llama.cpp fallback that names the 26B
+	// agent seat is not bound on a band that will not serve it (see ramDrops26B).
+	MoE26B     string `json:"moe_26b"`
+	Include26B bool   `json:"include_26b"`
 	// ConfigSeedLowUp is the RAM-gated overlay for the 32 GB class and up: applied when the
 	// detected ram_tier is low, mid or high (28 GB and above), never on min. It exists for a
 	// binding whose seat needs host RAM a `min` box does not have but a `low` box does (the
@@ -609,6 +615,33 @@ func RAMLowUp(ramTier string) bool {
 	return false
 }
 
+// ramDrops26B mirrors the render's RAM gate (install_render.go moePlacement, install.ps1
+// Resolve-ProfileParams): a tier that does not carry the 26B drops it on every band, cpu_moe
+// drops it on min and low, n_cpu_moe on min; "" (an unknown band) is the ungated widest roster
+// and drops nothing.
+func (p Profile) ramDrops26B(ramTier string) bool {
+	if !p.Include26B || p.MoE26B == "drop" {
+		return true
+	}
+	switch p.MoE26B {
+	case "cpu_moe":
+		return ramTier == "min" || ramTier == "low"
+	case "n_cpu_moe":
+		return ramTier == "min"
+	}
+	return false
+}
+
+// names26BSeat reports whether a seed value names the 26B weights under any of the entry
+// names the render gives them (the cascade seat and the reasoning-on agent entry).
+func names26BSeat(v any) bool {
+	switch s, _ := v.(string); s {
+	case "gemma4-26b-a4b", "gemma-4-26b-agent", "gemma4-26b-agent", "26b-agent":
+		return true
+	}
+	return false
+}
+
 // Resolve renders one tier's seed for a target machine: overlay applied, tokens
 // expanded, vae_mode translated, and the whole thing validated. The result is ready
 // to merge into a config.json.
@@ -662,6 +695,14 @@ func Resolve(p Profile, id string, opt Options) (map[string]any, error) {
 				return nil, err
 			}
 			b = p.VLLMSeat.Bindings()
+		} else if p.ramDrops26B(ramTier) && names26BSeat(b["agent_model"]) {
+			// The fallback is the 26B agent seat on a RAM band whose gate drops the 26B from
+			// the render: binding it would route the agent lane to a seat the roster does not
+			// serve. The seed layers above decide the lane there instead (blackwell-16,
+			// 2026-11-05: an explicit blank in config_seed on min, the 26B agent seat from
+			// config_seed_ram_low_up on 28 GB and up).
+			delete(b, "agent_model")
+			delete(b, "agent_ctx_tokens")
 		}
 		for k, v := range b {
 			merged[k] = v
