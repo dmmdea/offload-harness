@@ -59,3 +59,34 @@ Derived from this machine's bindings, not declared. `CONFIGURED` = bound and the
 ---
 
 Send this file back as-is. It is read-only output: no model was loaded, no GPU work was queued, and nothing on this machine changed.
+
+## Operator measurements, 2026-11-05 (not part of the `report` output above)
+
+Taken on the same box by hand-run jobs (llama-bench and bare llama-server probes on a scratch port), inside a GPU window that opens only while the owner's own tenants are idle. The card is the desktop's display card: the owner's dictation stack and an Ollama embed model held 4.5 GB at the start and idle-unloaded to about 1.6 GB during the run (the "desktop before" column). llama.cpp win-cuda-13.4 prebuilt b12110 (commit cd959bae9), driver CUDA 13.x.
+
+### llama-bench (`-ngl 99 -fa 1`, 3 repeats)
+
+| model | pp512 tok/s | pp2048 tok/s | tg128 tok/s |
+|---|---|---|---|
+| gemma4-e2b (2.43 GiB) | 34454 (sd 3069) | 40701 | 345.1 |
+| offload-e4b (3.91 GiB) | 17694 (sd 909) | 19532 | 212.4 |
+
+This retires the "CUDA-13 build serves Blackwell through a cuBLAS fallback, ~5.6x slower prefill" warning for sm_120: there is no fallback on this build.
+
+### 26B-A4B (UD-Q4_K_XL) placement sweep, ctx 32768, q8_0 KV, 784-token prompt, 96 tokens generated
+
+| placement | desktop before (MiB) | seat on the card (MiB) | free after load (MiB) | pp tok/s | tg tok/s | load s |
+|---|---|---|---|---|---|---|
+| `-ngl 99` (the seat as rendered before 0.207.2) | 4546 | 10997 + spill | 760 | 351 | 17.0 | 18.6 |
+| `-ngl 99`, ctx 16384 | 1810 | 13627 + spill | 866 | 357 | 18.5 | 10.6 |
+| `--n-cpu-moe 4` | 1546 | 13065 | 1692 | 1428 | 121.2 | 6.5 |
+| `--n-cpu-moe 8` | 1553 | 11563 | 3187 | 824 | 81.2 | 6.6 |
+| `--n-cpu-moe 14` | 1556 | 9109 | 5638 | 535 | 62.5 | 4.5 |
+
+Full GPU needs roughly 14.4 GB on the card, which a display card never has free while the desktop runs (the selftest saw 139 tok/s once at a near-empty card and 20 tok/s on the next run). `--n-cpu-moe 14` is the placement the tier ships from 0.207.2: it fits with 2.6 GB to spare under the heaviest desktop observed on this box (5.4 GB) and holds about 5 GB of experts in host RAM. N=8 fits only below a 4.5 GB desktop; N=4 only an empty card.
+
+Qwen3.8-27B UD-IQ3_S at `-ngl 99`, ctx 32768, q8_0 KV: 12370 MiB on the card, 2103 free, pp 1347 tok/s, tg 59.4 tok/s, coherent with thinking. Not a tier seat on Windows (the tier's declared agent seat is the vLLM build, with the 26B agent entry as the fallback this box serves); recorded as a measured option.
+
+### The shipped placement, live through llama-swap
+
+Both 26B entries patched to `--n-cpu-moe 14 -ngl 999` on the box ahead of the release that renders it, llama-swap restarted while idle. One chat completion on `gemma4-26b-a4b` at the owner's desktop: 8.5 s wall including the cold load, pp 472 tok/s, tg 58.2 tok/s, 10678 of 16303 MiB used with the seat loaded (1378 MiB before), a coherent three-sentence answer.

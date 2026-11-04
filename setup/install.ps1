@@ -1206,14 +1206,15 @@ function Test-YamlHasEveryExpertFlag {
 # the TOOLKIT (nvcc) only matters for the source-build path, so it is reported
 # as an opportunity, never required.
 #
-# Matrix (upstream reality — the sm_120 / cuBLAS findings below were measured on an earlier build on
-# 2026-07-15 and are not re-measured on every newer one):
+# Matrix (upstream reality):
 #   * win-cuda-12.4 prebuilt: NO sm_120 -> will not run Blackwell at all.
-#   * win-cuda-13.4 prebuilt (13.3 on older builds): SERVES Blackwell (MMQ falls back to cuBLAS,
-#     ~5.6x slower prefill on Q4 — functional, not peak). Needs a CUDA-13 driver.
-#   * NO win-cuda-12.8 prebuilt exists -> the PEAK path (sm_120 MMQ,
-#     -DCMAKE_CUDA_ARCHITECTURES=120) is a documented source-build vs a
-#     12.8/12.9 toolkit. See setup/SETUP-AGENT.md, Blackwell note.
+#   * win-cuda-13.4 prebuilt (13.3 on older builds): SERVES Blackwell at full speed. Measured
+#     2026-11-05 on an RTX 5080 with b12110: E4B pp512 17694 tok/s / tg128 212, E2B 34454 / 345
+#     (llama-bench, -ngl 99 -fa 1). The 2026-07-15 finding of an MMQ-to-cuBLAS fallback (~5.6x
+#     slower prefill) was an earlier build and does not reproduce. Needs a CUDA-13 driver.
+#   * NO win-cuda-12.8 prebuilt exists; a source build vs a 12.8/12.9 toolkit
+#     (-DCMAKE_CUDA_ARCHITECTURES=120) is optional, not a speed fix. See setup/SETUP-AGENT.md,
+#     Blackwell note.
 #   * dual sm_70+sm_120: no single prebuilt covers both, and the CUDA-13 toolkit
 #     cannot compile sm_70 (Volta offline compilation removed in CUDA 13.0) ->
 #     source-build vs a 12.8/12.9 toolkit with -DCMAKE_CUDA_ARCHITECTURES="70;120"
@@ -1246,10 +1247,10 @@ function Select-CudaBuild {
   if ($ProfileId -match '^blackwell-') {
     if ($driverVer -and $driverVer -ge [version]'13.0') {
       $report = @(
-        "Blackwell (sm_120), $cudaDesc -> CUDA-13.4 prebuilt: SERVES now (MMQ falls back to cuBLAS, ~5.6x slower prefill on Q4). Functional, not peak.",
-        "Peak path: source-build vs a CUDA 12.8/12.9 toolkit with -DCMAKE_CUDA_ARCHITECTURES=120 (MMQ). See setup/SETUP-AGENT.md - Blackwell note." )
+        "Blackwell (sm_120), $cudaDesc -> CUDA-13.4 prebuilt: SERVES at full speed (measured 2026-11-05 on an RTX 5080, b12110: E4B pp512 17694 tok/s, tg128 212; E2B 34454 / 345).",
+        "A source build vs a CUDA 12.8/12.9 toolkit (-DCMAKE_CUDA_ARCHITECTURES=120) is optional, not a speed fix. See setup/SETUP-AGENT.md - Blackwell note." )
       if ($toolkitVer -and $toolkitVer -ge [version]'12.8' -and $toolkitVer -lt [version]'13.0') {
-        $report += "Toolkit $CudaToolkit is already installed - the peak source-build is available on this box now."
+        $report += "Toolkit $CudaToolkit is installed - the optional source build is available on this box."
       }
       return @{ component = 'llama-cuda13'; keys = @('llama-cuda13','llama-cudart13'); tier = 'serves'; refuse = $false; report = $report }
     }

@@ -353,20 +353,21 @@ If `uv` is missing at call time, run-graph returns a clean **DEFER `SATISFIER_UN
 installed on the box.** Do NOT hard-require one version — detect what's present and pick the best
 build for it. Three cases:
 
-- **CUDA 13.x installed (e.g. 13.3):** the card **DOES serve** on a CUDA-13 build — it just falls
-  back from the Blackwell MMQ kernel to a cuBLAS path that is roughly **5.6× slower on prefill** for
-  Q4 (measured elsewhere: ~772 vs ~5611 t/s pp512; token generation is far less affected). This is a
-  **functional, ship-it-now state** — good enough to run, not peak. Use the CUDA-13 build and record
-  the perf caveat; do not treat 13.x as broken.
-- **CUDA 12.8 installed:** the **peak** path — a build with `-DCMAKE_CUDA_ARCHITECTURES=120` uses the
-  MMQ integer kernels for full Q4 prefill speed. Recommend/install this when you want peak throughput.
+- **CUDA 13.x installed (e.g. 13.3, 13.4):** the card serves on the CUDA-13 prebuilt **at full
+  speed**. Measured 2026-11-05 on an RTX 5080 with b12110 (llama-bench, `-ngl 99 -fa 1`): E4B pp512
+  17694 tok/s / tg128 212, E2B 34454 / 345 (`docs/tiers/reports/blackwell-16-node-h.md`). The
+  2026-07-15 finding that this build fell back from the Blackwell MMQ kernel to a cuBLAS path
+  (~5.6× slower prefill, ~772 vs ~5611 t/s pp512) was an earlier build and does not reproduce. Use
+  the CUDA-13 build; do not treat 13.x as a slow path.
+- **CUDA 12.8 installed:** a source build with `-DCMAKE_CUDA_ARCHITECTURES=120` is **optional**, not a
+  speed fix; the prebuilt above is what the installer picks.
 - **CUDA 12.4 (the old stock prebuilt) only:** has **no sm_120** — Blackwell won't run on it at all.
   This is the one case that requires action (install a CUDA-13 or 12.8 build).
 
 **Flexibility is the requirement.** The workstation is transitional — a 5060 Ti may run alone on
 CUDA 13.3 today and gain a V100 tomorrow — so the installer must key the build off the *detected*
 CUDA version + the *detected* GPU set, not a fixed assumption:
-- **Single 5060 Ti on 13.3:** CUDA-13 build, serves now (cuBLAS-fallback perf note); offer 12.8 for peak.
+- **Single 16 GB Blackwell card (5060 Ti, 5080) on 13.x:** the CUDA-13 prebuilt, full speed (measured 2026-11-05).
 - **Dual `5060 Ti + V100`:** a **multi-arch** build covering **both** `sm_120` (Blackwell) and
   `sm_70` (Volta). It must be compiled against a **CUDA 12.8/12.9 toolkit** — CUDA 13.0 removed
   offline compilation for Volta (`sm_70`), so a 13.x toolkit cannot produce this build (an R580+

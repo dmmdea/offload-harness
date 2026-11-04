@@ -501,11 +501,13 @@ if ($os -ne 'windows') { Write-Error 'This detector targets Windows. Use the Lin
 #  - driver_cuda   = the driver's max CUDA (nvidia-smi header "CUDA Version: X.Y")
 #  - driver_version= the NVIDIA driver build
 #  - toolkit_cuda  = the installed CUDA Toolkit (nvcc), or null if no toolkit is present
-# Why it matters on Blackwell (sm_120): a CUDA-13 build SERVES (falls back from the MMQ
-# kernel to cuBLAS, ~5.6x slower prefill on Q4 — functional, not peak); a CUDA-12.8 build
-# hits MMQ for full speed; the old CUDA-12.4 prebuilt has no sm_120 and won't run. The
-# installer keys the build choice off these, not a fixed assumption. All null when the
-# tools are absent (e.g. no driver yet) — that is a valid, honest state.
+# Why it matters on Blackwell (sm_120): the CUDA-13 prebuilt serves at full speed (measured
+# 2026-11-05 on an RTX 5080, b12110: E4B pp512 17.7k tok/s, tg128 212; the 2026-07-15 finding
+# of an MMQ-to-cuBLAS fallback, ~5.6x slower prefill, was an earlier build and does not
+# reproduce); the old CUDA-12.4 prebuilt has no sm_120 and won't run; a source build vs a
+# 12.8/12.9 toolkit is optional. The installer keys the build choice off these, not a fixed
+# assumption. All null when the tools are absent (e.g. no driver yet) — that is a valid,
+# honest state.
 function Get-CudaInfo {
   $info = [ordered]@{ driver_cuda = $null; driver_version = $null; toolkit_cuda = $null }
   try {
@@ -638,11 +640,11 @@ if ($gpuArch -eq 'blackwell') {
   if ($eff -match '^12\.4') {
     $warnings += "Blackwell (sm_120) with CUDA ${eff}: the 12.4 prebuilt has NO sm_120 and will not run - install a CUDA-13 (serves) or CUDA-12.8 (peak) build. See SETUP-AGENT.md Blackwell note."
   } elseif ($eff -match '^13\.') {
-    $warnings += "Blackwell (sm_120) with CUDA ${eff}: SERVES on a CUDA-13 build (cuBLAS fallback, ~5.6x slower prefill on Q4). For peak throughput build/install against CUDA 12.8 (MMQ). Functional now; not peak."
+    # the CUDA-13 prebuilt serves sm_120 at full speed (measured 2026-11-05, RTX 5080, b12110): nothing to warn about
   } elseif ($eff -match '^12\.(8|9)' -or $eff -match '^12\.1[0-9]') {
-    $warnings += "Blackwell (sm_120) with CUDA ${eff}: peak path - build with -DCMAKE_CUDA_ARCHITECTURES=120 (MMQ)."
+    $warnings += "Blackwell (sm_120) with CUDA ${eff}: the CUDA-13 prebuilt the installer picks serves at full speed on sm_120 (measured 2026-11-05); a source build vs this toolkit (-DCMAKE_CUDA_ARCHITECTURES=120) is optional, not a speed fix."
   } else {
-    $warnings += "Blackwell (sm_120): CUDA version undetected ($eff). Detect the installed CUDA before choosing the build (12.8=peak, 13.x=serves-slower, 12.4=won't run)."
+    $warnings += "Blackwell (sm_120): CUDA version undetected ($eff). Detect the installed CUDA before choosing the build (13.x prebuilt serves at full speed, 12.4 won't run)."
   }
 }
 
