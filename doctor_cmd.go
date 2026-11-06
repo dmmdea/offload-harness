@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -31,6 +32,7 @@ func runDoctor(args []string) error {
 	// that produced it, so a file that FAILED validation is named here, verbatim, before
 	// anything else is printed.
 	tainted := doctorConfigRow(src, os.Stdout)
+	doctorEnvShadowRow(src, os.Stdout)
 	err := doctorRunChecked(cfg, mediacap.RoutesChecked(cfg, mediacap.LiveNodeChecker(doctorComfyAPI(), 3*time.Second)), os.Stdout, liveDataReport(cfg))
 	if err != nil {
 		return err
@@ -72,6 +74,28 @@ func doctorConfigRow(src config.Source, w io.Writer) bool {
 	}
 	fmt.Fprintf(w, "config:     FAIL  %s — %v\n", strings.ToUpper(config.LoadFailure(src.LoadErr)), src.LoadErr)
 	return true
+}
+
+// doctorEnvShadowRow says so when $LOCAL_OFFLOAD_CONFIG outranks an installed home config: every verdict below is
+// about the file the variable names, and an installer's fresh tier, data home and seats sit unread in the other one.
+func doctorEnvShadowRow(src config.Source, w io.Writer) {
+	env := os.Getenv("LOCAL_OFFLOAD_CONFIG")
+	if env == "" || src.Path != env {
+		return
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	def := filepath.Join(home, ".local-offload", "config.json")
+	defInfo, err := os.Stat(def)
+	if err != nil || defInfo.IsDir() {
+		return
+	}
+	if envInfo, err := os.Stat(env); err == nil && os.SameFile(envInfo, defInfo) {
+		return
+	}
+	fmt.Fprintf(w, "config:     WARN  $LOCAL_OFFLOAD_CONFIG=%s outranks %s, so that file is not read; clear the variable if it is a leftover\n", env, def)
 }
 
 // aliasCheck pairs a config key with its configured llama-swap model alias.
