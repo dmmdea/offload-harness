@@ -57,6 +57,16 @@ param([switch]$RenderOnly, [string]$RenderOut, [switch]$Update)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is ~10x faster without the progress UI
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Started through Start-Process from PowerShell 7, Windows PowerShell inherits PowerShell 7's module paths and cannot
+# load the Utility module from them, so Get-FileHash does not exist and every download fails on its hash check.
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+  $modulePaths = @($env:PSModulePath -split ';')
+  $keptPaths = @($modulePaths | Where-Object { $_ -notlike '*\PowerShell\Modules*' -and $_ -notlike '*\PowerShell\7\Modules*' -and $_ -notlike '*\microsoft.powershell_7*' })
+  if ($keptPaths.Count -ne $modulePaths.Count) {
+    $env:PSModulePath = $keptPaths -join ';'
+    Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -Force
+  }
+}
 $repoRoot  = Split-Path -Parent $scriptDir
 
 # ---------------------------------------------------------------------------
@@ -2955,9 +2965,24 @@ if ($env:COMFY_PY)  { $comfyPy  = $env:COMFY_PY }  else { $comfyPy  = Join-Path 
 # bare or half-made C:/ComfyUI folder and no venv (the first fresh Windows install, an RTX 5080
 # desktop, 2026-11-04) reached Ensure-RunGraphDeps, which called the missing python.exe and
 # killed the install one step before the manifest and the verdict. Best-effort means SKIP.
-if ((Test-Path $comfyDir) -and (Test-Path $comfyPy)) {
+# A tier that blanks run_graph_script serves no run-graph route, so a ComfyUI on this box is the owner's own and this
+# installer has no reason to pip into it.
+$runGraphBlank = $false
+if (Test-Path $cfgDest) {
+  try {
+    $rgCfg = Get-Content -Raw $cfgDest | ConvertFrom-Json
+    $runGraphBlank = ($rgCfg.PSObject.Properties['run_graph_script'] -and -not $rgCfg.run_graph_script)
+  } catch { $runGraphBlank = $false }
+}
+if ($runGraphBlank) {
+  Write-Host "SKIP  run-graph deps (this tier serves no run-graph route; any ComfyUI on this box is left alone)" -ForegroundColor DarkGray
+} elseif ((Test-Path $comfyDir) -and (Test-Path $comfyPy)) {
   Write-Host "DO    run-graph deps (ComfyUI at $comfyDir)" -ForegroundColor Cyan
-  $rgLog = Ensure-RunGraphDeps -ComfyPy $comfyPy -ComfyDir $comfyDir
+  # pip writes its 'not found' answer to stderr, which is a terminating error under this file's 'Stop': a box whose
+  # ComfyUI lacks comfy-cli died here, one step before the manifest. Only exit codes and throws decide in this helper.
+  $prevEapRg = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { $rgLog = Ensure-RunGraphDeps -ComfyPy $comfyPy -ComfyDir $comfyDir } finally { $ErrorActionPreference = $prevEapRg }
   Write-Host "OK    run-graph deps: $rgLog" -ForegroundColor Green
 } elseif (Test-Path $comfyDir) {
   Write-Host "SKIP  run-graph deps (a directory at $comfyDir but no venv python at $comfyPy; offload_run_graph will DEFER SATISFIER_UNAVAILABLE, not crash; set COMFY_PY to the ComfyUI python to enable)" -ForegroundColor DarkGray
