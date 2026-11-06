@@ -202,8 +202,8 @@ $SOURCES = @{
   'model-wan22-vae'      = @{ kind = 'hf-file'; repo = 'QuantStack/Wan2.2-TI2V-5B-GGUF'; file = 'VAE/Wan2.2_VAE.safetensors'; dest = 'wan22-ti2v-5b/Wan2.2_VAE.safetensors' }
   'model-umt5-xxl'       = @{ kind = 'hf-file'; repo = 'city96/umt5-xxl-encoder-gguf'; file = 'umt5-xxl-encoder-Q8_0.gguf'; dest = 'wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf' }
   'model-wan22-tae'      = @{ kind = 'hf-file'; repo = 'lightx2v/Autoencoders'; file = 'taew2_2.safetensors'; dest = 'wan22-ti2v-5b/taew2_2.safetensors' }
-  'model-vace'           = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors'; dest = 'wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors' }
-  'model-wan21-vae'      = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/vae/wan_2.1_vae.safetensors'; dest = 'wan21-vace-1.3b/wan_2.1_vae.safetensors' }
+  'model-vace'           = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan-2.1'; file = 'split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors'; dest = 'wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors' }
+  'model-wan21-vae'      = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan-2.1'; file = 'split_files/vae/wan_2.1_vae.safetensors'; dest = 'wan21-vace-1.3b/wan_2.1_vae.safetensors' }
   'model-depth-anything' = @{ kind = 'hf-file'; repo = 'mudler/depth-anything.cpp-gguf'; file = 'depth-anything2-small-q8_0.gguf'; dest = 'depth/depth-anything2-small-q8_0.gguf' }
   'model-chatterbox'     = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'Chatterbox-GGUF/chatterbox-q8_0.gguf'; dest = 'chatterbox/chatterbox-q8_0.gguf' }
   'model-ace-step'       = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf'; dest = 'ace-step/ace-step-1.5-turbo-bf16.gguf' }
@@ -384,7 +384,10 @@ function Get-HfTree {
   while ($uri -and $guard -lt 50) {
     $guard++
     $r = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 60 -Headers @{ 'User-Agent' = 'offload-harness-installer' }
-    $all += @($r.Content | ConvertFrom-Json)
+    # Assigned first: Windows PowerShell's ConvertFrom-Json writes a JSON array as ONE object, so @(...) held a single
+    # element, the lookup in Get-HfFile never saw a file, and every download leaned on the redirect's headers.
+    $page = $r.Content | ConvertFrom-Json
+    foreach ($entry in $page) { $all += $entry }
     $uri = $null
     $link = $r.Headers['Link']
     if ($link) {
@@ -396,19 +399,28 @@ function Get-HfTree {
   return $all
 }
 
-# The 302 of a resolve URL carries the file's sha256 (X-Linked-ETag) and size (X-Linked-Size).
+# The 302 of a resolve URL carries the file's sha256 (X-Linked-ETag) and size (X-Linked-Size). A renamed repo first answers
+# 307 with a relative Location and neither header, so a redirect without them is followed.
 function Get-HfLinkedHeaders {
   param([string]$Url)
-  $req = [System.Net.HttpWebRequest]::Create($Url)
-  $req.Method = 'HEAD'
-  $req.AllowAutoRedirect = $false
-  $req.UserAgent = 'offload-harness-installer'
-  $req.Timeout = 30000
-  $resp = $req.GetResponse()
-  try {
-    $etag = [string]$resp.Headers['X-Linked-ETag']
-    $sz = [string]$resp.Headers['X-Linked-Size']
-  } finally { $resp.Close() }
+  $current = $Url
+  $etag = ''
+  $sz = ''
+  foreach ($hop in 1..4) {
+    $req = [System.Net.HttpWebRequest]::Create($current)
+    $req.Method = 'HEAD'
+    $req.AllowAutoRedirect = $false
+    $req.UserAgent = 'offload-harness-installer'
+    $req.Timeout = 30000
+    $resp = $req.GetResponse()
+    try {
+      $etag = [string]$resp.Headers['X-Linked-ETag']
+      $sz = [string]$resp.Headers['X-Linked-Size']
+      $next = [string]$resp.Headers['Location']
+    } finally { $resp.Close() }
+    if ($etag.Trim() -or -not $next) { break }
+    $current = (New-Object System.Uri -ArgumentList ([System.Uri]$current), $next).AbsoluteUri
+  }
   $etag = $etag.Trim()
   if ($etag.StartsWith('W/')) { $etag = $etag.Substring(2) }
   $szNum = [int64]0
