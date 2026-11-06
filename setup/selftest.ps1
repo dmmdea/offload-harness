@@ -80,6 +80,36 @@ function Test-PortFree {
   return -not [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
+# A killed server's port stays listed long after its process is gone: measured 15 s and 74 s with a model on the card,
+# against the 8 s this used to wait. The next probe then reported "port busy" and its canary read as a failed load of a
+# model that was never tried.
+function Wait-PortFree {
+  param([int]$Port, [int]$TimeoutSec = 120)
+  $deadline = (Get-Date).AddSeconds($TimeoutSec)
+  while ((Get-Date) -lt $deadline) {
+    if (Test-PortFree $Port) { return $true }
+    Start-Sleep -Milliseconds 500
+  }
+  return (Test-PortFree $Port)
+}
+
+# Stop a server this script started, and wait until it is gone and its port is free.
+function Stop-ProbeServer {
+  param($Proc, [int]$Port)
+  if ($Proc -and -not $Proc.HasExited) {
+    try { Stop-Process -Id $Proc.Id -Force -ErrorAction SilentlyContinue } catch { }
+    try { [void]$Proc.WaitForExit(30000) } catch { }
+  }
+  [void](Wait-PortFree $Port)
+}
+
+# The servers the transient swap started, by parent process. An install-path filter also matched the owner's live seats
+# on :11436, which run from the same install, so a selftest on a working box killed them.
+function Get-SwapChildren {
+  if (-not $script:swapProc) { return @() }
+  return @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($script:swapProc.Id)" -ErrorAction SilentlyContinue)
+}
+
 # Write a file as UTF-8 WITHOUT a BOM. Windows PowerShell 5.1's `-Encoding UTF8`
 # (Set-Content/Out-File) writes a BOM; pwsh 7's does not. Go rejects a BOM'd payload
 # (json.Unmarshal: "invalid character ... looking for beginning of value"), so EVERY file this
@@ -361,7 +391,7 @@ function Test-LargerCtxLoad {
   if (-not (Test-Path $llamaServer)) { return @{ ok = $false; detail = 'llama-server.exe absent' } }
   if (-not (Test-Path $modelPath))   { return @{ ok = $false; detail = "model gguf absent: $tierFile" } }
   $probePort = 18803
-  if (-not (Test-PortFree $probePort)) { return @{ ok = $false; detail = "probe port $probePort busy" } }
+  if (-not (Wait-PortFree $probePort)) { return @{ ok = $false; detail = "probe port $probePort busy" } }
   $ngl = if ($backend -eq 'cpu') { 0 } else { 999 }
   $logFile = Join-Path $env:TEMP ("offload-selftest-ctxprobe-{0}.log" -f $PID)
   $args = @('-m', $modelPath, '-c', "$Ctx", '-ngl', "$ngl", '--flash-attn', 'on',
@@ -371,6 +401,7 @@ function Test-LargerCtxLoad {
   try {
     $proc = Start-Process -FilePath $llamaServer -ArgumentList $args -PassThru -NoNewWindow `
               -RedirectStandardError $logFile -RedirectStandardOutput "$logFile.out"
+    $null = $proc.Handle   # Windows PowerShell reads ExitCode as empty unless the handle was taken while it ran
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
       if ($proc.HasExited) {
@@ -386,16 +417,7 @@ function Test-LargerCtxLoad {
   } catch {
     return @{ ok = $false; detail = "probe threw: $($_.Exception.Message)" }
   } finally {
-    if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { } }
-    # Kill any lingering llama-server bound to our probe port (child processes can outlive the parent handle).
-    try {
-      $kids = Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape("127.0.0.1:$probePort")) }
-      foreach ($k in $kids) { try { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
-    } catch { }
-    # Wait briefly for the probe port to free so a later section never collides with it.
-    $pd = (Get-Date).AddSeconds(8)
-    while ((Get-Date) -lt $pd) { if (Test-PortFree $probePort) { break }; Start-Sleep -Milliseconds 400 }
+    Stop-ProbeServer -Proc $proc -Port $probePort
     Get-ChildItem $env:TEMP -Filter ("offload-selftest-ctxprobe-{0}*" -f $PID) -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
   }
 }
@@ -516,7 +538,7 @@ function Invoke-ProbeLoad {
   if (-not (Test-Path $llamaServer)) { return @{ ok = $false; detail = 'llama-server.exe absent'; cold_load_s = $null; tps = $null } }
   if (-not (Test-Path $modelPath))   { return @{ ok = $false; detail = "model gguf absent: $ModelFile"; cold_load_s = $null; tps = $null } }
   $probePort = 18804
-  if (-not (Test-PortFree $probePort)) { return @{ ok = $false; detail = "probe port $probePort busy"; cold_load_s = $null; tps = $null } }
+  if (-not (Wait-PortFree $probePort)) { return @{ ok = $false; detail = "probe port $probePort busy"; cold_load_s = $null; tps = $null } }
   # -ngl: cpu backend has none; otherwise offload all non-expert layers (99/999 both mean "all").
   $ngl = if ($backend -eq 'cpu') { 0 } else { 999 }
   $logFile = Join-Path $env:TEMP ("offload-selftest-probeload-{0}.log" -f $PID)
@@ -535,6 +557,7 @@ function Invoke-ProbeLoad {
   try {
     $proc = Start-Process -FilePath $llamaServer -ArgumentList ([string[]]$svArgs) -PassThru -NoNewWindow `
               -RedirectStandardError $logFile -RedirectStandardOutput "$logFile.out"
+    $null = $proc.Handle   # see Test-LargerCtxLoad
     $healthy = $false
     $deadline = (Get-Date).AddSeconds($TimeoutSec)
     while ((Get-Date) -lt $deadline) {
@@ -598,14 +621,7 @@ function Invoke-ProbeLoad {
   } catch {
     return @{ ok = $false; detail = "probe threw: $($_.Exception.Message)"; cold_load_s = $null; tps = $null; text = ''; fa_state = $null }
   } finally {
-    if ($proc -and -not $proc.HasExited) { try { Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue } catch { } }
-    try {
-      $kids = Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
-                Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape("127.0.0.1:$probePort")) }
-      foreach ($k in $kids) { try { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
-    } catch { }
-    $pd = (Get-Date).AddSeconds(8)
-    while ((Get-Date) -lt $pd) { if (Test-PortFree $probePort) { break }; Start-Sleep -Milliseconds 400 }
+    Stop-ProbeServer -Proc $proc -Port $probePort
     Get-ChildItem $env:TEMP -Filter ("offload-selftest-probeload-{0}*" -f $PID) -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
   }
 }
@@ -708,7 +724,8 @@ $receipt = [ordered]@{
     bench            = [ordered]@{ status = 'skipped'; pp512_tps = $null; tg128_tps = $null; detail = $null }
     swap_leak        = [ordered]@{ status = 'skipped'; servers_after = $null; detail = $null }
     embedder         = [ordered]@{ status = 'skipped'; cos_related = $null; cos_unrelated = $null; reranker = 'skipped: no reranker model is installed by this stack (memory_stack rerank seat is operator-provisioned)'; detail = $null }
-    whisper          = [ordered]@{ status = 'skipped'; detail = 'no whisper seat is installed by this stack; when binding one on an AMD iGPU, whisper.cpp >= 1.8.3 is the FLOOR (earlier builds are not viable on AMD iGPUs; ~3-4x realtime expected)' }
+    whisper          = [ordered]@{ status = 'skipped'; detail = 'not run this pass' }
+    vision           = [ordered]@{ status = 'skipped'; detail = 'not run this pass' }
   }
   # J2: the first media selftest leg. Runs when the sd.cpp media tier is installed
   # (install.ps1 Step 5b); reference render = the install-integrity gate, gpu_vae =
@@ -1007,7 +1024,10 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         -ArgumentList $agentArgs `
         -PassThru -NoNewWindow -RedirectStandardError $agentLog -RedirectStandardOutput "$agentLog.out"
     $agentUp = $false
-    $deadline = (Get-Date).AddSeconds(30)
+    # The server listens only after its served-window probe, and that probe cold-loads the planner seat or waits behind a
+    # render, for up to 10 minutes (coldStartWait in internal/agent/window.go). 30 s here read a 26B seat's cold load as a
+    # dead server: 24 s of it on a 5070 Ti, longer on an iGPU.
+    $deadline = (Get-Date).AddSeconds(630)
     while ((Get-Date) -lt $deadline) {
       if ($script:agentProc.HasExited) { break }
       $am = Invoke-JsonGet "http://127.0.0.1:$AGENT_PORT/v1/models" 5
@@ -1019,7 +1039,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       LogOk "local-agent server answered /v1/models on $AGENT_PORT"
     } else {
       $receipt.agent_smoke = 'fail'
-      LogFail "local-agent server did not answer /v1/models on $AGENT_PORT within 30s"
+      LogFail "local-agent server did not answer /v1/models on $AGENT_PORT within 630s"
     }
   } catch {
     $receipt.agent_smoke = 'fail'
@@ -1073,9 +1093,10 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       else { LogWarn ("larger-ctx load MEASURED fail at {0}: {1} (served {2} unaffected)" -f $AGENT_LARGER_CTX, $probe.detail, $servedCtx) }
     }
 
-    # 2. Agentic micro-bench: ONE warm edit-style call through llama-swap. The tier loop already
-    # cold-loaded offload-e4b, so this hits a resident model (warm tok/s). Well-formed = the model
-    # returned the corrected line containing the fix, non-empty. Skip honestly if the tier is absent.
+    # 2. Agentic micro-bench: ONE warm edit-style call through llama-swap. The tier loop ends on its last tier and
+    # the headroom probe just ran, so a first call here pays a cold load and its tok/s reads as a broken seat (0.3 on
+    # a card that serves this tier at 88): load the tier first. Well-formed = the model returned the corrected line
+    # containing the fix, non-empty. Skip honestly if the tier is absent.
     if (-not $agentTierPresent) {
       $receipt.agent.microbench_ok = $false
       $receipt.agent.skipped = $true
@@ -1085,6 +1106,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       $editPrompt = "You are a code-editing agent. Here is one line of Python with a bug:`n" +
                     "    resutl = a + b`n" +
                     "Reply with ONLY the corrected line, no explanation, no code fence."
+      [void](Invoke-Chat -Model $AGENT_TIER -UserContent 'Reply with exactly the single word: ok' -MaxTokens 8 -TimeoutSec 300)
       $mb = Invoke-Chat -Model $AGENT_TIER -UserContent $editPrompt -MaxTokens 64 -TimeoutSec 180
       if ($mb.ok -and $mb.text -and $mb.text.Trim().Length -gt 0) {
         $receipt.agent.microbench_tps = $mb.tok_s
@@ -1327,7 +1349,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
   # ctx 16K->32K (ctx_sweep), f16->q8_0 KV (fa_q8kv). (moe_full_offload is retired: no host-RAM
   # floor exists to promote from.) Nothing is auto-applied here. Default gate: vulkan backend;
   # OFFLOAD_SELFTEST_CANARIES=1 forces on any box, =0 forces off.
-  LogStep "H3 canaries: promotion gates (fa_q8kv / moe_full_offload / ctx_sweep / bench / swap_leak / embedder / whisper)"
+  LogStep "H3 canaries: promotion gates (fa_q8kv / moe_full_offload / ctx_sweep / bench / swap_leak / embedder / whisper / vision)"
   $cn = $receipt.canaries
   try {
     $canaryOn = $false
@@ -1464,7 +1486,21 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         $cn.bench.detail = 'resident-tier gguf absent'; LogWarn "bench SKIPPED: $($cn.bench.detail)"
       } else {
         LogStep "  bench: llama-bench -p 512 -n 128 on $($cnResidentSpec.id)"
-        $benchRaw = Invoke-WithEapContinue { & $benchExe -m (Join-Path $modelDir $cnResidentSpec.file) -p 512 -n 128 -o json 2>$null | Out-String }
+        # A bounded child, not a pipe: this is the one call here with no timeout of its own, and a hung driver would
+        # hang the whole selftest on the owner's display adapter.
+        $benchOut = Join-Path $env:TEMP ("offload-selftest-bench-{0}.json" -f $PID)
+        $benchArgs = (@('-m', (Join-Path $modelDir $cnResidentSpec.file), '-p', '512', '-n', '128', '-o', 'json') |
+                       ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+        $benchProc = Start-Process -FilePath $benchExe -ArgumentList $benchArgs -PassThru -NoNewWindow `
+                       -RedirectStandardOutput $benchOut -RedirectStandardError "$benchOut.err"
+        $benchRaw = ''
+        if ($benchProc.WaitForExit(900000)) {
+          $benchRaw = Get-Content -Raw -Path $benchOut -ErrorAction SilentlyContinue
+        } else {
+          try { Stop-Process -Id $benchProc.Id -Force -ErrorAction SilentlyContinue } catch { }
+          LogWarn 'bench: no result in 15 minutes - stopped it'
+        }
+        Remove-Item $benchOut, "$benchOut.err" -Force -ErrorAction SilentlyContinue
         $benchDoc = $null
         try { $benchDoc = $benchRaw | ConvertFrom-Json } catch { $benchDoc = $null }
         if ($benchDoc) {
@@ -1497,10 +1533,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         }
         Start-Sleep -Seconds 5
         $mineProcs = @()
-        try {
-          $mineProcs = @(Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
-            Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape($HOME_DIR.Replace('\','/')) -or $_.CommandLine -match [regex]::Escape($HOME_DIR)) })
-        } catch { $mineProcs = @() }
+        try { $mineProcs = @(Get-SwapChildren | Where-Object { $_.Name -eq 'llama-server.exe' }) } catch { $mineProcs = @() }
         $cn.swap_leak.servers_after = $mineProcs.Count
         $stillUp = [bool](Invoke-JsonGet "$swapBase/v1/models" 5)
         $cycleLabel = if ($installedTiers.Count -ge 2) { 'after the eviction cycle' } else { '(single tier - process-count check only, no eviction cycle ran)' }
@@ -1559,9 +1592,46 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         }
       }
 
-      # (7) whisper - no seat installed by this stack; the receipt's preset detail carries
-      # the version FLOOR (whisper.cpp >= 1.8.3 on AMD iGPUs) for when one is bound.
-      LogWarn "whisper: $($cn.whisper.detail)"
+      # (7, 8) whisper, vision: the speech and vision seats this tier binds, through the real lanes and each against a
+      # known answer. `acceptance --only` owns the inputs and the checks, so this and the gate cannot disagree; a seat the
+      # tier does not bind comes back SKIP. Outputs stay beside the receipts.
+      LogStep "  whisper + vision: real lanes against known answers"
+      try {
+        $gateDir = Join-Path (Join-Path $HOME_DIR 'receipts') ("selftest-gate-{0}" -f (Get-Date).ToString('yyyyMMdd-HHmmss'))
+        $gateOut = Invoke-WithEapContinue { & $harnessExe --config $tmpCfg acceptance --only 'vision,stt' --out-dir $gateDir --json 2>$null }
+        $gateDoc = (($gateOut | ForEach-Object { "$_" }) -join "`n") | ConvertFrom-Json
+        foreach ($pair in @(@('whisper', 'render stt'), @('vision', 'render vision'))) {
+          $row = @($gateDoc.checks | Where-Object { $_.name -eq $pair[1] }) | Select-Object -First 1
+          $entry = $cn[$pair[0]]
+          if (-not $row) { $entry.detail = "the gate returned no '$($pair[1])' row"; LogWarn "$($pair[0]): $($entry.detail)"; continue }
+          $entry.status = switch ($row.status) { 'PASS' { 'pass' } 'FAIL' { 'fail' } default { 'skipped' } }
+          $entry.detail = [string]$row.detail
+          if ($entry.status -eq 'pass') { LogOk "$($pair[0]): $($entry.detail)" } else { LogWarn "$($pair[0]) $($entry.status): $($entry.detail)" }
+        }
+      } catch {
+        foreach ($k in @('whisper', 'vision')) { $cn[$k].status = 'fail'; $cn[$k].detail = "the gate could not run: $($_.Exception.Message)" }
+        LogWarn "whisper + vision: $($cn.whisper.detail)"
+      }
+
+      # What the canaries earned this pass, in the one list the receipt calls "apply this". Nothing here is applied:
+      # a promotion belongs in the tier's profile, where the installer renders it.
+      try {
+        $tuned = $receipt.profile_measure.tuned
+        $earned = New-Object System.Collections.Generic.List[string]
+        if ($cn.fa_q8kv.status -eq 'pass' -and $tuned.kv_type -ne 'q8_0') {
+          $tuned.kv_type = 'q8_0'
+          $earned.Add('kv_type=q8_0 (fa_q8kv passed)')
+        }
+        if ($cn.ctx_sweep.status -eq 'pass' -and $null -ne $cn.ctx_sweep.max_ok_ctx -and $cn.ctx_sweep.max_ok_ctx -gt [int]$tuned.ctx_size) {
+          $tuned.ctx_size = $cn.ctx_sweep.max_ok_ctx
+          $earned.Add("ctx_size=$($cn.ctx_sweep.max_ok_ctx) (ctx_sweep loaded and generated at it)")
+        }
+        if ($earned.Count -gt 0) {
+          $tuned.source = 'measured'
+          $tuned.notes = (@($tuned.notes) + @("promotions earned: $($earned -join ', ')")) -join '; '
+          LogOk "promotions earned: $($earned -join ', ')"
+        }
+      } catch { LogWarn "could not record the promotions: $($_.Exception.Message)" }
     }
   } catch {
     $cn.gate = "canary section threw: $($_.Exception.Message)"
@@ -1617,12 +1687,11 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       # production renders get (the runner frees llama-swap inside withGpuSlot).
       # Teardown in finally stays idempotent.
       try {
+        $kids = Get-SwapChildren
         if ($script:swapProc -and -not $script:swapProc.HasExited) {
           Log "  stopping the transient swap before media renders (uncontended-GPU timings)"
           try { Stop-Process -Id $script:swapProc.Id -Force -ErrorAction SilentlyContinue } catch { }
         }
-        $kids = Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
-                  Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape($HOME_DIR.Replace('\','/')) -or $_.CommandLine -match [regex]::Escape($HOME_DIR)) }
         foreach ($k in $kids) { try { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
         Start-Sleep -Seconds 2
       } catch { }
@@ -1650,6 +1719,8 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         try {
           $proc = Start-Process -FilePath $sdBin -ArgumentList $argStr -PassThru -NoNewWindow `
                     -RedirectStandardError $logF -RedirectStandardOutput "$logF.out"
+          # Without this Windows PowerShell reads ExitCode as empty, and -ne 0 then failed every finished render.
+          $null = $proc.Handle
           $deadline = (Get-Date).AddSeconds($TimeoutSec)
           while ((Get-Date) -lt $deadline -and -not $proc.HasExited) { Start-Sleep -Milliseconds 500 }
           $sw.Stop()
@@ -1658,7 +1729,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
             return @{ ok = $false; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); detail = "render exceeded ${TimeoutSec}s - killed" }
           }
           $tail = ''
-          try { $tail = (Get-Content -Path $logF -Tail 3 -ErrorAction SilentlyContinue) -join ' | ' } catch { }
+          try { $tail = (@(Get-Content -Path $logF -Tail 3 -ErrorAction SilentlyContinue) + @(Get-Content -Path "$logF.out" -Tail 3 -ErrorAction SilentlyContinue)) -join ' | ' } catch { }
           if ($proc.ExitCode -ne 0) { return @{ ok = $false; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); detail = "sd-cli exited $($proc.ExitCode): $tail" } }
           return @{ ok = $true; seconds = [math]::Round($sw.Elapsed.TotalSeconds, 1); detail = 'ok' }
         } catch {
@@ -1760,18 +1831,15 @@ finally {
   # Teardown - GUARANTEED. Stop both transient processes; verify both ports freed.
   # ---------------------------------------------------------------------------
   LogStep "teardown: stopping transient processes; freeing ports"
+  # Read the swap's servers before it goes, so a loaded model does not outlive the selftest and hold the port.
+  $kids = @()
+  try { $kids = Get-SwapChildren } catch { }
   foreach ($pv in @($script:agentProc, $script:swapProc)) {
     if ($pv -and -not $pv.HasExited) {
       try { Stop-Process -Id $pv.Id -Force -ErrorAction SilentlyContinue } catch { }
     }
   }
-  # llama-swap spawns child llama-server.exe processes; kill any whose command line points at OUR
-  # test port or our config, so a loaded model does not outlive the selftest and hold the port.
-  try {
-    $kids = Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'" -ErrorAction SilentlyContinue |
-              Where-Object { $_.CommandLine -and ($_.CommandLine -match [regex]::Escape("127.0.0.1")) -and ($_.CommandLine -match [regex]::Escape($HOME_DIR.Replace('\','/')) -or $_.CommandLine -match [regex]::Escape($HOME_DIR)) }
-    foreach ($k in $kids) { try { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
-  } catch { }
+  foreach ($k in $kids) { try { Stop-Process -Id $k.ProcessId -Force -ErrorAction SilentlyContinue } catch { } }
   # Wait up to 10s for both ports to actually free (process exit + socket close are not instant).
   $freeDeadline = (Get-Date).AddSeconds(10)
   while ((Get-Date) -lt $freeDeadline) {
@@ -1828,7 +1896,7 @@ if (-not $receipt.canaries.ran) {
   if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
 } else {
   # Individually skipped canaries prove nothing either - each lands its own line.
-  foreach ($cnName in @('fa_q8kv','moe_full_offload','ctx_sweep','bench','swap_leak','embedder')) {
+  foreach ($cnName in @('fa_q8kv','moe_full_offload','ctx_sweep','bench','swap_leak','embedder','whisper','vision')) {
     $cnEntry = $receipt.canaries[$cnName]
     if ($cnEntry -and $cnEntry.status -eq 'skipped') {
       $d = "canary ${cnName}: skipped ($($cnEntry.detail)) - its promotion/verification is not authorized this pass"
@@ -1859,5 +1927,13 @@ $receipt.profile_measure.cold_swap = [object[]]@($receipt.profile_measure.cold_s
 # J1: same force for the ctx_sweep results array.
 $receipt.canaries.ctx_sweep.results = [object[]]@($receipt.canaries.ctx_sweep.results)
 $json = ([pscustomobject]$receipt) | ConvertTo-Json -Depth 8 -Compress
+# On disk too: a receipt that lives only on stdout is lost with the console that ran it.
+try {
+  $receiptDir = Join-Path $HOME_DIR 'receipts'
+  New-Item -ItemType Directory -Force -Path $receiptDir | Out-Null
+  $receiptPath = Join-Path $receiptDir ("selftest-{0}.json" -f (Get-Date).ToString('yyyyMMdd-HHmmss'))
+  Write-Utf8NoBom -Path $receiptPath -Content $json
+  Log "receipt saved: $receiptPath"
+} catch { LogWarn "could not save the receipt: $($_.Exception.Message)" }
 Write-Output $json
 if ($receipt.verdict -eq 'fail') { exit 1 } else { exit 0 }
