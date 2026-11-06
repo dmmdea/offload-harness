@@ -1194,7 +1194,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         $r2 = Invoke-ProbeLoad -ModelFile $residentSpec.file -Ctx $downCtx -KvType $kv -FlashAttn $fa -TimeoutSec 180
         $pm.ctx.downshifted = $true
         $pm.ctx.src = 'measured'
-        $receipt.remediations += ,([ordered]@{ tier = $residentId; action = ("downshift ctx {0}->{1}" -f $tryCtx, $downCtx); outcome = (if ($r2.ok) { 'pass' } else { 'fail' }) })
+        $receipt.remediations += ,([ordered]@{ tier = $residentId; action = ("downshift ctx {0}->{1}" -f $tryCtx, $downCtx); outcome = $(if ($r2.ok) { 'pass' } else { 'fail' }) })
         if ($r2.ok) {
           $pm.ctx.measured_ctx = $downCtx
           $pm.ctx.measured_ctx_ok = $true
