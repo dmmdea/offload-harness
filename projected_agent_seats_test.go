@@ -47,7 +47,7 @@ type agentSeatLabel struct {
 var projectedAgentSeats = map[string]agentSeatLabel{
 	"amd-rdna3": {
 		Seat:            "",
-		Why:             "derives its seat from resident_tier offload-e4b (the workhorse equals the resident, so the derive rule exempts it); no agent contract has run on this class",
+		Why:             "derives its seat from resident_tier offload-e4b below the 64 GB band (the workhorse equals the resident, so the derive rule exempts it); that band binds gemma-4-26b-agent in config_seed_ram_mid_high; no agent contract has run on this class",
 		FailedElsewhere: "offload-e4b",
 	},
 	"amd-rdna3-dgpu": {
