@@ -49,9 +49,9 @@ $ENGINES = @{
   audiocpp = @{
     Repo = '0xShug0/audio.cpp'; Source = 'audio.cpp'; Floor = ''; Releases = $true; Submodules = $true
     Patch = 'patches\audiocpp-v0.9.0-vulkan-planner-prefill.patch'
-    # NOMINMAX: libstdc++ defines it as 1 and two of its files define it empty, which is an error under its warning
-    # flags. Defined empty here, nothing redefines it.
-    Configure = @('-DENGINE_ENABLE_VULKAN=ON', '-DENGINE_ENABLE_NATIVE_CPU=ON', '-DENGINE_ENABLE_CUDA=OFF', '-DENGINE_ENABLE_HIP=OFF', '-DBUILD_SHARED_LIBS=OFF', '-DCMAKE_CXX_FLAGS=-DNOMINMAX=')
+    # Only the two models this harness binds: the full set is some sixty models and far longer on half an APU's cores, and
+    # one of them (kokoro) does not compile with MinGW's libstdc++, which defines NOMINMAX itself.
+    Configure = @('-DENGINE_ENABLE_VULKAN=ON', '-DENGINE_ENABLE_NATIVE_CPU=ON', '-DENGINE_ENABLE_CUDA=OFF', '-DENGINE_ENABLE_HIP=OFF', '-DBUILD_SHARED_LIBS=OFF', '-DAUDIOCPP_MODEL_SET=custom', '-DAUDIOCPP_MODELS=chatterbox,ace_step')
     Target = 'audiocpp_cli'; Exe = 'build\bin\audiocpp_cli.exe'
   }
 }
