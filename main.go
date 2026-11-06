@@ -341,7 +341,9 @@ Usage:
   local-offload agent-audit verify [--file PATH] [--json]
                                          verify the hash chain of every agent run on the broker audit trail (audit_chain, register SF-08); exit 1 naming the run and seq of an edited, removed or reordered row. Open runs (no run_end) and unchained rows are reported, not failed.
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
-  local-offload acceptance [--json]      the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
+  local-offload acceptance [--json] [--render [--only a,b] [--out-dir DIR]] [--list]
+                                         the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
+                                         --render also makes one REAL call per bound route through its own verb (summarize,classify,embed,vision,stt,agent,image,video,animate,voice,music,compose,edit,media,inpaint,upscale) and checks the answer against a known one; --only names groups, --out-dir keeps the outputs (default: a new temp folder, never deleted); --list prints each group, whether it is bound and the exact command, and runs nothing
   local-offload install detect [--json]  classify this machine into a hardware tier (works on every OS)
   local-offload install plan [--json]    the tier + the media bindings an install would seed here
   local-offload install render [--profile ID] [--llama-bin DIR] [--llama-bin-cpu DIR] [--llama-bin-eg2 DIR] [--models DIR] [--out FILE]   render this tier's llama-swap serving config (templates embedded); --llama-bin-cpu adds the tier's CPU seat family (tier must declare alt_backends), --llama-bin-eg2 runs ONLY the embeddinggemma2 entry from a second llama.cpp build (b11452 or newer) for a node whose main build is older
