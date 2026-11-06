@@ -1902,6 +1902,98 @@ function Ensure-RunGraphDeps {
   return ($log -join '; ')
 }
 
+# Where a fresh install goes when OFFLOAD_HOME is unset (first-class rule 2: never the OS drive by default). This
+# runs before Go exists on the box, so it cannot ask `local-offload install volumes`; the rule is that one's, plus USB.
+# An install already on a drive stays there. Otherwise: the fixed NTFS or ReFS volume with the most free space, never
+# the OS drive, never over USB (GetDriveType calls a USB SSD fixed; a stack on it vanishes with the cable), never a
+# cloud-synced virtual drive (they report FAT32). A box with no such volume fails LOUD before anything is downloaded;
+# OFFLOAD_ALLOW_OS_DATA=1 is the recorded decision to stay under the user profile on a one-disk box.
+# PURE: -Volumes is what Get-InstallVolumes reads. Returns @{ Home; Root; Because; Persist; Error }.
+function Get-InstallHomeChoice {
+  param($Volumes = @(), [string]$OsDrive = 'C:', [bool]$AllowOS = $false, [string]$ProfileHome = '', [bool]$ProfileHasInstall = $false, [long]$MinFree = 21474836480)
+  if ($ProfileHasInstall) {
+    return [pscustomobject]@{ Home = $ProfileHome; Root = ''; Because = 'an install already lives here'; Persist = $false; Error = '' }
+  }
+  if ($AllowOS) {
+    return [pscustomobject]@{ Home = $ProfileHome; Root = ''; Because = 'OFFLOAD_ALLOW_OS_DATA=1'; Persist = $false; Error = '' }
+  }
+  $os = $OsDrive.TrimEnd('\', '/').ToUpper()
+  $kept = @(); $why = @()
+  foreach ($v in @($Volumes)) {
+    $root = ([string]$v.Root).TrimEnd('\', '/').ToUpper()
+    if ($root -eq $os) { $why += "$root is the OS drive"; continue }
+    if ($v.Usb) { $why += "$root is on USB"; continue }
+    if ([string]$v.FileSystem -notin @('NTFS', 'ReFS')) { $why += "$root is $($v.FileSystem), not a disk a store can live on"; continue }
+    if ([long]$v.Free -lt $MinFree -and -not $v.HasInstall) { $why += "$root has under $([math]::Round($MinFree / 1GB)) GB free"; continue }
+    $kept += $v
+  }
+  $pick = @($kept | Where-Object { $_.HasInstall } | Select-Object -First 1)
+  $because = 'an install already lives here'
+  if ($pick.Count -eq 0) {
+    $pick = @($kept | Sort-Object { [long]$_.Free } -Descending | Select-Object -First 1)
+    if ($pick.Count -gt 0) { $because = "most free space of the data drives ($([math]::Round([long]$pick[0].Free / 1GB)) GB)" }
+  }
+  if ($pick.Count -eq 0) {
+    return [pscustomobject]@{ Home = ''; Root = ''; Because = ''; Persist = $false
+      Error = "no data drive for the stack ($($why -join '; ')). Set OFFLOAD_HOME=<a directory on a data drive>, or OFFLOAD_ALLOW_OS_DATA=1 to keep this one-disk box's stack under the user profile." }
+  }
+  $r = ([string]$pick[0].Root).TrimEnd('\', '/')
+  return [pscustomobject]@{ Home = "$r\offload-stack"; Root = $r; Because = $because; Persist = $true; Error = '' }
+}
+
+# The volumes Get-InstallHomeChoice decides over. A drive whose disk cannot be read is not called USB: the rule's other
+# tests still apply to it, and the cloud drives this probe cannot see through report a filesystem the rule refuses.
+function Get-InstallVolumes {
+  $out = @()
+  foreach ($d in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue)) {
+    $usb = $false
+    try {
+      $disk = Get-Partition -DriveLetter ($d.DeviceID.TrimEnd(':')) -ErrorAction Stop | Get-Disk -ErrorAction Stop
+      $usb = ("$($disk.BusType)" -eq 'USB')
+    } catch { $usb = $false }
+    $out += [pscustomobject]@{ Root = $d.DeviceID; Free = [long]$d.FreeSpace; FileSystem = "$($d.FileSystem)"; Usb = $usb
+      HasInstall = (Test-Path -LiteralPath (Join-Path "$($d.DeviceID)\" 'offload-stack\installed.json')) }
+  }
+  return ,$out
+}
+
+# The tool caches and temp of THIS run, under the install root when that root is off the OS drive (operator rule: C:
+# holds Windows and program installs, never tool caches). Go's toolchain download lands in GOMODCACHE, so it moves too.
+# A one-disk box keeps the tools' own defaults. Process scope only: it changes nothing for the owner's other builds.
+# PURE: returns an ordered map, empty when there is nothing to move.
+function Get-ToolCacheEnv {
+  param([string]$HomeDir, [string]$OsDrive = 'C:')
+  $map = [ordered]@{}
+  if (-not $HomeDir) { return $map }
+  $qual = { param($p) if ($p -match '^\s*([A-Za-z]):') { return ($Matches[1].ToUpper() + ':') } return '' }
+  $homeDrive = & $qual $HomeDir
+  if (-not $homeDrive -or $homeDrive -eq (& $qual $OsDrive)) { return $map }
+  $root = Join-Path $HomeDir 'cache'
+  $map['GOCACHE'] = Join-Path $root 'go-build'
+  $map['GOMODCACHE'] = Join-Path $root 'go-mod'
+  $map['GOTMPDIR'] = Join-Path $root 'go-tmp'
+  $map['npm_config_cache'] = Join-Path $root 'npm'
+  $map['UV_CACHE_DIR'] = Join-Path $root 'uv'
+  $map['PIP_CACHE_DIR'] = Join-Path $root 'pip'
+  $map['TEMP'] = Join-Path $root 'tmp'
+  $map['TMP'] = Join-Path $root 'tmp'
+  return $map
+}
+
+# A LOCAL_OFFLOAD_CONFIG naming another file outranks the config this install writes, so every later run keeps reading
+# that file and the tier, data home and seats of this install never load (found on a box with a months-old trial's
+# variable still set). PURE: '' when there is no conflict, else the message with the exact fix.
+function Get-ConfigEnvShadow {
+  param([string]$EnvValue, [string]$ConfigPath)
+  if (-not $EnvValue -or -not $EnvValue.Trim()) { return '' }
+  $a = $EnvValue.Trim(); $b = $ConfigPath
+  try { $a = [System.IO.Path]::GetFullPath($a); $b = [System.IO.Path]::GetFullPath($b) } catch { }
+  if ($a -ieq $b) { return '' }
+  return ("LOCAL_OFFLOAD_CONFIG=$EnvValue outranks the config this install writes ($ConfigPath), so the harness would keep reading that file and this install would not take effect. " +
+    "If it is a leftover, clear it and run the installer in a new shell: [Environment]::SetEnvironmentVariable('LOCAL_OFFLOAD_CONFIG', `$null, 'User'). " +
+    "To keep it on purpose, set OFFLOAD_ALLOW_CONFIG_ENV=1 for this run.")
+}
+
 # Test seam: OFFLOAD_INSTALL_DOT_SOURCE=1 -> define the pure helpers above and
 # return before ANY main-flow work (no dirs, no transcript, no detection). Used
 # by setup/tests/install-cuda-build.test.ps1 + install-config-seed.test.ps1 +
@@ -1912,7 +2004,41 @@ if ($env:OFFLOAD_INSTALL_DOT_SOURCE -eq '1') { return }
 # ---------------------------------------------------------------------------
 # Resolve config
 # ---------------------------------------------------------------------------
-if ($env:OFFLOAD_HOME) { $HOME_DIR = $env:OFFLOAD_HOME } else { $HOME_DIR = Join-Path $HOME 'offload-stack' }
+# Fail before anything is written or downloaded: see Get-ConfigEnvShadow.
+if (-not $RenderOnly) {
+  $cfgShadow = Get-ConfigEnvShadow -EnvValue $env:LOCAL_OFFLOAD_CONFIG -ConfigPath (Join-Path (Join-Path $HOME '.local-offload') 'config.json')
+  if ($cfgShadow) {
+    if ($env:OFFLOAD_ALLOW_CONFIG_ENV -eq '1') { Write-Host "NOTE  $cfgShadow" -ForegroundColor Yellow } else { throw $cfgShadow }
+  }
+}
+$script:homePickedRoot = ''
+if ($env:OFFLOAD_HOME) { $HOME_DIR = $env:OFFLOAD_HOME }
+elseif ($RenderOnly) { $HOME_DIR = Join-Path $HOME 'offload-stack' }
+else {
+  $profileHome = Join-Path $HOME 'offload-stack'
+  $hc = Get-InstallHomeChoice -Volumes (Get-InstallVolumes) -OsDrive $env:SystemDrive -AllowOS ($env:OFFLOAD_ALLOW_OS_DATA -eq '1') -ProfileHome $profileHome `
+    -ProfileHasInstall ((Test-Path (Join-Path $profileHome 'installed.json')) -or (Test-Path (Join-Path $profileHome 'llama-swap.yaml')))
+  if ($hc.Error) { throw "install home: $($hc.Error)" }
+  $HOME_DIR = $hc.Home
+  $script:homePickedRoot = $hc.Root
+  Write-Host "install home: $HOME_DIR ($($hc.Because))" -ForegroundColor White
+  if ($hc.Persist) {
+    # selftest, doctor, update and report find the install through this; set here so a crash mid-install still finds it.
+    [Environment]::SetEnvironmentVariable('OFFLOAD_HOME', $HOME_DIR, 'User')
+    $env:OFFLOAD_HOME = $HOME_DIR
+    Write-Host "      OFFLOAD_HOME=$HOME_DIR saved for this user; a shell opened before now does not have it" -ForegroundColor DarkGray
+  }
+}
+if (-not $RenderOnly) {
+  $toolCaches = Get-ToolCacheEnv -HomeDir $HOME_DIR -OsDrive $env:SystemDrive
+  foreach ($k in @($toolCaches.Keys)) {
+    # An operator's own cache setting stands. TEMP and TMP are always set by Windows, so those two always move.
+    if ($k -notin @('TEMP', 'TMP') -and (Test-Path "Env:$k")) { continue }
+    New-Item -ItemType Directory -Force -Path $toolCaches[$k] | Out-Null
+    Set-Item -Path "Env:$k" -Value $toolCaches[$k]
+  }
+  if (@($toolCaches.Keys).Count -gt 0) { Write-Host "      tool caches and temp: $(Join-Path $HOME_DIR 'cache')" -ForegroundColor DarkGray }
+}
 # HAILO_HOME must ALWAYS be non-empty (Task 5 review finding: an empty value expands
 # __HAILO_HOME__ to "" and silently produces the plausible-wrong "/hailo-http.cmd").
 # Set here, beside HOME_DIR, so EVERY path that can reach the seed merge has it.
@@ -2027,6 +2153,81 @@ function Test-Go126 {
   if ($parts.Count -lt 2) { return $false }
   return ([int]$parts[0] -gt 1) -or ([int]$parts[0] -eq 1 -and [int]$parts[1] -ge 26)
 }
+# The repo VERSION file is the renderer's REQUIRED version. A harness exe whose
+# embedded templates/structs predate the on-disk profiles.json renders it wrong
+# silently (an unknown include_qwen38 is dropped by the old struct, so the yaml
+# loses entries Step 5 just downloaded 18.8GB for) — every consumer below
+# (Resolve-HarnessExe, the Step 6 refusal, Step 7's rebuild gate) compares
+# against this one value.
+$versionFile = Join-Path $repoRoot 'VERSION'
+if (-not (Test-Path $versionFile)) { throw "no VERSION file at $versionFile - cannot version-gate the renderer" }
+$repoVersion = (Get-Content -Raw $versionFile).Trim()
+
+# Get-HarnessExeVersion reads what a built exe says it is (`local-offload <ver>`).
+# $null on any failure (missing exe, an exe too old to answer) - callers treat
+# $null as a mismatch, so a broken/ancient binary takes the rebuild path.
+# NB: the output is drained into an array, NOT piped through Select-Object -First 1
+# - an early pipeline stop kills the native process and leaves $LASTEXITCODE unset,
+# which read as a failure and sent every render down the version-mismatch throw.
+function Get-HarnessExeVersion {
+  param([string]$Exe)
+  if (-not ($Exe -and (Test-Path $Exe))) { return $null }
+  try {
+    $out = @(& $Exe --version 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $out.Count -lt 1 -or -not $out[0]) { return $null }
+    return ("$($out[0])" -split '\s+')[-1].Trim()   # last token: the format may grow a prefix
+  } catch { return $null }
+}
+
+# Resolve-HarnessExe returns a local-offload.exe able to render a serving config.
+# Step 6 delegates rendering to it, but Step 7 is what BUILDS the installed copy, so
+# at Step 6 time there may not be one yet. Resolution order, cheapest first:
+#   1. $env:OFFLOAD_HARNESS_EXE  - an explicit override; render.tests.ps1 builds once
+#                                  and points every case at it instead of paying a
+#                                  build per render.
+#   2. the already-installed exe - ONLY when its --version matches the repo VERSION
+#                                  file. A stale installed exe on a re-install is the
+#                                  version-skew trap above; it falls through to 3.
+#   3. `go build` into a temp dir - Go is a verified prereq well before Step 6, and
+#                                  this touches NO install artifact, which keeps
+#                                  -RenderOnly side-effect-free with respect to the
+#                                  install tree (it is no longer build-free, and the
+#                                  header says so).
+function Resolve-HarnessExe {
+  if ($env:OFFLOAD_HARNESS_EXE -and (Test-Path $env:OFFLOAD_HARNESS_EXE)) { return $env:OFFLOAD_HARNESS_EXE }
+  $installed = Join-Path (Join-Path $HOME_DIR 'harness') 'local-offload.exe'
+  if ((Test-Path $installed) -and ((Get-HarnessExeVersion $installed) -eq $repoVersion)) { return $installed }
+  if ($script:tmpRenderExe -and (Test-Path $script:tmpRenderExe)) { return $script:tmpRenderExe }
+  $repoRoot = Split-Path -Parent $scriptDir
+  Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Filter 'offload-render-*.exe' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue   # an earlier run that died
+  $tmpExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".exe")
+  Push-Location $repoRoot
+  # `go build` writes "go: downloading <module>" to STDERR on a box whose module cache is
+  # cold (every fresh install), and under this file's $ErrorActionPreference='Stop' a
+  # stderr line merged by 2>&1 is a TERMINATING NativeCommandError: the first fresh Windows
+  # box (an RTX 5080 desktop, 2026-11-04) died here with the build still running. Only the
+  # exit code decides a build; stderr is its log.
+  $prevEapGo = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $buildOut = @(& go build -o $tmpExe . 2>&1 | ForEach-Object { "$_" })
+    $goRc = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
+  if ($goRc -ne 0) { throw "cannot build the renderer from $repoRoot ($goRc): $($buildOut -join ' ')" }
+  if (-not (Test-Path $tmpExe)) { throw "go build reported success but produced no $tmpExe" }
+  $script:tmpRenderExe = $tmpExe
+  return $tmpExe
+}
+
+# The temp renderer has no job once the installed exe exists, or once a dry run has rendered.
+function Remove-TempRenderer {
+  if ($script:tmpRenderExe) {
+    Remove-Item -LiteralPath $script:tmpRenderExe -Force -ErrorAction SilentlyContinue
+    $script:tmpRenderExe = $null
+  }
+}
+
+
 if (-not $RenderOnly) {
 $wingetFlags = @('--accept-package-agreements', '--accept-source-agreements', '--silent')
 Step 'prereq: Git' `
@@ -2047,6 +2248,10 @@ Step 'prereq: Go >=1.26' `
     Update-SessionPath
     if (-not (Test-Go126)) { throw "Go still <1.26 after winget install + PATH refresh" }
   }
+# Build the renderer now. A module whose Go toolchain cannot be fetched (go.mod's floor is a patch level above what
+# Test-Go126 reads; GOTOOLCHAIN=local, a blocked proxy) or a tree that does not compile fails here, in the first
+# minutes, instead of after tens of GB of weights.
+Step 'preflight: build the renderer' { $false } { $null = Resolve-HarnessExe }
 
 # ---------------------------------------------------------------------------
 # Step 3: llama.cpp binaries for the backend (+ cudart for CUDA)
@@ -2202,69 +2407,6 @@ if ($withMedia) {
 }
 }  # end if (-not $RenderOnly) — Steps 2-5 (artifact acquisition)
 
-# The repo VERSION file is the renderer's REQUIRED version. A harness exe whose
-# embedded templates/structs predate the on-disk profiles.json renders it wrong
-# silently (an unknown include_qwen38 is dropped by the old struct, so the yaml
-# loses entries Step 5 just downloaded 18.8GB for) — every consumer below
-# (Resolve-HarnessExe, the Step 6 refusal, Step 7's rebuild gate) compares
-# against this one value.
-$versionFile = Join-Path $repoRoot 'VERSION'
-if (-not (Test-Path $versionFile)) { throw "no VERSION file at $versionFile - cannot version-gate the renderer" }
-$repoVersion = (Get-Content -Raw $versionFile).Trim()
-
-# Get-HarnessExeVersion reads what a built exe says it is (`local-offload <ver>`).
-# $null on any failure (missing exe, an exe too old to answer) - callers treat
-# $null as a mismatch, so a broken/ancient binary takes the rebuild path.
-# NB: the output is drained into an array, NOT piped through Select-Object -First 1
-# - an early pipeline stop kills the native process and leaves $LASTEXITCODE unset,
-# which read as a failure and sent every render down the version-mismatch throw.
-function Get-HarnessExeVersion {
-  param([string]$Exe)
-  if (-not ($Exe -and (Test-Path $Exe))) { return $null }
-  try {
-    $out = @(& $Exe --version 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $out.Count -lt 1 -or -not $out[0]) { return $null }
-    return ("$($out[0])" -split '\s+')[-1].Trim()   # last token: the format may grow a prefix
-  } catch { return $null }
-}
-
-# Resolve-HarnessExe returns a local-offload.exe able to render a serving config.
-# Step 6 delegates rendering to it, but Step 7 is what BUILDS the installed copy, so
-# at Step 6 time there may not be one yet. Resolution order, cheapest first:
-#   1. $env:OFFLOAD_HARNESS_EXE  - an explicit override; render.tests.ps1 builds once
-#                                  and points every case at it instead of paying a
-#                                  build per render.
-#   2. the already-installed exe - ONLY when its --version matches the repo VERSION
-#                                  file. A stale installed exe on a re-install is the
-#                                  version-skew trap above; it falls through to 3.
-#   3. `go build` into a temp dir - Go is a verified prereq well before Step 6, and
-#                                  this touches NO install artifact, which keeps
-#                                  -RenderOnly side-effect-free with respect to the
-#                                  install tree (it is no longer build-free, and the
-#                                  header says so).
-function Resolve-HarnessExe {
-  if ($env:OFFLOAD_HARNESS_EXE -and (Test-Path $env:OFFLOAD_HARNESS_EXE)) { return $env:OFFLOAD_HARNESS_EXE }
-  $installed = Join-Path (Join-Path $HOME_DIR 'harness') 'local-offload.exe'
-  if ((Test-Path $installed) -and ((Get-HarnessExeVersion $installed) -eq $repoVersion)) { return $installed }
-  $repoRoot = Split-Path -Parent $scriptDir
-  $tmpExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".exe")
-  Push-Location $repoRoot
-  # `go build` writes "go: downloading <module>" to STDERR on a box whose module cache is
-  # cold (every fresh install), and under this file's $ErrorActionPreference='Stop' a
-  # stderr line merged by 2>&1 is a TERMINATING NativeCommandError: the first fresh Windows
-  # box (an RTX 5080 desktop, 2026-11-04) died here with the build still running. Only the
-  # exit code decides a build; stderr is its log.
-  $prevEapGo = $ErrorActionPreference
-  $ErrorActionPreference = 'Continue'
-  try {
-    $buildOut = @(& go build -o $tmpExe . 2>&1 | ForEach-Object { "$_" })
-    $goRc = $LASTEXITCODE
-  } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
-  if ($goRc -ne 0) { throw "cannot build the renderer from $repoRoot ($goRc): $($buildOut -join ' ')" }
-  if (-not (Test-Path $tmpExe)) { throw "go build reported success but produced no $tmpExe" }
-  return $tmpExe
-}
-
 # ---------------------------------------------------------------------------
 # Step 6: render llama-swap.yaml PROFILE-DRIVEN (H2). The template is chosen by
 # the profile's backend (cuda|vulkan|cpu|dual-cuda), and the profile's serving
@@ -2317,6 +2459,61 @@ if ($env:OFFLOAD_EG2_LLAMA_BIN) {
   }
   $eg2Bin = $eg2Dir.Replace('\', '/').TrimEnd('/')
 }
+# The render's inputs, one list for the render itself and for the verdict on an existing file.
+function Get-RenderArgs {
+  $renderArgs = @(
+    'install', 'render',
+    '--os', 'windows',
+    '--llama-bin', $llamaDir.Replace('\', '/'),
+    '--models', $modelDir.Replace('\', '/'),
+    '--home', $HOME_DIR.Replace('\', '/'),
+    '--listen', '127.0.0.1:11436',
+    '--out', $yamlDest,
+    '--root', (Split-Path -Parent $scriptDir)
+  )
+  # The embeddinggemma2 entry's own build (OFFLOAD_EG2_LLAMA_BIN), only when the operator set one.
+  if ($eg2Bin) { $renderArgs += @('--llama-bin-eg2', $eg2Bin) }
+  # An unknown/absent profile still renders: the binary carries the same off-matrix
+  # backend defaults this script used to hold, keyed by the TEMPLATE's backend.
+  if ($pp.known -and $profileId) { $renderArgs += @('--profile', $profileId) }
+  else { $renderArgs += @('--fallback-backend', $tplBackend) }
+  # --threads matters only where the template carries the __NTHREADS__ token: the cpu
+  # backend's entries and, since ADR 0080, the RAM-spill agent seat of the cuda template
+  # (the spilled experts run on those threads). The value is PHYSICAL cores - the value
+  # this script has always used. The bake's own thread count is not recorded in the repo,
+  # so the spill seat's --threads is the renderer's input, not a measured literal.
+  $cores = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum
+  if (-not $cores -or $cores -lt 1) { $cores = [Environment]::ProcessorCount }
+  $renderArgs += @('--threads', "$cores")
+  # The RAM gate on the 26B lives in the binary now, but the VALUE is this script's:
+  # it resolves ram_tier from the detect verdict (or OFFLOAD_RAM_TIER), defaulting to
+  # 'min'. Passing it keeps the gate byte-identical to what this script used to do
+  # itself - cpu_moe needs a real RAM path and is dropped on low/min.
+  if ($ramTier) { $renderArgs += @('--ram-tier', $ramTier) }
+  return ,$renderArgs
+}
+
+# The re-run half of Step 6's SKIP: the file against what THIS install's inputs render. MATCH keeps it. STALE re-renders
+# (a promoted profile, a new seat); the action keeps the old file beside the new one. HAND-EDITED keeps it and says so,
+# because re-rendering destroys somebody's edit; OFFLOAD_RERENDER=1 is the explicit way past that. UNSTAMPED predates
+# the stamp, so the content probes above it decide. A render that refuses goes to the action, which reports it by name.
+function Test-YamlRenderCurrent {
+  $stateArgs = (Get-RenderArgs) + '--state'
+  $exe = Resolve-HarnessExe
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { $lines = @(& $exe @stateArgs 2>$null | ForEach-Object { "$_" }); $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prevEap }
+  if ($rc -ne 0) { return $false }
+  $verdict = [string](@($lines | Where-Object { $_ -match '^(MATCH|STALE|UNSTAMPED|HAND-EDITED|MISSING)\b' }) | Select-Object -First 1)
+  if ($verdict -match '^STALE') { Write-Host "      $verdict" -ForegroundColor Yellow; return $false }
+  if ($verdict -match '^HAND-EDITED') {
+    if ($env:OFFLOAD_RERENDER -eq '1') { Write-Host "      $verdict" -ForegroundColor Yellow; return $false }
+    Write-Host "WARN  $verdict" -ForegroundColor Yellow
+    Write-Host "      keeping it, so this box does not serve what the profile says. To replace it with the render (the old file is kept beside it): set OFFLOAD_RERENDER=1 and run the installer again." -ForegroundColor Yellow
+  }
+  return $true
+}
+
 Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $profileId } else { '(defaults)' }) ctx=$(if ($pp.known) { $pp.ctx } else { 'template' }) kv=$(if ($pp.known) { $pp.kv_k } else { 'template' }) 26b=$(if ($pp.known) { $pp.moe_mode } else { 'template' }))" `
   {
     (Test-Path $yamlDest) -and
@@ -2332,7 +2529,8 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     # Adding the seat's __TOKEN__ pair to the regex above does NOT catch this: Render
     # refuses to emit a leftover token, so a rendered file can never contain one - that
     # list only detects hand-edited files. This has to be a CONTENT probe.
-    (@($gatedSeats.GetEnumerator() | Where-Object { $_.Value -and -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $_.Key -Quiet) }).Count -eq 0)
+    (@($gatedSeats.GetEnumerator() | Where-Object { $_.Value -and -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $_.Key -Quiet) }).Count -eq 0) -and
+    (Test-YamlRenderCurrent)
   } `
   {
     # DELEGATED to `local-offload install render` (ADR 0021). This script used to
@@ -2342,6 +2540,11 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     # `-match '^blackwell-'` branch that a Linux install of the same tier never got.
     # ONE renderer, in the binary, consumed by both wrappers - which is what section 3
     # of the first-class-install plan always described.
+    if ((Test-Path $yamlDest) -and -not $RenderOnly) {
+      $yamlPrev = "$yamlDest.prev-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+      Copy-Item -LiteralPath $yamlDest -Destination $yamlPrev -Force
+      Write-Host "      old config kept as $yamlPrev; a running llama-swap serves the old one until it restarts" -ForegroundColor DarkGray
+    }
     $offloadRender = Resolve-HarnessExe
     # Belt for the version gate: Resolve-HarnessExe already refuses a stale
     # INSTALLED exe, so a mismatch here means the fallback build itself handed
@@ -2352,35 +2555,7 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     if ($renderVersion -ne $repoVersion) {
       throw "renderer $offloadRender reports version '$renderVersion' but the repo VERSION is '$repoVersion' - a stale renderer silently drops newer profile fields; rebuild it (or point OFFLOAD_HARNESS_EXE at a current build) and re-run"
     }
-    $renderArgs = @(
-      'install', 'render',
-      '--os', 'windows',
-      '--llama-bin', $llamaDir.Replace('\', '/'),
-      '--models', $modelDir.Replace('\', '/'),
-      '--home', $HOME_DIR.Replace('\', '/'),
-      '--listen', '127.0.0.1:11436',
-      '--out', $yamlDest,
-      '--root', (Split-Path -Parent $scriptDir)
-    )
-    # The embeddinggemma2 entry's own build (OFFLOAD_EG2_LLAMA_BIN), only when the operator set one.
-    if ($eg2Bin) { $renderArgs += @('--llama-bin-eg2', $eg2Bin) }
-    # An unknown/absent profile still renders: the binary carries the same off-matrix
-    # backend defaults this script used to hold, keyed by the TEMPLATE's backend.
-    if ($pp.known -and $profileId) { $renderArgs += @('--profile', $profileId) }
-    else { $renderArgs += @('--fallback-backend', $tplBackend) }
-    # --threads matters only where the template carries the __NTHREADS__ token: the cpu
-    # backend's entries and, since ADR 0080, the RAM-spill agent seat of the cuda template
-    # (the spilled experts run on those threads). The value is PHYSICAL cores - the value
-    # this script has always used. The bake's own thread count is not recorded in the repo,
-    # so the spill seat's --threads is the renderer's input, not a measured literal.
-    $cores = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum
-    if (-not $cores -or $cores -lt 1) { $cores = [Environment]::ProcessorCount }
-    $renderArgs += @('--threads', "$cores")
-    # The RAM gate on the 26B lives in the binary now, but the VALUE is this script's:
-    # it resolves ram_tier from the detect verdict (or OFFLOAD_RAM_TIER), defaulting to
-    # 'min'. Passing it keeps the gate byte-identical to what this script used to do
-    # itself - cpu_moe needs a real RAM path and is dropped on low/min.
-    if ($ramTier) { $renderArgs += @('--ram-tier', $ramTier) }
+    $renderArgs = Get-RenderArgs
 
     # A native command writing to stderr becomes a TERMINATING error under
     # $ErrorActionPreference='Stop', so warnings from the renderer would abort the
@@ -2405,6 +2580,7 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
 # -RenderOnly stops here: config rendered, no artifacts/build/manifest. Emit a
 # compact JSON verdict describing the resolved profile so a test can assert on it.
 if ($RenderOnly) {
+  Remove-TempRenderer
   $rv = @{ render_only = $true; backend = $backend; render_backend = $tplBackend;
     profile = $profileId; ram_tier = $ramTier; big_ram = $bigRam;
     agent_ctx_tokens = $agentCtxTokens; include_26b = [bool]$pp.include_26b;
@@ -2438,6 +2614,7 @@ Step 'build local-offload.exe' `
     if ($goRc -ne 0) { throw "go build (harness) failed (exit $goRc)" }
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
   }
+Remove-TempRenderer
 $manifestComponents['local-offload'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
 # Step 7a: the render runners beside the harness exe. The shipped defaults are
 # "render/*.mjs", resolved against the EXECUTABLE's directory (gpugen.ResolveScript),
@@ -2551,6 +2728,12 @@ Step 'harness config -> ~/.local-offload/config.json' `
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seedCond -OffloadHome $HOME_DIR
       Write-Host "      config_seed_ram_mid_high ($profileId, ram_tier=$ramTier): $(@($seedCond.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
     }
+    # tierseed.Resolve's rule, which this raw merge bypasses: the tier's agent window unless a seed layer set one. Without
+    # it a Windows node advertises no context ceiling and the delegator's placement gate never selects it (config.go).
+    $ctxSeeded = @(@($seed, $seedCondLow, $seedCond) | Where-Object { $_ -and $_.PSObject.Properties['agent_ctx_tokens'] }).Count -gt 0
+    if (-not $ctxSeeded -and $pp.known -and [int]$agentCtxTokens -gt 0) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ agent_ctx_tokens = [int]$agentCtxTokens })
+    }
     # A box off the tier matrix has no profile row, so no seed reseeds its escalation and reasoning rungs; the
     # template binds both to the 26B, which the CUDA fallback render no longer serves (0186 w4).
     $rungSeed = Get-OffMatrixRungSeed -ProfileRow $profRow -Include26B ([bool]$pp.include_26b)
@@ -2657,8 +2840,12 @@ Step 'harness config -> ~/.local-offload/config.json' `
     $prevEapVol = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'   # a non-zero exit (no eligible volume) still prints the JSON the rule reads
     try { $volJson = (@(& $dataHomeExe @volArgs 2>$null) -join "`n") } catch { $volJson = '' } finally { $ErrorActionPreference = $prevEapVol }
-    $dh = Get-DataHome -VolumesJson $volJson -Override $env:OFFLOAD_DATA_HOME -OsDrive $env:SystemDrive -AllowOS $allowOsData
+    # When this run chose the stack's drive, the data goes with it: that choice already refused USB, which the volume probe cannot see.
+    $dataHomeGiven = $env:OFFLOAD_DATA_HOME
+    if (-not $dataHomeGiven -and $script:homePickedRoot) { $dataHomeGiven = "$script:homePickedRoot/local-offload" }
+    $dh = Get-DataHome -VolumesJson $volJson -Override $dataHomeGiven -OsDrive $env:SystemDrive -AllowOS $allowOsData
     if ($dh.Error) { throw "data home: $($dh.Error)" }
+    if (-not $env:OFFLOAD_DATA_HOME -and $script:homePickedRoot) { $dh.Because = 'the drive this install chose for the stack' }
     New-Item -ItemType Directory -Force -Path $dh.Home | Out-Null
     $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ home = $dh.Home })
     $script:dataHomeChoice = $dh

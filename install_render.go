@@ -764,6 +764,7 @@ func runInstallRender(args []string) error {
 	threads := fs.Int("threads", 0, "--threads per server (default: half the logical CPUs)")
 	goos := fs.String("os", "", "target OS: windows|linux (default: this machine)")
 	out := fs.String("out", "", "write the rendered config here instead of stdout")
+	stateOnly := fs.Bool("state", false, "print this render's verdict on the file at --out and write nothing: MATCH, STALE, UNSTAMPED, HAND-EDITED or MISSING, first word of one line (the installer's re-run check)")
 	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
 	home := fs.String("home", "", "install root, for media seat paths (__OFFLOAD_HOME__)")
 	rknpuHome := fs.String("rknpu-home", "", "RKNPU home, for the rkllm seat's launcher (__RKNPU_HOME__; default: $RKNPU_HOME, else <home>/rknpu)")
@@ -798,6 +799,9 @@ func runInstallRender(args []string) error {
 	// a config that fails one is REFUSED here, before it can be written.
 	if err := renderGate(res); err != nil {
 		return err
+	}
+	if *stateOnly {
+		return printRenderState(os.Stdout, *out, res)
 	}
 	// The llama.cpp floor of the embeddinggemma2 entry. WRITE time only: a replay (audit-yaml) runs on
 	// another machine with another machine's paths, so deriveRender never asks.
@@ -843,6 +847,27 @@ func runInstallRender(args []string) error {
 	// stdout is free here because the config only goes there when --out is empty.
 	spec, _, _ := servingtmpl.SpecHash(res.Basis)
 	fmt.Printf("wrote %s (tier %s, %s/%s, spec_sha256 %s)\n", *out, res.TierID, osTag(target), res.Profile.Backend, spec)
+	return nil
+}
+
+// printRenderState answers the installer's re-run question: is the config at path what these exact inputs render?
+// It uses the render's own per-box inputs, which is what audit-yaml's replay cannot know, so MATCH here means the
+// file is what this install would write. The verdict order is AgainstRender's: a hand edit is reported as a hand
+// edit even when the file is also stale, because re-rendering it would destroy the edit.
+func printRenderState(w io.Writer, path string, res renderResult) error {
+	if path == "" {
+		return errors.New("install render --state needs --out: the verdict is about that file")
+	}
+	text, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(w, "MISSING %s\n", path)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rep := servingtmpl.AgainstRender(string(text), res.Basis, res.Config)
+	fmt.Fprintf(w, "%s %s\n", rep.State, rep.Line(path))
 	return nil
 }
 
