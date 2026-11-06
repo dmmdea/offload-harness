@@ -1781,15 +1781,12 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         $r2 = Invoke-SdcppRender -OutPng $trialPng -Extras $trialExtras -TimeoutSec $sdTimeout
         $md.gpu_vae.seconds = $r2.seconds
         $trialColors = if ($r2.ok -and (Test-Path $trialPng)) { Get-PngDistinctColors -Path $trialPng } else { $null }
-        if ($r2.ok -and $null -ne $trialColors -and $trialColors -ge 8 -and $r2.seconds -lt $r1.seconds) {
+        # Clean is enough: no model part stays on the CPU when the card can take it, whichever render was quicker. The
+        # workaround is only for a decode that fails or comes out blank.
+        if ($r2.ok -and $null -ne $trialColors -and $trialColors -ge 8) {
           $md.gpu_vae.status = 'pass'
           $md.gpu_vae.promote = $true
-          $md.gpu_vae.detail = "GPU VAE decode clean + faster ($($r2.seconds)s vs $($r1.seconds)s) - dropping the CPU-VAE workaround is authorized"
-          LogOk "gpu_vae: $($md.gpu_vae.detail)"
-        } elseif ($r2.ok -and $null -ne $trialColors -and $trialColors -ge 8) {
-          $md.gpu_vae.status = 'pass'
-          $md.gpu_vae.promote = $false
-          $md.gpu_vae.detail = "GPU VAE decode clean but not faster ($($r2.seconds)s vs $($r1.seconds)s) - keep the seeded workaround"
+          $md.gpu_vae.detail = "GPU VAE decode clean ($($r2.seconds)s, $($r1.seconds)s with the VAE on the CPU) - dropping the CPU-VAE workaround is authorized"
           LogOk "gpu_vae: $($md.gpu_vae.detail)"
         } else {
           $md.gpu_vae.status = 'fail'

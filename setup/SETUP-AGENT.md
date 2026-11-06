@@ -537,7 +537,7 @@ spawn-per-job under the same GPU lock, zero-warm, no ComfyUI/Python anywhere.
 | Check | Proves | Does NOT prove | On fail |
 |---|---|---|---|
 | `render` | the seeded config produces a real image (non-blank: sampled `distinct_colors ≥ 8`, >20 KB) in `seconds` on THIS gpu+driver | prompt-following quality (eyeball the PNG; a VLM verdict is a later luxury) | Blank/solid = the #1031 quant class or a VAE fault — verify the model SHA matches the pin, then report. Do not swap quants on your own. |
-| `gpu_vae` | dropping the CPU-VAE workaround decodes clean AND faster | stability at larger sizes (1024²+ may still need `--vae-tiling`, sd.cpp #1621) | Keep the seeded workaround. |
+| `gpu_vae` | dropping the CPU-VAE workaround decodes clean, whichever render was quicker | stability at larger sizes (1024²+ may still need `--vae-tiling`, sd.cpp #1621) | Keep the seeded workaround. |
 
 **Timing calibration** (ZLUDA-Comfy anchors measured on a real 780M — sd.cpp receipts replace
 them): SD1.5-class 512² ≈ 12.7 s · SDXL-class ≈ 117 s. Honest expectations: Turbo-class ≤1024² is
