@@ -165,6 +165,14 @@ $SOURCES = @{
   'model-sd15'     = @{ kind = 'hf-file'; repo = 'stable-diffusion-v1-5/stable-diffusion-v1-5'; file = 'v1-5-pruned-emaonly.safetensors'; dest = 'v1-5-pruned-emaonly.safetensors' }
   'model-sdxl'     = @{ kind = 'hf-file'; repo = 'stabilityai/stable-diffusion-xl-base-1.0'; file = 'sd_xl_base_1.0.safetensors'; dest = 'sd_xl_base_1.0.safetensors' }
   'model-sdxl-vae' = @{ kind = 'hf-file'; repo = 'madebyollin/sdxl-vae-fp16-fix'; file = 'sdxl_vae.safetensors'; dest = 'sdxl_vae_fp16_fix.safetensors' }
+  # The seats' own weights, found by Get-SeatWeightKeys through dest (Step 5c). forModel: several tiers save a different
+  # projector under the same local name, so the row only answers for the seat whose model it belongs to.
+  'model-whisper-turbo' = @{ kind = 'hf-file'; repo = 'ggerganov/whisper.cpp'; file = 'ggml-large-v3-turbo.bin'; dest = 'ggml-large-v3-turbo.bin' }
+  'model-silero-v6'     = @{ kind = 'hf-file'; repo = 'ggml-org/whisper-vad'; file = 'ggml-silero-v6.2.0.bin'; dest = 'ggml-silero-v6.2.0.bin' }
+  'model-e4b-mmproj'    = @{ kind = 'hf-file'; repo = 'unsloth/gemma-4-E4B-it-qat-GGUF'; file = 'mmproj-F16.gguf'; dest = 'mmproj-F16.gguf'; forModel = 'gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf' }
+  'model-iq3s-mmproj'   = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3.8-27B-GGUF'; file = 'mmproj-F16.gguf'; dest = 'mmproj-F16.gguf'; forModel = 'Qwen3.8-27B-UD-IQ3_S.gguf' }
+  'model-qwen3vl-8b'    = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3-VL-8B-Instruct-GGUF'; file = 'Qwen3-VL-8B-Instruct-Q8_0.gguf'; dest = 'Qwen3VL-8B-Instruct-Q8_0.gguf' }
+  'model-qwen3vl-8b-mmproj' = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3-VL-8B-Instruct-GGUF'; file = 'mmproj-F16.gguf'; dest = 'mmproj-Qwen3VL-8B-Instruct-F16.gguf' }
   # --- maxwell-3 (the 3 GB band, 2026-10-28) media-seat weights, PLACED BY HAND like the CT-51 I5 rows below:
   # `install render` emits the tier's vision and stt seats from profiles.json and WARNS when these files are
   # not under the models dir; nothing here downloads them yet (no gate names these keys), so the operator places
@@ -1994,6 +2002,39 @@ function Get-ConfigEnvShadow {
     "To keep it on purpose, set OFFLOAD_ALLOW_CONFIG_ENV=1 for this run.")
 }
 
+# The source rows behind a tier's declared seats (first-class rule 3: no hand-placed weights). A seat names its files
+# by the local names the rendered yaml expects, so the row is found by dest. Several tiers save a different projector
+# as mmproj-F16.gguf, so a row that is one seat's projector says so with forModel. A file with no row is returned, not
+# dropped: the install reports it by name. PURE.
+function Get-SeatWeightKeys {
+  param($ProfileRow, $Sources)
+  $keys = New-Object System.Collections.ArrayList
+  $unresolved = New-Object System.Collections.ArrayList
+  if (-not $ProfileRow -or -not $ProfileRow.PSObject.Properties['media_seats']) {
+    return [pscustomobject]@{ Keys = @(); Unresolved = @() }
+  }
+  foreach ($seat in @($ProfileRow.media_seats)) {
+    # A forecast seat's model is a harness-managed directory, not a file a row can name.
+    if ("$($seat.kind)" -eq 'forecast') { continue }
+    foreach ($field in 'model', 'mmproj', 'vad_model') {
+      if (-not $seat.PSObject.Properties[$field]) { continue }
+      $file = "$($seat.$field)"
+      if (-not $file) { continue }
+      $match = $null
+      foreach ($k in $Sources.Keys) {
+        $row = $Sources[$k]
+        if ($row.kind -ne 'hf-file' -or $row.dest -ne $file) { continue }
+        if ($row.ContainsKey('forModel') -and $row.forModel -ne "$($seat.model)") { continue }
+        $match = $k
+        break
+      }
+      if ($match) { if (-not $keys.Contains($match)) { [void]$keys.Add($match) } }
+      elseif (-not $unresolved.Contains($file)) { [void]$unresolved.Add($file) }
+    }
+  }
+  return [pscustomobject]@{ Keys = @($keys); Unresolved = @($unresolved) }
+}
+
 # Test seam: OFFLOAD_INSTALL_DOT_SOURCE=1 -> define the pure helpers above and
 # return before ANY main-flow work (no dirs, no transcript, no detection). Used
 # by setup/tests/install-cuda-build.test.ps1 + install-config-seed.test.ps1 +
@@ -2404,6 +2445,32 @@ if ($withMedia) {
   foreach ($key in $mediaKeys) { Invoke-ModelInstall -Key $key -StepPrefix 'media model' }
 } else {
   Write-Host "SKIP  media tier (profile=$(if ($profileId) { $profileId } else { '(none)' }) is not amd-*; set OFFLOAD_WITH_MEDIA=1 to install sd.cpp + the image roster on any Vulkan-capable box)" -ForegroundColor DarkGray
+}
+# ---------------------------------------------------------------------------
+# Step 5c: what the tier's declared seats need. `install render` emits the vision and stt seats from media_seats and
+# only warned about their files, so every Windows box reached those routes by hand. Their weights now come from the
+# seats themselves, and on a Vulkan box the speech seat's engine is built here, since whisper.cpp ships no Windows
+# Vulkan binary. OFFLOAD_WITH_MEDIA=0 skips this too (metered links).
+# ---------------------------------------------------------------------------
+if ($profileId -and (Test-Path $profilesJson) -and $env:OFFLOAD_WITH_MEDIA -ne '0') {
+  $seatProfiles = (Get-Content -Raw $profilesJson | ConvertFrom-Json).profiles
+  if ($seatProfiles.PSObject.Properties[$profileId]) {
+    $seatRow = $seatProfiles.$profileId
+    $seatWeights = Get-SeatWeightKeys -ProfileRow $seatRow -Sources $SOURCES
+    foreach ($key in @($seatWeights.Keys)) { Invoke-ModelInstall -Key $key -StepPrefix 'seat weight' }
+    foreach ($file in @($seatWeights.Unresolved)) {
+      Write-Host "NOTE  seat file $file has no source in this installer; the seat that names it stays unserved until it is placed in $modelDir" -ForegroundColor Yellow
+    }
+    $sttSeat = @(@($seatRow.media_seats) | Where-Object { "$($_.kind)" -eq 'stt' }) | Select-Object -First 1
+    if ($sttSeat -and $backend -eq 'vulkan') {
+      $whisperBuild = Join-Path $scriptDir 'build-whisper-vulkan.ps1'
+      Step 'engine: whisper-server (Vulkan, built on this box)' { $false } {
+        # Its own process: the build puts a compiler first on its PATH and lowers its own priority.
+        & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $whisperBuild -HomeDir $HOME_DIR
+        if ($LASTEXITCODE -ne 0) { throw "the whisper-server build failed (exit $LASTEXITCODE); the log is above" }
+      }
+    }
+  }
 }
 }  # end if (-not $RenderOnly) — Steps 2-5 (artifact acquisition)
 
