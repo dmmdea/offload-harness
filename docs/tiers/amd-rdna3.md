@@ -33,6 +33,41 @@ binding can never name a seat that was not rendered:
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
 every seed.
 
+This tier's media bindings are **RAM-gated** (`config_seed_ram_mid_high`): the installer applies
+them only when the detected `ram_tier` is `mid` or `high`, so the same tier on a low-RAM box
+honestly serves text only.
+
+| key | value |
+|---|---|
+| `animategen_cfg` | `6` |
+| `animategen_depth_bin` | `__OFFLOAD_HOME__/build/depth-anything.cpp/build/examples/cli/da3-cli__EXE__` |
+| `animategen_depth_model` | `__OFFLOAD_HOME__/models/depth/depth-anything2-small-q8_0.gguf` |
+| `animategen_engine` | `sdcpp` |
+| `animategen_frames` | `33` |
+| `animategen_height` | `512` |
+| `animategen_sdcpp_backend` | `vulkan0` |
+| `animategen_sdcpp_bin` | `__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__` |
+| `animategen_sdcpp_max_tokens` | `5800` |
+| `animategen_sdcpp_model` | `__OFFLOAD_HOME__/models/wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors` |
+| `animategen_sdcpp_t5xxl` | `__OFFLOAD_HOME__/models/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf` |
+| `animategen_sdcpp_vae` | `__OFFLOAD_HOME__/models/wan21-vace-1.3b/wan_2.1_vae.safetensors` |
+| `animategen_sdcpp_vae_stride` | `8` |
+| `animategen_steps` | `20` |
+| `animategen_timeout_sec` | `5400` |
+| `animategen_width` | `288` |
+| `audiocpp_backend` | `vulkan` |
+| `audiocpp_bin` | `__OFFLOAD_HOME__/build/audio.cpp/build/bin/audiocpp_cli__EXE__` |
+| `audiocpp_device` | `0` |
+| `audiocpp_music_family` | `ace_step` |
+| `audiocpp_music_model` | `__OFFLOAD_HOME__/models/ace-step/ace-step-1.5-turbo-bf16.gguf` |
+| `audiocpp_voice_family` | `chatterbox` |
+| `audiocpp_voice_model` | `__OFFLOAD_HOME__/models/chatterbox/chatterbox-q8_0.gguf` |
+| `musicgen_engine` | `audiocpp` |
+| `videogen_families` | `{"fastwan":{"cfg":1,"commercial_use":true,"engine":"sdcpp","flow_shift":5,"fps":24,"frames":49,"height":480,"license":"Apache-2.0","sampler":"euler","sdcpp_backend":"vulkan0","sdcpp_bin":"__OFFLOAD_HOME__/sdcpp/sd-cli__EXE__","sdcpp_max_tokens":5200,"sdcpp_model":"__OFFLOAD_HOME__/models/wan22-ti2v-5b/FastWan2.2-TI2V-5B-q8_0.gguf","sdcpp_t5xxl":"__OFFLOAD_HOME__/models/wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf","sdcpp_tae":"__OFFLOAD_HOME__/models/wan22-ti2v-5b/taew2_2.safetensors","sdcpp_vae":"__OFFLOAD_HOME__/models/wan22-ti2v-5b/Wan2.2_VAE.safetensors","sdcpp_vae_stride":16,"steps":3,"width":832}}` |
+| `videogen_family` | `fastwan` |
+| `videogen_timeout_sec` | `7200` |
+| `voicegen_engine` | `audiocpp` |
+
 The installer seeds this tier's media bindings (`config_seed`):
 
 | key | value |
@@ -77,7 +112,7 @@ here so they are never mistaken for a media capability:
 Recorded with the profile — several are measurements from real hardware,
 including reasons a tempting change was deliberately not made.
 
-> Config #7 (780M/gfx1103 iGPU + 64GB dual-channel DDR5, Vulkan UMA). SAFE FLOOR: f16 KV + 16K ctx + 26B [SUPERSEDED 2026-09-21 (wiring-debt W4): this read 'cpu-moe'; RAM is overflow only (operator rule 2026-09-10), and this is a unified-memory iGPU, so the 26B now runs on the iGPU - moe_26b 'gpu'. PROJECTED: no amd-rdna3 box has run it yet] (ram_tier mid/high; else dropped). Research 2026-07-23 (J1): the floor is deliberately BELOW what this hardware measures elsewhere - 26B-A4B Q4_K_M runs FULLY OFFLOADED (-ngl 99, weights in GTT/shared memory) at ~20-25 tok/s tg on a 780M with dual-channel DDR5 (two independent community measurements; the earlier 'cpu-moe = very slow' note was wrong for dual-channel boxes), and Vulkan FA + q8_0 KV is production-supported since the Feb-Mar 2026 AMD tuning PRs. selftest.ps1's H3 canaries (fa_q8kv / moe_full_offload / ctx_sweep) MEASURE all three promotions on the real box; the agent applies them canary-gated per SETUP-AGENT.md (amd-rdna3 chapter). REQUIRES a llama.cpp win-vulkan build >= Mar-2026 (the newest complete build the installer takes satisfies this; never install a build below the floor) and flash-attn EXPLICITLY 'on' (never auto: a silent FA-off then fails quantized-V loads on Gemma). Single-channel RAM is a clean ~2x tg loss - confirm dual-channel at install. PROJECTED until receipts return. J-media 2026-07-28 (a contributor's amd-rdna3 box - the D9 audit gap): STT via the whisper.cpp Vulkan build. Vision reuses this tier's resident E4B + mmproj, so no extra multi-GB download on a UMA box. Vision keeps the CLIP encoder on CPU (--no-mmproj-offload). The REASON, stated accurately: llama.cpp #20081 reports mmproj quality degradation on Vulkan, but the maintainer could not reproduce it across several devices and the reporter closed it inconclusively - so quality alone is weak evidence. The load-bearing fact is in the same thread: running model + mmproj both on the Vulkan backend of a Radeon 780M iGPU gives a hard vk::DeviceLostError immediately after 'decoding image batch 1/8', reproducibly, on the exact silicon this tier targets. Keeping the encoder on CPU avoids that crash path and costs only encoder throughput; the LLM still decodes on the GPU. Both seats pin GGML_VK_VISIBLE_DEVICES=0 (multi-ICD boxes). REQUIRES a whisper.cpp Vulkan build + the whisper weights, which install.ps1's amd-* asset table does NOT fetch - `install render` warns by exact path. PROJECTED. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change. AGENT LANE 2026-11-06: 64 GB boxes bind the 26B agent seat from config_seed_ram_mid_high, the same RAM gate that renders it, and opt the node into remote agent work with one worker, because the seat serves --parallel 1. Below that band the lane stays on the workhorse and the node stays out of remote agent work, since E4B has failed fleet-smoke on another APU class. PROJECTED until a box runs a contract. The ComfyUI script keys are blanked and upscale_model removed: this tier has no ComfyUI, and the shipped defaults read as bound routes in doctor.
+> Config #7 (780M/gfx1103 iGPU + 64GB dual-channel DDR5, Vulkan UMA). SAFE FLOOR: f16 KV + 16K ctx + 26B [SUPERSEDED 2026-09-21 (wiring-debt W4): this read 'cpu-moe'; RAM is overflow only (operator rule 2026-09-10), and this is a unified-memory iGPU, so the 26B now runs on the iGPU - moe_26b 'gpu'. PROJECTED: no amd-rdna3 box has run it yet] (ram_tier mid/high; else dropped). Research 2026-07-23 (J1): the floor is deliberately BELOW what this hardware measures elsewhere - 26B-A4B Q4_K_M runs FULLY OFFLOADED (-ngl 99, weights in GTT/shared memory) at ~20-25 tok/s tg on a 780M with dual-channel DDR5 (two independent community measurements; the earlier 'cpu-moe = very slow' note was wrong for dual-channel boxes), and Vulkan FA + q8_0 KV is production-supported since the Feb-Mar 2026 AMD tuning PRs. selftest.ps1's H3 canaries (fa_q8kv / moe_full_offload / ctx_sweep) MEASURE all three promotions on the real box; the agent applies them canary-gated per SETUP-AGENT.md (amd-rdna3 chapter). REQUIRES a llama.cpp win-vulkan build >= Mar-2026 (the newest complete build the installer takes satisfies this; never install a build below the floor) and flash-attn EXPLICITLY 'on' (never auto: a silent FA-off then fails quantized-V loads on Gemma). Single-channel RAM is a clean ~2x tg loss - confirm dual-channel at install. PROJECTED until receipts return. J-media 2026-07-28 (a contributor's amd-rdna3 box - the D9 audit gap): STT via the whisper.cpp Vulkan build. Vision reuses this tier's resident E4B + mmproj, so no extra multi-GB download on a UMA box. Vision keeps the CLIP encoder on CPU (--no-mmproj-offload). The REASON, stated accurately: llama.cpp #20081 reports mmproj quality degradation on Vulkan, but the maintainer could not reproduce it across several devices and the reporter closed it inconclusively - so quality alone is weak evidence. The load-bearing fact is in the same thread: running model + mmproj both on the Vulkan backend of a Radeon 780M iGPU gives a hard vk::DeviceLostError immediately after 'decoding image batch 1/8', reproducibly, on the exact silicon this tier targets. Keeping the encoder on CPU avoids that crash path and costs only encoder throughput; the LLM still decodes on the GPU. Both seats pin GGML_VK_VISIBLE_DEVICES=0 (multi-ICD boxes). REQUIRES a whisper.cpp Vulkan build + the whisper weights, which install.ps1's amd-* asset table does NOT fetch - `install render` warns by exact path. PROJECTED. TIER-DOCTRINE PASS 2026-08-16: reviewed; seats are the best that fit — no change. AGENT LANE 2026-11-06: 64 GB boxes bind the 26B agent seat from config_seed_ram_mid_high, the same RAM gate that renders it, and opt the node into remote agent work with one worker, because the seat serves --parallel 1. Below that band the lane stays on the workhorse and the node stays out of remote agent work, since E4B has failed fleet-smoke on another APU class. PROJECTED until a box runs a contract. The ComfyUI script keys are blanked and upscale_model removed: this tier has no ComfyUI, and the shipped defaults read as bound routes in doctor. IGPU MEDIA 2026-11-06: the 64 GB band binds video (FastWan), animate (VACE + depth), voice (Chatterbox) and music (ACE-Step), copied from amd-gcn's measured set, with the same RAM gate as the 26B seat because each job needs more memory than a smaller box can give it. The installer fetches every weight the seed names and builds da3-cli and a patched audiocpp_cli on the box (setup/build-engine-vulkan.ps1): depth-anything.cpp has no releases, and audio.cpp's Windows zip cannot carry the planner patch music needs. The timeouts, token caps and sizes are amd-gcn's, measured on a Vega 7 under Linux. PROJECTED until a 780M has run them.
 
 ## Capability report
 

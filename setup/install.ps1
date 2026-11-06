@@ -193,20 +193,20 @@ $SOURCES = @{
   # q5_0 gives the same transcript 300 MiB lighter; q8_0 is the quality pick the 3 GB card still holds with room.
   'model-whisper-turbo-q8' = @{ kind = 'hf-file'; repo = 'ggerganov/whisper.cpp'; file = 'ggml-large-v3-turbo-q8_0.bin'; dest = 'ggml-large-v3-turbo-q8_0.bin' }
   'model-silero-v5'        = @{ kind = 'hf-file'; repo = 'ggml-org/whisper-vad'; file = 'ggml-silero-v5.1.2.bin'; dest = 'ggml-silero-v5.1.2.bin' }
-  # --- CT-51 I5: the amd-gcn (Vulkan iGPU) media models, PLACED BY HAND. Nothing in this installer downloads them
-  # (no gate names these keys; the Linux install has no media leg yet, so the weights are placed out of band).
+  # --- CT-51 I5: the iGPU media models. Step 5b fetches the ones a tier's seed binds, found by dest, so each dest is the
+  # path the seed names under models/ (the Linux install has no media leg yet, so there they are placed out of band).
   # Licences: FastWan2.2-TI2V-5B, the Wan 2.2 / 2.1 VAEs, umt5-xxl, taew2_2,
   # Wan2.1 VACE 1.3B and Depth-Anything V2 Small are Apache-2.0 (commercial use allowed); Chatterbox is MIT;
   # the ACE-Step 1.5 licence is MIT (the LICENSE file of its project and its Hugging Face card, read 2026-10-18; commercial use allowed); the audio lanes have no commercial_use key to set.
-  'model-fastwan'        = @{ kind = 'hf-file'; repo = 'Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF'; file = 'FastWan2.2-TI2V-5B-q8_0.gguf'; dest = 'FastWan2.2-TI2V-5B-q8_0.gguf' }
-  'model-wan22-vae'      = @{ kind = 'hf-file'; repo = 'QuantStack/Wan2.2-TI2V-5B-GGUF'; file = 'VAE/Wan2.2_VAE.safetensors'; dest = 'Wan2.2_VAE.safetensors' }
-  'model-umt5-xxl'       = @{ kind = 'hf-file'; repo = 'city96/umt5-xxl-encoder-gguf'; file = 'umt5-xxl-encoder-Q8_0.gguf'; dest = 'umt5-xxl-encoder-Q8_0.gguf' }
-  'model-wan22-tae'      = @{ kind = 'hf-file'; repo = 'lightx2v/Autoencoders'; file = 'taew2_2.safetensors'; dest = 'taew2_2.safetensors' }
-  'model-vace'           = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors'; dest = 'wan2.1_vace_1.3B_fp16.safetensors' }
-  'model-wan21-vae'      = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/vae/wan_2.1_vae.safetensors'; dest = 'wan_2.1_vae.safetensors' }
-  'model-depth-anything' = @{ kind = 'hf-file'; repo = 'mudler/depth-anything.cpp-gguf'; file = 'depth-anything2-small-q8_0.gguf'; dest = 'depth-anything2-small-q8_0.gguf' }
-  'model-chatterbox'     = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'Chatterbox-GGUF/chatterbox-q8_0.gguf'; dest = 'chatterbox-q8_0.gguf' }
-  'model-ace-step'       = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf'; dest = 'ace-step-1.5-turbo-bf16.gguf' }
+  'model-fastwan'        = @{ kind = 'hf-file'; repo = 'Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF'; file = 'FastWan2.2-TI2V-5B-q8_0.gguf'; dest = 'wan22-ti2v-5b/FastWan2.2-TI2V-5B-q8_0.gguf' }
+  'model-wan22-vae'      = @{ kind = 'hf-file'; repo = 'QuantStack/Wan2.2-TI2V-5B-GGUF'; file = 'VAE/Wan2.2_VAE.safetensors'; dest = 'wan22-ti2v-5b/Wan2.2_VAE.safetensors' }
+  'model-umt5-xxl'       = @{ kind = 'hf-file'; repo = 'city96/umt5-xxl-encoder-gguf'; file = 'umt5-xxl-encoder-Q8_0.gguf'; dest = 'wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf' }
+  'model-wan22-tae'      = @{ kind = 'hf-file'; repo = 'lightx2v/Autoencoders'; file = 'taew2_2.safetensors'; dest = 'wan22-ti2v-5b/taew2_2.safetensors' }
+  'model-vace'           = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors'; dest = 'wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors' }
+  'model-wan21-vae'      = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/vae/wan_2.1_vae.safetensors'; dest = 'wan21-vace-1.3b/wan_2.1_vae.safetensors' }
+  'model-depth-anything' = @{ kind = 'hf-file'; repo = 'mudler/depth-anything.cpp-gguf'; file = 'depth-anything2-small-q8_0.gguf'; dest = 'depth/depth-anything2-small-q8_0.gguf' }
+  'model-chatterbox'     = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'Chatterbox-GGUF/chatterbox-q8_0.gguf'; dest = 'chatterbox/chatterbox-q8_0.gguf' }
+  'model-ace-step'       = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf'; dest = 'ace-step/ace-step-1.5-turbo-bf16.gguf' }
 }
 
 # ---------------------------------------------------------------------------
@@ -1992,6 +1992,7 @@ function Get-ToolCacheEnv {
   $map['GOTMPDIR'] = Join-Path $root 'go-tmp'
   $map['npm_config_cache'] = Join-Path $root 'npm'
   $map['UV_CACHE_DIR'] = Join-Path $root 'uv'
+  $map['UV_PYTHON_INSTALL_DIR'] = Join-Path $root 'uv-python'
   $map['PIP_CACHE_DIR'] = Join-Path $root 'pip'
   $map['TEMP'] = Join-Path $root 'tmp'
   $map['TMP'] = Join-Path $root 'tmp'
@@ -2042,6 +2043,42 @@ function Get-SeatWeightKeys {
       elseif (-not $unresolved.Contains($file)) { [void]$unresolved.Add($file) }
     }
   }
+  return [pscustomobject]@{ Keys = @($keys); Unresolved = @($unresolved) }
+}
+
+# The source rows behind a tier's seed (first-class rule 3: no hand-placed weights). A seed names each file it binds as
+# __OFFLOAD_HOME__/models/<dest>, at any depth (a video family nests its files), so the row is found by dest. A layer
+# counts only when this box's RAM band applies it. A file with no row is returned, not dropped. PURE.
+function Get-SeedWeightKeys {
+  param($ProfileRow, $Sources, [string]$RamTier = '')
+  $keys = New-Object System.Collections.ArrayList
+  $unresolved = New-Object System.Collections.ArrayList
+  if (-not $ProfileRow) { return [pscustomobject]@{ Keys = @(); Unresolved = @() } }
+  $layers = New-Object System.Collections.ArrayList
+  if ($ProfileRow.PSObject.Properties['config_seed']) { [void]$layers.Add($ProfileRow.config_seed) }
+  if ($RamTier -in @('low', 'mid', 'high') -and $ProfileRow.PSObject.Properties['config_seed_ram_low_up']) { [void]$layers.Add($ProfileRow.config_seed_ram_low_up) }
+  if ($RamTier -in @('mid', 'high') -and $ProfileRow.PSObject.Properties['config_seed_ram_mid_high']) { [void]$layers.Add($ProfileRow.config_seed_ram_mid_high) }
+  $prefix = '__OFFLOAD_HOME__/models/'
+  $walk = {
+    param($node)
+    if ($null -eq $node) { return }
+    if ($node -is [string]) {
+      if ($node.StartsWith($prefix)) {
+        $file = $node.Substring($prefix.Length)
+        $match = $null
+        foreach ($k in $Sources.Keys) {
+          $row = $Sources[$k]
+          if ($row.kind -eq 'hf-file' -and $row.dest -eq $file) { $match = $k; break }
+        }
+        if ($match) { if (-not $keys.Contains($match)) { [void]$keys.Add($match) } }
+        elseif (-not $unresolved.Contains($file)) { [void]$unresolved.Add($file) }
+      }
+      return
+    }
+    if ($node -is [System.Collections.IEnumerable]) { foreach ($v in $node) { & $walk $v }; return }
+    if ($node -is [System.Management.Automation.PSCustomObject]) { foreach ($p in $node.PSObject.Properties) { & $walk $p.Value } }
+  }
+  foreach ($layer in $layers) { & $walk $layer }
   return [pscustomobject]@{ Keys = @($keys); Unresolved = @($unresolved) }
 }
 
@@ -2299,6 +2336,24 @@ Step 'prereq: Go >=1.26' `
     Update-SessionPath
     if (-not (Test-Go126)) { throw "Go still <1.26 after winget install + PATH refresh" }
   }
+# The media and compose lanes spawn ffmpeg and ffprobe, and nothing else on this path installs them, so on a clean box
+# every one of those routes read BOUND-BUT-MISSING. Not fatal: the text and vision seats serve without it, and a metered
+# run (OFFLOAD_WITH_MEDIA=0) asked for no media.
+if ($env:OFFLOAD_WITH_MEDIA -ne '0') {
+  Step 'prereq: ffmpeg' `
+    { [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue) -and [bool](Get-Command ffprobe -ErrorAction SilentlyContinue) } `
+    {
+      $ffmpegWhy = ''
+      if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { $ffmpegWhy = 'winget is unavailable' }
+      else {
+        & winget install --id Gyan.FFmpeg -e --source winget @wingetFlags
+        if ($LASTEXITCODE -ne 0) { $ffmpegWhy = "winget install Gyan.FFmpeg failed (exit $LASTEXITCODE)" }
+        Update-SessionPath
+        if (-not $ffmpegWhy -and -not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { $ffmpegWhy = 'ffmpeg is still not on PATH after winget install + PATH refresh' }
+      }
+      if ($ffmpegWhy) { Write-Host "WARN  ffmpeg: $ffmpegWhy. Install it and put it on PATH; until then the media, compose, video, animate and audio routes defer." -ForegroundColor Yellow }
+    }
+}
 # Build the renderer now. A module whose Go toolchain cannot be fetched (go.mod's floor is a patch level above what
 # Test-Go126 reads; GOTOOLCHAIN=local, a blocked proxy) or a tree that does not compile fails here, in the first
 # minutes, instead of after tens of GB of weights.
@@ -2441,7 +2496,8 @@ foreach ($key in $modelKeys) { Invoke-ModelInstall -Key $key -StepPrefix 'model'
 # Step 5b (J2): media tier - stable-diffusion.cpp (Vulkan) + the image roster.
 # Default gate: ON for the AMD/Vulkan profiles (amd-*: the tier this leg was built
 # for), OFF elsewhere. OFFLOAD_WITH_MEDIA=1 forces on any box (sd.cpp runs on any
-# Vulkan GPU incl. NVIDIA); =0 forces off (metered links - the lead set is ~10GB).
+# Vulkan GPU incl. NVIDIA); =0 forces off (metered links - the image set is ~10GB, and a
+# tier that also binds video, animate, voice and music brings ~28GB more).
 # OFFLOAD_MEDIA_EXTRAS=1 additionally pulls SD1.5 + SDXL base + fp16-fix VAE.
 # ---------------------------------------------------------------------------
 $withMedia = ($profileId -match '^amd-rdna3')
@@ -2452,6 +2508,17 @@ if ($withMedia) {
   Invoke-EngineInstall -Keys @('sdcpp-vulkan') -Dest $sdcppDir -ExeName 'sd-cli.exe' -Label "sd.cpp (vulkan) -> $sdcppDir"
   $mediaKeys = @('model-zimage', 'model-zimage-llm', 'model-zimage-vae')
   if ($env:OFFLOAD_MEDIA_EXTRAS -eq '1') { $mediaKeys += @('model-sd15', 'model-sdxl', 'model-sdxl-vae') }
+  # Everything else the tier's seed binds: the seed is the one list, so a route cannot be seeded with no way to its files.
+  if ($profileId -and (Test-Path $profilesJson)) {
+    $mediaProfiles = (Get-Content -Raw $profilesJson | ConvertFrom-Json).profiles
+    if ($mediaProfiles.PSObject.Properties[$profileId]) {
+      $seedWeights = Get-SeedWeightKeys -ProfileRow $mediaProfiles.$profileId -Sources $SOURCES -RamTier $ramTier
+      $mediaKeys = @($mediaKeys + @($seedWeights.Keys) | Select-Object -Unique)
+      foreach ($file in @($seedWeights.Unresolved)) {
+        Write-Host "NOTE  seed file $file has no source in this installer; the route that binds it reads BOUND-BUT-MISSING until it is placed in $modelDir" -ForegroundColor Yellow
+      }
+    }
+  }
   foreach ($key in $mediaKeys) { Invoke-ModelInstall -Key $key -StepPrefix 'media model' }
 } else {
   Write-Host "SKIP  media tier (profile=$(if ($profileId) { $profileId } else { '(none)' }) is not amd-*; set OFFLOAD_WITH_MEDIA=1 to install sd.cpp + the image roster on any Vulkan-capable box)" -ForegroundColor DarkGray
@@ -2472,12 +2539,30 @@ if ($profileId -and (Test-Path $profilesJson) -and $env:OFFLOAD_WITH_MEDIA -ne '
       Write-Host "NOTE  seat file $file has no source in this installer; the seat that names it stays unserved until it is placed in $modelDir" -ForegroundColor Yellow
     }
     $sttSeat = @(@($seatRow.media_seats) | Where-Object { "$($_.kind)" -eq 'stt' }) | Select-Object -First 1
-    if ($sttSeat -and $backend -eq 'vulkan') {
-      $whisperBuild = Join-Path $scriptDir 'build-whisper-vulkan.ps1'
-      Step 'engine: whisper-server (Vulkan, built on this box)' { $false } {
-        # Its own process: the build puts a compiler first on its PATH and lowers its own priority.
-        & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $whisperBuild -HomeDir $HOME_DIR
-        if ($LASTEXITCODE -ne 0) { throw "the whisper-server build failed (exit $LASTEXITCODE); the log is above" }
+    if ($backend -eq 'vulkan') {
+      # The engines with no Windows Vulkan binary this tier uses, read from what it binds. The seed layers count only when
+      # this box's RAM band applies them.
+      $engineBuilds = New-Object System.Collections.ArrayList
+      if ($sttSeat) { [void]$engineBuilds.Add('whisper') }
+      $engineLayers = @($seatRow.config_seed)
+      if ($ramTier -in @('low', 'mid', 'high') -and $seatRow.PSObject.Properties['config_seed_ram_low_up']) { $engineLayers += $seatRow.config_seed_ram_low_up }
+      if ($ramTier -in @('mid', 'high') -and $seatRow.PSObject.Properties['config_seed_ram_mid_high']) { $engineLayers += $seatRow.config_seed_ram_mid_high }
+      foreach ($layer in $engineLayers) {
+        if ($layer -and "$($layer.animategen_depth_bin)" -like '__OFFLOAD_HOME__/build/*' -and -not $engineBuilds.Contains('da3')) { [void]$engineBuilds.Add('da3') }
+        if ($layer -and "$($layer.audiocpp_bin)" -like '__OFFLOAD_HOME__/build/*' -and -not $engineBuilds.Contains('audiocpp')) { [void]$engineBuilds.Add('audiocpp') }
+      }
+      $engineScript = Join-Path $scriptDir 'build-engine-vulkan.ps1'
+      foreach ($engine in @($engineBuilds)) {
+        Step "engine: $engine (Vulkan, built on this box)" { $false } {
+          # Its own process: the build puts a compiler first on its PATH and lowers its own priority. A failed build does
+          # not end the install: the text seats still serve, and the route it feeds reads BOUND-BUT-MISSING and fails the
+          # acceptance gate, by name.
+          $prevEapBuild = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          try { & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $engineScript -Engine $engine -HomeDir $HOME_DIR }
+          finally { $ErrorActionPreference = $prevEapBuild }
+          if ($LASTEXITCODE -ne 0) { Write-Host "WARN  the $engine build failed (exit $LASTEXITCODE); the log is above. The routes it feeds read BOUND-BUT-MISSING until it builds." -ForegroundColor Yellow }
+        }
       }
     }
   }
@@ -2811,6 +2896,9 @@ Step 'harness config -> ~/.local-offload/config.json' `
     if (-not $ctxSeeded -and $pp.known -and [int]$agentCtxTokens -gt 0) {
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ agent_ctx_tokens = [int]$agentCtxTokens })
     }
+    # This step is the one place that knows which yaml the node serves. Without the key the node publishes no provenance
+    # for it, doctor's capacity row reads UNKNOWN, and a GPU lease cannot place a seat by its device pin (config.go).
+    $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ serving_config_path = $yamlDest.Replace([string][char]92, '/') })
     # A box off the tier matrix has no profile row, so no seed reseeds its escalation and reasoning rungs; the
     # template binds both to the 26B, which the CUDA fallback render no longer serves (0186 w4).
     $rungSeed = Get-OffMatrixRungSeed -ProfileRow $profRow -Include26B ([bool]$pp.include_26b)
@@ -2871,6 +2959,23 @@ Step 'harness config -> ~/.local-offload/config.json' `
       }
       $comfyProbeDir = if ($env:COMFY_DIR) { $env:COMFY_DIR } else { 'C:/ComfyUI' }
       $comfyVenv = Test-Path (Join-Path $comfyProbeDir '.venv/Scripts/python.exe')
+      # edit_image needs only Pillow, so a box without it gets a venv of its own under the install root. Never a pip into
+      # a python this install does not own.
+      if (-not $comfyVenv -and -not ($pyExe -and $pyHasPil)) {
+        $editVenv = Join-Path $HOME_DIR 'venvs\edit'
+        $editPy = Join-Path $editVenv 'Scripts\python.exe'
+        if (Get-Command uv -ErrorAction SilentlyContinue) {
+          if (-not (Test-Path $editPy)) { & uv venv $editVenv --quiet 2>$null | Out-Null }
+          if (Test-Path $editPy) { & uv pip install --quiet --python $editPy pillow 2>$null | Out-Null }
+        } elseif ($pyExe) {
+          if (-not (Test-Path $editPy)) { & $pyExe -m venv $editVenv 2>$null | Out-Null }
+          if (Test-Path $editPy) { & $editPy -m pip install --quiet pillow 2>$null | Out-Null }
+        }
+        if (Test-Path $editPy) {
+          & $editPy -c "import PIL" 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { $pyExe = $editPy; $pyHasPil = $true }
+        }
+      }
     } catch {
       # Engine-level throws (a vanished interpreter, AV blocking process creation,
       # a stale `py` registration) ignore $ErrorActionPreference — an optional
