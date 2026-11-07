@@ -1863,6 +1863,7 @@
         "audiocpp_device": "0",
         "audiocpp_voice_family": "chatterbox",
         "audiocpp_voice_model": "__OFFLOAD_HOME__/models/chatterbox/chatterbox-q8_0.gguf",
+        "voicegen_ref": "__OFFLOAD_HOME__/voices/default-voice.wav",
         "audiocpp_music_family": "ace_step",
         "audiocpp_music_model": "__OFFLOAD_HOME__/models/ace-step/ace-step-1.5-turbo-bf16.gguf"
       },

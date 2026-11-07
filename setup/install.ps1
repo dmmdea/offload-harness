@@ -2066,6 +2066,19 @@ function Get-SeatWeightKeys {
 # The source rows behind a tier's seed (first-class rule 3: no hand-placed weights). A seed names each file it binds as
 # __OFFLOAD_HOME__/models/<dest>, at any depth (a video family nests its files), so the row is found by dest. A layer
 # counts only when this box's RAM band applies it. A file with no row is returned, not dropped. PURE.
+# A wav of this box's own Windows voice reading a neutral passage, for an engine that clones every voice from a reference.
+function New-VoiceReference {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+  Add-Type -AssemblyName System.Speech
+  $speech = New-Object System.Speech.Synthesis.SpeechSynthesizer
+  try {
+    $format = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo -ArgumentList 24000, ([System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen), ([System.Speech.AudioFormat.AudioChannel]::Mono)
+    $speech.SetOutputToWaveFile($Path, $format)
+    $speech.Speak('The harbour was quiet that morning, and the first boats were only just leaving. A light wind came in from the west, carrying the smell of salt and fresh bread from the town. By noon the market had filled, and the whole street was talking about the weather.')
+  } finally { $speech.Dispose() }
+}
+
 function Get-SeedWeightKeys {
   param($ProfileRow, $Sources, [string]$RamTier = '')
   $keys = New-Object System.Collections.ArrayList
@@ -2567,6 +2580,18 @@ if ($profileId -and (Test-Path $profilesJson) -and $env:OFFLOAD_WITH_MEDIA -ne '
       foreach ($layer in $engineLayers) {
         if ($layer -and "$($layer.animategen_depth_bin)" -like '__OFFLOAD_HOME__/build/*' -and -not $engineBuilds.Contains('da3')) { [void]$engineBuilds.Add('da3') }
         if ($layer -and "$($layer.audiocpp_bin)" -like '__OFFLOAD_HOME__/build/*' -and -not $engineBuilds.Contains('audiocpp')) { [void]$engineBuilds.Add('audiocpp') }
+      }
+      # audio.cpp's Chatterbox has no voice of its own. The seed names a reference under <home>\voices, and this box's own
+      # Windows voice speaks it: nothing is downloaded, and no real person's voice becomes the default. If it cannot be made
+      # the voice route reads BOUND-BUT-MISSING, by name.
+      foreach ($layer in $engineLayers) {
+        if ($layer -and "$($layer.voicegen_ref)" -like '__OFFLOAD_HOME__/voices/*') {
+          $voiceRef = Join-Path $HOME_DIR ("$($layer.voicegen_ref)".Replace('__OFFLOAD_HOME__/', '') -replace '/', '\')
+          Step 'default voice reference (spoken by this box''s Windows voice)' { Test-Path -LiteralPath $voiceRef } {
+            try { New-VoiceReference -Path $voiceRef }
+            catch { Write-Host "WARN  could not make $voiceRef ($($_.Exception.Message)). The voice route reads BOUND-BUT-MISSING until a wav is placed there or voicegen_ref is rebound." -ForegroundColor Yellow }
+          }
+        }
       }
       $engineScript = Join-Path $scriptDir 'build-engine-vulkan.ps1'
       foreach ($engine in @($engineBuilds)) {

@@ -270,6 +270,12 @@ async function main() {
   flags.device = refuseAudioDevice(flags.device);
   const extra = refuseExtraArgs(parseExtraArgs(flags["extra-args"]), { engine: "audiocpp", key: "--extra-args" });
   const bin = refuseRelativeBinary("--bin", flags.bin);
+  // audio.cpp's Chatterbox has no voice of its own: with no speaker reference it fails while loading, after the lease and the
+  // model load. Say what is missing before any of that.
+  if (kind === "voice" && flags.family === "chatterbox" && !flags.clone) {
+    console.error("AUDIOCPP FAILED: Chatterbox needs a speaker reference and none was given: pass a clone reference, or bind voicegen_ref to a wav file");
+    process.exit(1);
+  }
   for (const [k, v] of [["--model", flags.model], ["--clone", flags.clone]]) {
     if (v && !existsSync(v)) {
       console.error(`AUDIOCPP FAILED: ${k} not found: ${v}`);

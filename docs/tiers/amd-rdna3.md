@@ -67,6 +67,7 @@ honestly serves text only.
 | `videogen_family` | `fastwan` |
 | `videogen_timeout_sec` | `7200` |
 | `voicegen_engine` | `audiocpp` |
+| `voicegen_ref` | `__OFFLOAD_HOME__/voices/default-voice.wav` |
 
 The installer seeds this tier's media bindings (`config_seed`):
 

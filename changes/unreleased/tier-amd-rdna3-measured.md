@@ -1,12 +1,13 @@
 ### Added - `local-offload acceptance --render`: one real output per bound route
 
-- **What it does.** `acceptance --render [--only a,b] [--list] [--out-dir DIR] [--json]` runs each bound route once through this binary's real verb and checks the output against a known answer: summarize, classify, embed, vision, stt, agent, image, video, animate, voice, music, compose, edit, media, inpaint, upscale. An unbound route is a named SKIP, and a deferred run is a FAIL, because a route that did not run proves nothing. Outputs stay in the output folder.
+- **What it does.** `acceptance --render [--only a,b] [--list] [--out-dir DIR] [--json]` runs each bound route once through this binary's real verb and checks the output against a known answer: summarize, classify, embed, vision, stt, agent, image, video, animate, voice, music, compose, edit, media, inpaint, upscale. An unbound route is a named SKIP, and a deferred run is a FAIL, because a route that did not run proves nothing. The gate runs with the result cache off, because a cached answer proves nothing either. Outputs stay in the output folder.
 - **Why.** A node counted as installed once `doctor` was green, and `doctor` only reads configuration. A bound route could still fail on its first real job.
 
 ### Added - tier amd-rdna3 binds video, animate, voice and music on 64 GB boxes
 
 - **What it does.** The mid and high RAM bands bind FastWan video, VACE animate with depth, Chatterbox voice and ACE-Step music from `config_seed_ram_mid_high`. The Windows installer fetches every weight the seed names, about 28 GB, and builds what has no usable Windows binary.
 - **Builds.** `setup/build-engine-vulkan.ps1` builds whisper-server, da3-cli and a patched audiocpp_cli on the box with a portable MSYS2 under `<home>\toolchain`. It takes no admin rights, runs at below-normal priority on half the cores, and refuses a binary with no Vulkan link. A failed build warns and the install goes on: the route it feeds reads BOUND-BUT-MISSING and the render gate fails it by name.
+- **Voice reference.** audio.cpp's Chatterbox has no voice of its own, so a voice call with no reference failed while loading. The runner now says so before the lease, and on this tier the installer makes a default reference from the box's own Windows voice.
 - **Limits.** The timeouts, token caps and sizes are amd-gcn's, measured on a Vega 7 under Linux, so they stay projected until a 780M has run them. `local-offload update` has no audio.cpp or depth-anything row yet, on this tier or on amd-gcn.
 
 ### Added - upscale and inpaint with no ComfyUI

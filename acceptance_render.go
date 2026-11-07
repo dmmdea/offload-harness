@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -289,7 +290,7 @@ var renderGroups = []renderGroup{
 				check: needAll("transcript of the speech sample", "country", "ask")}}
 		}},
 	{"agent",
-			func(e *renderEnv) string { return e.laneSkip("agent_model") },
+		func(e *renderEnv) string { return e.laneSkip("agent_model") },
 		func(e *renderEnv) []renderStep {
 			if !e.cfg.AgentDelegationEnabled {
 				// Delegating is the operator's opt-in and no tier seeds it, but a worker node still serves this seat to
@@ -630,6 +631,29 @@ func (e *renderEnv) runStep(ctx context.Context, s renderStep) (string, error) {
 }
 
 // runRender runs every wanted group and returns one Check per group.
+// writeNoCacheConfig writes a copy of the config beside the outputs with the result cache off ("" = no cache, cli_support.go)
+// and returns its absolute path. The file may hold the fleet token, so it is private and the caller removes it.
+func writeNoCacheConfig(path, dir string) (string, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimPrefix(raw, []byte("\xef\xbb\xbf")), &doc); err != nil {
+		return "", fmt.Errorf("%s: %w", path, err)
+	}
+	doc["cache_path"] = json.RawMessage(`""`)
+	b, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	p := filepath.Join(dir, "gate-config.json")
+	if err := os.WriteFile(p, b, 0o600); err != nil {
+		return "", err
+	}
+	return p, nil
+}
+
 func runRender(ctx context.Context, cfg config.Config, src config.Source, routes []mediacap.Route, o renderOpts) []acceptance.Check {
 	dir := o.outDir
 	if dir == "" {
@@ -646,6 +670,17 @@ func runRender(ctx context.Context, cfg config.Config, src config.Source, routes
 		return []acceptance.Check{{Name: "render outputs", Status: acceptance.Fail, Detail: "cannot write the assets into " + dir + ": " + err.Error()}}
 	}
 	e := newRenderEnv(cfg, src, routes, dir, true)
+	// An answer must come from this run. The gate asks the same questions of the same assets every time, so a second run read
+	// its vision answer from the result cache in 0.2 s and proved nothing about the seat.
+	if src.Loaded() {
+		p, err := writeNoCacheConfig(src.Path, dir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "acceptance: keeping the result cache on: %v\n", err)
+		} else {
+			defer os.Remove(p)
+			e.cfgPath = p
+		}
+	}
 	out := []acceptance.Check{{Name: "render outputs", Status: acceptance.Pass, Detail: dir + " (kept; nothing is deleted)"}}
 	for _, g := range renderGroups {
 		if !o.wants(g.name) {
