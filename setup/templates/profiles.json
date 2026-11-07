@@ -23,7 +23,7 @@
     "n_cpu_moe_max": "optional: the tier's MEASURED spill (INV-1, register H-01): the most expert layers a measurement showed may be placed in host RAM. A separate number from n_cpu_moe on purpose - the placement a tier ships and the ceiling its measurement supports are two decisions, and one field cannot check itself. `install render` refuses a config whose `--n-cpu-moe` exceeds it; 0 or absent means the tier recorded no measured spill, so none is sanctioned. It bounds EVERY `--n-cpu-moe` the rendered config carries - the 26B placement and a literal in a seat entry alike (the audit is entry-agnostic). ampere-6 declares 40 (the Qwen3.6-35B-A3B spill seat's measured `--n-cpu-moe 40`, ADR 0080; on that tier it would also sanction a 26B placement of up to 40, which is inert while moe_26b is drop); blackwell-16 declares 14, the 26B's measured display-card placement (2026-11-05, docs/tiers/reports/blackwell-16-node-h.md).",
     "config_seed_ram_low_up": "optional: config.json keys merged AFTER config_seed on a box whose ram_tier is low, mid or high (28 GB and above; tierseed.RAMLowUp), never on min or an unknown tier, and BEFORE config_seed_ram_mid_high (which wins key by key where both apply). Same key rules as config_seed. It exists for a binding whose seat needs host RAM a `min` box lacks but a 32 GB (`low`) box has: ampere-6 binds agent_model to the Qwen3.6-35B-A3B spill seat here, and its render gate (include_qwen36_35b) is the same predicate, so the binding never names a seat the roster dropped.",
     "flash_attn": "on|off -> --flash-attn.",
-    "backend": "the llama-swap.<os>-<backend> template this profile renders from (cuda|vulkan|cpu|dual-cuda; rk3588 is the Rockchip RK3588 SoC, Linux only: llama.cpp on Vulkan for the tier's GPU entry plus rkllm NPU seats, from a template that lists only models that fit its shared-RAM budget).",
+    "backend": "the llama-swap.<os>-<backend> template this profile renders from (cuda|vulkan|cpu|dual-cuda|cuda-pair; cuda-pair is two identical cards with every model pinned whole to one and the heavy/utility roles chosen at render time, Linux only; rk3588 is the Rockchip RK3588 SoC, Linux only: llama.cpp on Vulkan for the tier's GPU entry plus rkllm NPU seats, from a template that lists only models that fit its shared-RAM budget).",
     "dual_resident": "dual-gpu only: render two models resident (no shared exclusive swap group).",
     "gpu_env": "env vars added to EVERY model in the rendered serving config, appended after whatever the template already declares. Was an `if ($profileId -match '^blackwell-')` branch inside install.ps1, so a Linux install of the same tier silently did not get it. CUDA_VISIBLE_DEVICES pins the device (hybrid-graphics can resolve the default to -1); CUDA_MODULE_LOADING=LAZY is llama.cpp #22696.",
     "media_seats": "ALIAS-backed media capabilities this tier serves, rendered into BOTH the llama-swap models map and the harness config binding that routes to them (internal/mediaseat). Each seat: kind (vision|stt|ocr|rkllm|forecast), name (the llama-swap model id AND the binding value), aliases, model/mmproj/vad_model (relative to the models dir), bin + lib_dir for a seat that is not llama-server (may carry __OFFLOAD_HOME__/__EXE__), ctx_size (vision runs its own smaller window), residency (swappable|resident - a ROLE, since group names are per-template), ttl, and extra (true = a registered extra: rendered into llama-swap and reachable by name and aliases, but bound to NO config key and not counted by the one-writer check, so a tier can serve a second vision/ocr/stt model beside the bound one; not on rkllm, no tasks). An rkllm seat is an NPU LLM/VLM served by the Rockchip RKLLM runtime, not llama-server: it takes model (a .rkllm), an optional vision_encoder (a .rknn under the models dir; with one the seat is a VLM and writes vision_model, without one it is a chat model and writes nothing), ctx_size and cpu_mask (hex, default 0x0f = the A55 cluster; at least 3 bits, the runtime refuses fewer than the SoC has NPU cores), and bin defaults to the launcher the rknpu accelerator ships. A forecast seat is the Timestral time-series forecaster: a Python server the harness binary launches (`<bin> forecast-serve --forecast-dir <home>/forecast --model <models>/<model> --port ${PORT}`), so its bin is the harness binary (__HARNESS_BIN__: <home>/harness/local-offload.exe on Windows, <home>/bin/local-offload on Linux, where each installer lays it down), its model is the weights directory under the models dir, and it writes forecast_model; it refuses every llama-server, whisper-server and task field, and a per-seat gpu_env pins it to the card that holds the tier's whisper seat. A tier declaring NO seat leaves vision_model/stt_model/forecast_model empty and the route honestly defers. FILE-backed media (image/video/music) is NOT here - those are spawn-per-job subprocesses under the GPU lease, seeded via config_seed and derived by internal/mediacap.",
@@ -1189,6 +1189,89 @@
           "measured": "Timestral-209M, fp32, 804 MiB of weights; measured 2026-10-24 on an RTX 5060 Ti (sm_120, torch 2.14.1+cu132): cold load 19 s, a warm batch of 8-20 windows 0.2-0.7 s, peak 0.87-1.08 GiB univariate and 2.46 GiB with 6 covariate rows x 20 series x 4096 steps. Resident beside the agent seat on a card of 16 GB or more, on the card that holds this tier's whisper and embedder residents. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
           "residency": "resident",
           "ttl": 300
+        }
+      ]
+    },
+    "ampere-2x16": {
+      "disable_cuda_graphs": true,
+      "ctx_size": 131072,
+      "kv_type": "q8_0",
+      "agent_ctx_tokens": 131072,
+      "resident_tier": "offload-e4b",
+      "include_26b": false,
+      "include_qwen35_4b": true,
+      "include_qwen38_27b": true,
+      "moe_26b": "drop",
+      "flash_attn": "on",
+      "backend": "cuda-pair",
+      "gpu_env": [
+        "CUDA_DEVICE_ORDER=PCI_BUS_ID"
+      ],
+      "config_seed": {
+        "agent_model": "qwen3.5-4b-agent",
+        "agent_profile": "research",
+        "agent_max_tokens": 1024,
+        "fleet_max_concurrent_jobs": 1,
+        "escalation_model": "",
+        "reasoning_model": ""
+      },
+      "notes": "Two identical 16 GB Ampere cards (2x NVIDIA A2, sm_86, 15,356 MiB each, no NVLink) on a small-form-factor desktop, served as PIN, DON'T SPLIT: every model fits one card and is pinned whole to it (llama-swap.linux-cuda-pair.yaml). HEAVY card: the Qwen3.8-27B agent (UD-IQ3_S) and the vision seat, one 12 GB model at a time. UTILITY card: the memory stack (embeddinggemma, reranker), STT, the forecaster, and the cascade (e4b | e2b | the 4B agent) as alternatives; the `both` set runs the cascade beside the 27B. Card roles are a render-time choice, not a profile field: `install render --heavy-card N [--utility-card M]` (a CUDA index or a GPU-<uuid>; default heavy 0, utility 1; install.sh takes the same flags and OFFLOAD_HEAVY_CARD / OFFLOAD_UTILITY_CARD). Indices follow CUDA_DEVICE_ORDER=PCI_BUS_ID, which gpu_env sets on every entry. The heavy card is a per-box choice because the two slots are not equal: on the reference box card 0 (CPU-lane slot, 60 W) was thermally limited by its chassis fan header, a host airflow fault and not a tier property, so the 27B ran on card 1 (chipset x4 slot, held at a 35 W floor) and its figures are a LOWER BOUND; a box with sound airflow renders heavy 0. MEASURED 2026-11-07 on that box (llama.cpp b12192 sm_86 CUDA 13.4, llama-swap v270): the 27B agent pinned to the 35 W card, 13,956 MiB, 8.4 tok/s generation and 42.5 tok/s prompt on a short prompt; offload-e4b 4,430 MiB plus embeddinggemma 452 MiB concurrently on the other card; whisper large-v3-turbo on CUDA 1,624 MB, an 11 s clip transcribed exactly in 6.7 s wall cold; timestral-209m 54.5 ms model wall, 934 MiB; every seat unloaded at ttl 300 (both cards back to 0 MiB, P8); doctor rc 0, acceptance READY. Ctx 131072 q8_0 for the cascade and the 4B, 49152 literal for the 27B (the single-A2 fit, ampere-16). include_26b is false and moe_26b drops it: the 26B measured 1/8 on the A2 (ampere-16). The agent seat is the 4B, as on ampere-16. PROJECTED, not measured on this tier: the vision seat (it is the ampere-16 bake-off's winner on the same silicon, never run on the two-card box), the 27B as the default agent binding, any concurrent load of the heavy seat with the cascade under real traffic, host RAM 32 GB (the reference box has 16 GB, ram tier min; at 32 GB it becomes low). No vLLM seat: no two-card vLLM measurement and no venv on the reference box (the ampere-16 vLLM seat is single-card, device 0). No comfy, image or video keys: the reference box has no ComfyUI install, so no image or video lane is declared until one is measured on this tier. Linux only (no Windows cuda-pair template); classification is gated to Linux.",
+      "media_seats": [
+        {
+          "kind": "vision",
+          "name": "qwen38-27b-vision",
+          "aliases": [
+            "vision",
+            "vlm",
+            "ocr"
+          ],
+          "model": "Qwen3.8-27B-UD-IQ3_S.gguf",
+          "mmproj": "mmproj-F16.gguf",
+          "ctx_size": 8192,
+          "reasoning": "off",
+          "residency": "swappable",
+          "ttl": 300,
+          "gpu_env": [
+            "CUDA_VISIBLE_DEVICES=__HEAVY_CARD__"
+          ],
+          "measured": "Same weights, mmproj and flags as the ampere-16 vision seat, whose bake-off (2026-09-12, a single A2 16 GB) is recorded on that tier: Qwen3.8-27B UD-IQ3_S was the only candidate that read every serial, email and low-contrast string, 12,394 MiB resident (IQ3_S 12.04 GB + mmproj 0.93 GB + 8k q8_0 KV) on a 15,356 MiB card. On this tier it is an alternative of qwen38-27b-agent on the heavy card. NOT measured on the two-card box: only the 27B agent entry (13,956 MiB, 2026-11-07) was."
+        },
+        {
+          "kind": "stt",
+          "name": "whisper-stt",
+          "aliases": [
+            "stt",
+            "whisper",
+            "transcribe",
+            "whisper-turbo"
+          ],
+          "bin": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin/whisper-server__EXE__",
+          "lib_dir": "__OFFLOAD_HOME__/build/whisper.cpp/build/bin",
+          "model": "ggml-large-v3-turbo.bin",
+          "vad_model": "ggml-silero-v6.2.0.bin",
+          "no_flash_attn": true,
+          "residency": "resident",
+          "ttl": 300,
+          "gpu_env": [
+            "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__"
+          ],
+          "measured": "large-v3-turbo on CUDA, 1,624 MB, on the utility card beside the memory stack and the forecaster; an 11 s clip transcribed exactly in 6.7 s wall cold (2026-11-07, two NVIDIA A2, llama.cpp b12192 sm_86 CUDA 13.4 build tree). Resident here so it stays up while the 27B swaps on the heavy card."
+        },
+        {
+          "kind": "forecast",
+          "name": "timestral-209m",
+          "aliases": [
+            "forecast",
+            "timestral"
+          ],
+          "bin": "__HARNESS_BIN__",
+          "model": "timestral-209m",
+          "measured": "Timestral-209M, fp32: 54.5 ms model wall, 934 MiB resident on the utility card (2026-11-07, NVIDIA A2, sm_86). Weights 804 MiB; load, batch and covariate-row figures are those measured on an RTX 5060 Ti (sm_120) in the ampere-16 entry. The harness binary launches the server (forecast-serve) and holds its python child, so llama-swap's stop never orphans it.",
+          "residency": "resident",
+          "ttl": 300,
+          "gpu_env": [
+            "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__"
+          ]
         }
       ]
     },

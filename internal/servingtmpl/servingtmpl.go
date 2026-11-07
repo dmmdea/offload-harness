@@ -239,6 +239,19 @@ type Params struct {
 	// embeddinggemma2 and the kNN pre-filter is off by default. Requires IncludeEG2 (the
 	// embedder the aliases move to) and a template whose residents set names `emb`.
 	OmitEmbed300M bool
+
+	// HeavyCard and UtilityCard name the physical card each ROLE of a two-card pinned template
+	// (llama-swap.linux-cuda-pair.yaml) runs on: a CUDA index ("0") or a "GPU-<uuid>" the pin
+	// rule can read by identity. The HEAVY card carries the 27B agent and vision seats; the
+	// UTILITY card carries the memory stack, the cascade, STT and the forecaster, beside it.
+	// Empty means the template default (heavy 0, utility 1); when only one is given and it is
+	// a numeric index, the other is the opposite index (PairCards). They exist so a box whose
+	// card 0 runs hot renders heavy 1 / utility 0 without post-processing the yaml. Meaningful
+	// only on a template that carries the __HEAVY_CARD__ / __UTILITY_CARD__ tokens: set against
+	// one that does not, Render refuses. Omitted from the stamp when empty, so every other
+	// tier keeps the spec hash it had.
+	HeavyCard   string
+	UtilityCard string
 }
 
 // seatAnchors is the TEMPLATE's own declaration of which residency roles it can
@@ -610,6 +623,17 @@ func Render(tmpl string, p Params) (string, error) {
 		}
 		e4bLead, e4bAnd = "", ""
 	}
+	// The two-card roles. Resolved on every render so a set value against a template with no
+	// token is refused by name (a flag that silently did nothing would leave a hot card in
+	// service), and an invalid pair is refused before any token expands.
+	heavyCard, utilityCard, err := PairCards(p.HeavyCard, p.UtilityCard)
+	if err != nil {
+		return "", err
+	}
+	if (p.HeavyCard != "" || p.UtilityCard != "") && !strings.Contains(out, tokenHeavyCard) && !strings.Contains(out, tokenUtilityCard) {
+		return "", fmt.Errorf("heavy/utility card set (%q/%q) but the target serving template pins no card roles "+
+			"(it carries neither %s nor %s): only a two-card pinned template takes them", p.HeavyCard, p.UtilityCard, tokenHeavyCard, tokenUtilityCard)
+	}
 	for from, to := range map[string]string{
 		"__E4B_LEAD__":          e4bLead,
 		"__E4B_AND__":           e4bAnd,
@@ -638,6 +662,8 @@ func Render(tmpl string, p Params) (string, error) {
 		"__NTHREADS__":          fmt.Sprint(p.Threads),
 		"__CACHE_RAM__":         fmt.Sprint(p.cacheRAMMiB()),
 		"__SLOT_SAVE__":         p.slotSaveFlag(),
+		tokenHeavyCard:          heavyCard,
+		tokenUtilityCard:        utilityCard,
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
@@ -672,6 +698,59 @@ func (p Params) servesWithoutLlama() bool {
 		}
 	}
 	return true
+}
+
+// The two-card template's role tokens, and the defaults they take when a render names no card.
+const (
+	tokenHeavyCard   = "__HEAVY_CARD__"
+	tokenUtilityCard = "__UTILITY_CARD__"
+	defaultHeavyCard = "0"
+	defaultUtilCard  = "1"
+)
+
+var (
+	cardIndexRe = regexp.MustCompile(`^[0-9]+$`)
+	cardUUIDRe  = regexp.MustCompile(`^(GPU|MIG)-[A-Za-z0-9-]+$`)
+)
+
+// PairCards resolves the heavy and utility card of a two-card render. Both empty is the template
+// default (heavy 0, utility 1). Exactly one given: if it is the index 0 or 1 the other is the
+// opposite index; any other single value is refused, because the machine's other card cannot be
+// guessed from a UUID. Each value must be a CUDA index or a GPU-/MIG- UUID (it lands inside a
+// CUDA_VISIBLE_DEVICES pin), and the two must differ: both roles on one card is the layout this
+// tier exists to avoid.
+func PairCards(heavy, utility string) (string, string, error) {
+	heavy, utility = strings.TrimSpace(heavy), strings.TrimSpace(utility)
+	for _, c := range []struct{ flag, v string }{{"heavy card", heavy}, {"utility card", utility}} {
+		if c.v != "" && !cardIndexRe.MatchString(c.v) && !cardUUIDRe.MatchString(c.v) {
+			return "", "", fmt.Errorf("%s %q is neither a CUDA index nor a GPU-<uuid>", c.flag, c.v)
+		}
+	}
+	other := func(v string) string {
+		switch v {
+		case "0":
+			return "1"
+		case "1":
+			return "0"
+		}
+		return ""
+	}
+	switch {
+	case heavy == "" && utility == "":
+		heavy, utility = defaultHeavyCard, defaultUtilCard
+	case utility == "":
+		if utility = other(heavy); utility == "" {
+			return "", "", fmt.Errorf("heavy card %q given without a utility card, and only the indices 0 and 1 imply the other card: name both", heavy)
+		}
+	case heavy == "":
+		if heavy = other(utility); heavy == "" {
+			return "", "", fmt.Errorf("utility card %q given without a heavy card, and only the indices 0 and 1 imply the other card: name both", utility)
+		}
+	}
+	if heavy == utility {
+		return "", "", fmt.Errorf("heavy and utility card are both %q: the two roles must sit on different cards (pin, don't split)", heavy)
+	}
+	return heavy, utility, nil
 }
 
 // validateEG2Bin refuses an own build the render cannot honour: one set for an entry the render does not

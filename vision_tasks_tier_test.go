@@ -60,6 +60,7 @@ func TestShippedTiersDeclareTheVisionLaneTheirPagesSupport(t *testing.T) {
 		"blackwell-48":   unrestricted,
 		"blackwell-72":   unrestricted,
 		"ampere-16":      unrestricted,
+		"ampere-2x16":    unrestricted,
 		"volta-16":       unrestricted,
 	}
 	profiles, err := tierseed.Parse(embeddedProfiles)

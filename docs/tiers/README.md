@@ -16,6 +16,7 @@ a Windows class.
 | [amd-rdna3](amd-rdna3.md) | vulkan | 16384 | f16 | offload-e4b | `gpu` | `sdcpp` (z-image-turbo) + stt/vision seat | — |
 | [amd-rdna3-dgpu](amd-rdna3-dgpu.md) | vulkan | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | `sdcpp` (z-image-turbo) + stt/vision seat | — |
 | [ampere-16](ampere-16.md) | cuda | 131072 | q8_0 | offload-e4b | dropped | comfyui (hidream-o1) + forecast/stt/vision seat | — |
+| [ampere-2x16](ampere-2x16.md) | cuda-pair | 131072 | q8_0 | offload-e4b | dropped | forecast/stt/vision seat | [1](reports/ampere-2x16-node-i.md) |
 | [ampere-6](ampere-6.md) | cuda | 32768 | q8_0 | offload-e4b | dropped | `sdcpp` + forecast/stt/vision seat | [1](reports/ampere-6-node-c.md) |
 | [ampere-8](ampere-8.md) | cuda | 32768 | q8_0 | offload-e4b | dropped | yes + forecast/stt/vision seat | [1](reports/ampere-8-node-a.md) |
 | [blackwell-16](blackwell-16.md) | cuda | 32768 | q8_0 | gemma4-26b-a4b | `n_cpu_moe` | comfyui (hidream-o1) + forecast/stt/vision seat | [2](reports/blackwell-16-node-b.md) |
