@@ -284,6 +284,14 @@ it interactive." Two parts of the 2026-10-12 amendment are superseded; the cap, 
   `DisplayVramGiB` and starts nothing on a refusal (exit 6). From llama-swap's session 0 the desk cannot be read, so
   there "idle" means the console is locked (or `operator_presence: away`).
 
+- **A whole-node worker is kept off the screen's card.** A whole-node media call whose worker starts no ComfyUI and
+  computes on one CUDA device (sd.cpp, the Chatterbox voice worker) ran on `cuda:0`, which CUDA's fastest-first order
+  makes the display card on the `blackwell-3x16` reference box, at any presence and with no cap. Its children now see
+  only the non-display cards (`CUDA_VISIBLE_DEVICES` by UUID) unless `DisplayAdmits` would give the display card a job
+  that declares no footprint (`offDisplayEnv` in `internal/pipeline/mediaadmit.go`). A route that drives ComfyUI keeps
+  every card visible, because the default instance's `--cuda-device` indexes all of them; an existing
+  `CUDA_VISIBLE_DEVICES` in the process is left alone.
+
 What it does not do: it judges admission only, as the cap always did. A job or seat started while the card was idle is
 not evicted when the operator comes back; it runs until it ends or llama-swap unloads it (ttl 300). The status
 surfaces (`gpu status`, `gpu cards`, the `offload_status` brief) append the gate's reading to the display card's

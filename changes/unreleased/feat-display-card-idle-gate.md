@@ -7,7 +7,9 @@
   `--cards 2` on the `blackwell-3x16` reference box takes the two 5060 Ti cards. A new verb, `gpu display-check --vram GiB [--json]`, asks the
   same rule for a launcher outside a lease (exit 0 admits, 3 refuses), and the vLLM seat stub `seat-cmd.ps1` asks it for a seat
   whose row declares `DisplayVramGiB` and starts nothing on a refusal. The display card's `display cap:` status line ends with
-  the gate's reading (`idle_gate`, `idle_why` in JSON).
+  the gate's reading (`idle_gate`, `idle_why` in JSON). A whole-node media call whose worker drives no ComfyUI (sd.cpp, the
+  Chatterbox voice worker) used to compute on `cuda:0`, the display card under CUDA's fastest-first order; its children now see
+  only the non-display cards unless the display card would take an undeclared job now.
 - **Why.** The operator's rule of 2026-11-07, with the monitors back on the 5070 Ti: "send 2 card jobs to the 5060s first and 3
   card jobs follow the rule of only using up to 60% of the 5070ti card WHEN IDLE so i can always keep it interactive." It
   supersedes the 2026-10-11 "60 % at all times, no presence term" rule and the order that put an empty display card first.

@@ -115,8 +115,13 @@ if ($want.DisplayVramGiB -gt 0) {
     "[$(Get-Date -Format s)] display gate: not started - the harness binary '$($want.Harness)' is not there, so the display card cannot be shown idle" | Out-File -Append $log
     exit 6
   }
-  $gateArgs = @('gpu', 'display-check', '--vram', "$($want.DisplayVramGiB)")
-  if ($want.HarnessConfig) { $gateArgs += @('--config', $want.HarnessConfig) }
+  # The operator's config, not SYSTEM's defaults: without it the check would open SYSTEM's own state and could not see a
+  # lease on the display card, so a row that names no config starts nothing either.
+  if (-not $want.HarnessConfig -or -not (Test-Path -LiteralPath $want.HarnessConfig)) {
+    "[$(Get-Date -Format s)] display gate: not started - the harness config '$($want.HarnessConfig)' is not there" | Out-File -Append $log
+    exit 6
+  }
+  $gateArgs = @('gpu', 'display-check', '--vram', "$($want.DisplayVramGiB)", '--config', $want.HarnessConfig)
   $gate = & $want.Harness @gateArgs 2>&1
   $gateRc = $LASTEXITCODE
   if ($gateRc -ne 0) {

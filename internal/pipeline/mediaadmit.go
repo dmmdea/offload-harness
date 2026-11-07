@@ -27,7 +27,9 @@ package pipeline
 //     it holds the whole node (a graph in the default instance sees every card, so a lease on
 //     some of them would not confine it);
 //   - everything else (sdcpp, voice, a host with card-scoped leases off or no card table) takes
-//     the whole-node lease exactly as before, byte for byte.
+//     the whole-node lease as before. A whole-node call whose worker drives no ComfyUI (sdcpp and
+//     the Chatterbox voice worker, mediaNeed.OffDisplay) also has its own CUDA work kept off the
+//     screen's card unless the allocator would give that card an undeclared job (offDisplayEnv).
 //
 // A call that cannot get a card inside its window does not fail with "gpu busy". It leaves a
 // place-keeping token (gpulease/tokens.go) and answers with it, its position and an ETA; the
@@ -117,6 +119,17 @@ type mediaNeed struct {
 	Refusal string
 	// Row is the card-only recipe the binding matched (needMulticard, nil = none), kept so forCanvas can hold the request's canvas to the row's cap.
 	Row *mediacap.MulticardRow
+	// OffDisplay marks a whole-node call whose worker starts no ComfyUI and computes on ONE CUDA device (sd.cpp, the
+	// Chatterbox voice worker): its children are shown only the non-display cards unless the display card would take an
+	// undeclared job now (offDisplayEnv). A route that drives ComfyUI never sets it: the default instance's --cuda-device
+	// is an index into every card, which a narrower CUDA_VISIBLE_DEVICES would renumber.
+	OffDisplay bool
+}
+
+// offDisplay marks a whole-node need as one whose worker stays off the display card (mediaNeed.OffDisplay).
+func (n mediaNeed) offDisplay() mediaNeed {
+	n.OffDisplay = true
+	return n
 }
 
 // footKey is a footprint-store identity: family, quant, task.
@@ -722,7 +735,62 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	if place != nil {
 		place.m.DropToken(place.tok.ID) // served: the place is spent (a grant without a wait never consumed it)
 	}
+	if need.OffDisplay {
+		env = append(env, p.offDisplayEnv(ctx, readTable)...)
+	}
 	return mediaGrant{Env: env, Release: release}, nil
+}
+
+// offDisplayEnv keeps a whole-node call's own CUDA work off the operator's screen (operator rule 2026-11-07: the display
+// card takes jobs only while it is idle, and the other cards are used first). The call holds every card, but its worker
+// (sd.cpp, the Chatterbox voice worker) computes on cuda:0, and CUDA's default fastest-first order makes that the fastest
+// card, which on the `blackwell-3x16` reference box is the display card: before this, those workers ran on the screen's
+// card whatever the operator was doing, with no cap. The answer is the allocator's own rule for a job that declares no
+// footprint (gpulease.DisplayAdmits, the idle gate and the cap read live): where it would not give the display card such
+// a job, the children see only the other cards (CUDA_VISIBLE_DEVICES by UUID, in nvidia-smi order). Nothing is set when
+// this process already carries CUDA_VISIBLE_DEVICES (an operator's or an outer lease's pin), when the table cannot be
+// read, names no display card or cannot say which card the monitor is on, or when no other card exists. table is the
+// table the admission read (nil = read it here; empty = it could not be read).
+func (p *Pipeline) offDisplayEnv(ctx context.Context, table []gpuprobe.Card) []string {
+	if strings.TrimSpace(os.Getenv("CUDA_VISIBLE_DEVICES")) != "" {
+		return nil
+	}
+	if table == nil {
+		t, _, err := p.alloc.CardTable(ctx, p.cfg)
+		if err != nil {
+			log.Printf("media admission: the card table could not be read (%v), so this whole-node call's worker is not kept off the display card", err)
+			return nil
+		}
+		table = t
+	}
+	var others []string
+	display := false
+	for _, c := range table {
+		if c.DisplayUnknown {
+			log.Printf("media admission: the card table cannot say which card the monitor is on, so this whole-node call's worker is not kept off the display card")
+			return nil
+		}
+		if c.Display {
+			display = true
+			continue
+		}
+		others = append(others, c.UUID)
+	}
+	if !display || len(others) == 0 {
+		return nil
+	}
+	in := gpulease.AllocInput{Cards: table, DisplayCapPct: p.cfg.LiveGPUDisplayCap(), DisplayFloorGiB: p.cfg.DisplayFloorGiB()}
+	if in.DisplayCapPct > 0 {
+		busy := p.alloc.DisplayBusy
+		if busy == nil {
+			busy = gpualloc.DisplayBusy
+		}
+		in.DisplayBusy = busy(p.cfg, table)
+	}
+	if ok, _ := gpulease.DisplayAdmits(in); ok {
+		return nil
+	}
+	return []string{"CUDA_VISIBLE_DEVICES=" + strings.Join(others, ",")}
 }
 
 // acquireMediaLeaseHeld is acquireMediaLease for a caller that waits a long time for its card (a batch with nowhere else to

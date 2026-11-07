@@ -1943,7 +1943,7 @@ is given:
 | the same with a pin that cannot be resolved (no `gpu_comfy_order`, a comma list, not an index, a position the box does not have) | the whole node, with today's `--cuda-device` | the whole node | the default instance, as before |
 | a pooled image or video route | the cards its pool keys name, when the pool has at least two cards and the box has at most three | a lease on those cards | the default instance, **launch unchanged** (every card visible) |
 | `run-graph` with ONE declared device | that card | a lease on it | its instance, pinned by uuid |
-| `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice) |
+| `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice; their worker is shown only the non-display cards, `CUDA_VISIBLE_DEVICES` by UUID, unless the display card would take an undeclared job now: idle, and a cap of 100 with no floor; since 2026-11-07, `offDisplayEnv`) |
 | any call on a host that does not lease cards, or whose card table cannot be read at admission (after one retry) | the whole node | the whole node | exactly as before this change, and the answer of a call that must wait says why it waits for the node ([below](#a-card-table-that-runs-out-of-time-is-not-a-refusal)) |
 
 **Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the

@@ -502,9 +502,9 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	}
 
 	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
-	// voice (Chatterbox TTS) has no ComfyUI instance to bind to a card: the whole node. music drives
-	// ComfyUI on a single card.
-	need := wholeNeed(paramStr(req.Params, "waiter_token")).resumableBy(req)
+	// voice (Chatterbox TTS) has no ComfyUI instance to bind to a card: the whole node, with its worker kept off the
+	// display card unless that card would take an undeclared job now (offDisplay). music drives ComfyUI on a single card.
+	need := wholeNeed(paramStr(req.Params, "waiter_token")).offDisplay().resumableBy(req)
 	if kind == "music" {
 		need = singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).declaresRAM(routeRAM(hostneed.RouteMusic, p.cfg)).resumableBy(req)
 	}
