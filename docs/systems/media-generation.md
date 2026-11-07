@@ -364,8 +364,10 @@ it is an enlargement tool, not a faithful restore — an exact resample is `edit
 binding, and since 0.78.0 every image-capable tier seeds `upscale_model: 4x-UltraSharp.pth` (the
 three tiers with no image route stay unseeded and defer). A per-request `model` override (a name
 relative to `upscale_models/`) works even on a box that binds none. The runner is the ComfyUI graph,
-so an sd.cpp-primary box without ComfyUI defers with the `comfyui` prereq missing — an sd.cpp arm
-(stable-diffusion.cpp has native ESRGAN support) is a documented follow-up.
+so a box with `upscale_engine` unset and no ComfyUI defers with the `comfyui` prereq missing. With
+`upscale_engine: "sdcpp"` the route runs `sd-cli -M upscale` instead, with no ComfyUI (see "Upscale and
+inpaint with no ComfyUI" in the iGPU engines section); a per-request `model` override is then refused,
+because the weight is the full path in `upscale_sdcpp_model`.
 
 **Generative instruction edit** (`offload_edit_image_generative`, MCP-only — no CLI verb) is the
 third edit-shaped route, for changes that are global or diffuse and have no drawable region: "make
@@ -423,7 +425,8 @@ The three edit-shaped routes in one line each: `edit_image` = deterministic PIL 
 GPU lock); `inpaint_image` = re-denoise inside a mask you supply (everything outside the mask is
 preserved in INTENT, but is NOT pixel-identical: `grow_mask` dilates + feathers the mask by 16 px in
 latent space by default, and the whole frame is VAE round-tripped on decode — there is no
-composite-back node in the graph; pass `grow_mask: 0` for the tightest mask);
+composite-back node in the graph; pass `grow_mask: 0` for the tightest mask; with `inpaint_engine: "sdcpp"`
+the runner does composite the render back over the source, so the pixels outside the mask are exact);
 `edit_image_generative` = maskless instruction edit (the whole frame re-renders).
 
 **Per-box device/launch seams (J4).** Three env knobs decouple shared code from CUDA-box
@@ -2269,6 +2272,24 @@ The runner extracts the driver's frames with ffmpeg (16 fps, scaled to cover W x
 **Frame count.** With a reference image sd.cpp samples N+4 frames (the reference occupies one latent frame; `generate_video 480x832x37` for 33 requested is the sample size). The measured build trims that itself and decodes exactly N (`decoded 288x512x33`, ffprobe `nb_read_frames` 33), so the runner probes the decoded count with ffprobe and drops the first 4 frames only if it finds N+4; N keeps everything, and any other count keeps everything and says so. The mp4 therefore always carries N frames. The same black / frozen clip gate as the video lane runs last.
 
 **Quality, honestly.** Measured at 288x512x33 on the reference node (preview-grade): motion, pose and layout follow the driver closely (depth-guided); the reference identity transfers partially (face, beard and clay style yes, outfit no).
+
+### Upscale and inpaint with no ComfyUI (`render/sdcpp-upscale.mjs`, `render/sdcpp-inpaint.mjs`)
+
+`upscale_image` and `inpaint_image` run through stable-diffusion.cpp on a box with no ComfyUI. Both are selected by an engine key (`upscale_engine: "sdcpp"`, `inpaint_engine: "sdcpp"`), both are spawn-per-job under the media lease, and both use the same no-CPU guards as the other iGPU runners. The `amd-rdna3` tier seeds both from its base `config_seed` (they need no RAM the image lane does not). The numbers below were measured on a Vulkan GPU of another class; the tier stays PROJECTED until a 780M has run them.
+
+Config, upscale: `upscale_engine`, `upscale_sdcpp_bin`, `upscale_sdcpp_model` (the full path of the weight), `upscale_sdcpp_backend` (`vulkan0`, never cpu), `upscale_sdcpp_extra_args`; `upscale_sdcpp_script` overrides the runner path; `upscale_timeout_sec` is shared with the ComfyUI route. Config, inpaint: `inpaint_engine`, `inpaint_sdcpp_backend`, `inpaint_sdcpp_extra_args`; `inpaint_sdcpp_script` overrides the runner path. Inpaint has no weight of its own: it reuses the image lane's `sdcpp_bin`, `sdcpp_model`, `sdcpp_model_kind`, `sdcpp_vae`, `sdcpp_llm` and the other model keys, with `imagegen_steps`, `imagegen_cfg` and `imagegen_sampler`. It does not forward the image lane's `sdcpp_extra_args`: on the AMD tier they hold `--vae-on-cpu`, which the extra-args screen refuses, and the VAE stays on the GPU with `--vae-tiling`.
+
+**Upscale.** The command is `sd-cli -M upscale --upscale-model <model> -i <in> --backend vulkan0 -v -o <out>`. No diffusion model, VAE or text encoder is loaded. On a Vulkan GPU a 512x512 input gave 2048x2048 in 8 s. The scale comes from the model (4x for the bound weight). A request for another size (`scale`, or `width` and `height`) is met by an ffmpeg resample of the model's output to the exact size (lanczos, or the request's `method`), because the Go side rejects a result more than 2 px off the requested size and the render gate asks for `scale: 2`. The resample is a plain image resize, the same kind of operation as `edit_image` resize. A `method` with no requested size is accepted and ignored, and the result's `notes` say so. A failed upscaler load is silent in sd-cli: it logs `new_upscaler_ctx failed`, saves the un-upscaled image and exits 0. So the runner checks that the output is really larger than the input and fails `MODEL_INCOMPATIBLE` otherwise.
+
+**The weight is 4xNomos2_hq_mosr** (Hugging Face `Phips/4xNomos2_hq_mosr`, `4xNomos2_hq_mosr.safetensors`, 8,593,400 bytes, sha256 `f2ddd71b9734c20eb86d9fbbed5635f51b5c58497ed076a64c74854547fde3a7`). Its licence is CC-BY-4.0: commercial use is allowed with attribution to its author (Phips). The installer fetches it to `models/upscale/` (source row `model-esrgan-nomos2`). It is built for clean input. It is not 4x-UltraSharp, which the ComfyUI tiers bind: that one is CC BY-NC-SA 4.0 and not for commercial use.
+
+**Inpaint.** The command is `sd-cli --diffusion-model <z-image> --vae <ae> --llm <qwen> -i <in> --mask <mask> -p <prompt> --steps 8 --cfg-scale 1 -s <seed> --vae-tiling --backend vulkan0 -v --strength 1.0 -o <out>`. White in the mask means repaint, black means keep, the same as the ComfyUI route. Z-Image Turbo needs no dedicated inpaint checkpoint: sd.cpp blends the denoise mask into the latents for every model. `denoise` becomes `--strength` (default 1.0). `grow_mask` reaches the runner (default 16; 0 = no growth).
+
+**The composite.** The VAE round trip moves pixels the mask never covered (a mean of 2.5/255 was measured), so the runner never delivers sd-cli's output as it is. It grows the mask by `grow_mask` pixels (a blur and a threshold in ffmpeg, after scaling the mask to the source's size with nearest), gives that grown mask to both sd-cli and the composite, and merges the render back over the source through it with a feather of about `grow_mask / 3` pixels. Far from the seam the result equals the source exactly (a difference of 0.000 was measured). The growth is needed because a tight mask left a ghost of the old content at its edge. sd-cli gets a PNG working copy of the source snapped to a multiple of 16 per side; its output is scaled back to the source's size before the merge. The delivered picture has the source's size and no alpha. A flat render of a picture that is not flat is refused as `BLACK_CLIP`, and a result identical to the source is refused as `FROZEN_CLIP`.
+
+**Quality, honestly.** Removal is clean: a removal prompt at strength 1.0 erased the text and filled the background. A large repaint that adds a new object can show the mask's rectangle, because Z-Image is not an inpaint model. For that kind of edit use a smaller or better-shaped mask, or an inpaint-capable checkpoint on a ComfyUI box.
+
+**The placement guard has an upscale stage.** The upscale log prints `mosr compute buffer size: 0.19 MB(RAM) on CPU` before `mosr compute buffer size: 64.03 MB(VRAM) on Vulkan0`. The default stage would kill the run on the first line and would demand a diffusion buffer an upscale never has. `createLogGuard({engine: "sdcpp", stage: "upscale"})` takes the device line plus a compute buffer on Vulkan for the upscaler module (`mosr` or `esrgan`) as its evidence. A host buffer no bigger than the device buffer beside it is fine in either order. A host buffer with no device buffer, or a bigger one, is still `CPU_PLACEMENT`. The default stage is unchanged.
 
 ### Voice and music (`render/audiocpp-generate.mjs`)
 
