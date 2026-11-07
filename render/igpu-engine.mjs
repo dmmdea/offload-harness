@@ -383,6 +383,10 @@ const SD_CPU_SHAPES = [
   /->\s*compute\s+cpu\d*\b/i, // auto-fit plan: "... -> compute CPU, params RAM"
   /auto-fit:\s*no GPU memory budget available;\s*using CPU/i,
 ];
+// The upscaler module of an `sd-cli -M upscale` run, by the name it prints in its compute buffer line
+// ("mosr compute buffer size: 64.03 MB(VRAM) on Vulkan0" on the measured run; esrgan for the older
+// architecture). Matched against the whole module name.
+export const SD_UPSCALER_MODULE = /^(?:mosr|esrgan)$/i;
 const DA3_BACKEND = /^\[da3\]\s+da::Backend using device:\s*(\S+)/i;
 const DA3_CPU_SHAPES = [/^\[da3\]\s+offload_weights:.*->\s*CPU\b/i, /^\[da3\]\s+.*node\(s\) run on CPU\b/i];
 const AUDIO_BUFFER = new RegExp("^" + AUDIO_HEAD + String.raw`([\w.-]+)\.weights\.buffer_name\s+(\S+)`);
@@ -431,10 +435,16 @@ function buildEchoMatcher(echoes) {
 // createLogGuard: a stateful line scanner. scan(line) returns null, or
 // {kind: "CPU_PLACEMENT" | "GPU_RESET", line, lineNo} for a line that must abort the run now;
 // verdict() is called when the engine exits and says whether the positive evidence was seen.
-export function createLogGuard({ engine, echoes = [] }) {
+//
+// `stage` is "default" (every run that has a diffusion stage) or "upscale" (sd-cli -M upscale: no diffusion model
+// is loaded, the upscaler module is the whole run; see SD_UPSCALER_MODULE). The default stage is unchanged.
+export const GUARD_STAGES = ["default", "upscale"];
+export function createLogGuard({ engine, echoes = [], stage = "default" }) {
   if (!GUARD_ENGINES.includes(engine)) throw new Error(`createLogGuard: unknown engine ${JSON.stringify(engine)} (want ${GUARD_ENGINES.join(", ")})`);
+  if (!GUARD_STAGES.includes(stage)) throw new Error(`createLogGuard: unknown stage ${JSON.stringify(stage)} (want ${GUARD_STAGES.join(", ")})`);
+  const upscaleStage = engine === "sdcpp" && stage === "upscale";
   const echo = buildEchoMatcher(echoes);
-  const st = { lineNo: 0, inBlock: false, device: false, diffusion: false, da3: false, audio: false, sdDevice: new Map() };
+  const st = { lineNo: 0, inBlock: false, device: false, diffusion: false, upscaler: false, da3: false, audio: false, sdDevice: new Map(), pendingHost: new Map() };
   const evidence = [];
   const note = (s) => { if (evidence.length < 20) evidence.push(s); };
 
@@ -496,10 +506,28 @@ export function createLogGuard({ engine, echoes = [] }) {
             note(`${desc} host buffer ${mb} MB beside ${dev} MB on the device`);
             return null;
           }
+          // The upscale stage: the upscaler prints its host buffer BEFORE its device buffer (0.19 MB on the CPU, then
+          // 64.03 MB on Vulkan0 on the measured run). Hold the host line until the module's device buffer arrives; it is
+          // a placement when that buffer never comes, or is smaller than the host one (settled at the device line, or
+          // by the verdict at the end of the run).
+          if (upscaleStage && !isEcho && SD_UPSCALER_MODULE.test(desc) && mb !== undefined && !st.pendingHost.has(desc)) {
+            st.pendingHost.set(desc, { mb, hit: cpu(line) });
+            return null;
+          }
           return cpu(line);
         }
         if (/^Vulkan\d+$/i.test(on) && !isEcho) {
+          const held = upscaleStage ? st.pendingHost.get(desc) : undefined;
+          if (held) {
+            if (mb === undefined || held.mb > mb) return held.hit;
+            st.pendingHost.delete(desc);
+            note(`${desc} host buffer ${held.mb} MB beside ${mb} MB on the device`);
+          }
           if (mb !== undefined) st.sdDevice.set(desc, mb);
+          if (upscaleStage && SD_UPSCALER_MODULE.test(desc)) {
+            st.upscaler = true;
+            note(`${desc} compute on ${on}`);
+          }
           if (!SD_AUX_MODULE.test(desc)) {
             st.diffusion = true;
             note(`${desc} compute on ${on}`);
@@ -542,7 +570,11 @@ export function createLogGuard({ engine, echoes = [] }) {
   function verdict() {
     let ok;
     let expected;
-    if (engine === "sdcpp") {
+    if (upscaleStage) {
+      ok = st.device && st.upscaler && st.pendingHost.size === 0;
+      const held = [...st.pendingHost.keys()];
+      expected = `a non-software "ggml_vulkan: <n> = <device>" line${st.device ? " (seen)" : " (missing)"} and an upscaler "compute buffer size ... on Vulkan<N>" line (mosr or esrgan)${st.upscaler ? " (seen)" : " (missing)"}${held.length ? `; the host buffer of ${held.join(", ")} has no device buffer beside it` : ""}`;
+    } else if (engine === "sdcpp") {
       ok = st.device && st.diffusion;
       expected = `a non-software "ggml_vulkan: <n> = <device>" line${st.device ? " (seen)" : " (missing)"} and a diffusion-stage "compute buffer size ... on Vulkan<N>" line (or the auto-fit plan's DiT "-> compute Vulkan<N>" line)${st.diffusion ? " (seen)" : " (missing)"}`;
     } else if (engine === "da3") {

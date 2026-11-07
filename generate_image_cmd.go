@@ -148,8 +148,9 @@ func runGenerateImage(args []string) error {
 // --prompt "<text>" [--negative ...] [--denoise F] [--grow-mask N] [--steps N]
 // [--seed N] [--out path] [--json] [--compact]`. The positional argument is the
 // IMAGE PATH; the mask is a white-on-black image the same size (white = repaint).
-// It re-renders ONLY the masked region on the LOCAL ComfyUI for free (SDXL-class
-// inpaint_* binding required).
+// It re-renders ONLY the masked region for free, on the LOCAL ComfyUI (SDXL-class
+// inpaint_* binding required) or, where inpaint_engine is sdcpp, through
+// stable-diffusion.cpp with no ComfyUI.
 func runInpaintImage(args []string) error {
 	fs := flag.NewFlagSet("inpaint-image", flag.ExitOnError)
 	fs.String("config", "", "config file path")
@@ -222,7 +223,8 @@ func runInpaintImage(args []string) error {
 // runUpscaleImage handles `local-offload upscale-image <image> [--scale F]
 // [--width N --height N] [--method m] [--model name] [--out path] [--json]
 // [--compact]`. The positional argument is the IMAGE PATH. It enlarges the image
-// with this machine's ESRGAN-family upscale_model on the LOCAL ComfyUI for free.
+// with this machine's ESRGAN-family model for free: upscale_model on the LOCAL ComfyUI,
+// or upscale_sdcpp_model through stable-diffusion.cpp where upscale_engine is sdcpp.
 func runUpscaleImage(args []string) error {
 	fs := flag.NewFlagSet("upscale-image", flag.ExitOnError)
 	fs.String("config", "", "config file path")
@@ -231,7 +233,7 @@ func runUpscaleImage(args []string) error {
 	width := fs.Int("width", 0, "exact output width (give with --height; wins over --scale)")
 	height := fs.Int("height", 0, "exact output height (give with --width)")
 	method := fs.String("method", "", "resampler for the scale/size step: lanczos (default) | bicubic | bilinear | area | nearest-exact")
-	model := fs.String("model", "", "override this machine's upscale_model (ComfyUI upscale_models filename)")
+	model := fs.String("model", "", "override this machine's upscale_model (ComfyUI upscale_models filename; refused where upscale_engine is sdcpp)")
 	out := fs.String("out", "", "output PNG path (default under the media dir)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	positional, flagArgs := splitArgs(args, map[string]bool{

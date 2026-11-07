@@ -289,6 +289,23 @@ func validateVideoFamilyEngine(name string, b VideoFamilyBinding) error {
 
 // validateIGPUMedia is the load-time door for the animate and audio engine keys.
 func validateIGPUMedia(c Config) error {
+	for _, e := range []struct{ engineKey, backendKey, argsKey, engine, backend string; args []string }{
+		{"upscale_engine", "upscale_sdcpp_backend", "upscale_sdcpp_extra_args", c.UpscaleEngine, c.UpscaleSdcppBackend, c.UpscaleSdcppExtraArgs},
+		{"inpaint_engine", "inpaint_sdcpp_backend", "inpaint_sdcpp_extra_args", c.InpaintEngine, c.InpaintSdcppBackend, c.InpaintSdcppExtraArgs},
+	} {
+		switch e.engine {
+		case "":
+		case EngineSdcpp:
+			if err := CPUBackendRefusal(e.backend); err != nil {
+				return fmt.Errorf("%s: %w", e.backendKey, err)
+			}
+		default:
+			return fmt.Errorf("%s: %q is not \"\" or \"sdcpp\"", e.engineKey, e.engine)
+		}
+		if err := ExtraArgsRefusal(e.argsKey, ExtraArgsSdcpp, e.args); err != nil {
+			return err
+		}
+	}
 	switch c.AnimateGenEngine {
 	case "":
 	case EngineSdcpp:

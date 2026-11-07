@@ -159,6 +159,50 @@ func sdcppAnimateRoute(cfg config.Config, exeDir string) Route {
 	return r
 }
 
+// sdcppUpscaleRoute is upscale_image with upscale_engine sdcpp: `sd-cli -M upscale` with an
+// ESRGAN-family weight, then an ffmpeg resample when the request names a size the model's own
+// factor does not give. No ComfyUI.
+func sdcppUpscaleRoute(cfg config.Config, exeDir string) Route {
+	script := cfg.UpscaleSdcppScript
+	if script == "" {
+		script = "render/sdcpp-upscale.mjs"
+	}
+	bs := []binding{
+		{key: "upscale_sdcpp_bin", value: cfg.UpscaleSdcppBin, kind: binaryBinding},
+		{key: "upscale_sdcpp_model", value: cfg.UpscaleSdcppModel, kind: fileBinding},
+		{key: "upscale_sdcpp_script", value: script, kind: scriptBinding},
+	}
+	bs = append(bs, ffmpegBindings(cfg)...)
+	return engineRoute("upscale_image", engineSdcpp, "upscale_sdcpp_backend", cfg.UpscaleSdcppBackend, config.CPUBackendRefusal,
+		[]kv{{"upscale_sdcpp_bin", cfg.UpscaleSdcppBin}, {"upscale_sdcpp_model", cfg.UpscaleSdcppModel}},
+		bs, exeDir)
+}
+
+// sdcppInpaintRoute is inpaint_image with inpaint_engine sdcpp: sd-cli -i/--mask on the image
+// lane's own binding (sdcpp_bin, sdcpp_model and the vae / text-encoder files that lane sets),
+// composited back over the source by ffmpeg. No ComfyUI and no weight of its own.
+func sdcppInpaintRoute(cfg config.Config, exeDir string) Route {
+	script := cfg.InpaintSdcppScript
+	if script == "" {
+		script = "render/sdcpp-inpaint.mjs"
+	}
+	bs := []binding{
+		{key: "sdcpp_bin", value: cfg.SdcppBin, kind: binaryBinding},
+		{key: "sdcpp_model", value: cfg.SdcppModel, kind: fileBinding},
+	}
+	for _, f := range []kv{{"sdcpp_vae", cfg.SdcppVAE}, {"sdcpp_llm", cfg.SdcppLLM}, {"sdcpp_clip_l", cfg.SdcppClipL},
+		{"sdcpp_clip_g", cfg.SdcppClipG}, {"sdcpp_t5xxl", cfg.SdcppT5}} {
+		if strings.TrimSpace(f.value) != "" {
+			bs = append(bs, binding{key: f.key, value: f.value, kind: fileBinding})
+		}
+	}
+	bs = append(bs, binding{key: "inpaint_sdcpp_script", value: script, kind: scriptBinding})
+	bs = append(bs, ffmpegBindings(cfg)...)
+	return engineRoute("inpaint_image", engineSdcpp, "inpaint_sdcpp_backend", cfg.InpaintSdcppBackend, config.CPUBackendRefusal,
+		[]kv{{"sdcpp_bin", cfg.SdcppBin}, {"sdcpp_model", cfg.SdcppModel}},
+		bs, exeDir)
+}
+
 // audiocppRoute is generate_audio:voice or :music with the audiocpp engine.
 func audiocppRoute(kind string, cfg config.Config, exeDir string) Route {
 	name := "generate_audio:" + kind
@@ -216,6 +260,12 @@ func igpuRoutes(cfg config.Config, exeDir string) (replaced map[string]Route, ex
 	}
 	if cfg.AnimateGenEngine == config.EngineSdcpp {
 		replaced["animate_character"] = sdcppAnimateRoute(cfg, exeDir)
+	}
+	if cfg.UpscaleEngine == config.EngineSdcpp {
+		replaced["upscale_image"] = sdcppUpscaleRoute(cfg, exeDir)
+	}
+	if cfg.InpaintEngine == config.EngineSdcpp {
+		replaced["inpaint_image"] = sdcppInpaintRoute(cfg, exeDir)
 	}
 	if cfg.VoiceGenEngine == config.EngineAudiocpp {
 		replaced["generate_audio:voice"] = audiocppRoute("voice", cfg, exeDir)
