@@ -185,16 +185,21 @@ func TestAllocatorPrefersCardWithNoResidentSeat(t *testing.T) {
 	if len(a.Devices) != 1 || a.Devices[0] != "gpu-cccc0000" {
 		t.Fatalf("the only card with no resident seat is card 2, got %v", a.Devices)
 	}
-	// Both residents: the cheaper eviction goes first, then the lowest id.
+	// Every card resident: the non-display cards come first whatever the display card costs (operator rule
+	// 2026-11-07), then the cheaper eviction, then the lowest id.
 	in.Resident["gpu-cccc0000"] = ResidentInfo{Seats: []string{"seat-c"}, CostGiB: 12}
 	a, _ = Allocate(in)
-	if a.Devices[0] != "gpu-bbbb0000" {
-		t.Fatalf("least eviction cost is card 1 (3 GiB), got %v", a.Devices)
+	if a.Devices[0] != "gpu-aaaa0000" {
+		t.Fatalf("the display card (3 GiB to evict) sorts after the others; of those card 0 (10 GiB) is cheaper than card 2 (12), got %v", a.Devices)
 	}
-	in.Resident["gpu-aaaa0000"] = ResidentInfo{Seats: []string{"seat-a"}, CostGiB: 3}
+	in.Resident["gpu-aaaa0000"] = ResidentInfo{Seats: []string{"seat-a"}, CostGiB: 12}
 	a, _ = Allocate(in)
 	if a.Devices[0] != "gpu-aaaa0000" {
 		t.Fatalf("equal cost breaks on the lowest id, got %v", a.Devices)
+	}
+	in.Min, in.Max = 2, 2
+	if a, _ = Allocate(in); len(a.Devices) != 2 || hasDevice(a.Devices, "gpu-bbbb0000") {
+		t.Fatalf("a two-card job on a three-card box takes the two cards that are not the screen's, got %v", a.Devices)
 	}
 }
 

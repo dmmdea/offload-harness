@@ -488,10 +488,12 @@ type Config struct {
 	// says so), "auto" (console session locked ⇒ away; else last input idle
 	// ≥ operator_idle_sec and the shell not busy/fullscreen ⇒ away). Defaults
 	// to present — the display card fails closed until the operator has read
-	// the probe's readings in offload_status and set auto or away. The layer's
-	// presence guard is the key's only reader since 0.183.0: the card allocator (gpu
-	// reserve --cards, an auto-placed media call) no longer reads presence, it admits
-	// the display card by gpu_display_cap_pct (GPUDisplayCapPct) at all times.
+	// the probe's readings in offload_status and set auto or away. That default is the
+	// display layer's. The card allocator (gpu reserve --cards, an auto-placed media call,
+	// gpu display-check) reads the key too since 2026-11-07 (AllocatorPresenceMode): unset
+	// means auto there, so the display card takes jobs, within gpu_display_cap_pct, only
+	// while the operator is away and the card is not busy (operator rule 2026-11-07, "only
+	// up to 60% of the 5070ti card WHEN IDLE"). From 0.183.0 to then it read no presence.
 	OperatorPresence string `json:"operator_presence,omitempty"`
 	// OperatorIdleSec is the last-input idle threshold behind presence mode
 	// "auto". 0 = 900 (15 min): long enough that a coffee break does not admit
@@ -1451,9 +1453,11 @@ type Config struct {
 	// GPUDisplayCapPct (A-RAM-15, default 60) is how much of the display card's total VRAM jobs may use, the
 	// desktop's own memory included: the card allocator (`gpu reserve --cards`, the media admission path) takes the
 	// screen's card only while the VRAM in use now plus the job's declared footprint stays at or under this share of
-	// the card. The operator's rule of 2026-10-11: the display card may be used up to 60 percent at all times unless
-	// he says he needs it, so no presence reading opens or closes it any more; 0 is the "I need it" switch and keeps
-	// the card closed to the allocator. A pointer because unset (60) and 0 (closed) must differ; 1..100 are shares, and
+	// the card. The share is the operator's rule of 2026-10-11; since 2026-11-07 it applies only WHILE THE CARD IS IDLE
+	// ("only up to 60% of the 5070ti card WHEN IDLE so i can always keep it interactive"): the allocator's idle gate
+	// (gpualloc.DisplayBusy: the operator away by the presence probe, and the card under 15 % busy) closes the card
+	// otherwise, which supersedes the 10-11 "at all times, no presence reading" wording. 0 is the "I need it" switch
+	// and keeps the card closed to the allocator whatever the gate reads. A pointer because unset (60) and 0 (closed) must differ; 1..100 are shares, and
 	// a value outside 0..100 refuses the load by name (and reads as closed where a caller goes on with it anyway). The
 	// switch is read from this file as it is when the allocator builds its input or a status surface prints the card
 	// table (LiveGPUDisplayCap), not as it was at start, so a 0 written while a request is in line or a server is running takes effect. It bounds ADMISSION only: nothing limits a job after it is placed, and a job that declares no footprint (`--vram`)

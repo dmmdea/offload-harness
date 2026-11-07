@@ -63,8 +63,9 @@ func validateGPUHostRAMHold(c Config) error {
 }
 
 // DefaultGPUDisplayCapPct is the share of the display card's VRAM the card allocator may fill when
-// gpu_display_cap_pct is unset: the operator's rule of 2026-10-11 ("the display card may be used up to 60 percent
-// at all times unless I say I need it"). It is the operator's figure, not a measurement.
+// gpu_display_cap_pct is unset: the operator's figure (rule of 2026-10-11), not a measurement. Since 2026-11-07 it
+// applies only while the card is idle ("only up to 60% of the 5070ti card WHEN IDLE so i can always keep it
+// interactive"): the allocator's idle gate (gpualloc.DisplayBusy) closes the card otherwise.
 const DefaultGPUDisplayCapPct = 60
 
 // GPUDisplayCap is gpu_display_cap_pct with the default applied: 60 when unset, and 0 (the card closed to the

@@ -25,7 +25,7 @@ func (e *ErrGrantRefused) Error() string {
 //
 // WHY THIS EXISTS: a request queued on the display card was decided against the rule for that card at
 // ENQUEUE (the presence guard and the desktop floor until A-RAM-15, the card's cap and the VRAM in use
-// since). FIFO can take hours; the operator may have closed the card, or a game may have taken its
+// since, and from 2026-11-07 the card's idle gate as well). FIFO can take hours; the operator may have closed the card, or a game may have taken its
 // memory, by the time the front of the line is reached. Nothing re-asked, so the queue handed the
 // screen's card to a job the rule would now refuse.
 //

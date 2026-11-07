@@ -63,6 +63,31 @@ type DisplayCap struct {
 	OverByGiB float64 `json:"over_by_gb,omitempty"`
 	Closed    bool    `json:"closed,omitempty"`
 	Unknown   string  `json:"unknown,omitempty"`
+	// IdleGate is the operator's 2026-11-07 rule on this card: the cap's share is the jobs' only WHILE THE CARD IS
+	// IDLE (the operator away and the card not busy). "open" or "closed" as the allocator would read it now
+	// (gpualloc.DisplayBusy), stamped by MarkIdleGate; empty on a surface that did not read it. IdleWhy says why
+	// a closed gate is closed.
+	IdleGate string `json:"idle_gate,omitempty"`
+	IdleWhy  string `json:"idle_why,omitempty"`
+}
+
+// MarkIdleGate stamps the idle gate onto the display card's cap verdict in rows (busy is gpualloc.DisplayBusy's
+// answer: "" = idle), so a surface that prints the cap does not call the card open to jobs while the allocator,
+// reading the desk, keeps them off it. A row with no judged cap (not the display card, unknown, closed by a cap
+// of 0) is left as it is. It returns rows for chaining.
+func MarkIdleGate(rows []Row, busy string) []Row {
+	for _, r := range rows {
+		d := r.DisplayCap
+		if d == nil || d.Unknown != "" || d.Closed || !r.Display {
+			continue
+		}
+		if busy == "" {
+			d.IdleGate = "open"
+			continue
+		}
+		d.IdleGate, d.IdleWhy = "closed", busy
+	}
+	return rows
 }
 
 // RowsWithCap joins the card table with the live leases and the display card's cap. A card-scoped lease holds
@@ -351,8 +376,15 @@ func capLine(r Row) string {
 			verdict = "OVER by less than 0.1 GiB"
 		}
 	}
-	return indent + fmt.Sprintf("%.1f of %.1f GiB in use (%.0f%%); gpu_display_cap_pct %d (with any declared display floor) allows %.1f GiB: %s (the desktop and every process are counted; this line cannot say whose memory it is)",
+	line := indent + fmt.Sprintf("%.1f of %.1f GiB in use (%.0f%%); gpu_display_cap_pct %d (with any declared display floor) allows %.1f GiB: %s (the desktop and every process are counted; this line cannot say whose memory it is)",
 		d.UsedGiB, r.VRAMTotalGiB, d.UsedPct, d.CapPct, d.BudgetGiB, verdict)
+	switch d.IdleGate {
+	case "open":
+		line += "; idle gate: open (the operator is away and the card is not busy)"
+	case "closed":
+		line += "; idle gate: CLOSED to jobs, the cap applies only while the card is idle (" + d.IdleWhy + ")"
+	}
+	return line
 }
 
 func clip(s string, n int) string {

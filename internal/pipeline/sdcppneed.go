@@ -82,7 +82,7 @@ func animateSdcppFiles(cfg config.Config) []hostneed.SdcppFile {
 // sdcppImageNeed is the need of the sd.cpp image lane for the resolved binding cfg: the whole node (sd.cpp has no ComfyUI
 // instance to bind to a card), declaring its own parked bytes and recorded under the lane's footprint key.
 func (p *Pipeline) sdcppImageNeed(cfg config.Config, family, quant, token string) mediaNeed {
-	return wholeNeed(token).
+	return wholeNeed(token).offDisplay().
 		declaresRAM(sdcppDeclared(p.cfg, family, imageSdcppFiles(cfg), cfg.SdcppExtraArgs)).
 		withFootprint(footKey{family, quant, "image-gen"})
 }

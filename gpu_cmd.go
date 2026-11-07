@@ -54,7 +54,7 @@ import (
 
 // gpuVerbs are the subcommands runGPU dispatches, in the order the usage lists them. `hold` is the hidden
 // holder a --detach reserve spawns and is not documented.
-var gpuVerbs = []string{"status", "cards", "faults", "reserve", "release", "doctor", "owner-flags", "hold"}
+var gpuVerbs = []string{"status", "cards", "display-check", "faults", "reserve", "release", "doctor", "owner-flags", "hold"}
 
 func runGPU(args []string) error {
 	if len(args) == 0 {
@@ -81,6 +81,8 @@ func runGPU(args []string) error {
 		return runGPUHold(rest)
 	case "cards":
 		return runGPUCards(rest)
+	case "display-check":
+		return runGPUDisplayCheck(rest)
 	case "faults":
 		return runGPUFaults(rest)
 	case "doctor":
@@ -88,12 +90,12 @@ func runGPU(args []string) error {
 	case "owner-flags":
 		return runGPUOwnerFlags(rest)
 	default:
-		return fmt.Errorf("unknown gpu subcommand %q (want status, cards, faults, reserve, release, doctor or owner-flags; `local-offload gpu --help` lists them)", sub)
+		return fmt.Errorf("unknown gpu subcommand %q (want status, cards, display-check, faults, reserve, release, doctor or owner-flags; `local-offload gpu --help` lists them)", sub)
 	}
 }
 
 // gpuUsageLine is the one-line usage a bare `gpu` (or a `gpu --config x` with no subcommand) is refused with.
-const gpuUsageLine = "usage: local-offload gpu [--config <path>] <status|cards|faults|reserve|release|doctor|owner-flags> [flags] (local-offload gpu --help lists them)"
+const gpuUsageLine = "usage: local-offload gpu [--config <path>] <status|cards|display-check|faults|reserve|release|doctor|owner-flags> [flags] (local-offload gpu --help lists them)"
 
 // gpuUsage is what `gpu --help` prints on stdout: every documented subcommand once, and where the flags of
 // each are (the sub-verbs' own flag sets print them on --help).
@@ -106,6 +108,9 @@ Usage:
 Subcommands:
   gpu status [--json]                    who holds the cards, the queue behind them, and what the holder is doing (verdict and note)
   gpu cards [--json]                     the card table, with each card's holder
+  gpu display-check --vram GiB [--json]  whether the display card would take a job of that footprint now (idle and within
+                                         gpu_display_cap_pct): exit 0 admits, 3 refuses with the reason; for launchers that
+                                         put work on the display card outside a lease
   gpu faults [--days N] [--jobs] [--json]
                                          the driver's fault history (up to 30 days, every card) as incidents, with known-error
                                          classes and NVIDIA's action; --jobs adds the ledger rows that ran here during each
@@ -421,7 +426,7 @@ func runGPUReserve(args []string) (retErr error) {
 	exclusive := fs.Bool("exclusive", false, "stamp a text lease exclusive: the harness's text-load gate then keeps models off these cards for the lease's length (loads ride a cascade remote lane or wait their own budget); implied by --unload-seat")
 	asJSON := fs.Bool("json", false, "emit JSON")
 	devicesFlag := fs.String("devices", "", "hold only these cards (nvidia-smi indices or GPU UUID prefixes, comma-separated) instead of the whole node; needs card-scoped leases on this host (config gpu_card_scoped_leases and a green `gpu doctor --write-audit`); the command is pinned to them with CUDA_VISIBLE_DEVICES unless it pins itself")
-	cardsFlag := fs.String("cards", "", "hold N cards (or MIN..MAX) chosen by the allocator: not claimed, the display card only within gpu_display_cap_pct of its VRAM (default 60, 0 closes it) and, below a cap of 100, only with --vram declared (at 100 with no display_floor_gib the whole card is open and nothing is held to a footprint), no foreign compute process, VRAM and host RAM that fit; queues when none qualify; the command is pinned to them with CUDA_VISIBLE_DEVICES unless it pins itself")
+	cardsFlag := fs.String("cards", "", "hold N cards (or MIN..MAX) chosen by the allocator: not claimed, the non-display cards first and the display card only while it is idle (the operator away and the card under 15 % busy, rule 2026-11-07) and within gpu_display_cap_pct of its VRAM (default 60, 0 closes it) and, below a cap of 100, only with --vram declared (at 100 with no display_floor_gib the whole card is open and nothing is held to a footprint), no foreign compute process, VRAM and host RAM that fit; queues when none qualify; the command is pinned to them with CUDA_VISIBLE_DEVICES unless it pins itself")
 	wholeNode := fs.Bool("whole-node", false, "hold the whole node (the default when the command names no card)")
 	groupFlag := fs.String("group", "", "label for leases taken together for one job (shown in `gpu status`)")
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card (0 = not declared)")

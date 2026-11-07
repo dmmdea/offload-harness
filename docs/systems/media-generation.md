@@ -1943,7 +1943,7 @@ is given:
 | the same with a pin that cannot be resolved (no `gpu_comfy_order`, a comma list, not an index, a position the box does not have) | the whole node, with today's `--cuda-device` | the whole node | the default instance, as before |
 | a pooled image or video route | the cards its pool keys name, when the pool has at least two cards and the box has at most three | a lease on those cards | the default instance, **launch unchanged** (every card visible) |
 | `run-graph` with ONE declared device | that card | a lease on it | its instance, pinned by uuid |
-| `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice) |
+| `run-graph` with several declared devices, or none, sd.cpp, voice | the whole node | the whole node | the default instance (none for sd.cpp and voice; their worker is shown only the non-display cards, `CUDA_VISIBLE_DEVICES` by UUID, unless the display card would take an undeclared job now: idle, and a cap of 100 with no floor; since 2026-11-07, `offDisplayEnv`) |
 | any call on a host that does not lease cards, or whose card table cannot be read at admission (after one retry) | the whole node | the whole node | exactly as before this change, and the answer of a call that must wait says why it waits for the node ([below](#a-card-table-that-runs-out-of-time-is-not-a-refusal)) |
 
 **Host RAM.** A generation call also declares the host RAM its weights will stream from (the UNet or checkpoint and the
@@ -1969,8 +1969,9 @@ can resume, a busy defer for the rest) until the first is done
 (`gpu_lease`, "The allocator"): not claimed by a live lease, not promised to a caller waiting in line
 (below), not held by another job in this process, with the free VRAM and host RAM. The display card is the one whose
 `display_active` reads Enabled **or** whose `display_attached` reads Yes (`gpuprobe.ScreenCardUUIDs`, the card table's rule);
-it is auto-assigned at any presence, but only while the VRAM in use plus the call's footprint stays within
-`gpu_display_cap_pct` of it (default 60; 0 closes it; ADR 0039, amendment 2026-10-12). A media call declares no
+it is auto-assigned only while it is idle (the operator away and the card under 15 % busy, ADR 0039 amendment
+2026-11-07), and then only while the VRAM in use plus the call's footprint stays within `gpu_display_cap_pct` of it
+(default 60; 0 closes it; ADR 0039, amendment 2026-10-12). The non-display cards are always tried first. A media call declares no
 footprint, so an unpinned call never takes it under a cap below 100: it picks among the other cards. An explicit pin may always name it (the operator's word). Ties go to a card with no resident seat, then
 the cheapest eviction, then the lowest id.
 
