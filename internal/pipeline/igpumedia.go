@@ -44,6 +44,11 @@ const (
 
 	defaultSdcppVideoScript   = "render/sdcpp-video.mjs"
 	defaultSdcppAnimateScript = "render/sdcpp-animate.mjs"
+	defaultSdcppUpscaleScript = "render/sdcpp-upscale.mjs"
+	defaultSdcppInpaintScript = "render/sdcpp-inpaint.mjs"
+
+	// upscaleSdcppFootprintFamily is the footprint-store family the sd.cpp upscale lane records under.
+	upscaleSdcppFootprintFamily = "sdcpp-upscale"
 	defaultAudiocppScript     = "render/audiocpp-generate.mjs"
 )
 
@@ -635,6 +640,176 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 	payload := map[string]any{"video_path": outPath, "seed": seed}
 	notes.addTo(payload)
 	data, _ := json.Marshal(payload)
+	p.record(req.Task, meta, len(prompt))
+	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// ---------------------------------------------------------------- image upscale and inpaint
+
+// runUpscaleSdcpp enlarges an image through render/sdcpp-upscale.mjs (upscale_engine sdcpp):
+// `sd-cli -M upscale` with the bound ESRGAN-family weight, no ComfyUI. The caller (runUpscaleImage) has
+// validated the request and checks the written size afterwards; this runs the engine and returns the
+// path, or the typed defer result. A bound CPU backend, screened extra args and an unset key are typed
+// defers before anything is leased.
+func (p *Pipeline) runUpscaleSdcpp(ctx context.Context, req core.Request, meta *core.Meta, start time.Time, image, out string, w, h int, scale float64) (string, *core.Result) {
+	cfg := p.cfg
+	fail := func(res core.Result) (string, *core.Result) { return "", &res }
+	if err := config.CPUBackendRefusal(cfg.UpscaleSdcppBackend); err != nil {
+		return fail(p.deferCPUBackend(req, *meta, start, "image upscale", err))
+	}
+	if err := config.ExtraArgsRefusal("upscale_sdcpp_extra_args", config.ExtraArgsSdcpp, cfg.UpscaleSdcppExtraArgs); err != nil {
+		return fail(p.deferRefused(req, *meta, start, errClassExtraArgsRefused, "image upscale", err))
+	}
+	for _, m := range []struct{ key, v string }{{"upscale_sdcpp_bin", cfg.UpscaleSdcppBin}, {"upscale_sdcpp_model", cfg.UpscaleSdcppModel}} {
+		if strings.TrimSpace(m.v) == "" {
+			return fail(p.deferGen(req, *meta, start, len(req.Input), "upscale_engine is sdcpp but "+m.key+" is not configured"))
+		}
+	}
+	if res, notReady := p.routeReadyOrDefer(req, *meta, start, cfg, "upscale_image", "image upscale"); notReady {
+		return fail(res)
+	}
+	script, serr := resolveIGPUScript(cfg.UpscaleSdcppScript, defaultSdcppUpscaleScript)
+	if serr != nil {
+		return fail(p.deferGen(req, *meta, start, len(req.Input), serr.Error()))
+	}
+	sdBin, berr := resolveEngineBin("upscale_sdcpp_bin", cfg.UpscaleSdcppBin)
+	if berr != nil {
+		return fail(p.deferGen(req, *meta, start, len(req.Input), "image upscale refused: "+berr.Error()))
+	}
+	if err := ensureOutDir(out); err != nil {
+		return fail(p.deferGen(req, *meta, start, len(req.Input), "image upscale refused: "+err.Error()))
+	}
+	timeout := time.Duration(cfg.UpscaleTimeoutSec) * time.Second
+	flags := []string{"--sd-bin", sdBin, "--model", cfg.UpscaleSdcppModel, "--backend", cfg.UpscaleSdcppBackend}
+	if w > 0 && h > 0 {
+		flags = append(flags, "--width", strconv.Itoa(w), "--height", strconv.Itoa(h))
+	}
+	if scale > 0 {
+		flags = append(flags, "--scale", fmtFloat(scale))
+	}
+	if m := paramStr(req.Params, "method"); m != "" {
+		flags = append(flags, "--method", m)
+	}
+	flags = append(flags, extraArgsFlag(cfg.UpscaleSdcppExtraArgs)...)
+	flags = append(flags, timeoutArgs(timeout)...)
+	outPath, dres := p.runIGPU(ctx, req, meta, start, igpuRun{
+		leaseReason: "upscale (sdcpp)", failVerb: "upscale failed",
+		fpFamily: upscaleSdcppFootprintFamily, fpQuant: quantFromModelFile(cfg.UpscaleSdcppModel), fpTask: "upscale",
+		script: script, args: runnerArgs(flags, out, image), out: out, timeout: timeout,
+		ram: sdcppDeclared(p.cfg, upscaleSdcppFootprintFamily, []hostneed.SdcppFile{{Label: "upscale_sdcpp_model", Path: cfg.UpscaleSdcppModel}}, cfg.UpscaleSdcppExtraArgs),
+	})
+	if dres != nil {
+		return "", dres
+	}
+	return outPath, nil
+}
+
+// runInpaintImageSdcpp repaints the masked region through render/sdcpp-inpaint.mjs (inpaint_engine
+// sdcpp): sd-cli -i/--mask on the image lane's own binding, composited back over the source by the
+// runner. The caller (runInpaintImage) has resolved the prompt, image and mask (auto_text included).
+// denoise becomes --strength (default 1.0) and grow_mask reaches the runner (default 16). The image
+// lane's sdcpp_extra_args are NOT forwarded: on the AMD tier they hold --vae-on-cpu, which the screen
+// refuses; this route has inpaint_sdcpp_extra_args.
+func (p *Pipeline) runInpaintImageSdcpp(ctx context.Context, req core.Request, meta core.Meta, start time.Time, image, mask, prompt string) core.Result {
+	cfg := p.cfg
+	meta.Model = "sdcpp-inpaint:" + filepath.Base(cfg.SdcppModel)
+	if err := config.CPUBackendRefusal(cfg.InpaintSdcppBackend); err != nil {
+		return p.deferCPUBackend(req, meta, start, "inpaint", err)
+	}
+	if err := config.ExtraArgsRefusal("inpaint_sdcpp_extra_args", config.ExtraArgsSdcpp, cfg.InpaintSdcppExtraArgs); err != nil {
+		return p.deferRefused(req, meta, start, errClassExtraArgsRefused, "inpaint", err)
+	}
+	for _, m := range []struct{ key, v string }{{"sdcpp_bin", cfg.SdcppBin}, {"sdcpp_model", cfg.SdcppModel}} {
+		if strings.TrimSpace(m.v) == "" {
+			return p.deferGen(req, meta, start, len(req.Input), "inpaint_engine is sdcpp but "+m.key+" is not configured")
+		}
+	}
+	for _, f := range []struct{ what, path string }{{"inpaint source image", image}, {"inpaint mask", mask}} {
+		if fi, err := os.Stat(f.path); err != nil || fi.IsDir() {
+			return p.deferGen(req, meta, start, len(req.Input), f.what+" not found: "+f.path)
+		}
+	}
+	if d, present := req.Params["denoise"]; present {
+		if f, ok := d.(float64); !ok || f <= 0 || f > 1 {
+			return p.deferGen(req, meta, start, len(req.Input), "inpaint denoise must be a number in (0, 1]")
+		}
+	}
+	if _, present := req.Params["grow_mask"]; present && paramIntOr(req.Params, "grow_mask", -1) < 0 {
+		return p.deferGen(req, meta, start, len(req.Input), "inpaint grow_mask must be a non-negative integer")
+	}
+	if res, notReady := p.routeReadyOrDefer(req, meta, start, cfg, "inpaint_image", "inpaint"); notReady {
+		return res
+	}
+	script, serr := resolveIGPUScript(cfg.InpaintSdcppScript, defaultSdcppInpaintScript)
+	if serr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), serr.Error())
+	}
+	sdBin, berr := resolveEngineBin("sdcpp_bin", cfg.SdcppBin)
+	if berr != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "inpaint refused: "+berr.Error())
+	}
+	// Pin a concrete seed BEFORE the render (the same reproducibility rule as the other image lanes).
+	seed := paramIntOr(req.Params, "seed", 0)
+	if seed <= 0 {
+		seed = mintSeed()
+		if req.Params == nil {
+			req.Params = map[string]any{}
+		}
+		req.Params["seed"] = seed
+	}
+	out := paramStr(req.Params, "out")
+	if out == "" {
+		_ = os.MkdirAll(cfg.MediaDir, 0o755)
+		out = filepath.Join(cfg.MediaDir, "inpaint-"+sha256hex(image + prompt + tasks.StableParamsKey(req.Params))[:8]+".png")
+	}
+	if err := ensureOutDir(out); err != nil {
+		return p.deferGen(req, meta, start, len(req.Input), "inpaint refused: "+err.Error())
+	}
+	timeout := time.Duration(cfg.InpaintTimeoutSec) * time.Second
+	flags := []string{"--sd-bin", sdBin, "--model", cfg.SdcppModel, "--backend", cfg.InpaintSdcppBackend}
+	for _, f := range []struct{ flag, v string }{{"--model-kind", cfg.SdcppModelKind}, {"--vae", cfg.SdcppVAE}, {"--clip-l", cfg.SdcppClipL},
+		{"--clip-g", cfg.SdcppClipG}, {"--t5xxl", cfg.SdcppT5}, {"--llm", cfg.SdcppLLM}} {
+		if strings.TrimSpace(f.v) != "" {
+			flags = append(flags, f.flag, f.v)
+		}
+	}
+	if n := paramStr(req.Params, "negative"); n != "" {
+		flags = append(flags, "--negative", n)
+	}
+	steps := paramIntOr(req.Params, "steps", 0)
+	if steps <= 0 {
+		steps = cfg.ImageGenSteps
+	}
+	if steps > 0 {
+		flags = append(flags, "--steps", strconv.Itoa(steps))
+	}
+	if cfg.ImageGenCFG > 0 {
+		flags = append(flags, "--cfg", fmtFloat(cfg.ImageGenCFG))
+	}
+	if cfg.ImageGenSampler != "" {
+		flags = append(flags, "--sampler", cfg.ImageGenSampler)
+	}
+	flags = append(flags, "--seed", strconv.Itoa(seed))
+	if f, ok := req.Params["denoise"].(float64); ok {
+		flags = append(flags, "--denoise", fmtFloat(f))
+	}
+	if _, present := req.Params["grow_mask"]; present {
+		flags = append(flags, "--grow-mask", strconv.Itoa(paramIntOr(req.Params, "grow_mask", 0)))
+	}
+	flags = append(flags, extraArgsFlag(cfg.InpaintSdcppExtraArgs)...)
+	flags = append(flags, timeoutArgs(timeout)...)
+	imgFamily, imgQuant := imageFootprintKey(cfg)
+	outPath, dres := p.runIGPU(ctx, req, &meta, start, igpuRun{
+		leaseReason: "inpaint (sdcpp)", failVerb: "inpaint failed",
+		fpFamily: imgFamily, fpQuant: imgQuant, fpTask: "inpaint",
+		script: script, args: runnerArgs(flags, out, image, mask, prompt), out: out, timeout: timeout,
+		ram: sdcppDeclared(p.cfg, imgFamily, imageSdcppFiles(cfg), cfg.InpaintSdcppExtraArgs),
+	})
+	if dres != nil {
+		return *dres
+	}
+	meta.LatencyMs = time.Since(start).Milliseconds()
+	data, _ := json.Marshal(map[string]any{"image_path": outPath, "seed": seed})
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }

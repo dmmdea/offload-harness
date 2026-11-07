@@ -342,7 +342,8 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 		p.recordDefer(req.Task, meta, len(req.Input), reason)
 		return core.Deferf(reason, "", meta)
 	}
-	if p.cfg.InpaintScript == "" || p.cfg.InpaintCkpt == "" {
+	sdcppInpaint := p.cfg.InpaintEngine == config.EngineSdcpp
+	if !sdcppInpaint && (p.cfg.InpaintScript == "" || p.cfg.InpaintCkpt == "") {
 		return defer1("no inpaint route configured")
 	}
 	prompt := strings.TrimSpace(req.Input)
@@ -375,6 +376,10 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	}
 	if mask == "" {
 		return defer1("inpaint requires params.mask")
+	}
+	// inpaint_engine sdcpp: sd-cli -i/--mask on the image lane's binding, no ComfyUI (igpumedia.go).
+	if sdcppInpaint {
+		return p.runInpaintImageSdcpp(ctx, req, meta, start, image, mask, prompt)
 	}
 	script, serr := gpugen.ResolveScript(p.cfg.InpaintScript)
 	if serr != nil {
@@ -432,11 +437,19 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		p.recordDefer(req.Task, meta, len(req.Input), reason)
 		return core.Deferf(reason, "", meta)
 	}
-	if p.cfg.UpscaleScript == "" {
+	sdcppUpscale := p.cfg.UpscaleEngine == config.EngineSdcpp
+	if !sdcppUpscale && p.cfg.UpscaleScript == "" {
 		return defer1("no upscale route configured (upscale_script unset)")
 	}
 	model := p.cfg.EffectiveUpscaleModel()
-	if s, ok := req.Params["model"].(string); ok && s != "" {
+	if sdcppUpscale {
+		model = p.cfg.UpscaleSdcppModel
+	}
+	if s, ok := req.Params["model"].(string); ok && s != "" && sdcppUpscale {
+		// The weight is a full path in upscale_sdcpp_model, not a name in a ComfyUI folder: a per-request
+		// model cannot be honored, and silently using the bound one would answer a different question.
+		return defer1("upscale model override " + s + " is refused: upscale_engine is sdcpp, which upscales with the weight bound in upscale_sdcpp_model; drop the model parameter")
+	} else if ok && s != "" {
 		// A ComfyUI model NAME relative to upscale_models/ (subfolders are fine — the
 		// loader lists them as "ESRGAN/4x.pth"). An absolute or parent-escaping path
 		// can only be a typo or a different models root, and ComfyUI would reject it
@@ -446,10 +459,17 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		}
 		model = s
 	}
+	if model == "" && sdcppUpscale {
+		return defer1("upscale_engine is sdcpp but upscale_sdcpp_model is not configured")
+	}
 	if model == "" {
 		return defer1("no upscale route configured (upscale_model / videogen_upscale_model unset)")
 	}
 	meta.Model = "comfyui-upscale:" + model
+	if sdcppUpscale {
+		model = filepath.Base(model)
+		meta.Model = "sdcpp-upscale:" + model
+	}
 	image := paramStr(req.Params, "image")
 	if image == "" {
 		return defer1("upscale requires params.image")
@@ -494,30 +514,40 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 			return defer1(fmt.Sprintf("upscale scale %g on a %dx%d source needs %dx%d, above ComfyUI's %d limit", scale, srcW, srcH, expW, expH, upscaleMaxResolution))
 		}
 	}
-	script, serr := gpugen.ResolveScript(p.cfg.UpscaleScript)
-	if serr != nil {
-		return defer1(serr.Error())
-	}
 	out := paramStr(req.Params, "out")
 	if out == "" {
 		_ = os.MkdirAll(p.cfg.MediaDir, 0o755)
 		out = filepath.Join(p.cfg.MediaDir, "upscale-"+sha256hex(image + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
-	timeout := time.Duration(p.cfg.UpscaleTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "upscale", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
-	if lerr != nil {
-		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
-	}
-	defer grant.Release()
-	// Single-card route: the device pin applies (comfyLaunch), or the instance bound to the card.
-	outPath, gerr := imagegen.Upscale(ctx, imagegen.UpscaleRequest{
-		Node: p.cfg.NodePath, Script: script, ComfyDir: p.cfg.ComfyDir, Out: out, Image: image,
-		Params: req.Params, Model: imagegen.UpscaleModel{Model: model}, Timeout: timeout,
-		ExtraEnv: append(grant.Env, grant.launch(comfyLaunch(p.cfg, true)).Env()...),
-	})
-	if gerr != nil {
-		meta.ErrClass = classifyErr(gerr)
-		return defer1("upscale failed: " + gerr.Error())
+	var outPath string
+	if sdcppUpscale {
+		// upscale_engine sdcpp: sd-cli -M upscale, no ComfyUI (igpumedia.go). The size check below runs on its file too.
+		var dres *core.Result
+		if outPath, dres = p.runUpscaleSdcpp(ctx, req, &meta, start, image, out, w, h, scale); dres != nil {
+			return *dres
+		}
+	} else {
+		script, serr := gpugen.ResolveScript(p.cfg.UpscaleScript)
+		if serr != nil {
+			return defer1(serr.Error())
+		}
+		timeout := time.Duration(p.cfg.UpscaleTimeoutSec) * time.Second
+		grant, lerr := p.acquireMediaLease(ctx, "upscale", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
+		if lerr != nil {
+			return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
+		}
+		defer grant.Release()
+		// Single-card route: the device pin applies (comfyLaunch), or the instance bound to the card.
+		var gerr error
+		outPath, gerr = imagegen.Upscale(ctx, imagegen.UpscaleRequest{
+			Node: p.cfg.NodePath, Script: script, ComfyDir: p.cfg.ComfyDir, Out: out, Image: image,
+			Params: req.Params, Model: imagegen.UpscaleModel{Model: model}, Timeout: timeout,
+			ExtraEnv: append(grant.Env, grant.launch(comfyLaunch(p.cfg, true)).Env()...),
+		})
+		if gerr != nil {
+			meta.ErrClass = classifyErr(gerr)
+			return defer1("upscale failed: " + gerr.Error())
+		}
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	// Size is read from the file the runner wrote, never predicted: gpugen proved the
@@ -543,6 +573,10 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		} else {
 			result["factor_x"], result["factor_y"] = fx, fy
 		}
+	}
+	if sdcppUpscale && paramStr(req.Params, "method") != "" && w == 0 && scale == 0 {
+		// The resampler only meets a requested size; the model's own enlargement is not a resampler.
+		result["notes"] = []string{"method=" + paramStr(req.Params, "method") + " is accepted and ignored: no width, height or scale was requested, so no resample ran (the upscale model's own enlargement does not use it)"}
 	}
 	data, _ := json.Marshal(result)
 	p.record(req.Task, meta, 0)

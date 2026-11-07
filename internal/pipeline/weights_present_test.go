@@ -52,10 +52,11 @@ func presentWeights(t *testing.T, dir string, cfg *config.Config) {
 	bin(&cfg.AnimateGenSdcppBin)
 	bin(&cfg.AnimateGenDepthBin)
 	bin(&cfg.AudiocppBin)
+	bin(&cfg.UpscaleSdcppBin)
 	for _, p := range []*string{
 		&cfg.SdcppModel, &cfg.SdcppVAE, &cfg.SdcppClipL, &cfg.SdcppClipG, &cfg.SdcppT5, &cfg.SdcppLLM,
 		&cfg.AnimateGenSdcppModel, &cfg.AnimateGenSdcppVAE, &cfg.AnimateGenSdcppT5xxl, &cfg.AnimateGenDepthModel,
-		&cfg.AudiocppVoiceModel, &cfg.AudiocppMusicModel,
+		&cfg.AudiocppVoiceModel, &cfg.AudiocppMusicModel, &cfg.UpscaleSdcppModel,
 	} {
 		fix(p)
 	}

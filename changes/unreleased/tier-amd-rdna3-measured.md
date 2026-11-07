@@ -9,6 +9,14 @@
 - **Builds.** `setup/build-engine-vulkan.ps1` builds whisper-server, da3-cli and a patched audiocpp_cli on the box with a portable MSYS2 under `<home>\toolchain`. It takes no admin rights, runs at below-normal priority on half the cores, and refuses a binary with no Vulkan link. A failed build warns and the install goes on: the route it feeds reads BOUND-BUT-MISSING and the render gate fails it by name.
 - **Limits.** The timeouts, token caps and sizes are amd-gcn's, measured on a Vega 7 under Linux, so they stay projected until a 780M has run them. `local-offload update` has no audio.cpp or depth-anything row yet, on this tier or on amd-gcn.
 
+### Added - upscale and inpaint with no ComfyUI
+
+- **What it does.** `upscale_image` and `inpaint_image` run through stable-diffusion.cpp's `sd-cli` behind the new engine keys `upscale_engine` and `inpaint_engine` (`sdcpp`). Tier amd-rdna3 seeds both from its base `config_seed`, so a 780M box serves them with no ComfyUI.
+- **Upscale.** `sd-cli -M upscale` with 4xNomos2_hq_mosr (CC-BY-4.0, commercial use allowed with attribution, 8.6 MB, fetched by the installer to `models/upscale/`). The scale comes from the model, so a `scale`, `width` or `height` that differs is met by an ffmpeg lanczos resample to the exact size. A failed upscaler load saves the un-upscaled image and exits 0 in sd-cli, so the runner checks the output really is larger and fails `MODEL_INCOMPATIBLE` otherwise. A per-request `model` is refused on this engine.
+- **Inpaint.** `sd-cli -i --mask --strength` on the image lane's own Z-Image Turbo files, with no weight of its own. The runner grows the mask by `grow_mask` (default 16), renders, and merges the render back over the source through the feathered mask, so the pixels outside the seam are exact. The image lane's `--vae-on-cpu` is not forwarded. Removal is clean. A large repaint that adds a new object can show the mask's rectangle, because Z-Image is not an inpaint model.
+- **Guard.** `createLogGuard` has an upscale stage: the upscaler prints a small host buffer before its device buffer, and the default stage would kill that run and demand a diffusion buffer an upscale never has. The default stage is unchanged.
+- **Limits.** Measured on a Vulkan GPU of another class (upscale 512 to 2048 in 8 s, inpaint clean), so the tier stays PROJECTED until a 780M has run them. `edit_image_generative` and `run_graph` still need ComfyUI.
+
 ### Fixed - a fresh Windows Vulkan install reaches a working stack on a data drive
 
 - **Install home.** `install.ps1` no longer defaults to the OS drive. It picks a fixed NTFS or ReFS volume with at least 20 GiB free, never the OS drive, USB or a cloud drive: a drive already holding an install first, otherwise the one with the most free space. It records `OFFLOAD_HOME` for the user. An existing profile install stays where it is. `OFFLOAD_ALLOW_OS_DATA=1` keeps the profile. A box with no other disk fails loud and names both overrides.

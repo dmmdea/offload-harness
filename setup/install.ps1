@@ -207,6 +207,11 @@ $SOURCES = @{
   'model-depth-anything' = @{ kind = 'hf-file'; repo = 'mudler/depth-anything.cpp-gguf'; file = 'depth-anything2-small-q8_0.gguf'; dest = 'depth/depth-anything2-small-q8_0.gguf' }
   'model-chatterbox'     = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'Chatterbox-GGUF/chatterbox-q8_0.gguf'; dest = 'chatterbox/chatterbox-q8_0.gguf' }
   'model-ace-step'       = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf'; dest = 'ace-step/ace-step-1.5-turbo-bf16.gguf' }
+  # The sd.cpp upscale weight (`sd-cli -M upscale`, no ComfyUI): 4xNomos2_hq_mosr, 8,593,400 bytes (the checksum is in
+  # docs/systems/media-generation.md; an installer carries no pinned hashes). Licence CC-BY-4.0 (the Hugging Face card metadata):
+  # commercial use is allowed with attribution to its author (Phips), which docs/systems/media-generation.md carries.
+  # NOT 4x-UltraSharp, the ComfyUI tiers' upscaler: that one is CC BY-NC-SA 4.0, non-commercial.
+  'model-esrgan-nomos2'  = @{ kind = 'hf-file'; repo = 'Phips/4xNomos2_hq_mosr'; file = '4xNomos2_hq_mosr.safetensors'; dest = 'upscale/4xNomos2_hq_mosr.safetensors' }
 }
 
 # ---------------------------------------------------------------------------
