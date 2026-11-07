@@ -8,10 +8,11 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
-// The display card is allocatable up to a share of its total VRAM, at all times (A-RAM-15, the operator's rule
-// of 2026-10-11: "the display card may be used up to 60 percent at all times unless I say I need it"). The share
-// is AllocInput.DisplayCapPct; the VRAM in use now, the desktop's own included, plus the job's declared footprint
-// must stay at or under it. No presence term: the operator's presence opens nothing and closes nothing here.
+// The display card is allocatable up to a share of its total VRAM (A-RAM-15, the operator's rule of 2026-10-11),
+// and since 2026-11-07 only while it is idle ("only up to 60% of the 5070ti card WHEN IDLE"): AllocInput.DisplayBusy
+// empty. The share is AllocInput.DisplayCapPct; the VRAM in use now, the desktop's own included, plus the job's
+// declared footprint must stay at or under it. The display card sorts after every other card, so the tests that
+// ask whether it is allocatable ask for every card that qualifies (takeAll) and look for it in the pick.
 
 // capCards is the canned card table of the reference three-card box: card 1 is the display card with 2.6 GiB in
 // use of 15.9, so a 60 percent cap allows jobs up to 9.54 - 2.6 = 6.94 GiB there.
@@ -23,8 +24,8 @@ func capCards() []gpuprobe.Card {
 	}
 }
 
-// capInput asks for one card with the pair seat loaded on cards 0 and 2, so the display card is the one with no
-// resident seat and sorts first whenever it is allocatable.
+// capInput asks for one card with the pair seat loaded on cards 0 and 2. The display card sorts after them
+// whatever they cost (non-display cards first, 2026-11-07), so a one-card pick takes card 0 or 2.
 func capInput(footprint float64, capPct int) AllocInput {
 	in := baseInput()
 	in.Cards = capCards()
@@ -32,6 +33,22 @@ func capInput(footprint float64, capPct int) AllocInput {
 	in.FootprintGiB = footprint
 	in.Resident = pairResident()
 	return in
+}
+
+// takeAll asks for every card that qualifies (one to all), so whether the display card is allocatable shows in
+// the pick, and a refused display card shows in the skips.
+func takeAll(in AllocInput) AllocInput {
+	in.Min, in.Max = 1, len(in.Cards)
+	return in
+}
+
+func hasDevice(devs []string, id string) bool {
+	for _, d := range devs {
+		if d == id {
+			return true
+		}
+	}
+	return false
 }
 
 func skipOf(a Allocation, id string) Skip {
@@ -43,16 +60,35 @@ func skipOf(a Allocation, id string) Skip {
 	return Skip{}
 }
 
-func TestAllocatorOpensTheDisplayCardWithinTheCapWithoutPresence(t *testing.T) {
-	a, err := Allocate(capInput(6, 60))
+func TestAllocatorOpensTheDisplayCardWithinTheCapWhileIdle(t *testing.T) {
+	a, err := Allocate(takeAll(capInput(6, 60)))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(a.Devices) != 1 || a.Devices[0] != "gpu-bbbb0000" {
-		t.Fatalf("2.6 GiB in use of 15.9 and a 6 GiB job make 8.6 GiB, under the 9.54 GiB cap: the display card (no resident seat) is the pick, got %v (skipped %+v)", a.Devices, a.Skipped)
+	if !hasDevice(a.Devices, "gpu-bbbb0000") {
+		t.Fatalf("2.6 GiB in use of 15.9 and a 6 GiB job make 8.6 GiB, under the 9.54 GiB cap, and the card is idle: the display card is allocatable, got %v (skipped %+v)", a.Devices, a.Skipped)
 	}
 	if s := skipOf(a, "gpu-bbbb0000"); s.Reason != "" {
 		t.Errorf("the display card was taken, so it is not skipped: %+v", s)
+	}
+	// The same job with the card not idle (operator rule 2026-11-07): closed, as display, with the reason.
+	in := takeAll(capInput(6, 60))
+	in.DisplayBusy = "the operator is at the desk"
+	if a, err = Allocate(in); err != nil {
+		t.Fatal(err)
+	}
+	if hasDevice(a.Devices, "gpu-bbbb0000") {
+		t.Fatalf("a display card that is not idle takes no job, whatever the cap: %v", a.Devices)
+	}
+	if s := skipOf(a, "gpu-bbbb0000"); s.Reason != ReasonDisplay || !s.Display || !strings.Contains(s.Detail, "idle") || !strings.Contains(s.Detail, "at the desk") {
+		t.Errorf("the busy card is skipped as %q naming the idle rule and the reading, got %+v", ReasonDisplay, s)
+	}
+	if ok, why := DisplayAdmits(in); ok || !strings.Contains(why, "at the desk") {
+		t.Errorf("gpu display-check's rule refuses it in the same words: ok=%v %q", ok, why)
+	}
+	in.DisplayBusy = ""
+	if ok, why := DisplayAdmits(in); !ok {
+		t.Errorf("idle and within the cap, gpu display-check's rule admits it: %q", why)
 	}
 }
 
@@ -68,14 +104,11 @@ func TestAllocatorRefusesTheDisplayCardPastTheCapAndNamesIt(t *testing.T) {
 		{7.5, false},  // the plan's number: 10.1 GiB against 9.54
 		{13.3, false}, // fits the free VRAM, not the cap
 	} {
-		a, err := Allocate(capInput(tc.footprint, 60))
+		a, err := Allocate(takeAll(capInput(tc.footprint, 60)))
 		if err != nil {
 			t.Fatalf("footprint %v: %v", tc.footprint, err)
 		}
-		if len(a.Devices) != 1 {
-			t.Fatalf("footprint %v: one card was asked for, got %v", tc.footprint, a.Devices)
-		}
-		if taken := a.Devices[0] == "gpu-bbbb0000"; taken != tc.wantTaken {
+		if taken := hasDevice(a.Devices, "gpu-bbbb0000"); taken != tc.wantTaken {
 			t.Errorf("footprint %v: display card taken = %v, want %v (picked %v, skipped %+v)", tc.footprint, taken, tc.wantTaken, a.Devices, a.Skipped)
 		}
 		if tc.wantTaken {
@@ -288,15 +321,15 @@ func TestACapWithNoDisplayCardInTheReadingChangesNothing(t *testing.T) {
 // (10 x 40 / 100 is fine, but 6.1 - 2.1 is 3.9999999999999996, under 4), so the comparison holds a tolerance far
 // below anything a card reports: 3.9 GiB in use of 10 plus a declared 2.1 is exactly 60 percent.
 func TestAJobThatLandsExactlyOnTheCapIsAdmittedDespiteFloatError(t *testing.T) {
-	in := capInput(2.1, 60)
+	in := takeAll(capInput(2.1, 60))
 	in.Cards[1].VRAMTotalGiB, in.Cards[1].VRAMFreeGiB = 10, 6.1
 	a, err := Allocate(in)
-	if err != nil || len(a.Devices) != 1 || a.Devices[0] != "gpu-bbbb0000" {
+	if err != nil || !hasDevice(a.Devices, "gpu-bbbb0000") {
 		t.Fatalf("3.9 in use + 2.1 declared = 6.0 of 10 is exactly the 60 percent cap: want the display card, got %v %v (skipped %+v)", a.Devices, err, a.Skipped)
 	}
-	in = capInput(2.2, 60) // a tenth of a GiB over
+	in = takeAll(capInput(2.2, 60)) // a tenth of a GiB over
 	in.Cards[1].VRAMTotalGiB, in.Cards[1].VRAMFreeGiB = 10, 6.1
-	if a, err = Allocate(in); err != nil || a.Devices[0] == "gpu-bbbb0000" {
+	if a, err = Allocate(in); err != nil || hasDevice(a.Devices, "gpu-bbbb0000") {
 		t.Fatalf("0.1 GiB over the cap is over: %v %v", a.Devices, err)
 	}
 }
@@ -345,16 +378,16 @@ func TestAStaleTableClosesTheDisplayCardAndTheSkipNamesTheTable(t *testing.T) {
 // does not fit the free VRAM.
 func TestACapOf100WithNoDeclaredFloorTakesAJobThatDeclaresNoFootprint(t *testing.T) {
 	taken := func(footprint float64, capPct int, floor float64) bool {
-		in := capInput(footprint, capPct)
+		in := takeAll(capInput(footprint, capPct))
 		in.DisplayFloorGiB = floor
 		a, err := Allocate(in)
 		if err != nil {
 			t.Fatal(err)
 		}
-		return len(a.Devices) == 1 && a.Devices[0] == "gpu-bbbb0000"
+		return hasDevice(a.Devices, "gpu-bbbb0000")
 	}
 	if !taken(0, 100, 0) {
-		t.Error("the whole card, no floor declared: a job that declares no footprint is given it (it sorts first, nothing resident)")
+		t.Error("the whole card, no floor declared: a job that declares no footprint is given it")
 	}
 	if taken(0, 99, 0) {
 		t.Error("one point under the whole card holds a share back, and a job that declares no footprint cannot be held to it")

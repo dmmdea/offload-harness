@@ -10,12 +10,15 @@ package gpulease
 // lease (a whole-node lease claims every card), not busy under a foreign compute process, and
 // its free VRAM fits the footprint; and the HOST's memory admits the RAM the job declares
 // (gpuprobe.HostRAMAdmitsLoad, the rule the lease grant itself applies, hostram.go).
-// The display card is open to the allocator at all times, up to a share of its total VRAM
-// (A-RAM-15, the operator's 60 percent rule): the VRAM in use now, the desktop's included, plus
-// the job's declared footprint must stay at or under DisplayCapPct of the card (fitsCard).
-// Nothing about the operator's presence enters: 0 percent is the "I need the card" switch.
-// Order among allocatable cards: no resident seat first, then the cheapest eviction, then
-// the lowest id.
+// The display card is open to the allocator only WHILE IT IS IDLE (operator rule 2026-11-07: "3 card
+// jobs follow the rule of only using up to 60% of the 5070ti card WHEN IDLE so i can always keep it
+// interactive"), and then up to a share of its total VRAM (A-RAM-15, the 60 percent rule): the VRAM
+// in use now, the desktop's included, plus the job's declared footprint must stay at or under
+// DisplayCapPct of the card (fitsCard). Idle is read by the caller (AllocInput.DisplayBusy: the
+// operator away by the presence probe AND the card not busy); 0 percent stays the "I need the card"
+// switch. Order among allocatable cards: non-display cards first ("send 2 card jobs to the 5060s
+// first"), so the display card is taken only when a request needs more cards than the others give;
+// then no resident seat first, then the cheapest eviction, then the lowest id.
 //
 // Naming cards (`--devices`) bypasses the CARD choice: an explicit word is the operator's,
 // queued FIFO behind whoever holds those cards, and never second-guessed here. It does not
@@ -54,6 +57,8 @@ const (
 	displayClosedDetail  = "the operator's screen; gpu_display_cap_pct is 0, so it is not auto-assigned"
 	displayStaleDetail   = "the operator's screen; this call was placed from a card table that could not be re-read, so how much of the card is in use now is not known and it is not auto-assigned"
 	displayUnknownDetail = "this reading could not say which card the monitor is on; no card is auto-assigned until one can"
+	// displayBusyDetail leads the skip of a display card that is not idle; AllocInput.DisplayBusy says what was read.
+	displayBusyDetail = "the operator's screen; it takes jobs only while it is idle (the operator away and the card not busy, operator rule 2026-11-07), and it is not idle now: "
 )
 
 // capEpsilonGiB absorbs the float error of a share of a total (15.9 x 40 / 100 is not exactly 6.36), so a
@@ -93,6 +98,12 @@ type AllocInput struct {
 	// misstates. It is a reading's doing, not the operator's, so DisplayCapPct keeps what the config says and
 	// the skip says why the card is closed (the table, not a gpu_display_cap_pct of 0 nobody wrote).
 	DisplayStale bool
+	// DisplayBusy closes the display card whatever the cap says while the card is not idle (operator rule
+	// 2026-11-07: the cap's share is the jobs' only WHEN IDLE): the caller's reading of why, empty when the
+	// operator is away and the card is not busy (gpualloc.DisplayBusy reads both, and fails closed). The empty
+	// zero value is "idle" so an input built by hand keeps the cap's own behaviour; every production input is
+	// built by gpualloc.BuildInput, which always reads it.
+	DisplayBusy string
 	// DisplayFloorGiB is a floor the display layer declares in absolute terms (display_floor_gib,
 	// internal/placement/guards.go) and keeps on the display card on top of the cap: the card keeps
 	// the LARGER of this and the cap's remainder, so a stricter declaration still holds and the
@@ -211,6 +222,11 @@ func Allocate(in AllocInput) (Allocation, error) {
 		}
 	}
 	less := func(a, b cand) bool {
+		// The display card last (operator rule 2026-11-07: "send 2 card jobs to the 5060s first"): ahead of the
+		// resident test, so an empty display card no longer sorts before a compute card with a seat to evict.
+		if a.card.Display != b.card.Display {
+			return !a.card.Display
+		}
 		ar, br := len(a.res.Seats) > 0, len(b.res.Seats) > 0
 		if ar != br {
 			return !ar
@@ -261,17 +277,54 @@ func fits(c gpuprobe.Card, needGiB float64) bool {
 	return needGiB <= 0 || c.VRAMFreeGiB >= needGiB
 }
 
-// displayOpen: the cap lets the allocator consider the display card at all, and the table it reads from is
-// not one the caller could not refresh.
-func (in AllocInput) displayOpen() bool { return in.DisplayCapPct > 0 && !in.DisplayStale }
+// displayOpen: the cap lets the allocator consider the display card at all, the table it reads from is not one
+// the caller could not refresh, and the card is idle (DisplayBusy empty).
+func (in AllocInput) displayOpen() bool {
+	return in.DisplayCapPct > 0 && !in.DisplayStale && in.DisplayBusy == ""
+}
 
 // displayClosedWhy is the skip detail of a display card that displayOpen refuses. The operator's switch (a cap
-// of 0) is named first when both are true: it is the cause that outlasts the reading.
+// of 0) is named first when several are true: it is the cause that outlasts the reading; then a table that
+// could not be re-read, then a card that is not idle.
 func (in AllocInput) displayClosedWhy() string {
-	if in.DisplayCapPct <= 0 {
+	switch {
+	case in.DisplayCapPct <= 0:
 		return displayClosedDetail
+	case in.DisplayStale:
+		return displayStaleDetail
 	}
-	return displayStaleDetail
+	return displayBusyDetail + in.DisplayBusy
+}
+
+// DisplayAdmits is the allocator's display-card rule alone, for a launcher that puts work on the display card
+// outside a lease (`gpu display-check`, which the opencode-only three-card vLLM seat's seat-cmd.ps1 asks before
+// it starts): whether the display card(s) of in.Cards would take a job of in.FootprintGiB NOW. The card must be
+// open (cap above 0, a fresh table, idle), vouched for by the reading, not claimed by a live lease, and the
+// footprint must fit under the cap. ok is false with the allocator's own words when any display card refuses,
+// and when the reading names no display card at all (then there is nothing to admit onto).
+func DisplayAdmits(in AllocInput) (ok bool, why string) {
+	seen := false
+	for _, c := range in.Cards {
+		if !c.Display && !c.DisplayUnknown {
+			continue
+		}
+		seen = true
+		id := c.LeaseID()
+		switch {
+		case c.DisplayUnknown:
+			return false, fmt.Sprintf("card %d: %s", c.NvidiaIndex, displayUnknownDetail)
+		case !in.displayOpen():
+			return false, fmt.Sprintf("card %d: %s", c.NvidiaIndex, in.displayClosedWhy())
+		case in.WholeNodeHeld || in.Claimed[id]:
+			return false, fmt.Sprintf("card %d: held by a live lease", c.NvidiaIndex)
+		case !in.fitsCard(c):
+			return false, fmt.Sprintf("card %d: %s", c.NvidiaIndex, in.vramDetail(c))
+		}
+	}
+	if !seen {
+		return false, "this reading names no display card"
+	}
+	return true, ""
 }
 
 // floorApplies: the display card's cap is in force on this card. It is the display card's alone (a pair

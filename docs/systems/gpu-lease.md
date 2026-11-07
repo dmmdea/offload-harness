@@ -861,7 +861,7 @@ retry would hold the mutex against every other poller of the gate. What a media 
 | form | meaning |
 |---|---|
 | `gpu reserve --devices 0,GPU-aaaa ...` | exactly these cards (an nvidia-smi index or a UUID prefix of at least four characters; ambiguous or unknown is an error). The operator's word: the display card is allowed, and a busy card is a place in line, FIFO behind its holder. |
-| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). The display card is allocatable up to `gpu_display_cap_pct` (default 60 percent of its VRAM, the desktop's own use included) at any presence, only with a declared `--vram`, and never when the cap is 0 ("The display card is allocatable up to a cap", below). |
+| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). The non-display cards are taken first. The display card is allocatable only while it is idle, up to `gpu_display_cap_pct` (default 60 percent of its VRAM, the desktop's own use included), only with a declared `--vram`, and never when the cap is 0 ("The display card is allocatable up to a cap", below). |
 | `gpu reserve --whole-node ...` | everything, as before. |
 | `gpu reserve ... -- <cmd>` | the cards `<cmd>` names itself: `CUDA_VISIBLE_DEVICES` (a UUID, or an index in PCI order when `CUDA_DEVICE_ORDER=PCI_BUS_ID`, else in ComfyUI order), else `--cuda-device N`, else `COMFY_CUDA_DEVICE`. Nothing named means the whole node. |
 
@@ -957,9 +957,23 @@ unreadable host-memory reading refuses only when a RAM need was declared, and a 
 request at once. On Windows (WDDM) nvidia-smi lists no per-process
 rows for compute apps, so `foreign-busy` is Linux-only evidence today.
 
-**The display card is allocatable up to a cap, at any presence (`gpu_display_cap_pct`, 0.183.0).** The operator's rule of
-2026-10-11: the display card may be used up to 60 percent at all times, unless he says he needs it. The allocator used to read
-`operator_presence` (never the card at the desk, the card above the layer's floor when away); it now reads no presence at all.
+**The display card is allocatable up to a cap, only while it is idle (`gpu_display_cap_pct`, 0.183.0; the idle gate since
+2026-11-07).** The operator's rule of 2026-11-07: "send 2 card jobs to the 5060s first and 3 card jobs follow the rule of only
+using up to 60% of the 5070ti card WHEN IDLE so i can always keep it interactive." It replaced the 2026-10-11 rule ("up to 60
+percent at all times"), so the cap below now sits behind an idle gate, and the allocator's order puts every non-display card
+first ([ADR 0039](../architecture/decisions/0039-a-held-card-is-a-place-in-line.md), amendment 2026-11-07).
+
+- **The idle gate.** Idle is both readings at once (`gpualloc.DisplayBusy`): the card's utilization known and under 15 percent
+  (`DisplayIdleUtilPct`), and the operator away by the presence probe read with `Config.AllocatorPresenceMode`
+  (`operator_presence` unset reads `auto` here: the console locked, or no input for `operator_idle_sec` with nothing
+  fullscreen; `away` overrides, `present` closes). An unreadable utilization or presence is busy; from session 0 the desk reads
+  unknown unless the console is locked. A closed card is skipped as `display` with the reason, the grant-time check reads it
+  again, and the display card's `display cap:` line in `gpu status` / `gpu cards` / the brief ends with `idle gate: open` or
+  `idle gate: CLOSED to jobs ... (<why>)` (JSON `idle_gate`, `idle_why`).
+- **`gpu display-check --vram GiB [--json]`** asks the same rule for a launcher that puts work on the display card outside a
+  lease: exit 0 admits, exit 3 refuses with the reason, exit 1 is a check that could not run. The vLLM seat stub
+  (`seat-cmd.ps1`) asks it for a seat whose row declares `DisplayVramGiB` (`Harness`, `HarnessConfig` beside it) and starts
+  nothing on a refusal (exit 6).
 One key, `gpu_display_cap_pct` (a whole number of percent, default 60 when unset, `0` closes the card to the allocator, `100` is
 the whole card, a value outside `0..100` refuses the load by name; unset and `0` are different values): the display card is
 allocatable while the VRAM in use now, **the desktop's own included**, plus the request's declared footprint is at most that share
@@ -970,8 +984,7 @@ there and a 7.5 GiB one cannot, and the skip names the cap. The cap applies to t
 the footprint, as it always was.
 
 - **`gpu_display_cap_pct: 0` is the operator's "I need the card" switch.** The card is skipped as `display` and the skip names the
-  key, whatever the desk is doing. Nothing watches the desk any more: a locked screen, an idle desk and a game on the card are one
-  question, answered by the VRAM in use at the moment of the pick.
+  key, whatever the desk is doing.
 - **A footprint is needed to be held to a share.** A job that gives no `--vram` is not given the display card under a cap below 100
   (the layer's guard refuses a seat with no display footprint the same way); a media call declares no VRAM footprint, so the typed
   media tools do not take the display card until a measured footprint is fed to the allocator. `--devices` names the card on the
@@ -979,9 +992,9 @@ the footprint, as it always was.
 - **An unknown display stays closed.** A reading that could not say which card the monitor is on marks every card `display-unknown`
   and none of them is handed out, whatever the cap.
 - **The cap bounds admission only.** Nothing limits a job after it is placed, so the footprint has to be a measured peak, and one
-  number per request cannot describe a donor slice beside a compute share. A display card with no resident seat sorts first (nothing
-  to evict), so with the pair seat loaded `gpu reserve --cards 1 --vram 6` now prefers the screen's card to an eviction;
-  `gpu_display_cap_pct: 0` restores the old order.
+  number per request cannot describe a donor slice beside a compute share. The display card sorts after every other card (since 2026-11-07;
+  before, a display card with no resident seat sorted first), so a job that fits elsewhere never lands on the screen's card,
+  and a job admitted while the card was idle is not evicted when the operator returns.
 - **A seat llama-swap pins onto the display card is not admitted by the cap at all.** The allocator places jobs; a llama-swap model
   that loads onto the card is outside it (a vLLM seat pinned onto the display card once put 13,281 MiB, 81 percent of a 16 GB card,
   there while the audit printed OK). What reports on the card afterwards is the display cap row of `gpu status` / `gpu cards` / the

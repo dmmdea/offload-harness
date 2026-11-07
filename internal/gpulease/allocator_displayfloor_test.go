@@ -12,8 +12,8 @@ import (
 // that card cannot disagree about it. These tests open the card to its whole VRAM (cap 100) so the
 // declared floor is the only bound in play; allocator_displaycap_test.go holds the cap itself.
 
-// pairResident is the box with the pair seat loaded on cards 0 and 2, so the display card is
-// the one with no resident seat and would sort first.
+// pairResident is the box with the pair seat loaded on cards 0 and 2: the display card is the one
+// with no resident seat, and it still sorts after them (non-display cards first, 2026-11-07).
 func pairResident() map[string]ResidentInfo {
 	return map[string]ResidentInfo{
 		"gpu-aaaa0000": {Seats: []string{"agent-pool"}, CostGiB: 15},
@@ -47,14 +47,11 @@ func TestAnOpenedDisplayCardIsHeldToTheDesktopFloor(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			a, err := Allocate(openedDisplayInput(tc.footprint, tc.floor))
+			a, err := Allocate(takeAll(openedDisplayInput(tc.footprint, tc.floor)))
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(a.Devices) != 1 {
-				t.Fatalf("one card was asked for, got %v", a.Devices)
-			}
-			taken := a.Devices[0] == "gpu-bbbb0000"
+			taken := hasDevice(a.Devices, "gpu-bbbb0000")
 			if taken != tc.wantTaken {
 				t.Fatalf("display card taken = %v, want %v (picked %v, skipped %+v)", taken, tc.wantTaken, a.Devices, a.Skipped)
 			}
@@ -172,8 +169,9 @@ func TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard(t *testing.T) {
 	if len(a.Devices) != 1 || a.Devices[0] != "gpu-aaaa0000" {
 		t.Fatalf("a 3 GiB eviction on card 0 must beat the 6.2 GiB twin on the display card, got %v", a.Devices)
 	}
-	// The same box with the twin NOT seen: the display card reads as empty and sorts first. This is
-	// the ordering the twin's residency exists to change.
+	// The same box with the twin NOT seen: the display card reads as empty, and it still sorts after
+	// the other cards (non-display cards first, operator rule 2026-11-07), so an empty screen's card is
+	// never preferred to an eviction elsewhere.
 	in.Resident = map[string]ResidentInfo{
 		"gpu-aaaa0000": {Seats: []string{"small-seat"}, CostGiB: 3},
 		"gpu-cccc0000": {Seats: []string{"small-seat"}, CostGiB: 3},
@@ -182,7 +180,7 @@ func TestALoadedTwinOnTheDisplayCardIsAnEvictionNotAnEmptyCard(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(a.Devices) != 1 || a.Devices[0] != "gpu-bbbb0000" {
-		t.Fatalf("with no resident seat seen on it the display card sorts first, got %v", a.Devices)
+	if len(a.Devices) != 1 || a.Devices[0] != "gpu-aaaa0000" {
+		t.Fatalf("with no resident seat seen on it the display card still sorts after the other cards, got %v", a.Devices)
 	}
 }

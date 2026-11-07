@@ -256,3 +256,39 @@ allocator and the display card"), [ADR 0075](0075-the-display-layer-opens-under-
 ## Amendment 2026-10-14 (the card rule is stated once)
 
 The place in line (clause 8), the per-card media door and the card-only placement (clause 7) and the display cap (clause 7, the allocator) above are collected with the rest of the card rule in [ADR 0094](0094-a-lease-names-its-cards-a-card-has-one-holder.md), which also lists what is not built: a media plan that always names its cards, and a local worker pool across cards.
+
+## Amendment 2026-11-07 (the display card is open only while it is idle, and it is picked last)
+
+The operator moved the monitors back to the 5070 Ti for months and gave the rule on 2026-11-07: "send 2 card jobs to
+the 5060s first and 3 card jobs follow the rule of only using up to 60% of the 5070ti card WHEN IDLE so i can always keep
+it interactive." Two parts of the 2026-10-12 amendment are superseded; the cap, its arithmetic and its `0` switch stand.
+
+- **An idle gate in front of the cap** (supersedes "No presence term"). The allocator opens the display card only
+  while it is idle, and idle is both readings at once (`gpualloc.DisplayBusy`, `AllocInput.DisplayBusy`): the card's
+  utilization is known and under 15 percent (`gpualloc.DisplayIdleUtilPct`, a chosen figure: the desktop alone read
+  0-4 percent on the `blackwell-3x16` reference box, a game 37-41 percent), and the operator is away by the presence probe
+  (`placement.ProbePresence`) read with `Config.AllocatorPresenceMode` (`operator_presence` unset reads `auto` here:
+  the console locked, or no input for `operator_idle_sec` with nothing fullscreen; `away` is his override, `present`
+  his word that he is at the desk). Every failure to read is busy: an unknown utilization, and a presence the probe
+  could not establish (off Windows, and from session 0 unless the console is locked). A busy card is skipped as
+  `display` with the reason; only an unclaimed display card is read (a held card's utilization is its holder's job),
+  and the grant-time check rebuilds the input, so a request queued while the card was idle is re-asked at the grant.
+  The display layer's llama-swap twin guards still read `operator_presence` as before (unset = present there).
+- **Non-display cards first** (supersedes "a display card with no resident seat sorts first"). The allocator's order
+  puts every non-display card ahead of the display card before any other key, so `--cards 2` on the `blackwell-3x16`
+  reference box takes the two 5060 Ti cards and a one-card pick takes the screen's card only when no other card qualifies.
+- **A door for a launcher outside a lease: `gpu display-check --vram GiB`.** It is the allocator's display-card rule
+  alone (`gpulease.DisplayAdmits` over the input every lease build reads), exit 0 admits and exit 3 refuses with the
+  reason. The opencode-only three-card vLLM seat puts a pipeline stage on the display card through llama-swap, not a
+  lease; the seat stub (`setup/templates/vllm-seat/windows-wsl/seat-cmd.ps1`) asks it when the seat's row declares
+  `DisplayVramGiB` and starts nothing on a refusal (exit 6). From llama-swap's session 0 the desk cannot be read, so
+  there "idle" means the console is locked (or `operator_presence: away`).
+
+What it does not do: it judges admission only, as the cap always did. A job or seat started while the card was idle is
+not evicted when the operator comes back; it runs until it ends or llama-swap unloads it (ttl 300). The status
+surfaces (`gpu status`, `gpu cards`, the `offload_status` brief) append the gate's reading to the display card's
+`display cap` line (`idle_gate`, `idle_why` in JSON), so none calls the card open while the allocator keeps jobs off it.
+
+Related code: `internal/gpulease/allocator.go` (`displayOpen`, `less`, `DisplayAdmits`), `internal/gpualloc/input.go`
+(`DisplayBusy`, `BuildInput`), `internal/config/layers.go` (`AllocatorPresenceMode`), `internal/gpucards/gpucards.go`
+(`MarkIdleGate`), `gpu_cards.go` (`runGPUDisplayCheck`).

@@ -9,8 +9,9 @@ package pipeline
 //   - a single-card route (image, edit, inpaint, upscale, animate, music, un-pooled video) asks
 //     the allocator for ONE card, holds a lease on it, and runs in the ComfyUI instance bound to
 //     that card (its own port, directories and launch marker, pinned by GPU uuid). Two such calls
-//     run on two cards at once; the display card is open to the allocator only up to the
-//     operator's cap (gpu_display_cap_pct) and to a call that declares a VRAM footprint, which a
+//     run on two cards at once; the display card is open to the allocator only while it is
+//     idle (rule 2026-11-07), up to the operator's cap (gpu_display_cap_pct), and to a call that
+//     declares a VRAM footprint, which a
 //     media call does not yet, so it is not auto-assigned to one today (which card is the display
 //     card is the shared rule in gpuprobe, which reads display_attached as well as
 //     display_active);

@@ -50,10 +50,13 @@ func scratchManager(t *testing.T) *gpulease.Manager {
 	return m
 }
 
+// hostDeps is a host the tests assemble. The desk reads idle (DisplayBusy ""), so no test depends on whether
+// the machine running it has someone at its keyboard; a test of the idle gate sets DisplayBusy itself.
 func hostDeps(cards []gpuprobe.Card) Deps {
 	return Deps{
-		Cards:      func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil },
-		HostMemory: func() (gpuprobe.HostMemory, bool) { return roomyHostMemory, true },
+		Cards:       func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return cards, "", nil },
+		HostMemory:  func() (gpuprobe.HostMemory, bool) { return roomyHostMemory, true },
+		DisplayBusy: func(config.Config, []gpuprobe.Card) string { return "" },
 	}
 }
 
@@ -112,32 +115,39 @@ func TestBuildInputNamesAFailedCardTable(t *testing.T) {
 	}
 }
 
-// The display card is open up to the operator's cap at all times: BuildInput carries gpu_display_cap_pct
-// and reads no presence, so the answer is the same whatever operator_presence says.
-func TestBuildInputOpensTheDisplayCardAtTheCapWhateverThePresence(t *testing.T) {
+// The display card is open up to the operator's cap only while it is idle (operator rule 2026-11-07): BuildInput
+// carries gpu_display_cap_pct and the idle gate's reading. operator_presence "present" and "away" are read by the
+// production DisplayBusy without touching the desk; unset (auto for the allocator) reads the desk, so those cases
+// stand the desk in with a stub.
+func TestBuildInputOpensTheDisplayCardAtTheCapOnlyWhileItIsIdle(t *testing.T) {
 	m := scratchManager(t)
 	zero, thirtyFive, refused := 0, 35, 600
+	idle := func(config.Config, []gpuprobe.Card) string { return "" }
+	atDesk := func(config.Config, []gpuprobe.Card) string { return "the operator is at the desk" }
 	for _, tc := range []struct {
-		name     string
-		presence string
-		cap      *int
-		want     int
+		name      string
+		presence  string
+		cap       *int
+		busy      func(config.Config, []gpuprobe.Card) string // nil = the production reader
+		want      int
+		wantTaken bool
 	}{
-		{"no presence set, no cap set", "", nil, 60},
-		{"present", "present", nil, 60},
-		{"away", "away", nil, 60},
-		{"auto", "auto", nil, 60},
-		{"a configured share", "present", &thirtyFive, 35},
-		{"the operator needs the card", "away", &zero, 0},
+		{"no presence set, the desk idle", "", nil, idle, 60, true},
+		{"no presence set, the operator at the desk", "", nil, atDesk, 60, false},
+		{"present closes it", "present", nil, nil, 60, false},
+		{"away opens it", "away", nil, nil, 60, true},
+		{"a configured share", "away", &thirtyFive, nil, 35, true},
+		{"the operator needs the card", "away", &zero, nil, 0, false},
 		// Load refuses 600 by name but returns the Config beside the error, and the one-shot verbs go on with it.
-		{"a refused 600 reads as closed, not as the whole card", "present", &refused, 0},
+		{"a refused 600 reads as closed, not as the whole card", "away", &refused, nil, 0, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg := config.Config{OperatorPresence: tc.presence, GPUDisplayCapPct: tc.cap}
-			// The pair seat is loaded on the two non-display cards, so the display card is the one with
-			// nothing to evict and sorts first whenever the cap lets it in.
+			// The pair seat is loaded on the two non-display cards; the display card sorts after them whatever
+			// they cost, so the request takes every card that qualifies and the display card is in it or not.
 			cards := threeCards()
 			deps := hostDeps(cards)
+			deps.DisplayBusy = tc.busy
 			deps.Resident = func(context.Context, config.Config, []gpuprobe.Card) map[string]gpulease.ResidentInfo {
 				seat := gpulease.ResidentInfo{Seats: []string{"agent-pool"}, CostGiB: 15}
 				return map[string]gpulease.ResidentInfo{cards[0].LeaseID(): seat, cards[2].LeaseID(): seat}
@@ -154,54 +164,72 @@ func TestBuildInputOpensTheDisplayCardAtTheCapWhateverThePresence(t *testing.T) 
 				t.Fatal(err)
 			}
 			display := threeCards()[1].LeaseID()
-			if taken := len(a.Devices) == 1 && a.Devices[0] == display; taken != (tc.want > 0) {
-				t.Fatalf("display card taken = %v with a cap of %d (a 2 GiB job on 2 GiB in use of 16, the pair seat on the other two): %v", taken, tc.want, a.Devices)
+			if taken := containsID(a.Devices, display); taken != tc.wantTaken {
+				t.Fatalf("display card taken = %v, want %v, with a cap of %d and the gate reading %q (a 2 GiB job on 2 GiB in use of 16): %v", taken, tc.wantTaken, tc.want, in.DisplayBusy, a.Devices)
 			}
 		})
 	}
 }
 
+// gulease2Allocate asks for every card that qualifies (one to three), so whether the display card is allocatable
+// shows in the pick: it sorts after the other cards, and a one-card request would never reach it.
 func gulease2Allocate(in gpulease.AllocInput) (gpulease.Allocation, error) {
-	in.Min, in.Max = 1, 1
+	in.Min, in.Max = 1, 3
 	return gpulease.Allocate(in)
 }
 
-// The reason this package exists: the allocator, fed by the shared builder, hands the card the monitor is
-// attached to to an unnamed request only where its declared footprint keeps the card under the cap (60 percent
-// of 16 GiB = 9.6 GiB, with 2 in use: a job of up to 7.6 GiB), and never to a request that declares none.
-func TestPickAutoTakesTheDisplayCardAtTheDeskOnlyWithinTheCap(t *testing.T) {
+func containsID(ids []string, id string) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
+}
+
+// The reason this package exists: the allocator, fed by the shared builder, gives a two-card request the two
+// cards that are not the screen's (operator rule 2026-11-07: "send 2 card jobs to the 5060s first"), and hands the
+// card the monitor is attached to an unnamed request only while it is idle and only where the declared footprint
+// keeps the card under the cap (60 percent of 16 GiB = 9.6 GiB, with 2 in use: a job of up to 7.6 GiB), never to
+// a request that declares none.
+func TestPickAutoTakesTheDisplayCardOnlyWhileIdleAndWithinTheCap(t *testing.T) {
 	m := scratchManager(t)
 	display := threeCards()[1].LeaseID()
-	pick := func(cfg config.Config, vram float64, n int) []string {
+	pickWith := func(cfg config.Config, vram float64, plan Plan, busy string) []string {
 		t.Helper()
+		deps := hostDeps(threeCards())
+		deps.DisplayBusy = func(config.Config, []gpuprobe.Card) string { return busy }
 		build := func() (gpulease.AllocInput, error) {
-			return BuildInput(context.Background(), m, cfg, Need{VRAMGiB: vram}, hostDeps(threeCards()))
+			return BuildInput(context.Background(), m, cfg, Need{VRAMGiB: vram}, deps)
 		}
-		ids, free, err := PickAuto(Plan{Min: n, Max: n}, 0, build, io.Discard, func(time.Duration) { t.Error("must not wait") }, time.Now)
+		ids, free, err := PickAuto(plan, 0, build, io.Discard, func(time.Duration) { t.Error("must not wait") }, time.Now)
 		if err != nil || !free {
-			t.Fatalf("vram %v n %d: ids=%v free=%v err=%v", vram, n, ids, free, err)
+			t.Fatalf("vram %v plan %+v: ids=%v free=%v err=%v", vram, plan, ids, free, err)
 		}
 		return ids
 	}
-	has := func(ids []string) bool {
-		for _, id := range ids {
-			if id == display {
-				return true
-			}
-		}
-		return false
+	// Two to three cards: the display card joins the two others only where it qualifies.
+	pick := func(cfg config.Config, vram float64) []string {
+		return pickWith(cfg, vram, Plan{Min: 2, Max: 3}, "")
 	}
-	if ids := pick(config.Config{}, 6, 2); !has(ids) {
-		t.Errorf("a 6 GiB job on 2 GiB in use of 16 is under the 60 percent cap and the display card has no seat to evict: want it in %v", ids)
+	has := func(ids []string) bool { return containsID(ids, display) }
+	if ids := pickWith(config.Config{}, 6, Plan{Min: 2, Max: 2}, ""); has(ids) || len(ids) != 2 {
+		t.Errorf("a two-card job takes the two cards that are not the screen's, even with the display card idle and open: got %v", ids)
 	}
-	if ids := pick(config.Config{}, 8, 2); has(ids) {
+	if ids := pick(config.Config{}, 6); !has(ids) {
+		t.Errorf("a 6 GiB job on 2 GiB in use of 16 is under the 60 percent cap and the desk is idle: want the display card in %v", ids)
+	}
+	if ids := pickWith(config.Config{}, 6, Plan{Min: 2, Max: 3}, "the operator is at the desk"); has(ids) {
+		t.Errorf("the operator at the desk closes the display card whatever the cap: it must stay out of %v", ids)
+	}
+	if ids := pick(config.Config{}, 8); has(ids) {
 		t.Errorf("a 8 GiB job makes 10 GiB in use on the display card, over the 9.6 GiB cap: it must not be handed out, got %v", ids)
 	}
-	if ids := pick(config.Config{}, 0, 2); has(ids) {
+	if ids := pick(config.Config{}, 0); has(ids) {
 		t.Errorf("a request that declares no footprint cannot be shown to stay under the cap: %v", ids)
 	}
 	zero := 0
-	if ids := pick(config.Config{GPUDisplayCapPct: &zero}, 6, 2); has(ids) {
+	if ids := pick(config.Config{GPUDisplayCapPct: &zero}, 6); has(ids) {
 		t.Errorf("a cap of 0 is the operator's switch: the display card must stay out of %v", ids)
 	}
 	// Three cards asked for with the display card over the cap: the allocator cannot, and nothing waiting

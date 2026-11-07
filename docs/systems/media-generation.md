@@ -1969,8 +1969,9 @@ can resume, a busy defer for the rest) until the first is done
 (`gpu_lease`, "The allocator"): not claimed by a live lease, not promised to a caller waiting in line
 (below), not held by another job in this process, with the free VRAM and host RAM. The display card is the one whose
 `display_active` reads Enabled **or** whose `display_attached` reads Yes (`gpuprobe.ScreenCardUUIDs`, the card table's rule);
-it is auto-assigned at any presence, but only while the VRAM in use plus the call's footprint stays within
-`gpu_display_cap_pct` of it (default 60; 0 closes it; ADR 0039, amendment 2026-10-12). A media call declares no
+it is auto-assigned only while it is idle (the operator away and the card under 15 % busy, ADR 0039 amendment
+2026-11-07), and then only while the VRAM in use plus the call's footprint stays within `gpu_display_cap_pct` of it
+(default 60; 0 closes it; ADR 0039, amendment 2026-10-12). The non-display cards are always tried first. A media call declares no
 footprint, so an unpinned call never takes it under a cap below 100: it picks among the other cards. An explicit pin may always name it (the operator's word). Ties go to a card with no resident seat, then
 the cheapest eviction, then the lowest id.
 

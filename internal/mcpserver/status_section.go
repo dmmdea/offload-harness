@@ -25,6 +25,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
+	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpucards"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
@@ -201,6 +202,10 @@ func (s *Server) statusBrief(ctx context.Context, cfg config.Config) map[string]
 	return brief
 }
 
+// displayBusyFn reads the display card's idle gate for the brief (gpualloc.DisplayBusy, "" = idle); a variable
+// so a test can stand in for the desk.
+var displayBusyFn = gpualloc.DisplayBusy
+
 // gpuCardsSection is the brief's per-card block. The card table comes from the same
 // nvidia-smi sample the lease verdict already took (act.GPUs), so the brief costs no
 // second call; without one the block says there is no table and still lists the leases.
@@ -230,8 +235,19 @@ func gpuCardsSection(cfg config.Config, act gpuactivity.View) map[string]any {
 		_ = m.ApplyCardScopedConfig(cfg.GPUCardScopedLeases)
 		leases, waiters, scoped = modelaffinity.ScopeLeases(m.Dir(), m.Leases()), m.Waiters(), m.CardScoped()
 	}
-	sec := gpucards.Section(cards, note, leases, waiters, cfg.LiveGPUDisplayCap(), cfg.DisplayFloorGiB())
+	capPct := cfg.LiveGPUDisplayCap()
+	sec := gpucards.Section(cards, note, leases, waiters, capPct, cfg.DisplayFloorGiB())
 	sec["card_scoped_leases"] = scoped
+	// The idle gate (operator rule 2026-11-07), as the allocator reads it now, so the brief does not call the
+	// display card open to jobs while the allocator keeps them off it.
+	if rows, ok := sec["cards"].([]gpucards.Row); ok && capPct > 0 {
+		for _, c := range cards {
+			if c.Display {
+				gpucards.MarkIdleGate(rows, displayBusyFn(cfg, cards))
+				break
+			}
+		}
+	}
 	return sec
 }
 
