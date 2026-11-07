@@ -208,6 +208,8 @@ func newAdmitFixtureWith(t *testing.T, spec admitSpec) *admitFixture {
 	f.p.alloc = gpualloc.Deps{
 		Cards:      func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return f.cards, "", nil },
 		HostMemory: func() (gpuprobe.HostMemory, bool) { return roomyHostMem, true },
+		// The desk reads idle, so no test depends on someone being at the keyboard of the machine running it.
+		DisplayBusy: func(config.Config, []gpuprobe.Card) string { return "" },
 	}
 	f.p.instanceAPI = func(c gpuprobe.Card) string { return fmt.Sprintf("%s/card%d", f.frees.srv.URL, c.NvidiaIndex) }
 	f.p.stopKept = func(_ context.Context, dir string, epoch uint64) []comfyinst.Outcome {
