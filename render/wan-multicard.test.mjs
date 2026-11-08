@@ -188,7 +188,7 @@ test("queryCards asks for display_attached and falls back to display_active alon
 // The reading that failed for real on node-i (headless Linux, two NVIDIA A2, driver 615.71): both datacenter cards answer
 // display_attached Yes with no connector at all, and the multicard placement refused the pair as "drives a display".
 test("queryCards reads a Yes on a card the kernel shows with no display connector as No (Linux), and leaves every other case alone", () => {
-  const A = "GPU-16e08b2a-0000-0000-0000-000000000001", B = "GPU-44c08a94-0000-0000-0000-000000000002";
+  const A = "GPU-1111aaaa-0000-0000-0000-000000000001", B = "GPU-2222bbbb-0000-0000-0000-000000000002";
   const table = `0, ${A}, NVIDIA A2, 15356, 14241, Disabled, Yes\n1, ${B}, NVIDIA A2, 15356, 15017, Disabled, Yes\n`;
   const spawn = (cmd, args) => /pci\.bus_id/.test(args[0])
     ? { status: 0, stdout: `${A}, 00000000:01:00.0\n${B}, 00000000:03:00.0\n` }

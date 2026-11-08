@@ -39,11 +39,11 @@ func TestPhantomAttachedIgnoredWhenCardHasNoConnectors(t *testing.T) {
 	resetPhantomState()
 	sysfsRoot = root
 	smiBusIDs = func() (string, error) {
-		return "GPU-16e08b2a-0000-0000-0000-000000000001, 00000000:01:00.0\nGPU-44c08a94-0000-0000-0000-000000000002, 00000000:03:00.0\n", nil
+		return "GPU-1111aaaa-0000-0000-0000-000000000001, 00000000:01:00.0\nGPU-2222bbbb-0000-0000-0000-000000000002, 00000000:03:00.0\n", nil
 	}
 
-	out := "0, GPU-16e08b2a-0000-0000-0000-000000000001, NVIDIA A2, 15356, 1115, 0, Disabled, Yes\n" +
-		"1, GPU-44c08a94-0000-0000-0000-000000000002, NVIDIA A2, 15356, 339, 0, Disabled, Yes\n"
+	out := "0, GPU-1111aaaa-0000-0000-0000-000000000001, NVIDIA A2, 15356, 1115, 0, Disabled, Yes\n" +
+		"1, GPU-2222bbbb-0000-0000-0000-000000000002, NVIDIA A2, 15356, 339, 0, Disabled, Yes\n"
 	devs, err := ParseSmiMemoryDevices(maskPhantomAttached(out))
 	if err != nil || len(devs) != 2 {
 		t.Fatalf("parse: %v (%d devices)", err, len(devs))
@@ -63,7 +63,7 @@ func TestPhantomAttachedIgnoredWhenCardHasNoConnectors(t *testing.T) {
 	if !devs[0].DisplayActive || !devs[0].DrivesDisplay() {
 		t.Errorf("display_active Enabled must stay authoritative, got %+v", devs[0])
 	}
-	smiBusIDs = func() (string, error) { return "GPU-16e08b2a-0000-0000-0000-000000000001, 00000000:00:02.0\n", nil }
+	smiBusIDs = func() (string, error) { return "GPU-1111aaaa-0000-0000-0000-000000000001, 00000000:00:02.0\n", nil }
 	resetPhantomState()
 	devs, _ = ParseSmiMemoryDevices(maskPhantomAttached(out))
 	if !devs[0].DisplayAttached {
