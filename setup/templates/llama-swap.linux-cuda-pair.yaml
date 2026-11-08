@@ -20,7 +20,7 @@
 #                 explicitly (utility card first, heavy card second: the utility card is
 #                 the one that carries the resident memory stack, and layer-split puts the
 #                 larger share on the card listed last), split by layer (see the entries for
-#                 why not tensor), and live in their own `pooled` set: a pooled seat takes
+#                 why not tensor), and live in their own sets (`pooled`, and `pooled27` for the 27B): a pooled seat takes
 #                 both cards, so it never shares a set with the cascade or a single-card
 #                 seat.
 #
@@ -147,10 +147,15 @@ models:
   # embedder through llama-swap (12,964 + 13,594 MiB). For comparison the single-card 27B
   # above (UD-IQ3_S, ctx 49152) decodes 8.4 tok/s. `--split-mode tensor` decoded 10.71 tok/s but
   # its prefill fell to 138 tok/s (and one card was thermally throttled during that run), so
-  # layer is the shipped mode. NOT measured: the full resident stack (reranker, whisper,
-  # forecaster) loaded on the utility card beside this seat; the measurement carried the
-  # embedder only. The utility card is listed FIRST so the lighter share lands beside the
-  # residents; the two --tensor-split weights are equal because the cards are identical.
+  # layer is the shipped mode. MEASURED later with the embedder (438 MiB), reranker (324 MiB)
+  # and forecaster (926 MiB) loaded on the utility card: 14,230 of 15,356 MiB there (12,516 MiB
+  # of it this seat's share) and 13,620 MiB on the other card; a 3,668-token prompt prefilled at
+  # 209.7 tok/s and decode was 8.1 tok/s. That leaves 1.1 GiB free on the utility card, less
+  # than whisper large-v3-turbo needs, so this seat is NOT co-resident with whisper: it sits in
+  # the `pooled27` set, which carries the memory stack and every resident seat EXCEPT the speech
+  # seat. A transcription request evicts it. The utility card is
+  # listed FIRST so the lighter share lands beside the residents; the two --tensor-split
+  # weights are equal because the cards are identical.
   qwen38-27b-pool:
     aliases: [27b-pool, pooled-27b]
     env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__,__HEAVY_CARD__"]
@@ -167,7 +172,9 @@ models:
   # both cards with its mmproj-F16: the fast pooled seat. Same flags as the 27B pool minus MTP,
   # at ctx 32768. MEASURED 2026-11-07 (same hosts, builds and layer split): decode 11.92 tok/s,
   # prefill 234 tok/s, 9,012 MiB + 7,250 MiB. Measured with one card thermally
-  # throttled, so these are a LOWER BOUND. (The single-card 26B stays out of this tier: it
+  # throttled, so these are a LOWER BOUND. With the embedder, reranker and forecaster resident on
+  # the utility card: 10,744 + 7,278 MiB, prefill 357 tok/s, decode 17.0 tok/s. It fits beside
+  # whisper, so it keeps the full residents. (The single-card 26B stays out of this tier: it
   # measured 1/8 on the A2, ampere-16.)
   gemma4-26b-a4b-pool:
     aliases: [26b-pool, pooled-26b]
@@ -182,9 +189,12 @@ models:
     ttl: 300
   # POOLED Gemma 4 31B (QAT UD-Q4_K_XL, 17.3 GB, dense) across both cards with its mmproj-F16:
   # the ESCALATION seat (config_seed.escalation_model), the largest model the pair can hold.
-  # Same flags as the 26B pool, ctx 32768. It loads and answers; it has so far only been measured
-  # with one card thermally throttled (2.38 tok/s decode), a figure that says nothing about a
-  # healthy pair, and it AWAITS A MEASUREMENT ON A COOLED PAIR before any speed is claimed for it.
+  # Same flags as the 26B pool, ctx 32768. MEASURED with the embedder, reranker and forecaster
+  # resident: 12,834 + 9,954 MiB, prefill 59 tok/s, decode 2.2 tok/s. THAT SPEED IS A THERMAL
+  # ARTEFACT, not the seat's: the utility card throttled to 210 MHz at 86 C on a host cooling
+  # fault while the other card held 1770 MHz (an earlier throttled run read 2.38 tok/s). It
+  # AWAITS A MEASUREMENT ON A COOLED PAIR before any speed is claimed for it. Whisper loaded and
+  # transcribed beside it plus all residents with no eviction, so it keeps the full residents.
   gemma4-31b-pool:
     aliases: [31b-pool, pooled-31b]
     env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__,__HEAVY_CARD__"]
@@ -308,9 +318,14 @@ matrix:
   # `pooled` is one model spanning BOTH cards beside the residents: the cascade and the single-card
   # seats are deliberately not in it (a pooled seat leaves neither card free for them), and a pooled
   # var appears in no other set, so no single-card big seat can ever be co-scheduled with one.
+  # `pooled` (the two Gemma pools) keeps the full residents, speech-to-text included: measured to fit.
+  # `pooled27` (the 27B pool) is the one set WITHOUT `+residents`: it lists the memory stack and the
+  # resident seats except speech-to-text, because the 27B's share leaves the utility card 1.1 GiB
+  # free, less than whisper needs. Its resident fragment is the NOSTT twin of the one in `residents`.
   sets:
     residents: "emb & rer__EG2_AND____SEATS_RESIDENT__"
     utility: "+residents & (__E4B_LEAD__e2b__Q354B_ALT__)"
     heavy: "+residents & (q3827__SEATS_SWAPPABLE__)"
     both: "+residents & (__E4B_LEAD__e2b__Q354B_ALT__) & (q3827__SEATS_SWAPPABLE__)"
-    pooled: "+residents & (p27 | g26 | g31)"
+    pooled: "+residents & (g26 | g31)"
+    pooled27: "emb & rer__EG2_AND____SEATS_RESIDENT_NOSTT__ & p27"

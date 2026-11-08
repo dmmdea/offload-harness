@@ -617,8 +617,8 @@ func Render(tmpl string, p Params) (string, error) {
 	e4bLead, e4bAnd := "e4b | ", " & e4b"
 	if p.OmitE4B {
 		if !strings.Contains(out, "__E4B_LEAD__") && !strings.Contains(out, "__E4B_AND__") {
-			return "", fmt.Errorf("this tier sets omit_e4b but the target serving template carries no "+
-				"__E4B_LEAD__ / __E4B_AND__ set token, so the `e4b` var it removes would stay referenced in a set "+
+			return "", fmt.Errorf("this tier sets omit_e4b but the target serving template carries no " +
+				"__E4B_LEAD__ / __E4B_AND__ set token, so the `e4b` var it removes would stay referenced in a set " +
 				"(a config llama-swap rejects at startup) — tokenize the template's e4b set membership, or drop omit_e4b from the tier")
 		}
 		e4bLead, e4bAnd = "", ""
@@ -635,35 +635,36 @@ func Render(tmpl string, p Params) (string, error) {
 			"(it carries neither %s nor %s): only a two-card pinned template takes them", p.HeavyCard, p.UtilityCard, tokenHeavyCard, tokenUtilityCard)
 	}
 	for from, to := range map[string]string{
-		"__E4B_LEAD__":          e4bLead,
-		"__E4B_AND__":           e4bAnd,
-		"__EG2_AND__":           eg2and,
-		"__M26_ALT__":           m26alt,
-		"__M26_AND__":           m26and,
-		"__Q38_ALT__":           q38alt,
-		"__Q38_AND__":           q38and,
-		"__Q354B_ALT__":         q354balt,
-		"__Q354B_AGENT_ALIAS__": q354bAgentAlias,
-		"__Q359B_ALT__":         q359balt,
-		"__Q359B_AGENT_ALIAS__": q359bAgentAlias,
-		"__MIMO9B_ALT__":        mimo9balt,
-		"__Q3827B_ALT__":        q3827balt,
-		"__Q3635B_ALT__":        q3635balt,
-		"__SEATS_SWAPPABLE__":   seatFrag[roleSwappable],
-		"__SEATS_RESIDENT__":    seatFrag[roleResident],
-		"__LLAMA_BIN__":         strings.TrimRight(p.LlamaBin, "/"),
-		"__MODELS__":            strings.TrimRight(p.ModelsDir, "/"),
-		"__LISTEN__":            p.Listen,
-		"__CTX__":               fmt.Sprint(p.Ctx),
-		"__KV_K__":              p.KVType,
-		"__KV_V__":              p.KVType,
-		"__FLASH_ATTN__":        p.FlashAttn,
-		"__MOE_26B__":           p.MoE26B,
-		"__NTHREADS__":          fmt.Sprint(p.Threads),
-		"__CACHE_RAM__":         fmt.Sprint(p.cacheRAMMiB()),
-		"__SLOT_SAVE__":         p.slotSaveFlag(),
-		tokenHeavyCard:          heavyCard,
-		tokenUtilityCard:        utilityCard,
+		"__E4B_LEAD__":             e4bLead,
+		"__E4B_AND__":              e4bAnd,
+		"__EG2_AND__":              eg2and,
+		"__M26_ALT__":              m26alt,
+		"__M26_AND__":              m26and,
+		"__Q38_ALT__":              q38alt,
+		"__Q38_AND__":              q38and,
+		"__Q354B_ALT__":            q354balt,
+		"__Q354B_AGENT_ALIAS__":    q354bAgentAlias,
+		"__Q359B_ALT__":            q359balt,
+		"__Q359B_AGENT_ALIAS__":    q359bAgentAlias,
+		"__MIMO9B_ALT__":           mimo9balt,
+		"__Q3827B_ALT__":           q3827balt,
+		"__Q3635B_ALT__":           q3635balt,
+		"__SEATS_SWAPPABLE__":      seatFrag[roleSwappable],
+		"__SEATS_RESIDENT__":       seatFrag[roleResident],
+		"__SEATS_RESIDENT_NOSTT__": seatFrag[fragResidentNoSTT],
+		"__LLAMA_BIN__":            strings.TrimRight(p.LlamaBin, "/"),
+		"__MODELS__":               strings.TrimRight(p.ModelsDir, "/"),
+		"__LISTEN__":               p.Listen,
+		"__CTX__":                  fmt.Sprint(p.Ctx),
+		"__KV_K__":                 p.KVType,
+		"__KV_V__":                 p.KVType,
+		"__FLASH_ATTN__":           p.FlashAttn,
+		"__MOE_26B__":              p.MoE26B,
+		"__NTHREADS__":             fmt.Sprint(p.Threads),
+		"__CACHE_RAM__":            fmt.Sprint(p.cacheRAMMiB()),
+		"__SLOT_SAVE__":            p.slotSaveFlag(),
+		tokenHeavyCard:             heavyCard,
+		tokenUtilityCard:           utilityCard,
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
@@ -959,6 +960,12 @@ func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 			return "", nil, err
 		}
 		frag[s.Residency] += matrixJoin(s.Residency) + id
+		// The same resident members without a speech-to-text seat, for a set that must leave STT
+		// out (__SEATS_RESIDENT_NOSTT__): a pooled model that fills the utility card cannot stay
+		// beside whisper.
+		if s.Residency == roleResident && s.Kind != mediaseat.KindSTT {
+			frag[fragResidentNoSTT] += matrixJoin(s.Residency) + id
+		}
 	}
 	if p.VLLMSeat != nil || len(p.vllmExtras()) > 0 {
 		var err error
@@ -1067,8 +1074,10 @@ func insertVLLMSeat(out string, p Params, anchors seatAnchors, taken map[string]
 	}
 	if len(ids) == 1 {
 		frag[roleResident] += matrixJoin(roleResident) + ids[0]
+		frag[fragResidentNoSTT] += matrixJoin(roleResident) + ids[0]
 	} else {
 		frag[roleResident] += matrixJoin(roleResident) + "(" + strings.Join(ids, " | ") + ")"
+		frag[fragResidentNoSTT] += matrixJoin(roleResident) + "(" + strings.Join(ids, " | ") + ")"
 	}
 	return out, frag, nil
 }
@@ -1106,6 +1115,10 @@ const (
 	roleSwappable = mediaseat.Swappable
 	roleResident  = mediaseat.Resident
 )
+
+// fragResidentNoSTT keys the resident-seat fragment that omits speech-to-text seats; it is not a
+// residency role, only a second view of the resident members.
+const fragResidentNoSTT = "resident-nostt"
 
 // matrixJoin is the set operator a role's members are combined with. Swappable
 // members are alternatives (one at a time); residents are conjunctions (all at once).

@@ -75,4 +75,16 @@ Sources: the 27B and its projector are from `unsloth/Qwen3.8-27B-GGUF` (LFS sha2
 
 The tier now seeds `agent_model` and `reasoning_model` as `qwen38-27b-pool` and `escalation_model` as `gemma4-31b-pool` (the single-card 27B and the 4B stay rendered and are still bound by name when one card is busy). The thermal caveat above applies to the pooled figures: one card was throttled during the 26B-A4B and 31B runs (and during the tensor-split run), which is why they are recorded as lower bounds.
 
-Not measured: the pooled 27B with the reranker, whisper and the forecaster all loaded on the utility card (the run above carried the embedder only; a full resident stack takes roughly 4 GB of that card's 15,356 MiB), image input through the pooled seats' projectors, and the 31B on a cooled pair.
+### With the resident stack loaded (later the same day)
+
+Measured with the embedder (438 MiB), the reranker (324 MiB) and the forecaster (926 MiB) resident on the utility card, heavy share listed second, llama.cpp b12192:
+
+| seat | utility card + other card | prefill | decode | note |
+|---|---|---|---|---|
+| `qwen38-27b-pool` | 14,230 MiB of 15,356 (12,516 MiB of it the pool share) + 13,620 MiB | 209.7 tok/s (3,668-token prompt) | 8.1 tok/s | 1.1 GiB left on the utility card, less than whisper large-v3-turbo needs: **whisper cannot be co-resident** |
+| `gemma4-26b-a4b-pool` | 10,744 + 7,278 MiB | 357 tok/s | 17.0 tok/s | fits beside whisper |
+| `gemma4-31b-pool` | 12,834 + 9,954 MiB | 59 tok/s | 2.2 tok/s | **thermal artefact, not the seat's speed**: the utility card throttled to 210 MHz at 86 C on the host's cooling fault while the other card held 1770 MHz |
+
+Whisper loaded and transcribed beside `gemma4-31b-pool` plus all residents with no eviction (a `+residents & stt & (g26 | g31)` set). Because of the 27B pool's figure the template gives it its own set, `pooled27`: the memory stack and every resident seat except speech-to-text, so a transcription request evicts the 27B pool rather than OOM-ing the utility card. The two Gemma pools stay in `pooled` with the full residents. The 8.1 tok/s decode here is below the 10.34 tok/s of the earlier run that carried the embedder alone; both are recorded as measured.
+
+Not measured: image input through the pooled seats' projectors, and the 31B on a cooled pair.
