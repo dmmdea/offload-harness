@@ -155,8 +155,8 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf
       -ngl 999 --parallel 1 --ctx-size 65536 --flash-attn on
-      --cache-type-k q8_0 --cache-type-v q8_0 --reasoning off --jinja
-      --port ${PORT} --host 127.0.0.1
+      --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram __CACHE_RAM__ __SLOT_SAVE__
+      --reasoning off --jinja --port ${PORT} --host 127.0.0.1
     ttl: 300
   # AGENT seat for the 16GB class — see the linux-cuda template for the full rationale.
   # Literal --ctx-size 49152 (measured fit), MTP head embedded in the GGUF, and no

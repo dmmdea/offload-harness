@@ -207,9 +207,7 @@ type wireResp struct {
 	Usage struct {
 		PromptTokens        int `json:"prompt_tokens"`
 		CompletionTokens    int `json:"completion_tokens"`
-		PromptTokensDetails struct {
-			CachedTokens int `json:"cached_tokens"`
-		} `json:"prompt_tokens_details"`
+		PromptTokensDetails wirePromptTokensDetails `json:"prompt_tokens_details"`
 		// CompletionTokensDetails.ReasoningTokens: vLLM's count of the
 		// completion tokens spent inside the think block. Absent on llama.cpp
 		// (0 = not reported, never "no reasoning").
@@ -224,6 +222,30 @@ type wireResp struct {
 		PredictedN  int     `json:"predicted_n"`
 		PredictedMS float64 `json:"predicted_ms"`
 	} `json:"timings"`
+}
+
+// wirePromptTokensDetails is usage.prompt_tokens_details. CachedTokens alone cannot tell
+// "the server reported 0 cached" from "the server did not report the field": vLLM omits
+// the block (or sends null) unless it runs with --enable-prompt-tokens-details, and the
+// first reads as a measured full prefill while the second is unmeasured. CachedReported
+// carries that difference; CachedTokens keeps its plain int shape for existing readers.
+type wirePromptTokensDetails struct {
+	CachedTokens   int
+	CachedReported bool
+}
+
+func (d *wirePromptTokensDetails) UnmarshalJSON(b []byte) error {
+	var aux struct {
+		CachedTokens *int `json:"cached_tokens"`
+	}
+	if err := json.Unmarshal(b, &aux); err != nil {
+		return err
+	}
+	*d = wirePromptTokensDetails{}
+	if aux.CachedTokens != nil {
+		d.CachedTokens, d.CachedReported = *aux.CachedTokens, true
+	}
+	return nil
 }
 
 // ServeStats is the SERVER's own accounting for one completion — the only
@@ -241,6 +263,10 @@ type ServeStats struct {
 	PredictedMS       float64 `json:"predicted_ms"`
 	UsagePromptTokens int     `json:"usage_prompt_tokens"`
 	UsageCachedTokens int     `json:"usage_cached_tokens"`
+	// UsageCachedReported: the server sent usage.prompt_tokens_details.cached_tokens at
+	// all. False makes UsageCachedTokens 0-because-absent, which PrefillStats must not
+	// read as "nothing was reused" on a backend that sends no timings.
+	UsageCachedReported bool `json:"usage_cached_reported,omitempty"`
 	// UsageCompletionTokens is the server's own count of tokens it GENERATED for
 	// this completion. It is the number the harness ledger needs for "work the seat
 	// did" — until 0.115.5 the loop never summed it, so an agent run that generated
@@ -489,6 +515,7 @@ func (c *LLMClient) Chat(ctx context.Context, msgs []Msg, tools []ToolSpec, maxT
 			PredictedN: wr.Timings.PredictedN, PredictedMS: wr.Timings.PredictedMS,
 			UsagePromptTokens:     wr.Usage.PromptTokens,
 			UsageCachedTokens:     wr.Usage.PromptTokensDetails.CachedTokens,
+			UsageCachedReported:   wr.Usage.PromptTokensDetails.CachedReported,
 			UsageCompletionTokens: wr.Usage.CompletionTokens,
 			UsageReasoningTokens:  wr.Usage.CompletionTokensDetails.ReasoningTokens,
 		}

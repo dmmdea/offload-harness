@@ -669,6 +669,18 @@ func (s Spec) validate(tier string, lane bool) error {
 		if strings.TrimSpace(s.StorelessReason) != "" {
 			problems = append(problems, "storeless_reason is set beside a cache_server — a seat is bound to a store or it is storeless, never both")
 		}
+		// NeedsLMCacheOverlay recognises only an fp8 KV dtype, so an nvfp4 seat bound to a
+		// store would render WITHOUT the overlay guard. Whether LMCache restores nvfp4
+		// pages faithfully is unmeasured, and the one public report is bad: vllm PR #46329
+		// saw every-second-request corruption and 8.8 vs 62 tok/s decode against fp8 on two
+		// RTX 5060 Ti. Refused for the pair only (a storeless nvfp4 seat stays legal), and
+		// by prefix on this one dtype, not by an allowlist: a new dtype is not pinned out.
+		if strings.HasPrefix(strings.ToLower(s.KVCacheDtype), "nvfp4") {
+			problems = append(problems, fmt.Sprintf(
+				"kv_cache_dtype %q beside a cache_server — nvfp4 KV restore fidelity through LMCache is unmeasured, and vllm PR #46329 "+
+					"reports every-second-request corruption and 8.8 vs 62 tok/s decode against fp8 on two RTX 5060 Ti; "+
+					"drop the cache_server binding (a storeless nvfp4 seat is allowed) or use a measured dtype", s.KVCacheDtype))
+		}
 	}
 	// H-33: the engine's per-step token budget must cover at least one KV block. The
 	// block is a model-and-dtype property known only as measured pairs (784 fp16, 1568

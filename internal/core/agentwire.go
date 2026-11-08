@@ -644,6 +644,9 @@ type AgentWireResult struct {
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
+	// PrefillSource: "timings" | "usage" | "mixed" -- which server accounting the
+	// four counts came from (a vLLM seat has usage only, so no prefill_ms).
+	PrefillSource string `json:"prefill_source,omitempty"`
 
 	// --- Context-pager gate and compaction passes. The loop measures both and
 	// the wire dropped them, so the delegation log could not say how often the compaction

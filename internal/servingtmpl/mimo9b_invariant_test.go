@@ -106,6 +106,12 @@ func TestMimo9BSeatKeepsItsMeasuredInvariants(t *testing.T) {
 				if !strings.Contains(block, "--cache-type-k q8_0") || !strings.Contains(block, "--cache-type-v q8_0") {
 					t.Errorf("seat lost its explicit measured q8_0 KV cache type. Block:\n%s", block)
 				}
+				// ctx/flash-attn/KV are measured literals, but the host-RAM prompt cache is
+				// sized by the node's RAM tier: without the flag the seat runs at the server
+				// default 8192 MiB on a 1 GiB-RAM box too.
+				if !strings.Contains(block, "--cache-ram 8192") {
+					t.Errorf("%s's mimo-9b-agent must carry the tier's --cache-ram, like every other tier-driven seat on this template. Block:\n%s", tc.name, block)
+				}
 			}
 		})
 	}

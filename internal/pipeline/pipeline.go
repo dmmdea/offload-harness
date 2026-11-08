@@ -986,6 +986,7 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		PrefillTokens:      meta.PrefillTokens,
 		CacheTokens:        meta.CacheTokens,
 		PrefillMS:          meta.PrefillMS,
+		PrefillSource:      meta.PrefillSource,
 		Layer:              placedLayer(meta.Placed),
 		// The job behind an agent row and the route's placement note (D-101):
 		// empty — omitted — on a plain cascade call.
