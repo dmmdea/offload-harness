@@ -159,7 +159,8 @@ models:
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/MiMo-V2.6-Distill-Qwen-9B-Q4_K_M.gguf
       --n-gpu-layers 999 --parallel 1 --ctx-size 65536 --flash-attn on
-      --cache-type-k q8_0 --cache-type-v q8_0 --threads __NTHREADS__ --reasoning off --jinja
+      --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram __CACHE_RAM__ __SLOT_SAVE__
+      --threads __NTHREADS__ --reasoning off --jinja
       --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300

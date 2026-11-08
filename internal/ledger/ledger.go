@@ -131,6 +131,8 @@ type Entry struct {
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
+	// PrefillSource: "timings" | "usage" | "mixed" (see core.Meta.PrefillSource).
+	PrefillSource string `json:"prefill_source,omitempty"`
 	// Arm labels which experimental arm this row was recorded under — the
 	// LEDGER twin of the delegation log's field of the same name (see
 	// delegate.delegationLogLine.Arm for the full argument: once rows from an

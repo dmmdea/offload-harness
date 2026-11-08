@@ -455,6 +455,10 @@ type Meta struct {
 	PrefillTokens    int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens      int64   `json:"cache_tokens,omitempty"`
 	PrefillMS        float64 `json:"prefill_ms,omitempty"`
+	// PrefillSource: where the counts above came from -- "timings" (llama.cpp), "usage"
+	// (a vLLM seat's usage.prompt_tokens_details.cached_tokens; no prefill_ms, so
+	// prefill_ms is absent, not a measured 0) or "mixed". Absent on rows that predate it.
+	PrefillSource string `json:"prefill_source,omitempty"`
 	// CacheHitInLoop marks a cache hit served from an entry that was WRITTEN by
 	// the agent loop's in-loop offload (T2-D) rather than by a recorded,
 	// caller-facing call.
