@@ -952,11 +952,18 @@ A row that has had a run is launchable again by clearing `blocked` and `Blocked`
 text encoder's initial device from the text-encoder device and builds the whole encoder there before the DisTorch2 allocation string that splits it is attached, so the stock
 `CLIPLoaderDisTorch2MultiGPU` ran out of memory 1.4 s in (14.10 GiB allocated) on the first live card-only run of this row; the 13.3 GiB the row's old evidence line called the
 encoder's share is the bf16 DiT file's size, not the encoder's. The row therefore names the `distorch2-host` text-encoder loader: the harness's own
-`OffloadCLIPLoaderDisTorch2` (`render/comfyui-ext/nodes/offload_multicard`), which runs the stock loader with ComfyUI's one answer to "where is the encoder built" changed to the CPU,
-then places it at once through DisTorch2's own load path, block by block, by the allocation `cuda:1,8gb;cuda:0,*`: on the compute-first launch 8 GiB of the encoder lands on the storage card
-(`cuda:1`) and 8.33 GiB on the compute card (`cuda:0`, where it computes and keeps its embedding blocks), and the node refuses to continue if more than 64 MiB of weights are left in host RAM.
-Host RAM is used transiently, at load time only: the encoder is staged on the CPU while it is built and filled (read through the read-only map, released when the placement ends) and no
-weight stays there during sampling. The graph then routes the conditioning through `OffloadFreeAfterEncode` (node 14 of `wf-qwen-image-21.mjs`), which drops the encoder from
+`OffloadCLIPLoaderDisTorch2` (`render/comfyui-ext/nodes/offload_multicard`), which runs the stock loader with two of ComfyUI's answers changed for the length of the call: the
+encoder is built on torch's `meta` device (nothing is allocated), and its weights are taken by assignment (`load_state_dict(..., assign=True)`), so the parameters ARE the read-only
+map's tensors and no host copy exists. It then places the encoder at once through DisTorch2's own load path, block by block, by the allocation `cuda:1,8gb;cuda:0,*`: on the
+compute-first launch 8 GiB of the encoder lands on the storage card (`cuda:1`) and 8.33 GiB on the compute card (`cuda:0`, where it computes and keeps its embedding blocks), so every
+weight goes from the file's pages straight to a card. Before any card is touched the node refuses a tensor that got no weight from the file (`OFFLOAD-TE-UNFILLED`: `strict=False`
+would otherwise leave it weightless) and a weight held in anonymous host memory (`OFFLOAD-TE-NOMAP`); after the placement it refuses more than 64 MiB of weights left in host RAM.
+The stock path assigns nothing under `--gpu-only` and a copy into a `meta` tensor is a silent no-op, so the assignment is what makes the encoder real. Until 2026-11-08 the encoder was
+built on the CPU instead and filled by a copy: the whole encoder sat in anonymous host memory during the load, and a 16 GB host ran out of memory there (node-i, 14.8 GiB of RAM,
+anon-rss 13.77 GB). Measured on node-i with the bf16 Qwen2.5-VL-7B (15.45 GiB file, 14.43 GiB loaded): filled with 0.0 MiB anonymous, placed in 11.0 s (`cuda:0` 6.45 GiB, `cuda:1`
+7.98 GiB, host 0.00), released in 0.8 s; ComfyUI's anonymous memory peaked at 1.23 GiB for the whole edit and host free memory never fell under 11.63 GiB. A quantized encoder (the
+LTX-2.5 int8 convrot Gemma) loads through ComfyUI's own quantized layers, which the `meta` path was not measured with, so it keeps the earlier CPU build (staged in host RAM while it
+is built, then placed at once, the same 64 MiB check after the placement). The graph then routes the conditioning through `OffloadFreeAfterEncode` (node 14 of `wf-qwen-image-21.mjs`), which drops the encoder from
 ComfyUI's loaded models and frees both cards before the sampler loads the DiT; it raises `OFFLOAD-TE-STILL-RESIDENT` if an encoder tensor is still on a card.
 Measured 2026-10-20 at 2048x2048 (the family default and the row's cap), 40 steps: the encoder placed in 7.3 s (`cuda:0` 8.33 GiB, `cuda:1` 8.00 GiB, 0 on the CPU), the release freed both
 cards in 0.8 s (14.48 and 14.80 GiB free after it), the DiT built empty and landed 8 GiB on `cuda:0` and 5.25 GiB on `cuda:1`, and the sampler ran 5.57 s per step: 280.0 s, peaks
