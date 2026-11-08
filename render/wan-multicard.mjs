@@ -32,7 +32,7 @@
 // It reads the lease's cards from gpu-lock.mjs and the sage-attention token rule from comfy-lifecycle.mjs, and nothing else of the harness; the card table and the
 // pack scan are injectable for tests.
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { leaseDevices } from "./gpu-lock.mjs";
@@ -143,8 +143,9 @@ export function parseCardTable(text) {
  * queryCards asks the driver for the card table. A failed query is asked once more before a driver is taken to lack
  * display_attached (a transient failure is not a missing column); the fallback without it leaves every card's display state
  * unknown, which the selection refuses. The planners read the table through queryCardsRanked, which adds the board power.
+ * On Linux a Yes on a card the kernel shows with no display connector is read as No (ignorePhantomAttached).
  */
-export function queryCards(spawnSync = nodeSpawnSync) {
+export function queryCards(spawnSync = nodeSpawnSync, { sysfs = SYSFS, platform = process.platform } = {}) {
   const ask = (fields) => spawnSync("nvidia-smi", [`--query-gpu=${fields}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true });
   const failed = (r) => !r || r.status !== 0 || !r.stdout;
   let r = ask(QUERY);
@@ -153,9 +154,62 @@ export function queryCards(spawnSync = nodeSpawnSync) {
   if (!r || r.status !== 0 || !r.stdout) {
     throw placementError("nvidia-smi gave no card table, so the two cards cannot be told from the display card" + (r && r.error ? ` (${r.error.message})` : ""));
   }
-  const cards = parseCardTable(r.stdout);
+  const cards = ignorePhantomAttached(parseCardTable(r.stdout), spawnSync, { sysfs, platform });
   if (cards.length === 0) throw placementError("nvidia-smi listed no card");
   return cards;
+}
+
+/** The kernel's PCI/DRM tree, injectable so a test can feed a layout (root "" turns the connector check off). */
+const SYSFS = { root: "/sys", readdirSync, readFileSync };
+
+/**
+ * connectorlessNvidia: the sysfs bus ids (lower case, "0000:01:00.0") of NVIDIA PCI devices that have a DRM card node
+ * (<root>/bus/pci/devices/<bus id>/drm/cardN) with ZERO connector entries (cardN-<connector>) under it: a card that cannot drive
+ * a display. A device with no DRM node (nvidia-drm not loaded) or one that cannot be read is not in the set (unknown stays unknown).
+ * The same rule as internal/gpuprobe (maskPhantomAttached), see the measured table in internal/gpuprobe/display.go.
+ */
+export function connectorlessNvidia({ root = "/sys", readdirSync: ls = readdirSync, readFileSync: rd = readFileSync } = {}) {
+  const out = new Set();
+  if (!root) return out;
+  const base = `${root}/bus/pci/devices`;
+  let devices;
+  try { devices = ls(base); } catch { return out; }
+  for (const bus of devices) {
+    try {
+      if (String(rd(`${base}/${bus}/vendor`, "utf8")).trim().toLowerCase() !== "0x10de") continue;
+      const cards = ls(`${base}/${bus}/drm`).filter((n) => /^card\d+$/.test(n));
+      if (cards.length === 0) continue;
+      if (cards.every((c) => ls(`${base}/${bus}/drm/${c}`).every((k) => !k.startsWith(`${c}-`)))) out.add(String(bus).toLowerCase());
+    } catch { /* unreadable: the driver's answer stands */ }
+  }
+  return out;
+}
+
+/**
+ * ignorePhantomAttached: on Linux, a card whose display_attached is Yes but whose PCI device has a DRM card node with no
+ * connector cannot drive a display (an A2 has no display connector at all, and the driver answers Yes anyway; measured on node-i,
+ * driver 615.71: it made every card a display card and refused every multicard placement). Its Yes is read as No, with
+ * `attachedIgnored` saying why; display_active Enabled stays authoritative, and a card WITH connectors, a card with no DRM node,
+ * and any failure to learn the bus id keep what the driver said. The bus ids come from a separate best-effort query
+ * (uuid,pci.bus_id), asked only when a card says Yes AND the kernel tree shows an NVIDIA card without connectors, so the
+ * display ladder above never depends on it.
+ */
+function ignorePhantomAttached(cards, spawnSync, { sysfs, platform }) {
+  if (platform !== "linux" || !cards.some((c) => c.displayAttached.toLowerCase() === "yes")) return cards;
+  const phantom = connectorlessNvidia(sysfs);
+  if (phantom.size === 0) return cards;
+  let r;
+  try { r = spawnSync("nvidia-smi", ["--query-gpu=uuid,pci.bus_id", "--format=csv,noheader"], { encoding: "utf8", timeout: 30000, windowsHide: true }); } catch { return cards; }
+  if (!r || r.status !== 0 || !r.stdout) return cards;
+  const bus = new Map();
+  for (const raw of String(r.stdout).split(/\r?\n/)) {
+    const cols = raw.split(",").map((c) => c.trim());
+    if (cols.length === 2 && /^GPU-/i.test(cols[0])) bus.set(cols[0].toLowerCase(), cols[1].toLowerCase().replace(/^[0-9a-f]{8}:/, (m) => m.slice(4)));
+  }
+  return cards.map((c) => {
+    if (c.displayAttached.toLowerCase() !== "yes" || !phantom.has(bus.get(c.uuid.toLowerCase()))) return c;
+    return { ...c, displayAttached: "No", display: c.displayActive.toLowerCase() === "enabled", attachedIgnored: "no display connectors" };
+  });
 }
 
 /** What the board-power query asks for: the UUID to join on, and the board's design power (not the operator-adjustable power.limit). */
@@ -183,10 +237,10 @@ function parsePowerTable(text) {
  * rungs. A power that cannot be read at all leaves every card at 0, which ranks nothing: the roles are then the ones the planner always gave, and the
  * placement is never refused for it. Every ask hides its console window on Windows (windowsHide).
  */
-export function queryCardsRanked(spawnSync = nodeSpawnSync) {
+export function queryCardsRanked(spawnSync = nodeSpawnSync, opts) {
   // forwarded through a rest parameter, not handed over as a value: queryCards' own calls carry windowsHide, and the
   // no-visible-windows scan can only judge a call it can see
-  const cards = queryCards((...a) => spawnSync(...a));
+  const cards = queryCards((...a) => spawnSync(...a), opts);
   const askPower = () => { try { return spawnSync("nvidia-smi", [`--query-gpu=${POWER_QUERY}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true }); } catch { return null; } };
   let r = askPower();
   if (!r || r.status !== 0 || !r.stdout) r = askPower();

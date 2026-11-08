@@ -59,10 +59,28 @@ package gpuprobe
 //	2026-09-21  <node-a>, laptop, screen on the iGPU . Disabled                        (the RTX is scored)
 //	2026-10-03  the 3-card box, screen asleep ........ active Disabled on all three,
 //	                                                   attached No / YES / No          (card 1: the monitor)
+//	2026-11-07  node-i, headless Linux, 2x A2, driver 615.71 (open modules), Intel iGPU
+//	                                                   active Disabled on both,
+//	                                                   attached YES on both (no connectors)
 //
-// The last row is why the rule has two inputs: with the screen asleep the 3-card
+// The 3-card row is why the rule has two inputs: with the screen asleep the 3-card
 // box reported no display card at all through display_active, so the allocator's
 // never-auto-pick-the-display-card rule (plan invariant I6) had nothing to act on.
+//
+// The node-i row is why display_attached is not taken at its word on Linux. An A2 is a datacenter
+// card with no display connector at all, yet the driver answers Yes, and with every card a display
+// card the single-card guard below (eligible == 0) excluded none and the multicard placement
+// refused the pair. The kernel says what the driver does not: /sys/class/drm shows card0 and card1
+// (nvidia) with no cardN-<connector> entries, while the iGPU's card2 has DP/HDMI connectors, all
+// disconnected. So on Linux a card whose PCI device has a DRM card node
+// (/sys/bus/pci/devices/<bus id>/drm/cardN) with ZERO connector entries under it cannot drive a
+// display, and its Yes is read as No ("attached ignored: no display connectors", logged once per
+// card; maskPhantomAttached in nvidia.go). The edges stay as they were: display_active Enabled is
+// authoritative and untouched; a card WITH connectors keeps display_attached as reported, connected
+// or not (the monitor with its screen asleep, the 3-card row above); a card with no DRM node
+// (nvidia-drm not loaded), a node that cannot be read, or a bus id that cannot be had keeps the
+// driver's answer; Windows and macOS are not touched. The JS runner applies the same rule to its own
+// card table (render/wan-multicard.mjs, queryCards) so that the two sides cannot disagree.
 
 // DisplayCardUUIDs returns, by UUID, the cards driving a display IN USE (display_active
 // Enabled: a game or a lit screen has initialised one) — the ones the 3-card law forbids seats

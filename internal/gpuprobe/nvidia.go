@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -213,7 +214,7 @@ func RunDisplayAwareReport(run func(withAttached bool) (string, error)) (string,
 		attachedGate.mu.Lock()
 		attachedGate.fails = 0
 		attachedGate.mu.Unlock()
-		return out, AttachedRead, nil
+		return maskPhantomAttached(out), AttachedRead, nil
 	}
 	legacy, lerr := run(false)
 	if lerr != nil {
@@ -241,6 +242,188 @@ func RunDisplayAwareReport(run func(withAttached bool) (string, error)) (string,
 		return legacy, AttachedUnsupported, nil
 	}
 	return legacy, AttachedUnknown, nil
+}
+
+// sysfsRoot is where the connector check reads the kernel's PCI/DRM tree. Empty (Windows, macOS)
+// turns the check off; a test points it at a directory laid out like /sys.
+var sysfsRoot = func() string {
+	if runtime.GOOS == "linux" {
+		return "/sys"
+	}
+	return ""
+}()
+
+// smiBusIDs asks nvidia-smi for each card's UUID and PCI bus id. A variable so a test injects the answer.
+var smiBusIDs = func() (string, error) {
+	bin, err := nvidiaSmiPath()
+	if err != nil {
+		return "", err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	out, err := winexec.CommandContext(ctx, bin, "--query-gpu=uuid,pci.bus_id", "--format=csv,noheader").Output()
+	return string(out), err
+}
+
+// phantom remembers what the connector check has already learned: a card's bus id never changes while the
+// process runs, and the reason is logged once per card rather than every 2 s tick.
+var phantom struct {
+	mu     sync.Mutex
+	busIDs map[string]string // lower-cased UUID -> normalised bus id
+	logged map[string]bool
+}
+
+func resetPhantomState() {
+	phantom.mu.Lock()
+	phantom.busIDs, phantom.logged = nil, nil
+	phantom.mu.Unlock()
+}
+
+// normalizeBusID turns nvidia-smi's "00000000:01:00.0" into the sysfs spelling "0000:01:00.0".
+func normalizeBusID(id string) string {
+	id = strings.ToLower(strings.TrimSpace(id))
+	if i := strings.Index(id, ":"); i == 8 {
+		id = id[4:]
+	}
+	return id
+}
+
+func isDRMCardNode(name string) bool {
+	if !strings.HasPrefix(name, "card") || len(name) == len("card") {
+		return false
+	}
+	_, err := strconv.Atoi(name[len("card"):])
+	return err == nil
+}
+
+// connectorlessNVIDIA returns the sysfs bus ids of NVIDIA PCI devices that have a DRM card node
+// (<root>/bus/pci/devices/<bus id>/drm/cardN) and ZERO connector entries (cardN-<connector>) under it:
+// a card that cannot drive a display, whatever the driver's display_attached says. A device with no DRM
+// node (nvidia-drm not loaded) or one that cannot be read is NOT in the set: that is "unknown", and an
+// unknown leaves the driver's answer standing.
+func connectorlessNVIDIA(root string) map[string]bool {
+	if root == "" {
+		return nil
+	}
+	base := filepath.Join(root, "bus", "pci", "devices")
+	entries, err := os.ReadDir(base)
+	if err != nil {
+		return nil
+	}
+	out := map[string]bool{}
+	for _, e := range entries {
+		dev := filepath.Join(base, e.Name())
+		if v, err := os.ReadFile(filepath.Join(dev, "vendor")); err != nil || strings.ToLower(strings.TrimSpace(string(v))) != "0x10de" {
+			continue
+		}
+		nodes, err := os.ReadDir(filepath.Join(dev, "drm"))
+		if err != nil {
+			continue
+		}
+		sawCard, readable, connectors := false, true, 0
+		for _, n := range nodes {
+			if !isDRMCardNode(n.Name()) {
+				continue
+			}
+			sawCard = true
+			kids, err := os.ReadDir(filepath.Join(dev, "drm", n.Name()))
+			if err != nil {
+				readable = false
+				break
+			}
+			for _, k := range kids {
+				if strings.HasPrefix(k.Name(), n.Name()+"-") {
+					connectors++
+				}
+			}
+		}
+		if sawCard && readable && connectors == 0 {
+			out[normalizeBusID(e.Name())] = true
+		}
+	}
+	return out
+}
+
+// busIDOf resolves a card's PCI bus id from its UUID: from the cache, else from one nvidia-smi query that
+// fills the cache for every card. !ok when it cannot be told.
+func busIDOf(uuid string) (string, bool) {
+	key := strings.ToLower(uuid)
+	phantom.mu.Lock()
+	id, ok := phantom.busIDs[key]
+	phantom.mu.Unlock()
+	if ok {
+		return id, true
+	}
+	out, err := smiBusIDs()
+	if err != nil {
+		return "", false
+	}
+	found := map[string]string{}
+	for _, line := range strings.Split(out, "\n") {
+		f := strings.Split(strings.TrimSpace(line), ",")
+		if len(f) == 2 && strings.HasPrefix(strings.ToUpper(strings.TrimSpace(f[0])), "GPU-") {
+			found[strings.ToLower(strings.TrimSpace(f[0]))] = normalizeBusID(f[1])
+		}
+	}
+	phantom.mu.Lock()
+	if phantom.busIDs == nil {
+		phantom.busIDs = map[string]string{}
+	}
+	for k, v := range found {
+		phantom.busIDs[k] = v
+	}
+	phantom.mu.Unlock()
+	id, ok = found[key]
+	return id, ok
+}
+
+// maskPhantomAttached applies the connector rule to one per-device reading (the full query, whose
+// display_attached is the eighth column in both readers of this package and of gpuactivity): on Linux, a
+// card whose PCI device has a DRM card node with zero connectors cannot drive a display, so a
+// display_attached "Yes" on it is a driver false positive and is rewritten to "No". display_active is not
+// touched and stays authoritative. Measured on node-i (headless Linux, 2x A2, driver 615.71): both A2 answer
+// Yes with no connector at all, which made every card a display card, so the single-card guard excluded
+// none and the multicard placement refused. A card WITH connectors keeps what the driver said, connected or
+// not (the monitor with its screen asleep). When the DRM node is absent or unreadable, or the bus id cannot
+// be read, the line is left as the driver gave it.
+//
+// Nothing is asked of nvidia-smi unless some card says Yes AND the kernel tree shows an NVIDIA card without
+// connectors, so a box without the false positive pays only a directory read.
+func maskPhantomAttached(out string) string {
+	lines := strings.Split(out, "\n")
+	var set map[string]bool
+	scanned := false
+	for i, line := range lines {
+		body := strings.TrimRight(line, "\r")
+		f := strings.Split(body, ",")
+		if len(f) != 8 || !strings.EqualFold(strings.TrimSpace(f[7]), "Yes") {
+			continue
+		}
+		if !scanned {
+			set, scanned = connectorlessNVIDIA(sysfsRoot), true
+		}
+		if len(set) == 0 {
+			return out
+		}
+		uuid := strings.TrimSpace(f[1])
+		bus, ok := busIDOf(uuid)
+		if !ok || !set[bus] {
+			continue
+		}
+		f[7] = f[7][:len(f[7])-len(strings.TrimLeft(f[7], " \t"))] + "No"
+		lines[i] = strings.Join(f, ",") + line[len(body):]
+		phantom.mu.Lock()
+		first := !phantom.logged[uuid]
+		if phantom.logged == nil {
+			phantom.logged = map[string]bool{}
+		}
+		phantom.logged[uuid] = true
+		phantom.mu.Unlock()
+		if first {
+			smiLogf("gpuprobe: %s (pci %s): display_attached Yes ignored: attached ignored: no display connectors", uuid, bus)
+		}
+	}
+	return strings.Join(lines, "\n")
 }
 
 // ParseSmiMemoryDevices parses `nvidia-smi --query-gpu=index,uuid,name,
