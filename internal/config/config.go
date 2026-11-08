@@ -1368,6 +1368,12 @@ type Config struct {
 	// "audiocpp" = render/audiocpp-generate.mjs --kind music (audio.cpp's ace_step
 	// family, `--task gen`).
 	MusicGenEngine string `json:"musicgen_engine,omitempty"`
+	// MusicGenPlacement asks the typed music door for the CARD-ONLY placement ("multicard"; ""/"single" = today's one-card lease): ACE-Step 1.5 XL's DiT
+	// (9.29 GiB) and its two text encoders and VAE (9.2 GiB) do not fit one 16 GB card together, so on a node of two equal cards it runs on two leased
+	// non-display cards, the DiT whole on one and the encoders and VAE on the other, every weight in VRAM and none in host RAM
+	// (render/multicard-recipes.json, row acestep/xl-turbo-bf16). Only the ComfyUI engine reads it. UNSET by default on every box
+	// (docs/systems/media-generation.md, "Card-only music").
+	MusicGenPlacement string `json:"musicgen_placement,omitempty"`
 	// AudiocppScript is the runner for both audio kinds (default
 	// render/audiocpp-generate.mjs). AudiocppBin is audiocpp_cli (full path).
 	// AudiocppBackend (required, never cpu) and AudiocppDevice (a device index; "" = 0)
@@ -3116,6 +3122,7 @@ func (s bindingTrapSink) Write(p []byte) (int, error) {
 func warnMediaGenBindingTrapsTo(c Config, w io.Writer) {
 	warnImageBindingTo(c, w, "")
 	warnEditBindingTo(c, w, "")
+	warnMusicBindingTo(c, w)
 	// The pooled VIDEO seat carries the IDENTICAL MultiGPU #191 requirement
 	// (docs/tiers/blackwell-2x16.md; render/wf-ltx25-i2v.mjs). Un-pooled, an
 	// int8 DiT that upcasts to ~39 GB at compute no longer fits the virtual pool
@@ -3244,8 +3251,11 @@ func warnImageBindingTo(c Config, w io.Writer, where string) {
 func warnMulticardLaunchTo(c Config, w io.Writer, where, key, seat string) {
 	if !c.GPUCardScopedLeases {
 		noun := "render"
-		if seat == "edit" {
+		switch seat {
+		case "edit":
 			noun = "edit"
+		case "music":
+			noun = "music render"
 		}
 		fmt.Fprintf(w, "warning: %s%s is multicard but gpu_card_scoped_leases is off — the call holds the whole node and names no cards, so the runner refuses it and EVERY %s will be refused; turn card-scoped leases on (after a green reader audit) or unset the placement\n", where, key, noun)
 	}
@@ -3262,6 +3272,9 @@ func (c Config) MulticardLaunchNotes() []string {
 	}
 	if c.EditMulticard() {
 		seats = append(seats, "gen_edit_placement")
+	}
+	if c.MusicMulticard() {
+		seats = append(seats, "musicgen_placement")
 	}
 	for _, name := range sortedFamilyNames(c.ImageGenFamilies) {
 		if cp, _, _, err := applyOverlay(c, name, c.ImageGenFamilies[name], imageOverlay); err == nil && cp.ImageMulticard() {
@@ -3313,11 +3326,28 @@ func (c Config) EditMulticard() bool {
 	return strings.TrimSpace(c.GenEditPlacement) == PlacementMulticard
 }
 
-// The values of imagegen_placement and gen_edit_placement: "" and "single" are the one-card lease every box has always taken.
+// MusicMulticard reports a music binding that asks for the card-only placement (musicgen_placement: multicard).
+func (c Config) MusicMulticard() bool {
+	return strings.TrimSpace(c.MusicGenPlacement) == PlacementMulticard
+}
+
+// The values of imagegen_placement, gen_edit_placement and musicgen_placement: "" and "single" are the one-card lease every box has always taken.
 const (
 	PlacementSingle    = "single"
 	PlacementMulticard = "multicard"
 )
+
+// warnMusicBindingTo carries the music seat's traps: the card-only placement is a ComfyUI placement of one recipe (ACE-Step 1.5 XL turbo bf16), and it needs the
+// lease to name its two cards.
+func warnMusicBindingTo(c Config, w io.Writer) {
+	if !c.MusicMulticard() {
+		return
+	}
+	if c.MusicGenEngine != "" {
+		fmt.Fprintf(w, "warning: musicgen_placement is multicard but musicgen_engine is %q — the card-only placement is a ComfyUI placement; the audio.cpp runner never reads it\n", c.MusicGenEngine)
+	}
+	warnMulticardLaunchTo(c, w, "", "musicgen_placement", "music")
+}
 
 // warnEditBindingTo carries the edit seat's traps for one (effective) binding.
 func warnEditBindingTo(c Config, w io.Writer, where string) {

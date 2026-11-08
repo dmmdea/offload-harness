@@ -81,7 +81,7 @@ const (
 	needSingle                     // one card: the allocator's, or the explicit pin's
 	needPooled                     // the cards a pool's keys name
 	needDeclared                   // cards the operator declared (run-graph `devices`)
-	needMulticard                  // the box's two non-display cards, leased as a set (imagegen_placement / gen_edit_placement: multicard)
+	needMulticard                  // the box's two non-display cards, leased as a set (imagegen_placement / gen_edit_placement / musicgen_placement: multicard)
 )
 
 // mediaNeed is what one media call asks of the GPU.
@@ -349,6 +349,40 @@ func editNeed(cfg config.Config, token string) mediaNeed {
 		return multicardNeed(hostneed.RouteEdit, cfg, token)
 	}
 	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteEdit, cfg))
+}
+
+// musicNeed is the need of the music route (ACE-Step on ComfyUI) for the resolved binding: two cards under the card-only placement, else one.
+func musicNeed(cfg config.Config, token string) mediaNeed {
+	if cfg.MusicMulticard() {
+		return multicardNeed(hostneed.RouteMusic, cfg, token)
+	}
+	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteMusic, cfg))
+}
+
+// voiceNeed is the need of the Chatterbox voice worker (no ComfyUI instance). With card-scoped leases on and a green reader audit (onCard, p.cardScopedOn) it asks for ONE card, the allocator's pick with no pin (comfy_cuda_device pins ComfyUI, not
+// this worker), so a voice render runs beside a render on another card; otherwise it holds the whole node with its worker kept off the display card, as it
+// always did.
+func voiceNeed(onCard bool, token string) mediaNeed {
+	if onCard {
+		return mediaNeed{Kind: needSingle, Token: token}
+	}
+	return wholeNeed(token).offDisplay()
+}
+
+// cardScopedOn says whether this host leases cards: gpu_card_scoped_leases is on and the reader audit is green (the lease manager's CardScoped, the predicate
+// acquireCardScoped asks before it plans a single-card call).
+func (p *Pipeline) cardScopedOn() bool {
+	m, err := p.scopedManager()
+	return err == nil && m.CardScoped()
+}
+
+// voiceCardEnv pins a voice worker to the card its grant holds: the card by uuid (never an index, which a narrower CUDA_VISIBLE_DEVICES would renumber),
+// in PCI bus order, so the worker sees exactly that card as cuda:0. A grant that holds no card (the whole-node fallback) pins nothing.
+func voiceCardEnv(g mediaGrant) []string {
+	if g.Card == nil || g.Card.UUID == "" {
+		return nil
+	}
+	return []string{"CUDA_VISIBLE_DEVICES=" + g.Card.UUID, "CUDA_DEVICE_ORDER=PCI_BUS_ID"}
 }
 
 // videoNeed is the need of the video route: pooled, or a single card like image generation.
