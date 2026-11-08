@@ -16,3 +16,5 @@
   a host that names no cards is refused before anything starts; the single-placement graph is byte-identical to the old one. No card-only music render has
   been run yet, so the recipe row is predicted and declares the ordinary host-RAM estimate until one reads the per-card peaks.
   Documented in `docs/systems/media-generation.md` ("Card-only music").
+- Music loudness normalization keeps the render's own sample rate: ffmpeg's loudnorm resamples to 192 kHz internally and kept that rate for the output, so a 48 kHz ACE-Step render came back as a 192 kHz FLAC (four times the size).
+- The ACE-Step 1.5 XL card-only row is measured: on two 16 GB A2 cards a 30 s clip took 41 s, peaking at 9,774 MiB on the compute card and 9,364 MiB on the storage card, with 2.23 GiB of ComfyUI anonymous RSS and no weight in host RAM.

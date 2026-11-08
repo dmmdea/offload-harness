@@ -197,11 +197,11 @@
       "clipType": "ace",
       "unet": { "loader": "plain" },
       "clip": { "loader": "plain", "dual": true },
-      "basis": "predicted",
-      "peakGiB": { "compute": 10.8, "storage": 9.2 },
+      "basis": "measured",
+      "peakGiB": { "compute": 9.6, "storage": 9.2 },
       "activationsGiB": 1.5,
       "packs": ["multigpu"],
-      "evidence": "Predicted from file sizes, not run. ACE-Step 1.5 XL turbo is 9.29 GiB of DiT (acestep_v1.5_xl_turbo_bf16), 7.80 GiB of Qwen3-4B text encoder (qwen_4b_ace15) and 1.11 GiB of Qwen3-0.6B text encoder (qwen_0.6b_ace15), loaded together by one DualCLIPLoader of type ace, and a 0.31 GiB VAE (ace_1.5_vae): 18.5 GiB, more than one 16 GB card with the 1 GiB reserve, which is why the single placement streams from host RAM there. Card-only, the DiT goes whole on the compute card (UNETLoaderMultiGPU) and the two text encoders whole on the storage card (DualCLIPLoaderMultiGPU, the stock DualCLIPLoader's inputs plus device), with the VAE on the storage card (VAELoaderMultiGPU). Compute card: 9.3 GiB DiT plus about 1.5 GiB of sampler activations and context (a 30 to 40 second clip is a short latent) is 10.8 GiB. Storage card: 8.9 GiB of encoders (7.80 + 1.11) plus the 0.31 GiB VAE and about 0.3 GiB of slack is 9.2 GiB; the encoders and the VAE share the card, and the 4B encoder also writes the audio codes there before the DiT samples. Both fit a 16 GB card with its 1 GiB reserve (about 14 GiB usable) with room to spare, so no weight is read from or held in host RAM. The row is predicted until a card-only run reads the per-card peaks and the host growth with the read-only safetensors loader."
+      "evidence": "MEASURED card-only 2026-11-07 on node-i (two NVIDIA A2 16 GB, 15.0 GiB each, 14.8 GiB of host RAM), harness launch (--gpu-only, the read-only loader env), a 30 s clip (over-rendered, then trimmed back), 8 steps: 41 s for the whole call including both loads. ACE-Step 1.5 XL turbo is 9.29 GiB of DiT (acestep_v1.5_xl_turbo_bf16), 7.80 GiB of Qwen3-4B text encoder (qwen_4b_ace15) and 1.11 GiB of Qwen3-0.6B (qwen_0.6b_ace15), loaded together by one DualCLIPLoaderMultiGPU of type ace, and a 0.31 GiB VAE (ace_1.5_vae): 18.5 GiB, more than one card. The DiT sat whole on the compute card (UNETLoaderMultiGPU, cuda:1), both encoders and the VAE whole on the storage card (cuda:0). Per-card peaks read by nvidia-smi every second, CUDA context included: 9,774 MiB on the compute card and 9,364 MiB on the storage card. Host side: ComfyUI's anonymous RSS peaked at 2.23 GiB (the interpreter, torch and two CUDA contexts; no weight), MemAvailable never fell under 10.6 of 14.8 GiB, swap stayed at 267 MiB. The file: 30.0 s, -14.5 LUFS integrated, no silence at -45 dB, mean spectral centroid 1.1 kHz and flatness 0.035 (tonal music, not noise)."
     }
   ]
 }

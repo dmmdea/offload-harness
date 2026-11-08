@@ -10,7 +10,7 @@ import "regexp"
 //
 // Measured is true only for a row whose host growth was read in a run that used the read-only safetensors loader (a card-only run that charged no
 // weight file to host commit). The 2511 fp8mixed edit, the 2512 Q5_1 GGUF, the krea2 bf16 DiT, the qwen-image-2.1 bf16 and int8_convrot DiTs and the
-// qwen-image-2.1 bf16 edit are measured; the 2511 Q5_1 GGUF edit and the qwen-image-2.1 int8_convrot edit rows are predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
+// qwen-image-2.1 bf16 edit and the ACE-Step 1.5 XL music row are measured; the 2511 Q5_1 GGUF edit and the qwen-image-2.1 int8_convrot edit rows are predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
 //
 // A row can be held back (Blocked): it stays in the table, but it is no recipe to FindMulticardRow. No row is held back today. The qwen-image-2.1 rows'
 // 16.33 GiB bf16 text encoder is bigger than a card, and under --gpu-only ComfyUI would build the whole of it on one card before a DisTorch2 split
@@ -80,7 +80,7 @@ var multicardRows = []MulticardRow{
 		UnetLoader: "distorch2", ResidentGiB: 8, ClipLoader: "distorch2-host", ClipResidentGiB: 8, ComputeGiB: 14.5, StorageGiB: 11.0, Measured: true, MaxPixels: 4194304, Packs: []string{"multigpu"}},
 	// ACE-Step 1.5 XL turbo (route "music"): predicted from file sizes, not yet run card-only (render/multicard-recipes.json, basis predicted)
 	{ID: "acestep/xl-turbo-bf16", Route: "music", Family: "acestep", Quant: "xl-turbo-bf16", UnetMatch: `acestep_v1\.5_xl.*bf16\.safetensors$`, ClipMatch: "ace15", DefaultClip: "qwen_4b_ace15.safetensors",
-		UnetLoader: "plain", ClipLoader: "plain", ClipDual: true, ComputeGiB: 10.8, StorageGiB: 9.2, Packs: []string{"multigpu"}},
+		UnetLoader: "plain", ClipLoader: "plain", ClipDual: true, ComputeGiB: 9.6, StorageGiB: 9.2, Measured: true, Packs: []string{"multigpu"}},
 }
 
 // multicardMatchers are the rows' regular expressions, compiled once, in the rows' order.
