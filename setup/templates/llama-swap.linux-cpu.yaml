@@ -24,7 +24,7 @@ listen: __LISTEN__
 
 macros:
   common: >-
-    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__
+    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
     --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
   ld: "LD_LIBRARY_PATH=__LLAMA_BIN__:${LD_LIBRARY_PATH:-}"
 
@@ -34,7 +34,7 @@ models:
     env: ["${ld}"]
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
-      --parallel 1 ${common}
+      --parallel 1 __SLOT_SAVE__ ${common}
     checkEndpoint: /health
     ttl: 300
   gemma4-e2b:
@@ -51,7 +51,7 @@ models:
     env: ["${ld}"]
     cmd: >-
       __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
-      --parallel 1 ${common}
+      --parallel 1 __SLOT_SAVE__ ${common}
     checkEndpoint: /health
     ttl: 300
   embeddinggemma:

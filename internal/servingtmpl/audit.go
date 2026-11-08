@@ -196,12 +196,14 @@ func CmdParallel(cmd string) (n int, found bool) {
 	return n, found
 }
 
-// AuditSlotSave is the render-time rule that a slot directory never sits beside more than one slot: an entry whose
-// command carries --slot-save-path and states --parallel (or -np) above 1 is refused. Slot 0 of an eight-slot server
-// belongs to whichever request last held it, so a save there stores someone else's context under this key and a
-// restore overwrites a stranger's. The templates drop the __SLOT_SAVE__ token from such entries; this is the check
-// that a later template edit cannot put it back. Entries are read as llama-swap runs them (macros expanded), the
-// report is sorted by entry, and a document that does not parse is Audit's finding, not this rule's.
+// AuditSlotSave is the render-time rule that a slot directory sits only beside exactly one slot: an entry whose
+// command carries --slot-save-path and states --parallel (or -np) above 1, or states no slot count at all, is
+// refused. Slot 0 of an eight-slot server belongs to whichever request last held it, so a save there stores someone
+// else's context under this key and a restore overwrites a stranger's; an entry that states no count runs the
+// server's default of several, which is why the loop and the /fleet/kvslot lane refuse it too (kvslot.SlotDir). The
+// templates carry the __SLOT_SAVE__ token right after `--parallel 1` and never in a shared macro; this is the check
+// that a later template edit cannot put it anywhere else. Entries are read as llama-swap runs them (macros expanded),
+// the report is sorted by entry, and a document that does not parse is Audit's finding, not this rule's.
 func AuditSlotSave(text string) []Violation {
 	var doc struct {
 		Models map[string]map[string]any `yaml:"models"`
@@ -222,7 +224,11 @@ func AuditSlotSave(text string) []Violation {
 		if !found {
 			n, _, found = lastStated(parallelEnvRe, expandMacros(flatEnv(m["env"]), macros))
 		}
-		if !found || n <= 1 {
+		if !found {
+			out = append(out, Violation{Rule: "slot-save-parallel", Where: name, Text: "--slot-save-path on an entry that states no --parallel: the server's default runs several slots, and slot 0 belongs to whichever request last held it (ADR 0056); put __SLOT_SAVE__ only after `--parallel 1`"})
+			continue
+		}
+		if n <= 1 {
 			continue
 		}
 		out = append(out, Violation{Rule: "slot-save-parallel", Where: name, Text: fmt.Sprintf(

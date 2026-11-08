@@ -69,7 +69,8 @@ is unmeasured, and the report names its source. Every other decision below is ju
   The node now drives it:
   - **Render.** `--slot-save-path <home>/kvslots` renders only when the render knows the install home, the
     node's llama.cpp build is at or above the floor in `setup/floors.json`, and the entry runs one slot. The
-    render creates the directory. A render-time audit refuses the flag beside `--parallel` above 1.
+    render creates the directory. A render-time audit refuses the flag beside `--parallel` above 1 and on an
+    entry that states no `--parallel`; the token follows `--parallel 1` in each entry, never a shared macro.
   - **Run start.** The agent loop keys the byte-exact prefix it is about to send: the seat's config pin, the
     model, the tool specs, and every message up to the first turn, recall and setup replay included. When a
     file for that key exists, the node restores it.
