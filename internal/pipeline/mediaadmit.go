@@ -364,7 +364,9 @@ func musicNeed(cfg config.Config, token string) mediaNeed {
 // always did.
 func voiceNeed(onCard bool, token string) mediaNeed {
 	if onCard {
-		return mediaNeed{Kind: needSingle, Token: token}
+		// offDisplay is read only when the card path falls back to the whole node (the card table unreadable, or an inherited lease that names no card):
+		// that fallback grant holds no card, so the worker is pinned by the off-display rule, never left on cuda:0.
+		return mediaNeed{Kind: needSingle, Token: token}.offDisplay()
 	}
 	return wholeNeed(token).offDisplay()
 }

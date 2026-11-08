@@ -1523,20 +1523,24 @@ and the VAE on the storage card (`VAELoaderMultiGPU`). It is the `acestep/xl-tur
   runner is handed `--placement multicard` and the pair's launch (no `comfy_cuda_device` pin, no dynamic VRAM). `render/comfy-music.mjs` accepts
   `--placement single|multicard [--cards <a>,<b>]` spelled `--flag value`; `--resident-gb` is refused (the DiT is whole on one card), and so is a
   `--graph` file. The single placement is byte for byte the graph it always built; the over-render and trim, loudness and dead-air gates are unchanged.
-- **Host RAM.** `basis` is `predicted`: the per-card peaks (compute 10.8 GiB = 9.3 + 1.5, storage 9.2 GiB = 8.9 + 0.3) are file sizes plus activations,
-  not a run. A predicted row declares the ordinary estimate with the reason (as the image rows do) until a card-only run reads the per-card peaks and
-  the host growth with the read-only loader; then flip `Measured` in `internal/mediacap/multicard.go` and `basis` in the JSON, and the call declares
-  0 GiB (`CardOnly`).
+- **Host RAM.** `basis` is `measured` (2026-11-07, node-i, two A2 16 GB, 14.8 GiB of host RAM, the harness launch with the read-only loader): a
+  30 s clip at 8 steps took 41 s for the whole call, both loads included. nvidia-smi read the per-card peaks every second, CUDA context included:
+  9,774 MiB on the compute card (the DiT) and 9,364 MiB on the storage card (both encoders and the VAE). The row records 9.6 and 9.2 GiB. ComfyUI's
+  anonymous RSS peaked at 2.23 GiB, all of it the interpreter, torch and two CUDA contexts, with no weight in it. MemAvailable never fell under
+  10.6 GiB, and swap held at 267 MiB. `Measured` is set in `internal/mediacap/multicard.go`, so the call declares 0 GiB of host RAM (`CardOnly`).
+  The single-card placement still streams 18.5 GiB from host RAM, and a 16 GB host still refuses it.
 - **The doctor.** The `generate_audio:music` line names `placement=multicard` and checks the three MultiGPU loader classes, as the image lines do.
 - **Voice on one card.** The Chatterbox voice worker used to take the whole node (`wholeNeed().offDisplay()`) and land on `cuda:0`. With
   `gpu_card_scoped_leases` on and a green reader audit (the lease manager's `CardScoped`, the predicate the other single-card lanes use) it asks for
   ONE card (`needSingle`, the allocator's pick, no `comfy_cuda_device` pin: that pins ComfyUI, not this worker) and its worker is pinned to the granted
-  card with `CUDA_VISIBLE_DEVICES=<card uuid>` and `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so it runs beside a render on the other card. With card-scoped
-  leases off the call is exactly what it was: the whole node with the worker kept off the display card.
+  card with `CUDA_VISIBLE_DEVICES=<card uuid>` and `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so it runs beside a render on the other card. The card path can
+  still fall back to the whole node: the card table cannot be read, or an inherited lease names no card. That fallback grant holds no card to pin, so
+  the need carries the off-display mark there too, and the worker stays off the display card as before. With card-scoped leases off, the call is
+  what it always was: the whole node, with the worker kept off the display card.
 
-Unverified: `DualCLIPLoaderMultiGPU` is registered by the installed ComfyUI-MultiGPU pack (`override_class_clip` over the stock `DualCLIPLoader`,
-inputs `clip_name1`, `clip_name2`, `type` plus the optional `device`); the recipe's run-time check (`verifyImagePlacement`) asks the running ComfyUI for the
-class and every input the recipe sets. No card-only music render has been run yet.
+The installed ComfyUI-MultiGPU pack registers `DualCLIPLoaderMultiGPU` (`override_class_clip` over the stock `DualCLIPLoader`, with inputs
+`clip_name1`, `clip_name2` and `type`, plus the optional `device`). The 2026-11-07 run passed the recipe's run-time check (`verifyImagePlacement`),
+which asks the running ComfyUI for the class and every input the recipe sets.
 
 ### Launch profile (`comfy_cuda_device`, `comfy_dynamic_vram`, `comfy_extra_args`)
 
