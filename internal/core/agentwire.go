@@ -644,6 +644,9 @@ type AgentWireResult struct {
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
+	// PrefillSource: "timings" | "usage" | "mixed" -- which server accounting the
+	// four counts came from (a vLLM seat has usage only, so no prefill_ms).
+	PrefillSource string `json:"prefill_source,omitempty"`
 
 	// KV-slot retention (ADR 0100): what the node-side save/restore did for this run. Flat kvslot_* fields, omitted when
 	// the node attached no store. KVSlotRestore is the run-start restore judged on the next completion ("hit", "miss",

@@ -1060,6 +1060,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		meta.PrefillTokens = pf.PrefillTokens
 		meta.CacheTokens = pf.CacheTokens
 		meta.PrefillMS = pf.PrefillMS
+		meta.PrefillSource = pf.Source
 		// Mirror onto the WIRE result too: the node's ledger row already had
 		// these, the delegator's corpus did not — a remote run's prefill
 		// economics were computed then discarded from the delegation log's
@@ -1070,6 +1071,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.PrefillTokens = pf.PrefillTokens
 		wire.CacheTokens = pf.CacheTokens
 		wire.PrefillMS = pf.PrefillMS
+		wire.PrefillSource = pf.Source
 	}
 	// The retention's report rides every branch the same way (ADR 0100): a restore that missed, a save that was skipped
 	// and a tool-wait restore are all as interesting on the runs that deferred as on the ones that finished.
