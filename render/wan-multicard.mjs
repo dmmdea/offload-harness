@@ -36,7 +36,7 @@ import { existsSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { leaseDevices } from "./gpu-lock.mjs";
-import { isSageAttentionToken } from "./comfy-lifecycle.mjs";
+import { isSageAttentionToken, COMFY_PORT_BASE } from "./comfy-lifecycle.mjs";
 import { WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE } from "./wf-wan22-i2v.mjs";
 import { LTX25_RESIDENT_GB_DEFAULT, LTX25_TE_ALLOCATION_DEFAULT, LTX25_COMPUTE_DEVICE, LTX25_STORAGE_DEVICE } from "./wf-ltx25-i2v.mjs";
 
@@ -409,14 +409,43 @@ export function multicardLaunch(pair, { comfyDir, packDirsFn = packDirs, yaml = 
 }
 
 /**
+ * multicardPort: the port of a multicard instance, one that no other instance key can hold. The per-card instances own
+ * COMFY_PORT_BASE + the card's nvidia-smi index (base .. base + n - 1, n = the cards of the node), so a multicard instance
+ * sits above them: base + n + block * n * n + first * n + second, where first and second are the nvidia-smi indexes of the two
+ * cards in the order the launch lists them (the order ComfyUI numbers them in) and block is 0 for the storage-first launch
+ * and 1 for the compute-first one. The key spells that same ordered pair and order (multicardInstanceKey), so one key has one
+ * port and two keys never share one. A two-card node: storage-first 0,1 is base + 3 and 1,0 is base + 4; compute-first
+ * 0,1 is base + 7 and 1,0 is base + 8. n is the highest index of the driver's whole table plus one (a display card or a
+ * gap in the indexes still counts). 0 when it cannot be worked out (a card absent from the table, a COMFY_PORT_BASE that
+ * is no port, a port past 65535): the instance then falls back to the key's own port, as before.
+ */
+export function multicardPort(launch, table, env = {}) {
+  const cards = Array.isArray(launch && launch.cards) ? launch.cards : [];
+  const indexOf = (uuid) => (table || []).find((c) => String(c.uuid).toLowerCase() === String(uuid).toLowerCase());
+  const [a, b] = cards.map(indexOf);
+  if (cards.length !== 2 || !a || !b || !(table || []).length) return 0;
+  const n = Math.max(...table.map((c) => c.index)) + 1;
+  const raw = String(env.COMFY_PORT_BASE ?? "").trim();
+  const base = raw ? Number(raw) : COMFY_PORT_BASE;
+  if (!Number.isInteger(base) || base < 1024 || base > 65535) return 0;
+  const block = launch.order === CARD_ORDER_COMPUTE_FIRST ? 1 : 0;
+  const port = base + n + block * n * n + a.index * n + b.index;
+  return port > 65535 ? 0 : port;
+}
+
+/**
  * multicardEnv: the environment ensureComfy launches with. The film's driver (and any caller) may carry settings that
  * contradict a two-card --gpu-only launch: a single card pin (COMFY_CARD_UUID, COMFY_CUDA_DEVICE) and dynamic VRAM
  * (COMFY_DYNAMIC_VRAM=on). They are dropped here, for the launch only, and the instance key is set so the instance has
- * its own port (the caller's COMFY_API when it gave one), directories and marker.
+ * its own port (the caller's COMFY_API when it gave one, else multicardPort from the card table), directories and marker.
  */
-export function multicardEnv(env, launch) {
+export function multicardEnv(env, launch, table = []) {
   const out = { ...env, COMFY_INSTANCE: launch.key, COMFY_CARD_UUID: "", COMFY_CUDA_DEVICE: "", COMFY_DYNAMIC_VRAM: "" };
   delete out.CUDA_VISIBLE_DEVICES; // ensureComfy sets it from the launch
+  if (!String(env && env.COMFY_API || "").trim()) {
+    const port = multicardPort(launch, table, env || {});
+    if (port) out.COMFY_API = `http://127.0.0.1:${port}`;
+  }
   return out;
 }
 
@@ -675,8 +704,8 @@ export function confirmWithLease(pair, held, cardsFlag = "wan-cards") {
 }
 
 /**
- * portNote: a multicard instance with no --api and no COMFY_API listens where its instance key falls back to (COMFY_PORT_BASE + index,
- * the port the per-card instances use too). A ComfyUI already holding it stops the run, closed (COMFY-PORT-TAKEN / COMFY-PROFILE-MISMATCH),
+ * portNote: a multicard instance with no --api and no COMFY_API listens on the port multicardPort works out for its card pair; only when that
+ * cannot be worked out does it fall back to where its instance key falls back to (COMFY_PORT_BASE + index, the port the per-card instances use too). A ComfyUI already holding it stops the run, closed (COMFY-PORT-TAKEN / COMFY-PROFILE-MISMATCH),
  * so the caller is told which port it got and how to pick its own. "" when the caller gave one.
  */
 export function portNote(flags, env, api, label = "wan-placement") {
@@ -704,7 +733,8 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   if (ltx) refuseUnmeasuredLtx(flags); else refuseUnmeasuredWan(flags);
   const residentGb = ltx ? wanResidentGb(flags, LTX25_RESIDENT_GB_DEFAULT) : wanResidentGb(flags);
   const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn });
-  const pair = resolveWanCards({ tokens, source, cards: cards(), compute: computeOverride(env) });
+  const table = cards();
+  const pair = resolveWanCards({ tokens, source, cards: table, compute: computeOverride(env) });
   if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
   if (ltx) {
     // The LTX-2.5 launch lists the compute card first (cuda:0 computes: ComfyUI-MultiGPU #220), loads the MultiGPU pack and the harness's own and nothing else (the graph
@@ -712,7 +742,7 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
     checkLtxResident(residentGb, pair, flags);
     say("LTX-PLACEMENT-NOTE: one LTX-2.5 run was made on the two cards: 1280x704x121 with the default " + LTX25_RESIDENT_GB_DEFAULT + " GiB share peaked at 11.54 GiB on the compute card and 12.71 GiB on the storage card, 124 s of ComfyUI time; a larger share or clip is unmeasured and can run out of memory in the first sampler step (lower --wan-resident-gb if it does), and the " + MULTICARD_WAIT_SEC + " s default wait is the Wan film's (pass --wait-sec to change it)");
     const launch = launchFn(pair, { comfyDir, packDirsFn: (d) => packDirs(d, undefined, [PACK_MULTIGPU]), order: CARD_ORDER_COMPUTE_FIRST });
-    const plan = { pair, launch, residentGb, family: "ltx25", env: multicardEnv(env, launch) };
+    const plan = { pair, launch, residentGb, family: "ltx25", env: multicardEnv(env, launch, table) };
     const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
     say(`ltx25-placement: multicard on ${source}: ${line("compute", LTX25_COMPUTE_DEVICE, pair.compute)}; ${line("storage", LTX25_STORAGE_DEVICE, pair.storage)}; ${residentGb} GiB of the DiT resident on the compute card; text encoder split ${LTX25_TE_ALLOCATION_DEFAULT}, released from the cards after the prompt is encoded; ${computeChosen(pair)}`);
     return plan;
@@ -726,7 +756,7 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   const gguf = wanIsGguf(flags);
   const launchOpts = gguf ? { comfyDir, packDirsFn: (d) => packDirs(d, undefined, [...REQUIRED_PACKS, PACK_GGUF]) } : { comfyDir };
   const launch = { ...launchFn(pair, launchOpts), sage: attention === "sage", ...(gguf ? { gguf: true } : {}) };
-  const plan = { pair, launch, residentGb, attention, env: multicardEnv(env, launch) };
+  const plan = { pair, launch, residentGb, attention, env: multicardEnv(env, launch, table) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
   const sageClause = attention === "sage" ? `; sage attention (COMFY_EXTRA_ARGS): activations sized at ${wanActivationsGib(wanGeometry(flags).tokens, attention).toFixed(1)} GiB` : "";
   say(`wan-placement: multicard on ${source}: ${line("storage", WAN_STORAGE_DEVICE, pair.storage)}; ${line("compute", WAN_COMPUTE_DEVICE, pair.compute)}; ${residentGb} GiB of each expert resident on the compute card; ${computeChosen(pair)}${sageClause}`);

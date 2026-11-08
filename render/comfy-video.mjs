@@ -427,7 +427,8 @@ export function planRun(argv, { env = process.env, comfyDir = COMFY_DIR, planFn 
   const { pos, flags } = parseArgs(argv);
   const multicard = planFn({ flags, env, comfyDir, isWanGraph: runsWanGraph(flags), isLtxGraph: runsLtxGraph(flags), say });
   const api = comfyApi(flags.api, multicard ? multicard.env : env);
-  const note = multicard ? portNote(flags, multicard.env, api) : "";
+  // the CALLER's env: multicard.env now carries the derived COMFY_API, which would read as a port the caller gave
+  const note = multicard ? portNote(flags, env, api) : "";
   const slot = {
     noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api, reserveVram: flags["reserve-vram"],
     family: familySignature("video-" + (flags.model || "wan"), flags.transformer || flags["high-unet"]),

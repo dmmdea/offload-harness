@@ -1706,7 +1706,15 @@ first and miss a holder on `127.0.0.1`). If something holds the port the launch 
 `COMFY_PORT_BASE` (default 8189) plus `COMFY_INSTANCE_INDEX`; the harness's own admission (P13b) gives
 the endpoint explicitly as the base plus the card's nvidia-smi index, so a card always has the same port
 (the ownership proof refuses to reuse an instance whose launch marker records another one), and
-`COMFY_PORT_BASE` moves the whole range. The harness reserves 8189 to 8192 on a host for this, so a
+`COMFY_PORT_BASE` moves the whole range. A card-only (multicard) instance never shares a port with a
+per-card one: with `n` the highest nvidia-smi index of the node plus one, its port is
+`COMFY_PORT_BASE + n + block*n*n + first*n + second`, where `first` and `second` are the nvidia-smi
+indexes of its two cards in the order ComfyUI numbers them (storage first, or compute first for LTX-2.5
+and the compute-first image rows) and `block` is 0 for the storage-first launch and 1 for the compute-first
+one, so each instance key has one port and no two keys share one (a two-card node: 8192 and 8193
+storage-first, 8196 and 8197 compute-first; a three-card node: 8193 to 8195, 8197 to 8199 storage-first and
+8202 to 8204, 8206 to 8208 compute-first, inside 8192 to 8209). `--api` / `COMFY_API` still wins; the
+runner derives the port only when neither is given. The harness reserves 8189 to 8192 on a host for this, so a
 hand-started set of per-card ComfyUI processes on the same ports (an older stopgap launcher that
 numbers them by card ordinal and uses its own output directories) is never reused or stopped: it
 fails the ownership proof above and is refused with `COMFY-PROFILE-MISMATCH`. The two launchers must
@@ -1997,7 +2005,9 @@ the whole node; one declared device runs in that card's own instance, which sees
 the lease holds, lease ids) for a card lease; for a per-card instance `COMFY_CARD_UUID` (the driver's GPU
 uuid, never an index: `COMFY_CUDA_DEVICE` is blank) and `COMFY_API` (the instance's endpoint: the base
 port, 8189, plus the card's nvidia-smi index, so 8189, 8190 and 8191 on the 3-card box; `COMFY_PORT_BASE`
-moves the range). The port is stable per card because the render layer refuses to reuse an instance whose
+moves the range); a card-only call gets no `COMFY_API` from the harness, because the roles and the card order
+that name its instance key are chosen in the runner, which derives its port above this range (see
+"Ports and other launchers"). The port is stable per card because the render layer refuses to reuse an instance whose
 launch marker records another port. And `GPU_LEASE_UNLOAD_MODELS`: the models the runner's unload may
 take, which is every model of the roster except the memory stack and the models positively placed on
 another card (`gpualloc.UnloadModels`, the rule `gpu reserve --devices` uses). A model is placed by `layers`,
