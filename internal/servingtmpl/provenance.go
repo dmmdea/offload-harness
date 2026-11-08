@@ -187,6 +187,10 @@ type ParamsBasis struct {
 	OmitE4B bool `json:"omit_e4b,omitempty"`
 	// OmitEmbed300M is omitted when false, so every tier that keeps the 300M embedder hashes as it did.
 	OmitEmbed300M bool `json:"omit_embeddinggemma,omitempty"`
+	// HeavyCard and UtilityCard are omitted when empty, so every render that names no card role (every
+	// tier but the two-card pinned one, and that one at its defaults) hashes as it did.
+	HeavyCard   string `json:"heavy_card,omitempty"`
+	UtilityCard string `json:"utility_card,omitempty"`
 }
 
 // BasisOf projects a Params into its hashed mirror.
@@ -201,6 +205,7 @@ func BasisOf(p Params) ParamsBasis {
 		Backend: p.Backend, AltCPULlamaBin: p.AltCPULlamaBin, DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat: p.VLLMSeat, ExtraVLLMSeats: p.ExtraVLLMSeats, VLLMRuntime: p.VLLMRuntime,
 		OmitE4B: p.OmitE4B, OmitEmbed300M: p.OmitEmbed300M,
+		HeavyCard: p.HeavyCard, UtilityCard: p.UtilityCard,
 	}
 }
 
@@ -219,6 +224,7 @@ func (b ParamsBasis) Params() Params {
 		Backend: b.Backend, AltCPULlamaBin: b.AltCPULlamaBin, DisableCUDAGraphs: b.DisableCUDAGraphs,
 		VLLMSeat: b.VLLMSeat, ExtraVLLMSeats: b.ExtraVLLMSeats, VLLMRuntime: b.VLLMRuntime,
 		OmitE4B: b.OmitE4B, OmitEmbed300M: b.OmitEmbed300M,
+		HeavyCard: b.HeavyCard, UtilityCard: b.UtilityCard,
 	}
 }
 

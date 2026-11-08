@@ -49,6 +49,9 @@ function Get-GpuArch {
   if ($Name -imatch 'RTX\s+PRO\s+\d{4}') { return 'blackwell' }
   if ($Name -imatch 'RTX\s*40\d{2}' -or $Name -imatch 'RTX\s*40\b') { return 'ada' }
   if ($Name -imatch 'RTX\s*30\d{2}' -or $Name -imatch 'RTX\s*30\b') { return 'ampere' }
+  # Data-center / workstation Ampere without an RTX 30xx number (A2, A10, A16, A30, A40, A100, RTX A4000...):
+  # label only, mirrors internal/hwdetect/arch.go; keeps an A2 out of the 'unrecognized NVIDIA' warning.
+  if ($Name -imatch '\bNVIDIA\s+A(2|10|16|30|40|100)\b' -or $Name -imatch '\bRTX\s+A\d{4}\b') { return 'ampere' }
   # NVIDIA Maxwell (sm_50/sm_52): GTX 900 desktop+mobile, 750/750 Ti/745, 8x0M / 9x0M(X)
   # mobile, Quadro M, the original TITAN X. ABOVE the AMD '\b7\d{2}M\b' rule, which would
   # otherwise read a "750M" as RDNA3. Same rules as internal/hwdetect/arch.go.

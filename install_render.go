@@ -543,6 +543,10 @@ type renderRequest struct {
 	// deriveRender normalises it, so the value the stamp records and the replay re-derives from is
 	// the cleaned one.
 	EG2LlamaBin string
+	// HeavyCard / UtilityCard (--heavy-card, --utility-card) place the two roles of a two-card
+	// pinned template on physical cards (a CUDA index or a GPU-<uuid>); empty is the template
+	// default (heavy 0, utility 1). Only a tier whose template pins card roles accepts them.
+	HeavyCard, UtilityCard string
 	// PinnedVLLM, when set, REPLACES the vLLM seat resolution instead of running
 	// it. Only the replay sets it: vllmSeatFor inspects the LOCAL box (does this
 	// machine have the hand-built venv and the snapshot?), so re-running the
@@ -730,6 +734,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		DisplayLayer:  displayLayerOf(layers),
 		OmitE4B:       p.OmitE4B,
 		OmitEmbed300M: p.OmitEmbeddingGemma,
+		HeavyCard:     req.HeavyCard, UtilityCard: req.UtilityCard,
 	}
 	rendered, err := servingtmpl.Render(tmpl, params)
 	if err != nil {
@@ -759,6 +764,8 @@ func runInstallRender(args []string) error {
 	llamaBin := fs.String("llama-bin", "", "directory holding llama-server and its shared objects")
 	altLlamaBinCPU := fs.String("llama-bin-cpu", "", "directory of a CPU llama-server build: renders the tier's CPU seat family beside its GPU seats (tier must declare alt_backends [cpu])")
 	eg2LlamaBin := fs.String("llama-bin-eg2", "", "directory of the llama.cpp build that serves ONLY the embeddinggemma2 entry (default: --llama-bin)")
+	heavyCard := fs.String("heavy-card", "", "two-card tiers: the card (CUDA index or GPU-<uuid>) that carries the 27B agent and vision seats (default 0; the utility card defaults to the other index)")
+	utilityCard := fs.String("utility-card", "", "two-card tiers: the card that carries the memory stack, the cascade, STT and the forecaster beside the heavy seat (default 1)")
 	modelsDir := fs.String("models", "", "directory holding the GGUF model files")
 	listen := fs.String("listen", "127.0.0.1:11436", "llama-swap listen address")
 	threads := fs.Int("threads", 0, "--threads per server (default: half the logical CPUs)")
@@ -789,6 +796,8 @@ func runInstallRender(args []string) error {
 		RknpuHome:      homeOr(*rknpuHome, "RKNPU_HOME", *home, "rknpu"),
 		AltLlamaBinCPU: *altLlamaBinCPU,
 		EG2LlamaBin:    *eg2LlamaBin,
+		HeavyCard:      *heavyCard,
+		UtilityCard:    *utilityCard,
 		VLLM:           vllmRuntimeFlags{user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome},
 	})
 	if err != nil {
@@ -901,6 +910,8 @@ var nineBAgentSeatEntries = []string{"mimo-9b-agent", "qwen3.5-9b-agent"}
 // llama.cpp fails (register A-07); the tier's agent answer is the 27B GSQ seat, with the 4B as its fallback.
 var noNineBAgentSeatTiers = map[string]string{
 	"ampere-16": "measured on the A2: the 9B under llama.cpp fails, and the 9B under vLLM only ties the 4B (register A-07)",
+	// The same silicon twice (two A2s, one 16 GB card per role): the 27B and 4B seats are measured there, the 9B never was.
+	"ampere-2x16": "two A2 cards, same sm_86 silicon as ampere-16: the 9B under llama.cpp fails there, and the 9B under vLLM only ties the 4B (register A-07)",
 }
 
 // refuseLlamaCppNineBAgentSeat is the render-time form of register A-40, which recorded the A2 prohibition and
@@ -1433,6 +1444,8 @@ func replayRequest(b servingtmpl.SpecBasis) (renderRequest, bool) {
 		// replay that dropped one re-rendered the entry or the family on the main build and read STALE for
 		// a path the node chose itself, which no re-render by this binary could ever fix.
 		AltLlamaBinCPU: b.Params.AltCPULlamaBin, EG2LlamaBin: b.Params.EG2LlamaBin,
+		// The card roles are a per-BOX choice (which card runs hot), so a replay re-derives them from the stamp.
+		HeavyCard: b.Params.HeavyCard, UtilityCard: b.Params.UtilityCard,
 		// The vLLM deployment half is a per-BOX fact (the account, the bound
 		// address, where the venv lives), never a seed. Pinned from the stamp so
 		// the replay measures seed drift and not "the auditing box is not the
