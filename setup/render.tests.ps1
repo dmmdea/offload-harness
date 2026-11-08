@@ -105,7 +105,7 @@ if ($macro -match '--ctx-size 32768')                          { Ok 'ampere-8/mi
 if ($macro -match '--cache-type-k q8_0' -and $macro -match '--cache-type-v q8_0') { Ok 'ampere-8/mid KV=q8_0 (symmetric)' } else { Bad 'ampere-8/mid KV q8_0' }
 if ($macro -match '--flash-attn on')                           { Ok 'ampere-8/mid flash-attn on' }    else { Bad 'ampere-8/mid flash-attn' }
 if ($macro -match '--cache-ram 16384')                         { Ok 'ampere-8/mid cache-ram 16384 (ADR 0056, never below the 8192 upstream default)' } else { Bad "ampere-8/mid cache-ram (got: $macro)" }
-if ($macro -notmatch '--slot-save-path')                      { Ok 'ampere-8/mid renders NO slot-save-path (ADR 0056: llama-server REFUSES TO START when the path is missing, and the par8 seat has 8 slots)' } else { Bad "ampere-8/mid must not render slot-save-path (got: $macro)" }
+if ($macro -notmatch '--slot-save-path')                      { Ok 'ampere-8/mid renders NO slot-save-path while the llama.cpp build is unknown (it renders only when the install home is known, the build is at or above the kvslot floor in setup/floors.json and the entry runs one slot; the render creates the directory, since llama-server REFUSES TO START on a missing one)' } else { Bad "ampere-8/mid must not render slot-save-path with no known llama.cpp build (got: $macro)" }
 # RAM is overflow only (operator rule 2026-09-10; wiring-debt W4, 0.132.4): an 8 GB card cannot hold the
 # 26B without parking its experts in RAM, and --cpu-moe parks ALL of them. This block used to assert the
 # opposite - that ampere-8/mid renders the 26B WITH --cpu-moe - which is how <node-a> served it live.

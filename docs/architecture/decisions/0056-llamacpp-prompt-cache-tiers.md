@@ -5,7 +5,7 @@ date: "2026-09-20"
 
 # ADR 0056 — llama.cpp prompt-cache tiers: host-RAM cache per RAM tier, SSD slot save/restore driven by the harness
 
-Status: ACCEPTED (Layer 1 shipped 0.131.3, 2026-09-20; Layer 2 node side shipped 0.132.0, 2026-09-21; its delegator side planned — `plans/2026-09-20-llamacpp-prompt-cache-tiers.md`, operator-approved 2026-09-20)
+Status: ACCEPTED (Layer 1 shipped 0.131.3, 2026-09-20; Layer 2 node side shipped 0.132.0, 2026-09-21; its delegator side blocked on upstream #25913, unblocked by #26004 and shipped node-side 2026-11-08 — see the amendment and ADR 0100)
 
 ## Context
 
@@ -162,3 +162,42 @@ One operational number for whoever unblocks this: a slot file is roughly 50 MB f
 33 KB per cached token — 61 MB for 344 tokens, 151 MB for 3,231, and about 1.1 GB for a full
 32k window. The 8 GiB default cap therefore holds ~7 full-window slots, and the per-tier caps
 in the plan need to be set from that arithmetic, not guessed.
+
+## Amendment 2026-11-08 — the unblock condition is met; Layer 2 ships node-side
+
+Upstream PR #26004 ("server : preserve context checkpoints across slot save/restore") merged on
+2026-10-08 as commit 033df86, which is tag b11506. The re-run was taken on `<node-b>` rather than
+`<node-f>`: llama.cpp b11977 (it carries the fix, 471 commits past it), CUDA, one RTX 5060 Ti,
+Qwen3.5-9B UD-Q4_K_XL (hybrid, the model class #25913 broke). The flags are the rendered ones:
+`--jinja --reasoning off`, a 32k window, flash attention, q8_0/q8_0, `--cache-ram 8192`,
+`--parallel 1` and `--slot-save-path`. One 3,279-token prompt, and **every arm a new process**:
+
+| arm | tokens processed | prompt_ms |
+|---|---|---|
+| cold (the baseline) | 3,279 | 1,348 |
+| control: same process, same prompt again (Layer 1) | 4 | 73 |
+| control: restart, no restore | 3,279 | 1,253 |
+| **restart, restore (299 ms), same prompt** | **4** | **109** |
+| **restart, restore (311 ms), the prompt plus one new turn** | **26** | **353** |
+| control: restart, the prompt plus one new turn, no restore | 3,301 | 1,256 |
+
+Save took 251 ms and wrote 267,939,204 bytes for 3,279 tokens, about 82 KB per token on this model
+and KV type. That is more than double the 33 KB per token measured on the 4B above, so the cap
+arithmetic is redone per seat.
+
+The restore arm beats the baseline, so the delegator work this ADR blocked is reopened. It ships
+NODE-side, inside the agent loop, and [ADR 0100](0100-the-memory-wall-mapped-onto-the-fleet.md)
+records the design. The delegator never sees the recall block or the setup replay, so a key computed
+there could never match the prefix the node sends.
+
+- The render gate. `--slot-save-path <home>/kvslots` renders when the install home is known, the
+  node's build is at or above the floor in `setup/floors.json`, and the entry runs one slot. The
+  render creates the directory. An audit refuses the flag next to `--parallel` above 1, and the
+  `--parallel 8` twins no longer carry the token. Both rendering defects above are closed.
+- The node reads its slot directory from the running seat's command line, so `OFFLOAD_HOME` no
+  longer has to agree with the render's `--home`.
+- A restore counts as `hit` only when the next completion took most of its prompt from the cache.
+- A restore touches its file, so the LRU sweep keeps hot keys (the limitation noted at
+  `SweepKVSlotDir`).
+- `<node-f>`'s own re-run, on Vulkan, is still owed. Until a node's build reaches the floor, its
+  render emits nothing and it behaves exactly as before.

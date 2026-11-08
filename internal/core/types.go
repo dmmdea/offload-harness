@@ -455,6 +455,19 @@ type Meta struct {
 	PrefillTokens    int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens      int64   `json:"cache_tokens,omitempty"`
 	PrefillMS        float64 `json:"prefill_ms,omitempty"`
+
+	// KV-slot retention (ADR 0100): what the node-side save/restore did for this run. Flat kvslot_* fields, omitted when
+	// the node attached no store. KVSlotRestore is the run-start restore judged on the next completion ("hit", "miss",
+	// "skip:<reason>"; empty = none attempted); KVSlotAdmit the presence-admission verdict when none was.
+	KVSlotRestore          string `json:"kvslot_restore,omitempty"`
+	KVSlotRestoredTokens   int    `json:"kvslot_restored_tokens,omitempty"`
+	KVSlotRestoreMS        int64  `json:"kvslot_restore_ms,omitempty"`
+	KVSlotAdmit            string `json:"kvslot_admit,omitempty"`
+	KVSlotSaves            int    `json:"kvslot_saves,omitempty"`
+	KVSlotSavedBytes       int64  `json:"kvslot_saved_bytes,omitempty"`
+	KVSlotToolWaitSaves    int    `json:"kvslot_toolwait_saves,omitempty"`
+	KVSlotToolWaitRestores int    `json:"kvslot_toolwait_restores,omitempty"`
+	KVSlotToolWaitHits     int    `json:"kvslot_toolwait_hits,omitempty"`
 	// CacheHitInLoop marks a cache hit served from an entry that was WRITTEN by
 	// the agent loop's in-loop offload (T2-D) rather than by a recorded,
 	// caller-facing call.

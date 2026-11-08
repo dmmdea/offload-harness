@@ -145,6 +145,11 @@ type Params struct {
 	// suffix. Both matter only when Seats is non-empty.
 	Home string
 	GOOS string
+	// SlotSave is the caller's verdict that the llama.cpp build this render points at is at or above the
+	// kvslot floor in setup/floors.json (a build that keeps a hybrid model's context checkpoints across a
+	// slot save/restore, upstream #26004). The renderer cannot read a build, so the caller decides and the
+	// decision is hashed with the rest; false (every older caller, an unreadable build) renders no flag.
+	SlotSave bool
 	// RknpuHome is the rknpu accelerator's home, substituted for __RKNPU_HOME__ in seat
 	// paths (an rkllm seat's default launcher lives there). Empty falls back to
 	// <Home>/rknpu, the layout `install seed` uses when no RKNPU_HOME says otherwise.
@@ -2022,26 +2027,31 @@ func (p Params) cacheRAMMiB() int {
 	return 8192
 }
 
-// slotSaveFlag renders NOTHING, on purpose, and the token stays wired so that
-// turning it back on is this one function (ADR 0056 Layer 2).
+// SlotSaveDir is the directory the slot files live in on this render: <install home>/kvslots, spelled the way the
+// templates spell every other home-relative path (forward slashes, unquoted). "" when the render does not turn the
+// feature on: SlotSave unset, no install home, or a home with whitespace in it (the templates leave paths unquoted,
+// so the flag's value would split into two arguments).
+func (p Params) SlotSaveDir() string {
+	if !p.SlotSave || strings.TrimSpace(p.Home) == "" || strings.ContainsAny(p.Home, " \t") {
+		return ""
+	}
+	return strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/") + "/kvslots"
+}
+
+// slotSaveFlag is `--slot-save-path <home>/kvslots` on a render that may carry it, "" otherwise (ADR 0056
+// Layer 2; ADR 0100). It lets llama-server write one slot's KV to a file and read it back, which is how a
+// session's context survives the five-minute idle unload. It is gated on three things, each a way to hurt a node:
 //
-// MEASURED 2026-09-21 on <node-f> (llama.cpp b9934), the two reasons:
-//
-//  1. llama-server REFUSES TO START when the path does not exist —
-//     `error while handling argument "--slot-save-path": not a directory: …`.
-//     A node that renders the flag against a directory nobody created loses
-//     EVERY chat and agent seat, not just this lane. The node's slot directory
-//     comes from OFFLOAD_HOME at runtime while the flag comes from the render's
-//     --home, and the Windows fleet-node launcher sets neither, so those two
-//     agreeing is a coincidence rather than a guarantee.
-//  2. `qwen3.8-27b-par8` on both Blackwell pair templates runs --parallel 8,
-//     where slot 0 belongs to whichever of eight concurrent requests last held
-//     it — so a save there stores someone else's context under this key.
-//
-// Neither is worth carrying while the capability the flag exists for is itself
-// inert (a restore buys zero prefill on this build; upstream #25913). When a
-// build with #26004 beats the cold baseline, this returns the flag again AND
-// the render must create the directory it names.
+//  1. The install home is known (SlotSaveDir) and the llama.cpp build clears the kvslot floor (Params.SlotSave,
+//     decided by the caller from setup/floors.json). Below the floor a restore buys no prefill on a hybrid model.
+//  2. The directory exists. llama-server REFUSES TO START on a missing one, which would take down every seat on the
+//     node, so `install render` creates it before it writes the config.
+//  3. The entry runs one slot. The templates drop the token from every --parallel > 1 entry, and AuditSlotSave
+//     refuses a render that carries both: at --parallel 8 slot 0 belongs to whichever request last held it.
 func (p Params) slotSaveFlag() string {
-	return ""
+	dir := p.SlotSaveDir()
+	if dir == "" {
+		return ""
+	}
+	return "--slot-save-path " + dir
 }

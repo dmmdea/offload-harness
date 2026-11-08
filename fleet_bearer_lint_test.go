@@ -92,7 +92,6 @@ var fleetClientDirs = map[string]bool{
 // fleetBearerAllowlist: requests that go without the bearer, and why.
 var fleetBearerAllowlist = map[string]string{
 	"internal/fleetnode/chat_lane.go:handleChat":       "the node's own forward to its loopback llama-swap, not a request to a fleet node",
-	"internal/fleetnode/kvslots.go:handleKVSlot":       "the node's own forward to its loopback llama-swap, not a request to a fleet node",
 	"internal/fleetview/topmodel.go:fetch":             "the terminal view reads the fleet-ui dashboard's own /api/overview, an unauthenticated route of the operator's dashboard and not a fleet node (the poller behind the dashboard sets the bearer on every node request)",
 	"internal/llamaclient/client.go:Health":            "llama-swap's own /health on the client's endpoint, not a fleet node",
 	"internal/llamaclient/lanes.go:probeFleetHealth":   "the identity read of a cascade lane base that may be a plain llama-swap: health is open, and the bearer must never be offered to a base that is not a fleet node",

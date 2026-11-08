@@ -986,6 +986,9 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		PrefillTokens:      meta.PrefillTokens,
 		CacheTokens:        meta.CacheTokens,
 		PrefillMS:          meta.PrefillMS,
+		KVSlotRestore:      meta.KVSlotRestore, KVSlotRestoredTokens: meta.KVSlotRestoredTokens, KVSlotRestoreMS: meta.KVSlotRestoreMS,
+		KVSlotAdmit: meta.KVSlotAdmit, KVSlotSaves: meta.KVSlotSaves, KVSlotSavedBytes: meta.KVSlotSavedBytes,
+		KVSlotToolWaitSaves: meta.KVSlotToolWaitSaves, KVSlotToolWaitRestores: meta.KVSlotToolWaitRestores, KVSlotToolWaitHits: meta.KVSlotToolWaitHits,
 		Layer:              placedLayer(meta.Placed),
 		// The job behind an agent row and the route's placement note (D-101):
 		// empty — omitted — on a plain cascade call.

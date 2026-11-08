@@ -985,6 +985,12 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	}
 
 	built.Loop.WithObserver(obs).WithLiveness(live)
+	// KV-slot retention (ADR 0100): only where the RUNNING seat's own command names a slot directory and runs one slot
+	// (llama-swap /running), and the config does not switch it off. The seat is warm here (the warm-up above), so the
+	// run-start restore needs no extra warm.
+	if kvStore := p.newKVSlotStore(cctx, seat); kvStore != nil {
+		built.Loop.WithKVSlots(kvStore, agent.DefaultKVSlotPolicy())
+	}
 	act.Phase("running")
 	res, rerr := built.Loop.Run(cctx, contract.Goal)
 	// The run's last liveness reading rides the wire on every branch below —
@@ -1064,6 +1070,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		wire.PrefillTokens = pf.PrefillTokens
 		wire.CacheTokens = pf.CacheTokens
 		wire.PrefillMS = pf.PrefillMS
+	}
+	// The retention's report rides every branch the same way (ADR 0100): a restore that missed, a save that was skipped
+	// and a tool-wait restore are all as interesting on the runs that deferred as on the ones that finished.
+	if kv := res.KVSlot; kv != nil {
+		meta.KVSlotRestore, meta.KVSlotRestoredTokens, meta.KVSlotRestoreMS = kv.Restore, kv.RestoredTokens, kv.RestoreMS
+		meta.KVSlotAdmit, meta.KVSlotSaves, meta.KVSlotSavedBytes = kv.Admit, kv.Saves, kv.SavedBytes
+		meta.KVSlotToolWaitSaves, meta.KVSlotToolWaitRestores, meta.KVSlotToolWaitHits = kv.ToolWaitSaves, kv.ToolWaitRestores, kv.ToolWaitHits
+		wire.KVSlotRestore, wire.KVSlotRestoredTokens, wire.KVSlotRestoreMS = kv.Restore, kv.RestoredTokens, kv.RestoreMS
+		wire.KVSlotAdmit, wire.KVSlotSaves, wire.KVSlotSavedBytes = kv.Admit, kv.Saves, kv.SavedBytes
+		wire.KVSlotToolWaitSaves, wire.KVSlotToolWaitRestores, wire.KVSlotToolWaitHits = kv.ToolWaitSaves, kv.ToolWaitRestores, kv.ToolWaitHits
 	}
 	// The seat's measured numbers from THIS run feed the next estimate: the
 	// effective decode rate over the ≥ 1,024-token completions and the cold
