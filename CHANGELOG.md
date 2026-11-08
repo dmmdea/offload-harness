@@ -7,6 +7,83 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.209.0] - 2026-11-08 - a seat's KV context survives the idle unload on llama.cpp, vLLM agent runs report their reuse, and the ampere-2x16 tier
+
+### Fixed - vLLM agent runs report their KV reuse, the CUDA mimo seat takes the tier's host cache, nvfp4 KV is refused beside a cache server
+
+- **What it does.** Three fixes:
+  - **Reuse accounting on vLLM.** The agent loop's prefill instrument now reads vLLM's
+    `usage.prompt_tokens_details.cached_tokens` when a step carries no llama.cpp `timings`. When the server
+    does not report the field, the step stays unmeasured. A new `prefill_source` (`timings`, `usage` or
+    `mixed`) travels with the run's wire result and ledger row, and the per-step prefill milliseconds are
+    averaged only over steps that carried timings.
+  - **CUDA mimo seat.** The literal `mimo-9b-agent` entry on the Windows and Linux CUDA templates now
+    carries `--cache-ram __CACHE_RAM__ __SLOT_SAVE__` like every other agent seat and its Vulkan twin.
+  - **nvfp4 KV refusal.** A vLLM seat spec that pairs `kv_cache_dtype` nvfp4 with a `cache_server` binding
+    fails validation with the reason. A storeless nvfp4 seat stays allowed, and there is no dtype allowlist.
+- **Why.** These are the "what we store, how much work we reuse" lessons of ADR 0100.
+  - A vLLM seat sends `usage` and no `timings`, so every vLLM step counted as observed with zero cached and
+    zero prefilled tokens: a run read `measured` with no reuse, on the seat that carries the pair boxes'
+    agent work.
+  - The mimo entry ran at llama-server's 8,192 MiB default on every RAM tier, a 1 GiB box included.
+  - The LMCache overlay guard keys on an fp8 prefix, so an nvfp4 seat with a store rendered without it. vLLM
+    PR #46329 reports 8.8 vs 62 tok/s decode and every-second-request corruption for nvfp4 KV on two
+    RTX 5060 Ti.
+- **Check.** All on `<node-b>`:
+  - A local delegation on the vLLM agent seat wrote a ledger row with `prefill_steps 3, prefill_tokens 6235,
+    cache_tokens 1568, prefill_source "usage"` (20 % reuse measured). The previous row from the same seat
+    carried `prefill_steps 2` and no token counts.
+  - `install render --profile ampere-8 --ram-tier min` renders `--cache-ram 1024` on `mimo-9b-agent` for
+    both Windows and Linux.
+  - `Spec.Validate` refuses blackwell-2x16 with `kv_cache_dtype` nvfp4, citing the PR, and passes the shipped
+    fp8 spec.
+
+### Added - llama.cpp KV slot retention: a seat's context survives the idle unload (ADR 0056 Layer 2 reopened, ADR 0100)
+
+- **What it does.** Five parts:
+  - **Render.** On a node whose llama.cpp build is at or above the new floor `"kvslot": 11506` in
+    `setup/floors.json`, `install render` gives every one-slot chat and agent seat
+    `--slot-save-path <home>/kvslots` and creates that directory. The `--parallel 8` twins no longer carry the
+    token, and a new render audit refuses the flag beside a stated slot count above one. An unknown or older
+    build renders exactly what it rendered before.
+  - **Run start.** The agent loop keys the byte-exact prompt its first call sends: the seat's config pin, the
+    seat, the tool specs, and every message, recall and setup replay included. When a slot file for that key
+    is on the node, the loop restores it. A key is saved on its second sighting and restored from the third.
+  - **Tool waits.** Beside a tool call whose cap is 240 s or more, the loop saves the session under a
+    run-scoped key. If the seat unloaded during the tool, it warms the seat and restores. That file is
+    deleted when the run ends.
+  - **Verdicts.** Every restore is judged on the next completion: `hit` only when the cache served at least
+    80 % of what the restore could hold, and a missed start restore deletes its file. The run's
+    `kvslot_restore`, `kvslot_admit`, `kvslot_restored_tokens`, `kvslot_restore_ms`, `kvslot_saves`,
+    `kvslot_saved_bytes` and `kvslot_toolwait_*` travel on the wire result and the ledger row.
+  - **Shared core.** The loop and the bearer-gated `/fleet/kvslot/*` lane share one core, `internal/kvslot`.
+    It refuses a seat whose running command does not state one slot, skips a save with under 6 GiB free on
+    the slot volume, touches a restored file so the LRU sweep keeps it, and sweeps only `k1-<sha256>.bin`
+    files. The node reads the slot directory from the running seat's own command line. `agent_kvslot_retention:
+    false` turns the loop's retention off.
+- **Why.** Layer 2 was blocked because a restore bought zero prefill on b9934 (upstream #25913). The fix,
+  PR #26004, is tag b11506. On b11977 with a hybrid 9B on CUDA, every arm a new process, a restore turned a
+  3,279-token prefill into 4 tokens, and a follow-on turn into 26. The idle unload, a media job and a GPU
+  lease all drop a seat's context mid-session today; this is the memory wall's "move out and restore
+  instead of rebuild by compute" on hardware that has no coherent CPU-GPU link.
+- **Check.** On `<node-b>`, a scratch fleet node built from this branch served a Qwen3.5-9B seat with the
+  flag. The same contract was delegated three times, with the seat unloaded before the third
+  (`/running` empty):
+  - Run 1 was `first-sighting` (5,584 tokens prefilled, 1,886 ms).
+  - Run 2 was `repeat-saved` (one 241,593,408-byte file).
+  - Run 3 was `kvslot_restore: hit` (1,768 tokens restored in 304 ms; 3,845 prefilled, 1,282 ms).
+  - The answer was identical in all three.
+
+  The engine re-measure is recorded in the ADR 0056 amendment. The tool-wait save was not driven end to end:
+  no tool in the contract ran 240 s. Its save, restore and judge are the same core calls this run exercised.
+
+### Added - the `ampere-2x16` tier: two 16 GB Ampere cards, every model pinned whole to one card, card roles chosen at render time
+
+- **What it does.** `install detect` on Linux now classifies exactly two Ampere cards that are each 14-20 GB (two NVIDIA A2, RTX A4000 class) as `ampere-2x16` instead of `dual-gpu`, which has no Linux template. The tier renders the new `llama-swap.linux-cuda-pair.yaml` (backend `cuda-pair`): the Qwen3.8-27B agent and the vision seat sit on the HEAVY card as alternatives; the memory stack, whisper, the forecaster and the cascade (e4b | e2b | the 4B agent) sit on the UTILITY card; the `both` set runs the cascade beside the 27B. `install render --heavy-card N [--utility-card M]` (a CUDA index or a `GPU-<uuid>`; default heavy 0, utility 1) and the same flags on `install.sh` (also `OFFLOAD_HEAVY_CARD` / `OFFLOAD_UTILITY_CARD`) put the roles on physical cards, so a box whose card 0 runs hot renders heavy 1 without post-processing the yaml. Both values ride the provenance stamp, so `audit-yaml --against-render` replays a flipped layout as `MATCH`; the flags are refused on a tier whose template pins no roles, and on two roles that share a card.
+- **Detection.** `NVIDIA A2/A10/A16/A30/A40/A100` and `RTX A<4 digits>` now classify as arch `ampere` (an A2 was `other`), in `arch.go` and mirrored in `detect.ps1`. `Facts` gains `min_vram_gb` (the smallest card), so the pair rule needs EVERY card in the band; the floor is 14 GB because an A2 reports 14.996 GiB. The rule is Linux only (there is no Windows `cuda-pair` template) and no other box's tier changes: a single A2 stays `ampere-16`, a 24 GB or 22.5 GB pair and a mixed 16+8 pair stay `dual-gpu`.
+- **Measured 2026-11-07** on two NVIDIA A2 (llama.cpp b12192 sm_86 CUDA 13.4, llama-swap v270): the 27B agent 8.4 tok/s generation, 42.5 tok/s prompt, 13,956 MiB, on the slot-limited 35 W card (a lower bound: the 60 W card was thermally limited by its chassis fan header, a host airflow fault); e4b 4,430 MiB + embeddinggemma 452 MiB concurrently on the other card; whisper 1,624 MB, an 11 s clip exact in 6.7 s cold; timestral 54.5 ms, 934 MiB; every seat unloaded at ttl 300. Capability record: `docs/tiers/reports/ampere-2x16-node-i.md`.
+- **Check.** `install render --profile ampere-2x16 --os linux --heavy-card 1` reproduces the nine models, per-model card pins and ttl 300 of the hand-pinned config on that box; the only differences are the order of the two env entries and `whisper-stt` resident in every set rather than a conjunct of two.
+
 ## [0.208.0] - 2026-11-07 - the display card takes jobs only while it is idle, and is picked last
 
 ### Changed - the display card takes jobs only while it is idle, and is picked last
