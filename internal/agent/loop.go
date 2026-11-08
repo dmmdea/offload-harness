@@ -190,6 +190,9 @@ type Result struct {
 	// reports no timings yields ObservedSteps 0 and Basis "insufficient_data"
 	// rather than a fabricated 0% reuse.
 	Prefill PrefillReport
+	// KVSlot reports what the node-side KV-slot retention did for this run (kvslot.go): the run-start restore and
+	// its verdict, the saves, and the tool-wait save/restore. nil when no store was attached.
+	KVSlot *KVSlotReport `json:"kvslot,omitempty"`
 	// PrefillSamples (0.131.1): per-call (uncached prompt tokens, ms to first
 	// delta) — see PrefillSample. Present on deferred runs too.
 	PrefillSamples []PrefillSample
@@ -364,6 +367,9 @@ type Loop struct {
 	// the request this client has always sent.
 	sampling      *Sampling
 	samplingFinal *Sampling
+	// kvStore / kvPolicy are the KV-slot retention (kvslot.go), immutable once the Loop is built; nil store = off.
+	kvStore  KVSlotStore
+	kvPolicy KVSlotPolicy
 	// specReserve is the token cost of the tool-spec block, reserved out of the
 	// input budget — the specs ship with EVERY chat request, and on a full
 	// --allow-* build they cost several compactionMargins' worth of tokens
@@ -967,6 +973,8 @@ type budgetState struct {
 	note     string
 	reissue  string
 	narrowed bool
+	// kv is the run's KV-slot retention state (kvslot.go): per run, never on the shared Loop.
+	kv kvRun
 }
 
 // Run executes the loop for objective until the model stops, the step budget is
@@ -981,6 +989,9 @@ func (l *Loop) Run(ctx context.Context, objective string) (Result, error) {
 		res.FinalBudgetFit, res.BudgetNote = bs.fit, bs.note
 	}
 	res.FinalReissue = bs.reissue
+	if rep := bs.kv.report(l.kvStore != nil); rep != nil {
+		res.KVSlot = rep
+	}
 	if l.live != nil {
 		res.SeatRecoveries = l.live.SeatRecoveries()
 	}
@@ -1204,6 +1215,10 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// call of its own for the loop to end on.
 		return rootGoneResult(0), rootGone
 	}
+	// KV-slot retention (kvslot.go): the prompt the first call will send is complete here - preamble and setup replay
+	// both in msgs - so this is the one moment its key is known. Best-effort; a run is never failed or slowed by it.
+	defer l.kvRunEnd(bs)
+	l.kvRunStart(ctx, bs, msgs)
 	for step := 0; step < l.maxSteps; step++ {
 		if err := ctx.Err(); err != nil {
 			return Result{Steps: step, StopReason: "error", Transcript: msgs, TokensIn: tokIn, TokensOut: tokOut, CompactionsExhausted: exhausted, TokenCal: l.calReport(), Prefill: l.prefill.Report(), Pager: l.pager.Report(), TokenizerPath: l.tokPath(), Effects: effects, RuleHits: ruleHits, Calls: calls}, err
@@ -1510,6 +1525,7 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		callRec.Sampling = samp.Summary()
 		callRec.Ms = time.Since(callStart).Milliseconds()
 		calls = append(calls, callRec)
+		l.kvAfterStep(ctx, bs, comp)
 		if l.observer != nil {
 			l.observer.OnStep(step+1, tokOut)
 		}
@@ -1767,7 +1783,9 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 					disabledTools[call.Name] = true
 				}
 			} else {
+				tw := l.kvToolWaitBegin(ctx, bs, call, lastPrompt) // a save beside a long tool call, joined below
 				content, isErr, eff, gone = l.dispatchOrThrottle(ctx, call, msgs, exactCalls, sameNameCalls, disabledTools, firstCallID, pinned, reExecuted, reads)
+				l.kvToolWaitEnd(ctx, bs, tw)
 				if gone != nil && rootGone == nil {
 					rootGone = gone
 				}

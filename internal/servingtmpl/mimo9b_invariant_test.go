@@ -60,7 +60,7 @@ func TestMimo9BSeatKeepsItsMeasuredInvariants(t *testing.T) {
 			}
 			p := params()
 			p.IncludeMimo9B = true
-			p.Ctx = 32768 // amd-gcn's own measured window — must not equal the CUDA literal 65536
+			p.Ctx = 32768    // amd-gcn's own measured window — must not equal the CUDA literal 65536
 			p.KVType = "f16" // amd-gcn's own measured KV type — must not equal the CUDA literal q8_0
 			p.CacheRAMMiB = 8192
 			out, err := Render(string(b), p)

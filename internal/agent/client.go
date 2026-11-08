@@ -205,8 +205,8 @@ type wireResp struct {
 	// a caller can always tell "unmeasured" from "measured zero" — never an
 	// error, never a behavior change (Phase D, ADR 0017).
 	Usage struct {
-		PromptTokens        int `json:"prompt_tokens"`
-		CompletionTokens    int `json:"completion_tokens"`
+		PromptTokens        int                     `json:"prompt_tokens"`
+		CompletionTokens    int                     `json:"completion_tokens"`
 		PromptTokensDetails wirePromptTokensDetails `json:"prompt_tokens_details"`
 		// CompletionTokensDetails.ReasoningTokens: vLLM's count of the
 		// completion tokens spent inside the think block. Absent on llama.cpp

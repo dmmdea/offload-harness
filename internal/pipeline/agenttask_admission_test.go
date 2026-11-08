@@ -12,7 +12,9 @@ import (
 
 func admissionTestPipeline(t *testing.T, base string, admissionSec int) *Pipeline {
 	t.Helper()
+	off := false // these tests count /running polls for admission; the KV-slot store's own /running read is not one
 	cfg := config.Config{
+		AgentKVSlotRetention:  &off,
 		Endpoint:              base,
 		Model:                 "workhorse",
 		AgentModel:            agentTestSeat,
