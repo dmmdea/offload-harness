@@ -48,10 +48,20 @@ shared install. Four parts:
    cannot load it card-only: under --gpu-only ComfyUI builds the whole encoder on the text-encoder card
    (comfy.sd.CLIP.__init__ asks text_encoder_initial_device, which answers the load device when the
    load and offload devices are the same card) and only then does the DisTorch2 allocation apply, so the
-   build runs out of memory on a 15.9 GiB card. This node runs the stock loader with that one answer
-   changed to the CPU (so the encoder is built and filled off the cards, from the read-only map), then
-   places it at once through DisTorch2's own load path, block by block, onto the cards its allocation
-   string names, and checks that no weight is left in host RAM.
+   build runs out of memory on a 15.9 GiB card. Building it on the CPU instead is no answer on a 16 GB host:
+   the stock build allocates every weight there (torch.empty), then copies the file into it
+   (load_state_dict without assign), and the 16.33 GiB encoder ran the 14.8 GiB node-i out of memory
+   (anon-rss 13.77 GB, 2026-11-07). So this node runs the stock loader with two answers changed for the length of
+   the call. The encoder is built on torch's `meta` device, which allocates nothing. Its weights are then taken by
+   assignment, so the parameters ARE the read-only map's tensors (OFFLOAD_RO_LOAD=1) and no host copy exists. The
+   node places the encoder at once through DisTorch2's own load path, block by block, onto the cards its
+   allocation string names, so weights go from the file's pages to a card. It refuses before any card is
+   touched when a tensor got no weight from the file or when a weight sits in anonymous host memory, and after
+   the placement when a weight is left in host RAM. That path is for a plain-float encoder (bf16, fp16, fp32, no
+   quantization marker), which every image and edit recipe row names. A quantized encoder (the LTX-2.5 int8
+   convrot Gemma) loads through ComfyUI's own quantized layers, which this path was never measured with, so it keeps
+   the build this node always made: on the CPU from the read-only map, placed at once, and the host-weight check
+   after the placement. A plain file whose tensors are not the read-only map's is refused (OFFLOAD-TE-NOMAP).
 
 4. OffloadFreeAfterEncode, a pass-through of the positive and negative CONDITIONING that takes the text
    encoder off every card (the LTX-2.5 card-only graph: the 14.3 GiB Gemma encoder and the 20 GiB int8 DiT do
@@ -385,8 +395,65 @@ def _gib_line(totals):
     return ", ".join(f"{name} {size / GIB:.2f} GiB" for name, size in sorted(totals.items())) or "no weights"
 
 
+def _on_map(tensor):
+    # a tensor cut from the read-only map (or a view of one, or a Parameter wrapping one) shares the storage the reader tagged
+    return getattr(tensor.untyped_storage(), "_offload_ro_refs", None) is not None
+
+
+def _named_tensors(module):
+    return list(module.named_parameters()) + list(module.named_buffers())
+
+
+def _encoder_file_verdict(state_dicts):
+    """("plain", None) when every tensor of every state dict is a plain float in the read-only map; ("quantized", why) for a file with a
+    quantization marker or a tensor that is not a plain float; ("unmapped", why) for a plain file whose tensors are not the map's."""
+    import torch
+    plain = (torch.bfloat16, torch.float16, torch.float32)
+    unmapped = None
+    for sd in state_dicts:
+        for name, tensor in sd.items():
+            if name.endswith((".comfy_quant", "scaled_fp8", ".weight_scale", ".scale_weight", ".input_scale", ".scale_input")):
+                return "quantized", f"it carries a quantization marker ({name})"
+            if tensor.dtype not in plain:
+                return "quantized", f"its tensor {name} is {tensor.dtype}, not a plain float"
+            if unmapped is None and tensor.nbytes > 0 and not _on_map(tensor):
+                unmapped = (f"its tensor {name} is not a read-only map tensor (the harness sets OFFLOAD_RO_LOAD=1 for a card-only run; "
+                            f"without the map the weights would be copied into host RAM)")
+    return ("unmapped", unmapped) if unmapped else ("plain", None)
+
+
+def _host_anon_bytes(module):
+    # weight bytes held in host memory that is not the read-only map (a copy, or a tensor torch allocated)
+    return sum(t.nbytes for _, t in _named_tensors(module) if t.device.type == "cpu" and t.nbytes > 0 and not _on_map(t))
+
+
+def _check_filled(module, clip_name):
+    meta = [name for name, t in _named_tensors(module) if t.is_meta]
+    if meta:
+        # load_state_dict runs with strict=False, so a key the file lacks is only logged; on a meta build it would stay a weightless tensor
+        raise RuntimeError(f"OFFLOAD-TE-UNFILLED: {len(meta)} tensors of the text encoder {clip_name} got no weight from the file "
+                           f"(e.g. {meta[:4]}); nothing was placed on a card")
+    # a parameter whose file dtype differs from the dtype it was built with: stock ComfyUI casts it while copying, so this does too, if it is small
+    cast = 0
+    for module_ in module.modules():
+        for name, param in list(module_.named_parameters(recurse=False)):
+            want = getattr(module_, f"{name}_comfy_model_dtype", None)
+            if want is not None and param.dtype != want:
+                cast += param.nbytes
+                if cast > HOST_WEIGHT_LIMIT_BYTES:
+                    raise RuntimeError(f"OFFLOAD-TE-DTYPE: the text encoder {clip_name} stores {param.dtype} where it was built for {want} "
+                                       f"(more than {HOST_WEIGHT_LIMIT_BYTES // 1024 ** 2} MiB of it); casting that would copy it into host RAM")
+                param.data = param.data.to(want)
+    anon = _host_anon_bytes(module)
+    if anon > HOST_WEIGHT_LIMIT_BYTES:
+        raise RuntimeError(f"OFFLOAD-TE-NOMAP: {anon / GIB:.2f} GiB of the text encoder {clip_name} sits in anonymous host memory, "
+                           f"not in the read-only map; nothing was placed on a card")
+    return cast
+
+
 class OffloadCLIPLoaderDisTorch2:
-    """CLIP loader. Builds the text encoder off the cards, then places its blocks on the cards `expert_mode_allocations` names (DisTorch2)."""
+    """CLIP loader. Builds the text encoder on `meta`, fills it from the read-only map, then places its blocks on the cards
+    `expert_mode_allocations` names (DisTorch2). No weight is ever copied into host RAM."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -405,24 +472,71 @@ class OffloadCLIPLoaderDisTorch2:
 
         if not str(expert_mode_allocations).strip():
             raise ValueError("OFFLOAD-TE-NOSPLIT: expert_mode_allocations is empty, so this would build the whole encoder on one card, which is what this node exists to avoid")
-        stock = _stock_clip_loader()()
-        original = mm.text_encoder_initial_device
+        import comfy.sd
 
-        def off_card(load_device, offload_device, model_size=0):
+        stock = _stock_clip_loader()()
+        original_device = mm.text_encoder_initial_device
+        original_states = comfy.sd.load_text_encoder_state_dicts
+        original_load_sd = comfy.sd.CLIP.load_sd
+        seen = {"files": 0, "mode": None}
+
+        def judge_states(state_dicts=[], *args, **kwargs):
+            # the file is read (load_clip, through the read-only reader) before the encoder is built, so it is judged here, before any build
+            seen["files"] += len(state_dicts)
+            kind, reason = _encoder_file_verdict(state_dicts)
+            if kind == "unmapped":
+                raise RuntimeError(f"OFFLOAD-TE-NOMAP: the text encoder {clip_name} cannot be built card-only: {reason}")
+            if kind == "quantized":
+                # not measured on the meta path (a quantized encoder loads through ComfyUI's own quantized layers): it keeps the build this
+                # node always made, on the CPU from the read-only map and placed at once, with the host-weight check after the placement
+                _say(f"text encoder {clip_name}: {reason}, so it is built off the cards as before (staged in host RAM while it is built), not on meta")
+            seen["mode"] = "meta" if kind == "plain" else "host"
+            return original_states(state_dicts, *args, **kwargs)
+
+        def where_built(load_device, offload_device, model_size=0):
+            if seen["mode"] == "meta":
+                _say(f"text encoder {clip_name}: {model_size / GIB:.2f} GiB built on meta (nothing allocated), to be filled from the read-only map, "
+                     f"not built on {load_device} as --gpu-only would")
+                return torch.device("meta")
             _say(f"text encoder {clip_name}: {model_size / GIB:.2f} GiB built off the cards (load device {load_device}), not on {load_device} as --gpu-only would")
             return torch.device("cpu")
 
-        mm.text_encoder_initial_device = off_card
+        def load_sd_by_assign(clip_self, sd, full_model=False):
+            # stock comfy.sd.CLIP.load_sd assigns only for a dynamic patcher (never under --gpu-only) and otherwise copies into the built
+            # weights; on a meta build a copy is a silent no-op, so every load here assigns: the parameters become the map's tensors
+            if seen["mode"] != "meta":
+                return original_load_sd(clip_self, sd, full_model=full_model)
+            if full_model:
+                return clip_self.cond_stage_model.load_state_dict(sd, strict=False, assign=True)
+            clip_self.cond_stage_model.can_assign_sd = True
+            for m in clip_self.cond_stage_model.modules():
+                m.can_assign_sd = True
+            return clip_self.cond_stage_model.load_sd(sd)
+
+        mm.text_encoder_initial_device = where_built
+        comfy.sd.load_text_encoder_state_dicts = judge_states
+        comfy.sd.CLIP.load_sd = load_sd_by_assign
         try:
             out = stock.override(clip_name=clip_name, type=type, device=device, virtual_vram_gb=0.0, donor_device="cpu",
                                  expert_mode_allocations=expert_mode_allocations, eject_models=eject_models)
         finally:
-            mm.text_encoder_initial_device = original
+            mm.text_encoder_initial_device = original_device
+            comfy.sd.load_text_encoder_state_dicts = original_states
+            comfy.sd.CLIP.load_sd = original_load_sd
+        if not seen["files"]:
+            # the stock loader took a path this node does not see (a ComfyUI change); its file was never judged, so nothing is trusted
+            raise RuntimeError(f"OFFLOAD-TE-UNJUDGED: the stock loader built {clip_name} without comfy.sd.load_text_encoder_state_dicts; "
+                               f"this node cannot tell whether it was built off the map, so it stops before any card is touched")
 
         clip = out[0]
         model = clip.patcher.model
         built = _weight_bytes_by_device(model)
-        _say(f"text encoder {clip_name} built: {_gib_line(built)}")
+        if seen["mode"] == "meta":
+            cast = _check_filled(model, clip_name)
+            _say(f"text encoder {clip_name} filled from the read-only map: {_gib_line(built)} (file pages, not host copies; "
+                 f"anonymous {_host_anon_bytes(model) / 1024 ** 2:.1f} MiB, cast {cast / 1024 ** 2:.1f} MiB)")
+        else:
+            _say(f"text encoder {clip_name} built: {_gib_line(built)}")
         started = time.time()
         # the load ComfyUI makes itself when the build was on the load device (comfy.sd.CLIP.__init__), now through DisTorch2's allocation
         mm.load_models_gpu([clip.patcher], force_full_load=True)
