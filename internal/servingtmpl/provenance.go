@@ -165,11 +165,11 @@ type ParamsBasis struct {
 	Seats         []mediaseat.Seat `json:"seats"`
 	Home          string           `json:"home"`
 	GOOS          string           `json:"goos"`
+	// SlotSave is omitted when false, so a render that carries no --slot-save-path hashes as it did.
+	SlotSave bool `json:"slot_save,omitempty"`
 	// RknpuHome is omitted when empty, so every tier that never sets it keeps the spec
 	// hash it had before the field existed (AltCPULlamaBin does the same).
 	RknpuHome string `json:"rknpu_home,omitempty"`
-	// SlotSave is omitted when false, so a render that carries no --slot-save-path hashes as it did.
-	SlotSave bool `json:"slot_save,omitempty"`
 	// DisplayLayer is hashed as the whole layer spec, not as its name: the
 	// template substitutes the layer’s rungs, its device pin and its guards into
 	// the rendered text (ADR 0052), so a change to any of them changes the
