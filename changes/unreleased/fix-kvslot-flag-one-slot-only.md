@@ -21,3 +21,18 @@
   - `ampere-6` now flags `qwen3.6-35b-a3b-agent`.
   - The new audit refuses `gemma4-e2b` in the 0.209.0 renders of `ampere-8`/linux and
     `blackwell-2x16`/windows, and passes the new renders.
+
+### Fixed - `loupe` reads the KV reuse of local delegations again
+
+- **What it does.** The `agent_prefill` section of `local-offload loupe` now reads every run row,
+  including the inner `agent` row that a delegator-local job writes beside its `agent_delegate` row.
+  Dispatch markers and refusal rows stay out. Job counters still read one row per job (register C-62).
+- **Why.** The report built its prefill figures from the job rows, and since 0.143.0 those drop the inner
+  row whenever its parent is present. The inner row is the only one carrying `prefill_*`, and it now also
+  carries `kvslot_*`. So every local delegation read as unmeasured: on the vLLM agent seat, the 0.209.0
+  reuse fix was in the ledger and nowhere in the report. The parent row carries no prefill steps, so
+  each run is still counted once.
+- **Check.** `loupe --since 1 --include-test-traffic --json` on `<node-b>`'s ledger:
+  - Released 0.209.0: `measured_rows 0`, `kv_reuse_pct null`, `insufficient_data`.
+  - This branch: `measured_rows 25`, `prefill_tokens 6235`, `cache_tokens 1568`, `kv_reuse_pct 20.09`.
+  - Over the whole ledger, measured rows go from 2,334 to 3,908, and reuse from 49.5 % to 48.9 %.

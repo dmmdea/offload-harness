@@ -246,6 +246,19 @@ func runLoupe(args []string) error {
 			rows = append(rows, e)
 		}
 	}
+	// The prefill report reads RUN rows, not job rows. A delegator-local job's prefill (and KV-slot) telemetry
+	// lives on its inner `agent` row, which JobRows drops beside its `agent_delegate` parent, so every local
+	// delegation read as unmeasured. The parent carries no prefill steps, so reading both counts each run once;
+	// dispatch markers and refusal rows did no work and stay out.
+	runRows := make([]ledger.Entry, 0, len(all))
+	for _, e := range all {
+		if e.Phase == ledger.PhaseStarted || e.Refusal {
+			continue
+		}
+		if sinceTS == 0 || e.TS >= sinceTS {
+			runRows = append(runRows, e)
+		}
+	}
 
 	rep := statsReport{LedgerPath: cfg.LedgerPath, Rows: len(rows), WindowDays: *since, ExcludedNonProduction: excluded}
 	rep.EmbedMemo = readEmbedMemoReport(cfg)
@@ -349,7 +362,7 @@ func runLoupe(args []string) error {
 	// observation window. Passing a zero span makes it report insufficient_data rather than
 	// dividing by a guess.
 	rep.Reliability = buildReliability(rows)
-	rep.Prefill = buildPrefill(rows)
+	rep.Prefill = buildPrefill(runRows)
 	rep.Atlas = buildAtlas(rows, rep.SpanDays)
 
 	// Duplicate rate is computed ONLY over rows that carry an identity, so the
