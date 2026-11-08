@@ -173,6 +173,71 @@ func AuditSpill(text string, maxNCPUMoE int) []Violation {
 	return out
 }
 
+// slotSavePathRe matches llama-server's slot directory flag in both spellings, capturing its value (a quoted value
+// keeps its spaces).
+var slotSavePathRe = regexp.MustCompile(`(?:^|\s)--slot-save-path(?:\s+|=)("[^"]*"|'[^']*'|\S+)`)
+
+// CmdSlotSavePath is the --slot-save-path a llama-server command line names, unquoted. ok=false when it names none.
+// The node reads it from the command llama-swap actually spawned (GET /running), so the directory it saves into is
+// the one the running seat was started with and not a second opinion about the install home.
+func CmdSlotSavePath(cmd string) (dir string, ok bool) {
+	all := slotSavePathRe.FindAllStringSubmatch(cmd, -1)
+	if len(all) == 0 {
+		return "", false
+	}
+	dir = strings.Trim(all[len(all)-1][1], `"'`)
+	return dir, dir != ""
+}
+
+// CmdParallel is the slot count a llama-server command line states (`--parallel N`, `-np N`, auto = 4), the last
+// flag winning. found=false when it states none: the build's default then applies and the line cannot say what that is.
+func CmdParallel(cmd string) (n int, found bool) {
+	n, _, found = lastStated(parallelFlagRe, cmd)
+	return n, found
+}
+
+// AuditSlotSave is the render-time rule that a slot directory sits only beside exactly one slot: an entry whose
+// command carries --slot-save-path and states --parallel (or -np) above 1, or states no slot count at all, is
+// refused. Slot 0 of an eight-slot server belongs to whichever request last held it, so a save there stores someone
+// else's context under this key and a restore overwrites a stranger's; an entry that states no count runs the
+// server's default of several, which is why the loop and the /fleet/kvslot lane refuse it too (kvslot.SlotDir). The
+// templates carry the __SLOT_SAVE__ token right after `--parallel 1` and never in a shared macro; this is the check
+// that a later template edit cannot put it anywhere else. Entries are read as llama-swap runs them (macros expanded),
+// the report is sorted by entry, and a document that does not parse is Audit's finding, not this rule's.
+func AuditSlotSave(text string) []Violation {
+	var doc struct {
+		Models map[string]map[string]any `yaml:"models"`
+		Macros any                       `yaml:"macros"`
+	}
+	if err := yaml.Unmarshal([]byte(text), &doc); err != nil {
+		return nil
+	}
+	macros := macroTable(doc.Macros)
+	var out []Violation
+	for name, m := range doc.Models {
+		cmd, _ := m["cmd"].(string)
+		cmd = expandMacros(cmd, macros)
+		if _, has := CmdSlotSavePath(cmd); !has {
+			continue
+		}
+		n, found := CmdParallel(cmd)
+		if !found {
+			n, _, found = lastStated(parallelEnvRe, expandMacros(flatEnv(m["env"]), macros))
+		}
+		if !found {
+			out = append(out, Violation{Rule: "slot-save-parallel", Where: name, Text: "--slot-save-path on an entry that states no --parallel: the server's default runs several slots, and slot 0 belongs to whichever request last held it (ADR 0056); put __SLOT_SAVE__ only after `--parallel 1`"})
+			continue
+		}
+		if n <= 1 {
+			continue
+		}
+		out = append(out, Violation{Rule: "slot-save-parallel", Where: name, Text: fmt.Sprintf(
+			"--slot-save-path beside %d slots: slot 0 belongs to whichever request last held it, so a save stores another request's context under this key (ADR 0056); drop __SLOT_SAVE__ from this entry", n)})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Where < out[j].Where })
+	return out
+}
+
 // macroRefRe matches a llama-swap macro reference, `${name}`. llama-swap's own substitutions
 // (`${PORT}`, `${MODEL_ID}`) match it too and are left alone, because no macro carries their name.
 var macroRefRe = regexp.MustCompile(`\$\{([A-Za-z0-9_-]+)\}`)

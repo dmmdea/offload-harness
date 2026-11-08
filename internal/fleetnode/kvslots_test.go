@@ -25,7 +25,7 @@ func kvSlotStub(t *testing.T, seat string, slotDir string) *httptest.Server {
 		case r.URL.Path == "/running":
 			// The lane refuses to START a seat, so every happy-path case needs one
 			// that /running already reports ready.
-			_ = json.NewEncoder(w).Encode(map[string]any{"running": []map[string]any{{"model": seat, "state": "ready", "cmd": "x"}}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"running": []map[string]any{{"model": seat, "state": "ready", "cmd": slotCmd(slotDir)}}})
 		case strings.HasPrefix(r.URL.Path, "/upstream/"+seat+"/slots/0"):
 			var body struct {
 				Filename string `json:"filename"`
@@ -78,6 +78,14 @@ func kvSlotPost(t *testing.T, h http.Handler, path string, body any) (int, KVSlo
 // repetition so it reads as a fixture (and so the repo's secret scanner does
 // not mistake a literal 64-hex string for a credential).
 var kvTestKey = "k1-" + strings.Repeat("0123456789abcdef", 4)
+
+// kvKeyOf is another well-formed key fixture, one repeated hex digit: the sweep touches only k1-<sha256>.bin names.
+func kvKeyOf(c string) string { return "k1-" + strings.Repeat(c, 64) }
+
+// slotCmd is the command a one-slot seat with a slot directory runs: the lane refuses any other seat.
+func slotCmd(dir string) string {
+	return "llama-server --slot-save-path " + filepath.ToSlash(dir) + " --parallel 1"
+}
 
 func TestKVSlotSaveThenRestoreRoundTrip(t *testing.T) {
 	dir := t.TempDir()
@@ -133,7 +141,7 @@ func TestKVSlotNeverReportsOkWithoutEvidence(t *testing.T) {
 					return
 				}
 				if r.URL.Path == "/running" {
-					_ = json.NewEncoder(w).Encode(map[string]any{"running": []map[string]any{{"model": "seat-x", "state": "ready", "cmd": "x"}}})
+					_ = json.NewEncoder(w).Encode(map[string]any{"running": []map[string]any{{"model": "seat-x", "state": "ready", "cmd": slotCmd(dir)}}})
 					return
 				}
 				_, _ = w.Write([]byte(tc.body))
@@ -207,14 +215,16 @@ func TestSweepKVSlotDirDeletesOldestFirst(t *testing.T) {
 		_ = os.WriteFile(p, bytes.Repeat([]byte{7}, 1000), 0o644)
 		_ = os.Chtimes(p, time.Now().Add(-age), time.Now().Add(-age))
 	}
-	mk("k1-old.bin", 3*time.Hour)
-	mk("k1-mid.bin", 2*time.Hour)
-	mk("k1-new.bin", time.Hour)
+	old, mid, newest := kvKeyOf("a")+".bin", kvKeyOf("b")+".bin", kvKeyOf("c")+".bin"
+	mk(old, 3*time.Hour)
+	mk(mid, 2*time.Hour)
+	mk(newest, time.Hour)
+	mk("ggml-base.bin", 4*time.Hour) // a model beside the slots, oldest of all: never the sweep's to delete
 	_ = os.WriteFile(filepath.Join(dir, "not-a-slot.txt"), []byte("keep"), 0o644)
 	if err := SweepKVSlotDir(dir, 1500, ""); err != nil {
 		t.Fatal(err)
 	}
-	for name, want := range map[string]bool{"k1-old.bin": false, "k1-mid.bin": false, "k1-new.bin": true, "not-a-slot.txt": true} {
+	for name, want := range map[string]bool{old: false, mid: false, newest: true, "ggml-base.bin": true, "not-a-slot.txt": true} {
 		_, err := os.Stat(filepath.Join(dir, name))
 		if (err == nil) != want {
 			t.Errorf("%s: exists=%v, want %v", name, err == nil, want)
@@ -280,7 +290,7 @@ func TestKVSlotRejectsNonJSONContentType(t *testing.T) {
 // the response says ok with a byte count would be a lie.
 func TestSweepNeverDeletesTheFileTheSaveJustWrote(t *testing.T) {
 	dir := t.TempDir()
-	fresh := filepath.Join(dir, "k1-fresh.bin")
+	fresh := filepath.Join(dir, kvKeyOf("d")+".bin")
 	if err := os.WriteFile(fresh, bytes.Repeat([]byte{1}, 4000), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -165,6 +165,8 @@ type ParamsBasis struct {
 	Seats         []mediaseat.Seat `json:"seats"`
 	Home          string           `json:"home"`
 	GOOS          string           `json:"goos"`
+	// SlotSave is omitted when false, so a render that carries no --slot-save-path hashes as it did.
+	SlotSave bool `json:"slot_save,omitempty"`
 	// RknpuHome is omitted when empty, so every tier that never sets it keeps the spec
 	// hash it had before the field existed (AltCPULlamaBin does the same).
 	RknpuHome string `json:"rknpu_home,omitempty"`
@@ -201,7 +203,7 @@ func BasisOf(p Params) ParamsBasis {
 		Threads: p.Threads, CacheRAMMiB: p.CacheRAMMiB, Include26B: p.Include26B, IncludeQ38: p.IncludeQ38,
 		IncludeQ354B: p.IncludeQ354B, IncludeQ359B: p.IncludeQ359B, IncludeMimo9B: p.IncludeMimo9B,
 		IncludeQ3827B: p.IncludeQ3827B, IncludeQ3635B: p.IncludeQ3635B, IncludeEG2: p.IncludeEG2, EG2TextOnly: p.EG2TextOnly, EG2LlamaBin: p.EG2LlamaBin,
-		Seats: p.Seats, Home: p.Home, GOOS: p.GOOS, RknpuHome: p.RknpuHome, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
+		Seats: p.Seats, Home: p.Home, GOOS: p.GOOS, SlotSave: p.SlotSave, RknpuHome: p.RknpuHome, DisplayLayer: p.DisplayLayer, GPUEnv: p.GPUEnv,
 		Backend: p.Backend, AltCPULlamaBin: p.AltCPULlamaBin, DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat: p.VLLMSeat, ExtraVLLMSeats: p.ExtraVLLMSeats, VLLMRuntime: p.VLLMRuntime,
 		OmitE4B: p.OmitE4B, OmitEmbed300M: p.OmitEmbed300M,
@@ -220,7 +222,7 @@ func (b ParamsBasis) Params() Params {
 		Threads: b.Threads, CacheRAMMiB: b.CacheRAMMiB, Include26B: b.Include26B, IncludeQ38: b.IncludeQ38,
 		IncludeQ354B: b.IncludeQ354B, IncludeQ359B: b.IncludeQ359B, IncludeMimo9B: b.IncludeMimo9B,
 		IncludeQ3827B: b.IncludeQ3827B, IncludeQ3635B: b.IncludeQ3635B, IncludeEG2: b.IncludeEG2, EG2TextOnly: b.EG2TextOnly, EG2LlamaBin: b.EG2LlamaBin,
-		Seats: b.Seats, Home: b.Home, GOOS: b.GOOS, RknpuHome: b.RknpuHome, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
+		Seats: b.Seats, Home: b.Home, GOOS: b.GOOS, SlotSave: b.SlotSave, RknpuHome: b.RknpuHome, DisplayLayer: b.DisplayLayer, GPUEnv: b.GPUEnv,
 		Backend: b.Backend, AltCPULlamaBin: b.AltCPULlamaBin, DisableCUDAGraphs: b.DisableCUDAGraphs,
 		VLLMSeat: b.VLLMSeat, ExtraVLLMSeats: b.ExtraVLLMSeats, VLLMRuntime: b.VLLMRuntime,
 		OmitE4B: b.OmitE4B, OmitEmbed300M: b.OmitEmbed300M,

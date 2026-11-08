@@ -12,7 +12,7 @@ logLevel: info
 
 macros:
   common: >-
-    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__
+    --ctx-size __CTX__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
     --jinja --reasoning off --threads __NTHREADS__ --port ${PORT} --host 127.0.0.1
 
 models:
@@ -20,7 +20,7 @@ models:
     aliases: [gemma4-e4b]
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
-      --parallel 1 ${common}
+      --parallel 1 __SLOT_SAVE__ ${common}
     ttl: 300
   gemma4-e2b:
     cmd: >-
@@ -34,7 +34,7 @@ models:
   gemma4-26b-a4b:
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
-      --parallel 1 ${common}
+      --parallel 1 __SLOT_SAVE__ ${common}
     ttl: 300
   embeddinggemma:
     cmd: >-

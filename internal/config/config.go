@@ -2060,6 +2060,11 @@ type Config struct {
 	FleetSTTMaxConcurrent int `json:"fleet_stt_max_concurrent,omitempty"`
 	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
+	// AgentKVSlotRetention switches the agent loop's own use of those slot files (ADR 0100): a run restores the KV of
+	// a prompt this node already paid for, saves a prompt on its second sighting, and saves around a tool call long
+	// enough for the seat to unload. *bool because it defaults ON wherever the running seat supports it (a
+	// --slot-save-path in its command, one slot) and an absent key must not read as an opt-out; false turns it off.
+	AgentKVSlotRetention *bool `json:"agent_kvslot_retention,omitempty"`
 	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
 	// (docs/specs/2026-08-16-multi-node-agent-delegation.md). Default false:
 	// the agent lane runs a coding-agent loop on caller-supplied contracts, so
@@ -4168,6 +4173,11 @@ func (c Config) EnsureDirs() error {
 		}
 	}
 	return nil
+}
+
+// AgentKVSlotRetentionOn reports whether the agent loop's KV-slot retention may attach: on unless the key is false.
+func (c Config) AgentKVSlotRetentionOn() bool {
+	return c.AgentKVSlotRetention == nil || *c.AgentKVSlotRetention
 }
 
 // CascadeSeatGuardOn reports whether the cascade seat guard runs: on unless

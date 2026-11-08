@@ -359,6 +359,7 @@
   "fleet_stt_transcript_ttl_min": 0,
   "fleet_stt_max_concurrent": 0,
   "kvslot_cap_gib": 0,
+  "agent_kvslot_retention": null,
   "fleet_agent_enabled": false,
   "agent_delegation_enabled": false,
   "tools_schema_profile": "full",
