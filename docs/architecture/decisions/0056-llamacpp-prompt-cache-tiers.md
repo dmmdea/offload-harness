@@ -192,8 +192,11 @@ there could never match the prefix the node sends.
 
 - The render gate. `--slot-save-path <home>/kvslots` renders when the install home is known, the
   node's build is at or above the floor in `setup/floors.json`, and the entry runs one slot. The
-  render creates the directory. An audit refuses the flag next to `--parallel` above 1, and the
-  `--parallel 8` twins no longer carry the token. Both rendering defects above are closed.
+  render creates the directory. An audit refuses the flag next to `--parallel` above 1 and on an entry
+  that states no `--parallel` at all (the server's default runs several slots), and the token sits right
+  after `--parallel 1` in each entry, never in a shared macro (0.209.1: the `common` macro had handed it to
+  the multi-slot `gemma4-e2b`). The `--parallel 8` twins no longer carry the token. Both rendering defects
+  above are closed.
 - The node reads its slot directory from the running seat's command line, so `OFFLOAD_HOME` no
   longer has to agree with the render's `--home`.
 - A restore counts as `hit` only when the next completion took most of its prompt from the cache.
