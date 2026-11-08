@@ -204,7 +204,7 @@ test("fixture: normalizeLoudness moves a loud clip's measured loudness toward th
   assert.ok(afterDist < beforeDist, `normalization did not move loudness toward target: before=${before.integratedLUFS} after=${after.integratedLUFS} target=${LOUDNESS_TARGET_LUFS}`);
   assert.ok(afterDist < 1.0, `normalized loudness ${after.integratedLUFS} LUFS is not within 1 LU of the ${LOUDNESS_TARGET_LUFS} LUFS target`);
   // loudnorm's internal 192 kHz must not leak into the output (a 48 kHz music render came back at 192 kHz, 2026-11-07).
-  const rateOf = (f) => spawnSync(bins.ffprobe, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "csv=p=0", f], { encoding: "utf8" }).stdout.trim();
+  const rateOf = (f) => spawnSync(bins.ffprobe, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "csv=p=0", f], { encoding: "utf8", windowsHide: true }).stdout.trim();
   assert.equal(rateOf(tmpOut), rateOf(file), "normalization must keep the source sample rate");
 });
 
