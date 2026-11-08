@@ -19,7 +19,6 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpugen"
-	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/sttclient"
 	"github.com/dmmdea/offload-harness/internal/tasks"
@@ -499,14 +498,21 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 		if rv := paramStr(req.Params, "reserve_vram"); rv != "" {
 			args = append(args, "--reserve-vram", rv)
 		}
+		// the card-only placement (musicgen_placement): the runner plans the pair from the lease (GPU_LEASE_DEVICES) and builds the recipe's loaders
+		if p.cfg.MusicMulticard() {
+			args = append(args, "--placement", "multicard")
+		}
 	}
 
 	timeout := time.Duration(p.cfg.AudioGenTimeoutSec) * time.Second
-	// voice (Chatterbox TTS) has no ComfyUI instance to bind to a card: the whole node, with its worker kept off the
-	// display card unless that card would take an undeclared job now (offDisplay). music drives ComfyUI on a single card.
-	need := wholeNeed(paramStr(req.Params, "waiter_token")).offDisplay().resumableBy(req)
+	// voice (Chatterbox TTS) has no ComfyUI instance to bind to a card. With card-scoped leases on it asks for one card and its worker is pinned to
+	// the card it is granted (voiceNeed), so it runs beside a render on another card; otherwise the whole node, with its worker kept off the
+	// display card unless that card would take an undeclared job now (offDisplay). music drives ComfyUI on a single card, or on two under
+	// musicgen_placement multicard (musicNeed).
+	voiceOnCard := kind == "voice" && p.cardScopedOn()
+	need := voiceNeed(voiceOnCard, paramStr(req.Params, "waiter_token")).resumableBy(req)
 	if kind == "music" {
-		need = singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).declaresRAM(routeRAM(hostneed.RouteMusic, p.cfg)).resumableBy(req)
+		need = musicNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req)
 	}
 	grant, lerr := p.acquireMediaLease(ctx, "audio-gen ("+kind+")", timeout, p.gpuWait(), need)
 	if lerr != nil {
@@ -519,6 +525,12 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	audioGenEnv := p.genEnv()
 	if kind == "music" {
 		audioGenEnv = p.comfyGenEnvFor(grant, true)
+		if p.cfg.MusicMulticard() {
+			// two cards: no pin, no dynamic VRAM (the pair has an instance of its own, keyed by the two cards)
+			audioGenEnv = append(p.genEnv(), grant.launch(multicardLaunch(p.cfg)).Env()...)
+		}
+	} else if voiceOnCard {
+		audioGenEnv = append(audioGenEnv, voiceCardEnv(grant)...)
 	}
 	spec := gpugen.Spec{
 		Exe:           p.cfg.NodePath,

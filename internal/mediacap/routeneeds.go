@@ -344,6 +344,17 @@ func imageNodeClasses(cfg config.Config) []string {
 	return nil
 }
 
+// musicNodeClasses: the custom-node classes the music graph names. ACE-Step's single-card graph is core nodes only; a card-only binding
+// (musicgen_placement: multicard) loads through the recipe's MultiGPU classes.
+func musicNodeClasses(cfg config.Config) []string {
+	if cfg.MusicMulticard() {
+		if row := FindMulticardRow("music", "acestep", MusicModelFiles()); row != nil {
+			return row.NodeClasses()
+		}
+	}
+	return nil
+}
+
 func editNodeClasses(cfg config.Config) []string {
 	if cfg.EditMulticard() {
 		fam := cfg.GenEditFamily
@@ -406,6 +417,8 @@ var classPacks = map[string][]string{
 	// the card-only image and edit recipes (multicard.go): the plain DiT pin and the DisTorch2 text-encoder loader
 	"UNETLoaderMultiGPU":          {"ComfyUI-MultiGPU"},
 	"CLIPLoaderDisTorch2MultiGPU": {"ComfyUI-MultiGPU"},
+	// the card-only music recipe's two-encoder loader (the stock DualCLIPLoader plus `device`)
+	"DualCLIPLoaderMultiGPU": {"ComfyUI-MultiGPU"},
 }
 
 // NodeCheck answers "can this ComfyUI build these node classes?".

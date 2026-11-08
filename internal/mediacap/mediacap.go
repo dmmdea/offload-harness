@@ -217,7 +217,10 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 			return voiceRoute(cfg, exeDir)
 		}},
 		{"generate_audio:music", "acestep", "musicgen_script", cfg.MusicGenScript, true, func(r Route) Route {
-			return withNeeds(r, cfg.ComfyDir, musicNeeds(), nil, nil, nodes)
+			if cfg.MusicMulticard() && r.State == Configured {
+				r.Detail += "; placement=multicard (card-only recipe acestep/xl-turbo-bf16: the DiT on one leased card, the text encoders and the VAE on the other)"
+			}
+			return withNeeds(r, cfg.ComfyDir, musicNeeds(), musicNodeClasses(cfg), nil, nodes)
 		}},
 		{"run_graph", "comfyui", "run_graph_script", cfg.RunGraphScript, true, nil},
 	} {

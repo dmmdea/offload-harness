@@ -509,7 +509,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
 | Upscale | `upscale_script` (shipped default `render/comfy-upscale.mjs`), `upscale_model` (ComfyUI `upscale_models/` filename; empty = `videogen_upscale_model`), `upscale_timeout_sec` (600) |
 | Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb`, `videogen_wan_decode` (`tiled` default; `plain`/`auto` opt-in), `videogen_placement` (`""`/`single` or `multicard`: the card-only Wan placement, "Card-only Wan") and `videogen_wan_resident_gb` (0 = the runner's 3; at most 64) (Wan keys; `placement` / `wan_resident_gb` in a `videogen_families` entry); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
-| Audio | `voicegen_*`, `musicgen_script`; `tts_endpoint` / `tts_model` (default `tts-1`) / `tts_voice` / `tts_api_key` (0.113.25: an OpenAI-compatible speech SERVER for `generate_audio kind=voice` — `voice: endpoint`, or the default on a box with no `voicegen_script`; `internal/ttsclient` POSTs `/v1/audio/speech`, writes the WAV atomically, defers naming the server's words on any non-audio answer, takes no media lease because the server owns its GPU; e.g. VoiceStudio on `http://127.0.0.1:3900`) |
+| Audio | `voicegen_*`, `musicgen_script`, `musicgen_placement` (`""`/`single` or `multicard`: the card-only ACE-Step placement on a node of two equal cards, "Card-only music"; a flat key, not a family-overlay key); `tts_endpoint` / `tts_model` (default `tts-1`) / `tts_voice` / `tts_api_key` (0.113.25: an OpenAI-compatible speech SERVER for `generate_audio kind=voice` — `voice: endpoint`, or the default on a box with no `voicegen_script`; `internal/ttsclient` POSTs `/v1/audio/speech`, writes the WAV atomically, defers naming the server's words on any non-audio answer, takes no media lease because the server owns its GPU; e.g. VoiceStudio on `http://127.0.0.1:3900`) |
 | Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
 | Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
 | ComfyUI | `comfy_dir`, per-task `*_script` and `*_timeout_sec`; launch profile `comfy_cuda_device`, `comfy_dynamic_vram` (`on`/`off`/`""`), `comfy_extra_args` |
@@ -1506,6 +1506,41 @@ OWN derived context's `DeadlineExceeded` directly — authoritative regardless o
 for the child's exit code — and folds "timeout"/"deadline exceeded" into the returned error text, so
 `ClassifyErr(gerr) == "timeout"` is reliable for every `gpugen`-based lane (image, video, audio), not
 just the one that happened to reproduce it.
+
+#### Card-only music: `musicgen_placement` = `multicard`, and the voice worker on one card
+
+ACE-Step 1.5 XL turbo is a 9.29 GiB DiT (`acestep_v1.5_xl_turbo_bf16`), two text encoders in one DualCLIPLoader of type `ace`
+(`qwen_4b_ace15` 7.80 GiB and `qwen_0.6b_ace15` 1.11 GiB) and a 0.31 GiB VAE (`ace_1.5_vae`): 18.5 GiB, more than one 16 GB card. The single
+placement therefore plans to stream from host RAM, and a 16 GB host refuses it. `musicgen_placement: "multicard"` (opt-in, unset by default, a
+flat key; the audio.cpp engine never reads it) runs it on two leased non-display cards with every weight in VRAM: the DiT whole on the compute card
+(`UNETLoaderMultiGPU`), both text encoders whole on the storage card (`DualCLIPLoaderMultiGPU`, the stock `DualCLIPLoader` inputs plus `device`)
+and the VAE on the storage card (`VAELoaderMultiGPU`). It is the `acestep/xl-turbo-bf16` row of `render/multicard-recipes.json`
+(route `music`; mirrored in `internal/mediacap/multicard.go`), and it reuses the image and edit machinery unchanged: `planImageMulticard`,
+`verifyImagePlacement`, the pair's own ComfyUI instance and `internal/pipeline/mediamulticard.go`.
+
+- **The door.** `generate_audio kind=music` takes `musicNeed`: the pair of non-display cards under the multicard placement (`multicardNeed`,
+  refused by name, before any lease, for a host without card-scoped leases or without exactly two non-display cards), else one card as before. The
+  runner is handed `--placement multicard` and the pair's launch (no `comfy_cuda_device` pin, no dynamic VRAM). `render/comfy-music.mjs` accepts
+  `--placement single|multicard [--cards <a>,<b>]` spelled `--flag value`; `--resident-gb` is refused (the DiT is whole on one card), and so is a
+  `--graph` file. The single placement is byte for byte the graph it always built; the over-render and trim, loudness and dead-air gates are unchanged.
+- **Host RAM.** `basis` is `measured` (2026-11-07, node-i, two A2 16 GB, 14.8 GiB of host RAM, the harness launch with the read-only loader): a
+  30 s clip at 8 steps took 41 s for the whole call, both loads included. nvidia-smi read the per-card peaks every second, CUDA context included:
+  9,774 MiB on the compute card (the DiT) and 9,364 MiB on the storage card (both encoders and the VAE). The row records 9.6 and 9.2 GiB. ComfyUI's
+  anonymous RSS peaked at 2.23 GiB, all of it the interpreter, torch and two CUDA contexts, with no weight in it. MemAvailable never fell under
+  10.6 GiB, and swap held at 267 MiB. `Measured` is set in `internal/mediacap/multicard.go`, so the call declares 0 GiB of host RAM (`CardOnly`).
+  The single-card placement still streams 18.5 GiB from host RAM, and a 16 GB host still refuses it.
+- **The doctor.** The `generate_audio:music` line names `placement=multicard` and checks the three MultiGPU loader classes, as the image lines do.
+- **Voice on one card.** The Chatterbox voice worker used to take the whole node (`wholeNeed().offDisplay()`) and land on `cuda:0`. With
+  `gpu_card_scoped_leases` on and a green reader audit (the lease manager's `CardScoped`, the predicate the other single-card lanes use) it asks for
+  ONE card (`needSingle`, the allocator's pick, no `comfy_cuda_device` pin: that pins ComfyUI, not this worker) and its worker is pinned to the granted
+  card with `CUDA_VISIBLE_DEVICES=<card uuid>` and `CUDA_DEVICE_ORDER=PCI_BUS_ID`, so it runs beside a render on the other card. The card path can
+  still fall back to the whole node: the card table cannot be read, or an inherited lease names no card. That fallback grant holds no card to pin, so
+  the need carries the off-display mark there too, and the worker stays off the display card as before. With card-scoped leases off, the call is
+  what it always was: the whole node, with the worker kept off the display card.
+
+The installed ComfyUI-MultiGPU pack registers `DualCLIPLoaderMultiGPU` (`override_class_clip` over the stock `DualCLIPLoader`, with inputs
+`clip_name1`, `clip_name2` and `type`, plus the optional `device`). The 2026-11-07 run passed the recipe's run-time check (`verifyImagePlacement`),
+which asks the running ComfyUI for the class and every input the recipe sets.
 
 ### Launch profile (`comfy_cuda_device`, `comfy_dynamic_vram`, `comfy_extra_args`)
 

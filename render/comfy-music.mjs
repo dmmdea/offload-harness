@@ -27,12 +27,15 @@
 //        [--lyrics "..."] [--seconds N] [--seed N] [--steps N] [--cfg X] [--shift X] \
 //        [--unet name.safetensors] [--reserve-vram X] [--api http://127.0.0.1:8188] \
 //        [--no-lock] [--keep-comfy]   |   <out.flac> --graph wf.json
+//        [--placement single|multicard [--cards <a>,<b>]]   # multicard: the DiT on one leased non-display card, the two text encoders and the VAE on the other
+//                                      # (render/multicard-recipes.json row acestep/xl-turbo-bf16; docs/systems/media-generation.md, "Card-only music"); flags spelled `--flag value`
 import { readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomic, commitPartial, discardPartial } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import { familySignature } from "./comfy-family.mjs";
-import { comfyApi } from "./comfy-lifecycle.mjs";
+import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
+import { planImageMulticard, lifecycleOptions, verifyImagePlacement, beginPlacedWatch } from "./multicard-image.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { buildAceStep } from "./wf-acestep.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, comfyUnusableClassLine } from "./comfy-submit.mjs";
@@ -45,6 +48,9 @@ import {
 // generic 1.0 reserve (held back for the Windows display/WDDM) fits comfortably on 8GB.
 // Per invariant 5 it stays per-workflow overridable via --reserve-vram.
 export const RESERVE_VRAM_DEFAULT = "1.0";
+
+// The DiT the graph loads when --unet names none (wf-acestep.mjs's default): the card-only recipe is picked by it.
+const ACE_UNET_DEFAULT = "acestep_v1.5_xl_turbo_bf16.safetensors";
 
 // parseArgs: positionals + flags. --no-lock/--keep-comfy are boolean (no value);
 // everything else consumes the next argv token. (Same shape as comfy-video.mjs.)
@@ -84,7 +90,7 @@ export function computeRenderSeconds(seconds) {
 // produced file back down afterward. The returned `seconds`/`renderSeconds` tell the
 // caller what to trim to and whether trimming applies at all (undefined = no trim,
 // either because opts.trim was false or because --graph was used).
-export function buildGraphFromArgs(pos, flags, { trim = false } = {}) {
+export function buildGraphFromArgs(pos, flags, { trim = false, multicard = false } = {}) {
   const seed = Number(flags.seed || Math.floor(Math.random() * 1e15));
   if (flags.graph) {
     return { graph: JSON.parse(readFileSync(flags.graph, "utf8")), seed };
@@ -99,6 +105,7 @@ export function buildGraphFromArgs(pos, flags, { trim = false } = {}) {
   if (flags.cfg) common.cfg = Number(flags.cfg);
   if (flags.shift) common.shift = Number(flags.shift);
   if (flags.unet) common.unet = flags.unet; // v1.5 UNET override (was --ckpt in the retired v1 graph)
+  if (multicard) common.placement = "multicard"; // the card-only recipe's loaders; the plan (the two cards and their launch) was made by main()
   return { graph: buildAceStep(common), seed, seconds, renderSeconds: trim ? renderSeconds : undefined };
 }
 
@@ -108,7 +115,9 @@ export function buildGraphFromArgs(pos, flags, { trim = false } = {}) {
 // CLI-preferred submit with byte-identical raw fallback; hardened poll loop
 // (dead-server watchdog). Split out of generate() so the audio-QA retry (below) can
 // call it a second time with a re-seeded graph without duplicating this plumbing.
-async function renderOnce(out, API, graph, seed, cli) {
+async function renderOnce(out, API, graph, seed, cli, placement = null) {
+  // The card-only placement: the instance's console is watched while the prompt runs (an out-of-memory wedge ComfyUI does not report); the cursor is made BEFORE the submit.
+  const watch = beginPlacedWatch(placement);
   const { promptId } = await submitGraph({ api: API, graph, clientId: "music-" + seed, cli });
   console.log("queued", promptId, "ace-step seed", seed);
   // waitSec 1200 = the historical fixed 600 x 2s polls (~20 min; TextEncodeAceStepAudio
@@ -119,6 +128,7 @@ async function renderOnce(out, API, graph, seed, cli) {
     isDone: (entry) => !!firstOutputFile(entry.outputs, graph),
     noOutputMsg: "no audio produced in time",
     onExecError: () => finalizeRun({ api: API, promptId, cli }),
+    ...(watch ? { watch } : {}),
   });
   const file = firstOutputFile(h.outputs, graph);
   writeFileAtomic(out, await fetchView({ api: API, file }));
@@ -198,9 +208,9 @@ export function cleanupFailedDeadAirOutput(out, { unlink = unlinkSync } = {}) {
 // ffprobe are guaranteed available here (F-38, 2026-09-24): main() calls
 // assertFfmpegAvailable() before this function is ever invoked, so a box that
 // cannot run the QA gate never reaches renderOnce at all.
-async function generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, renderSeconds } = {}) {
+async function generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, renderSeconds, placement = null } = {}) {
   const cli = resolveCli();
-  await renderOnce(out, API, graph, seed, cli);
+  await renderOnce(out, API, graph, seed, cli, placement);
 
   // renderSeconds is only set when buildGraphFromArgs actually over-rendered (args-
   // built graph + ffmpeg/ffprobe resolved at build time); a --graph passthrough never
@@ -214,7 +224,7 @@ async function generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, rende
     const retrySeed = Math.floor(Math.random() * 1e15);
     seedsTried.push(retrySeed);
     console.error(`audio-qa: dead air detected (${verdict.reason}) — retrying once with seed ${retrySeed}`);
-    await renderOnce(out, API, rewireSeed(graph, retrySeed), retrySeed, cli);
+    await renderOnce(out, API, rewireSeed(graph, retrySeed), retrySeed, cli, placement);
     if (trimsApply) applyTrim(ffmpeg, out, seconds);
     verdict = assessDeadAir(measure(ffmpeg, ffprobe, out));
     if (verdict.deadAir) {
@@ -242,7 +252,6 @@ async function generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, rende
 async function main() {
   const { pos, flags } = parseArgs(process.argv.slice(2));
   const out = pos[0];
-  const API = comfyApi(flags.api);
   if (!out) { console.error('usage: node comfy-music.mjs <out.flac> "<style tags>" [--lyrics "..."] [--seconds N] [--seed N] [--reserve-vram X]   |   <out.flac> --graph wf.json'); process.exit(2); }
   // Resolved once, up front: whether to over-render (and later trim) depends on
   // ffmpeg/ffprobe being available, and buildAceStep's `seconds` has to be decided
@@ -254,11 +263,22 @@ async function main() {
   const ffprobe = ffmpeg ? resolveFfprobe(ffmpeg) : "";
   assertFfmpegAvailable(ffmpeg, ffprobe);
   const trim = !flags.graph && !!ffmpeg && !!ffprobe;
-  const { graph, seed, seconds, renderSeconds } = buildGraphFromArgs(pos, flags, { trim });
+  // The card-only placement is planned first: it refuses, before anything is launched, every request it cannot honour (no recipe, no cards named, not two,
+  // a display card, a --graph file). Its own environment names the instance, so the api and the lease slot read it too. No --placement is the single placement, untouched.
+  let placement = null;
+  try {
+    placement = planImageMulticard({ route: "music", family: "acestep", unet: flags.unet || ACE_UNET_DEFAULT, flags, comfyDir: COMFY_DIR, isGraph: !!flags.graph, say: (m) => console.error(m) });
+  } catch (e) { console.error("PLACEMENT REFUSED: " + e.message); process.exit(2); }
+  const API = comfyApi(flags.api, placement ? placement.env : process.env);
+  const { graph, seed, seconds, renderSeconds } = buildGraphFromArgs(pos, flags, { trim, multicard: !!placement });
   await withGpuSlot(
     { noLock: flags["no-lock"], keepComfy: flags["keep-comfy"], comfyManaged: true, api: API, reserveVram: flags["reserve-vram"] || RESERVE_VRAM_DEFAULT,
-      family: familySignature("acestep") },
-    () => generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, renderSeconds }),
+      family: familySignature("acestep"), ...lifecycleOptions(placement) },
+    async () => {
+      // the running ComfyUI's own cards must be the pinned pair and the harness's pack must have loaded, before anything is posted (a mismatch submits nothing)
+      if (placement) await verifyImagePlacement(API, placement);
+      return generate(out, API, graph, seed, { ffmpeg, ffprobe, seconds, renderSeconds, placement });
+    },
   );
 }
 

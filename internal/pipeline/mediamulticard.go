@@ -47,12 +47,17 @@ func (e *errMulticard) Error() string { return e.why }
 // gpuReserveHint is the way out the refusals share: lease the two cards by hand and run the call inside the lease.
 const gpuReserveHint = "lease the two you mean with `local-offload gpu reserve --devices <card>,<card> -- <command>`"
 
-// multicardNeed is the need of a binding that asks for the card-only placement on route (image or edit).
+// multicardNeed is the need of a binding that asks for the card-only placement on route (image, edit or music).
 func multicardNeed(route hostneed.Route, cfg config.Config, token string) mediaNeed {
 	n := mediaNeed{Kind: needMulticard, Token: token, RAMPair: multicardRAM(route, cfg)}
 	var family string
 	var files []mediacap.ModelFile
 	switch route {
+	case hostneed.RouteMusic:
+		// ACE-Step's files are the builder's defaults (no key binds them); the recipe row is the one XL turbo bf16 DiT
+		n.PlacementKey = "musicgen_placement"
+		family = "acestep"
+		files = mediacap.MusicModelFiles()
 	case hostneed.RouteEdit:
 		n.PlacementKey = "gen_edit_placement"
 		if family = strings.TrimSpace(cfg.GenEditFamily); family == "" {

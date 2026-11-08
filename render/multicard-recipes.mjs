@@ -56,7 +56,7 @@ export function rowDevices(row) {
   return { order: CARD_ORDER_STORAGE_FIRST, compute: MULTICARD_COMPUTE, storage: MULTICARD_STORAGE, encoder: MULTICARD_STORAGE, encoderDonor: MULTICARD_COMPUTE };
 }
 
-/** The placements of the image and edit builders: single is today's graph (the default), multicard is the card-only one. */
+/** The placements of the image, edit and music builders: single is today's graph (the default), multicard is the card-only one. */
 export const PLACEMENTS = Object.freeze(["single", "multicard"]);
 export const PLACEMENT_DEFAULT = "single";
 
@@ -84,6 +84,7 @@ const FAMILY_HINTS = Object.freeze({
   "hidream-o1": "it fits one card pair only with host RAM and was never measured card-only",
   "hidream-o1-dev": "it fits one card pair only with host RAM and was never measured card-only",
   "qwen-image-2.1": "the card-only recipes are the bf16 and int8_convrot DiTs with the bf16 Qwen3-VL-8B text encoder; bind those files",
+  acestep: "the card-only recipe is the XL turbo bf16 DiT with the qwen_4b_ace15 and qwen_0.6b_ace15 text encoders; name those files",
 });
 
 /**
@@ -99,7 +100,7 @@ function routeOffer(route) {
 }
 
 /**
- * findRecipe: the recipe for a call, or a RecipeRefusal that says why there is none. route is "image" or "edit"; family is the
+ * findRecipe: the recipe for a call, or a RecipeRefusal that says why there is none. route is "image", "edit" or "music" (family "acestep"); family is the
  * graph family ("" is the generic SDXL graph on the image route and the 2511 graph on the edit route); unet is the DiT file the
  * call names; clip is the text encoder it names (the recipe's default stands in when the builder has one and the call names none).
  */
@@ -190,9 +191,10 @@ export function recipeResident(row, override) {
 
 /**
  * multicardLoaders: the three loader nodes of a graph ("1" DiT, "2" text encoder, "3" VAE, the ids the single-card builders use), for a
- * recipe. unet/clip/vae are the file names the call binds; residentGb overrides the recipe's share of the DiT on the compute card.
+ * recipe. unet/clip/vae are the file names the call binds; residentGb overrides the recipe's share of the DiT on the compute card. A row whose clip is `dual`
+ * (the ACE-Step music row: two text encoders, one DualCLIPLoader of the row's clipType) takes the second encoder as `clip2` (clip_name2; `clip` is clip_name1).
  */
-export function multicardLoaders(row, { unet, clip, vae, residentGb } = {}) {
+export function multicardLoaders(row, { unet, clip, clip2, vae, residentGb } = {}) {
   const share = recipeResident(row, residentGb);
   const d = rowDevices(row);
   let unetNode;
@@ -212,12 +214,17 @@ export function multicardLoaders(row, { unet, clip, vae, residentGb } = {}) {
   let clipNode;
   switch (row.clip.loader) {
     case "plain":
-      clipNode = { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: d.encoder } };
+      // DualCLIPLoaderMultiGPU is the stock DualCLIPLoader's inputs plus the optional `device` (ComfyUI-MultiGPU override_class_clip), both encoders whole on that card
+      clipNode = row.clip.dual
+        ? { class_type: "DualCLIPLoaderMultiGPU", inputs: { clip_name1: clip, clip_name2: clip2, type: row.clipType || "qwen_image", device: d.encoder } }
+        : { class_type: "CLIPLoaderMultiGPU", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: d.encoder } };
       break;
     case "distorch2":
+      if (row.clip.dual) throw new Error(`multicardLoaders: recipe ${row.id} asks for a dual text encoder through a split loader, which only the plain loader builds`);
       clipNode = { class_type: "CLIPLoaderDisTorch2MultiGPU", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: d.encoder, virtual_vram_gb: 0, donor_device: "cpu", expert_mode_allocations: allocationString(row.clip.residentGb, d.encoderDonor, d.encoder), eject_models: false } };
       break;
     case "distorch2-host":
+      if (row.clip.dual) throw new Error(`multicardLoaders: recipe ${row.id} asks for a dual text encoder through a split loader, which only the plain loader builds`);
       // the harness's own loader: the encoder is built off the cards and placed by the allocation (it computes on `device`, cuda:0; the `residentGb` of it is
       // parked on the other card, cuda:1, and streamed across at encode time), so it never has to fit one card while it is built
       clipNode = { class_type: "OffloadCLIPLoaderDisTorch2", inputs: { clip_name: clip, type: row.clipType || "qwen_image", device: d.encoder, expert_mode_allocations: allocationString(row.clip.residentGb, d.encoderDonor, d.encoder), eject_models: false } };

@@ -7,7 +7,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 )
 
-// THE CARD-ONLY IMAGE AND EDIT PLACEMENT (--placement multicard on render/comfy-generate.mjs, comfy-render.mjs and comfy-edit.mjs).
+// THE CARD-ONLY IMAGE, EDIT AND MUSIC PLACEMENT (--placement multicard on render/comfy-generate.mjs, comfy-render.mjs, comfy-edit.mjs and comfy-music.mjs).
 //
 // The runner (render/multicard-image.mjs) puts the text encoder and the VAE on one leased card and the DiT on the other, or splits the DiT
 // between them, through the MultiGPU loaders, and maps every weight file read-only, so nothing streams from the host. Whether a CALL declares 0 host RAM
@@ -27,10 +27,10 @@ import (
 // The figures are render/multicard-recipes.json's, copied into internal/mediacap/multicard.go (which also finds the recipe of a call);
 // mediacap's TestTheMulticardRowsAreTheRunnersRecipes fails when either side moves.
 
-// PlacementMulticard is the value of --placement (and of imagegen_placement / gen_edit_placement) that asks for the card-only placement.
+// PlacementMulticard is the value of --placement (and of imagegen_placement / gen_edit_placement / musicgen_placement) that asks for the card-only placement.
 const PlacementMulticard = "multicard"
 
-// estimatePlaced is estimate for a route that may ask for the card-only placement (image and edit). Without the placement, or with a call that has no
+// estimatePlaced is estimate for a route that may ask for the card-only placement (image, edit and music). Without the placement, or with a call that has no
 // recipe, it is estimate exactly. With one it adds what the recipe says: a measured row whose peaks fit the two leased cards declares 0, and
 // anything else keeps the ordinary figure and says why.
 func estimatePlaced(route Route, family string, files []mediacap.ModelFile, f Facts) (Need, bool) {

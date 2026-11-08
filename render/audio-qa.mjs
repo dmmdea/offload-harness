@@ -226,12 +226,26 @@ const LOUDNESS_RANGE_TARGET_LU = 11;
 // rule: never withhold already-produced content).
 export function normalizeLoudness(ffmpegPath, file, tmpOut) {
   if (!ffmpegPath) return false;
+  // loudnorm resamples to 192 kHz internally and ffmpeg keeps that rate for the output unless one is set
+  // (measured 2026-11-07: a 48 kHz ACE-Step render came back as a 192 kHz FLAC, four times the size), so
+  // the output keeps the source's own rate whenever ffprobe can read it.
+  const rate = sourceSampleRate(ffmpegPath, file);
   const r = spawnSync(ffmpegPath, [
     "-hide_banner", "-loglevel", "error", "-y", "-i", file,
     "-af", `loudnorm=I=${LOUDNESS_TARGET_LUFS}:TP=${TRUE_PEAK_TARGET_DBTP}:LRA=${LOUDNESS_RANGE_TARGET_LU}`,
+    ...(rate ? ["-ar", String(rate)] : []),
     tmpOut,
   ], { encoding: "utf8", windowsHide: true });
   return !r.error && r.status === 0 && existsSync(tmpOut);
+}
+
+// sourceSampleRate: the first audio stream's sample rate in Hz, or 0 when ffprobe is missing or says nothing.
+function sourceSampleRate(ffmpegPath, file) {
+  const ffprobe = resolveFfprobe(ffmpegPath);
+  if (!ffprobe) return 0;
+  const r = spawnSync(ffprobe, ["-v", "error", "-select_streams", "a:0", "-show_entries", "stream=sample_rate", "-of", "csv=p=0", file], { encoding: "utf8", windowsHide: true });
+  const n = Number(String((!r.error && r.status === 0 && r.stdout) || "").trim());
+  return Number.isInteger(n) && n > 0 ? n : 0;
 }
 
 // trimToSeconds: re-encodes `file` down to exactly `seconds` long, with a

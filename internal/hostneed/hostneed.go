@@ -475,7 +475,8 @@ func ForRoute(route Route, cfg config.Config, f Facts) (Need, bool) {
 	case RouteAnimate:
 		return estimate("wan-animate2", mediacap.AnimateModelFiles(cfg), f)
 	case RouteMusic:
-		return estimate("acestep", mediacap.MusicModelFiles(), f)
+		// the card-only placement (musicgen_placement: multicard) is the "music" row of the recipe table; without it this is estimate exactly
+		return estimatePlaced(RouteMusic, "acestep", mediacap.MusicModelFiles(), f)
 	}
 	return Need{}, false
 }
