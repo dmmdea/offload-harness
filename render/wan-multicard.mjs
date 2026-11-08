@@ -154,7 +154,9 @@ export function queryCards(spawnSync = nodeSpawnSync, { sysfs = SYSFS, platform 
   if (!r || r.status !== 0 || !r.stdout) {
     throw placementError("nvidia-smi gave no card table, so the two cards cannot be told from the display card" + (r && r.error ? ` (${r.error.message})` : ""));
   }
-  const cards = ignorePhantomAttached(parseCardTable(r.stdout), spawnSync, { sysfs, platform });
+  // the bus-id query is built here, where spawnSync is called with its options, and handed over as a function
+  const busIds = () => spawnSync("nvidia-smi", ["--query-gpu=uuid,pci.bus_id", "--format=csv,noheader"], { encoding: "utf8", timeout: 30000, windowsHide: true });
+  const cards = ignorePhantomAttached(parseCardTable(r.stdout), busIds, { sysfs, platform });
   if (cards.length === 0) throw placementError("nvidia-smi listed no card");
   return cards;
 }
@@ -194,12 +196,12 @@ export function connectorlessNvidia({ root = "/sys", readdirSync: ls = readdirSy
  * (uuid,pci.bus_id), asked only when a card says Yes AND the kernel tree shows an NVIDIA card without connectors, so the
  * display ladder above never depends on it.
  */
-function ignorePhantomAttached(cards, spawnSync, { sysfs, platform }) {
+function ignorePhantomAttached(cards, busIds, { sysfs, platform }) {
   if (platform !== "linux" || !cards.some((c) => c.displayAttached.toLowerCase() === "yes")) return cards;
   const phantom = connectorlessNvidia(sysfs);
   if (phantom.size === 0) return cards;
   let r;
-  try { r = spawnSync("nvidia-smi", ["--query-gpu=uuid,pci.bus_id", "--format=csv,noheader"], { encoding: "utf8", timeout: 30000, windowsHide: true }); } catch { return cards; }
+  try { r = busIds(); } catch { return cards; }
   if (!r || r.status !== 0 || !r.stdout) return cards;
   const bus = new Map();
   for (const raw of String(r.stdout).split(/\r?\n/)) {
