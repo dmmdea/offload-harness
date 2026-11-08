@@ -58,3 +58,33 @@ Also verified: `doctor` rc 0, `acceptance` READY, a summarize call returned vali
 Native render check, same day: `install render --profile ampere-2x16 --os linux` with both card roles given as `GPU-<uuid>` was served by a throwaway llama-swap on a test port. It loaded five seats at once in 56 s: the embedder, e4b, whisper and the forecaster on the utility card, and the 27B agent on the heavy card. That placement was confirmed per process with `nvidia-smi --query-compute-apps`, at 7,822 MiB and 13,946 MiB used. The embedding was 768-dimensional, the forecaster's health endpoint answered 200, and e4b and the 27B both answered. Once the instance stopped, both cards were back at 0 MiB. `audit-yaml --against-render` reads the file as `MATCH` (byte for byte), with no pin-by-index note because the pins are by UUID.
 
 Not measured on this box: the vision seat, the cascade running beside the 27B under sustained traffic, and anything at 32 GB of host RAM.
+
+## Pooled seats (measured later the same day)
+
+The tier also serves three models that span BOTH cards, for work where quality outranks a free second card. They are pinned to both cards explicitly (`CUDA_VISIBLE_DEVICES=<utility>,<heavy>`, utility first), split by layer with equal weights, and live in their own `pooled` matrix set beside the memory stack: the cascade and the single-card 27B are never co-scheduled with them. Same builds as above (llama.cpp b12192, llama-swap v270), `--split-mode layer --tensor-split 1,1 --parallel 1 --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 1024 --jinja --reasoning off`, `CUDA_DEVICE_ORDER=PCI_BUS_ID`.
+
+| seat | weights | ctx | VRAM (first card + second) | decode | prefill | note |
+|---|---|---|---|---|---|---|
+| `qwen38-27b-pool` | Qwen3.8-27B UD-Q6_K (21,983,677,344 B) + mmproj-F16, MTP draft depth 3 | 65536 | 12,504 + 13,594 MiB | 10.34 tok/s | 237 tok/s (3,672-token prompt) | loaded in 18 s; known-answer correct; MTP acceptance 293/465 (63 %); resident beside the embedder through llama-swap (12,964 + 13,594 MiB) |
+| `gemma4-26b-a4b-pool` | gemma-4-26B-A4B-it-qat UD-Q4_K_XL (14,249,047,104 B) + mmproj-F16 | 32768 | 9,012 + 7,250 MiB | 11.92 tok/s | 234 tok/s | one card thermally throttled: a lower bound |
+| `gemma4-31b-pool` | gemma-4-31B-it-qat UD-Q4_K_XL (17,287,670,048 B) + mmproj-F16 | 32768 | not recorded | 2.38 tok/s | not recorded | one card thermally throttled; **awaits a measurement on a cooled pair** |
+
+For comparison the tier's single-card 27B (UD-IQ3_S, ctx 49152) decodes 8.4 tok/s, so the pooled 27B at the higher UD-Q6_K quant is also the faster 27B. `--split-mode tensor` on the pooled 27B decoded 10.71 tok/s but its prefill fell to 138 tok/s, with one card throttled during that run, so layer is what ships and tensor is not shipped.
+
+Sources: the 27B and its projector are from `unsloth/Qwen3.8-27B-GGUF` (LFS sha256 of the Q6_K file `c9c206812fbe4ac7b76a729e25928b63f2ae89d37f69da7a71c20aec763cd436`); the 26B-A4B from `unsloth/gemma-4-26B-A4B-it-qat-GGUF` (model sha256 `a7c5bc715f5ff8e99a3e8901ce7d2b42b402c669bf24f7c5250747633d0f5891`, projector sha256 beginning `d00f211a7d4f7fb1`); the 31B from `unsloth/gemma-4-31B-it-qat-GGUF` (model sha256 `00b5a7c497f0c8934033088c10a7fa9a4c015e46ee6d89e9c6890650ba5d0e71`, projector sha256 beginning `4775e1bf6ef6f8df`). The three projectors are all named `mmproj-F16.gguf` upstream, so the template reads them as `mmproj-F16.gguf` (the 27B's, shared with the vision seat), `mmproj-gemma-4-26B-A4B-it-F16.gguf` and `mmproj-gemma-4-31B-it-F16.gguf`; the Linux install leaves model downloads out-of-band, and `install render` warns by name when any of these six files is missing.
+
+The tier now seeds `agent_model` and `reasoning_model` as `qwen38-27b-pool` and `escalation_model` as `gemma4-31b-pool` (the single-card 27B and the 4B stay rendered and are still bound by name when one card is busy). The thermal caveat above applies to the pooled figures: one card was throttled during the 26B-A4B and 31B runs (and during the tensor-split run), which is why they are recorded as lower bounds.
+
+### With the resident stack loaded (later the same day)
+
+Measured with the embedder (438 MiB), the reranker (324 MiB) and the forecaster (926 MiB) resident on the utility card, heavy share listed second, llama.cpp b12192:
+
+| seat | utility card + other card | prefill | decode | note |
+|---|---|---|---|---|
+| `qwen38-27b-pool` | 14,230 MiB of 15,356 (12,516 MiB of it the pool share) + 13,620 MiB | 209.7 tok/s (3,668-token prompt) | 8.1 tok/s | 1.1 GiB left on the utility card, less than whisper large-v3-turbo needs: **whisper cannot be co-resident** |
+| `gemma4-26b-a4b-pool` | 10,744 + 7,278 MiB | 357 tok/s | 17.0 tok/s | fits beside whisper |
+| `gemma4-31b-pool` | 12,834 + 9,954 MiB | 59 tok/s | 2.2 tok/s | **thermal artefact, not the seat's speed**: the utility card throttled to 210 MHz at 86 C on the host's cooling fault while the other card held 1770 MHz |
+
+Whisper loaded and transcribed beside `gemma4-31b-pool` plus all residents with no eviction (a `+residents & stt & (g26 | g31)` set). Because of the 27B pool's figure the template gives it its own set, `pooled27`: the memory stack and every resident seat except speech-to-text, so a transcription request evicts the 27B pool rather than OOM-ing the utility card. The two Gemma pools stay in `pooled` with the full residents. The 8.1 tok/s decode here is below the 10.34 tok/s of the earlier run that carried the embedder alone; both are recorded as measured.
+
+Not measured: image input through the pooled seats' projectors, and the 31B on a cooled pair.
