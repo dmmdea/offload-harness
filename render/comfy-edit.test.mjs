@@ -18,12 +18,30 @@ const one = (g, cls) => {
   return ns[0].inputs;
 };
 const always = () => true;
-const plan = (argv, extra = {}) => planEdit({ ...parseEditArgs(argv), env: {}, exists: always, measure: () => ({ width: 1024, height: 1024 }), ...extra });
+const plan = (argv, extra = {}) => planEdit({ ...parseEditArgs(argv), env: {}, exists: always, measure: () => ({ width: 1024, height: 1024 }), noiseSeed: (s) => s, ...extra });
 
 const E2511 = ["o.png", "src.png", "make it snow", "--unet", "qwen-image-edit-2511-Q5_1.gguf"];
 const E21 = ["o.png", "target.png", "put the shirt from <image2> on the person in <image1>", "--family", "qwen-image-2.1",
   "--unet", "qwen_image_2.1_bf16.safetensors", "--clip", "qwen3vl_8b_bf16.safetensors",
   "--vae", "qwen_image_2.1_vae_bf16.safetensors", "--seed", "5"];
+
+// The 2026-11-08 burn: a source rendered at seed 7, edited at seed 7 on the same canvas, started from its own noise and came out
+// fried. The graph's seed must not be the caller's seed, must not depend on anything but the seed and the source's bytes, and an
+// edit of the edit's output (a chain at one seed) must draw new noise.
+test("the KSampler seed is the caller's seed mixed with the source's bytes, never the caller's seed itself", (t) => {
+  const dir = scratchDir(t, "comfy-edit-");
+  const a = join(dir, "a.png"); const b = join(dir, "b.png");
+  writeFileSync(a, "source rendered at seed 7"); writeFileSync(b, "that source's edit, the next edit's source");
+  const real = (src) => planEdit({ ...parseEditArgs(["o.png", src, "make it snow", "--unet", "qwen-image-edit-2511-Q5_1.gguf", "--seed", "7"]), env: {}, measure: () => ({ width: 1024, height: 1024 }) });
+  const seedOf = (p) => one(p.build(["s.png"]), "KSampler").seed;
+  const first = real(a);
+  assert.equal(first.seed, 7, "the plan still reports the caller's seed");
+  assert.notEqual(seedOf(first), 7);
+  assert.equal(seedOf(first), first.noiseSeed);
+  assert.equal(seedOf(real(a)), seedOf(first), "same seed, same file: same render");
+  assert.notEqual(seedOf(real(b)), seedOf(first), "a chained edit at the same seed draws new noise");
+  assert.ok(Number.isSafeInteger(seedOf(first)) && seedOf(first) >= 0);
+});
 
 test("parseEditArgs: --ref repeats in order; --no-lock is boolean", () => {
   const { pos, flags, refs } = parseEditArgs(["o.png", "--ref", "a.png", "t.png", "--no-lock", "--ref", "b.png", "p"]);

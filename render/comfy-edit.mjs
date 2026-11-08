@@ -48,6 +48,7 @@ import {
   QWEN_IMAGE_21_CACHE_DEVICES, QWEN_IMAGE_21_CACHE_DTYPES,
  QWEN_IMAGE_21_EDIT_SCHEDULES } from "./wf-qwen-image-21.mjs";
 import { imageSize } from "./image-size.mjs";
+import { sourceNoiseSeed } from "./noise-seed.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun } from "./comfy-submit.mjs";
 
@@ -89,8 +90,11 @@ function boolFlag(name, v) {
  * GPU work. It returns the source images (target first) and a build(stagedNames)
  * that turns the staged filenames into the graph. measure(path) returns the file's
  * {width,height} (injectable; the 2511 canvas needs it, and so does the card-only 2.1 canvas at --resolution 0).
+ * noiseSeed(seed, sources) is the KSampler seed the graph gets: by default the caller's seed mixed with the sources' bytes
+ * (noise-seed.mjs: an edit at the seed that rendered its source starts from that source's own noise and burns). `seed`
+ * stays the caller's seed; the plan carries both.
  */
-export function planEdit({ pos, flags, refs = [], env = process.env, measure = (p) => imageSize(readFileSync(p)), exists = defaultExists, random = Math.random, multicard }) {
+export function planEdit({ pos, flags, refs = [], env = process.env, measure = (p) => imageSize(readFileSync(p)), exists = defaultExists, random = Math.random, noiseSeed = sourceNoiseSeed, multicard }) {
   const [out, imagePath, prompt] = pos;
   if (!out || !imagePath || !prompt) throw new UsageError('usage: node comfy-edit.mjs <out.png> <image> "<instruction>" [flags]');
   const family = flags.family || EDIT_DEFAULT_FAMILY;
@@ -151,9 +155,10 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
       throw new UsageError(`error: ${via} pins a ${megapixels} MP edit canvas, and the card-only recipe ${recipe.id} is scaled to at most ${recipe.maxMegapixels.toFixed(1)} MP (its compute card holds ${recipe.activationsGiB} GiB of activations there, and a larger canvas needs more than the two cards have left): pin ${recipe.maxMegapixels.toFixed(1)} or less, or drop --placement multicard; nothing was started`);
     }
     const srcNote = src.width > 0 ? `${src.width}x${src.height}` : "size-unknown";
+    const noise = noiseSeed(seed, [imagePath]);
     return {
-      family, sources: [imagePath], seed,
-      describe: `family ${family} preset ${presetName} steps ${steps} cfg ${cfg} ${lora ? "lora " + lora : "no-lora"} src ${srcNote} mp ${megapixels}${recipe ? ` placement multicard (${recipe.id})` : ""}`,
+      family, sources: [imagePath], seed, noiseSeed: noise,
+      describe: `family ${family} preset ${presetName} steps ${steps} cfg ${cfg} ${lora ? "lora " + lora : "no-lora"} src ${srcNote} mp ${megapixels} noise-seed ${noise}${recipe ? ` placement multicard (${recipe.id})` : ""}`,
       build: (staged) => buildQwenImageEdit({
         image: staged[0], prompt,
         negative: flags.negative || "",
@@ -166,7 +171,7 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
         sampler: flags.sampler || undefined,
         scheduler: flags.scheduler || undefined,
         shift: Number(flags.shift || 0) || undefined,
-        seed,
+        seed: noise,
         ...(recipe ? { placement: "multicard", residentGb: multicard.residentGb ?? undefined } : {}),
       }),
     };
@@ -227,16 +232,17 @@ export function planEdit({ pos, flags, refs = [], env = process.env, measure = (
   const transparent = boolFlag("transparent", flags.transparent);
   const steps = flags.steps != null ? Number(flags.steps) : undefined;
   const cfg = flags.cfg != null ? Number(flags.cfg) : undefined;
+  const noise = noiseSeed(seed, sources);
   return {
-    family, sources, seed,
-    describe: `family ${family} images ${sources.length} resolution ${resolution} cache ${cacheDevice}/${cacheDtype} schedule ${schedule}${transparent ? " transparent" : ""}${recipe ? ` placement multicard (${recipe.id})` : ""}`,
+    family, sources, seed, noiseSeed: noise,
+    describe: `family ${family} images ${sources.length} resolution ${resolution} cache ${cacheDevice}/${cacheDtype} schedule ${schedule}${transparent ? " transparent" : ""} noise-seed ${noise}${recipe ? ` placement multicard (${recipe.id})` : ""}`,
     build: (staged) => buildQwenImage21Edit({
       images: staged, prompt,
       negative: flags.negative || "",
       unet, clip: flags.clip, vae: flags.vae,
       steps, cfg,
       sampler: flags.sampler || undefined, scheduler: flags.scheduler || undefined,
-      resolution, cacheDevice, cacheDtype, schedule, transparent, seed,
+      resolution, cacheDevice, cacheDtype, schedule, transparent, seed: noise,
       ...(recipe ? { placement: "multicard", residentGb: multicard.residentGb ?? undefined } : {}),
     }),
   };

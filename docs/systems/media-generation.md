@@ -1204,6 +1204,17 @@ manifest (e.g. the creative-marketing-pipelines scene-swap). **Pin a `_1` GGUF q
 15,757 MiB. FLUX-family models remain prohibited
 ([ADR 0011](../architecture/decisions/0011-flux-family-license-prohibition.md)).
 
+**The sampler seed of an edit or an inpaint is not the caller's seed.** `render/noise-seed.mjs` mixes the caller's seed with
+the bytes of every source image, and the graph's KSampler gets that mix: both edit families (`comfy-edit.mjs` `planEdit`)
+and both inpaint families (`comfy-inpaint.mjs`). ComfyUI draws the starting noise from the seed in the latent's own shape.
+So a source rendered at seed S, then edited at seed S on the same canvas, starts from the noise that made the source, and
+Qwen-Image-Edit-2511 burns that edit: posterized colour, clipped channels.
+- **Measured on node-i (two A2s), 2026-11-08,** with source, prompt, weights, LoRA and cards unchanged:
+  - seed 7, the source's own: 21.5 % of the pixels had a channel at 0 and 14.0 % one at 255;
+  - seeds 8 and 1234: 1.1 % and 0.3 %, clean edits.
+- **The burn did not depend on the rest of the stack.** It stayed the same with the fp8 or the bf16 encoder, with or without the vision tower, under the `index` or the `index_timestep_zero` method, as a GGUF on one card or as fp8 split over two, and at 40 steps without the LoRA. Without a reference latent, the same graph rendered clean.
+- **What a caller sees.** The same seed and the same source file give the same render. The result and the runner's `queued` line still report the caller's seed, and the plan's `describe` names the noise seed. A chain of edits at one seed draws new noise at every step, because each step's source is a new file.
+
 ## Named families, launch profiles and license tags (ADR 0058)
 
 A node has ONE default image binding (`imagegen_*`) and ONE default edit binding (`gen_edit_*`).

@@ -263,7 +263,7 @@ test("comfy-render: --placement multicard on a family with no recipe, or on a --
 // gen_edit_megapixels verbatim (resolveEditMegapixels), so a pinned canvas above the cap is a canvas no peak was measured or scaled for: on a 16 GB card it is the
 // out-of-memory with both cards held. A canvas the runner derives from the source is held to the cap by resolveEditMegapixels itself.
 test("comfy-edit: a canvas the call pins above the recipe's cap is refused before ComfyUI starts, whichever way it is pinned; at the cap, and derived from the source, it runs", () => {
-  const plan = (flags, extra = {}) => planEdit({ pos: ["o.png", "in.png", "make it orange"], flags, env: {}, measure: () => ({ width: 928, height: 1664 }), exists: () => true, random: () => 0.5, ...extra });
+  const plan = (flags, extra = {}) => planEdit({ pos: ["o.png", "in.png", "make it orange"], flags, env: {}, measure: () => ({ width: 928, height: 1664 }), exists: () => true, random: () => 0.5, noiseSeed: (s) => s, ...extra });
   const mc = { multicard: { residentGb: 9 } };
   const refused = (e) => e instanceof EditUsageError && /--megapixels 4.*qwen-image-edit-2511\/fp8mixed.*at most 2\.0/s.test(e.message) && /nothing was started/.test(e.message);
   assert.throws(() => plan({ unet: FP8, placement: "multicard", megapixels: "4" }, mc), refused);
@@ -280,7 +280,7 @@ test("comfy-edit: a canvas the call pins above the recipe's cap is refused befor
 });
 
 test("comfy-edit: --placement multicard plans the 2511 recipe from the --unet the binding names", () => {
-  const plan = (flags, extra = {}) => planEdit({ pos: ["o.png", "in.png", "make it orange"], flags, env: {}, measure: () => ({ width: 928, height: 1664 }), exists: () => true, random: () => 0.5, ...extra });
+  const plan = (flags, extra = {}) => planEdit({ pos: ["o.png", "in.png", "make it orange"], flags, env: {}, measure: () => ({ width: 928, height: 1664 }), exists: () => true, random: () => 0.5, noiseSeed: (s) => s, ...extra });
   const fp8 = plan({ unet: FP8, placement: "multicard" }, { multicard: { residentGb: 9 } });
   const g = fp8.build(["staged.png"]);
   assert.equal(g["1"].class_type, "UNETLoaderDisTorch2MultiGPU");

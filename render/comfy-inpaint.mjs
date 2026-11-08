@@ -44,6 +44,7 @@ import { buildQwenInpaint, QWEN_INPAINT_PRESETS } from "./wf-qwen-inpaint.mjs";
 import { parseInpaintJobs, qwenRecipe, batchAbort } from "./inpaint-jobs.mjs";
 import { resultLine, batchExitCode, batchEndLine } from "./batch-jobs.mjs";
 import { firstOutputFile } from "./comfy-output.mjs";
+import { sourceNoiseSeed } from "./noise-seed.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, comfyUnusableClassLine } from "./comfy-submit.mjs";
 
 const argv = process.argv.slice(2);
@@ -88,7 +89,10 @@ function stageInput(p) {
   return stageToInput("inpaint_in", p);
 }
 
+// The KSampler seed is the job's seed mixed with the source image's bytes (noise-seed.mjs). Both families sample from the
+// source's own latent, so at the seed that rendered the source the run would start from that source's noise.
 function buildGraph(job, staged) {
+  const noise = sourceNoiseSeed(job.seed, [job.image]);
   if (FAMILY === "qwen") {
     const recipe = qwenRecipe(job, flags, QWEN_INPAINT_PRESETS);
     return buildQwenInpaint({
@@ -102,7 +106,7 @@ function buildGraph(job, staged) {
       vae: flags.qvae || undefined,
       steps: recipe.steps, cfg: recipe.cfg,
       lora: recipe.lora, loraStrength: flags["lora-strength"] != null ? Number(flags["lora-strength"]) : undefined,
-      seed: job.seed,
+      seed: noise,
     });
   }
   return buildSDXLInpaint({
@@ -114,7 +118,7 @@ function buildGraph(job, staged) {
     cfg: (job.cfg ?? Number(flags.cfg || 0)) || undefined,
     sampler: flags.sampler || undefined,
     scheduler: flags.scheduler || undefined,
-    seed: job.seed,
+    seed: noise,
     denoise: (job.denoise ?? Number(flags.denoise || 0)) || undefined,
     growMask: job.grow_mask != null ? Number(job.grow_mask)
       : flags["grow-mask"] != null ? Number(flags["grow-mask"]) : undefined,
