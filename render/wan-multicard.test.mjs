@@ -780,6 +780,26 @@ test("portNote names the port a multicard instance falls back to when no --api o
   assert.equal(M.portNote({}, { COMFY_API: "http://127.0.0.1:18852" }, "http://127.0.0.1:18852"), "");
 });
 
+test("every multicard instance key of a two-card node gets a port no other key and no per-card instance holds", () => {
+  // the failure that happened: krea2 (storage-first) then qwen-image-2.1 (compute-first) on the same two cards shared one port, and the idle first run refused the second
+  const table = [{ index: 0, uuid: U0, name: "A2", totalMiB: 15360, freeMiB: 15000, display: false }, { index: 1, uuid: U2, name: "A2", totalMiB: 15360, freeMiB: 15000, display: false }];
+  const opts = { comfyDir: "/c", packDirsFn: () => ["ComfyUI-MultiGPU"] };
+  const [a, b] = [table[0], table[1]];
+  const ports = new Map();
+  for (const [storage, compute] of [[a, b], [b, a]]) {
+    for (const order of [M.CARD_ORDER_STORAGE_FIRST, M.CARD_ORDER_COMPUTE_FIRST]) {
+      const launch = M.multicardLaunch({ storage, compute }, { ...opts, order });
+      const env = M.multicardEnv({}, launch, table);
+      ports.set(launch.key, env.COMFY_API);
+    }
+  }
+  assert.equal(ports.size, 4);
+  assert.equal(new Set(ports.values()).size, 4, JSON.stringify([...ports]));
+  for (const api of ports.values()) assert.ok(Number(api.split(":").pop()) > 8189 + 1, `${api} is above the per-card range 8189..8190`);
+  assert.equal(ports.get("mc-" + U0.slice(4, 12).toLowerCase() + "-" + U2.slice(4, 12).toLowerCase()), "http://127.0.0.1:8192");
+  assert.equal(M.multicardEnv({ COMFY_API: "http://127.0.0.1:18852" }, M.multicardLaunch({ storage: a, compute: b }, opts), table).COMFY_API, "http://127.0.0.1:18852", "the caller's own port wins");
+});
+
 test("packDirs keeps the reason a custom_nodes listing failed", () => {
   assert.throws(() => M.packDirs("/c", () => { throw new Error("EACCES: nope"); }), /no comfyui-multigpu pack.*EACCES: nope/s);
 });

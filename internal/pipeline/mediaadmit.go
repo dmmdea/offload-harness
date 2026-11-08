@@ -636,7 +636,9 @@ func (p *Pipeline) unloadEnv(ctx context.Context, ids []string, cards []gpuprobe
 
 // instanceEndpoint is the endpoint of the ComfyUI instance bound to a card: the base port plus
 // the card's nvidia-smi index (8189, 8190, 8191 on the 3-card box). Stable per card, because the
-// render layer refuses to reuse an instance whose marker records another port.
+// render layer refuses to reuse an instance whose marker records another port. A card-only (multicard)
+// instance is not here: its roles and card order, which name its key, are chosen in the runner, so the
+// runner gives it a port above this range (render/wan-multicard.mjs multicardPort).
 func (p *Pipeline) instanceEndpoint(c gpuprobe.Card) string {
 	if p.instanceAPI != nil {
 		return p.instanceAPI(c)
