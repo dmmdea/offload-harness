@@ -10,7 +10,7 @@ import (
 
 // THE CARD-ONLY IMAGE AND EDIT PLACEMENT (comfy-generate.mjs / comfy-render.mjs / comfy-edit.mjs --placement multicard, render/multicard-recipes.json).
 // Two things must both hold before a call declares 0 host RAM: a recipe whose host growth was MEASURED with the read-only loader (the 2511 fp8mixed
-// edit, the 2512 Q5_1 GGUF, krea2 bf16 and the 2.1 bf16 and int8_convrot DiTs; the 2511 Q5_1 GGUF edit is still predicted) and its per-card peaks fitting
+// edit, the 2512 Q5_1 GGUF, krea2 bf16, the 2.1 bf16 and int8_convrot DiTs and both 2.1 edits; the 2511 Q5_1 GGUF edit is still predicted) and its per-card peaks fitting
 // the TWO cards the lease holds, each less the runner's reserve. A recipe that is only predicted, or does not fit, is the ordinary estimate, the honest
 // streaming figure, with the reason in the detail.
 
