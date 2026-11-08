@@ -416,6 +416,9 @@ type gatedModelSet struct {
 	IncludeQ3635B       bool
 	IncludeEG2          bool
 	IncludeEG2Projector bool
+	// IncludePooled is the two-card template's unconditional pooled seats (backend cuda-pair):
+	// three models whose weights and projectors the Linux install leaves out-of-band.
+	IncludePooled bool
 }
 
 // warnMissingGatedModels is warnMissingSeatModels' sibling for the flag-gated
@@ -478,6 +481,14 @@ func warnMissingGatedModelsTo(set gatedModelSet, modelsDir, target string, w io.
 		if set.IncludeEG2Projector {
 			check("embeddinggemma2", "mmproj", "mmproj-embeddinggemma-2-Q8_0.gguf")
 		}
+	}
+	if set.IncludePooled {
+		check("qwen38-27b-pool", "model", "Qwen3.8-27B-UD-Q6_K.gguf")
+		check("qwen38-27b-pool", "mmproj", "mmproj-F16.gguf")
+		check("gemma4-26b-a4b-pool", "model", "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf")
+		check("gemma4-26b-a4b-pool", "mmproj", "mmproj-gemma-4-26B-A4B-it-F16.gguf")
+		check("gemma4-31b-pool", "model", "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf")
+		check("gemma4-31b-pool", "mmproj", "mmproj-gemma-4-31B-it-F16.gguf")
 	}
 	if len(missing) == 0 {
 		return
@@ -828,6 +839,7 @@ func runInstallRender(args []string) error {
 		IncludeQ3635B:       res.Params.IncludeQ3635B,
 		IncludeEG2:          res.Params.IncludeEG2,
 		IncludeEG2Projector: !res.Params.EG2TextOnly,
+		IncludePooled:       res.Params.Backend == "cuda-pair",
 	}, *modelsDir, target)
 
 	// The provenance stamp (K-02) rides on every rendered config from here on.

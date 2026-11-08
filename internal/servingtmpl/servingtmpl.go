@@ -1912,7 +1912,25 @@ func dropEmbed300M(tmpl string) (string, error) {
 // dropModel removes one model block AND the matrix var naming it, with a
 // post-check that nothing functional still references it.
 func dropModel(tmpl, model string) (string, error) {
-	return dropModelWith(tmpl, model, func(l string) bool { return strings.Contains(l, model) })
+	return dropModelWith(tmpl, model, func(l string) bool { return namesWholeID(l, model) })
+}
+
+// namesWholeID reports whether line names the model id as a WHOLE id: an occurrence followed by
+// an id character is another entry that merely starts with it (gemma4-26b-a4b-pool is not a
+// reference to gemma4-26b-a4b), so it is not a dangling reference after the shorter id is dropped.
+func namesWholeID(line, model string) bool {
+	for rest, off := line, 0; ; {
+		i := strings.Index(rest, model)
+		if i < 0 {
+			return false
+		}
+		end := off + i + len(model)
+		if end >= len(line) || !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-", rune(line[end])) {
+			return true
+		}
+		off += i + 1
+		rest = line[off:]
+	}
 }
 
 // dropModelWith is dropModel with the caller's own test for a line that still names the model, for

@@ -14,6 +14,15 @@
 #                 forecaster) and the cascade (e4b | e2b | the 4B agent) as alternatives.
 #                 These join the heavy seat as CONJUNCTIONS in the `both` set, so the cascade
 #                 and the memory stack keep running while the 27B answers.
+#   POOLED seats  the one exception to "pin whole": three models that DO span both cards
+#                 (qwen38-27b-pool, gemma4-26b-a4b-pool, gemma4-31b-pool), for work whose
+#                 quality is worth more than a free second card. They pin BOTH cards
+#                 explicitly (utility card first, heavy card second: the utility card is
+#                 the one that carries the resident memory stack, and layer-split puts the
+#                 larger share on the card listed last), split by layer (see the entries for
+#                 why not tensor), and live in their own `pooled` set: a pooled seat takes
+#                 both cards, so it never shares a set with the cascade or a single-card
+#                 seat.
 #
 # The roles are tokens, not literals: __HEAVY_CARD__ and __UTILITY_CARD__ expand to a CUDA
 # index (heavy 0, utility 1 by default) or a GPU-<uuid>, chosen per box at render time
@@ -35,8 +44,10 @@
 # problem.
 #
 # This file serves the tier that carries include_qwen38_27b: the heavy set names the `q3827`
-# var literally. The 26B, the 9B agent seats and the RAM-spill seat of linux-cuda.yaml are not
-# here: none was measured on a two-card box.
+# var literally. The single-card 26B, the 9B agent seats and the RAM-spill seat of
+# linux-cuda.yaml are not here: none was measured on a two-card box. The pooled entries are
+# unconditional (this template only ever renders for a two-card box) and carry their own
+# literal ctx and flags, the configuration each was measured under.
 healthCheckTimeout: 300
 logLevel: info
 listen: __LISTEN__
@@ -124,6 +135,65 @@ models:
       --n-gpu-layers 999 --parallel 1 --ctx-size 49152 --flash-attn __FLASH_ATTN__
       --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__ --threads __NTHREADS__
       --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # POOLED 27B, the tier's quality seat: Qwen3.8-27B UD-Q6_K (22.0 GB, the quant the single
+  # card cannot hold) split by layer across BOTH cards, with the MTP head drafted at depth 3 and
+  # the same repo's mmproj-F16 so it also reads images. Does not claim `agent-seat`; the lane
+  # binds here through config_seed.agent_model / reasoning_model. MEASURED 2026-11-07 on two
+  # NVIDIA A2 (llama.cpp b12192 sm_86, llama-swap v270): loaded in 18 s; 12,504 MiB on the first
+  # card and 13,594 MiB on the second; known-answer correct; decode 10.34 tok/s with MTP
+  # acceptance 293/465 (63 %); a 3,672-token prefill ran at 237 tok/s; resident beside the
+  # embedder through llama-swap (12,964 + 13,594 MiB). For comparison the single-card 27B
+  # above (UD-IQ3_S, ctx 49152) decodes 8.4 tok/s. `--split-mode tensor` decoded 10.71 tok/s but
+  # its prefill fell to 138 tok/s (and one card was thermally throttled during that run), so
+  # layer is the shipped mode. NOT measured: the full resident stack (reranker, whisper,
+  # forecaster) loaded on the utility card beside this seat; the measurement carried the
+  # embedder only. The utility card is listed FIRST so the lighter share lands beside the
+  # residents; the two --tensor-split weights are equal because the cards are identical.
+  qwen38-27b-pool:
+    aliases: [27b-pool, pooled-27b]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__,__HEAVY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.8-27B-UD-Q6_K.gguf
+      --mmproj __MODELS__/mmproj-F16.gguf
+      --spec-type draft-mtp --spec-draft-n-max 3
+      --n-gpu-layers 999 --split-mode layer --tensor-split 1,1 --parallel 1 --ctx-size 65536
+      --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 1024
+      --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # POOLED Gemma 4 26B-A4B (QAT UD-Q4_K_XL, 14.2 GB, mixture-of-experts with 4B active) across
+  # both cards with its mmproj-F16: the fast pooled seat. Same flags as the 27B pool minus MTP,
+  # at ctx 32768. MEASURED 2026-11-07 (same hosts, builds and layer split): decode 11.92 tok/s,
+  # prefill 234 tok/s, 9,012 MiB + 7,250 MiB. Measured with one card thermally
+  # throttled, so these are a LOWER BOUND. (The single-card 26B stays out of this tier: it
+  # measured 1/8 on the A2, ampere-16.)
+  gemma4-26b-a4b-pool:
+    aliases: [26b-pool, pooled-26b]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__,__HEAVY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      --mmproj __MODELS__/mmproj-gemma-4-26B-A4B-it-F16.gguf
+      --n-gpu-layers 999 --split-mode layer --tensor-split 1,1 --parallel 1 --ctx-size 32768
+      --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 1024
+      --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # POOLED Gemma 4 31B (QAT UD-Q4_K_XL, 17.3 GB, dense) across both cards with its mmproj-F16:
+  # the ESCALATION seat (config_seed.escalation_model), the largest model the pair can hold.
+  # Same flags as the 26B pool, ctx 32768. It loads and answers; it has so far only been measured
+  # with one card thermally throttled (2.38 tok/s decode), a figure that says nothing about a
+  # healthy pair, and it AWAITS A MEASUREMENT ON A COOLED PAIR before any speed is claimed for it.
+  gemma4-31b-pool:
+    aliases: [31b-pool, pooled-31b]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__,__HEAVY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf
+      --mmproj __MODELS__/mmproj-gemma-4-31B-it-F16.gguf
+      --n-gpu-layers 999 --split-mode layer --tensor-split 1,1 --parallel 1 --ctx-size 32768
+      --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 1024
+      --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
     checkEndpoint: /health
     ttl: 300
   embeddinggemma:
@@ -221,6 +291,9 @@ matrix:
     e2b: gemma4-e2b
     q354: qwen3.5-4b-agent
     q3827: qwen38-27b-agent
+    p27: qwen38-27b-pool
+    g26: gemma4-26b-a4b-pool
+    g31: gemma4-31b-pool
   # The memory stack is the most expensive thing on this box to lose and the cheapest to
   # keep: make it maximally expensive to stop, so if the solver ever does have a choice
   # it stops something else first.
@@ -232,8 +305,12 @@ matrix:
   # tier's resident seats) and is in EVERY set. `utility` is the cascade beside it; `heavy` is
   # the 27B (and the swappable seats, as alternatives of it) beside it; `both` is the cascade
   # AND the heavy seat together, which only two cards can hold: the property this tier exists for.
+  # `pooled` is one model spanning BOTH cards beside the residents: the cascade and the single-card
+  # seats are deliberately not in it (a pooled seat leaves neither card free for them), and a pooled
+  # var appears in no other set, so no single-card big seat can ever be co-scheduled with one.
   sets:
     residents: "emb & rer__EG2_AND____SEATS_RESIDENT__"
     utility: "+residents & (__E4B_LEAD__e2b__Q354B_ALT__)"
     heavy: "+residents & (q3827__SEATS_SWAPPABLE__)"
     both: "+residents & (__E4B_LEAD__e2b__Q354B_ALT__) & (q3827__SEATS_SWAPPABLE__)"
+    pooled: "+residents & (p27 | g26 | g31)"
