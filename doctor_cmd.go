@@ -175,6 +175,24 @@ func writeDataHomeSection(w io.Writer, r *datahome.Report) int {
 	return len(r.OnOS)
 }
 
+// writeCallerScopeSection prints whose work this process does and which nodes the caller-scope policy keeps
+// it off (delegate_remote_scopes, caller_scope_roots; config scope.go). Nothing when the config declares no
+// scope keys and no override is set: the policy is then inert.
+func writeCallerScopeSection(w io.Writer, cfg config.Config) {
+	s := cfg.CallerScope
+	if s.Name == "" {
+		return
+	}
+	from := s.Source
+	if s.Dir != "" {
+		from += " " + s.Dir
+	}
+	fmt.Fprintf(w, "caller scope: %s (%s; %s)\n", s.Name, from, s.Why)
+	for _, x := range cfg.ScopeExcluded {
+		fmt.Fprintf(w, "  EXCLUDED     %s from %s — the node admits only %s callers\n", config.RedactBase(x.Base), x.List, strings.Join(x.Admits, ", "))
+	}
+}
+
 // writeFleetSkewSection prints one row per fleet remote (delegate_remotes): OK
 // when the node runs this binary's release, SKEW with both versions when it
 // does not, UNKNOWN when the node publishes no version, UNREACHABLE when its

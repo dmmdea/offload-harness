@@ -1650,6 +1650,9 @@ type healthPayload struct {
 	// its own can have its cards posted from here. Published exactly when the door would admit
 	// (PairRelayAdmissible); omitted otherwise, so a node without it is byte-identical to before.
 	PairRelay bool `json:"pair_relay,omitempty"`
+	// AdmitScopes is fleet_admit_scopes: the caller scopes this node takes work from (X-Offload-Scope). Omitted
+	// when the node admits every caller, so a node without the key is byte-identical to before.
+	AdmitScopes []string `json:"admit_scopes,omitempty"`
 	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
 	// the same one-predicate rule as vision_model. It is what a delegator's
 	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
@@ -1917,6 +1920,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.STTHQ = &hq
 		payload.STTUploadMaxMB = int(s.opts.Cfg.EffectiveSTTUploadMaxBytes() >> 20)
 	}
+	// The callers this node admits (fleet_admit_scopes, scope.go); omitted when it admits every caller.
+	payload.AdmitScopes = s.opts.Cfg.FleetAdmitScopes
 	// Chat lane (C-41b): the delegator's cascade lane reads `chat_lane` to
 	// learn this base is a fleet node it may route through, and served_models
 	// to learn WHICH models it may route — so served_models must be published
@@ -2516,10 +2521,12 @@ func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
 // node's lanes. The label is a fixed word for the door (the dispatch door passes dispatchRefusalLabel, since its
 // task type is in the body), never text the caller supplies.
 func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType string) bool {
+	// The caller-scope backstop (fleet_admit_scopes, scope.go) runs after the credential and before any body is
+	// read, on every door that passes through here.
 	if !tokenGated(s.opts.Cfg, taskType) {
-		return true
+		return s.admitsScope(w, r, taskType)
 	}
-	return s.authorizeLane(w, r, taskType, fleetTokenRequired)
+	return s.authorizeLane(w, r, taskType, fleetTokenRequired) && s.admitsScope(w, r, taskType)
 }
 
 // refusalLog writes the journal line for a refused request. A caller with no credential must not be able to grow the

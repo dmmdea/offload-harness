@@ -360,11 +360,12 @@ func (q *queueRT) cycle(ctx context.Context) {
 
 // liveCfg is the config the ticket decides with: the call's own, with delegate_remotes re-read from the config file when
 // that file changed (an MCP session never reloads its config, so a node added to the file would otherwise never be seen
-// until the session restarted). Nothing else in cfg moves.
+// until the session restarted). Nothing else in cfg moves. The re-read list passes the caller-scope policy again
+// (config.WithRoster), or a re-read would put back a node the load excluded for this caller.
 func (lt *liveTicket) liveCfg() config.Config {
 	cfg := lt.cfg
 	if remotes, ok := rosterFromFile(lt.rosterFile); ok {
-		cfg.DelegateRemotes = remotes
+		cfg = cfg.WithRoster(remotes)
 	}
 	return cfg
 }

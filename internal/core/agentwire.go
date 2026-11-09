@@ -295,6 +295,10 @@ const (
 const (
 	OriginHeader   = "X-Offload-Origin"
 	RunClassHeader = "X-Offload-Run-Class"
+	// ScopeHeader carries the asker's caller scope ("business" or "personal", internal/callscope) on every
+	// request that creates work on a fleet node. It is sent only when the asker resolved a known scope, so an
+	// absent header means unknown; a node with fleet_admit_scopes refuses an asker whose scope it does not admit.
+	ScopeHeader = "X-Offload-Scope"
 )
 
 // SanitizeAsker reduces an untrusted asker name to printable text of at most AskerMaxLen characters:

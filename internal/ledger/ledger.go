@@ -170,6 +170,10 @@ type Entry struct {
 	OriginSession string `json:"origin_session,omitempty"`
 	OriginPID     int    `json:"origin_pid,omitempty"`
 	OriginPPID    int    `json:"origin_ppid,omitempty"`
+	// CallerScope is the caller scope ("business", "personal", "unknown") the recording process resolved when
+	// its config declares the scope keys (internal/callscope), stamped on the rows the process writes for its
+	// own caller; absent on a box without the keys and on a row a node writes for another asker.
+	CallerScope string `json:"caller_scope,omitempty"`
 	// Door names the SURFACE that admitted the call (register A-102): an MCP
 	// tool name ("offload_summarize"), a CLI command ("cli:summarize"), or
 	// "fleet" for a request a fleet node ran for a delegator. Origin* above

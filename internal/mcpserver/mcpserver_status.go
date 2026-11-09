@@ -570,6 +570,14 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 			"Size contracts from ctx_tokens here, never from a written figure.",
 	}
 	out["local_agent_seat"] = localSeatView(ctx, cfg)
+	// Whose work this server does and which nodes the caller-scope policy keeps it off (config scope.go): a node
+	// missing from nodes[] for that reason is listed here, so it never reads as an outage or a misconfiguration.
+	if cfg.CallerScope.Name != "" {
+		out["caller_scope"] = cfg.CallerScope
+	}
+	if len(cfg.ScopeExcluded) > 0 {
+		out["scope_excluded"] = cfg.ScopeExcluded
+	}
 	// How callers narrowed placement (ADR 0078). This server's own counters, so the window is stated in the block; the
 	// ledger rows carry pin_reason and route_asked for any longer one. Absent when delegation is off: there is
 	// no door to pin through.
@@ -584,6 +592,10 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 	case !cfg.AgentDelegationEnabled:
 		out["nodes"] = []any{}
 		out["reason"] = "agent_delegation_enabled is false in the config THIS server loaded — agent_delegate is absent from tools/list and no node can be placed on"
+		return out
+	case len(cfg.DelegateRemotes) == 0 && len(cfg.ScopeExcluded) > 0:
+		out["nodes"] = []any{}
+		out["reason"] = "every delegate_remotes node admits only other callers than this one (delegate_remote_scopes; see caller_scope and scope_excluded) — delegation can only run on the local seat for this caller"
 		return out
 	case len(cfg.DelegateRemotes) == 0:
 		out["nodes"] = []any{}
