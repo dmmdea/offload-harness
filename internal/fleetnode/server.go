@@ -88,7 +88,11 @@ const agentResidencyMaxStale = 2 * agentResidencyTTL
 // a health request this much, once per refresh cycle, and then the previous
 // answer is served with a log line — never a client-side timeout. Any new
 // /fleet/health client must budget above this. A var so tests can shorten it.
-var residencyWaitBound = 1500 * time.Millisecond
+//
+// 400 ms (it was 1.5 s, paid by EVERY request while a slow probe was in the air, 2026-11): a
+// responsive llama-swap answers in milliseconds, and a node that is loading weights must still
+// answer its asker's probe well inside the 2 s budget above.
+var residencyWaitBound = 400 * time.Millisecond
 
 // errSeatStateUnresolved marks a /running reading that came back without an
 // error and without an ANSWER: the roster could not be read WHILE /running
@@ -354,6 +358,10 @@ type Server struct {
 	admittingLoggedOpen bool
 	admittingLoggedList bool
 	agentRes            agentResidency
+	// The slow, memoised reads of /fleet/health with the last value each returned (health_bounded.go).
+	healthRoutes       lastKnown[[]mediacap.Route]
+	healthImageRecipes lastKnown[[]ImageRecipeHealth]
+	healthMediaRecipes lastKnown[[]MediaRecipeHealth]
 	// backends / collectBackends: the cached per-lane and per-seat active_backend report
 	// (activebackend.go). collectBackends is a seam so tests drive the cache without a llama-swap;
 	// production always gets swapCollectBackends.
@@ -728,11 +736,17 @@ func (s *Server) agentResident() bool {
 		return v
 	}
 	previousAt := a.at
+	// A request already waited this refresh cycle's bound out (timeoutLogged is set then and reset when the
+	// refresh publishes): the next ones serve the previous answer at once instead of each paying the bound again
+	// while the same slow probe is still in the air.
+	alreadyWaited := a.timeoutLogged
 	a.mu.Unlock()
 	if owner {
 		go s.refreshAgentResidency()
 	}
-	a.awaitProbeFor(residencyWaitBound)
+	if !alreadyWaited {
+		a.awaitProbeFor(residencyWaitBound)
+	}
 	a.mu.Lock()
 	v := a.resident
 	if !a.at.After(previousAt) && !a.timeoutLogged {
@@ -1653,6 +1667,11 @@ type healthPayload struct {
 	// AdmitScopes is fleet_admit_scopes: the caller scopes this node takes work from (X-Offload-Scope). Omitted
 	// when the node admits every caller, so a node without the key is byte-identical to before.
 	AdmitScopes []string `json:"admit_scopes,omitempty"`
+	// StaleReads names the readings this payload served from their last known value because a fresh one was not ready
+	// within the health handler's bound, each with the age of the value in ms (health_bounded.go). Omitted when every
+	// reading is fresh, so a node that never lags is byte-identical to before. A reader treats a named part as
+	// "as of age_ms ago", not as a failure.
+	StaleReads []StaleRead `json:"stale_reads,omitempty"`
 	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
 	// the same one-predicate rule as vision_model. It is what a delegator's
 	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
@@ -1737,7 +1756,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// lists are derived per request from the same cached readings the admission path consults.
 	// ONE view of the media verdicts for the whole request: the task list, the family list and
 	// media_routes below all read the same single reading of the cache.
+	// The verdicts are a disk read memoised for a minute; the request that finds the memo expired waits for the rebuild
+	// at most healthReadBound and otherwise serves the last verdicts, labelled in stale_reads (health_bounded.go).
+	var stale staleReads
 	mv := s.mediaView()
+	routes, routesAge, routesStale := s.healthRoutes.read(healthReadBound, func() []mediacap.Route { return s.mediaView().get() })
+	mv.routes, mv.read = routes, true
+	if routesStale {
+		stale.note(staleMediaRoutes, routesAge)
+	}
 	tasks := supportedTasksIn(mv, s.opts.LoopbackListener)
 	families := familiesOf(s.opts.Cfg, tasks)
 	if tasks == nil {
@@ -1825,14 +1852,22 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tasks {
 		if t == "image-gen" {
 			payload.RefineHonoured = true
-			payload.ImageRecipes = s.imageRecipeRows()
+			rows, age, isStale := s.healthImageRecipes.read(healthReadBound, s.imageRecipeRows)
+			payload.ImageRecipes = rows
+			if isStale {
+				stale.note(staleImageRecipes, age)
+			}
 			break
 		}
 	}
 	// The video, animation and audio family rows (ADR 0082 Amendment 3) come from a memo too. They are not gated on the tasks the node
 	// serves (a node whose weights are gone still lists them, with -1, so a refusal can name the files); a node with no ComfyUI
 	// install and no sd.cpp video family has none and the key is omitted (mediacap.LaneRows).
-	payload.MediaRecipes = s.mediaRecipeRows()
+	rows, age, isStale := s.healthMediaRecipes.read(healthReadBound, s.mediaRecipeRows)
+	payload.MediaRecipes = rows
+	if isStale {
+		stale.note(staleMediaRecipes, age)
+	}
 	// GPU utilization: advertise the busiest device's utilization when known.
 	// Omitted when no device has published a known utilization — absent ≠ idle.
 	for _, d := range snap.Devices {
@@ -1878,6 +1913,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.AgentSeat = s.agentSeat
 		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens
 		payload.AgentResident = s.agentResident()
+		if age, old := s.agentRes.ageBeyondTTL(); old {
+			stale.note(staleAgentResident, age)
+		}
 		payload.ServedModels = s.servedModels()
 		payload.SeatBudget = s.seatBudget()
 		payload.SeatRate = s.seatRate()
@@ -1997,6 +2035,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !s.holdsBearer(r, healthRefusalLabel) {
 		payload = payload.withoutPrivateFields()
 	}
+	payload.StaleReads = stale
 	writeJSON(w, http.StatusOK, payload)
 }
 
