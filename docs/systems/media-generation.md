@@ -1194,8 +1194,9 @@ compute card, the kernel ran on the storage card and read the other card's memor
 (`cudaErrorIllegalAddress`, `Exception in thread Thread-1 (prompt_worker)`, which the runner reports as
 `IMAGE-PLACEMENT-OOM`). Measured on node-i (two A2 16 GB, P2P "chipset not supported"), ComfyUI `e6515b16`,
 comfy_kitchen 0.2.40: `flux3-klein/bf16` card-only crashed before the fix and rendered 1024x1024 in 85.17 s
-after it, with zero staging events. A node whose ComfyUI predates `d07dff45` (<node-b>'s `483dae43` of
-2026-10-23) never reaches the path; the fix is what lets such a node update ComfyUI. **Fallback source once
+after it, with zero staging events. A node whose ComfyUI does not contain `d07dff45` never reaches the path: <node-b> runs the release tag v0.42.5
+(`483dae43`, cut from the `release/v0.42` branch, which `git merge-base --is-ancestor` shows does not have that master commit, whatever
+the two commit dates suggest). The fix is what lets such a node move to a ComfyUI that has it. **Fallback source once
 upstream goes read-only:** private mirror
 `https://github.com/dmmdea/ComfyUI-MultiGPU-mirror` (a full `git clone --mirror`, all branches/tags;
 its default branch carries both local fixes). **The mirror is private**: a clone of this repository without
