@@ -138,6 +138,39 @@ func TestDeletionGuardRefusesAnUndeclaredDeletion(t *testing.T) {
 			t.Fatalf("a branch that deletes nothing was refused:\n%s", out)
 		}
 	})
+
+	// The 2026-11-09 shape: a pull request branch that merely sits BEHIND main. main gained a file
+	// after the branch forked; the branch deletes nothing, and merging it keeps the file. Comparing
+	// the branch head with the base TIP read that file as deleted, so every open pull request went
+	// red each time main moved (#773). The guard compares main with the MERGE RESULT instead.
+	t.Run("a branch behind main that deletes nothing", func(t *testing.T) {
+		repo := newSynthRepo(t)
+		repo.write("shared.txt", "shared\n")
+		repo.git("add", "-A")
+		repo.git("commit", "-m", "base")
+		fork := repo.rev("HEAD")
+
+		repo.write("added-on-main.txt", "merged after the branch forked\n")
+		repo.git("add", "-A")
+		repo.git("commit", "-m", "main moves on")
+		main := repo.rev("HEAD")
+
+		repo.git("checkout", "-q", "-b", "behind", fork)
+		repo.write("branch-work.txt", "the branch's own work\n")
+		repo.git("add", "-A")
+		repo.git("commit", "-m", "work on an older base")
+
+		if out, err := repo.run(script, main, "HEAD"); err != nil {
+			t.Fatalf("a branch that only sits behind main was refused:\n%s", out)
+		}
+		// The same branch deleting a file main still has is refused all the same.
+		repo.rm("shared.txt")
+		repo.git("commit", "-am", "drop it")
+		out, err := repo.run(script, main, "HEAD")
+		if err == nil || !strings.Contains(out, "shared.txt") {
+			t.Fatalf("a behind branch that deletes a file of main's passed, or the failure does not name it:\n%s", out)
+		}
+	})
 }
 
 // scriptPath returns the guard's absolute path, skipping when this host has no
