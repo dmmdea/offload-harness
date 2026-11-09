@@ -51,7 +51,7 @@ func capturesBefore(t *testing.T, name string, later ...string) {
 func TestRunMCPCapturesTheStartupImageBeforeOpeningAnything(t *testing.T) {
 	// mcpserver.New is in the list because the stale-binary guard starts from the identity captured here: a New that ran
 	// before the capture would start the guard from a stat taken after whatever was opened first.
-	capturesBefore(t, "runMCP", "loadCfgWithSource(", "openPipeline(", "StartReloader(", "mcpserver.New(")
+	capturesBefore(t, "runMCP", "loadCfgWithSource(", "openPipelineLongRunning(", "StartReloader(", "mcpserver.New(")
 }
 
 // A fleet node is as long-lived as an MCP server: its agent answers stamp harness_build_sha256 (pipeline/agenttask.go),
