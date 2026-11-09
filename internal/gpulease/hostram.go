@@ -161,10 +161,15 @@ func holderOf(l Info) holderKey {
 // heldOf is what the processes of a lease's job hold right now: below its holder (heldLoad), or, for a tree-orphan, the live
 // members the reader found for it and everything below them (membersHeld).
 func (m *Manager) heldOf(l Info) (gpuprobe.HostLoad, bool) {
+	var held gpuprobe.HostLoad
+	var ok bool
 	if l.TreeOrphan {
-		return membersHeld(l.TreeLive)
+		held, ok = membersHeld(l.TreeLive)
+	} else {
+		held, ok = m.heldLoad(l.PID)
 	}
-	return m.heldLoad(l.PID)
+	// The commit it has been seen to settle at (hostram_observed.go), so that memory a job loaded and let go is not charged again.
+	return m.creditObserved(l, held, ok), ok
 }
 
 const gibBytes = 1 << 30
