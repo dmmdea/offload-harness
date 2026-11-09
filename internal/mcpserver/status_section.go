@@ -444,7 +444,8 @@ func oneLine(s string, max int) string {
 }
 
 // statusPair is the "pair" block: which way this box's PAIR emitter reports (local ingress, node-info
-// fallback, relay <member route URL>, or off with the reason). nil (absent from the full answer) when
+// fallback, relay <member route URL>, or off with the reason) and, for the two ingress modes, whether the ingress accepts a
+// connection (ingress_reachable). nil (absent from the full answer) when
 // pair_workloads_enabled is off. It reads the per-config emitter the wire headers use (identity, and in
 // auto relay mode the delegate_remotes' health, cached), so a status call probes nothing a call just did.
 func statusPair(cfg config.Config) any {
@@ -458,6 +459,15 @@ func statusPair(cfg config.Config) any {
 	}
 	if m.Reason != "" {
 		out["reason"] = m.Reason
+	}
+	// ingress_reachable: one 1 s TCP dial to the ingress the cards are posted to. Mode comes from identity and says nothing
+	// about a listener, so a box with PAIR installed and its ingress off read "local ingress" while every card failed. Absent
+	// when nothing is dialled (mode off, or a relay).
+	if p, checked := pairworkloads.ProbeIngress(cfg, pairworkloads.IngressDialTimeout); checked {
+		out["ingress_reachable"] = p.Reachable
+		if !p.Reachable {
+			out["ingress_fix"] = pairworkloads.IngressFix
+		}
 	}
 	return out
 }

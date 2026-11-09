@@ -67,14 +67,15 @@ func TestFetchNodeViewMapsAgentFields(t *testing.T) {
 		t.Fatalf("FetchNodeView: %v", err)
 	}
 	want := NodeView{
-		NodeID:         "node-c",
-		AgentEnabled:   true,
-		AgentSeat:      "offload-e4b",
-		AgentResident:  true,
-		AgentCtxTokens: 8192,
-		QueueDepth:     2,
-		Tasks:          []string{"agent"}, // supported_task_types decodes since 0.116.0 (the vision lane is found in it)
-		Local:          false,             // a FETCHED view is by definition a remote node
+		NodeID:           "node-c",
+		AgentEnabled:     true,
+		AgentSeat:        "offload-e4b",
+		AgentResident:    true,
+		AgentCtxTokens:   8192,
+		QueueDepth:       2,
+		Tasks:            []string{"agent"}, // supported_task_types decodes since 0.116.0 (the vision lane is found in it)
+		LoadableFamilies: []string{},        // loadable_model_families decodes as published, here an empty list
+		Local:            false,             // a FETCHED view is by definition a remote node
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NodeView = %+v, want %+v", got, want)
@@ -90,7 +91,7 @@ func TestFetchNodeViewWithoutAgentFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("FetchNodeView: %v", err)
 	}
-	want := NodeView{NodeID: "media-only", QueueDepth: 1, Tasks: []string{"image-gen"}}
+	want := NodeView{NodeID: "media-only", QueueDepth: 1, Tasks: []string{"image-gen"}, LoadableFamilies: []string{"sdxl"}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("NodeView = %+v, want %+v", got, want)
 	}

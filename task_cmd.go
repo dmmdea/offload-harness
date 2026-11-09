@@ -18,6 +18,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/mcpserver"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 	"github.com/dmmdea/offload-harness/internal/sttremote"
 	"github.com/dmmdea/offload-harness/internal/textremote"
 	"github.com/dmmdea/offload-harness/internal/visionremote"
@@ -181,7 +182,7 @@ func runVideoDescribe(args []string) error {
 }
 
 // runTranscribe handles `local-offload transcribe <audio-path> [--language es]
-// [--hq] [--route local|auto|remote] [--json]`. The positional argument is a LOCAL
+// [--hq] [--route local|auto|remote] [--remote BASE ...] [--json]`. The positional argument is a LOCAL
 // AUDIO/VIDEO PATH (not stdin); the pipeline converts it to 16kHz WAV and runs
 // whisper-server over it, or the route sends it to a fleet node (sttremote).
 func runTranscribe(args []string) error {
@@ -193,8 +194,10 @@ func runTranscribe(args []string) error {
 	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep (e.g. gist,language,srt_path — drops the verbose segments[])")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	route := fs.String("route", "", sttRouteHelp)
+	var remotes repeatedFlag
+	fs.Var(&remotes, "remote", "fleet node base URL the spill may use (repeatable); must be one of delegate_remotes, narrows the fleet and never extends it; used by --route auto and remote")
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "language": true, "select": true, "route": true,
+		"config": true, "language": true, "select": true, "route": true, "remote": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -215,6 +218,11 @@ func runTranscribe(args []string) error {
 	}
 	if *hq {
 		params["hq"] = true
+	}
+	cfg, refused, ok := rosterprobe.NarrowLane(cfg, remotes)
+	if !ok {
+		emitResult(refused, *asJSON, *selectFlag, *compactFlag)
+		return nil
 	}
 	res := sttremote.Run(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskTranscribe,

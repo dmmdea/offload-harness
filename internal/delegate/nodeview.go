@@ -126,6 +126,12 @@ type NodeView struct {
 	// UNKNOWN, never "no route is configured".
 	MediaRoutes      []MediaRouteView
 	MediaRoutesKnown bool
+	// LoadableFamilies is health `loadable_model_families`: every model family the node can load for a task (image,
+	// video, animation, audio, whisper, the comfy graph). ImageFamilies is health `image_families`: the named image
+	// bindings a dispatcher can select. Both are nil on a node that predates them or publishes none, which a reader
+	// takes as UNKNOWN, never as "renders nothing".
+	LoadableFamilies []string
+	ImageFamilies    []ImageFamilyView
 	// LeaseBusy is the node's own "my card is spoken for long enough that you
 	// should place elsewhere" verdict (0.113.27), true for a LONG lease of any
 	// class. It exists because LeasedText alone left the harness's longest job
@@ -451,6 +457,14 @@ type MediaRouteView struct {
 	State  string `json:"state"`
 }
 
+// ImageFamilyView mirrors the identity columns of fleetnode.ImageFamily (health `image_families`): one image
+// binding a payload's `family` can select.
+type ImageFamilyView struct {
+	Name    string `json:"name"`
+	Family  string `json:"family"`
+	Default bool   `json:"default"`
+}
+
 // ImageRecipeView mirrors fleetnode.ImageRecipeHealth (and the mediacap.Recipe embedded in it): one ComfyUI image
 // binding a payload's `family` can select, and what it is. Mirrored here, not imported, as MediaRouteView mirrors
 // its row, so the delegator's decoder stays free of the media packages.
@@ -648,6 +662,9 @@ type healthWire struct {
 	// Additive (ADR 0077): the node's media route verdicts. A pointer so an absent key (an older
 	// node) stays distinguishable from a published list.
 	MediaRoutes *[]MediaRouteView `json:"media_routes"`
+	// Additive: the model families the node can load and its named image families. Absent on an older node.
+	LoadableModelFamilies []string          `json:"loadable_model_families"`
+	ImageFamilies         []ImageFamilyView `json:"image_families"`
 	// Additive (ADR 0082): what each image family on the node is, and whether its image-gen carries refine.
 	ImageRecipes   []ImageRecipeView `json:"image_recipes"`
 	RefineHonoured bool              `json:"refine_honoured"`
@@ -751,6 +768,9 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		ImageRecipes:   w.ImageRecipes,
 		MediaRecipes:   w.MediaRecipes,
 		RefineHonoured: w.RefineHonoured,
+
+		LoadableFamilies: w.LoadableModelFamilies,
+		ImageFamilies:    w.ImageFamilies,
 
 		STTHQ:          w.STTHQ,
 		STTUploadMaxMB: w.STTUploadMaxMB,

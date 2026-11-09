@@ -98,7 +98,7 @@ func leaseCardIdentity(args []string) (model, engine string) {
 // newLeaseCard opens the queued card. It returns nil (every method is then a
 // no-op) when PAIR reporting is off on this box.
 func newLeaseCard(cfg config.Config, args []string, origin string) *leaseCard {
-	pair := pairworkloads.New(pairworkloads.FromConfig(cfg))
+	pair := pairworkloads.New(pairworkloads.OneShotConfig(cfg)) // a short-lived command: the ingress warning is throttled across commands
 	if !pair.Enabled() {
 		return nil
 	}

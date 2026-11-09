@@ -16,6 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/composeremote"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/mediaremote"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 	"github.com/dmmdea/offload-harness/internal/sttremote"
 	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
@@ -61,6 +62,7 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 		Engine   string   `json:"engine"`
 		Select   []string `json:"select"`
 		Route    string   `json:"route"`
+		Remotes  []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -134,7 +136,12 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 	if run == nil {
 		run = sttremote.Run
 	}
-	res := run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: in.Audio, Params: params}, route)
+	// remotes pins the spill to named fleet nodes (each in delegate_remotes) for route auto and remote.
+	cfg, refused, ok := rosterprobe.NarrowLane(s.p.Cfg(), in.Remotes)
+	if !ok {
+		return result(refused)
+	}
+	res := run(ctx, cfg, s.p, core.Request{Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: in.Audio, Params: params}, route)
 	if len(in.Select) > 0 {
 		res.Data = core.ProjectFields(res.Data, in.Select)
 	}
@@ -155,8 +162,9 @@ func (s *Server) handleExtractImage(ctx context.Context, req *mcp.CallToolReques
 func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
 		Image string `json:"image"`
-		Brief string `json:"brief"`
-		Route string `json:"route"`
+		Brief   string   `json:"brief"`
+		Route   string   `json:"route"`
+		Remotes []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -165,14 +173,15 @@ func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest
 	if in.Brief != "" {
 		params["brief"] = in.Brief
 	}
-	return result(s.visionRun(ctx, core.Request{Task: core.TaskAssessImage, Door: "offload_assess_image", Image: in.Image, Params: params}, in.Route))
+	return result(s.visionRun(ctx, core.Request{Task: core.TaskAssessImage, Door: "offload_assess_image", Image: in.Image, Params: params}, in.Route, in.Remotes))
 }
 
 func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Image  string `json:"image"`
-		Engine string `json:"engine"`
-		Route  string `json:"route"`
+		Image   string   `json:"image"`
+		Engine  string   `json:"engine"`
+		Route   string   `json:"route"`
+		Remotes []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -182,7 +191,7 @@ func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// read stylised text differently and a silent switch would change results.
 	switch in.Engine {
 	case "", "gpu":
-		return result(s.visionRun(ctx, core.Request{Task: core.TaskOCR, Door: "offload_ocr", Image: in.Image}, in.Route))
+		return result(s.visionRun(ctx, core.Request{Task: core.TaskOCR, Door: "offload_ocr", Image: in.Image}, in.Route, in.Remotes))
 	case "npu":
 		if r, ok := visionremote.NormalizeRoute(in.Route); !ok || r != visionremote.RouteLocal {
 			// The route places the GPU vision model; the NPU path is this box's
@@ -838,6 +847,7 @@ func (s *Server) handleComposeVideo(ctx context.Context, req *mcp.CallToolReques
 		Strict      *bool          `json:"strict"`
 		Snapshots   []float64      `json:"snapshots"`
 		Route       string         `json:"route"`
+		Remotes     []string       `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -864,5 +874,9 @@ func (s *Server) handleComposeVideo(ctx context.Context, req *mcp.CallToolReques
 	if len(in.Snapshots) > 0 {
 		params["snapshots"] = in.Snapshots
 	}
-	return result(composeremote.Run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskComposeVideo, Door: "offload_compose_video", Params: params}, in.Route))
+	cfg, refused, ok := rosterprobe.NarrowLane(s.p.Cfg(), in.Remotes)
+	if !ok {
+		return result(refused)
+	}
+	return result(composeremote.Run(ctx, cfg, s.p, core.Request{Task: core.TaskComposeVideo, Door: "offload_compose_video", Params: params}, in.Route))
 }

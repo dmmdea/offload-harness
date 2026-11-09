@@ -534,34 +534,21 @@ func normBase(b string) string { return strings.TrimRight(strings.TrimSpace(b), 
 // delegate_remotes, so a call can narrow the fleet but never reach past the operator's list) or, when it
 // gave none, delegate_remotes.
 func candidateBases(cfg config.Config, remotes []string) ([]string, error) {
-	allowed := map[string]bool{}
 	var configured []string
 	for _, b := range cfg.DelegateRemotes {
 		if b = normBase(b); b != "" {
-			allowed[b] = true
 			configured = append(configured, b)
 		}
 	}
-	var asked []string
-	for _, b := range remotes {
-		if b = normBase(b); b != "" {
-			asked = append(asked, b)
-		}
+	asked, err := rosterprobe.NarrowFor(cfg, remotes)
+	if err != nil {
+		return nil, &contractError{err.Error()}
 	}
 	if len(asked) == 0 {
 		if len(configured) == 0 {
 			return nil, &placementError{core.DeferClassConfig, "no delegate_remotes configured: there is no fleet node to run the job on"}
 		}
 		return configured, nil
-	}
-	for _, b := range asked {
-		if !allowed[b] {
-			// A node the caller-scope policy removed reads "not in delegate_remotes" otherwise; say why instead.
-			if err := cfg.ScopeRefusal(b); err != nil {
-				return nil, &contractError{err.Error()}
-			}
-			return nil, &contractError{fmt.Sprintf("remote %s is not in delegate_remotes: a call may narrow the configured fleet, never extend it", b)}
-		}
 	}
 	return asked, nil
 }
