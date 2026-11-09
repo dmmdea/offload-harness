@@ -192,17 +192,25 @@ func runTranscribe(args []string) error {
 	language := fs.String("language", "", "force language: en, es, or auto (default auto-detect)")
 	hq := fs.Bool("hq", false, "use the configured higher-accuracy STT tier (slower; may return one full-span segment instead of timestamps)")
 	selectFlag := fs.String("select", "", "comma-separated top-level result fields to keep (e.g. gist,language,srt_path — drops the verbose segments[])")
+	words := fs.Bool("words", false, "also return per-word timing: words[] (word, start and end in seconds, offsets in ms as whisper.cpp writes them, probability) and words_path (the whole list as whisper.cpp -oj JSON); decodes at temperature 0 with no temperature fallback, so a rerun of the same audio gives the same words")
+	vad := fs.String("vad", "", "on | off: use the voice-activity detector for this call (off decodes the whole file, silence included; on needs stt_vad); default is the seat's own setting")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	route := fs.String("route", "", sttRouteHelp)
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "fleet node base URL the spill may use (repeatable); must be one of delegate_remotes, narrows the fleet and never extends it; used by --route auto and remote")
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "language": true, "select": true, "route": true, "remote": true,
+		"config": true, "language": true, "select": true, "route": true, "remote": true, "vad": true,
 	})
 	_ = fs.Parse(flagArgs)
 
 	if positional == "" || positional == "-" {
 		return fmt.Errorf("transcribe requires an audio path (not stdin): local-offload transcribe <audio> [--language es]")
+	}
+	switch v := strings.ToLower(strings.TrimSpace(*vad)); v {
+	case "", "on", "off":
+		*vad = v
+	default:
+		return fmt.Errorf("transcribe: --vad must be on or off, got %q", *vad)
 	}
 
 	cfg := loadCfg(fs)
@@ -218,6 +226,12 @@ func runTranscribe(args []string) error {
 	}
 	if *hq {
 		params["hq"] = true
+	}
+	if *words {
+		params["words"] = true
+	}
+	if *vad != "" {
+		params["vad"] = *vad
 	}
 	cfg, refused, ok := rosterprobe.NarrowLane(cfg, remotes)
 	if !ok {

@@ -263,6 +263,9 @@ func plan(req core.Request) (planned, error) {
 			setPos(p, k, out)
 		}
 		setReserve(p, out)
+		if err := planVoiceSampling(p, out); err != nil {
+			return planned{}, err
+		}
 		if clone := str(p, "clone"); clone != "" {
 			pl.inputs = append(pl.inputs, input{"clone", clone})
 		}

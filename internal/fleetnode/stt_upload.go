@@ -62,6 +62,10 @@ type STTUploadPayload struct {
 	AudioExt string `json:"audio_ext,omitempty"`
 	Language string `json:"language,omitempty"`
 	HQ       bool   `json:"hq,omitempty"`
+	// Words asks for per-word timing and a deterministic decode (temperature 0, no fallback); VAD is "on" or "off" for this call.
+	// Both mirror offload_transcribe's parameters and are absent from the body of a delegator that does not send them.
+	Words bool   `json:"words,omitempty"`
+	VAD   string `json:"vad,omitempty"`
 }
 
 // sttB64 is the audio_b64 field decoded WITHOUT a copy: the body of an upload is up to 85 MiB of base64,
@@ -97,7 +101,7 @@ type sttSkip struct{}
 
 func (*sttSkip) UnmarshalJSON([]byte) error { return nil }
 
-var sttUploadKeys = map[string]bool{"job_id": true, "audio_b64": true, "audio_ext": true, "language": true, "hq": true}
+var sttUploadKeys = map[string]bool{"job_id": true, "audio_b64": true, "audio_ext": true, "language": true, "hq": true, "words": true, "vad": true}
 
 // parseSTTUpload is the door's strict decode (unknown fields refused, as on every fleet door) that
 // never copies the audio: two passes over the same bytes, one to list the keys and one into the
@@ -295,6 +299,9 @@ func buildSTTUpload(cfg config.Config, payload json.RawMessage) (core.Request, f
 	if p.HQ && cfg.STTModelHQ == "" {
 		return core.Request{}, noop, errors.New("stt: hq requested but this node has no stt_model_hq")
 	}
+	if p.VAD != "" && p.VAD != "on" && p.VAD != "off" {
+		return core.Request{}, noop, fmt.Errorf("stt: vad %q must be on or off", p.VAD)
+	}
 	limit := cfg.EffectiveSTTUploadMaxBytes()
 	// Estimate before decoding: base64 length x 3/4 bounds the decoded size from above.
 	if est := int64(len(p.AudioB64)) * 3 / 4; est > limit+3 {
@@ -341,6 +348,12 @@ func buildSTTUpload(cfg config.Config, payload json.RawMessage) (core.Request, f
 	}
 	if p.HQ {
 		params["hq"] = true
+	}
+	if p.Words {
+		params["words"] = true
+	}
+	if p.VAD != "" {
+		params["vad"] = p.VAD
 	}
 	return core.Request{Task: core.TaskTranscribe, Audio: path, Params: params}, cleanup, nil
 }

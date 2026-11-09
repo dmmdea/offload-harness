@@ -861,6 +861,14 @@ names the key, with no class. A ComfyUI that stopped answering is `comfy_unusabl
 jobs it never ran; a job that failed on its own earlier keeps its own class). A `POST /prompt` it never answers ends after 120 s and
 counts as that death (the render exits 3 and a `--batch` stops); a `GET /view` it never answers ends after 600 s as a plain `timeout`.
 
+**Voice sampling and word-timed transcripts.** `local-offload generate-audio out.wav "text" --clone ref.wav --lang en --cfg-weight 0.3`
+sends the knob to the voice script (also `--exaggeration`, `--temperature`, `--repetition-penalty`, `--min-p`, `--top-p`; MCP `cfg_weight` and
+so on); an unset knob keeps the engine default, a bad value is refused before anything renders, and the knobs travel to a fleet node with the
+rest of the call. `local-offload transcribe take.wav --words --vad off --json` adds `words[]` (word, start, end in seconds plus whisper.cpp's
+millisecond `offsets`) and `words_path`, a file in the shape of `whisper-cli -oj`, from a deterministic decode (temperature 0, no temperature
+fallback); `--vad off` decodes without the voice-activity detector for that call. Details:
+[media-generation.md](systems/media-generation.md) and [mcp-server.md](systems/mcp-server.md).
+
 **A bare `--` ends the flags on the media verbs (CT-52).** `local-offload generate-audio out.wav -- "--- Intro ---"` passes the text,
 where `"--- Intro ---"` alone was read as a flag and the text came out empty. Everything after the first `--` is a positional, in order,
 even when it starts with a dash; a lone `-` is still stdin. The same holds for `generate-video`, `animate-character` and the verbs that

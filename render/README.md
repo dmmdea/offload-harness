@@ -271,7 +271,8 @@ worker's argument parser (as a separate token argparse reads `---` and `-x` as o
 and the worker then exits 2 after the lock was taken). Before 0.185.1 the sampling flags reached the fine-tuned worker only, so on the default engine
 `--cfg-weight 0.3` changed nothing, and an unknown flag was dropped without a word. The harness's own voice lane
 (`internal/pipeline/pipeline.go`) sends `--clone --lang` (generalist) or `--engine --model --base-dir --clone --lang` plus the
-configured `voicegen_ft_*` recipe (finetuned); `render/tts.test.mjs` reads `pipeline.go` and fails if tts.mjs would refuse
+configured `voicegen_ft_*` recipe (finetuned), and on either the sampling flags the request named (`cfg_weight` ... `top_p`,
+`internal/pipeline/pipeline_audio_sampling.go`; a request's value replaces the recipe's); `render/tts.test.mjs` reads `pipeline.go` and fails if tts.mjs would refuse
 any flag the Go side sends.
 
 **Setup** (one-time): build `.tts-venv` at the repo root on a python torch supports (3.11–3.12;

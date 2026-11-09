@@ -115,6 +115,9 @@ type NodeView struct {
 	// the node's image-gen task carries an explicit refine=false.
 	ImageRecipes   []ImageRecipeView
 	RefineHonoured bool
+	// VoiceSamplingHonoured is health `voice_sampling_honoured`: the node's audio-gen task carries the voice sampling knobs
+	// (cfg_weight, exaggeration, temperature, repetition_penalty, min_p, top_p). A node without it would drop them.
+	VoiceSamplingHonoured bool
 	// MediaRecipes are the family rows of the node's video, animation and audio bindings (health `media_recipes`, ADR 0082
 	// Amendment 3): which family each binding names and how big each weight file is on the node (-1: not there). A row carries no
 	// digest in this release, so it is never an identity. nil on a node that predates it or binds none of the three lanes through
@@ -668,6 +671,8 @@ type healthWire struct {
 	// Additive (ADR 0082): what each image family on the node is, and whether its image-gen carries refine.
 	ImageRecipes   []ImageRecipeView `json:"image_recipes"`
 	RefineHonoured bool              `json:"refine_honoured"`
+	// Additive: the audio-gen task carries the voice sampling knobs. Absent on an older node, which drops them.
+	VoiceSamplingHonoured bool `json:"voice_sampling_honoured"`
 	// Additive (ADR 0082 Amendment 3): the family rows of the node's video, animation and audio bindings.
 	MediaRecipes []MediaRecipeView `json:"media_recipes"`
 	// Additive (ADR 0072): the stt upload door's capability. Absent on an older node.
@@ -768,6 +773,8 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		ImageRecipes:   w.ImageRecipes,
 		MediaRecipes:   w.MediaRecipes,
 		RefineHonoured: w.RefineHonoured,
+
+		VoiceSamplingHonoured: w.VoiceSamplingHonoured,
 
 		LoadableFamilies: w.LoadableModelFamilies,
 		ImageFamilies:    w.ImageFamilies,

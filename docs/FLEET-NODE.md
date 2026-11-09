@@ -1576,8 +1576,12 @@ have an idle node do it. The legacy `stt` task of `/fleet/dispatch` takes only a
 
 ```
 POST /fleet/stt   Content-Type: application/json   (the vision lane's bearer rule, see below)
-{"job_id": "stt-…", "audio_b64": "<base64 of the audio file>", "audio_ext": "ogg", "language": "es", "hq": false}
+{"job_id": "stt-…", "audio_b64": "<base64 of the audio file>", "audio_ext": "ogg", "language": "es", "hq": false, "words": false, "vad": "off"}
 ```
+
+`words` (boolean) and `vad` (`"on"` or `"off"`) are optional and mirror `offload_transcribe`: `words` returns per-word timing from a
+deterministic decode (temperature 0, no temperature fallback) and `vad` switches the voice-activity detector for the one job. A node
+built before them refuses the unknown field with a `400`, so the call is never answered by a decode that ignored them.
 
 `audio_ext` is 1 to 8 lowercase letters or digits (it only names the node's temp file; ffmpeg sniffs the content),
 `language` is `auto` or a language code, `hq` needs the node to have an `stt_model_hq` (else `400 … no stt_model_hq`).

@@ -63,9 +63,14 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 		Select   []string `json:"select"`
 		Route    string   `json:"route"`
 		Remotes  []string `json:"remotes"`
+		Words    bool     `json:"words"`
+		VAD      string   `json:"vad"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
+	}
+	if (in.Words || in.VAD != "") && in.Engine == "npu" {
+		return jsonResult(map[string]any{"deferred": true, "reason": "words and vad apply to engine gpu only (the NPU whisper-base sidecar returns 5 s chunks with no word times and has no VAD switch)"})
 	}
 	// STT ownership mirrors OCR's (2026-08-23): the GPU whisper seat is the
 	// quality primary; the NPU's whisper-base is the caller's EXPLICIT fast
@@ -121,6 +126,12 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 	if in.HQ {
 		params["hq"] = true
 	}
+	if in.Words {
+		params["words"] = true
+	}
+	if in.VAD != "" {
+		params["vad"] = in.VAD
+	}
 	// A transcription of long audio is silent for minutes, like a delegation. With a progress
 	// token the client hears an opening notification and a heartbeat while the call runs;
 	// without one nothing is sent (register C-89).
@@ -161,7 +172,7 @@ func (s *Server) handleExtractImage(ctx context.Context, req *mcp.CallToolReques
 
 func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Image string `json:"image"`
+		Image   string   `json:"image"`
 		Brief   string   `json:"brief"`
 		Route   string   `json:"route"`
 		Remotes []string `json:"remotes"`
@@ -723,12 +734,28 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 		Route       string   `json:"route"`
 		Remotes     []string `json:"remotes"`
 		Node        string   `json:"node"`
+		// the voice sampling knobs: a pointer, so that 0 (a real cfg_weight or min_p) differs from not given
+		CfgWeight         *float64 `json:"cfg_weight"`
+		Exaggeration      *float64 `json:"exaggeration"`
+		Temperature       *float64 `json:"temperature"`
+		RepetitionPenalty *float64 `json:"repetition_penalty"`
+		MinP              *float64 `json:"min_p"`
+		TopP              *float64 `json:"top_p"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
 	params := map[string]any{}
 	laneTargeting(params, in.Node, nil)
+	for k, v := range map[string]*float64{"cfg_weight": in.CfgWeight, "exaggeration": in.Exaggeration, "temperature": in.Temperature,
+		"repetition_penalty": in.RepetitionPenalty, "min_p": in.MinP, "top_p": in.TopP} {
+		if v != nil {
+			params[k] = *v
+		}
+	}
+	if err := core.ValidateVoiceSampling(params); err != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+	}
 	if in.Kind != "" {
 		params["kind"] = in.Kind
 	}

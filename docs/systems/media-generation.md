@@ -465,7 +465,20 @@ value that is not a finite decimal number, an `--engine` other than `generalist|
 text) exit 2 with the reason and the usage line. A token is a flag only when it is shaped like one (`--` and a name), so a text that opens
 with dashes (`"--- Intro ---"`, which the CT-52 verbs keep intact, `---` or `-x`) is the text, and a bare `--` ends the flags. Every value
 reaches the worker as one `--flag=value` token, so a text, a path or a negative number that opens with a dash (`--text=---`,
-`--temperature=-1e-2`) is never read as an option by the worker's argparse, which would exit 2 after the lock was taken. Every flag `internal/pipeline/pipeline.go` sends stays accepted (`render/tts.test.mjs` reads the Go source to check). Flag table: [`render/README.md`](../../render/README.md#voice--narration--tts-chatterbox-multilingual-voice-cloning).
+`--temperature=-1e-2`) is never read as an option by the worker's argparse, which would exit 2 after the lock was taken. Every flag `internal/pipeline/pipeline.go` sends stays accepted (`render/tts.test.mjs` reads the Go source to check).
+
+The Go door carries the same six knobs. `generate_audio` / `generate-audio` take `cfg_weight` (0 to 1), `exaggeration` (0 to 2), `temperature`
+(above 0, up to 5), `repetition_penalty` (1 to 2), `min_p` (0 to 1) and `top_p` (above 0, up to 1), CLI `--cfg-weight` and so on; each is sent
+to the voice script only when given (`0` is a real `cfg_weight` or `min_p`), for the default engine and the fine-tuned one, where a request's
+value replaces the per-machine `voicegen_ft_*` recipe value of the same knob (`internal/core/voicesampling.go`,
+`internal/pipeline/pipeline_audio_sampling.go`). A lower `cfg_weight` slows a fast reference voice, which is what a narration pipeline tunes
+it for. Before this, the generalist path sent only `--clone` and `--lang`, so a `cfg_weight` asked for was dropped without a word. A knob is never
+dropped now: an out-of-range or non-numeric value, a knob on `kind` music, and a knob on a voice lane that has no such control (the
+`tts_endpoint` speech server, the audio.cpp voice engine) come back as a defer that names it. The knobs are request params, so they are part
+of the default output file name (a retake with another `cfg_weight` is a different file) and they travel in the fleet `audio-gen` payload
+and plan; a node publishes `voice_sampling_honoured: true` in `/fleet/health` when its audio-gen task carries them, and a call that names
+one is placed only on a node that does (an older node would drop them from the payload and render with its engine defaults, so it is a named
+miss, as `refine_honoured` is for images). The voice engine takes no seed, so takes are not repeatable. Flag table: [`render/README.md`](../../render/README.md#voice--narration--tts-chatterbox-multilingual-voice-cloning).
 
 ## Dependencies
 

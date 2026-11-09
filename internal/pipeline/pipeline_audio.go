@@ -40,6 +40,15 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	}
 	model, useOAI := sttRoute(p.cfg, paramBool(req.Params, "hq"))
 	meta.Model = model
+	opt, optWhy := sttOptions(p.cfg, req.Params, useOAI)
+	if optWhy != "" {
+		meta.LatencyMs = time.Since(start).Milliseconds()
+		meta.ErrClass = core.ErrClassBadInput
+		p.recordDefer(req.Task, meta, len(req.Audio), optWhy)
+		res := core.Deferf(optWhy, "", meta)
+		res.DeferClass = core.DeferClassContract
+		return res
+	}
 
 	lang := p.cfg.STTLanguage
 	if l := paramStr(req.Params, "language"); l != "" {
@@ -133,7 +142,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 	}
 	// ident names the on-disk stem (mediaBase) and nothing else, so no output file is
 	// renamed by the key fix.
-	ident := fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", audioID.Digest, model, identLang, proto)
+	ident := fmt.Sprintf("%s|model=%s|lang=%s|proto=%s", audioID.Digest, model, identLang, proto) + opt.stemSuffix()
 	// The params ingredient is the typed canonical form; params that cannot be keyed make
 	// the call uncacheable, like an unknown file identity does (resultCacheParamsKey says why).
 	paramsKey, keyable := p.resultCacheParamsKey(req.Task, req.Params, &meta)
@@ -166,6 +175,7 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		if !p.cfg.STTVAD {
 			prm.VAD = false
 		}
+		opt.apply(&prm)
 		tr, terr = p.stt.Transcribe(ctx, model, wav, prm)
 	}
 	// zero-always-warm: free the upstream's VRAM once the last call of a burst is done
@@ -235,6 +245,15 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		p.recordDefer(req.Task, meta, len(req.Audio), "empty transcript")
 		return core.Deferf("empty transcript", "", meta)
 	}
+	var words []sttclient.WordTiming
+	if opt.words {
+		// words is asked for: a transcript with no word times is not that answer, and is not passed off as it.
+		if words = sttclient.FlatWords(tr.Segments); len(words) == 0 {
+			meta.LatencyMs = time.Since(start).Milliseconds()
+			p.recordDefer(req.Task, meta, len(req.Audio), "the whisper upstream returned no word timings")
+			return core.Deferf("the whisper upstream returned no word timings", "", meta)
+		}
+	}
 	// The word times of a drifted transcript (issue #169) are named where an operator reads: the
 	// verdict is also published in the payload below, but a run that nobody reads the payload of
 	// would otherwise cut audio at the wrong words without a trace.
@@ -298,6 +317,9 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 		WordsReliable:     tr.WordsReliable,
 		WordsDriftSec:     tr.WordsDriftSec,
 	}
+	if opt.words {
+		attachWords(&out, base, words)
+	}
 	data, _ := json.Marshal(out)
 	// Storing under a non-content key is what turns a transient read failure into
 	// a permanent wrong answer — so an unidentifiable input is computed, returned,
@@ -320,7 +342,7 @@ func transcriptFilesPresent(data json.RawMessage) bool {
 	if json.Unmarshal(data, &r) != nil {
 		return true
 	}
-	for _, p := range []string{r.SRTPath, r.TextPath, r.JSONPath} {
+	for _, p := range []string{r.SRTPath, r.TextPath, r.JSONPath, r.WordsPath} {
 		if p == "" {
 			continue
 		}
@@ -350,6 +372,14 @@ type transcribeResult struct {
 	// bare array, so a reader of json_path alone does not see them.
 	WordsReliable *bool   `json:"words_reliable,omitempty"`
 	WordsDriftSec float64 `json:"words_drift_sec,omitempty"`
+	// Words is the per-word timing a words=true call asks for: word, start and end in seconds, offsets in
+	// milliseconds (whisper.cpp's JSON keys), probability. Cut at sttclient.MaxInlineWords with
+	// WordsTruncated set; NumWords counts them all and WordsPath holds the whole list in whisper.cpp's -oj
+	// shape. Absent unless words was asked for.
+	Words          []sttclient.WordTiming `json:"words,omitempty"`
+	NumWords       int                    `json:"num_words,omitempty"`
+	WordsTruncated bool                   `json:"words_truncated,omitempty"`
+	WordsPath      string                 `json:"words_path,omitempty"`
 }
 
 // mediaBase returns <MediaDir>/<sanitized-basename>-<8hex of ident> as the
@@ -391,6 +421,10 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 		script = p.cfg.MusicGenScript
 	default:
 		return p.deferGen(req, meta, start, len(req.Input), "unknown audio kind "+kind)
+	}
+	// the sampling knobs (cfg_weight ... top_p) are refused by name when they cannot be honoured, never dropped
+	if why := voiceSamplingRefusal(p.cfg, kind, req.Params); why != "" {
+		return p.deferGen(req, meta, start, len(req.Input), why)
 	}
 	// tts_endpoint lane (ttsendpoint.go, 0.113.25): an OpenAI-compatible speech
 	// server serves voice when asked for by name (voice=endpoint) or by default
@@ -441,7 +475,8 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 		out = filepath.Join(p.cfg.MediaDir, kind+"-"+sha256hex(text + tasks.StableParamsKey(req.Params))[:8]+ext)
 	}
 
-	// CLI: tts.mjs <out> "<text>" [--clone ref] [--lang es]
+	// CLI: tts.mjs <out> "<text>" [--clone ref] [--lang es] [--cfg-weight F --exaggeration F --temperature F
+	//      --repetition-penalty F --min-p F --top-p F]
 	//      music worker <out> "<style>" --seed N [--seconds N] [--lyrics ..] [--reserve-vram ..]
 	args := []string{out, text}
 	if kind == "voice" {
@@ -458,6 +493,7 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 			if lang := paramStr(req.Params, "lang"); lang != "" {
 				args = append(args, "--lang", lang)
 			}
+			args = appendVoiceSampling(args, req.Params)
 		case "finetuned":
 			// per-machine fine-tuned voice; requires a model + base dir, else defer (never cloud).
 			if p.cfg.VoiceGenFTModel == "" || p.cfg.VoiceGenFTBaseDir == "" {
@@ -481,6 +517,7 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 				args = append(args, "--lang", lang)
 			}
 			args = appendVoiceRecipe(args, p.cfg)
+			args = appendVoiceSampling(args, req.Params)
 		default:
 			return p.deferGen(req, meta, start, len(req.Input), "unknown voice "+voice)
 		}

@@ -737,6 +737,8 @@ func buildSTT(payload json.RawMessage) (core.Request, func(), error) {
 		Audio    string `json:"audio"`
 		Language string `json:"language"`
 		HQ       bool   `json:"hq"`
+		Words    bool   `json:"words"`
+		VAD      string `json:"vad"`
 	}
 	if err := json.Unmarshal(payload, &in); err != nil {
 		return core.Request{}, noop, fmt.Errorf("stt payload: %w", err)
@@ -750,6 +752,12 @@ func buildSTT(payload json.RawMessage) (core.Request, func(), error) {
 	}
 	if in.HQ {
 		params["hq"] = true
+	}
+	if in.Words {
+		params["words"] = true
+	}
+	if in.VAD != "" {
+		params["vad"] = in.VAD
 	}
 	return core.Request{Task: core.TaskTranscribe, Audio: in.Audio, Params: params}, noop, nil
 }
@@ -767,6 +775,13 @@ func buildAudioGen(payload json.RawMessage) (core.Request, func(), error) {
 		Seconds     int     `json:"seconds"`
 		Seed        int     `json:"seed"`
 		ReserveVRAM float64 `json:"reserve_vram"`
+		// the voice sampling knobs: a pointer, so that 0 (a real cfg_weight or min_p) differs from not sent
+		CfgWeight         *float64 `json:"cfg_weight"`
+		Exaggeration      *float64 `json:"exaggeration"`
+		Temperature       *float64 `json:"temperature"`
+		RepetitionPenalty *float64 `json:"repetition_penalty"`
+		MinP              *float64 `json:"min_p"`
+		TopP              *float64 `json:"top_p"`
 	}
 	if err := json.Unmarshal(payload, &in); err != nil {
 		return core.Request{}, noop, fmt.Errorf("audio-gen payload: %w", err)
@@ -795,6 +810,15 @@ func buildAudioGen(payload json.RawMessage) (core.Request, func(), error) {
 	}
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
+	}
+	for k, v := range map[string]*float64{"cfg_weight": in.CfgWeight, "exaggeration": in.Exaggeration, "temperature": in.Temperature,
+		"repetition_penalty": in.RepetitionPenalty, "min_p": in.MinP, "top_p": in.TopP} {
+		if v != nil {
+			params[k] = *v
+		}
+	}
+	if err := core.ValidateVoiceSampling(params); err != nil {
+		return core.Request{}, noop, fmt.Errorf("audio-gen payload: %w", err)
 	}
 	return core.Request{Task: core.TaskGenerateAudio, Input: in.Text, Params: params}, noop, nil
 }
