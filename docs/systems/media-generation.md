@@ -1138,7 +1138,7 @@ peaks fit the two leased cards, each less the runner's `--reserve-vram`, declare
 pipeline's log (once per key) and `gpu reserve` print it with its reason ("measured with the read-only safetensors loader ... so no weights stream from RAM"),
 because nothing can correct a 0 afterwards (`calibratedRAM` leaves 0 alone) and a false one would stream silently. A card-only image run records its VRAM peak and
 host growth under its own footprint key (the quant carries `+multicard`), not the single-card one. A call that pins an edit canvas above the recipe's cap, a lease of any number of cards but two, a recipe that does not fit,
-a *predicted* row and a binding with no recipe keep the ordinary streaming figure, with the reason in the declaring line. Declaring the figure of a row
+a *predicted* row, a flux3-klein call whose graph loads the prompt-upsampler file (the row was measured with the prompt upsampled outside ComfyUI) and a binding with no recipe keep the ordinary streaming figure, with the reason in the declaring line. The 0 is a Linux figure: on a Windows host a measured row that carries Windows figures (`hostWindowsGiB`; today `flux3-klein/bf16`, 12 GiB touched and 16 GiB of commit) declares those, stated, and the rows that carry none declare 0 there as before. Declaring the figure of a row
 nobody has measured would admit on a guess; this errs toward waiting for the host's room. `gpu reserve` around `comfy-generate.mjs`, `comfy-render.mjs` or
 `comfy-edit.mjs` with `--placement multicard` reads the same recipe (`Facts.Placement`, `--resident-gb`, `--megapixels`).
 
@@ -1178,16 +1178,36 @@ Neither native Dynamic VRAM nor `SelectModelDevice`/"MultiGPU Work Units" reprod
 donor+compute `virtual_vram_gb` weight-sharding (needed by the Wan GGUF lane and the pooled
 krea2/LTX-2.5 seats), so the harness stays on MultiGPU for those rather than migrating
 blind. **Source: the private mirror's default branch** — its head is upstream v2.6.4's last
-code commit plus one already-deployed local fix
-(`fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM`, operator, 2026-09-01 —
+code commit plus two already-deployed local fixes:
+(1) `fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM` (operator, 2026-09-01 —
 the first-stage fix for upstream issue #220's `libcudart.so`-on-Windows crash; the second-stage
 `illegal memory access` in the int8 dispatch path itself, hit only when `compute_device` is a
 *non-default* CUDA device, remains open and unfixable upstream — this is why the pooled LTX-2.5
-seat keeps `compute cuda:0`). **Fallback source once upstream goes read-only:** private mirror
+seat keeps `compute cuda:0`); (2) `fix(dlpack): stage comfy_kitchen inputs relative to torch's current
+device` (mirror PR #2, 2026-11-09, mirror main `98eb6bd`). Upstream's comfy_kitchen DLPack guard decided
+whether to CPU-stage a tensor against MultiGPU's own compute device, while the kernel comfy_kitchen launches
+next runs on torch's *current* device with its output beside the input tensor. ComfyUI `d07dff45` (2026-10-22,
+"Fuse and strip the Flux2 VAE through comfy-kitchen") runs the Flux2 VAE decoder's `group_norm_silu_pad3d`
+through comfy_kitchen on the VAE's card, so every card-only recipe that keeps the VAE on the storage card
+(all of them) died at the first decode on a ComfyUI at or past that commit: the inputs were staged to the
+compute card, the kernel ran on the storage card and read the other card's memory without P2P
+(`cudaErrorIllegalAddress`, `Exception in thread Thread-1 (prompt_worker)`, which the runner reports as
+`IMAGE-PLACEMENT-OOM`). Measured on node-i (two A2 16 GB, P2P "chipset not supported"), ComfyUI `e6515b16`,
+comfy_kitchen 0.2.40: `flux3-klein/bf16` card-only crashed before the fix and rendered 1024x1024 in 85.17 s
+after it, with zero staging events. A node whose ComfyUI does not contain `d07dff45` never reaches the path: <node-b> runs the release tag v0.42.5
+(`483dae43`, cut from the `release/v0.42` branch, which `git merge-base --is-ancestor` shows does not have that master commit, whatever
+the two commit dates suggest). The fix is what lets such a node move to a ComfyUI that has it. **Fallback source once
+upstream goes read-only:** private mirror
 `https://github.com/dmmdea/ComfyUI-MultiGPU-mirror` (a full `git clone --mirror`, all branches/tags;
-its default branch carries the local fix). **The mirror is private**: a clone of this repository without
+its default branch carries both local fixes). **The mirror is private**: a clone of this repository without
 access to it cannot fetch it (git fails with an auth error), and falls back to the archived but still public
-upstream `https://github.com/pollockjj/ComfyUI-MultiGPU` (the same code minus the one local fix). The
+upstream `https://github.com/pollockjj/ComfyUI-MultiGPU` (the same code minus the two local fixes). A fleet
+node without the operator's git credential reaches the mirror through a read-only deploy key: generate
+`~/.ssh/id_ed25519_multigpu_mirror` on the node, add its public half with
+`gh repo deploy-key add <pub> --repo dmmdea/ComfyUI-MultiGPU-mirror --title "<node> (read-only)"`, give
+`~/.ssh/config` a `Host github-multigpu-mirror` alias (HostName github.com, that IdentityFile, IdentitiesOnly yes)
+and set the pack's `origin` to `git@github-multigpu-mirror:dmmdea/ComfyUI-MultiGPU-mirror.git` (done on node-i
+2026-11-09, where the installer had fallen back to the public upstream). The
 installer does this itself: `render/manifest-satisfy.mjs` (`makeEnsurePack`) clones the repository a manifest's
 `node_packs` entry names, and when that clone fails it clones the next `render/node-packs.json` row of the same
 name (the upstream, for the mirror) into the same `custom_nodes/ComfyUI-MultiGPU` directory with git's credential
@@ -1473,7 +1493,13 @@ text encoder through `OffloadCLIPLoaderDisTorch2` with 6 GiB parked on cuda:1 an
 cuda:0, the VAE on cuda:1. Under `--gpu-only` nothing leaves a card by itself, so two `OffloadFreeAfterEncode` nodes take
 the upsampler (23) and then the encoder (24) off the cards once the prompt is encoded; the sampler reads the conditioning
 through them, so both releases land before the DiT loads. Rows `flux3-klein/bf16` and `flux3-klein/nvfp4`
-(`render/multicard-recipes.json`, Go mirror `internal/mediacap/multicard.go`).
+(`render/multicard-recipes.json`, Go mirror `internal/mediacap/multicard.go`). **`flux3-klein/bf16` is measured**
+(2026-11-09, node-i: two A2 16 GB, 14.8 GiB of host RAM, the read-only loader, the prompt upsampled by the `flux3-pup`
+seat): 1024x1024 in 117 s (85 s on ComfyUI's clock, 3.6 s/it), per-card totals 11,148 MiB compute and 6,872 MiB storage
+(the row holds 13.5 and 7.0 GiB), ComfyUI's anonymous RSS 1.65 GiB with every weight file-backed, MemAvailable never
+under 11.3 GiB — so under `--placement multicard` the call declares 0 host RAM and a 14.8 GiB host admits it (before,
+the predicted row declared the 18.6 GiB set and such a host could never admit it). The run needs the MultiGPU mirror at
+`98eb6bd` or later on a ComfyUI past `d07dff45` ("Archival" above). On a Windows host the same row declares its measured Windows figures instead of 0 (`hostWindowsGiB`, `MulticardRow.WindowsHostGiB`/`WindowsCommitGiB`; `hostneed.Facts.GOOS`): measured the same day on <node-b> (two 5060 Ti, 170.8 s), the ComfyUI working set peaked at 11.24 GiB while the plain loader copied the DiT from the read-only map to the card and its private commit at 15.45 GiB (WDDM backs the card allocations), so the call declares 12 GiB touched and 16 GiB of stated commit there (the two peaks rounded up to whole GiB). The read-only map is zero-copy on both systems; the difference is accounting: Linux's MemAvailable counts the map's clean file pages as available, Windows counts them against Available while they sit in the working set and charges the card allocations to commit. Both figures cover the load the runs made, the prompt upsampled outside ComfyUI by the `flux3-pup` seat: a call whose graph loads the upsampler **file** (`imagegen_upsampler` ending in `.safetensors`, the runner's `--upsampler`) keeps the ordinary estimate, the set with that file in it, because the one in-graph run (2026-10-24) held about the whole set in private bytes and none has been made with the read-only loader since.
 
 **sd.cpp bindings:** `sdcpp_model_kind: "diffusion"`, the leejet GGUF (`leejet/flux-3-image-klein-GGUF`), `sdcpp_llm` the
 Qwen3-VL-4B-Instruct GGUF (`Qwen/Qwen3-VL-4B-Instruct-GGUF`), `sdcpp_vae` the FLUX.2 VAE. The Apache-2.0 copy in

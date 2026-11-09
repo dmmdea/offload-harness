@@ -42,6 +42,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"runtime"
 	"strings"
 
 	"github.com/dmmdea/offload-harness/internal/config"
@@ -172,6 +173,17 @@ type Facts struct {
 	Stat func(path string) (size int64, ok bool)
 	// Env reads an environment variable (COMFY_CKPT and friends); nil = none set.
 	Env func(string) string
+	// GOOS is the host's operating system as runtime.GOOS spells it; "" = this process's. Only the card-only placement reads it: a measured
+	// recipe's host growth is 0 on Linux (the read-only map's pages are clean file pages MemAvailable counts) and the row's measured Windows
+	// figures on Windows (mediacap.MulticardRow.WindowsHostGiB / WindowsCommitGiB).
+	GOOS string
+}
+
+func (f Facts) goos() string {
+	if f.GOOS != "" {
+		return f.GOOS
+	}
+	return runtime.GOOS
 }
 
 func (f Facts) env(k string) string {

@@ -17,7 +17,11 @@ import (
 //     1.87 GiB of growth over ComfyUI's idle). Every image arm of that benchmark ran the stock loader, which charges each weight file to host commit,
 //     so the other rows are PREDICTED, and a predicted row says so and declares the ordinary estimate (the honest streaming figure: it errs toward
 //     waiting for the host's room, never toward admitting on a guess). A live run with the read-only loader promotes a row: flip Measured here and
-//     "basis" in render/multicard-recipes.json (a test pins the two together).
+//     "basis" in render/multicard-recipes.json (a test pins the two together). The 0 is a Linux figure: the read-only map's pages are clean file
+//     pages MemAvailable counts. A Windows host keeps the map's pages in the working set while a plain loader copies the DiT to the card and charges
+//     the card allocations to commit, so a row measured there carries WindowsHostGiB/WindowsCommitGiB and declares them, stated, on Windows
+//     (Facts.GOOS); a row that carries none declares 0 on every host, as before. A measured figure covers the load its run made: a flux3-klein
+//     call whose graph loads the prompt-upsampler FILE (the row was measured with the prompt upsampled outside ComfyUI) keeps the ordinary estimate.
 //  2. the row's per-card peaks fitting the TWO cards the lease holds, each less the runner's --reserve-vram: the larger card computes, the other stores
 //     (within 1 percent of one size the runner gives the role to the faster board instead, render/wan-multicard.mjs chooseRoles, so the card that
 //     computes may be the one up to 1 percent smaller; the compute stage is judged here against the larger card, so a row that fits by less than
@@ -81,5 +85,30 @@ func estimatePlaced(route Route, family string, files []mediacap.ModelFile, f Fa
 	if !row.Measured {
 		return note(fmt.Sprintf("the card-only recipe %s fits the two leased cards (%.1f + %.1f GiB): %s; but its host growth is predicted, not measured with the read-only loader, so the call declares the set until a run has measured it (render/multicard-recipes.json, basis predicted)", row.ID, small, large, peaks))
 	}
+	if up := inGraphUpsampler(files); up != "" {
+		// The row's host growth was measured with the prompt upsampled OUTSIDE ComfyUI (imagegen_upsampler naming a llama-swap model, which loads no
+		// file in the graph). A call whose graph loads the upsampler file itself is another load nobody measured with the read-only loader: the one
+		// run that did load it in-graph (2026-10-24, a Windows host) held about the whole weight set in private bytes. It keeps the ordinary figure.
+		return note(fmt.Sprintf("the card-only recipe %s fits the two leased cards (%.1f + %.1f GiB): %s; but its host growth was measured with the prompt upsampled outside ComfyUI, and this call loads the upsampler file %s in the graph, which no run has measured, so the call declares the set", row.ID, small, large, peaks, up))
+	}
+	if f.goos() == "windows" && (row.WindowsHostGiB > 0 || row.WindowsCommitGiB > 0) {
+		// The same read-only map costs a Windows host what a Linux host never pays: the file pages a plain loader touches while it copies the
+		// whole DiT to the card stay in the process's working set until Windows trims them (Available falls by that much), and WDDM backs
+		// the card allocations with system commit. Both were measured for this row; the commit is stated, so it is admitted against the
+		// commit limit like a stated --ram-commit, and the working set against physical RAM.
+		return Need{GiB: row.WindowsHostGiB, CommitGiB: row.WindowsCommitGiB, CommitStated: true, Source: SourceMeasured,
+			Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard, recipe %s) on 2 leased cards (%.1f + %.1f GiB): %s; on a Windows host the read-only map's pages sit in the working set while the DiT is copied to the card and WDDM commits the card allocations, measured at %.1f GiB touched and %.1f GiB of commit (a Linux host declares 0 for the same row)", family, row.ID, small, large, peaks, row.WindowsHostGiB, row.WindowsCommitGiB)}, true
+	}
 	return Need{GiB: 0, Source: n.Source, CardOnly: true, Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard, recipe %s) on 2 leased cards (%.1f + %.1f GiB): %s, measured with the read-only safetensors loader, so no weights stream from RAM", family, row.ID, small, large, peaks)}, true
+}
+
+// inGraphUpsampler is the prompt-upsampler file the call's graph loads (a flux3-klein binding's imagegen_upsampler in its file form, the runner's
+// --upsampler), "" when the graph loads none.
+func inGraphUpsampler(files []mediacap.ModelFile) string {
+	for _, mf := range files {
+		if mf.Label == "imagegen_upsampler" {
+			return mf.Name
+		}
+	}
+	return ""
 }
