@@ -530,6 +530,14 @@ export async function reapOwnWedgedInstance(o = {}) {
   }
   const outputDir = instancePaths(comfyDir, key).outputDir;
   const peekListeners = () => { try { return inspect.listenerPids(port); } catch { return []; } };
+  // Compare-and-clear: while this call waited, another runner may have launched a new instance on the key and written its own
+  // marker; deleting that one would orphan a live, healthy instance. Clear only the marker this call judged.
+  const clearIfSame = () => {
+    try {
+      const cur = readLaunch(comfyDir, key);
+      if (cur && cur.pid === marker.pid && cur.startedAt === marker.startedAt) clearLaunch(comfyDir, key);
+    } catch {}
+  };
   const wedgedErr = (listeners) => {
     const e = new Error(`COMFY-PORT-WEDGED: port ${port} held with no killable owner (marker pid ${marker.pid} alive=${alive(marker.pid)}, listener pid ${listeners.length ? listeners.join(",") : "none"}); the harness-launched instance '${key}' did not release it`);
     e.serverUnusable = true; // the runner ends with IGPU_CLASS=comfy_unusable: no later job can run on this port
@@ -548,7 +556,7 @@ export async function reapOwnWedgedInstance(o = {}) {
     const named = listeners.filter((p) => p > 0);
     if (named.length) return decline(`its pid ${marker.pid} is gone and the port is held by process ${named.join(",")}, which is not the instance`);
     if (await waitPortsFree({ port, hosts, portFree, waitMs: freeWaitMs, pollMs: freePollMs })) {
-      try { clearLaunch(comfyDir, key); } catch {}
+      clearIfSame();
       return { reaped: false, freed: true };
     }
     throw wedgedErr(listeners);
@@ -588,11 +596,18 @@ export async function reapOwnWedgedInstance(o = {}) {
   }
   // Prove it again right before the kill: the marker may have changed hands while we waited.
   const again = readLaunch(comfyDir, key);
-  if (!again || again.pid !== marker.pid || !alive(marker.pid)) return decline(`the instance changed while it was being checked (marker pid ${marker.pid})`);
+  if (!again || again.pid !== marker.pid || again.startedAt !== marker.startedAt || !alive(marker.pid)) return decline(`the instance changed while it was being checked (marker pid ${marker.pid})`);
+  // The ownership proof is a window of probes old; the pid may have exited and been reused (a relaunch by another runner, or a hand
+  // kill). Prove the process is still the one judged, from the OS, immediately before the kill.
+  let info2;
+  try { info2 = inspect.processInfo(marker.pid); } catch (e) { return decline(`could not re-read process ${marker.pid} before the kill (${e && e.message}), so nothing is killed`); }
+  if (!info2 || info2.startMs !== info.startMs) return decline(`process ${marker.pid} is not the process that was judged wedged (its start time changed), so the pid was reused; nothing is killed`);
+  const gap2 = wedgedProofGap({ marker: again, info: info2, port, outputDir });
+  if (gap2) return decline(gap2);
   // 3. Kill the tree, verify the port.
   try { inspect.killTree(marker.pid); } catch (e) { log(`COMFY-REAP-WARN: could not end process ${marker.pid} (${e && e.message})`); }
   if (!(await waitPortsFree({ port, hosts, portFree, waitMs: freeWaitMs, pollMs: freePollMs }))) throw wedgedErr(peekListeners());
-  try { clearLaunch(comfyDir, key); } catch {}
+  clearIfSame();
   const why = `${logKnown ? "3 probes unanswered, console log idle" : "3 probes unanswered over twice the window, no console log"}, listener ${listeners.length ? listeners.join(",") : "none"}`;
   log(`COMFY-REAPED: killed harness-launched pid ${marker.pid} on ${api} after ${silentSec}s unresponsive (${why})`);
   const reaped = { pid: marker.pid, port, key, unresponsiveSec: silentSec };

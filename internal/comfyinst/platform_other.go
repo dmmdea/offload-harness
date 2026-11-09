@@ -54,7 +54,7 @@ func processStartUnixMs(int) (int64, bool) { return 0, false }
 // lookupTimeout bounds each process or socket lookup, so a stuck system call cannot stall a release.
 const lookupTimeout = 15 * time.Second
 
-var ssPID = regexp.MustCompile(`pid=(d+)`)
+var ssPID = regexp.MustCompile(`pid=(\d+)`)
 
 // listenerPIDs lists the pids that listen on a TCP port (`ss -ltnp`); 0 is a listener the system cannot name an owner for.
 func listenerPIDs(port int) ([]int, error) {

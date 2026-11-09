@@ -263,6 +263,14 @@ func stopInstance(ctx context.Context, path string, m Marker, epoch uint64, inte
 	if !wedged {
 		postFree(ctx, client, base)
 	}
+	// The proof took seconds (a wedged one, several probes): the pid may have exited and been reused since the start-time check
+	// above. Check it once more at the moment of the kill, so a recycled pid is never the one killed.
+	if m.StartedAt > 0 && d.Start != nil {
+		if began, ok := d.Start(m.PID); ok && began > m.StartedAt+startSlackMs {
+			o.Why = fmt.Sprintf("process %d began after the launch marker was written (checked again just before the stop), so the pid was recycled and is not the instance; nothing killed", m.PID)
+			return o
+		}
+	}
 	if err := d.Kill(m.PID); err != nil {
 		o.Why = fmt.Sprintf("could not stop process %d: %v; still running", m.PID, err)
 		return o
