@@ -69,6 +69,8 @@ func fleetTaskOf(t core.TaskType) (string, bool) {
 		return taskAudio, true
 	case core.TaskRunGraph:
 		return taskRunGraph, true
+	case core.TaskEditImageGenerative:
+		return taskEdit, true
 	}
 	return "", false
 }
@@ -169,6 +171,13 @@ func plan(req core.Request) (planned, error) {
 		return planned{}, &contractError{fmt.Sprintf("task %q is not a media task a fleet node can run for another machine", req.Task)}
 	}
 	p := req.Params
+	if req.Task == core.TaskEditImageGenerative {
+		pl, err := planEdit(req)
+		if err != nil {
+			return planned{}, err
+		}
+		return checkPlanInputs(pl)
+	}
 	pl := planned{fleetTask: ft, payload: map[string]any{}}
 	out := pl.payload
 	switch req.Task {
@@ -301,6 +310,11 @@ func plan(req core.Request) (planned, error) {
 		}
 		pl.outDir = str(p, "out_dir")
 	}
+	return checkPlanInputs(pl)
+}
+
+// checkPlanInputs refuses a plan whose input files cannot travel: each must be a regular file.
+func checkPlanInputs(pl planned) (planned, error) {
 	for _, in := range pl.inputs {
 		fi, err := os.Stat(in.path)
 		if err != nil {

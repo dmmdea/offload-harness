@@ -116,6 +116,10 @@ type Recipe struct {
 	// differently: a request that carries its own `steps` is only valid on a graph that takes steps and cfg
 	// together when the binding set cfg too (see PairsStepsAndCFG).
 	Explicit []string `json:"explicit,omitempty"`
+	// Lane names the lane a recipe identifies when it is not the image-generation one: "edit" for the generative-edit lane
+	// (edit_recipe.go). Empty on every image recipe, and it enters the digest only when set, so an image digest is byte for byte
+	// what it was before the field existed and an edit recipe can never collide with an image recipe of the same graph name.
+	Lane string `json:"lane,omitempty"`
 }
 
 // samplingDefaults are the values a graph family's runner fills in for a sampling key the binding leaves unset.
@@ -343,6 +347,8 @@ type digestForm struct {
 	UpsamplerModel string `json:"upsampler_model,omitempty"`
 	License        string `json:"license"`
 	CommercialUse  *bool  `json:"commercial_use"`
+	// omitempty for the same reason: only an edit recipe has a lane
+	Lane string `json:"lane,omitempty"`
 }
 
 // Digest is the sha256 of the canonical JSON of the resolved recipe (hex). Explicit is not in it.
@@ -354,7 +360,7 @@ func (r Recipe) Digest() string {
 	}
 	b, _ := json.Marshal(digestForm{V: RecipeVersion, Engine: r.Engine, Graph: r.Graph, Files: files, Preset: r.Preset,
 		Steps: r.Steps, CFG: r.CFG, Sampler: r.Sampler, Scheduler: r.Scheduler, Schedule: r.Schedule, Shift: r.Shift,
-		LoRAStrength: r.LoRAStrength, UpsamplerModel: r.UpsamplerModel, License: r.License, CommercialUse: r.CommercialUse})
+		LoRAStrength: r.LoRAStrength, UpsamplerModel: r.UpsamplerModel, License: r.License, CommercialUse: r.CommercialUse, Lane: r.Lane})
 	sum := sha256.Sum256(b)
 	return hex.EncodeToString(sum[:])
 }
@@ -363,6 +369,9 @@ func (r Recipe) Digest() string {
 // Empty when the two digest alike. It is what a refusal prints so the operator sees WHICH key to change, or which
 // family to name instead.
 func (r Recipe) Diff(o Recipe) []string {
+	if r.Lane == RecipeLaneEdit || o.Lane == RecipeLaneEdit {
+		return r.diffEdit(o)
+	}
 	var d []string
 	str := func(key, a, b string) {
 		if a != b {

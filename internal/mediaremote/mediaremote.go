@@ -144,6 +144,8 @@ func LocalConfigured(cfg config.Config, req core.Request) bool {
 		return routes["run_graph"]
 	case core.TaskGenerateAudio:
 		return anyRoute(routes, audioRoutes(req.Params))
+	case core.TaskEditImageGenerative:
+		return editLaneConfigured(cfg, routes, str(req.Params, "family"))
 	}
 	return false
 }
@@ -273,6 +275,8 @@ func laneName(req core.Request) string {
 		return "audio"
 	case core.TaskRunGraph:
 		return "graph"
+	case core.TaskEditImageGenerative:
+		return "edit"
 	}
 	return string(req.Task)
 }
@@ -353,6 +357,10 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, remotes 
 		if err := os.MkdirAll(pl.outDir, 0o755); err != nil {
 			return core.Result{}, &contractError{fmt.Sprintf("out_dir %s: %v", pl.outDir, err)}
 		}
+	}
+	if pl.fleetTask == taskEdit {
+		// An edit is matched on its edit recipe and sent with its images in the media-job bundle (edit.go).
+		return callEdit(ctx, cfg, req, pl, bases, h, start)
 	}
 	rawPayload, err := json.Marshal(pl.payload)
 	if err != nil {
@@ -594,7 +602,7 @@ func buildBundle(cfg config.Config, inputs []input) ([]byte, []string, error) {
 	// Every way Pack refuses a file (not regular, over a limit, too many) was ruled out above (plan checked
 	// each input is a regular file, checkInputSizes the total), so what is left of a Pack error is this
 	// machine failing to read what it just copied.
-	bundle, err := packFn(tmp, composebundle.Limits{MaxFiles: 8, MaxFileBytes: max, MaxTotal: max})
+	bundle, err := packFn(tmp, composebundle.Limits{MaxFiles: bundleFileLimit(inputs), MaxFileBytes: max, MaxTotal: max})
 	if err != nil {
 		return nil, nil, &placementError{core.DeferClassInfrastructure, "packing the input files on this machine: " + err.Error()}
 	}

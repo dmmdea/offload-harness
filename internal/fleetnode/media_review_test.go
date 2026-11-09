@@ -285,11 +285,14 @@ func TestMediaJobCarriesOnlyItsFiveTasks(t *testing.T) {
 			t.Errorf("task %q was carried by the media-job door", task)
 			continue
 		}
-		if !strings.Contains(err.Error(), "is not one of image-gen, video-gen, animate, audio-gen, run-graph") {
+		if !strings.Contains(err.Error(), "is not one of image-gen, image-edit, video-gen, animate, audio-gen, run-graph") {
 			t.Errorf("task %q: refused for the wrong reason (want the allowlist): %v", task, err)
 		}
 	}
 	for _, task := range mediaJobTasks {
+		if task == ImageEditTask {
+			continue // needs an edit binding and a bundle of images; the door's real run covers it (edit_task.go)
+		}
 		inner := map[string]string{"image-gen": `{"prompt":"p"}`, "video-gen": `{"prompt":"p"}`, "audio-gen": `{"text":"t"}`,
 			"run-graph": `{"graph":{"1":{"class_type":"X"}}}`, "animate": `{"prompt":"p"}`}[task]
 		var payload []byte

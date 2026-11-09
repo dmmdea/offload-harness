@@ -367,7 +367,7 @@ relative to `upscale_models/`) works even on a box that binds none. The runner i
 so an sd.cpp-primary box without ComfyUI defers with the `comfyui` prereq missing — an sd.cpp arm
 (stable-diffusion.cpp has native ESRGAN support) is a documented follow-up.
 
-**Generative instruction edit** (`offload_edit_image_generative`, MCP-only — no CLI verb) is the
+**Generative instruction edit** (`offload_edit_image_generative`; CLI `edit-image-generative`) is the
 third edit-shaped route, for changes that are global or diffuse and have no drawable region: "make
 it snowing heavily", "turn the leather into fur". A Qwen-Image-Edit-class model reads the source
 through its own vision encoder and re-renders the whole frame, so fine detail outside the intended
@@ -399,7 +399,10 @@ DiT patch size 2; without the snap the latent needs padding and edits come back 
 warped). The runner measures the source file — PNG, JPEG or WebP headers, no decode — and targets its
 actual megapixels, so a source inside the band renders at exactly its own size: 2048x1024 in,
 2048x1024 out. `gen_edit_megapixels` overrides the target when every edit on a machine should land on
-one fixed size; an unreadable header falls back to the ceiling, the non-destructive direction.
+one fixed size; an unreadable header falls back to the ceiling, the non-destructive direction. A call may also carry its own
+`megapixels` (0.01 to 16, not on a `qwen-image-2.1` family) and `placement` (`single` or `multicard`) in `params`, which replace the
+binding's value for that one edit; a multicard call above the card-only recipe's 2.0 MP is refused by name before any lease. A fleet node
+sets them from an `image-edit` media job ([fleet-node.md](fleet-node.md#the-generative-edit-lane-on-a-node-image-edit-and-edit_recipes)).
 
 The band is deliberate at both ends. The 2.0 ceiling bounds VRAM and time on a seat running under a
 ~15 GB unet, so a 24 MP phone photo comes down instead of taking the box out. The 0.9 floor scales a
@@ -447,8 +450,8 @@ CLI verbs `generate-image` (`--family`, `--transparent`), `inpaint-image`, `gene
 (every `offload_generate_video` option, `--fast` included),
 `generate-audio`, `generate-svg`, `edit-image`, `media`, `run-graph`, `compose-video`; the matching
 `offload_*` MCP tools (`family` / `transparent` / `placement` on `offload_generate_image`; `family` / `images` /
-`transparent` on `offload_edit_image_generative`). The generative instruction edit is MCP-only
-(`offload_edit_image_generative`); ad-hoc runs use `render/comfy-edit.mjs` directly. The
+`transparent` / `placement` on `offload_edit_image_generative`). The generative instruction edit is
+`offload_edit_image_generative` and the CLI verb `edit-image-generative` (single and `--batch`); ad-hoc runs use `render/comfy-edit.mjs` directly. The
 composition lane is also a fleet task (`compose-video`), restricted to vetted templates.
 A bare `--` ends the flags on every one of these verbs (CT-52): `generate-audio out.wav -- "--- Intro ---"` keeps a text that starts with
 a dash, and so do `generate-video`, `animate-character` and the verbs that take one file or text (a lone `-` is still stdin).
@@ -3747,6 +3750,40 @@ and roster read, before any job runs), and the ticket path writes each row as it
 any earlier file of that name. A node job costs a ComfyUI cold start unless the node's kept instance is still up (ADR 0097), so for the 2.1 families the ticket path pays off when the lane is held
 by a long job and a node is idle, not when the lane is free (that is the warm session's case). The ticket path inherits the queue's named limits:
 one line per delegating machine, a CLI ticket dies with the CLI, a late-binding gap of up to a scan interval.
+
+## The generative edit across the fleet
+
+`offload_edit_image_generative` and `edit-image-generative` take the same `route` (`local`, `auto`, `remote`) and `remotes` as the image
+door, and `auto` is a ticket in the same way: this machine's edit lane when it is free, else the first lane that frees, here or on a
+node. What differs is how a node is chosen and what travels.
+
+- **Identity.** An edit is identified by its **edit recipe**, built by the function a node uses to publish `edit_recipes` in its
+  `/fleet/health` (`mediacap.EditRecipeWith`): the edit graph, the UNet, the text encoder, the VAE and the SET of LoRA files the
+  machine holds, each with its size and content fingerprint. A machine with a file missing or not yet fingerprinted has no identity and
+  its edit runs on its own lane. Preset, steps, cfg, `megapixels`, `placement`, seed and negative are **not** in it: they travel in the
+  request, so two machines that hold the same files match whatever each request asks for.
+- **Match.** A node is a candidate when it serves both `image-edit` and `media-job`, runs the same harness version, publishes an
+  `edit_recipes` row (lane `edit`) whose digest equals this machine's, has fingerprinted every file of the row, and does not report the
+  family's route (`edit_image_generative`, or `edit_image_generative:<name>` for a named family) as anything but configured. A node that
+  matches by name and size but has not fingerprinted all its files is a wait, not a difference. The node recomputes the digest at its
+  door and answers `412` when its files are not what it published, so a stale health read costs a pass to the next node, not a wrong render.
+- **What travels.** The source goes as the file `image` and each reference as `images_1` to `images_9` in the `media-job` bundle (up to ten
+  files for this task), with the payload `{prompt, recipe_digest, family?, negative?, preset?, steps?, cfg?, seed, transparent?, megapixels?,
+  placement?}`. `family` is the NODE's name for the matched row. The ticket fixes one seed, so an edit placed on a node and one run here use
+  the same seed. The output comes back by name, verified against the sha256 the node published.
+- **Per request.** `megapixels` (0.01 to 16, not on `qwen-image-2.1`) and `placement` (`single` or `multicard`) replace the binding's
+  `gen_edit_megapixels` and `gen_edit_placement` for that one edit, locally and on a node.
+- **CLI batch.** `edit-image-generative --batch rows.jsonl` reuses the image batch machinery (`--results`, `--resume`, `--spill`, one ticket
+  per row when the lane is busy) with chunks of one row, because `render/comfy-edit.mjs` renders one still per process and has no warm
+  session. `--seed S` gives a row without a seed `S` plus its 0-based index in the file. `--resume` skips a row whose `out` decodes as a PNG
+  of the size `mediacap.EditOutputSize` gives for the row's source and megapixels: the rule `render/wf-qwen-image-edit.mjs` applies
+  (ImageScaleToTotalPixels, `resolution_steps` 16, the target held inside 0.9 to 2.0 MP unless pinned), so no size is written down in the
+  harness. A `qwen-image-2.1` family has no such rule and is accepted on decoding alone.
+- **`--dry-run`.** Prints each row's resolved request, this machine's edit digest, the lane it would start on and every roster node's verdict
+  (matched, or the files that differ), and takes no lease, queues nothing and renders nothing.
+- **Named limits.** A matching digest promises the same weights, sampling, seed and source bytes, not pixel-identical output across GPU
+  architectures. License and `commercial_use` are not in the digest. `--node` (naming one node) is not an edit option; `remotes` narrows
+  the roster.
 
 ## Comfy workflow templates catalog (phase A)
 

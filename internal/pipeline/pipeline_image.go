@@ -16,6 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/svgkit"
 	"github.com/dmmdea/offload-harness/internal/tasks"
 )
@@ -629,6 +630,11 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 	meta.License = fam.License
 	if cfg.GenEditScript == "" || cfg.GenEditUnet == "" {
 		return defer1("no generative edit route configured")
+	}
+	// This request's own canvas (megapixels) and placement replace the binding's for this call (mediacap/edit_request_knobs.go).
+	var kerr error
+	if cfg, kerr = mediacap.ApplyEditRequestKnobs(cfg, req.Params); kerr != nil {
+		return defer1(kerr.Error())
 	}
 	prompt := strings.TrimSpace(req.Input)
 	if prompt == "" {

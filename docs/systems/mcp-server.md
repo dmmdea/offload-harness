@@ -76,6 +76,12 @@ server marks its requests resumable (`core.Request.Resumable`), and only those l
 a fleet node (`route: "remote"`, or `auto` that leaves this machine; ADR 0077) carries no `waiter_token`: the token
 names a place in line on this machine, and a resumed call that goes to a node gives that place up.
 
+**Generative edit on the fleet.** `offload_edit_image_generative` also takes `route` (`local`, `auto`, `remote`), `remotes`, `wait_s`,
+and, per request, `megapixels` (0.01 to 16) and `placement` (`single` or `multicard`). With `auto` a busy edit lane is a ticket that
+a fleet node holding the same edit recipe (`edit_recipes` in its health: graph, weights and the set of LoRA files, fingerprinted) can
+take, the source and reference images travelling in a hash-checked bundle
+([media-generation.md](media-generation.md#the-generative-edit-across-the-fleet)). The CLI twin is `edit-image-generative`.
+
 **Named media families (ADR 0058).** `offload_generate_image` and `offload_edit_image_generative`
 take a `family` param that selects one of the box's opt-in bindings beside its default one; the
 edit tool also takes `images` (multi-reference, qwen-image-2.1 families) and both take

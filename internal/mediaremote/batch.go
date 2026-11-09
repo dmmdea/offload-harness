@@ -60,6 +60,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"sort"
 	"strings"
@@ -85,6 +86,9 @@ type BatchJob struct {
 	Out      string `json:"out,omitempty"`
 	// Refine is an explicit opt-out of the prompt refiner when false; nil or true is the machine's own setting.
 	Refine *bool `json:"refine,omitempty"`
+	// Edit makes the job a generative edit (edit.go): the source and references, and the knobs only an edit has. The prompt, negative,
+	// steps, seed and out above are the edit's own. nil for an image job.
+	Edit *EditJob `json:"edit,omitempty"`
 }
 
 // Verdict says what became of one job.
@@ -296,10 +300,18 @@ func RunBatch(ctx context.Context, cfg config.Config, runner Runner, jobs []Batc
 	if route == RouteAuto {
 		cfg = effectiveCfg(cfg, o.RosterFile) // a node added to the config file since this process began is in the fleet
 	}
-	_, fam, ferr := cfg.ResolveImageFamily(o.Family)
+	var (
+		fam  config.FamilyInfo
+		ferr error
+	)
+	if jobs[0].Edit != nil {
+		fam, ferr = editBatchFamily(cfg, o.Family)
+	} else {
+		_, fam, ferr = cfg.ResolveImageFamily(o.Family)
+	}
 	carried := false
 	if ferr != nil {
-		if !carriesFamily(cfg, o, route) {
+		if !carriesFamily(cfg, o, route, jobs[0].Edit != nil) {
 			return nil, ferr
 		}
 		// A family only the nodes define is carried to them by name, as a single render carries it: this machine has no
@@ -332,7 +344,7 @@ func RunBatch(ctx context.Context, cfg config.Config, runner Runner, jobs []Batc
 			}
 		}
 		// 2. A file that proves itself is not rendered again.
-		if o.Resume && j.Out != "" && pngVerifies(j.Out, j.Width, j.Height) {
+		if o.Resume && j.Out != "" && batchVerifies(cfg, o.Family, j) {
 			row := BatchRow{I: i, Out: j.Out, Seed: j.Seed, OK: true, Verdict: VerdictSkipped}
 			if sum, _, err := fileSHA256(j.Out); err == nil {
 				row.SHA256 = sum
@@ -434,7 +446,9 @@ func sameJob(a, b BatchJob) bool {
 	}
 	a.Refine, b.Refine = nil, nil
 	a.Out, b.Out = "", ""
-	return a == b
+	ea, eb := a.Edit, b.Edit
+	a.Edit, b.Edit = nil, nil
+	return a == b && reflect.DeepEqual(ea, eb)
 }
 
 // selfOrLocal is the id a render on this machine is attributed to.
@@ -548,7 +562,7 @@ func chooseBatchMode(ctx context.Context, cfg config.Config, runner Runner, firs
 	}
 	// This machine's own identity (F59: it waits on the fingerprints of its weight files, up to 20 s for each on a cold cache, so it is built
 	// only now, after the lane was asked and found held, as the single call's door does). Without one the batch is what it was.
-	local, okID := identityOrLog(ctx, cfg, o.Family)
+	local, okID := identityOrLogFor(ctx, cfg, req)
 	if !okID {
 		return warmOr("")
 	}
@@ -612,19 +626,26 @@ func serialLine(asked int) string {
 // carriesFamily says a family this machine cannot resolve is carried to the nodes by name rather than refused: the batch is
 // forced onto the fleet (route remote), or this machine has no image lane at all (a thin client) and a fleet to hand it to.
 // A machine that renders locally keeps refusing a name it does not know, so a typo is caught before any job is sent.
-func carriesFamily(cfg config.Config, o BatchOpts, route string) bool {
+func carriesFamily(cfg config.Config, o BatchOpts, route string, edit bool) bool {
 	switch route {
 	case RouteRemote:
 		return true
 	case RouteAuto:
 		hasFleet := len(cfg.DelegateRemotes) > 0 || len(o.Remotes) > 0
-		return hasFleet && !LocalConfigured(cfg, core.Request{Task: core.TaskGenerateImage})
+		task := core.TaskGenerateImage
+		if edit {
+			task = core.TaskEditImageGenerative
+		}
+		return hasFleet && !LocalConfigured(cfg, core.Request{Task: task})
 	}
 	return false
 }
 
 // batchRequest is the single render a job stands for: what the lane question, the roster match and the ticket are about.
 func batchRequest(j BatchJob, family, placement string) core.Request {
+	if j.Edit != nil {
+		return editBatchRequest(j, family, placement)
+	}
 	params := map[string]any{}
 	if j.Out != "" {
 		params["out"] = j.Out

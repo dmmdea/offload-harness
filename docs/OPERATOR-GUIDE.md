@@ -556,11 +556,28 @@ defers whenever detection is unparseable, empty, or absurd (>60% coverage) — b
 mask with `mask_boxes` yourself when it does.
 
 For edits that have **no drawable region** ("make it snowing heavily", "turn the leather
-into fur") the third edit route is the maskless **generative instruction edit** — MCP-only
-(`offload_edit_image_generative`, no CLI verb), bound per machine by the `gen_edit_*`
+into fur") the third edit route is the maskless **generative instruction edit** — the MCP
+tool `offload_edit_image_generative` and the CLI verb `edit-image-generative` (not `edit-image`, the
+deterministic PIL editor), bound per machine by the `gen_edit_*`
 config keys — seeded on every ≥16 GB ComfyUI tier since 0.132.5 (Qwen-Image-Edit 2511,
 preset `lightning8`), unbound elsewhere. See
 [systems/media-generation.md](systems/media-generation.md).
+
+```bash
+local-offload edit-image-generative --image src.png --prompt "make it night" --out night.png [--ref ref.png]...   [--negative "..."] [--seed N] [--steps N] [--cfg F] [--preset lightning8] [--megapixels 1.2] [--placement single|multicard]   [--route auto|local|remote] [--remote URL] [--dry-run]
+local-offload edit-image-generative --batch rows.jsonl --results results.jsonl --resume [--spill] [--seed S]
+```
+
+A batch row is `{image, refs?, prompt, out, negative?, seed?, steps?, cfg?, preset?, megapixels?, placement?}`. The flags are the
+default of every row and a row's own value wins; with `--seed S` a row without its own seed gets `S` plus its 0-based index in the
+file, so a `--resume` does not move it. `megapixels` and `placement` are per request. The renderer makes one still per process, so a
+batch has no warm session: `--spill` hands each side (this machine, each matching fleet node) one row at a time. `--resume` skips a
+row whose `out` already decodes as a PNG of the size the edit canvas rule gives for its source and `megapixels` (the rule
+`render/comfy-edit.mjs` applies, not a fixed size). `--route auto` (default) runs an edit here when this machine has the lane and, when
+it is busy and a fleet node holds the **same edit recipe** (`edit_recipes` in its `/fleet/health`: the edit graph, the weights and the
+set of LoRA files, each fingerprinted, on the same release), on that node; the images travel in a hash-checked bundle and the output
+is fetched back verified. A node whose files differ by one byte is never used. `--dry-run` prints the per-row requests, this machine's edit
+digest and each roster node's verdict, and renders and sends nothing.
 
 ### Add a named image or edit family (license-tagged opt-in, ADR 0058) ✅
 
@@ -844,7 +861,11 @@ it; `local` never does. `remotes` narrows the nodes for one call and must be a s
 reference and driver, or a clone sample travels in a hash-checked bundle to the node's media-job door, which a node opens
 only with `fleet_media_inputs: true` and a `fleet_auth_token` (the caller holds the same token; `fleet_media_inputs_max_mb`
 caps the bundle, 256 MB by default: the node holds the base64 body and the decoded bundle together while it admits a job, about 0.58 GiB at the default, and takes one upload at a time (a second waits up to 30 s for the first, then is answered 503), so raise it only on a node with the RAM). A job with no input file, and every `run-graph` (its graph travels inline), needs no
-door. The outputs come back by name, each checked against the sha256 the node published; a mismatch defers and leaves no
+door. The same door carries a generative edit (`image-edit`): a node with an edit binding and `fleet_media_inputs: true` lists
+`image-edit` in `supported_task_types` and publishes `edit_recipes[]` in `/fleet/health` (the edit graph, UNet, text encoder, VAE and the
+LoRA files it holds, each fingerprinted; the preset, steps, canvas and seed travel in the request), and refuses an edit whose
+`recipe_digest` is not its own with `412` ([FLEET-NODE.md](FLEET-NODE.md#generative-edit-recipes-and-the-image-edit-task)). This is the
+node side; the asker side is `edit-image-generative` and `offload_edit_image_generative` (see [systems/media-generation.md](systems/media-generation.md#the-generative-edit-across-the-fleet)). The outputs come back by name, each checked against the sha256 the node published; a mismatch defers and leaves no
 file. A node advertises `video-gen`, `animate`, `audio-gen` and `run-graph` only while its media route is CONFIGURED, so a
 node with a missing weight drops the task and `/fleet/health` `media_routes` says which route and why; `doctor` and
 `offload_status` print the same verdicts. `tts_voice`, `transformer` and `run_graph`'s `devices` cannot travel and defer on a remote

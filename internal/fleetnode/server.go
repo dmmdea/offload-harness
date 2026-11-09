@@ -238,6 +238,8 @@ type Server struct {
 	// recipeGen is the fingerprinter's generation the rows were built at: a read that settled since turns a pending row
 	// into its digest without waiting for the memo's minute.
 	recipeGen uint64
+	// editRecipes is the memoised edit_recipes advertisement (edit_task.go), rebuilt on the same terms.
+	editRecipes editRecipeMemo
 	// mediaRecipeMemo is the memoised media_recipes advertisement (media_recipes.go): re-read at most every mediaRoutesTTL.
 	mediaRecipeMu   sync.Mutex
 	mediaRecipeMemo []MediaRecipeHealth
@@ -1366,6 +1368,12 @@ type healthPayload struct {
 	// (image_recipe.go, ADR 0082). Additive; omitted on a node with no ComfyUI binding that names a checkpoint, and
 	// on a node that predates it, which a reader takes as "cannot be matched", never as "matches anything".
 	ImageRecipes []ImageRecipeHealth `json:"image_recipes,omitempty"`
+	// EditRecipes is the same for the generative-edit lane (edit_task.go): per edit family the node's CAPABILITY (graph, UNet, text
+	// encoder, VAE and the set of LoRA files it holds, each with its content fingerprint), lane "edit", and the digest an asker
+	// matches and sends back as recipe_digest on an image-edit media job. Per-request knobs are not in it. Additive; published
+	// only by a node that lists image-edit in supported_task_types (an edit binding AND fleet_media_inputs), omitted otherwise
+	// and on a node that predates it, which a reader takes as "cannot be matched".
+	EditRecipes []ImageRecipeHealth `json:"edit_recipes,omitempty"`
 	// MediaRecipes is what each video, animation and audio binding of this node names: the family, the weight files and how big each
 	// is here (-1: not there), with no digest and no fingerprint in this release (media_recipes.go, ADR 0082 Amendment 3). Additive;
 	// omitted on a node with no ComfyUI install (comfy_dir is no directory on it) and no sd.cpp video family, and on a node that
@@ -1867,6 +1875,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tasks {
 		if t == "audio-gen" {
 			payload.VoiceSamplingHonoured = true
+			break
+		}
+	}
+	for _, t := range tasks {
+		if t == ImageEditTask {
+			payload.EditRecipes = s.editRecipeRows()
 			break
 		}
 	}
