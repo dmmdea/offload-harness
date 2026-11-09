@@ -281,12 +281,17 @@ func Generate(ctx context.Context, spec Spec) (string, error) {
 		// GPU_RESET line is longer than that tail, so the token would be cut off with it.
 		if cls := runnerClass(tw.Contents()); cls != "" {
 			return "", &RunError{Class: cls, err: fmt.Errorf("gpugen: %s failed [%s%s]: %w (%s)",
-				baseName(spec.Script), classTag, cls, err, typedDetail(tw))}
+				baseName(spec.Script), classTag, cls, err, withReaped(typedDetail(tw), tw))}
 		}
-		return "", fmt.Errorf("gpugen: %s failed: %w (%s)", baseName(spec.Script), err, tailDetail(tw))
+		return "", fmt.Errorf("gpugen: %s failed: %w (%s)", baseName(spec.Script), err, withReaped(tailDetail(tw), tw))
 	}
 	if fi, statErr := os.Stat(spec.Out); statErr != nil || fi.Size() == 0 {
 		return "", fmt.Errorf("gpugen: no output at %q (%s)", spec.Out, tailDetail(tw))
+	}
+	// The runner killed a hung ComfyUI of its own to get its port back (COMFY-REAPED): the job went on, and an operator reading the
+	// log should still see that an instance was ended.
+	if n := reapedNote(tw.Contents()); n != "" {
+		fmt.Fprintln(os.Stderr, "gpugen: "+n)
 	}
 	// SUCCESS only: a failed/phantom run's peak may be partial, so it never records.
 	if spec.Footprint != nil && spec.OnFootprint != nil && peak > 0 {
@@ -352,7 +357,39 @@ func runnerClass(out []byte) string {
 			return c
 		}
 	}
+	// A runner that died before it could print its class: a keyed ComfyUI port that stays held with no killable owner
+	// (render/comfy-lifecycle.mjs reapOwnWedgedInstance) can run no later job, which is what comfy_unusable says.
+	if comfyPortWedgedLine.Match(out) {
+		return "comfy_unusable"
+	}
 	return ""
+}
+
+// comfyPortWedgedLine matches the runner's COMFY-PORT-WEDGED line, the whole line at its start.
+var comfyPortWedgedLine = regexp.MustCompile(`(?m)^COMFY-PORT-WEDGED: `)
+
+// comfyReapedLine matches the runner's COMFY-REAPED line (a hung ComfyUI of the harness's own was killed to free its port).
+var comfyReapedLine = regexp.MustCompile(`(?m)^COMFY-REAPED: .*`)
+
+// reapedNote is the last COMFY-REAPED line of the output (at most 300 bytes), "" when there is none.
+func reapedNote(out []byte) string {
+	all := comfyReapedLine.FindAll(out, -1)
+	if len(all) == 0 {
+		return ""
+	}
+	n := strings.TrimSpace(string(all[len(all)-1]))
+	if len(n) > 300 {
+		n = n[:300] + "..."
+	}
+	return strings.ReplaceAll(n, "IGPU_CLASS=", "IGPU_CLASS~")
+}
+
+// withReaped appends the COMFY-REAPED line to a failure's detail, so the ledger reason says that an instance was ended on the way.
+func withReaped(detail string, tw *tailWriter) string {
+	if n := reapedNote(tw.Contents()); n != "" && !strings.Contains(detail, n) {
+		return detail + " [" + n + "]"
+	}
+	return detail
 }
 
 // failedLine matches a runner's final human line: "SDCPP VIDEO FAILED: GPU_RESET: ...".
