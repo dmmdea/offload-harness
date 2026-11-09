@@ -60,7 +60,19 @@ func resolveCfgPath(flagPath, envPath, home string, exists func(string) bool) st
 	return config.ResolvePath(flagPath, envPath, home, exists)
 }
 
+// openPipeline builds the pipeline of a one-shot command (every CLI verb): its PAIR emitter throttles the
+// "ingress unreachable" warning across commands (pairworkloads.OneShotConfig), because each command is a new process.
 func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
+	return openPipelineWith(cfg, pairworkloads.OneShotConfig(cfg))
+}
+
+// openPipelineLongRunning is openPipeline for a server that outlives its requests (the MCP server, fleet-serve): its
+// PAIR emitter keeps the plain once-per-process ingress warning.
+func openPipelineLongRunning(cfg config.Config) (*pipeline.Pipeline, func(), error) {
+	return openPipelineWith(cfg, pairworkloads.FromConfig(cfg))
+}
+
+func openPipelineWith(cfg config.Config, pairCfg pairworkloads.Config) (*pipeline.Pipeline, func(), error) {
 	if err := cfg.EnsureDirs(); err != nil {
 		return nil, nil, err
 	}
@@ -119,7 +131,7 @@ func openPipeline(cfg config.Config) (*pipeline.Pipeline, func(), error) {
 	// Every non-delegation tool row becomes one card in NVIDIA PAIR's Jobs
 	// list (docs/systems/pair-workloads.md); inert unless
 	// pair_workloads_enabled and PAIR is installed on this box.
-	pair := pairworkloads.New(pairworkloads.FromConfig(cfg))
+	pair := pairworkloads.New(pairCfg)
 	pair.AttachLedger(led)
 	p := pipeline.New(cfg, client, ca, led)
 	// A long media call opens its card when it starts (calls.go).

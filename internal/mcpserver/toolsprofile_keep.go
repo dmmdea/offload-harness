@@ -427,6 +427,11 @@ var compactKeep = []compactKeepEntry{
 	},
 	{
 		Tools:    []string{"offload_status"},
+		Sentence: "A node row's media block answers what media that node renders; served_models lists llama-swap chat seats only.",
+		Why:      "a node's media capability is its media block: served_models lists chat seats only, so a node with no image seat there is not a node with no image engine",
+	},
+	{
+		Tools:    []string{"offload_status"},
 		Sentence: "Read verdict before concluding anything from \"held\"; a held card is queued behind with queue_with, never refused.",
 		Why:      "read verdict before concluding anything from held: a held card is queued behind with queue_with, never refused",
 	},

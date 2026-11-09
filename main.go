@@ -451,7 +451,7 @@ func runMCP(args []string) error {
 	// that shape before. It starts and says so instead: offload_status carries
 	// config_error and every other tool defers by name (mcpserver.WithConfigError).
 	cfg, src := loadCfgWithSource(fs)
-	p, cleanup, err := openPipeline(cfg)
+	p, cleanup, err := openPipelineLongRunning(cfg)
 	if err != nil {
 		return err
 	}
@@ -728,7 +728,7 @@ func runFleetServe(args []string) error {
 
 	// Same pipeline construction as the mcp verb, incl. the hot-reloader (this
 	// is a long-running server; nightly retrains must go live without a restart).
-	p, cleanup, err := openPipeline(cfg)
+	p, cleanup, err := openPipelineLongRunning(cfg)
 	if err != nil {
 		return err
 	}
@@ -1008,6 +1008,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// Endpoints that name a box by a private-range IP literal instead of a tailnet name: pure config, a
 	// warning only (never an exit code), and silent on a config with none.
 	writeLANIPEndpointsSection(w, cfg)
+	// Whether the PAIR ingress this box posts cards to accepts a connection: one 1 s dial, a warning only, silent when PAIR
+	// reporting is off. The command-line emitters throttle their own warning, so this is where it stays visible.
+	writePairIngressRow(w, cfg)
 	// Fourth in the band, for the same reason: where the data lives is config plus a
 	// volume list, so a serving layer that is down must not hide it (register C-92).
 	dataOnOS := writeDataHomeSection(w, data)

@@ -7,6 +7,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 	"github.com/dmmdea/offload-harness/internal/textremote"
 	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
@@ -29,25 +30,27 @@ func (s *Server) handleSummarize(ctx context.Context, req *mcp.CallToolRequest) 
 func (s *Server) handleClassify(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
 		Text   string   `json:"text"`
-		Labels []string `json:"labels"`
-		Route  string   `json:"route"`
+		Labels  []string `json:"labels"`
+		Route   string   `json:"route"`
+		Remotes []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.textRun(ctx, core.Request{Task: core.TaskClassify, Door: "offload_classify", Input: in.Text, Params: map[string]any{"labels": in.Labels}}, in.Route))
+	return result(s.textRun(ctx, core.Request{Task: core.TaskClassify, Door: "offload_classify", Input: in.Text, Params: map[string]any{"labels": in.Labels}}, in.Route, in.Remotes))
 }
 
 func (s *Server) handleExtract(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
 		Text   string         `json:"text"`
-		Schema map[string]any `json:"schema"`
-		Route  string         `json:"route"`
+		Schema  map[string]any `json:"schema"`
+		Route   string         `json:"route"`
+		Remotes []string       `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.textRun(ctx, core.Request{Task: core.TaskExtract, Door: "offload_extract", Input: in.Text, Params: map[string]any{"schema": in.Schema}}, in.Route))
+	return result(s.textRun(ctx, core.Request{Task: core.TaskExtract, Door: "offload_extract", Input: in.Text, Params: map[string]any{"schema": in.Schema}}, in.Route, in.Remotes))
 }
 
 func (s *Server) handleTriage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -63,29 +66,38 @@ func (s *Server) handleTriage(ctx context.Context, req *mcp.CallToolRequest) (*m
 
 func (s *Server) handleVQA(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Image    string `json:"image"`
-		Question string `json:"question"`
-		Route    string `json:"route"`
+		Image    string   `json:"image"`
+		Question string   `json:"question"`
+		Route    string   `json:"route"`
+		Remotes  []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
-	return result(s.visionRun(ctx, core.Request{Task: core.TaskVQA, Door: "offload_vqa", Image: in.Image, Params: map[string]any{"question": in.Question}}, in.Route))
+	return result(s.visionRun(ctx, core.Request{Task: core.TaskVQA, Door: "offload_vqa", Image: in.Image, Params: map[string]any{"question": in.Question}}, in.Route, in.Remotes))
 }
 
 // visionRun is the ONE call behind the three single-image vision tools
 // (0.116.0): route "" / local runs in-process exactly as before, auto and
 // remote go through visionremote — the placement rule and the wire live
 // there so the CLI verbs share them.
-func (s *Server) visionRun(ctx context.Context, req core.Request, route string) core.Result {
-	return visionremote.Run(ctx, s.p.Cfg(), s.p, req, route)
+func (s *Server) visionRun(ctx context.Context, req core.Request, route string, remotes []string) core.Result {
+	cfg, refused, ok := rosterprobe.NarrowLane(s.p.Cfg(), remotes)
+	if !ok {
+		return refused
+	}
+	return visionremote.Run(ctx, cfg, s.p, req, route)
 }
 
 // textRun is the ONE call behind offload_classify and offload_extract: the default route (and
 // "local") runs the in-process pipeline exactly as before the route existed; auto and remote go
 // through textremote, where the placement rule and the wire live (0.154.0).
-func (s *Server) textRun(ctx context.Context, req core.Request, route string) core.Result {
-	return textremote.Run(ctx, s.p.Cfg(), s.p, req, route)
+func (s *Server) textRun(ctx context.Context, req core.Request, route string, remotes []string) core.Result {
+	cfg, refused, ok := rosterprobe.NarrowLane(s.p.Cfg(), remotes)
+	if !ok {
+		return refused
+	}
+	return textremote.Run(ctx, cfg, s.p, req, route)
 }
 
 // mediaRouteSchema is the `route` and `remotes` properties the five media doors share (offload_generate_image,
@@ -101,18 +113,23 @@ const mediaNodeSchema = `"node":{"type":"string","description":"OPTIONAL. Name t
 // mediaMinVRAMSchema is the `min_vram_gb` property the video and animation doors take, as the graph door does.
 const mediaMinVRAMSchema = `"min_vram_gb":{"type":"number","description":"OPTIONAL. Only a fleet node whose LARGEST card is at least this many GB may take the call (a card counts as the size it rounds to: a 16 GB card reads 15.92 GiB). Filters nodes only; this machine's own lane is its own grant. 0 asks for nothing. A number of GB, 0 or more; anything else is refused by name."}`
 
+// laneRemotesSchema is the `remotes` property the single-shot spill lanes share (offload_transcribe, the three vision
+// tools, offload_classify, offload_extract, offload_forecast, offload_compose_video), the twin of the one in
+// mediaRouteSchema: one string so the descriptions cannot drift. It pins where a spill may go; it never widens the fleet.
+const laneRemotesSchema = `"remotes":{"type":"array","items":{"type":"string"},"description":"fleet node base URLs this call may spill to, tailnet-only (e.g. http://node-c:18811); each must be one of delegate_remotes, so a call can narrow the fleet and never extend it; a base outside delegate_remotes is refused as a contract error naming it, and route local ignores them. Default: delegate_remotes"}`
+
 // textRouteSchema is the `route` property offload_classify and offload_extract share. Adding it
 // changed tools/list on every box (0.154.0): the default is local, so every caller that never
 // passes it is unchanged.
-const textRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the call runs (0.154.0): local (default; this box's own cascade, unchanged behaviour), auto (an idle local card runs it; when the machine-wide GPU lease is held — a render in flight or a text reservation — a fleet node advertising the text lane for this task runs it instead, and with no eligible node it still runs local), remote (force a fleet node; with none eligible it returns deferred:true with defer_class capacity — or config when no delegate_remotes are configured — and never touches the local GPU). The text lane is dark until a node's tier declares it (text_tasks in its health), so on today's fleets auto stays local and remote defers. The node runs its own pipeline and returns its full result; meta.node / meta.placement say where it ran"}`
+const textRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the call runs (0.154.0): local (default; this box's own cascade, unchanged behaviour), auto (an idle local card runs it; when the machine-wide GPU lease is held — a render in flight or a text reservation — a fleet node advertising the text lane for this task runs it instead, and with no eligible node it still runs local), remote (force a fleet node; with none eligible it returns deferred:true with defer_class capacity — or config when no delegate_remotes are configured — and never touches the local GPU). The text lane is dark until a node's tier declares it (text_tasks in its health), so on today's fleets auto stays local and remote defers. The node runs its own pipeline and returns its full result; meta.node / meta.placement say where it ran"}` + "," + laneRemotesSchema
 
 // sttRouteSchema is the `route` property of offload_transcribe (ADR 0072). Unlike the vision and text
 // tools its default is AUTO, not local: every fleet node serves the same whisper family, so a spill to a
 // node costs no quality, while a transcription that waits behind a render holding the cards is the
 // failure this route exists to remove (five 90 s refusals in one morning). A caller that wants the old
 // behaviour passes route "local".
-const sttRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the whisper model runs (ADR 0072). auto (the DEFAULT): this box's own whisper when the request would be served at once, and when a render or an exclusive hold would keep it waiting (a resident whisper is still served locally) a fleet node that advertises the stt upload door transcribes it instead; with no eligible node it still runs local. The default is auto because every node serves the same whisper family, so a spill costs no quality. local: only this box's whisper, unchanged behaviour; a held card then defers gpu_busy and the reason says a fleet node could take it. remote: force a fleet node; with none eligible it returns deferred:true with defer_class capacity (config when no delegate_remotes are configured) and never touches the local GPU. The audio is read on THIS box and sent as 16 kHz mono Opus (the original file when conversion is impossible); srt_path, text_path and json_path are always files written on THIS box. meta.node / meta.placement say where it ran. Does not apply under engine:npu, which is this box's own Hailo sidecar: a route you name there other than local is refused"}`
+const sttRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the whisper model runs (ADR 0072). auto (the DEFAULT): this box's own whisper when the request would be served at once, and when a render or an exclusive hold would keep it waiting (a resident whisper is still served locally) a fleet node that advertises the stt upload door transcribes it instead; with no eligible node it still runs local. The default is auto because every node serves the same whisper family, so a spill costs no quality. local: only this box's whisper, unchanged behaviour; a held card then defers gpu_busy and the reason says a fleet node could take it. remote: force a fleet node; with none eligible it returns deferred:true with defer_class capacity (config when no delegate_remotes are configured) and never touches the local GPU. The audio is read on THIS box and sent as 16 kHz mono Opus (the original file when conversion is impossible); srt_path, text_path and json_path are always files written on THIS box. meta.node / meta.placement say where it ran. Does not apply under engine:npu, which is this box's own Hailo sidecar: a route you name there other than local is refused"}` + "," + laneRemotesSchema
 
 // visionRouteSchema is the `route` property every single-image vision tool
 // carries; one string so the three descriptions cannot drift.
-const visionRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the vision model runs (0.116.0): local (default; this box's vision seat, unchanged behaviour), auto (idle local card runs it; when the machine-wide GPU lease is held — a render in flight or a text reservation — or the local vision seat is busy — a request in flight, a load or unload in progress, or a load that would unload a loaded vLLM seat — the least-loaded fleet node advertising the vision lane runs it instead, and with no eligible node it still runs local), remote (force a fleet node; with none eligible it returns deferred:true with defer_class capacity — or config when no delegate_remotes are configured — and never touches the local GPU). The image is read on THIS box under vision_max_image_bytes and travels with the job; meta.node / meta.placement say where it ran"}`
+const visionRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the vision model runs (0.116.0): local (default; this box's vision seat, unchanged behaviour), auto (idle local card runs it; when the machine-wide GPU lease is held — a render in flight or a text reservation — or the local vision seat is busy — a request in flight, a load or unload in progress, or a load that would unload a loaded vLLM seat — the least-loaded fleet node advertising the vision lane runs it instead, and with no eligible node it still runs local), remote (force a fleet node; with none eligible it returns deferred:true with defer_class capacity — or config when no delegate_remotes are configured — and never touches the local GPU). The image is read on THIS box under vision_max_image_bytes and travels with the job; meta.node / meta.placement say where it ran"}` + "," + laneRemotesSchema

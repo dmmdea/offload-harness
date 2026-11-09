@@ -18,6 +18,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/forecastremote"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -41,7 +42,7 @@ func forecastPlace(ctx context.Context, cfg config.Config, runner forecastRunner
 // forecastRouteSchema is the `route` property of offload_forecast. The default is auto: a box that
 // binds the forecast model runs it at once, and a box that does not (or whose card is held) is
 // served by a fleet node, because every node serves the same model and a spill costs no quality.
-const forecastRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the forecast runs. auto (the DEFAULT): this box's own forecast model when it binds one and its card is free, otherwise a fleet node that serves forecast. local: only this box's model; without one the call defers as config. remote: force a fleet node; with none eligible it defers with defer_class capacity (config when no delegate_remotes are configured) and never touches the local GPU. The series is read on THIS box and travels with the job; a large result file is always written on THIS box. meta.node / meta.placement say where it ran"}`
+const forecastRouteSchema = `"route":{"type":"string","enum":["local","auto","remote"],"description":"where the forecast runs. auto (the DEFAULT): this box's own forecast model when it binds one and its card is free, otherwise a fleet node that serves forecast. local: only this box's model; without one the call defers as config. remote: force a fleet node; with none eligible it defers with defer_class capacity (config when no delegate_remotes are configured) and never touches the local GPU. The series is read on THIS box and travels with the job; a large result file is always written on THIS box. meta.node / meta.placement say where it ran"}` + "," + laneRemotesSchema
 
 // Limits of the file inputs and of an inline answer.
 const (
@@ -63,6 +64,7 @@ type ForecastArgs struct {
 	KnownCovariates       json.RawMessage `json:"known_covariates"`
 	OutPath               string          `json:"out_path"`
 	Route                 string          `json:"route"`
+	Remotes               []string        `json:"remotes"`
 	Select                []string        `json:"select"`
 }
 
@@ -86,6 +88,11 @@ func RunForecast(ctx context.Context, cfg config.Config, runner forecastRunner, 
 	route := strings.TrimSpace(a.Route)
 	if route == "" {
 		route = "auto"
+	}
+	// remotes pins the spill to named fleet nodes (each in delegate_remotes); the placement then sees only those.
+	cfg, refused, ok := rosterprobe.NarrowLane(cfg, a.Remotes)
+	if !ok {
+		return refused
 	}
 	if run == nil {
 		run = forecastPlace

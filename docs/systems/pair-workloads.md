@@ -369,7 +369,14 @@ printable text of at most 64 characters (`core.SanitizeAsker`) before it is used
 
 The emitter (`internal/pairworkloads.Emitter`) is fire-and-forget: a goroutine per frame with
 a 2 s timeout, one warning per process on the first failure, nothing ever changes a harness
-result. PAIR being absent (no `node-id.json`) or down is normal.
+result. The one-shot command-line emitters (`gpu reserve`, every verb that opens a pipeline) set `Config.WarnQuiet`
+(`pairworkloads.OneShotConfig`, 6 h): they warn only when no command has under the same resolved state root in that window,
+tracked by the mtime of `<state root>/pair-ingress-warned`; any error reading or writing the marker (or a marker dated in the
+future) makes it warn, so a throttle that cannot be trusted never hides the signal. The MCP server, the fleet node, the delegate
+runner, the seat watcher and the orphan sweeper keep the plain once-per-process warning (`openPipelineLongRunning` for the first
+two). `local-offload doctor` prints a `pair ingress:` row (a 1 s TCP dial to the endpoint, `OK` or `WARN` with the fix: enable the
+ingress listener or set `pair_workloads_enabled=false`), and `offload_status` carries `ingress_reachable` in its `pair` block, because
+`Enabled()` proves an identity, not a listener. PAIR being absent (no `node-id.json`) or down is normal.
 
 **Frames of one job are not ordered on the wire.** Each frame is posted on its own goroutine, so
 a run that ends within milliseconds of its queued frame (a defer, a local run's error, a node's
@@ -539,7 +546,8 @@ stayed invisible. A **relay** closes the gap with the same frames: a fleet-serve
   markers for the pass and goes on to the markers of the other relays and of the local ingress; the skipped ones are retried
   by the next sweep (before this, the first failed post ended the pass for every marker behind it, until the 48 h give-up).
 - `offload_status` has a `pair` block (absent unless `pair_workloads_enabled` is on): `mode` is `local ingress`,
-  `node-info fallback`, `relay` (with the route URL) or `off` (with the reason).
+  `node-info fallback`, `relay` (with the route URL) or `off` (with the reason). In the two ingress modes it also carries
+  `ingress_reachable` (a 1 s TCP dial to the ingress; `false` adds `ingress_fix`).
 
 Trust: a holder of the fleet token can make this member post a card named for any asker, on any node PAIR knows. The frame
 carries no prompt, context or output, and the member checks its shape, namespaces its id, bounds its rate and the cards it leaves open; the token is

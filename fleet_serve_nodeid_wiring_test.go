@@ -58,7 +58,7 @@ func TestRunFleetServeAppliesItsNodeIDBeforeOpeningThePipeline(t *testing.T) {
 		case "fleetServeConfig":
 			applies++
 			applyPos, applyLHS, applyCall = as.Pos(), as.Lhs[0], call
-		case "openPipeline":
+		case "openPipeline", "openPipelineLongRunning": // the server variant keeps the plain once-per-process PAIR warning
 			opens++
 			openPos = as.Pos()
 			if len(call.Args) == 1 {
