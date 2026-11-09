@@ -446,7 +446,7 @@ observations are recorded as a side effect of successful renders — see
 CLI verbs `generate-image` (`--family`, `--transparent`), `inpaint-image`, `generate-video`
 (every `offload_generate_video` option, `--fast` included),
 `generate-audio`, `generate-svg`, `edit-image`, `media`, `run-graph`, `compose-video`; the matching
-`offload_*` MCP tools (`family` / `transparent` on `offload_generate_image`; `family` / `images` /
+`offload_*` MCP tools (`family` / `transparent` / `placement` on `offload_generate_image`; `family` / `images` /
 `transparent` on `offload_edit_image_generative`). The generative instruction edit is MCP-only
 (`offload_edit_image_generative`); ad-hoc runs use `render/comfy-edit.mjs` directly. The
 composition lane is also a fleet task (`compose-video`), restricted to vetted templates.
@@ -1222,6 +1222,8 @@ Qwen-Image-Edit-2511 burns that edit: posterized colour, clipped channels.
 - **What a caller sees.** The same seed and the same source file give the same render. The result and the runner's `queued` line still report the caller's seed, and the plan's `describe` names the noise seed. A chain of edits at one seed draws new noise at every step, because each step's source is a new file.
 
 ## Named families, launch profiles and license tags (ADR 0058)
+
+**Per-call placement.** `generate-image --placement single|multicard` (also on `--batch`, where every job carries it) and the `placement` parameter of `offload_generate_image` lay a placement over the family's own `imagegen_placement` for that call: `single` takes the one-card lease, `multicard` the pair (a family without a measured recipe is still refused by name, as for a binding). It travels with the job to a fleet node (the image-gen payload's `placement`), where the node's builder lays it over its own binding the way it reads config, and it is **not part of the recipe digest** (`mediacap.digestForm` has no placement), so it never changes which nodes match. A node on another release is not matched at all (the harness versions must be equal), so an older node cannot drop it silently. Any other value is refused by name.
 
 A node has ONE default image binding (`imagegen_*`) and ONE default edit binding (`gen_edit_*`).
 `imagegen_families` and `gen_edit_families` add **named** bindings beside them. A request selects one
@@ -3561,7 +3563,7 @@ video (`offload_generate_video` takes no `min_vram_gb`).
 
 ## The image batch across the fleet: one ticket per job when the lane is busy and a node can render the recipe (ADR 0083, decision 13)
 
-`local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N] [--spill]` is the
+`local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N] [--spill] [--placement single|multicard] [--dry-run] [--negative T] [--width N] [--height N] [--steps N] [--seed N]` is the
 P0's batch (register F28): jobs in, a picture at the exact `out` of each, a verdict per job, and the lanes of the whole roster when this
 machine's own is held. The orchestration is `mediaremote.RunBatch` (`internal/mediaremote/batch.go`); the verb (`generate_image_batch.go`)
 reads the file, wires the warm session (`pipeline.RunImageBatchAs`, which needs a ComfyUI and so cannot live in `mediaremote`) and keeps
@@ -3574,15 +3576,18 @@ the results file.
 | `--route local` | the warm batch on this machine whatever the lane says, as before the fleet existed |
 | `--route remote` | each job sent to a roster node through the single-render call, one at a time; refused up front without `delegate_remotes`; there is no ticket, so a job whose every node is busy, text-leased or not answering is asked again after a pause (5 s, 15 s, 1 min, then every 5 min; chosen) for up to the queue's 8 h ceiling, and ends `queued`, never `failed`, if it finds no place by then (the jobs not sent yet are then queued at once); a fleet that cannot take the job as configured (no node serves it, a route is not configured, no node carries `refine=false`, a roster entry the tailnet guard refuses) is not waited for, and the job fails at once naming each node's miss; a node chosen and then lost when the job is sent, or after, fails it too; the node's recipe is not compared (below) |
 | `--results r.jsonl` | one row per job, kept in `r.jsonl.partial` as each job is final and written whole, in job order, over `r.jsonl` when the batch ends; an earlier `r.jsonl` is untouched until then, so a batch the command refuses leaves it whole and one that dies leaves `r.jsonl.partial` with the jobs that ended; the run that reopens the name (the `--resume` that recovers a killed batch) first sets that record aside as `r.jsonl.partial.prev` (one is kept, the newest; an empty partial never replaces it), says so, and puts it back if the batch is then refused; opened before anything runs, so an unwritable path, a folder, and on Windows a read-only file stop the command with no lane time spent; it may not name the `--batch` file |
+| `--negative T`, `--width N`, `--height N`, `--steps N`, `--seed S` | the **defaults of every row** without its own value (below, "Row defaults and the size"); a row's own value wins |
+| `--placement single\|multicard` | the card placement for every job of the batch (default: the family's own `imagegen_placement`); it travels to a node with each job and never changes which nodes match (below, "Card-only image and edit") |
+| `--dry-run` | print the resolved rows (defaults applied, sizes snapped, seeds and outs fixed, and with `--resume` which rows would be skipped) and exit; it renders nothing, asks no lane and contacts no node |
 | `--resume` | skip a job whose `out` already holds a file that proves itself (below) |
 | `--jobs N` | the most tickets in flight (0 = the default below); applies to the ticket path only, and with `--spill` to the node workers |
-| `--spill` | opt-in, `--route auto` only (refused with `--route local` or `remote`): when the lane is free AND a roster node renders the same recipe, run both at once (below, "Spill") |
+| `--spill` | opt-in, `--route auto` only (refused with `--route local` or `remote`): when a roster node renders the same recipe, run both at once over one queue: at once when the lane is free, and when it is busy the nodes start and this machine's warm session joins when the lane frees (below, "Spill") |
 
 **Where the batch runs.** Decided once, at the start, and never mixed (except under `--spill`, below):
 
 1. **One warm session** (`RunImageBatchAs`: the checkpoint loads once, the batch boundary tears ComfyUI down once) when `--route local`;
    when the machine has no `delegate_remotes`; when the process runs under an inherited lease (`gpu reserve -- local-offload ...`: its card was
-   chosen for it); when it has no queue (the lease refuses the state root, so there is nowhere to keep a ticket; a config with no `state_dir` has one); when this machine's lane is **free** (`MediaLaneFree` for the batch's
+   chosen for it; a call that asked for `--spill` or typed `--route auto|remote`, on a machine with a fleet, prints one stderr line saying fleet ticketing and spill are off inside an inherited lease and to run it outside `gpu reserve`, `mediaremote.InheritedLeaseNotice`); when it has no queue (the lease refuses the state root, so there is nowhere to keep a ticket; a config with no `state_dir` has one); when this machine's lane is **free** (`MediaLaneFree` for the batch's
    family: free, and readable); and when the lane is not free but **no roster node renders the recipe**. The last is the honest limit: krea2 and
    the 2512 build exist on this machine's files only (the nodes hold no such weights, so the recipe match of ADR 0082 finds none), so a batch of
    either runs on the workstation as before. The batch **keeps its place in the lease line** for the lane for up to the queue's own 8 h ceiling
@@ -3606,9 +3611,9 @@ the results file.
    ticket would only wait another ceiling (`TestBatchTicketThatExpiresIsQueuedAndNotSentAgain`). Once one job has waited the ceiling, the jobs not yet
    sent are queued at once as `not started`, not sent to wait it again in turn (`TestBatchTicketCeilingQueuesTheJobsNotYetSent`).
 3. **Spill (`--spill`, opt-in).** Without the flag a free lane runs the whole file in one warm session and never uses a node that renders the same
-   recipe; only a busy lane makes tickets. With `--spill` (route auto only) a free lane and at least one matching node (the same digest and release the
+   recipe; only a busy lane makes tickets. With `--spill` (route auto only) at least one matching node (the same digest and release the
    tickets match on: compare them with `local-offload media-recipes` on each machine; the roster is the one the ticket path reads, `delegate_remotes`
-   re-read from the config file, narrowed by `--remote`) run **together over one shared queue** of the jobs not skipped by `--resume`:
+   re-read from the config file, narrowed by `--remote`) and this machine run **together over one shared queue** of the jobs not skipped by `--resume`. With the lane **free** both start at once. With the lane **busy** (a production render holds it) the node workers start at once and this machine's warm session joins when the lane frees: it asks the same lane probe the ticket scan uses every 10 s (`scanEvery`) for up to the queue's 8 h ceiling, takes its first chunk the moment the lane reads free, and goes back to waiting if another holder takes the lane between the probe and its lease. The batch no longer turns into one ticket per job just because the lane was held at the start:
    - **This machine** takes the queue in **chunks**, each one warm session. The warm call (`RunImageBatchWaiting`) takes a fixed list and writes it to
      a jobs file the render script reads once, so a session cannot be fed more jobs after it starts and cannot be kept warm across chunks: the
      checkpoint loads once per chunk. To keep that cost small the chunks are large: a chunk is the jobs left divided by the workers (this machine and
@@ -3622,7 +3627,7 @@ the results file.
    - If the warm side's lane is held past the pipeline's window the chunk goes back to the queue and it asks again (three asks, 5 s apart), then
      leaves the rest to the nodes. If the warm session stops (ComfyUI unusable, a full disk) its chunk's rows are written as for any warm batch, the
      command ends with that error (exit 1), and the nodes finish the queue. Jobs nobody could take are `queued` (`--resume`).
-   - With **no matching node**, or no fleet, or a busy lane, `--spill` says so on stderr (`--spill: ...`) and in the JSON (`spill_note`, with
+   - With **no matching node**, or no fleet, or an inherited lease, `--spill` says so on stderr (`--spill: ...`) and in the JSON (`spill_note`, with
      `cluster` naming each node's miss) and the batch is what `--route auto` does without it. The JSON `mode` is `spill` when the batch spilled; a
      warm chunk's rows say `node` = this machine's id and a node's rows say the node, so the split is in the rows. `refine_fallbacks` is not reported
      for a spill batch (nodes were not measured). Results rows, `--resume` and the exit status are as in the other modes.
@@ -3647,12 +3652,16 @@ the results file.
    define is carried by name** under `--route remote`, and on a machine with no image lane, as a single render carries it; a machine that renders
    locally still refuses a name it does not know (`TestBatchCarriesAFamilyThisMachineCannotResolveWhereItCannotRenderLocally`).
 
+**Row defaults and the size.** `--negative`, `--width`, `--height`, `--steps` and `--seed` on the batch verb are the defaults of every row that does not set its own, on every path (the warm session, the tickets, the spill workers, the one-at-a-time jobs): a row's own value wins. With `--seed S` a row without a seed gets `S + i`, `i` being the row's 0-based position among the jobs of the file, so the seeds are the same on every run and on a `--resume` of the same file whichever rows were already rendered. The size is **snapped once, before anything is placed**, to what the family renders (`config.Config.SnapImageDims`, the Go reading of the graph builders' own grids: `qwen-image`, `krea2` and `flux3-klein` floor to a multiple of 16 with a minimum of 64, `qwen-image-2.1` to a multiple of 32 with a minimum of 256, `hidream-o1` to a multiple of 32; a generic SDXL-shaped graph and the sd.cpp engine take the size as asked): a row that asks 1600x900 on `qwen-image` is a 1600x896 job from then on, so the size it renders at, the size the node is sent, the default `out` name and the size `--resume` checks the picture against are one number, and a finished 1600x896 PNG is skipped instead of rendered again. A family only the nodes define (carried by name) is left as asked. `--cfg` is not a flag of this verb (the guidance is the family binding's).
+
 **How many in flight.** `--jobs N`, else 1 for this machine's lane plus one per roster node whose recipe matches (busy or idle: a busy node
 frees), at most 8, and never more than there are jobs (`TestBatchNeverHasMoreThanNInFlight`). The cap of 8 is a chosen constant, not a
 measurement; more tickets than lanes only wait. A job whose single render comes back "a card is held", because a sibling job took the lane a
 moment after it read free, is sent again, at most twice (chosen): asked again, a call that finds the lane busy becomes a ticket and waits, so the retry
 is what turns a lost race into a wait. A lane that refuses the same job three times in a row is a place not had, so the row is `queued`, never `failed`; any
 other failure is a `failed` row at once, and the queue's own end of a ticket is not a lost race and is not asked again (`TestBatchRetriesALostLaneRaceAndOnlyThat`).
+
+**A slow health read is asked twice.** The delegator reads each node's `/fleet/health` before it places a job. A node whose cards are all busy can answer that read slowly, and one timeout used to read as "no node serves image generation", so a one-at-a-time batch slept its longest step (5 min) before it looked again. A read that ran out of time is now asked once more after 2.5 s (`probeRosterRetrying`, with the node's cached timeout forgotten first); a node that is refused, answers a status, or is served from the cache is not asked again.
 
 **The rows.** One per job, in the printed JSON (`items`) and in `--results`: `{i, out, seed, ok, ms, error?, node?, family?, sha256?, verdict}`, the first
 six keys being the ones `pipeline.parseBatchResults` reads from the render script's own results file.

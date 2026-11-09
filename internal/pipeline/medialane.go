@@ -152,6 +152,9 @@ func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf
 	}
 	// The binding the call would render with, resolved the way runGenerateImage resolves it.
 	cfg, _, ferr := p.cfg.ResolveImageFamily(paramStr(req.Params, "family"))
+	if ferr == nil {
+		cfg, ferr = cfg.WithImagePlacement(paramStr(req.Params, "placement")) // a per-call placement, as runGenerateImage lays it
+	}
 	if ferr != nil {
 		return ln, ferr.Error(), false
 	}

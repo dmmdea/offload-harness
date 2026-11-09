@@ -22,8 +22,9 @@ package mediaremote
 // (zero-warm, ADR 0009), and the warm session exists only on this machine. The one mixed mode is opt-in (BatchOpts.Spill,
 // `generate-image --batch --spill`, route auto only):
 //
-//   - the lane is free AND at least one roster node renders the batch's recipe (the same digest and harness version the ticket
-//     path matches on): the jobs go into ONE shared queue and both sides pull from it until it is empty. This machine's warm
+//   - at least one roster node renders the batch's recipe (the same digest and harness version the ticket path matches on), and the
+//     lane is free OR busy: the jobs go into ONE shared queue and both sides pull from it until it is empty. With the lane busy the
+//     node workers start at once and this machine's warm side joins when the lane frees (spillLocal polls the lane probe at scanEvery). This machine's warm
 //     session takes the jobs in CHUNKS (the warm call, pipeline.RunImageBatchWaiting, takes a fixed list and writes it to a
 //     jobs file the render script reads once, so a session cannot be fed more jobs after it starts: each chunk is one warm
 //     session, and the checkpoint loads once per chunk, not once per picture). A chunk is a share of what is left (spillChunk:
@@ -147,11 +148,14 @@ type BatchOpts struct {
 	// Jobs bounds the tickets in flight (0 = the default: 1 for this machine's lane plus one per roster node whose recipe
 	// matches, at most batchInFlightCap). It applies to the ticket path only, and, with Spill, to the remote workers.
 	Jobs int
-	// Spill (route auto only) keeps this machine's warm session busy AND feeds the roster nodes that render the same recipe
-	// when the lane is free: see the file header. Jobs then bounds the remote workers (0 = one per matching node).
+	// Spill (route auto only) keeps this machine's warm session busy AND feeds the roster nodes that render the same recipe,
+	// when the lane is free, or when it is busy and the warm session joins as the lane frees: see the file header. Jobs then bounds the remote workers (0 = one per matching node).
 	Spill bool
 	// Resume skips the jobs whose out already holds a file that proves itself.
 	Resume bool
+	// Placement is a per-call image placement ("single" | "multicard", generate-image --placement) every job carries to the lane
+	// that renders it, here or on a node; "" is the family's own imagegen_placement. It is not part of the recipe digest.
+	Placement string
 	// RosterFile is the config file whose delegate_remotes the tickets re-read when it changes.
 	RosterFile string
 	// Notify gets one line for a human at a time: where the batch runs, where a ticket stands. Called under a lock.
@@ -527,7 +531,7 @@ func chooseBatchMode(ctx context.Context, cfg config.Config, runner Runner, firs
 	if ambientLease() {
 		return warmOr("") // a lease this process inherited chose its card
 	}
-	req := batchRequest(first, o.Family)
+	req := batchRequest(first, o.Family, o.Placement)
 	if !LocalConfigured(cfg, req) {
 		// No image lane on this machine: every job goes to a node through the single-render call, which has no claim on a
 		// node (the claim belongs to the ticket queue), so one at a time.
@@ -559,6 +563,11 @@ func chooseBatchMode(ctx context.Context, cfg config.Config, runner Runner, firs
 		if r.matched {
 			matching++
 		}
+	}
+	if o.Spill && haveWarm && matching > 0 {
+		// --spill with this machine's lane busy: the matching nodes start on the shared queue at once and this machine's warm
+		// session joins it when the lane frees (spillLocal polls the lane at the ticket scan's step).
+		return spillPlanOf(spillNodesOf(cands, rows), len(todo), o, true)
 	}
 	if matching == 0 {
 		sort.SliceStable(rows, func(a, b int) bool { return rows[a].idx < rows[b].idx })
@@ -615,7 +624,7 @@ func carriesFamily(cfg config.Config, o BatchOpts, route string) bool {
 }
 
 // batchRequest is the single render a job stands for: what the lane question, the roster match and the ticket are about.
-func batchRequest(j BatchJob, family string) core.Request {
+func batchRequest(j BatchJob, family, placement string) core.Request {
 	params := map[string]any{}
 	if j.Out != "" {
 		params["out"] = j.Out
@@ -634,6 +643,9 @@ func batchRequest(j BatchJob, family string) core.Request {
 	}
 	if family != "" {
 		params["family"] = family
+	}
+	if placement != "" {
+		params["placement"] = placement
 	}
 	return core.Request{Task: core.TaskGenerateImage, Door: "cli:generate-image", Input: j.Prompt, Params: params}
 }
@@ -774,7 +786,7 @@ func shortDuration(d time.Duration) string {
 // job (every node left out for a configuration fact, see noPlaceNow) is not waited for: the job fails at once, naming each
 // node's miss. Anything else the call answers is final.
 func (s *batchState) runJob(ctx context.Context, cfg config.Config, runner Runner, i int, j BatchJob, route string) BatchRow {
-	req := batchRequest(j, s.o.Family)
+	req := batchRequest(j, s.o.Family, s.o.Placement)
 	w := Wait{Window: -1, RosterFile: s.o.RosterFile}
 	if s.o.Notify != nil {
 		w.Notify = func(line string) { s.say(fmt.Sprintf("job %d: %s", i, line)) }

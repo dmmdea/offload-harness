@@ -33,6 +33,13 @@ type imageBatchArgs struct {
 	refine                       bool
 	remotes                      []string
 	asJSON, compact              bool
+	// defaults are the verb's --negative/--width/--height/--steps/--seed: what a row without its own value takes (seed: base + the
+	// row's 0-based position in the file).
+	defaults pipeline.ImageBatchDefaults
+	// placement is --placement (single | multicard, "" = the family's own). routeAsked is --route as the caller typed it ("" when
+	// it did not), for the inherited-lease notice. dryRun is --dry-run.
+	placement, routeAsked string
+	dryRun                bool
 }
 
 // readBatchJobs reads a jobs.jsonl: one job per non-empty line, in order.
@@ -84,6 +91,16 @@ func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
 	// --refine=false applies to every job that does not set its own "refine" (job-level wins).
 	applyBatchRefineDefault(jobs, a.refine)
 	cfg, src := loadCfgWithSource(fs)
+	// The verb's own --negative/--width/--height/--steps/--seed are the defaults of every row without its own, and every size is
+	// snapped to the family's grid HERE, once, whichever way the batch then runs: the size a row asks for, the size it renders at
+	// and the size --resume checks the picture against are then one number.
+	jobs = pipeline.ApplyImageBatchDefaults(cfg, a.family, jobs, a.defaults)
+	if line := mediaremote.InheritedLeaseNotice(cfg, a.remotes, a.routeAsked, a.spill); line != "" {
+		fmt.Fprintln(os.Stderr, "local-offload: generate-image --batch: "+line)
+	}
+	if a.dryRun {
+		return printBatchDryRun(cfg, a, jobs)
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
@@ -116,7 +133,7 @@ func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
 
 	var warmItems []pipeline.ImageBatchItem
 	warm := func(ctx context.Context, js []mediaremote.BatchJob, wait time.Duration) ([]mediaremote.BatchRow, bool, error) {
-		items, berr := p.RunImageBatchWaiting(ctx, a.family, fromBatchJobs(js), wait)
+		items, berr := p.RunImageBatchPlaced(ctx, a.family, a.placement, fromBatchJobs(js), wait)
 		// Appended, not replaced: a --spill batch calls the warm session once per chunk, and Batch.WarmJobs lines up with the
 		// items of every chunk in order. A plain warm batch calls it once.
 		warmItems = append(warmItems, items...)
@@ -129,7 +146,7 @@ func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
 		return rows, berr != nil && pipeline.IsGPUBusy(berr), berr
 	}
 	opts := mediaremote.BatchOpts{
-		Family: a.family, Route: a.route, Remotes: a.remotes, Jobs: a.jobs, Spill: a.spill, Resume: a.resume,
+		Family: a.family, Route: a.route, Remotes: a.remotes, Jobs: a.jobs, Spill: a.spill, Resume: a.resume, Placement: a.placement,
 		Notify: func(line string) { fmt.Fprintln(os.Stderr, line) },
 	}
 	if src.Loaded() {

@@ -77,7 +77,7 @@ const refusalNotCapable = "not_capable"
 
 // Seams: tests replace the roster reader, this machine's release, the clock and the jitter; production never does.
 var (
-	probeRoster  = rosterprobe.Probe
+	probeRoster  = probeRosterRetrying
 	localVersion = buildinfo.Version
 	placerNow    = time.Now
 	hostnameFn   = os.Hostname

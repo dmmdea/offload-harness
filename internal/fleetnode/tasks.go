@@ -555,6 +555,10 @@ func buildImageGen(ctx context.Context, cfg config.Config, payload json.RawMessa
 		// unknown one with the list it serves (health's image_families).
 		Family      string `json:"family"`
 		Transparent bool   `json:"transparent"`
+		// Placement is the delegator's per-call placement (generate-image --placement: single | multicard), laid over this node's
+		// own imagegen_placement for the family exactly as a local call lays it. Not part of the recipe digest, so it never changes
+		// whether the node matched.
+		Placement string `json:"placement"`
 		// Refine is a pointer so absent differs from false, as in the MCP handler: only an EXPLICIT false
 		// reaches the pipeline (the opt-in prompt refiner's one request-level knob). It used to be dropped here,
 		// which is why a delegator could not send refine=false (health's refine_honoured says this node carries it).
@@ -583,6 +587,9 @@ func buildImageGen(ctx context.Context, cfg config.Config, payload json.RawMessa
 	}
 	if in.Transparent {
 		params["transparent"] = true
+	}
+	if in.Placement != "" {
+		params["placement"] = in.Placement
 	}
 	if in.Negative != "" {
 		params["negative"] = in.Negative

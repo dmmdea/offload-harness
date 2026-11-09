@@ -17,8 +17,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/mediaremote"
+	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
 // runGenerateImage handles `local-offload generate-image "<prompt>" [--negative ...]
@@ -28,12 +30,14 @@ func runGenerateImage(args []string) error {
 	fs := flag.NewFlagSet("generate-image", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
-	negative := fs.String("negative", "", "negative prompt (hard exclusions, e.g. 'people, text')")
+	negative := fs.String("negative", "", "negative prompt (hard exclusions, e.g. 'people, text'); on --batch the default of every job without its own \"negative\"")
 	out := fs.String("out", "", "output PNG path (default under the media dir)")
-	width := fs.Int("width", 0, "image width px (default 1024)")
-	height := fs.Int("height", 0, "image height px (default 1024)")
-	steps := fs.Int("steps", 0, "sampler steps (default: machine binding)")
-	seed := fs.Int("seed", 0, "RNG seed (default random)")
+	width := fs.Int("width", 0, "image width px (default 1024); on --batch the default of every job without its own \"width\" (a family snaps it to its grid, e.g. 900 -> 896 on qwen-image)")
+	height := fs.Int("height", 0, "image height px (default 1024); on --batch the default of every job without its own \"height\"")
+	steps := fs.Int("steps", 0, "sampler steps (default: machine binding); on --batch the default of every job without its own \"steps\"")
+	seed := fs.Int("seed", 0, "RNG seed (default random); on --batch the base seed: a job without its own \"seed\" gets seed+i, i being its 0-based position in the file")
+	placement := fs.String("placement", "", "card placement for this call: single (one card) | multicard (the box's two non-display cards as a pair; the family needs a measured recipe). Default: the family's own imagegen_placement. It travels to a fleet node and does not change which nodes match the recipe")
+	dryRun := fs.Bool("dry-run", false, "with --batch: print the resolved rows (defaults applied, sizes snapped to the family's grid, seeds and outs fixed, and which rows --resume would skip) and exit; renders nothing and asks no lane or node")
 	refine := fs.Bool("refine", true, "set --refine=false (the =form is required) to render the prompt verbatim, skipping this machine's opt-in prompt refiner; on --batch it applies to every job without its own \"refine\" value (no-op unless imagegen_refiner_model is configured)")
 	compactFlag := fs.Bool("compact", false, "compact (minified) JSON output")
 	family := fs.String("family", "", "named image family to render with (ADR 0058; offload_status media.image_families / doctor list them); default = this machine's default binding")
@@ -49,7 +53,7 @@ func runGenerateImage(args []string) error {
 	positional, flagArgs := splitArgs(args, map[string]bool{
 		"config": true, "negative": true, "out": true,
 		"width": true, "height": true, "steps": true, "seed": true,
-		"batch": true, "family": true, "route": true, "remote": true, "results": true, "jobs": true,
+		"batch": true, "family": true, "route": true, "remote": true, "results": true, "jobs": true, "placement": true,
 	})
 	_ = fs.Parse(flagArgs)
 	// Boolean flags in space form ("--refine false") make the value a stray
@@ -59,6 +63,9 @@ func runGenerateImage(args []string) error {
 		return err
 	}
 
+	if _, err := (config.Config{}).WithImagePlacement(*placement); err != nil {
+		return fmt.Errorf("generate-image: --placement: %w", err)
+	}
 	if *batchFile != "" {
 		// A batch renders ONE binding for every job: --transparent (a per-render alpha channel) has no place on it.
 		if *transparent {
@@ -70,12 +77,20 @@ func runGenerateImage(args []string) error {
 		if r, _ := mediaremote.NormalizeRoute(*route); *spillFlag && r != mediaremote.RouteAuto {
 			return fmt.Errorf("generate-image: --spill shares the jobs between this machine's warm session and the roster nodes, which only --route auto decides; --route %s names one place for every job: drop one of them", *route)
 		}
+		routeAsked := ""
+		fs.Visit(func(f *flag.Flag) {
+			if f.Name == "route" {
+				routeAsked = *route
+			}
+		})
 		return runImageBatchVerb(fs, imageBatchArgs{
 			file: *batchFile, family: *family, route: *route, results: *resultsFlag, resume: *resume, jobs: *jobsFlag, spill: *spillFlag,
 			refine: *refine, remotes: remotes, asJSON: *asJSON, compact: *compactFlag,
+			defaults:  pipeline.ImageBatchDefaults{Negative: *negative, Width: *width, Height: *height, Steps: *steps, Seed: *seed},
+			placement: strings.ToLower(strings.TrimSpace(*placement)), routeAsked: routeAsked, dryRun: *dryRun,
 		})
 	}
-	for _, name := range []string{"results", "resume", "jobs", "spill"} {
+	for _, name := range []string{"results", "resume", "jobs", "spill", "dry-run"} {
 		set := false
 		fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
 		if set {
@@ -120,6 +135,9 @@ func runGenerateImage(args []string) error {
 	}
 	if *family != "" {
 		params["family"] = *family
+	}
+	if p := strings.ToLower(strings.TrimSpace(*placement)); p != "" {
+		params["placement"] = p
 	}
 	if *transparent {
 		params["transparent"] = true
