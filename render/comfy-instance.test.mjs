@@ -763,7 +763,7 @@ const freePort = async () => {
 async function muteListener(port, outDir) {
   const child = spawnChild(process.execPath, ["-e",
     "require('net').createServer(() => {}).listen(Number(process.argv[3]), '127.0.0.1', () => console.log('listening'));",
-    "main.py", "--port", String(port), "--output-directory", outDir], { stdio: ["ignore", "pipe", "ignore"] });
+    "main.py", "--port", String(port), "--output-directory", outDir], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
   await new Promise((r) => child.stdout.once("data", r));
   return child;
 }

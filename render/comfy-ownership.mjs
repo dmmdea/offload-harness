@@ -152,8 +152,10 @@ const PS_TIMEOUT_MS = 15000;
 /** Pid-recycle slack, as the Go side (internal/comfyinst startSlackMs): the marker is written right after the spawn. */
 export const START_SLACK_MS = 10_000;
 
-function powershell(script, run = spawnSync) {
-  const r = run("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], { encoding: "utf8", timeout: PS_TIMEOUT_MS, windowsHide: true });
+// psArgs/psOut wrap one powershell.exe call; each call site makes the call itself, with windowsHide in its own options,
+// so the no-visible-windows scan can check it.
+const psArgs = (script) => ["-NoProfile", "-NonInteractive", "-Command", script];
+function psOut(r) {
   if (!r || r.error || r.status !== 0) throw new Error(`powershell did not answer (${r && r.error ? r.error.message : "exit " + (r && r.status)})`);
   return String(r.stdout || "").trim();
 }
@@ -166,7 +168,7 @@ function powershell(script, run = spawnSync) {
 export function processInfo(pid, { platform = process.platform, run = spawnSync } = {}) {
   if (!Number.isInteger(pid) || pid <= 0) return null;
   if (platform === "win32") {
-    const out = powershell(`$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if ($p) { @{ startMs = [DateTimeOffset]::new($p.CreationDate).ToUnixTimeMilliseconds(); cmd = [string]$p.CommandLine; ppid = [int]$p.ParentProcessId } | ConvertTo-Json -Compress }`, run);
+    const out = psOut(run("powershell.exe", psArgs(`$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if ($p) { @{ startMs = [DateTimeOffset]::new($p.CreationDate).ToUnixTimeMilliseconds(); cmd = [string]$p.CommandLine; ppid = [int]$p.ParentProcessId } | ConvertTo-Json -Compress }`), { encoding: "utf8", timeout: PS_TIMEOUT_MS, windowsHide: true }));
     if (!out) return null;
     const j = JSON.parse(out);
     return { startMs: Number(j.startMs), cmd: String(j.cmd || ""), ppid: Number(j.ppid) };
@@ -179,7 +181,7 @@ export function processInfo(pid, { platform = process.platform, run = spawnSync 
   if (!Number.isFinite(ppid) || !Number.isFinite(ticks)) throw new Error(`cannot parse /proc/${pid}/stat`);
   const btime = Number((readFileSync("/proc/stat", "utf8").match(/^btime\s+(\d+)/m) || [])[1]);
   if (!Number.isFinite(btime)) throw new Error("cannot read the boot time from /proc/stat");
-  const hz = Number(String(run("getconf", ["CLK_TCK"], { encoding: "utf8", timeout: 5000 }).stdout || "").trim()) || 100;
+  const hz = Number(String(run("getconf", ["CLK_TCK"], { encoding: "utf8", timeout: 5000, windowsHide: true }).stdout || "").trim()) || 100;
   const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" ");
   return { startMs: btime * 1000 + Math.round(ticks * 1000 / hz), cmd, ppid };
 }
@@ -194,10 +196,10 @@ export function listenerPids(port, { platform = process.platform, run = spawnSyn
     // By port alone, keeping the sockets with no remote end: `-State Listen` matched nothing for a live listener on a current Windows
     // 11 build (the State column comes back empty), which would read as "no listener" and let a foreign holder look like a ghost.
     // No socket at all is an ObjectNotFound error of the cmdlet (exit 1 even when silenced); any other error stays an error.
-    const out = powershell(`try { Get-NetTCPConnection -LocalPort ${Number(port)} -ErrorAction Stop | Where-Object { $_.RemotePort -eq 0 } | ForEach-Object { $_.OwningProcess } } catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }; exit 0`, run);
+    const out = psOut(run("powershell.exe", psArgs(`try { Get-NetTCPConnection -LocalPort ${Number(port)} -ErrorAction Stop | Where-Object { $_.RemotePort -eq 0 } | ForEach-Object { $_.OwningProcess } } catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }; exit 0`), { encoding: "utf8", timeout: PS_TIMEOUT_MS, windowsHide: true }));
     return out.split(/\s+/).filter(Boolean).map(Number).filter(Number.isInteger);
   }
-  const r = run("ss", ["-ltnp"], { encoding: "utf8", timeout: PS_TIMEOUT_MS });
+  const r = run("ss", ["-ltnp"], { encoding: "utf8", timeout: PS_TIMEOUT_MS, windowsHide: true });
   if (!r || r.error || r.status !== 0) throw new Error(`ss did not answer (${r && r.error ? r.error.message : "exit " + (r && r.status)})`);
   const pids = [];
   for (const line of String(r.stdout || "").split("\n")) {
