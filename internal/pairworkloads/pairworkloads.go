@@ -227,6 +227,16 @@ type Emitter struct {
 	selfOnce    sync.Once
 	selfStart   int64
 	sweepOnce   sync.Once
+	// Refused in-flight frames kept for resending (resend.go), under unsentMu: frameSeq is the
+	// newest planned frame of each job in flight, unsent its latest frame PAIR did not take.
+	unsentMu   sync.Mutex
+	frameN     int64
+	frameSeq   map[string]int64
+	unsent     map[string]unsentFrame
+	resending  bool
+	resendWake chan struct{}
+	// retryEvery is the resend interval; inflightRetryInterval unless a test sets it.
+	retryEvery time.Duration
 	// Open running cards for long tool calls (calls.go), by task.
 	callMu sync.Mutex
 	calls  map[string][]*openCall
@@ -814,13 +824,15 @@ func (e *Emitter) Emit(ev Event) {
 	e.SweepOrphansAsync()
 	pl, err := e.plan(ev)
 	done := ""
+	var n int64
 	if err == nil {
 		done = e.track(ev, pl)
+		n = e.noteFrame(ev)
 	}
 	e.inflight.Add(1)
 	go func() {
 		defer e.inflight.Done()
-		e.settle(pl, done, err)
+		e.settle(ev.JobID, n, pl, done, err)
 	}()
 }
 
@@ -838,23 +850,29 @@ func (e *Emitter) EmitSync(ev Event) {
 	e.SweepOrphansAsync()
 	pl, err := e.plan(ev)
 	done := ""
+	var n int64
 	if err == nil {
 		done = e.track(ev, pl)
+		n = e.noteFrame(ev)
 	}
-	e.settle(pl, done, err)
+	e.settle(ev.JobID, n, pl, done, err)
 }
 
-// settle posts a planned frame (unless planning already failed with err), settles its marker, and
-// warns once per process when PAIR could not be reached. Emit runs it on a background goroutine,
-// EmitSync inline.
-func (e *Emitter) settle(pl sendPlan, done string, err error) {
-	if err == nil {
+// settle posts a planned frame (unless planning already failed with err), settles its marker, books an
+// in-flight frame PAIR refused for resending (resend.go; n is its noteFrame number), and warns once per
+// process when PAIR could not be reached. Emit runs it on a background goroutine, EmitSync inline.
+func (e *Emitter) settle(jobID string, n int64, pl sendPlan, done string, err error) {
+	planned := err == nil
+	if planned {
 		err = e.deliver(context.Background(), pl)
 	}
 	// The terminal marker goes only after the post was attempted: a
 	// process killed in between still leaves a marker to close the card,
 	// and a post that failed leaves the terminal frame for the sweep.
 	e.untrack(done, pl, err)
+	if planned {
+		e.settleInflight(jobID, n, pl, err)
+	}
 	if err != nil {
 		e.warnOnce.Do(func() {
 			log.Printf("pairworkloads: PAIR ingress unreachable; harness jobs will not appear in PAIR's Jobs list (%v)", err)
