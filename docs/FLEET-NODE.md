@@ -661,6 +661,22 @@ digest is version 2, and a delegator compares recipes only between nodes on its 
 on a match. The cache is in memory (path, size, modification time); a restart reads each file's sample again (0.17 to 0.87 s per file on the one workstation measured, page cache not controlled; a cold or network disk was not measured).
 Details: [media-generation.md](systems/media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).
 
+### Generative edit recipes and the `image-edit` task
+
+A node with a generative edit binding and `fleet_media_inputs: true` (plus `fleet_auth_token`) lists `image-edit` in
+`supported_task_types` and publishes `edit_recipes[]` in `/fleet/health`, additive: one row per edit family in the shape of an
+`image_recipes` row plus `lane: "edit"`. A row is what the node can do for the lane, not one edit's settings: the edit graph, the UNet,
+the text encoder, the VAE and the set of LoRA files it holds, each with its size and content fingerprint (the same sampled sha256 as an
+image recipe, with the same `pending` / `unreadable` states and the same empty `digest` until every file is read). The preset, steps, cfg,
+megapixels, placement, seed and negative prompt are per request and are not in the digest. An edit has input images, so `image-edit` is
+carried only by `POST /fleet/media-job`, which needs the same `fleet_media_inputs` switch as every other job with input files; a
+payload sent to `/fleet/dispatch` is refused. The job must carry the `recipe_digest` it matched, and a node whose edit family digests
+differently answers `412` (cause `pending`, `unreadable` or `changed`, as for images) before anything is queued or rendered.
+A request may also carry `megapixels` (0.01 to 16; a multicard edit is held to 2.0) and `placement` (`single` or `multicard`), which
+replace `gen_edit_megapixels` and `gen_edit_placement` for that one edit. A node reads its config once at start, so turning
+`fleet_media_inputs` on, or changing an edit file, takes a restart, and the rows show `pending` until the files are read again.
+Details: [fleet-node.md](systems/fleet-node.md#the-generative-edit-lane-on-a-node-image-edit-and-edit_recipes).
+
 ## Pipeline-job task families
 
 `pipelines` (`internal/config` `Config.Pipelines map[string]PipelineSpec`) lets this node
@@ -897,7 +913,7 @@ The rule is one rule for every route that does work or returns a result. Three c
 | empty | anything else | refused `403 fleet lanes require fleet_auth_token on a non-loopback listener`, and `fleet-serve` **will not start** in this state (it names `fleet_auth_token`, the listen address and the config file it read) |
 
 - **Every task type is gated**, not the agent lane alone: `agent`, `vision`, `text`, `stt`, `stt-upload`, `compose-project`,
-  `media-job`, the PAIR relay and every media task (`image-gen`, `video-gen`, `animate`, `audio-gen`, `run-graph`, `accel`,
+  `media-job`, the PAIR relay and every media task (`image-gen`, `image-edit`, `video-gen`, `animate`, `audio-gen`, `run-graph`, `accel`,
   `compose-video`), and any task type a later release adds (`tokenGated` returns true for all of them). Before this rule
   a media task was admitted with no check at all, so any peer that could reach a listener beyond loopback could dispatch a
   `run-graph` whose manifest names node packs for the node to clone and install.

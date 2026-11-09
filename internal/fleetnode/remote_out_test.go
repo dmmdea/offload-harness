@@ -31,7 +31,8 @@ var remoteMediaPayloads = map[string]string{
 // from the input's own hash, the stt upload door's payload has no path field at all (a strict decode
 // refuses one: TestSTTUploadPayloadValidation) and names its private file itself, and the
 // agent/accel/vision/text/forecast lanes produce JSON only.
-var remoteNonWriters = []string{"stt", STTUploadTask, "agent", "accel", VisionTask, TextTask, ForecastTask}
+// image-edit is carried only by the media-job door (a payload sent to /fleet/dispatch is refused) and its builder reads no `out`.
+var remoteNonWriters = []string{ImageEditTask, "stt", STTUploadTask, "agent", "accel", VisionTask, TextTask, ForecastTask}
 
 func remoteOutCfg(t *testing.T) config.Config {
 	t.Helper()

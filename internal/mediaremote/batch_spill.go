@@ -51,7 +51,7 @@ func spillChoice(ctx context.Context, cfg config.Config, req core.Request, queue
 		w.spillNote = note
 		return m, n, w
 	}
-	local, okID := identityOrLog(ctx, cfg, o.Family)
+	local, okID := identityOrLogFor(ctx, cfg, req)
 	if !okID {
 		return fall("this machine's recipe could not be fingerprinted (a weight file is missing or unreadable), so no node can be matched to it: the batch runs on this machine's warm session alone")
 	}
@@ -142,6 +142,9 @@ type spillQueue struct {
 	workers int
 	done    chan struct{}
 	closed  bool
+	// unit: the warm side takes ONE job per chunk. A generative edit has no warm session (render/comfy-edit.mjs renders one still per
+	// process), so there is nothing a bigger chunk would share.
+	unit bool
 }
 
 func newSpillQueue(todo []int, workers int) *spillQueue {
@@ -180,6 +183,9 @@ func (q *spillQueue) takeChunk() []int {
 		return nil
 	}
 	n := spillChunk(len(q.pending), q.workers)
+	if q.unit {
+		n = 1
+	}
 	out := append([]int(nil), q.pending[:n]...)
 	q.pending = q.pending[n:]
 	q.held += n
@@ -237,6 +243,7 @@ func (q *spillQueue) rest() []int {
 // take (the warm side stopped and every node was out of reach) are left queued, with the reason, for a --resume.
 func (s *batchState) runSpill(ctx context.Context, cfg config.Config, runner Runner, jobs []BatchJob, todo []int, warm WarmFunc, plan *spillPlan) {
 	q := newSpillQueue(todo, 1+plan.workers)
+	q.unit = jobs[todo[0]].Edit != nil
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {

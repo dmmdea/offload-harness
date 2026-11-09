@@ -2151,7 +2151,8 @@ Three additions to the media tasks, all additive on the wire.
 `audio-gen` or `run-graph` job together with the input files it reads, from a holder of the fleet token. The body is
 `{job_id, task_type, payload, bundle?, bundle_sha256?, inputs?}`: `payload` is the inner task's payload exactly as
 `/fleet/dispatch` takes it, `bundle` is base64 of a gzip-tar of the files, and `inputs` maps a payload field to a bare name
-in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`, `animate.driver` and `audio-gen.clone`.
+in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`, `animate.driver`, `audio-gen.clone` and, for
+`image-edit`, `image` and `images_1` to `images_9` (see [Generative edit](#the-generative-edit-lane-on-a-node-image-edit-and-edit_recipes)).
 
 - It is open only when `fleet_media_inputs` is true, `fleet_auth_token` is set and a media task is bound
   (`config.MediaInputsAdmissible`; "bound" is the advertisement's own notion, a script, the speech endpoint or the sd.cpp /
@@ -2257,6 +2258,37 @@ lease block's class, reason and remaining seconds (`LeaseClass`, `LeaseReason`, 
 one lease, the first one's epoch (it names the holder in a ticket's answer). See
 [media-generation.md](media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).
 
+### The generative edit lane on a node: `image-edit` and `edit_recipes`
+
+A node with a generative edit binding (the default `gen_edit_script` and `gen_edit_unet`, or a named `gen_edit_families` entry that resolves
+to them) and `fleet_media_inputs` on lists the task `image-edit` in `supported_task_types` (`config.EditAdvertisable`; and
+`MediaInputsAdmissible` now counts an edit binding as a bound media task, so an edit-only node opens the door). It also publishes
+`edit_recipes[]` in `/fleet/health`, additive and omitted otherwise: one row per edit family, default first then named families in
+name order, in the shape of an `image_recipes` row plus `lane: "edit"` (`internal/fleetnode/edit_task.go`, from
+`mediacap.EditRecipeWith`, memoised and read through the fingerprint cache without waiting, exactly as the image rows). A row is the
+node's CAPABILITY for the lane and nothing one request chooses: the edit graph (`qwen-image-edit-2511`, or `qwen-image-2.1`), the UNet
+(`gen_edit_unet`), the text encoder, the VAE and the SET of LoRA files the node holds, each with `bytes` and the content `fingerprint`.
+The LoRA set is the binding's own LoRA (`gen_edit_lora`, else its preset's; listed with bytes `-1` when the file is missing) and, on the
+2511 graph, the other preset LoRAs a request may select, listed only when the node holds them. `preset`, `steps`, `cfg`, `sampler`,
+`megapixels`, `placement`, `seed` and `negative` are not in the digest; they travel in the request. `lane` enters the digest only when
+set, so every `image_recipes` digest is byte for byte what it was. A row with a missing or unhashed file has an empty `digest`.
+
+`image-edit` is carried ONLY by `POST /fleet/media-job` (a payload sent to `/fleet/dispatch` is answered `400`: its `image` would be a
+path on the node). The inner payload is `{prompt, recipe_digest, family?, negative?, preset?, steps?, cfg?, seed?, transparent?,
+megapixels?, placement?}`; the target travels as the file `image` and up to nine references as `images_1`..`images_9` (a bundle of up
+to ten files for this task, eight for every other; each is sniffed by magic bytes as PNG, JPEG or WebP, and the bundle cap is
+`fleet_media_inputs_max_mb`). `recipe_digest` is required: the builder (`buildImageEdit`) recomputes the digest of the edit family the
+payload names from the files on disk, waiting for fingerprints it lacks, and answers **`412`** on a mismatch, a missing file, a file it
+cannot fingerprint or a family it does not serve, with the same `cause` word as the image refusal, before anything is queued, leased or
+rendered. Then it refuses what can never render (`400`): references on a family that is not `qwen-image-2.1`, more than ten images in
+all, `transparent` on a family that renders opaque, `preset` on `qwen-image-2.1`, `megapixels` outside 0.01 to 16 or on
+`qwen-image-2.1`, a `placement` other than `single` or `multicard`, and a multicard `megapixels` above the card-only recipe's largest
+canvas (2.0). The request is the one the local door builds (`core.TaskEditImageGenerative`, run by `runEditImageGenerative` and its
+argv `imagegen.editArgs`); a per-request `megapixels` or `placement` replaces `gen_edit_megapixels` or `gen_edit_placement` for that
+call (`mediacap.ApplyEditRequestKnobs`, which the pipeline applies for the local door too). The seed is not changed: the noise mixes it with
+the source bytes by design (`render/noise-seed.mjs`). The output comes back as an `image_path` and `artifacts`, as an image-gen media
+job's does, under the door's own `mediajob-<hex>.png` name.
+
 **Video, animation and audio rows (ADR 0082 Amendment 3).** `/fleet/health` also carries `media_recipes[]`, additive: one row
 `{lane, name, default, engine, digest, files:[{role, name, bytes}], license, commercial_use}` per family a ComfyUI or sd.cpp binding of
 the node names for `video-gen` (the default family always, another only when `videogen_families` binds it or every file is on the node, an
@@ -2314,6 +2346,10 @@ died is still on the node under its job id; the next identical call from that ma
   the honest advertisement and `media_routes`
 - [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) — the `image_recipes` rows
   (memoised, fingerprints read without waiting), the `recipe_digest` check and the 412
+- [`internal/fleetnode/edit_task.go`](../../internal/fleetnode/edit_task.go) — the `edit_recipes` rows, the `image-edit` builder,
+  its digest check and the folding of the bundle's reference images
+- [`internal/mediacap/edit_recipe.go`](../../internal/mediacap/edit_recipe.go) and
+  [`edit_request_knobs.go`](../../internal/mediacap/edit_request_knobs.go) — the edit recipe, and the per-request canvas and placement
 - [`internal/fleetnode/media_recipes.go`](../../internal/fleetnode/media_recipes.go) — the `media_recipes` rows of the video,
   animation and audio bindings (sizes, no fingerprint; memoised)
 - [`internal/mediaremote/`](../../internal/mediaremote/) — the client that places a media job on a node, and (ADR 0082) the

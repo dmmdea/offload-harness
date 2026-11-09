@@ -34,7 +34,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask, ForecastTask}
+var fleetTaskOrder = []string{"image-gen", ImageEditTask, "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask, ForecastTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -65,6 +65,10 @@ func taskConfiguredIn(v *mediaView, taskType string, loopbackListener bool) bool
 		// fleet HTTP door can neither reach nor advertise a family doctor shows fully
 		// CONFIGURED (<node-f> wave session 5d227d30 §2a).
 		return cfg.ImageGenAdvertisable()
+	case ImageEditTask:
+		// The generative edit lane (edit_task.go): an edit binding that names the runner and a UNet (so the node has an
+		// edit recipe to publish) AND the media-job door open, the only door that carries the input images.
+		return cfg.EditAdvertisable() && cfg.MediaInputsAdmissible()
 	case "video-gen":
 		// Bound AND derived CONFIGURED by internal/mediacap (the script, the weights its graph loads
 		// and the custom nodes it names are on this machine): a bound script over a missing weight is
@@ -486,6 +490,9 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 	switch taskType {
 	case "image-gen":
 		return buildImageGen(ctx, cfg, payload)
+	case ImageEditTask:
+		// Carried only by /fleet/media-job (buildMediaJob builds it); a payload here would name image paths on this node.
+		return core.Request{}, noop, fmt.Errorf("task_type %q is carried only by /fleet/media-job (the images travel in its bundle)", taskType)
 	case "video-gen":
 		return buildVideoGen(payload)
 	case "animate":

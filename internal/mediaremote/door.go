@@ -91,7 +91,9 @@ func (q *queueRT) runQueued(ctx context.Context, cfg config.Config, runner Runne
 
 // ticketable says which tasks have a busy-lane path that is a ticket: an image call (identified by its recipe) and a whole-node
 // graph (identified by its content, and by the files a node holds). Video, animation and audio carry no identity yet.
-func ticketable(t core.TaskType) bool { return t == core.TaskGenerateImage || t == core.TaskRunGraph }
+func ticketable(t core.TaskType) bool {
+	return t == core.TaskGenerateImage || t == core.TaskRunGraph || t == core.TaskEditImageGenerative
+}
 
 // admit decides what a call is: a result already (the lane was free and the call ran, or it joined a ticket and waited for
 // it), or a ticket this process just made and the caller is to wait for.
@@ -167,8 +169,8 @@ func (q *queueRT) admit(ctx context.Context, cfg config.Config, runner Runner, r
 	// file that is missing or not fingerprinted) an image has nothing to compare and the call waits in this machine's own line, as
 	// before the fleet.
 	var local localID
-	if req.Task == core.TaskGenerateImage {
-		l, okID := identityOrLog(ctx, cfg, str(req.Params, "family"))
+	if req.Task == core.TaskGenerateImage || req.Task == core.TaskEditImageGenerative {
+		l, okID := identityOrLogFor(ctx, cfg, req)
 		if !okID {
 			return runner.Run(ctx, req), nil
 		}
@@ -202,7 +204,7 @@ func (q *queueRT) create(ctx context.Context, cfg config.Config, runner Runner, 
 	// An image ticket fixes one seed (ADR 0083 decision 3). A graph owns its own sampling (the harness reads no meaning into it),
 	// so the ticket gives it none and the node's payload and the local run are the graph as the caller sent it.
 	seed := 0
-	if req.Task == core.TaskGenerateImage {
+	if req.Task == core.TaskGenerateImage || req.Task == core.TaskEditImageGenerative {
 		var given bool
 		if seed, given = posInt(params, "seed"); !given {
 			seed = mintSeed()
@@ -325,8 +327,8 @@ func (q *queueRT) attach(ctx context.Context, cfg config.Config, runner Runner, 
 func (q *queueRT) adopt(ctx context.Context, cfg config.Config, runner Runner, req core.Request, remotes []string, w Wait, st *store, t ticketFile) *liveTicket {
 	// The job on the node was sent with the ticket's seed, and an adopted image is polled under it; a graph has none to carry.
 	var local localID
-	if req.Task == core.TaskGenerateImage {
-		local, _ = identityOrLog(ctx, cfg, str(req.Params, "family")) // the zero localID when there is none
+	if req.Task == core.TaskGenerateImage || req.Task == core.TaskEditImageGenerative {
+		local, _ = identityOrLogFor(ctx, cfg, req) // the zero localID when there is none
 		req = withSeed(req, t.Seed)
 	}
 	// A graph is planned from the copies the ticket kept (its owner made them with the job it sent), not from the caller's files,
