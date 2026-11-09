@@ -185,6 +185,8 @@ var reasonPrefixCodes = []struct{ prefix, code string }{
 	{"animate needs both a reference image and a driver video", ReasonBadInput},
 	{"unknown audio kind ", ReasonContract}, {"unknown voice ", ReasonContract},
 	{"empty transcript", ReasonAbstention}, {"empty vision output", ReasonAbstention}, {"vision output truncated", ReasonAbstention},
+	// transcribe --words: the upstream answered but gave no per-word timings, so the words door has nothing to return.
+	{"the whisper upstream returned no word timings", ReasonAbstention},
 	{"non-JSON output", ReasonAbstention},
 	{"transcribe call failed:", ReasonInfrastructure}, {"forecast call failed:", ReasonInfrastructure}, {"image generation failed:", ReasonInfrastructure},
 	{"audio generation failed:", ReasonInfrastructure}, {"video generation failed:", ReasonInfrastructure},
