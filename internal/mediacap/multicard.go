@@ -75,7 +75,7 @@ var multicardRows = []MulticardRow{
 	{ID: "krea2/bf16", Route: "image", Family: "krea2", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16", DefaultClip: "qwen3vl_4b_bf16.safetensors",
 		UnetLoader: "distorch2", ResidentGiB: 11, ClipLoader: "plain", ComputeGiB: 13.2, StorageGiB: 13.1, Measured: true, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "flux3-klein/bf16", Route: "image", Family: "flux3-klein", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16",
-		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 13.5, StorageGiB: 7.0, Measured: true, WindowsHostGiB: 11.5, WindowsCommitGiB: 15.5, MaxPixels: 1572864, Packs: []string{"multigpu"}},
+		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 13.5, StorageGiB: 7.0, Measured: true, WindowsHostGiB: 12, WindowsCommitGiB: 16, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "flux3-klein/nvfp4", Route: "image", Family: "flux3-klein", Quant: "nvfp4", UnetMatch: `nvfp4.*\.safetensors$`, ClipMatch: "bf16",
 		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 12.5, StorageGiB: 6.5, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/fp8mixed", Route: "edit", Family: "qwen-image-edit-2511", Quant: "fp8mixed", UnetMatch: `fp8mixed.*\.safetensors$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",

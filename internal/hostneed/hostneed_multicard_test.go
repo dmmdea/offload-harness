@@ -282,7 +282,8 @@ func TestOnlyAMeasuredCardOnlyDeclarationIsMarkedCardOnly(t *testing.T) {
 
 // The flux3-klein/bf16 row was measured on both operating systems (2026-11-09): on Linux the read-only map's pages are clean file pages
 // MemAvailable counts (ComfyUI's anonymous RSS 1.65 GiB), so the call declares 0; on Windows the same pages sit in the working set while the plain
-// loader copies the DiT to the card (11.24 GiB) and WDDM commits the card allocations (15.45 GiB private), so the call declares those, stated.
+// loader copies the DiT to the card (11.24 GiB) and WDDM commits the card allocations (15.45 GiB private), so the call declares those, rounded up
+// to whole GiB (12 and 16), stated.
 func TestAMeasuredCardOnlyRowDeclaresItsWindowsFiguresOnlyOnAWindowsHost(t *testing.T) {
 	f := imgFacts(t, 15.9, 15.9)
 	f.GOOS = "linux"
@@ -291,10 +292,10 @@ func TestAMeasuredCardOnlyRowDeclaresItsWindowsFiguresOnlyOnAWindowsHost(t *test
 	}
 	f.GOOS = "windows"
 	n := need(t, flux3McCmd, f)
-	if n.GiB != 11.5 || n.CommitGiB != 15.5 || !n.CommitStated || n.CardOnly || n.Source != SourceMeasured {
-		t.Fatalf("flux3-klein/bf16 card-only on a Windows host: %v, want 11.5 GiB touched and 15.5 GiB of stated commit, measured, not card-only", n)
+	if n.GiB != 12 || n.CommitGiB != 16 || !n.CommitStated || n.CardOnly || n.Source != SourceMeasured {
+		t.Fatalf("flux3-klein/bf16 card-only on a Windows host: %v, want 12 GiB touched and 16 GiB of stated commit, measured, not card-only", n)
 	}
-	for _, want := range []string{"flux3-klein/bf16", "Windows host", "11.5", "15.5", "Linux host declares 0"} {
+	for _, want := range []string{"flux3-klein/bf16", "Windows host", "12.0", "16.0", "Linux host declares 0"} {
 		if !strings.Contains(n.Detail, want) {
 			t.Errorf("the detail must say why (%q missing): %q", want, n.Detail)
 		}
