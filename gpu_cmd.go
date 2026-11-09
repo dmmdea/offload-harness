@@ -747,6 +747,9 @@ func runGPUReserve(args []string) (retErr error) {
 	endedAt := "" // the stage a signal found the wrapper in when its command never ran ("" = the command ran), for the sentence below
 	// Why the final release failed, for the error this command returns (finish sets it).
 	var releaseErr error
+	// The release the hold bound's re-queue attempted and that failed: the lease is still held and a second Release call on
+	// it would report success for a record that is still there, so finish reports this failure instead of releasing again.
+	var boundReleaseErr error
 	// closeTree lets go of the command's containment once it has started (gpu_tree.go). With
 	// --die-with-wrapper that ends whatever of the tree is still running; without it, nothing.
 	closeTree := func() {}
@@ -773,7 +776,11 @@ func runGPUReserve(args []string) (retErr error) {
 		}
 		// A release that fails is said, never dropped: the failure text of a bound or a wait was built before this ran and says
 		// only that the lease is being released.
-		if rerr := releaseLeaseConfirmed(m, lease); rerr != nil {
+		rerr := boundReleaseErr
+		if rerr == nil {
+			rerr = releaseLeaseConfirmed(m, lease)
+		}
+		if rerr != nil {
 			releaseErr = rerr
 			fmt.Fprintln(os.Stderr, leaseNotReleasedLine("gpu reserve", lease.Epoch(), rerr, m.SeatWarmOwed() != ""))
 		}
@@ -788,6 +795,10 @@ func runGPUReserve(args []string) (retErr error) {
 	defer finish()
 	if *drain || *unload {
 		heldSince := time.Now() // when the lease took its cards, for the hold bound's failure ("held the cards for")
+		// What the unload took down, kept across the hold bound's re-queues: the seat stays cleared (and its warm-back owed)
+		// while the cards are let go, so a re-queue neither unloads it again nor forgets what the first unload freed.
+		var freed unloadOutcome
+		seatClearedByBound := false
 		for requeues := 0; ; requeues++ {
 			// The drain now runs for the queue budget (hours) and the renewal loop
 			// below starts only once the wrapped command does; the reclaim rule needs
@@ -809,8 +820,10 @@ func runGPUReserve(args []string) (retErr error) {
 				case <-mctx.Done():
 				}
 			}()
-			var freed unloadOutcome
-			merr := maintainSeat(mctx, cfg, maintainOpts{restamp: lease.Restamp, drain: *drain, deadline: drainDeadline(*drainTimeout, queuedAt, *wait), unload: *unload, exclusive: exclusiveAfter, owed: markWarmOwed(m), devices: lease.Devices(), out: &freed})
+			if !seatClearedByBound {
+				freed = unloadOutcome{}
+			}
+			merr := maintainSeat(mctx, cfg, maintainOpts{restamp: lease.Restamp, drain: *drain, deadline: drainDeadline(*drainTimeout, queuedAt, *wait), unload: *unload && !seatClearedByBound, exclusive: exclusiveAfter, owed: markWarmOwed(m), devices: lease.Devices(), out: &freed})
 			// F82: the seat is cleared; the host is asked now, still holding the cards, under the same heartbeat and
 			// the same cancel as the drain. A lease lost or a signal received during this wait is handled below like
 			// one during the drain. The wait is bounded (hold bound): at the bound the lease is released by the deferred
@@ -832,8 +845,15 @@ func runGPUReserve(args []string) (retErr error) {
 				// line again (gpu_hostram_requeue.go), one line saying so; the cards held idle behind a figure the host could not
 				// meet are what the bound ends, not the caller's wait. Not counted in requeues (--wait is its bound).
 				if left := holdBoundRequeueBudget(queuedAt, *wait, time.Now()); left > 0 {
-					fmt.Fprintln(os.Stderr, holdBoundRequeueLine(bound, left))
-					if rerr := releaseLeaseConfirmed(m, lease); rerr == nil {
+					// Only a release that SUCCEEDED lets the reserve queue again: one that failed is said by the deferred finish
+					// (with its cause) and the bound's failure stands, so nothing is claimed released that is not.
+					if rerr := releaseLeaseConfirmed(m, lease); rerr != nil {
+						// The cards could not be let go: the failure is kept for the deferred finish, which says it (once) after the
+						// warm-back and does not try a release that already ran; the bound's failure stands.
+						boundReleaseErr = rerr
+					} else {
+						fmt.Fprintln(os.Stderr, holdBoundRequeueLine(bound, left))
+						seatClearedByBound = *unload && freed.ran
 						next, aerr := acquireQueued(m, gpulease.Class(*class), opts, left)
 						if aerr == nil {
 							lease = next
@@ -852,7 +872,6 @@ func runGPUReserve(args []string) (retErr error) {
 						card.finish(err)
 						return err
 					}
-					// The cards could not be let go: the deferred finish tries again and says so; the bound's failure stands.
 				}
 				// --wait is spent (or was 0), or the release failed: the lease is still ours (the wait only ends on its own
 				// bound), the deferred finish stops the kept instances, warms the seat back and releases it, and the reserve
@@ -916,6 +935,7 @@ func runGPUReserve(args []string) (retErr error) {
 			}
 			lease = next
 			heldSince = time.Now()
+			seatClearedByBound = false // a lease lost mid-drain starts the drain over, the unload with it
 		}
 	}
 	if wrapperBeforeStart != nil {
