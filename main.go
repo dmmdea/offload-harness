@@ -296,8 +296,8 @@ Usage:
                                          [--cfg-weight F] [--exaggeration F] [--temperature F] [--repetition-penalty F] [--min-p F] [--top-p F]  (voice sampling; unset keeps the engine default)
                                          a bare -- ends the flags, so text that starts with a dash is kept: generate-audio out.wav -- "--- Intro ---"
                                          (the same for generate-video, animate-character and the verbs that take one file, text or prompt)
-  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]
-  local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N] [--spill]
+  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent] [--placement single|multicard]
+  local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N] [--spill] [--placement single|multicard] [--dry-run] [--negative ".."] [--width N] [--height N] [--steps N] [--seed N]
                                          N prompts: ONE warm ComfyUI session when this machine's lane is free, else each job a ticket on the
                                          first matching lane that frees (fleet nodes included); --spill (route auto): when the lane is free AND a
                                          roster node renders the same recipe, run both at once over one queue (warm chunks here, one job at a time

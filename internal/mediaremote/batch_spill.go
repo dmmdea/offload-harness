@@ -38,6 +38,8 @@ type spillNode struct {
 type spillPlan struct {
 	nodes   []spillNode
 	workers int
+	// localBusy: this machine's lane was held when the batch began, so its warm session joins the queue when the lane frees.
+	localBusy bool
 }
 
 // spillChoice decides a Spill batch whose lane read free: ModeSpill when at least one roster node renders the recipe, else the
@@ -58,17 +60,7 @@ func spillChoice(ctx context.Context, cfg config.Config, req core.Request, queue
 		return fall("the fleet cannot be used for this batch (" + err.Error() + "): the batch runs on this machine's warm session alone")
 	}
 	cands, rows := candidatesFor(ctx, cfg, bases, local, needOf(req))
-	var nodes []spillNode
-	for _, c := range cands {
-		nodes = append(nodes, spillNode{base: c.base, shown: c.shown})
-	}
-	// A node that matched but is busy right now is still a node of the recipe: its worker asks again when it is free.
-	sort.SliceStable(rows, func(a, b int) bool { return rows[a].idx < rows[b].idx })
-	for _, r := range rows {
-		if r.matched {
-			nodes = append(nodes, spillNode{base: r.base, shown: r.row.Node})
-		}
-	}
+	nodes := spillNodesOf(cands, rows)
 	if len(nodes) == 0 {
 		cluster := make([]ClusterRow, 0, len(rows))
 		var parts []string
@@ -84,6 +76,30 @@ func spillChoice(ctx context.Context, cfg config.Config, req core.Request, queue
 		w.cluster, w.spillNote = cluster, note
 		return m, n, w
 	}
+	return spillPlanOf(nodes, queued, o, false)
+}
+
+// spillNodesOf lists the nodes of the roster that render the recipe: the ones free now, in the order the placer prefers them, then
+// the ones that matched but are busy right now (a node that matched is still a node of the recipe: its worker asks again when it is
+// free). rows is put in the roster's order.
+func spillNodesOf(cands []candidate, rows []rowAt) []spillNode {
+	var nodes []spillNode
+	for _, c := range cands {
+		nodes = append(nodes, spillNode{base: c.base, shown: c.shown})
+	}
+	sort.SliceStable(rows, func(a, b int) bool { return rows[a].idx < rows[b].idx })
+	for _, r := range rows {
+		if r.matched {
+			nodes = append(nodes, spillNode{base: r.base, shown: r.row.Node})
+		}
+	}
+	return nodes
+}
+
+// spillPlanOf is the ModeSpill answer for the matching nodes: one worker per node (Jobs may ask for fewer, or more), and the line
+// that says so. localBusy says this machine's lane was held when the batch began: the nodes start at once and the warm session joins
+// when the lane frees.
+func spillPlanOf(nodes []spillNode, queued int, o BatchOpts, localBusy bool) (string, int, modeWhy) {
 	workers := o.Jobs
 	if workers == 0 {
 		workers = len(nodes)
@@ -100,15 +116,17 @@ func spillChoice(ctx context.Context, cfg config.Config, req core.Request, queue
 	}
 	line := fmt.Sprintf("--spill: this machine's lane is free and %d roster node(s) render this recipe (%s): %d job(s) share one queue; the warm session here takes chunks of it, %d node worker(s) take one job at a time",
 		len(nodes), strings.Join(names, ", "), queued, workers)
-	return ModeSpill, workers, modeWhy{line: line, spill: &spillPlan{nodes: nodes, workers: workers}}
+	if localBusy {
+		line = fmt.Sprintf("--spill: this machine's lane is busy and %d roster node(s) render this recipe (%s): %d job(s) share one queue; %d node worker(s) take one job at a time now, and the warm session here joins and takes chunks when the lane frees (checked every %s)",
+			len(nodes), strings.Join(names, ", "), queued, workers, scanEvery)
+	}
+	return ModeSpill, workers, modeWhy{line: line, spill: &spillPlan{nodes: nodes, workers: workers, localBusy: localBusy}}
 }
 
 // spillMissNote says, for a Spill batch that did not spill, what ran instead. A reason the choice itself found (spillChoice)
 // is used in preference to this.
 func spillMissNote(mode string) string {
 	switch mode {
-	case ModeTickets:
-		return "this machine's lane is busy, so the jobs became tickets, which already run on the nodes that render this recipe: nothing to spill"
 	case ModeSerial:
 		return "the jobs run one at a time through the single-render call (this machine has no image lane for the recipe, or the family is only the nodes'): nothing to spill"
 	}
@@ -223,7 +241,7 @@ func (s *batchState) runSpill(ctx context.Context, cfg config.Config, runner Run
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		s.spillLocal(ctx, jobs, warm, q)
+		s.spillLocal(ctx, runner, jobs, todo, warm, q, plan.localBusy)
 	}()
 	for k := 0; k < plan.workers; k++ {
 		node := plan.nodes[k%len(plan.nodes)]
@@ -247,11 +265,47 @@ func (s *batchState) runSpill(ctx context.Context, cfg config.Config, runner Run
 	}
 }
 
-// spillLocal is the warm side: it takes a chunk, renders it in one warm session, and takes the next, until the queue is empty.
-func (s *batchState) spillLocal(ctx context.Context, jobs []BatchJob, warm WarmFunc, q *spillQueue) {
+// spillLaneFree waits until this machine's lane reads free (the probe the router and the ticket scan use, asked every scanEvery),
+// the queue has nothing left to wait for, ctx ends, or the queue's own ceiling (BatchHoldWindow) passes. It reports whether the lane
+// is free and there is still a queue to work.
+func (s *batchState) spillLaneFree(ctx context.Context, runner Runner, req core.Request, q *spillQueue) bool {
+	deadline := time.Now().Add(BatchHoldWindow())
+	for ctx.Err() == nil {
+		select {
+		case <-q.done:
+			return false
+		default:
+		}
+		if v := core.ProbeLane(ctx, runner, req); v.Free && !v.Unjudged {
+			return true
+		}
+		if time.Now().After(deadline) {
+			s.say(fmt.Sprintf("spill: this machine's lane stayed held for %s; the rest of the queue is left to the nodes", shortDuration(BatchHoldWindow())))
+			return false
+		}
+		if !pauseOrDone(ctx, scanEvery, q.done) {
+			return false
+		}
+	}
+	return false
+}
+
+// spillLocal is the warm side: it takes a chunk, renders it in one warm session, and takes the next, until the queue is empty. When
+// the lane was busy at the start (localBusy) it first waits for the lane while the node workers pull, and again after a chunk that
+// found the lane taken again.
+func (s *batchState) spillLocal(ctx context.Context, runner Runner, jobs []BatchJob, todo []int, warm WarmFunc, q *spillQueue, localBusy bool) {
 	defer q.leave()
 	busy := 0
+	probe := batchRequest(jobs[todo[0]], s.o.Family, s.o.Placement)
+	waitLane := localBusy
 	for ctx.Err() == nil {
+		if waitLane {
+			if !s.spillLaneFree(ctx, runner, probe, q) {
+				return
+			}
+			s.say("spill: this machine's lane is free; its warm session joins the queue")
+			waitLane = false
+		}
 		chunk := q.takeChunk()
 		if len(chunk) == 0 {
 			return
@@ -265,6 +319,12 @@ func (s *batchState) spillLocal(ctx context.Context, jobs []BatchJob, warm WarmF
 		if deferred && err != nil {
 			// The lane was held past the pipeline's window and nothing ran: the chunk goes back for the nodes.
 			q.giveBack(chunk)
+			if localBusy {
+				// The lane was taken again between the probe and the lease: wait for it as before, the nodes keep pulling.
+				s.say(fmt.Sprintf("spill: this machine's lane was taken again (%v); the %d job(s) went back to the queue, waiting for the lane", err, len(chunk)))
+				waitLane = true
+				continue
+			}
 			if busy++; busy >= spillLocalBusyAsks {
 				s.say(fmt.Sprintf("spill: this machine's lane stayed held (%v); the rest of the queue is left to the nodes", err))
 				return
@@ -305,7 +365,7 @@ func (s *batchState) spillRemote(ctx context.Context, cfg config.Config, runner 
 		if !ok {
 			return
 		}
-		req := batchRequest(jobs[i], s.o.Family)
+		req := batchRequest(jobs[i], s.o.Family, s.o.Placement)
 		w := Wait{Window: -1, RosterFile: s.o.RosterFile}
 		if s.o.Notify != nil {
 			w.Notify = func(line string) { s.say(fmt.Sprintf("job %d: %s", i, line)) }

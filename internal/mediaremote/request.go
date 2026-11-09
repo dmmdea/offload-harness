@@ -182,7 +182,7 @@ func plan(req core.Request) (planned, error) {
 		if refineOff(p) {
 			out["refine"] = false
 		}
-		for _, k := range []string{"negative", "family"} {
+		for _, k := range []string{"negative", "family", "placement"} {
 			setStr(p, k, out)
 		}
 		if flag(p, "transparent") {

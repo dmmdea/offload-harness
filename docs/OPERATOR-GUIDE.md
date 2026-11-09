@@ -322,6 +322,8 @@ local-offload generate-image --batch jobs.jsonl --family qwen-image-2.1-fast --r
 local-offload generate-image --batch jobs.jsonl --family qwen-image-2.1-fast --results results.jsonl --resume
 ```
 
+`--negative`, `--width`, `--height`, `--steps` and `--seed` on the batch verb are the defaults of every row without its own (a row wins; with `--seed S` row `i` gets `S+i`, `i` being its 0-based position in the file, so a `--resume` keeps the seeds). Sizes are snapped once to what the family renders (900 becomes 896 on `qwen-image`), so `--resume` takes a finished 1600x896 picture for a 1600x900 ask instead of rendering it again. `--placement single|multicard` sets the card placement for the call. `--dry-run` prints the resolved rows (and with `--resume` which would be skipped) and exits without rendering or contacting a node. `--spill` also starts while this machine's lane is busy: the matching nodes work the queue at once and this machine joins when its lane frees. Run inside an inherited `gpu reserve` lease, a call that asked for `--spill` or `--route auto|remote` prints one line saying fleet ticketing and spill are off there.
+
 Where the jobs run is decided once, at the start. If this machine's lane is **free**, the whole batch renders on one warm session, as above. If it
 is **held** and a roster node renders the same recipe, each job becomes a ticket (ADR 0083): it starts on the first matching lane that frees, here or
 on a node, at most N in flight (`--jobs`; default: this machine's lane plus one per matching node, at most 8), and the command blocks until every job

@@ -674,7 +674,7 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 	// never a dial), the probes run concurrently in configured order, and the shared memo and negative
 	// cache keep a dead node from costing a bound on every call. Reading.Index is the entry's slot in the
 	// list probed here, which is what "config order" breaks ties by.
-	for _, r := range rosterprobe.Probe(ctx, bases, cfg.FleetAuthToken, healthTimeout) {
+	for _, r := range probeRosterRetrying(ctx, bases, cfg.FleetAuthToken, healthTimeout) {
 		b, v := r.Base, r.View
 		if r.Err != nil {
 			misses = append(misses, r.Miss())

@@ -32,6 +32,10 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// under its own config copy and tags the result with its license. Resolved BEFORE
 	// the engine seam: a family may bind a different engine than the default.
 	cfg, fam, ferr := p.cfg.ResolveImageFamily(paramStr(req.Params, "family"))
+	if ferr == nil {
+		// A per-call placement (generate-image --placement) lies over the binding's imagegen_placement.
+		cfg, ferr = cfg.WithImagePlacement(paramStr(req.Params, "placement"))
+	}
 	if ferr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		p.recordDefer(req.Task, meta, len(req.Input), ferr.Error())

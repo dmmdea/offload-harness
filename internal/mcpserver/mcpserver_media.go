@@ -235,6 +235,7 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 		Refine      *bool    `json:"refine"`
 		Family      string   `json:"family"`
 		Transparent bool     `json:"transparent"`
+		Placement   string   `json:"placement"`
 		Route       string   `json:"route"`
 		Remotes     []string `json:"remotes"`
 		WaitS       *int     `json:"wait_s"`
@@ -243,6 +244,14 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 		return bad, nil
 	}
 	params := map[string]any{}
+	// A per-call placement (single | multicard) lies over the family's imagegen_placement; absent = the binding's own.
+	if p := strings.ToLower(strings.TrimSpace(in.Placement)); p != "" {
+		if p != "single" && p != "multicard" {
+			res, _ := jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("bad arguments: placement %q is not one of single, multicard", in.Placement)})
+			return res, nil
+		}
+		params["placement"] = p
+	}
 	// Named family (ADR 0058): absent = the default binding, byte-for-byte what a
 	// call without it rendered before families existed.
 	if in.Family != "" {
