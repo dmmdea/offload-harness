@@ -3534,7 +3534,7 @@ video (`offload_generate_video` takes no `min_vram_gb`).
 
 ## The image batch across the fleet: one ticket per job when the lane is busy and a node can render the recipe (ADR 0083, decision 13)
 
-`local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]` is the
+`local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N] [--spill]` is the
 P0's batch (register F28): jobs in, a picture at the exact `out` of each, a verdict per job, and the lanes of the whole roster when this
 machine's own is held. The orchestration is `mediaremote.RunBatch` (`internal/mediaremote/batch.go`); the verb (`generate_image_batch.go`)
 reads the file, wires the warm session (`pipeline.RunImageBatchAs`, which needs a ComfyUI and so cannot live in `mediaremote`) and keeps
@@ -3548,9 +3548,10 @@ the results file.
 | `--route remote` | each job sent to a roster node through the single-render call, one at a time; refused up front without `delegate_remotes`; there is no ticket, so a job whose every node is busy, text-leased or not answering is asked again after a pause (5 s, 15 s, 1 min, then every 5 min; chosen) for up to the queue's 8 h ceiling, and ends `queued`, never `failed`, if it finds no place by then (the jobs not sent yet are then queued at once); a fleet that cannot take the job as configured (no node serves it, a route is not configured, no node carries `refine=false`, a roster entry the tailnet guard refuses) is not waited for, and the job fails at once naming each node's miss; a node chosen and then lost when the job is sent, or after, fails it too; the node's recipe is not compared (below) |
 | `--results r.jsonl` | one row per job, kept in `r.jsonl.partial` as each job is final and written whole, in job order, over `r.jsonl` when the batch ends; an earlier `r.jsonl` is untouched until then, so a batch the command refuses leaves it whole and one that dies leaves `r.jsonl.partial` with the jobs that ended; the run that reopens the name (the `--resume` that recovers a killed batch) first sets that record aside as `r.jsonl.partial.prev` (one is kept, the newest; an empty partial never replaces it), says so, and puts it back if the batch is then refused; opened before anything runs, so an unwritable path, a folder, and on Windows a read-only file stop the command with no lane time spent; it may not name the `--batch` file |
 | `--resume` | skip a job whose `out` already holds a file that proves itself (below) |
-| `--jobs N` | the most tickets in flight (0 = the default below); applies to the ticket path only |
+| `--jobs N` | the most tickets in flight (0 = the default below); applies to the ticket path only, and with `--spill` to the node workers |
+| `--spill` | opt-in, `--route auto` only (refused with `--route local` or `remote`): when the lane is free AND a roster node renders the same recipe, run both at once (below, "Spill") |
 
-**Where the batch runs.** Decided once, at the start, and never mixed:
+**Where the batch runs.** Decided once, at the start, and never mixed (except under `--spill`, below):
 
 1. **One warm session** (`RunImageBatchAs`: the checkpoint loads once, the batch boundary tears ComfyUI down once) when `--route local`;
    when the machine has no `delegate_remotes`; when the process runs under an inherited lease (`gpu reserve -- local-offload ...`: its card was
@@ -3571,13 +3572,34 @@ the results file.
    single-job node at once** (`TestBatchNeverDispatchesTwoJobsToOneSingleJobNodeAtOnce`). The job reaches the node as it was written:
    `refine=false` only when the job says so, the seed, the negative, `width`, `height` and `steps` exactly, the family under the node's own name
    (`TestBatchJobsPlacedThroughTickets`). The output is fetched, checked against the sha256 the node published, to the exact `out`. A node renders
-   under its own zero-warm lifecycle (ADR 0009, changed in part by ADR 0097): one ComfyUI cold start per job unless the node's kept instance is still up. There is no mixed local/remote work stealing and no batch task on
-   the fleet in v1: a node renders one job per ticket and the warm session exists only here. **A ticket that ends without a place is not a failed job
+   under its own zero-warm lifecycle (ADR 0009, changed in part by ADR 0097): one ComfyUI cold start per job unless the node's kept instance is still up. There is no batch task on
+   the fleet in v1: a node renders one job per ticket and the warm session exists only here (`--spill` mixes the two sides, below). **A ticket that ends without a place is not a failed job
    and is not sent again**: the queue's own ceiling (a ticket that waited 8 h without a lane anywhere) and a ticket it could not take over carry the held
    class like a lost race does, but they come from a ticket that is over, so the job is `queued` with the queue's reason and `--resume` renders it; a new
    ticket would only wait another ceiling (`TestBatchTicketThatExpiresIsQueuedAndNotSentAgain`). Once one job has waited the ceiling, the jobs not yet
    sent are queued at once as `not started`, not sent to wait it again in turn (`TestBatchTicketCeilingQueuesTheJobsNotYetSent`).
-3. **One at a time** through the single-render call when `--route remote`, or when this machine has no image lane at all (a thin client). The claim
+3. **Spill (`--spill`, opt-in).** Without the flag a free lane runs the whole file in one warm session and never uses a node that renders the same
+   recipe; only a busy lane makes tickets. With `--spill` (route auto only) a free lane and at least one matching node (the same digest and release the
+   tickets match on: compare them with `local-offload media-recipes` on each machine; the roster is the one the ticket path reads, `delegate_remotes`
+   re-read from the config file, narrowed by `--remote`) run **together over one shared queue** of the jobs not skipped by `--resume`:
+   - **This machine** takes the queue in **chunks**, each one warm session. The warm call (`RunImageBatchWaiting`) takes a fixed list and writes it to
+     a jobs file the render script reads once, so a session cannot be fed more jobs after it starts and cannot be kept warm across chunks: the
+     checkpoint loads once per chunk. To keep that cost small the chunks are large: a chunk is the jobs left divided by the workers (this machine and
+     each node worker), at least 4 (`spillMinChunk`, chosen, not measured), so the first chunk is about half of a one-node batch and the chunks shrink
+     as the queue empties (a 100-job file and one node: 50, then about 20, 8, 4, ...).
+   - **Each matching node** gets a worker that takes **one job at a time** through the single-render call pinned to that node (route remote with that
+     node as the only remote). `--jobs N` bounds the node workers (default one per matching node, at most 8; with more workers than nodes a node gets
+     several). A node with no place for the job (busy, queue full, text-leased) hands it back to the queue, so the warm side can take it, and is asked
+     again after the one-at-a-time pause (5 s, 15 s, 1 min, then every 5 min); a node that can never take the batch as configured, or that had no
+     place for 8 h, stops pulling.
+   - If the warm side's lane is held past the pipeline's window the chunk goes back to the queue and it asks again (three asks, 5 s apart), then
+     leaves the rest to the nodes. If the warm session stops (ComfyUI unusable, a full disk) its chunk's rows are written as for any warm batch, the
+     command ends with that error (exit 1), and the nodes finish the queue. Jobs nobody could take are `queued` (`--resume`).
+   - With **no matching node**, or no fleet, or a busy lane, `--spill` says so on stderr (`--spill: ...`) and in the JSON (`spill_note`, with
+     `cluster` naming each node's miss) and the batch is what `--route auto` does without it. The JSON `mode` is `spill` when the batch spilled; a
+     warm chunk's rows say `node` = this machine's id and a node's rows say the node, so the split is in the rows. `refine_fallbacks` is not reported
+     for a spill batch (nodes were not measured). Results rows, `--resume` and the exit status are as in the other modes.
+4. **One at a time** through the single-render call when `--route remote`, or when this machine has no image lane at all (a thin client). The claim
    belongs to the ticket queue and that call picks a node without one, so two jobs in flight could pick one idle node; `--jobs` is told it did not
    apply (`TestBatchOneAtATimeWhereNoClaimProtectsANode`). Three things are different here, and the first line printed says them. **A busy place
    is waited for**: there is no ticket to hold the job, so a held card (a node's `gpu_busy`) or a fleet with no node free to take it (every node

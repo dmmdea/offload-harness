@@ -1,7 +1,7 @@
 package main
 
 // `local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume]
-// [--jobs N]`: the CLI half of the fleet batch (P0 plan S3, register F28; ADR 0083 decision 13). Where the jobs run, the
+// [--jobs N] [--spill]`: the CLI half of the fleet batch (P0 plan S3, register F28; ADR 0083 decision 13). Where the jobs run, the
 // verdict per job and the exit status are mediaremote.RunBatch's; this file reads the jobs file, wires the warm call
 // (pipeline.RunImageBatchAs, which needs a ComfyUI and so cannot live in mediaremote), keeps the results file as jobs end,
 // and prints the same JSON the batch printed before, with the new keys added.
@@ -29,6 +29,7 @@ type imageBatchArgs struct {
 	file, family, route, results string
 	resume                       bool
 	jobs                         int
+	spill                        bool
 	refine                       bool
 	remotes                      []string
 	asJSON, compact              bool
@@ -116,7 +117,9 @@ func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
 	var warmItems []pipeline.ImageBatchItem
 	warm := func(ctx context.Context, js []mediaremote.BatchJob, wait time.Duration) ([]mediaremote.BatchRow, bool, error) {
 		items, berr := p.RunImageBatchWaiting(ctx, a.family, fromBatchJobs(js), wait)
-		warmItems = items
+		// Appended, not replaced: a --spill batch calls the warm session once per chunk, and Batch.WarmJobs lines up with the
+		// items of every chunk in order. A plain warm batch calls it once.
+		warmItems = append(warmItems, items...)
 		rows := make([]mediaremote.BatchRow, len(items))
 		for i, it := range items {
 			rows[i] = mediaremote.BatchRow{Out: it.Out, Seed: it.Seed, OK: it.OK, Ms: it.Ms, Error: it.Error, Family: it.Family}
@@ -126,7 +129,7 @@ func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
 		return rows, berr != nil && pipeline.IsGPUBusy(berr), berr
 	}
 	opts := mediaremote.BatchOpts{
-		Family: a.family, Route: a.route, Remotes: a.remotes, Jobs: a.jobs, Resume: a.resume,
+		Family: a.family, Route: a.route, Remotes: a.remotes, Jobs: a.jobs, Spill: a.spill, Resume: a.resume,
 		Notify: func(line string) { fmt.Fprintln(os.Stderr, line) },
 	}
 	if src.Loaded() {
@@ -252,6 +255,10 @@ func batchPayload(b *mediaremote.Batch, fam config.FamilyInfo, resolved bool, wa
 	}
 	if len(b.Cluster) > 0 {
 		payload["cluster"] = b.Cluster
+	}
+	if b.SpillNote != "" {
+		// --spill was asked for and the batch did not spill: the reason, so the output says what ran instead.
+		payload["spill_note"] = b.SpillNote
 	}
 	// Surface the refiner fallback count in the batch summary when a refiner is configured and the warm call ran and answered
 	// (0 = all jobs refined or opted out) — absent otherwise: tickets and serial renders were not measured, a warm call that a

@@ -18,8 +18,20 @@ package mediaremote
 //   - the jobs go one at a time through the single-render call (route remote, a machine with no image lane, a family only
 //     the nodes define): see runJob for the wait, and BatchRow for what a row says about a recipe nobody compared.
 //
-// There is no mixed local/remote work stealing and no batch task on the fleet (v1): a node renders one job per ticket,
-// with a ComfyUI cold start each (zero-warm, ADR 0009), and the warm session exists only on this machine.
+// There is no batch task on the fleet: a node renders one job per ticket or per dispatch, with a ComfyUI cold start each
+// (zero-warm, ADR 0009), and the warm session exists only on this machine. The one mixed mode is opt-in (BatchOpts.Spill,
+// `generate-image --batch --spill`, route auto only):
+//
+//   - the lane is free AND at least one roster node renders the batch's recipe (the same digest and harness version the ticket
+//     path matches on): the jobs go into ONE shared queue and both sides pull from it until it is empty. This machine's warm
+//     session takes the jobs in CHUNKS (the warm call, pipeline.RunImageBatchWaiting, takes a fixed list and writes it to a
+//     jobs file the render script reads once, so a session cannot be fed more jobs after it starts: each chunk is one warm
+//     session, and the checkpoint loads once per chunk, not once per picture). A chunk is a share of what is left (spillChunk:
+//     the queue divided by the workers, at least spillMinChunk), so the first chunk is large and the chunks shrink as the
+//     queue empties. Each matching node gets a worker that takes ONE job at a time through the single-render call pinned to
+//     that node (route remote; the node's recipe was already compared at the start). A node with no place for a job (busy,
+//     queue full) is backed off from and the job goes back to the queue for the other side. With no matching node --spill says
+//     so and the batch is what route auto does without it.
 //
 // WHAT COMES BACK is one BatchRow per job in job order, and the same row is appended to <results>.partial as soon as the
 // job's verdict is known (see ResultsFile; on the warm path the jobs end together, when the warm session does, so their rows
@@ -133,8 +145,11 @@ type BatchOpts struct {
 	// Remotes narrows delegate_remotes for this batch (each must be one of them).
 	Remotes []string
 	// Jobs bounds the tickets in flight (0 = the default: 1 for this machine's lane plus one per roster node whose recipe
-	// matches, at most batchInFlightCap). It applies to the ticket path only.
+	// matches, at most batchInFlightCap). It applies to the ticket path only, and, with Spill, to the remote workers.
 	Jobs int
+	// Spill (route auto only) keeps this machine's warm session busy AND feeds the roster nodes that render the same recipe
+	// when the lane is free: see the file header. Jobs then bounds the remote workers (0 = one per matching node).
+	Spill bool
 	// Resume skips the jobs whose out already holds a file that proves itself.
 	Resume bool
 	// RosterFile is the config file whose delegate_remotes the tickets re-read when it changes.
@@ -152,12 +167,13 @@ type Batch struct {
 	// Mode says where the jobs ran: ModeWarm (one warm session here), ModeTickets (one ticket per job), ModeSerial (one at
 	// a time through the single-render call) or ModeNone (every job was skipped or failed before any lane was asked).
 	Mode string
-	// InFlight is the bound on tickets that applied (ModeTickets only).
+	// InFlight is the bound on tickets that applied (ModeTickets), or the number of remote workers (ModeSpill).
 	InFlight int
 	// Cluster is why no node was used, one row per roster node, when the batch ran warm for want of a match.
 	Cluster []ClusterRow
 	// WarmJobs are the jobs the warm call was handed, as indexes into the file (the ones that were not skipped or failed
-	// before any lane was asked): the call's own results are positional over exactly these.
+	// before any lane was asked): the call's own results are positional over exactly these. In ModeSpill they are the jobs
+	// of every chunk the warm call ran, in the order it ran them.
 	WarmJobs []int
 	// Deferred: a busy lane kept the warm batch waiting past its window; nothing ran. Err says why.
 	Deferred bool
@@ -168,6 +184,9 @@ type Batch struct {
 	Ceiling bool
 	// Err is the error the warm call stopped with, if it did.
 	Err error
+	// SpillNote is why a batch that asked for Spill did not spill (no matching node, a busy lane, no fleet); "" when it spilled
+	// or did not ask.
+	SpillNote string
 }
 
 const (
@@ -175,6 +194,8 @@ const (
 	ModeTickets = "tickets"
 	ModeSerial  = "serial"
 	ModeNone    = "none"
+	// ModeSpill: this machine's warm session (in chunks) and the matching nodes (one job each) share one queue.
+	ModeSpill = "spill"
 )
 
 // batchInFlightCap bounds the default number of tickets in flight (a chosen constant, not a measurement: 1 for this
@@ -253,6 +274,9 @@ func RunBatch(ctx context.Context, cfg config.Config, runner Runner, jobs []Batc
 	}
 	if len(jobs) == 0 {
 		return nil, errors.New("empty batch")
+	}
+	if o.Spill && route != RouteAuto {
+		return nil, fmt.Errorf("--spill shares one queue between this machine's warm session and the roster nodes, which is what --route auto decides; --route %s names one place for every job: drop one of them", route)
 	}
 	if route == RouteRemote {
 		// A hand-forced remote batch needs a fleet to send to; say so now, not once per job.
@@ -336,7 +360,16 @@ func RunBatch(ctx context.Context, cfg config.Config, runner Runner, jobs []Batc
 	if why.line != "" {
 		st.say(why.line)
 	}
+	if o.Spill && mode != ModeSpill {
+		b.SpillNote = why.spillNote
+		if b.SpillNote == "" {
+			b.SpillNote = spillMissNote(mode)
+		}
+		st.say("--spill: " + b.SpillNote)
+	}
 	switch mode {
+	case ModeSpill:
+		st.runSpill(ctx, cfg, runner, jobs, todo, warm, why.spill)
 	case ModeWarm:
 		if o.Jobs > 0 {
 			st.say(fmt.Sprintf("--jobs %d applies to the ticket path only: this batch renders on one warm session", o.Jobs))
@@ -462,6 +495,9 @@ type modeWhy struct {
 	// hold: the batch runs warm because the lane is busy and no roster node can relieve it, so it keeps its place in line
 	// for the lane (BatchHoldWindow) instead of giving up at the pipeline's own window.
 	hold bool
+	// spill is the plan of a ModeSpill batch; spillNote says, for a batch that asked for Spill and did not get it, why not.
+	spill     *spillPlan
+	spillNote string
 }
 
 // chooseBatchMode decides, once, where the jobs in todo run, and the bound on tickets in flight for the ticket path.
@@ -501,6 +537,9 @@ func chooseBatchMode(ctx context.Context, cfg config.Config, runner Runner, firs
 		return warmOr("") // no queue (the lease refuses the state root; a config with no state_dir has one): there is nothing to hold a job in
 	}
 	if v := core.ProbeLane(ctx, runner, req); v.Free && !v.Unjudged {
+		if o.Spill && haveWarm {
+			return spillChoice(ctx, cfg, req, len(todo), o, warmOr)
+		}
 		return warmOr("") // the lane is free: one warm session renders the whole batch
 	}
 	// This machine's own identity (F59: it waits on the fingerprints of its weight files, up to 20 s for each on a cold cache, so it is built
@@ -610,34 +649,40 @@ func (s *batchState) runWarm(ctx context.Context, jobs []BatchJob, todo []int, w
 	s.b.Err = err
 	s.b.Deferred = deferred && err != nil
 	for k, i := range todo {
-		var row BatchRow
-		switch {
-		case k < len(rows):
-			row = rows[k]
-			row.Seed = firstPositive(row.Seed, jobs[i].Seed)
-			if row.Out == "" {
-				row.Out = jobs[i].Out
-			}
-			if row.OK {
-				row.Node = s.self
-				row.Verdict = VerdictRendered
-				proveFile(&row)
-			} else {
-				row.Verdict = VerdictFailed
-				if row.Error == "" {
-					row.Error = "the render reported no reason"
-				}
-			}
-		case deferred:
-			row = BatchRow{Out: jobs[i].Out, Seed: jobs[i].Seed, Verdict: VerdictQueued, Error: errText(err, "the lane was held and the batch gave up waiting for it")}
-		case ctx.Err() != nil:
-			// The caller's interrupt reached the batch before it had a lane: nothing was wrong with the job.
-			row = BatchRow{Out: jobs[i].Out, Seed: jobs[i].Seed, Verdict: VerdictQueued, Error: "interrupted before this job ran: " + errText(err, ctx.Err().Error())}
-		default:
-			row = BatchRow{Out: jobs[i].Out, Seed: jobs[i].Seed, Verdict: VerdictFailed, Error: errText(err, "no result recorded (batch aborted?)")}
-		}
-		s.final(i, row)
+		s.final(i, warmRowFor(ctx, jobs[i], rows, k, deferred, err, s.self))
 	}
+}
+
+// warmRowFor is the row of the k-th job the warm call was handed: the call's own row when it gave one (proved against the file
+// at out), else the reason it gave none (a defer, an interrupt, a stop).
+func warmRowFor(ctx context.Context, job BatchJob, rows []BatchRow, k int, deferred bool, err error, self string) BatchRow {
+	var row BatchRow
+	switch {
+	case k < len(rows):
+		row = rows[k]
+		row.Seed = firstPositive(row.Seed, job.Seed)
+		if row.Out == "" {
+			row.Out = job.Out
+		}
+		if row.OK {
+			row.Node = self
+			row.Verdict = VerdictRendered
+			proveFile(&row)
+		} else {
+			row.Verdict = VerdictFailed
+			if row.Error == "" {
+				row.Error = "the render reported no reason"
+			}
+		}
+	case deferred:
+		row = BatchRow{Out: job.Out, Seed: job.Seed, Verdict: VerdictQueued, Error: errText(err, "the lane was held and the batch gave up waiting for it")}
+	case ctx.Err() != nil:
+		// The caller's interrupt reached the batch before it had a lane: nothing was wrong with the job.
+		row = BatchRow{Out: job.Out, Seed: job.Seed, Verdict: VerdictQueued, Error: "interrupted before this job ran: " + errText(err, ctx.Err().Error())}
+	default:
+		row = BatchRow{Out: job.Out, Seed: job.Seed, Verdict: VerdictFailed, Error: errText(err, "no result recorded (batch aborted?)")}
+	}
+	return row
 }
 
 func errText(err error, fallback string) string {
@@ -761,6 +806,12 @@ func (s *batchState) runJob(ctx context.Context, cfg config.Config, runner Runne
 		// call finds it busy and becomes a ticket.
 		s.say(fmt.Sprintf("job %d: the lane was taken by another job a moment after it read free; asking again", i))
 	}
+	return s.rowFromResult(ctx, j, res, start)
+}
+
+// rowFromResult is the row of a job whose single-render call ended with res: a picture to prove, or the reason there is none
+// (queued when no place was found for the job, failed when it ran and broke).
+func (s *batchState) rowFromResult(ctx context.Context, j BatchJob, res core.Result, start time.Time) BatchRow {
 	row := BatchRow{Out: j.Out, Seed: j.Seed, Ms: res.Meta.LatencyMs}
 	if row.Ms <= 0 {
 		row.Ms = time.Since(start).Milliseconds()

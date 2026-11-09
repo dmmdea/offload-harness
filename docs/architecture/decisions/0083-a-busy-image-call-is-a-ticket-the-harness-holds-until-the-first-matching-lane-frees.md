@@ -140,8 +140,8 @@ make the caller retry. Three things were still wrong once every lane was busy.
     the same call needed a decision of its own; Amendment 1 is that decision.
 
 13. **A batch is a set of tickets when it must be and one warm session when it can be.** `generate-image --batch jobs.jsonl [--family F]
-    [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]` (register F28) decides once, at the start, where its jobs run and never
-    mixes. The whole batch goes through the warm session (`pipeline.RunImageBatchAs`: one ComfyUI, the checkpoint loads once) when the route is
+    [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N] [--spill]` (register F28) decides once, at the start, where its jobs run and
+    never mixes, unless the operator asks for `--spill` (below). The whole batch goes through the warm session (`pipeline.RunImageBatchAs`: one ComfyUI, the checkpoint loads once) when the route is
     local, the machine has no fleet, no state dir or an inherited lease, its lane is free, or its lane is not free **and no roster node renders the
     recipe** (krea2 and the 2512 build exist on this machine's files only, so per-job tickets would be a cold start per picture on the one lane that
     can run them: slower than waiting for the lane once; that batch keeps its place in the lease line for the lane, up to the queue's 8 h ceiling and
@@ -155,8 +155,18 @@ make the caller retry. Three things were still wrong once every lane was busy.
     that can never take the job as configured (every node left out for a configuration fact, none merely busy or out of reach: `core.ErrClassNoNodeConfigured`)
     is not waited for, and the job fails at once naming each node's miss; the node's
     recipe is not compared there, so a row carries the family and licence the node reports, and a family only the nodes define is carried by name. The jobs reach a node exactly as written (decision 3 fixes a seed the job did not give; `refine=false` only
-    when the job says so), and each output is fetched, checked against the sha256 the node published, to its exact `out`. There is no mixed
-    local/remote work stealing and no batch task on the fleet (v1). Each job ends in a row `{i, out, seed, ok, ms, error, node, family, sha256,
+    when the job says so), and each output is fetched, checked against the sha256 the node published, to its exact `out`. There is no batch task on the fleet (v1). **`--spill`
+    (opt-in, route auto only; refused with `--route local` or `remote`) is the one mixed mode.** When this machine's lane is free and at least one roster
+    node renders the recipe (the same digest and release the tickets match on, read from the same roster the ticket path reads), the jobs go into one shared
+    queue and both sides pull from it, so neither idles while a job is left. The warm side takes the queue in chunks, because the warm session
+    (`pipeline.RunImageBatchWaiting`) takes a fixed list written to a jobs file the render script reads once and cannot be fed more jobs after it starts;
+    each chunk is one warm session (the checkpoint loads once per chunk, not once per picture), sized as the queue divided by the workers and at least 4
+    (chosen, not measured), so the first chunk is large and the chunks shrink as the queue empties. Each matching node has a worker that takes one job at a
+    time through the single-render call pinned to that node (the recipe was compared once, at the start, so the call does not compare it again); `--jobs N`
+    bounds those workers (default one per matching node). A node with no place for a job gets it back into the queue and is asked again after the pause of
+    the one-at-a-time path, and stops pulling at the queue's ceiling; a lane that stays held past three asks, or a warm session that stops, leaves the rest
+    to the nodes. With no matching node `--spill` prints why (and the JSON carries `spill_note`) and the batch is what `--route auto` does without it;
+    the output's `mode` is `spill` when it spilled. Rows, `--resume` and the exit status are unchanged. Each job ends in a row `{i, out, seed, ok, ms, error, node, family, sha256,
     verdict}` (`rendered`, `skipped-existing`, `failed`, `queued`), kept beside the results file (`<results>.partial`) as its job is final and written over it when the batch ends, so an earlier results file survives a refused or a dead batch (a run that reopens the name sets a dead batch's partial aside as `<results>.partial.prev`); a file the batch rejects (a node's file with no published sha256) is set aside as `<out>.unverified`, so a failed job leaves no file of its own at its path (a picture that was already there before the batch is not its to remove). `--resume` skips a job only when the file
     at its `out` is not empty, decodes whole as a PNG and has the size the job names; anything doubtful is rendered again (the 21 zero-byte PNGs of
     2026-10-09). A job whose `out` cannot be made fails alone before a lane is asked for it. Exit 0 every job has its picture or a busy lane deferred
@@ -183,8 +193,10 @@ make the caller retry. Three things were still wrong once every lane was busy.
 - **Cost.** Each waiting ticket pays a lane question (one bounded `nvidia-smi` read) and a roster read per scan; the creation
   reading is reused by the first scan for 2 s. N waiting tickets are N reads per interval; a roster-first short circuit and a
   shared table read are named follow-ups.
-- **A batch of krea2 or of the 2512 build never leaves this machine** (decision 13): no node renders them, so the batch keeps its place in line
-  for the lane (up to the 8 h ceiling) and runs warm on it, and says which node does not match and why. A batch of a 2.1 family pays a ComfyUI cold start per job
+- **A batch of a family no node renders never leaves this machine** (decision 13; krea2 and the 2512 build did not match any node when this was
+  written, and a roster that holds the same krea2 files on a second node does match it, which `local-offload media-recipes` shows on each machine): no node renders it, so the batch keeps its place in line
+  for the lane (up to the 8 h ceiling) and runs warm on it, and says which node does not match and why. On a free lane `--spill` is how such a roster
+  feeds the matching node while the warm session works. A batch of a 2.1 family pays a ComfyUI cold start per job
   on a node (zero-warm, ADR 0009), which beats waiting only while this machine's lane is held by a long job and a node is idle.
 - **An interrupted batch leaves its jobs on the nodes.** A job already on a node cannot be recalled (ADR 0064); the same command adopts it only if
   the jobs carry explicit seeds (the ticket's identity is the request, and a seed minted afresh is a new request). The verb runs both
@@ -210,8 +222,10 @@ make the caller retry. Three things were still wrong once every lane was busy.
 - **Read the state files and then send.** Rejected for the in-use rule: that is exactly the window in which two processes both
   read a node idle.
 - **Enable the pull queue (ADR 0030).** Still rejected for the reasons of ADR 0082: the nodes in question cannot pull.
-- **Mixed local/remote work stealing for a batch** (the warm session on this machine plus tickets on the nodes for the rest). Rejected for v1:
-  it needs a rule for which jobs go where, and nothing has measured the cold start a node pays against a warm job here, so the rule would be a guess.
+- **Mixed local/remote work stealing for a batch as the default** (the warm session on this machine plus the nodes for the rest). Rejected as the default for v1:
+  it needs a rule for which jobs go where, and nothing has measured the cold start a node pays against a warm job here, so the rule would be a guess. It
+  exists as the opt-in `--spill` (decision 13) with no rule at all: one shared queue, the warm side takes chunks of what is left and each node one job
+  at a time, so the faster side takes more by pulling more often.
 - **A batch task on the fleet** (a node holds a warm session for N jobs). Rejected for v1: every candidate node streams the 2.1 text encoder from
   RAM on every render, so a warm remote session buys little today, and it would be a new fleet task every node must keep true.
 - **Per-job tickets even when no node matches.** Rejected: one cold start per picture on one lane, to gain nothing.
