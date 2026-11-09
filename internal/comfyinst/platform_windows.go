@@ -6,13 +6,13 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // lookupTimeout bounds each process or socket lookup, so a stuck system call cannot stall a release.
@@ -24,7 +24,7 @@ const lookupTimeout = 15 * time.Second
 func terminate(pid int) error {
 	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "taskkill", "/T", "/F", "/PID", strconv.Itoa(pid))
+	cmd := winexec.CommandContext(ctx, "taskkill", "/T", "/F", "/PID", strconv.Itoa(pid))
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	if err := cmd.Run(); err == nil {
 		return nil
@@ -43,7 +43,7 @@ func processStartUnixMs(pid int) (int64, bool) { return gpulease.ProcessStart(pi
 func run(name string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), lookupTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, name, args...)
+	cmd := winexec.CommandContext(ctx, name, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{HideWindow: true}
 	out, err := cmd.Output()
 	return strings.TrimSpace(string(out)), err
