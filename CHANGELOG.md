@@ -7,6 +7,97 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.211.0] - 2026-11-09 - a generative edit runs on fleet nodes, generate-image --batch gets row defaults and a snapped resume, fleet/health answers in milliseconds under a hung engine, gpu reserve admits by the lease's observed RAM, voice sampling knobs travel, the animate lane runs card-only on two cards, and the two-card tiers declare the flux3-klein upsampler seat
+
+### Added - the FLUX 3 Klein prompt-upsampler seat (`flux3-pup`) is declared by the two-card and larger CUDA tiers, so a rendered llama-swap config carries it
+
+- **What it does.** A new media seat kind, `upsampler`, renders a plain llama-server entry for BFL's prompt upsampler (`flux3-klein-pup/flux-3-image-klein-pup-Q6_K.gguf` under the models dir, alias `flux3-klein-pup`, `-ngl 999 -c 8192 --flash-attn on --jinja --reasoning off --cache-ram 0`, ttl 300). `ampere-2x16`, `blackwell-2x16` and `blackwell-3x16` declare it as a swappable seat named `flux3-pup`, pinned to the utility card (the one holding the tier's whisper seat; `__UTILITY_CARD__` on `ampere-2x16`, card 0 on `blackwell-2x16`, card 2 on `blackwell-3x16`), so `local-offload install render` writes it into the stamped config and a node's `audit-yaml --against-render` reports MATCH instead of HAND-EDITED.
+- **Why.** The flux3-klein family calls a llama-swap seat before its render lease when it names one in `imagegen_upsampler`, but that seat existed only as a hand-written block in one operator's unstamped config. A two-card node whose config is rendered could not have it: a hand edit moves the file to HAND-EDITED and the next render drops the block. The recipe digest includes the upsampler's model name, so every node has to call it by the same name, `flux3-pup`.
+- **Binding.** The seat writes no config key (`BindingKey` answers empty, like a registered extra). `imagegen_upsampler` is a flux3-klein family key; writing it flat would change every other image family, and these tiers seed no flux3-klein family to put it in. A node that binds that family names the seat itself (`"imagegen_upsampler": "flux3-pup"`), so a node with the seat and a node without it behave the same for every other family.
+- **Details.** The seat takes `model`, `ctx_size`, `residency`, `ttl`, `aliases` and `gpu_env`; mmproj, bin, sampler, split and `extra` fields are refused rather than silently dropped. It is placed by the existing `__SEATS_SWAPPABLE__` marker (an alternative of the heavy seats, never co-resident with them). Weights stay out of band like every seed; `install render` warns while the file is missing. The tier pages under `docs/tiers/` are regenerated, and `docs/OPERATOR-GUIDE.md`, `docs/systems/media-generation.md`, `docs/systems/setup-installer.md` and `setup/SETUP-AGENT.md` describe the seat.
+
+### Added - a card-only placement for character animation, so a node of two 16 GB cards can run the animate lane
+
+- **What it does.** `animategen_placement: multicard` (with `animategen_resident_gb`) runs WAN-Animate-2 on the two non-display cards of a lease with no host RAM. The int8 DiT (15.5 GiB) is split through ComfyUI-MultiGPU's DisTorch2 loader, a resident share on the compute card (cuda:0, the launch lists it first, as for LTX-2.5) and the rest on the storage card; the umt5 encoder, clip_vision_h and the VAE sit on the storage card, and the encoder is taken off the cards after the prompt is encoded and before the DiT is placed. `render/comfy-animate.mjs` takes `--placement single|multicard` (default `single`, the graph and launch as before, node for node), `--resident-gb` (default 5) and `--cards`; `--print-graph` prints the resolved graph and exits without staging, leasing or contacting ComfyUI. `single` is unchanged.
+- **Why.** One 16 GB card holds about 15 GiB and a node that runs ComfyUI with `--gpu-only` cannot stream the DiT through host RAM, so the animate lane could not run on a node of two 16 GB cards at all.
+- **Details.** The planner is `planMulticard({ isAnimateGraph: true })` in `render/wan-multicard.mjs` and reuses the video placement's cards, roles, instance key, launch environment and lease confirmation. Its fit check states the arithmetic: two 14.996 GiB cards, 1 GiB reserved and the default 482x854x81 clip fit a resident share of 3.9 to 7.1 GiB, and a share outside what a card holds (or a `.gguf`, bf16 or fp16 DiT) is refused before ComfyUI starts, with the figures. The door (`animateNeed`) leases the pair and `hostneed.ForAnimateCardOnly` declares 0 host GiB when each card fits its stage. The recipe row a node advertises (`wan-animate2`) is name and files and does not carry the placement. `doctor` checks the MultiGPU classes the graph names (`CLIPVisionLoaderMultiGPU` is added to both node-pack tables).
+- **Not measured.** No animate run was made on two cards: the file sizes are exact, the activation and overhead figures are chosen from the Wan 2.2 two-card benchmark, and the runner says so once (`ANIMATE-PLACEMENT-NOTE`). The first real run is the measurement.
+- **Check.** The single graph was compared with the one built before the change (identical); `--print-graph` with `--placement multicard --cards <a>,<b>` on a three-card box printed the DisTorch2, MultiGPU and release nodes with their devices, and `--resident-gb 12`, `0` and `2`, a display card, no cards and a `.gguf` DiT were each refused with the reason. Docs: `docs/systems/media-generation.md` ("Card-only animate"), `docs/OPERATOR-GUIDE.md`, `render/README.md`.
+
+### Added - a generative edit runs on a fleet node: `image-edit` task, `edit_recipes`, `route` on the MCP tool and the `edit-image-generative` verb
+
+- **What it does.** A node with a generative edit binding and `fleet_media_inputs` on now lists `image-edit` in `supported_task_types` and publishes `edit_recipes[]` in `/fleet/health` (additive, omitted otherwise). A row is the node's capability for the edit lane: the edit graph, the UNet, the text encoder, the VAE and the set of LoRA files it holds, each with its size and content fingerprint, plus `lane: "edit"` and a digest. The preset, steps, cfg, canvas, placement, seed and negative prompt are not in it. `POST /fleet/media-job` carries the job (the target as the file `image`, up to nine references as `images_1` to `images_9`, up to ten files in a bundle for this task); a payload sent to `/fleet/dispatch` is refused.
+- **Refusals before any render.** The job must carry the `recipe_digest` its asker matched. The node recomputes it from the files on disk and answers `412` (cause `pending`, `unreadable` or `changed`, as for images) on a mismatch, before anything is queued or leased. It then refuses with `400` what can never render: references on a family that is not `qwen-image-2.1`, more than ten images, `preset` on `qwen-image-2.1`, `megapixels` outside 0.01 to 16, and a multicard canvas above the card-only recipe's 2.0 MP.
+- **Per-request canvas and placement.** An edit may carry its own `megapixels` and `placement` (`single` or `multicard`), which replace `gen_edit_megapixels` and `gen_edit_placement` for that call. The local edit door honours them too; with neither present it behaves as before.
+- **Why.** Image generation spills to other nodes because a recipe, a task type and a 412 check exist for it. The edit lane had none of the three, so a second node with the same Qwen-Image-Edit files could not take an edit.
+- **The asker.** `offload_edit_image_generative` takes `route` (`local`, `auto` default, `remote`), `remotes`, `wait_s`, and per-request `megapixels` (0.01 to 16) and `placement` (`single` or `multicard`). It builds this machine's edit recipe with the function a node uses to publish its own and picks a node only when the digest is equal, the node serves `image-edit` and `media-job`, and it runs the same release; a node whose files differ (one LoRA of another size, say) is refused by name and never sent the job. A busy lane is a ticket, as for images; the source and reference images travel in a hash-checked `media-job` bundle (target plus up to nine references) and the output is fetched back verified.
+- **The verb.** `edit-image-generative` (not `edit-image`, the PIL editor): single mode (`--image`, `--ref` repeatable, `--prompt`, `--out`, `--negative`, `--seed`, `--steps`, `--cfg`, `--preset`, `--megapixels`, `--placement`, `--route`, `--remote`) and `--batch rows.jsonl` with `--results`, `--resume` and `--spill`. Flags are the default of each row and a row's own value wins; `--seed S` gives a row without a seed `S` plus its 0-based index, stable across `--resume`. The renderer makes one still per process, so a batch hands each side one row at a time. `--resume` skips a row whose file decodes as a PNG of the size the edit canvas rule gives for its source and megapixels (the rule the renderer applies). `--dry-run` prints each row's request, this machine's edit digest and every roster node's match verdict and renders nothing.
+- **Unchanged.** Every `image_recipes` digest: the lane field enters the digest only when set. `render/noise-seed.mjs` and the seed are untouched.
+- **Details.** `docs/systems/fleet-node.md` (the generative edit lane on a node), `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`, `docs/systems/media-generation.md` (the generative edit across the fleet), `docs/systems/mcp-server.md`, `README.md`.
+
+### Fixed - a busy fleet node answers its health probe in well under a second
+
+- **What happened.** Askers read a node's `/fleet/health` before placing image work. While a node was rendering and
+  loading weights, those probes timed out and the asker concluded that no node served image-gen. Two parts of the
+  handler could hold a probe for a long time: a request that found the node's llama-swap residency answer too old
+  waited up to 1.5 s for the refresh, and every request that arrived while a slow refresh was still running waited the
+  full 1.5 s again (measured: five probes in a row at 1.5 s against an unreachable engine). The disk reads behind the
+  media routes and the image and media recipe rows were rebuilt inline once a minute, so a busy disk stalled that
+  request as well.
+- **What changed.** The residency wait is now 400 ms and only the first request of a refresh cycle pays it; the rest
+  serve the previous answer at once. The three disk reads run one at a time on their own goroutine and a request waits
+  for a rebuild at most 250 ms, otherwise it serves the last known value. Nothing is served silently: the payload gains
+  an additive `stale_reads` list of `{name, age_ms}` (omitted when every part is fresh) naming each part served from an
+  older reading. No field is dropped or renamed. A part that has never been read is still waited for in full.
+- **Measured** on a scratch node with image families and an unreachable engine address: probes against the
+  unreachable engine went from 1.5 s per request for the first several seconds (and again each minute) to one 0.42 s
+  request at start and about 3 ms after, plus one request of about 0.5 s when the minute-old reads are rebuilt; a node
+  with reachable engines answers in about 3 to 8 ms warm.
+- **Where it shows.** `docs/systems/fleet-node.md` (the `stale_reads` row and the residency paragraph).
+
+### Fixed - a second media lane no longer waits behind host memory the first lane never took, and a hold bound no longer leaves its card idle
+
+- **What happened.** Two media lanes ran on one two-card node. The first declared 36 GiB of commit and peaked at about 25 GiB while its weights moved onto its card. The second (`gpu reserve --ram 28 --ram-commit 36`) was told `+28.0 GiB still to load by leases already running` for the whole ten minutes of the host RAM hold bound, long after the first had loaded, then failed with `the host never had the room` and exit 1. Its card sat idle until someone launched the command again by hand.
+- **What changed (admission).** A running lease is now credited with the highest commit its process tree has been seen to hold once that peak has plateaued: four samples at least 2 seconds apart over at least a minute, with no rise past half a GiB (`internal/gpulease/hostram_observed.go`, using the same process-tree measurement the guard already took). Its still-to-load figure is then its declared commit less that peak, never below zero: 36 declared and 25 observed leaves 11, not 28, and the wait line shows the 11. Before the plateau, or when the tree cannot be read, nothing changes: the lease is credited with what it holds now only, so a job still loading is never counted as finished. Only commit is credited, not the working set, which the OS can trim.
+- **What changed (hold bound).** When the host RAM hold bound passes, a `gpu reserve ... -- <command>` with `--wait` time left now prints one line, lets the cards go and queues again for the same cards (anything waiting for them goes first), instead of exiting. It exits non-zero only when `--wait` is spent, with the same message as before. `--wait 0` and `--detach` reserves still release and exit at once. The seat stays cleared between attempts and is warmed back when the reserve ends.
+- **Docs.** `docs/systems/gpu-lease.md`, `docs/OPERATOR-GUIDE.md` and the `--ram-hold-max` help text describe both changes.
+
+### Fixed - The deletion guard (H-51) no longer reads a pull request branch that only sits behind main as deleting the files main gained after the branch forked. On a pull request it now compares the base tip with the merge result of base and head (`git merge-tree --write-tree`, falling back to the merge-base when that tree cannot be made); a real undeclared deletion and a merge whose tree drops what its first parent carried are refused as before. Before, every open pull request went red each time another one merged a changelog fragment.
+
+### Fixed - `generate-image --batch` keeps the flags you typed, resumes at the size the family renders, and spills while the lane is busy
+
+- **Flags were dropped.** `--negative`, `--width`, `--height`, `--steps` and `--seed` were read on the batch verb and then ignored, so a batch
+  rendered without its negative. They are now the defaults of every row that does not set its own, on the warm session, the tickets, the spill
+  workers and the one-at-a-time path. A row's own value wins. With `--seed S`, a row without a seed gets `S + i` (its 0-based position in the
+  file), so the seeds stay the same on a `--resume`.
+- **`--resume` re-rendered every picture.** A job asked 1600x900, the family rendered 1600x896, and the resume check wanted 900. The size is now
+  snapped once, before anything is placed, to the grid the family renders at (16 px for `qwen-image`, 32 px for `qwen-image-2.1`), so the
+  asked size, the rendered size and the resume check agree and a finished picture is skipped.
+- **`--spill` needed a free lane.** It now also starts while this machine's lane is busy: the matching nodes work the shared queue at once, and
+  this machine's warm session joins when the lane frees (it asks the same lane probe the ticket scan uses, every 10 s). With no matching node
+  it behaves as before.
+- **Inherited lease.** Inside `gpu reserve`, a call that asked for `--spill` or typed `--route auto|remote` now prints one line on stderr saying
+  fleet ticketing and spill are off there and to run the call outside the lease to use them. The helper is `mediaremote.InheritedLeaseNotice`.
+- **A slow node health read.** A node whose cards are busy can answer its health read slowly; one timeout was taken as "no node serves image
+  generation" and the batch slept up to five minutes. That read is now asked once more after 2.5 s before the node is counted as absent.
+
+### Added - `--placement single|multicard` on `generate-image`, `offload_generate_image` and the fleet image payload, and `--dry-run` on the batch
+
+- **Per-call placement.** `generate-image --placement` (also on `--batch`), the `placement` parameter of `offload_generate_image`, and the
+  fleet image-gen payload lay a card placement over the family's own `imagegen_placement` for that call. The node builds the request with it
+  the way it reads its config. It is not part of the recipe digest, so it never changes which nodes match.
+- **`--dry-run`.** With `--batch`, prints the resolved rows (defaults applied, sizes snapped, seeds and outs fixed, and with `--resume` which
+  rows would be skipped) and exits. It renders nothing, asks no lane and contacts no node.
+
+### Fixed - voice sampling knobs are carried to the voice worker, and transcribe can return word times with VAD off
+
+- **Voice sampling was silently dropped.** `generate-audio` / `offload_generate_audio` take `cfg_weight`, `exaggeration`, `temperature`, `repetition_penalty`, `min_p` and `top_p` (CLI `--cfg-weight` and so on). The default (generalist) voice path used to send only `--clone` and `--lang`, so a `cfg_weight` of 0.3 changed nothing; now each knob given is sent to `render/tts.mjs` (which already takes all six), for the default and the fine-tuned engine, and a request's value replaces the fine-tuned recipe's. A knob not given keeps the engine default (0 is a real value for `cfg_weight` and `min_p`).
+- **Never dropped, always named.** A value out of range or not a number, a knob on `kind` music, and a knob on a voice lane that has no such control (the speech-server endpoint, the audio.cpp engine) come back as a refusal that names the knob and the range, before anything renders.
+- **Fleet.** The knobs travel in the fleet `audio-gen` plan and payload, and the node's builder reads them. They are part of the default output file name, so a retake with another `cfg_weight` is a different take. A node publishes `voice_sampling_honoured` in `/fleet/health` and a call that names a knob is placed only on a node that does, because an older node would drop them and render with its own defaults.
+- **Word-timed transcripts.** `local-offload transcribe --words` / `offload_transcribe words=true` adds `words[]` (`word`, `start`, `end` in seconds, `offsets{from,to}` in milliseconds as whisper.cpp writes them, `probability`) and `words_path`, a file in the shape of `whisper-cli -oj`. A words call decodes at temperature 0 with no temperature fallback (`temperature_inc=0`; the seat's default steps up by 0.2), so the same audio gives the same words on a rerun. A transcript with no word times is a defer, not an empty list.
+- **VAD per call.** `--vad on|off` / `vad` sends the whisper server's per-request `vad` field, so `off` decodes a file without the voice-activity detector even on a seat started with `--vad`; `on` needs `stt_vad`. Both options travel to a fleet node on the stt upload door (an older node refuses the unknown field with a 400), and are refused by name on the hq tier served over the OpenAI protocol and on `engine: npu`, which have no word times or VAD switch.
+- **Why.** A narration pipeline that moves its voice take and its word-timing gate onto the harness needs the same sampling it uses today and the same un-VAD'd, deterministic word times; both were silently different.
+
 ## [0.210.0] - 2026-11-09 - a node can take only its operator's personal callers, a wedged ComfyUI is reaped, generate-image --batch --spill feeds matching nodes, node rows say what media they render, and the ampere-2x16 tier gets pooled two-card seats
 
 ### Fixed - an edit at the seed that rendered its source no longer comes out burnt
