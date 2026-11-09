@@ -41,7 +41,8 @@ func runGenerateImage(args []string) error {
 	batchFile := fs.String("batch", "", "render a JSONL batch of jobs (one line per job: {\"prompt\":...,\"out\"?,\"negative\"?,\"width\"?,\"height\"?,\"steps\"?,\"seed\"?,\"refine\"?}): through ONE warm ComfyUI session when this machine's lane is free, else each job a ticket on the first matching lane that frees (ADR 0083)")
 	resultsFlag := fs.String("results", "", "with --batch: write one JSON row per job to this file as it ends ({i,out,seed,ok,ms,error,node,family,sha256,verdict}; verdict rendered | skipped-existing | failed | queued)")
 	resume := fs.Bool("resume", false, "with --batch: skip a job whose out already holds a PNG that decodes whole and has the size the job names; anything doubtful (empty, cut short, another size, missing) is rendered again")
-	jobsFlag := fs.Int("jobs", 0, "with --batch: the most jobs in flight on the ticket path (default: this machine's lane plus one per roster node that renders the recipe, at most 8)")
+	jobsFlag := fs.Int("jobs", 0, "with --batch: the most jobs in flight on the ticket path (default: this machine's lane plus one per roster node that renders the recipe, at most 8); with --spill, the most node workers (default: one per matching node)")
+	spillFlag := fs.Bool("spill", false, "with --batch (route auto only): when this machine's lane is free AND a roster node renders the same recipe (same digest, see media-recipes), run both at once over one queue: the warm session here takes chunks of the jobs, each matching node takes one job at a time. Without a matching node it says so and the batch runs as it does without --spill")
 	route := fs.String("route", "auto", "local | auto (here when this machine has the lane, derived from the files its route loads, else a fleet node from delegate_remotes) | remote (a fleet node; input files travel in a hash-checked bundle and the output is fetched back verified; ADR 0077)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
@@ -66,12 +67,15 @@ func runGenerateImage(args []string) error {
 		if *jobsFlag < 0 {
 			return fmt.Errorf("generate-image: --jobs %d: the number of jobs in flight cannot be negative (0 is the default)", *jobsFlag)
 		}
+		if r, _ := mediaremote.NormalizeRoute(*route); *spillFlag && r != mediaremote.RouteAuto {
+			return fmt.Errorf("generate-image: --spill shares the jobs between this machine's warm session and the roster nodes, which only --route auto decides; --route %s names one place for every job: drop one of them", *route)
+		}
 		return runImageBatchVerb(fs, imageBatchArgs{
-			file: *batchFile, family: *family, route: *route, results: *resultsFlag, resume: *resume, jobs: *jobsFlag,
+			file: *batchFile, family: *family, route: *route, results: *resultsFlag, resume: *resume, jobs: *jobsFlag, spill: *spillFlag,
 			refine: *refine, remotes: remotes, asJSON: *asJSON, compact: *compactFlag,
 		})
 	}
-	for _, name := range []string{"results", "resume", "jobs"} {
+	for _, name := range []string{"results", "resume", "jobs", "spill"} {
 		set := false
 		fs.Visit(func(f *flag.Flag) { set = set || f.Name == name })
 		if set {

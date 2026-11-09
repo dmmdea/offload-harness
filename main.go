@@ -151,6 +151,8 @@ func main() {
 		err = runData(args)
 	case "models":
 		err = runModels(args)
+	case "media-recipes":
+		err = runMediaRecipes(args)
 	case "calibrate":
 		err = runCalibrate(args)
 	case "health":
@@ -294,9 +296,11 @@ Usage:
                                          a bare -- ends the flags, so text that starts with a dash is kept: generate-audio out.wav -- "--- Intro ---"
                                          (the same for generate-video, animate-character and the verbs that take one file, text or prompt)
   local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]
-  local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]
+  local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N] [--spill]
                                          N prompts: ONE warm ComfyUI session when this machine's lane is free, else each job a ticket on the
-                                         first matching lane that frees (fleet nodes included); a verdict per job; --resume re-renders only
+                                         first matching lane that frees (fleet nodes included); --spill (route auto): when the lane is free AND a
+                                         roster node renders the same recipe, run both at once over one queue (warm chunks here, one job at a time
+                                         per node, up to --jobs node workers), else it says why it did not; a verdict per job; --resume re-renders only
                                          what is missing or does not prove itself; rows go to r.jsonl.partial and over r.jsonl when the batch
                                          ends. exit 0 every job has its picture (or a busy lane deferred the whole warm batch: rows queued),
                                          4 some job failed (the JSON and the results file name them), 1 it stopped, errored or was interrupted
@@ -349,6 +353,7 @@ Usage:
   local-offload data status [--json]     where this node keeps its data, and whether any of it is on the OS drive (C: holds Windows and program installs, never data). Exit 1 when it is and a data volume qualifies.
   local-offload data migrate [--from DIR] [--to DIR] [--apply] [--stopped] [--json]   COPY the data tree to a data drive (never a move, never a junction, source untouched; dry run unless --apply; bbolt stores only with --stopped), then print the "home" line to set
   local-offload models                   show configured offload model
+  local-offload media-recipes [--json]   print this machine's image (and video, animation, audio) family recipes as the fleet node publishes them: digest, files with bytes and fingerprint, unfingerprinted files
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
   local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C | contextbench   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench, ContextBench tasks
   local-offload gate <freeze|check|verdict|selftest|schema> [flags]   the one measurement gate: freeze a pre-registration, check it, judge a candidate against the incumbent (ADOPT/BLOCK/INCONCLUSIVE, paired interval over tasks), write a model judge's self-test receipt (selftest); exit 0 a verdict was produced, 1 non-ADOPT under --require-adopt or a scorer that failed its self-test, 2 a refusal (docs/systems/measurement-gate.md)

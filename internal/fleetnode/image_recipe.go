@@ -55,6 +55,13 @@ type ImageRecipeHealth struct {
 // An sd.cpp binding has no recipe. Missing files are listed (with bytes -1) so a delegator can say which file a node
 // lacks; such a recipe never matches. It never waits for a hash (see the file header).
 func ImageRecipes(cfg config.Config) []ImageRecipeHealth {
+	return ImageRecipesWith(cfg, recipeFingerprints.Peek)
+}
+
+// ImageRecipesWith is ImageRecipes with the source of the content fingerprints chosen by the caller: the node's health passes
+// the Peek that never waits; the `media-recipes` CLI passes a blocking read, so a one-shot command prints digests and not
+// "pending". It is the one place the published rows are built, so what the CLI prints is what /fleet/health publishes.
+func ImageRecipesWith(cfg config.Config, fp mediacap.FingerprintFunc) []ImageRecipeHealth {
 	var out []ImageRecipeHealth
 	for _, fi := range cfg.ImageFamilies() {
 		// The default row is skipped on a node that has no default image binding (the same rule as ImageFamilies).
@@ -68,7 +75,7 @@ func ImageRecipes(cfg config.Config) []ImageRecipeHealth {
 				continue
 			}
 		}
-		r, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, recipeFingerprints.Peek)
+		r, ok := mediacap.ImageRecipeWith(eff, fi, mediacap.ModelRoots(eff.ComfyDir), nil, fp)
 		if !ok || !namesACheckpoint(r) {
 			continue
 		}
