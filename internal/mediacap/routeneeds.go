@@ -394,9 +394,12 @@ type nodePack struct {
 }
 
 // pollockjj/ComfyUI-MultiGPU archives 2026-09-30 (issue #223, no successor endorsed).
-// The head of upstream is its last code commit; the mirror's default branch carries one local fix already carried by the
-// fleet ("fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM", the first-stage fix for upstream
-// issue #220's libcudart.so-on-Windows crash). Mirrored (private) at dmmdea/ComfyUI-MultiGPU-mirror since upstream
+// The head of upstream is its last code commit; the mirror's default branch carries two local fixes ("fix(p2p): platform-aware
+// cudart load + fail-closed P2P on Windows/WDDM", the first-stage fix for upstream issue #220's libcudart.so-on-Windows crash,
+// and "fix(dlpack): stage comfy_kitchen inputs relative to torch's current device", 2026-11-09: ComfyUI d07dff45 and later run
+// the Flux2 VAE's fused group_norm through comfy_kitchen on the VAE's card, and upstream's guard staged the inputs to the compute
+// card while the kernel ran on the VAE's, an illegal memory access that killed the prompt worker whenever the VAE was not on the
+// compute card). Mirrored (private) at dmmdea/ComfyUI-MultiGPU-mirror since upstream
 // becomes read-only; the fleet installs from it, and anyone without access to the private mirror installs the public
 // upstream instead (both are rows of node-packs.json). No commit is named: the node installs the head
 // of the default branch and records it. See docs/systems/media-generation.md "Archival".
@@ -405,7 +408,7 @@ const multiGPUMirrorURL = "https://github.com/dmmdea/ComfyUI-MultiGPU-mirror"
 const multiGPUUpstreamURL = "https://github.com/pollockjj/ComfyUI-MultiGPU"
 
 var multiGPUArchivalNote = " — ARCHIVED upstream 2026-09-30 (no successor, still public and cloneable); the maintainer's mirror " + multiGPUMirrorURL +
-	" is PRIVATE (it carries one local Windows P2P/cudart fix): install from it only with access to it, otherwise from the public upstream " + multiGPUUpstreamURL
+	" is PRIVATE (it carries two local fixes: the Windows P2P/cudart load, and the comfy_kitchen DLPack staging that ComfyUI d07dff45+ needs for a VAE on a non-compute card): install from it only with access to it, otherwise from the public upstream " + multiGPUUpstreamURL
 
 var nodePacks = map[string]nodePack{
 	"ComfyUI-VideoHelperSuite": {"ComfyUI-VideoHelperSuite", "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite", "VHS_VideoCombine", ""},

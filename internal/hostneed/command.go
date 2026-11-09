@@ -101,6 +101,9 @@ func (c RenderCall) Estimate(f Facts) (Need, bool) {
 		cfg.ImageGenFamily = c.Flags["family"]
 		cfg.ImageGenCkpt = firstNonEmpty(c.Flags["ckpt"], f.env("COMFY_CKPT"))
 		cfg.ImageGenCLIP = c.Flags["clip"]
+		// --upsampler is the flux3-klein prompt-upsampler FILE the runner's graph loads (render/comfy-render.mjs); without the flag the graph loads
+		// none, whatever this machine's own binding names, so the machine's value must not leak into a hand-run runner command.
+		cfg.ImageGenUpsampler = c.Flags["upsampler"]
 		// --placement multicard asks for the card-only recipe of the family (hostneed/multicard.go); --resident-gb moves its resident share.
 		f = f.withPlacementFlags(c.Flags)
 		return ForRoute(RouteImage, cfg, f)

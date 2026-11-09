@@ -10,7 +10,7 @@ import "regexp"
 //
 // Measured is true only for a row whose host growth was read in a run that used the read-only safetensors loader (a card-only run that charged no
 // weight file to host commit). The 2511 fp8mixed edit, the 2512 Q5_1 GGUF, the krea2 bf16 DiT, the qwen-image-2.1 bf16 and int8_convrot DiTs and the
-// qwen-image-2.1 bf16 and int8_convrot edits and the ACE-Step 1.5 XL music row are measured; the 2511 Q5_1 GGUF edit row is predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
+// qwen-image-2.1 bf16 and int8_convrot edits, the ACE-Step 1.5 XL music row and the FLUX 3 Klein bf16 image row are measured; the 2511 Q5_1 GGUF edit row is predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
 //
 // A row can be held back (Blocked): it stays in the table, but it is no recipe to FindMulticardRow. No row is held back today. The qwen-image-2.1 rows'
 // 16.33 GiB bf16 text encoder is bigger than a card, and under --gpu-only ComfyUI would build the whole of it on one card before a DisTorch2 split
@@ -36,6 +36,14 @@ type MulticardRow struct {
 	ComputeGiB, StorageGiB float64
 	// Measured: the row's host growth was read in a run that used the read-only loader.
 	Measured bool
+	// WindowsHostGiB and WindowsCommitGiB are what the ComfyUI process was measured to hold on a WINDOWS host during a render of this row: the
+	// working-set peak (the read-only map's file pages are resident while a plain loader copies the whole DiT to the card, and Windows counts
+	// them against Available until it trims them) and the private-commit peak (WDDM backs the card allocations with system commit). On Linux the
+	// same pages are clean file pages MemAvailable already counts, so a measured row declares 0 there; on Windows it declares these two figures,
+	// stated, when they are set; a row that carries none (0, 0) declares 0 on every host, as it did before these fields existed. The figures cover
+	// the load the run made: for flux3-klein the prompt upsampled outside ComfyUI (hostneed keeps the ordinary estimate for an in-graph upsampler
+	// file). The JSON's "hostWindowsGiB" {touched, commit}.
+	WindowsHostGiB, WindowsCommitGiB float64
 	// MaxMegapixels is the largest edit canvas the compute peak is scaled to (0 = the row has none). The runner refuses a pinned canvas above it
 	// (render/comfy-edit.mjs planEdit), and so does the typed door before it leases the pair (internal/pipeline multicardNeed).
 	MaxMegapixels float64
@@ -67,7 +75,7 @@ var multicardRows = []MulticardRow{
 	{ID: "krea2/bf16", Route: "image", Family: "krea2", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16", DefaultClip: "qwen3vl_4b_bf16.safetensors",
 		UnetLoader: "distorch2", ResidentGiB: 11, ClipLoader: "plain", ComputeGiB: 13.2, StorageGiB: 13.1, Measured: true, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "flux3-klein/bf16", Route: "image", Family: "flux3-klein", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16",
-		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 13.5, StorageGiB: 6.5, MaxPixels: 1572864, Packs: []string{"multigpu"}},
+		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 13.5, StorageGiB: 7.0, Measured: true, WindowsHostGiB: 11.5, WindowsCommitGiB: 15.5, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "flux3-klein/nvfp4", Route: "image", Family: "flux3-klein", Quant: "nvfp4", UnetMatch: `nvfp4.*\.safetensors$`, ClipMatch: "bf16",
 		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 12.5, StorageGiB: 6.5, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/fp8mixed", Route: "edit", Family: "qwen-image-edit-2511", Quant: "fp8mixed", UnetMatch: `fp8mixed.*\.safetensors$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
