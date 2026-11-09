@@ -29,6 +29,13 @@
 // short of that is left running and reported, never killed: a foreign process on the port is
 // not ours to stop. Nothing here is a timer or a watcher; it runs once, in the releasing
 // process, at release.
+//
+// A HUNG INSTANCE (2026-11). One that does not answer cannot give its argv, so that proof alone left it
+// running for ever (a CUDA error had left the process up and mute, still holding its port). When the
+// platform can say (Deps.Listener, Deps.CmdLine), it is also stopped on the proof that needs no answer:
+// the process did not begin after the marker, its command line is main.py with the marker's --port and
+// --output-directory, and the port's listener is that pid, a process it started, or an owner the system
+// cannot name (wedged.go). The kill is a process-tree kill on Windows.
 package comfyinst
 
 import (
@@ -92,6 +99,14 @@ type Deps struct {
 	ProofAttempts int
 	// Client is the HTTP client; nil means one with HTTPTimeout.
 	Client *http.Client
+	// Listener lists the pids that listen on a TCP port (0 = an owner the system cannot name). CmdLine is the command line of a pid and
+	// Parent its parent pid. With the first two set, an instance that does not answer /system_stats can still be shown to be the
+	// harness's own from the operating system (wedgedProof) and stopped; unset, it is left running as it always was.
+	Listener func(port int) ([]int, error)
+	CmdLine  func(pid int) (string, error)
+	Parent   func(pid int) (int, error)
+	// Log receives the one COMFY-REAPED line said when a wedged instance was stopped; nil says nothing.
+	Log func(string)
 }
 
 // RealDeps is the production wiring.
@@ -106,6 +121,10 @@ func RealDeps() Deps {
 		// stop a busy instance, and the busy ones are the ones holding the memory.
 		HTTPTimeout:   8 * time.Second,
 		ProofAttempts: 3,
+		Listener:      listenerPIDs,
+		CmdLine:       commandLine,
+		Parent:        parentPID,
+		Log:           func(line string) { fmt.Fprintln(os.Stderr, line) },
 	}
 }
 
@@ -115,6 +134,8 @@ type Outcome struct {
 	PID     int    `json:"pid"`
 	Port    int    `json:"port"`
 	Stopped bool   `json:"stopped"`
+	// Reaped is true when the instance did not answer and was stopped on the proof of wedgedProof alone (a hung ComfyUI).
+	Reaped bool `json:"reaped,omitempty"`
 	// Spared is true when a routine release left an instance that bounds its own process (StopForRelease).
 	Spared bool `json:"spared,omitempty"`
 	// Why is empty when the instance was stopped; otherwise it says why it was left, or why its
@@ -208,10 +229,20 @@ func stopInstance(ctx context.Context, path string, m Marker, epoch uint64, inte
 		client = &http.Client{Timeout: d.HTTPTimeout}
 	}
 	argv, err := d.proveArgv(ctx, client, base)
+	wedged := false
 	switch {
 	case err != nil:
-		o.Why = fmt.Sprintf("the instance on port %d did not answer /system_stats after %d attempt(s) (%v), so it is not shown to be the harness's own; left running, and the next runner on its card frees it before its first job", m.Port, max(d.ProofAttempts, 1), err)
-		return o
+		// A hung instance can never answer, so it could never be proved ours and was never stopped. Prove it from the operating
+		// system instead (start time above, command line and listener here); only that proof lets it be killed unanswered.
+		ok, why := d.wedgedProof(m)
+		if !ok {
+			o.Why = fmt.Sprintf("the instance on port %d did not answer /system_stats after %d attempt(s) (%v), so it is not shown to be the harness's own; left running, and the next runner on its card frees it before its first job", m.Port, max(d.ProofAttempts, 1), err)
+			if why != "" {
+				o.Why += "; nor is it shown to be a wedged instance of the harness's own: " + why
+			}
+			return o
+		}
+		wedged = true
 	case !sameArgv(m.Args, argv):
 		o.Why = fmt.Sprintf("the argv the instance on port %d reports differs from the launch marker's, so it is not shown to be the harness's own; left running", m.Port)
 		return o
@@ -225,10 +256,21 @@ func stopInstance(ctx context.Context, path string, m Marker, epoch uint64, inte
 	}
 	// Tell it to stop what it is running, then drop its models: if the kill does not take, the
 	// card is at least empty.
-	if interrupt {
+	// A wedged instance answers nothing, so neither request would do more than wait out its timeout.
+	if interrupt && !wedged {
 		postInterrupt(ctx, client, base)
 	}
-	postFree(ctx, client, base)
+	if !wedged {
+		postFree(ctx, client, base)
+	}
+	// The proof took seconds (a wedged one, several probes): the pid may have exited and been reused since the start-time check
+	// above. Check it once more at the moment of the kill, so a recycled pid is never the one killed.
+	if m.StartedAt > 0 && d.Start != nil {
+		if began, ok := d.Start(m.PID); ok && began > m.StartedAt+startSlackMs {
+			o.Why = fmt.Sprintf("process %d began after the launch marker was written (checked again just before the stop), so the pid was recycled and is not the instance; nothing killed", m.PID)
+			return o
+		}
+	}
 	if err := d.Kill(m.PID); err != nil {
 		o.Why = fmt.Sprintf("could not stop process %d: %v; still running", m.PID, err)
 		return o
@@ -237,6 +279,7 @@ func stopInstance(ctx context.Context, path string, m Marker, epoch uint64, inte
 		if !d.Alive(m.PID) {
 			_ = os.Remove(path)
 			o.Stopped = true
+			d.reaped(&o, wedged)
 			return o
 		}
 		if d.Sleep != nil {
@@ -246,10 +289,22 @@ func stopInstance(ctx context.Context, path string, m Marker, epoch uint64, inte
 	if !d.Alive(m.PID) {
 		_ = os.Remove(path)
 		o.Stopped = true
+		d.reaped(&o, wedged)
 		return o
 	}
 	o.Why = fmt.Sprintf("stop sent to process %d but it is still running", m.PID)
 	return o
+}
+
+// reaped records and says that a wedged instance was stopped on the operating system's proof alone.
+func (d Deps) reaped(o *Outcome, wedged bool) {
+	if !wedged {
+		return
+	}
+	o.Reaped = true
+	if d.Log != nil {
+		d.Log(fmt.Sprintf("COMFY-REAPED: killed harness-launched pid %d on port %d (instance '%s'): it did not answer /system_stats and its command line and port listener show it is the one the launch marker records", o.PID, o.Port, o.Key))
+	}
 }
 
 // proveArgv asks for the instance's launch fingerprint, up to ProofAttempts times, pausing between

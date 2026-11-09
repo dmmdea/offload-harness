@@ -1758,8 +1758,33 @@ runner tries to bind the port on every address ComfyUI will listen on: `127.0.0.
 interface for a bare `--listen`. It does not probe the host the runner spells in its api, because
 that is where a client reaches ComfyUI, not where ComfyUI binds (`localhost` can resolve to `::1`
 first and miss a holder on `127.0.0.1`). If something holds the port the launch fails with
-`COMFY-PORT-TAKEN`; the holder is never signalled or killed. The default instance does not bind-check
+`COMFY-PORT-TAKEN`; a foreign holder is never signalled or killed. The default instance does not bind-check
 (that would change its failure mode).
+
+**A hung instance of the harness's own is reaped.** A kept instance can stop answering while its process
+keeps the port (a CUDA illegal-memory-access leaves it up and mute). Both stop paths used to need the
+instance to answer `GET /system_stats` with the argv the launch marker records, which a hung one never
+does, so nothing ended it and every following job on its port failed within a second with
+`COMFY-PORT-TAKEN` until an operator killed the pid by hand. `reapOwnWedgedInstance`
+(`render/comfy-lifecycle.mjs`, proof primitives in `render/comfy-ownership.mjs`) now kills it, and only
+it, when all of this holds: the instance is keyed (the unkeyed default is never reaped) and its launch
+marker records this key and port; the marker's `ownerPid` is not another live runner; the marker's pid is
+alive, began no later than 10 s after the marker was written, and its command line is `main.py` with
+`--port <port>` and the marker's `--output-directory` (asked of the operating system, no HTTP); every
+listener of the port is that pid, a process it started, or an owner the system cannot name (pid 0); it
+answered none of 3 probes spread over `COMFY_UNRESPONSIVE_SEC` (default 60 s, 20 s timeout each); and
+its console log (`offload-comfyui-<key>.log`) was not written in that window, so a slow prompt that is
+still printing is never killed (a missing log doubles the window). Any lookup that fails is a refusal.
+The kill is a tree kill (`taskkill /T /F`, or SIGKILL to the process group), followed by polling the port
+free on every bind address for up to 30 s. Freed: the marker is cleared, `COMFY-REAPED: killed
+harness-launched pid <n> on <api> after <s>s unresponsive (<reason>)` goes to stderr, `report.reaped` is
+set, and the launch goes on. Not freed: `COMFY-PORT-WEDGED: port <p> held with no killable owner …`, a
+`comfy_unusable` failure (no retry, no other port). It runs in three places: the bind check of a keyed
+launch (before `COMFY-PORT-TAKEN`), `stopHarnessInstance` when the failed job's instance does not answer
+(it says `COMFY-KEEP-WARN` with the reason when it declines), and the end of a job that launched its own
+instance, which now ends the whole process tree and checks that the port is free. The Go side
+(`internal/comfyinst`, a lease's release or a takeover) applies the same operating-system proof when
+`/system_stats` does not answer, and reports `COMFY-REAPED` when it stops such an instance.
 
 **Ports and other launchers.** A keyed instance's port comes from `--api` / `COMFY_API`, else
 `COMFY_PORT_BASE` (default 8189) plus `COMFY_INSTANCE_INDEX`; the harness's own admission (P13b) gives
@@ -1992,7 +2017,9 @@ cards, so confirm that an instance is on its card by per-card memory deltas, not
 | `COMFY-INSTANCE-INVALID: …` | a key, uuid, port base or index that cannot name an instance, or a keyed instance on the default port |
 | `COMFY-INSTANCE-CONFLICT: …` | an instance key (explicit, or a card uuid) and a device index both given |
 | `COMFY-INSTANCE-WARN: …` | extra args that would override the instance's pin, port or directories were dropped, or an instance with no card pin was launched |
-| `COMFY-PORT-TAKEN: …` | the instance's port is held, on an address ComfyUI will listen on, by something that is not ComfyUI; nothing was launched or killed |
+| `COMFY-PORT-TAKEN: …` | the instance's port is held, on an address ComfyUI will listen on, by something that is not ComfyUI (or by an instance of the harness's own that could not be shown hung); nothing was launched or killed. A `COMFY-REAP-SKIP` line before it says why the holder was not reaped |
+| `COMFY-REAPED: …` | the harness's own hung instance (silent, marker-recorded, proved by the operating system) was killed to free its port; the launch went on |
+| `COMFY-PORT-WEDGED: …` | the port stays held with no killable owner (after a reap, or with the marker's process gone); the run ends as `comfy_unusable` and nothing is retried on another port |
 | `COMFY-PROFILE-MISMATCH: …` | a ComfyUI answers on the instance's port but is not shown to be that instance (or is on the wrong card); refused, and stopped only when the harness's own marker proves it is the harness's and its spawner is gone |
 | `COMFY-GPU-LIST-WARN: …` | `nvidia-smi -L`, which counts the cards for a Windows launch (`cudaVisibleEnv`), did not answer in time: the first line says it is being asked once more under a longer timeout, a second line that it ran out again and the launch keeps ComfyUI's Windows default of card 0 only (a pooled graph then fails validation) |
 

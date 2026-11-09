@@ -11,7 +11,7 @@ import { createServer } from "node:net";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn, spawnSync as nodeSpawnSync } from "node:child_process";
-import { readLaunchOwner, writeLaunchOwner, restampLaunchOwner, clearLaunchOwner, harnessLaunched, pidAlive as defaultPidAlive } from "./comfy-ownership.mjs";
+import { readLaunchOwner, writeLaunchOwner, restampLaunchOwner, clearLaunchOwner, harnessLaunched, pidAlive as defaultPidAlive, processInfo, listenerPids, killProcessTree, wedgedProofGap } from "./comfy-ownership.mjs";
 
 // resolveComfyDir: the ComfyUI install this machine drives. The old default was
 // "C:/ComfyUI" on EVERY platform, so a Linux node reported an install it cannot have and
@@ -463,6 +463,158 @@ export async function instanceInUse(api, { ownHolds = 0, queue = false, probe = 
   }
 }
 
+/** The window an instance must be silent (no answer, no console output) before it counts as wedged; COMFY_UNRESPONSIVE_SEC, default 60. */
+export function unresponsiveWindowSec(env = process.env) {
+  const n = Number(String(env.COMFY_UNRESPONSIVE_SEC ?? "").trim());
+  return Number.isFinite(n) && n > 0 ? n : 60;
+}
+
+/** fetchProbe: does GET /system_stats answer 200 within timeoutMs? A hung instance accepts the connection and never replies. */
+async function fetchProbe(api, timeoutMs) {
+  try { const r = await fetch(api + "/system_stats", { signal: AbortSignal.timeout(timeoutMs) }); return r.ok; } catch { return false; }
+}
+
+/** waitPortsFree: poll until every address in `hosts` can be bound on `port`, for up to `waitMs`. true = free. */
+export async function waitPortsFree({ port, hosts, portFree = portIsFree, waitMs = 30000, pollMs = 500 }) {
+  const deadline = Date.now() + waitMs;
+  for (;;) {
+    let all = true;
+    for (const h of hosts) if (!(await portFree(port, h))) { all = false; break; }
+    if (all) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, pollMs));
+  }
+}
+
+/**
+ * reapOwnWedgedInstance: end THIS harness's own keyed ComfyUI when it has stopped answering and still holds its port. A hung
+ * instance (a CUDA illegal-memory-access left the process up and mute) can prove nothing over HTTP, so neither stop path ever
+ * killed it and every later job failed at once with COMFY-PORT-TAKEN until an operator killed the pid by hand.
+ *
+ * It kills only the process the launch marker of `key` records for `port`, and only when ALL of this holds, any introspection
+ * error counting as "no":
+ *   - the unkeyed default instance is never reaped; the marker names this key and this port and a pid;
+ *   - the marker's ownerPid is not another live runner (a runner at work on it);
+ *   - the pid is alive, began no later than the marker plus a slack (not a recycled pid), and its command line is main.py
+ *     with --port <port> and the instance's --output-directory (wedgedProofGap: no HTTP);
+ *   - every listener of the port is the pid, a descendant of it, or an unnamed owner (0); none at all is fine while the above holds;
+ *   - it answered none of 3 probes spread over COMFY_UNRESPONSIVE_SEC (default 60 s, 20 s timeout each), and its console log
+ *     (comfyLogPath) was not written in that window, so a slow prompt that is still printing is never killed; a log that does
+ *     not exist makes the window twice as long.
+ * Then it kills the tree (taskkill /T /F, or SIGKILL to the group) and polls the port free for up to 30 s.
+ *
+ * Returns { reaped: true, pid, port, key, unresponsiveSec } (marker cleared, COMFY-REAPED said, report.reaped set),
+ * { reaped: false, freed: true } when the marker's process was already gone and the port has since freed, or
+ * { reaped: false, reason } when it declined (nothing was killed). THROWS COMFY-PORT-WEDGED (serverUnusable) when the port
+ * stays held with no killable owner. Every seam is injectable for tests.
+ */
+export async function reapOwnWedgedInstance(o = {}) {
+  const {
+    api, comfyDir = COMFY_DIR, key = "", port, hosts = ["127.0.0.1"], report = null, env = process.env,
+    readLaunch = readLaunchOwner, clearLaunch = clearLaunchOwner, alive = defaultPidAlive,
+    probe = fetchProbe, portFree = portIsFree, log = (line) => console.error(line),
+    inspect = { processInfo, listenerPids, killTree: killProcessTree },
+    statLog = (p) => { try { return statSync(p).mtimeMs; } catch { return null; } },
+    sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = () => Date.now(),
+    freeWaitMs = 30000, freePollMs = 500,
+  } = o;
+  const decline = (reason) => ({ reaped: false, reason });
+  if (!key) return decline("the unkeyed default instance is never reaped");
+  if (!Number.isInteger(port) || port === DEFAULT_COMFY_PORT) return decline(`port ${port} is not an instance port`);
+  const marker = readLaunch(comfyDir, key);
+  if (!marker || marker.key !== key || marker.port !== port || !Number.isInteger(marker.pid) || marker.pid <= 0) {
+    return decline(`no launch marker of this harness records instance '${key}' on port ${port}`);
+  }
+  if (typeof marker.ownerPid === "number" && marker.ownerPid !== process.pid && alive(marker.ownerPid)) {
+    return decline(`its launching runner, process ${marker.ownerPid}, is still running; it may be at work on the instance`);
+  }
+  const outputDir = instancePaths(comfyDir, key).outputDir;
+  const peekListeners = () => { try { return inspect.listenerPids(port); } catch { return []; } };
+  // Compare-and-clear: while this call waited, another runner may have launched a new instance on the key and written its own
+  // marker; deleting that one would orphan a live, healthy instance. Clear only the marker this call judged.
+  const clearIfSame = () => {
+    try {
+      const cur = readLaunch(comfyDir, key);
+      if (cur && cur.pid === marker.pid && cur.startedAt === marker.startedAt) clearLaunch(comfyDir, key);
+    } catch {}
+  };
+  const wedgedErr = (listeners) => {
+    const e = new Error(`COMFY-PORT-WEDGED: port ${port} held with no killable owner (marker pid ${marker.pid} alive=${alive(marker.pid)}, listener pid ${listeners.length ? listeners.join(",") : "none"}); the harness-launched instance '${key}' did not release it`);
+    e.serverUnusable = true; // the runner ends with IGPU_CLASS=comfy_unusable: no later job can run on this port
+    return e;
+  };
+  // 1. Ownership, from the operating system alone.
+  let info, listeners;
+  try {
+    info = alive(marker.pid) ? inspect.processInfo(marker.pid) : null;
+    listeners = inspect.listenerPids(port);
+  } catch (e) {
+    return decline(`could not inspect the process or the port (${e && e.message}), so nothing is proved and nothing is killed`);
+  }
+  if (!info) {
+    // Our process is gone yet the port is held: there is nothing to kill. A named, live listener is someone else's.
+    const named = listeners.filter((p) => p > 0);
+    if (named.length) return decline(`its pid ${marker.pid} is gone and the port is held by process ${named.join(",")}, which is not the instance`);
+    if (await waitPortsFree({ port, hosts, portFree, waitMs: freeWaitMs, pollMs: freePollMs })) {
+      clearIfSame();
+      return { reaped: false, freed: true };
+    }
+    throw wedgedErr(listeners);
+  }
+  const gap = wedgedProofGap({ marker, info, port, outputDir });
+  if (gap) return decline(gap);
+  try {
+    for (const lp of listeners) {
+      if (lp === 0 || lp === marker.pid) continue;
+      let cur = lp, ok = false;
+      for (let depth = 0; depth < 8 && cur > 0; depth++) {
+        const pi = inspect.processInfo(cur);
+        if (!pi) break;
+        if (pi.ppid === marker.pid) { ok = true; break; }
+        cur = pi.ppid;
+      }
+      if (!ok) return decline(`the port is held by process ${lp}, which is neither the instance's pid ${marker.pid} nor one it started`);
+    }
+  } catch (e) {
+    return decline(`could not trace the port's listener (${e && e.message}), so nothing is proved and nothing is killed`);
+  }
+  // 2. Silence: no answer to any probe, and no console output, for the whole window.
+  const windowSec = unresponsiveWindowSec(env);
+  const logPath = comfyLogPath(comfyDir, key);
+  const logKnown = statLog(logPath) !== null;
+  const gapMs = windowSec * 1000 * (logKnown ? 1 : 2) / 3;
+  const t0 = now();
+  for (let i = 0; i < 3; i++) {
+    const startedAt = now();
+    if (await probe(api, Math.min(20000, gapMs))) return decline(`it answered probe ${i + 1} of 3: slow, not wedged`);
+    if (i < 2) await sleep(Math.max(0, gapMs - (now() - startedAt)));
+  }
+  const silentSec = Math.round((now() - t0) / 1000);
+  if (logKnown) {
+    const m = statLog(logPath);
+    if (m !== null && now() - m < windowSec * 1000) return decline(`its console log was written ${Math.round((now() - m) / 1000)} s ago (inside the ${windowSec} s window), so it is busy, not wedged`);
+  }
+  // Prove it again right before the kill: the marker may have changed hands while we waited.
+  const again = readLaunch(comfyDir, key);
+  if (!again || again.pid !== marker.pid || again.startedAt !== marker.startedAt || !alive(marker.pid)) return decline(`the instance changed while it was being checked (marker pid ${marker.pid})`);
+  // The ownership proof is a window of probes old; the pid may have exited and been reused (a relaunch by another runner, or a hand
+  // kill). Prove the process is still the one judged, from the OS, immediately before the kill.
+  let info2;
+  try { info2 = inspect.processInfo(marker.pid); } catch (e) { return decline(`could not re-read process ${marker.pid} before the kill (${e && e.message}), so nothing is killed`); }
+  if (!info2 || info2.startMs !== info.startMs) return decline(`process ${marker.pid} is not the process that was judged wedged (its start time changed), so the pid was reused; nothing is killed`);
+  const gap2 = wedgedProofGap({ marker: again, info: info2, port, outputDir });
+  if (gap2) return decline(gap2);
+  // 3. Kill the tree, verify the port.
+  try { inspect.killTree(marker.pid); } catch (e) { log(`COMFY-REAP-WARN: could not end process ${marker.pid} (${e && e.message})`); }
+  if (!(await waitPortsFree({ port, hosts, portFree, waitMs: freeWaitMs, pollMs: freePollMs }))) throw wedgedErr(peekListeners());
+  clearIfSame();
+  const why = `${logKnown ? "3 probes unanswered, console log idle" : "3 probes unanswered over twice the window, no console log"}, listener ${listeners.length ? listeners.join(",") : "none"}`;
+  log(`COMFY-REAPED: killed harness-launched pid ${marker.pid} on ${api} after ${silentSec}s unresponsive (${why})`);
+  const reaped = { pid: marker.pid, port, key, unresponsiveSec: silentSec };
+  if (report) report.reaped = reaped;
+  return { reaped: true, ...reaped };
+}
+
 /**
  * stopHarnessInstance: stop the instance on `api` after a job on it FAILED, when it is one this harness launched (its launch marker's
  * pid is alive and the server reports exactly the recorded argv). A kept instance used to be cured of a sticky CUDA error by the kill
@@ -471,12 +623,22 @@ export async function instanceInUse(api, { ownHolds = 0, queue = false, probe = 
  * runner's job is live, and the job that ends it stops it too if it fails. Its queue is not asked: a prompt of the failed job's own
  * that hangs looks like anyone's, and a hung instance never reaches its process bound. Never throws.
  */
-export async function stopHarnessInstance({ api, comfyDir = COMFY_DIR, key = "", reason = "the job on it failed", ownHolds = 0, inUse = instanceInUse, readLaunch = readLaunchOwner, systemArgv = fetchSystemArgv, alive = defaultPidAlive, killPid = (pid) => process.kill(pid), clearLaunch = clearLaunchOwner, up = comfyUp, log = (line) => console.error(line), pollMs = 1000, stopPolls = 15 } = {}) {
+export async function stopHarnessInstance({ api, comfyDir = COMFY_DIR, key = "", reason = "the job on it failed", ownHolds = 0, inUse = instanceInUse, readLaunch = readLaunchOwner, systemArgv = fetchSystemArgv, alive = defaultPidAlive, killPid = (pid) => process.kill(pid), clearLaunch = clearLaunchOwner, up = comfyUp, log = (line) => console.error(line), pollMs = 1000, stopPolls = 15, reap = reapOwnWedgedInstance, env = process.env } = {}) {
   try {
     const marker = key ? readLaunch(comfyDir, key) : readLaunch(comfyDir);
     // Only a self-bounded instance (one a default runner kept): an operator's explicit --keep-comfy session is theirs to end.
     if (!marker || !(Number(marker.idleExitSec) > 0)) return false;
     const argv = await systemArgv(api);
+    if (argv === null && key) {
+      // It does not answer, so it cannot be proved ours over HTTP: a hung instance never could, and was left running silently. Prove it
+      // from the operating system instead and end it only if it is silent, marker-recorded and ours (reapOwnWedgedInstance).
+      let port = Number(marker.port);
+      if (!Number.isInteger(port)) { try { port = Number(new URL(api).port); } catch { port = NaN; } }
+      const r = await reap({ api, comfyDir, key, port, hosts: bindHosts(env.COMFY_EXTRA_ARGS), env, log, alive, readLaunch, clearLaunch });
+      if (r && r.reaped) return true;
+      log(`COMFY-KEEP-WARN: left ComfyUI on ${api} running after a failed job: it does not answer, and it was not reaped: ${(r && r.reason) || "its port is free of it"}`);
+      return false;
+    }
     if (!harnessLaunched(marker, argv, alive)) return false;
     const busy = await inUse(api, { ownHolds });
     if (busy) {
@@ -491,6 +653,7 @@ export async function stopHarnessInstance({ api, comfyDir = COMFY_DIR, key = "",
     }
     log(`COMFY-KEEP-WARN: ComfyUI pid ${marker.pid} on ${api} still answers after a kill; its process bound ends it once it is idle`);
   } catch (e) {
+    if (e && /^COMFY-PORT-WEDGED:/.test(e.message)) { log(e.message); return false; }
     log(`COMFY-KEEP-WARN: could not stop the ComfyUI on ${api} after a failed job (${e && e.message}); its process bound ends it once it is idle`);
   }
   return false;
@@ -1093,6 +1256,8 @@ export async function ensureComfy(opts = {}) {
     alive = defaultPidAlive,
     killPid = (pid) => process.kill(pid),
     portFree = portIsFree,
+    // reap: ends this harness's own hung instance that holds the keyed port (reapOwnWedgedInstance); a test injects it.
+    reap = reapOwnWedgedInstance,
     // keep: the caller will leave this instance running after its job (runners' --keep-comfy).
     // A kept instance outlives the process that launched it, so it is spawned detached with its
     // console going to its own log FILE and unref'd (see the spawn below); openLogFd/closeFd are
@@ -1223,8 +1388,19 @@ export async function ensureComfy(opts = {}) {
     // ComfyUI will listen on (127.0.0.1 unless its --listen says otherwise), not to the host
     // the api happens to spell: "localhost" can resolve to ::1 first, which would miss a
     // holder on 127.0.0.1.
-    for (const host of bindHosts(env.COMFY_EXTRA_ARGS)) {
-      if (!(await portFree(instance.port, host))) {
+    const hosts = bindHosts(env.COMFY_EXTRA_ARGS);
+    let reapTried = false;
+    for (const host of hosts) {
+      let free = await portFree(instance.port, host);
+      if (!free && !reapTried) {
+        // The holder may be this harness's own instance, hung (a CUDA error left it up and mute): reap it when it is proved ours and
+        // silent, and launch on. A holder that is not (a foreign process, an instance with no marker) is refused below, untouched.
+        reapTried = true;
+        const r = await reap({ api, comfyDir, key, port: instance.port, hosts, report, env, log, readLaunch, clearLaunch, alive, portFree });
+        if (r && (r.reaped || r.freed)) free = await portFree(instance.port, host);
+        else if (r && r.reason) log(`COMFY-REAP-SKIP: not reaping what holds port ${instance.port} for instance '${key}': ${r.reason}`);
+      }
+      if (!free) {
         const line = `COMFY-PORT-TAKEN: port ${instance.port} on ${host} for ComfyUI instance '${key}' is held by a process that does not answer as ComfyUI on ${api}; not launching onto it, and not stopping it (free the port, or give the instance another one)`;
         log(line);
         throw new Error(line);

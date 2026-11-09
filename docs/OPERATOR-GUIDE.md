@@ -456,6 +456,13 @@ launch marker `.offload-launch-<key>.json` in the ComfyUI folder) and stop it (`
 Linux). For a keyed instance under a lease, `local-offload gpu release --epoch N` stops the instances of that lease; the media
 pipeline's own routine release leaves a self-bounded one running on purpose. Or just wait for the bound.
 
+An instance that stops answering is no longer yours to kill by hand. A keyed instance the harness launched that has gone mute
+(no answer to 3 probes over `COMFY_UNRESPONSIVE_SEC`, default 60 s, and no console output in that time) is killed, process tree
+and all, by the next job that finds its port held or by the failed job that used it; `COMFY-REAPED: killed harness-launched pid
+<n> …` on stderr says so. A port held by anything else still stops the launch with `COMFY-PORT-TAKEN` and is never touched. If
+the port stays held after the kill you get `COMFY-PORT-WEDGED`: that is a process the operating system will not release (a stuck
+GPU driver), and only a reboot or a different port (`COMFY_PORT_BASE` / `COMFY_INSTANCE_INDEX`) helps.
+
 **A hand-started ComfyUI is not bounded by the harness's idle free unless you opt in.** The ComfyUI the harness keeps
 (`--keep-comfy`) or runs warm (`--batch`) is launched with an idle pack that frees its models and caches after 300 s with
 nothing queued or running (`COMFY_IDLE_FREE_SEC` on the runner changes it, `0` or `off` disables it; do not confuse it with
