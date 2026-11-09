@@ -371,6 +371,14 @@ func runWith(ctx context.Context, rp runParams) ([]PlacedResult, Summary, error)
 		if err := netguard.TailnetURL(base); err != nil {
 			return nil, Summary{}, fmt.Errorf("delegate: remote %q: %w", base, err)
 		}
+		// A named URL never passed the load's caller-scope filter (the configured list did), so the policy is
+		// checked here: `delegate --remote` and fleet-smoke accept any tailnet URL, and a node that admits only
+		// some callers must refuse this one by name before anything is dialled.
+		if named {
+			if err := cfg.ScopeRefusal(base); err != nil {
+				return nil, Summary{}, fmt.Errorf("delegate: %w", err)
+			}
+		}
 	}
 	// A list a model named may only narrow the configured fleet (ADR 0038, amendment 2026-10-07): the
 	// roster is what the operator vetted, and a caller-named URL outside it is never dialled.

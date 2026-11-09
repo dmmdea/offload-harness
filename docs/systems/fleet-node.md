@@ -1933,6 +1933,24 @@ those pairs through as "distinct", and the second write then overwrote the first
 reporting it. `COM10`/`LPT10` and names that merely *start* like a device (`console.md`,
 `nullify.go`) are ordinary files and stay legal.
 
+### Caller scope (which askers a node takes work from, 2026-11-09)
+
+A node whose config sets `fleet_admit_scopes` (`["personal"]`, say) takes work only from askers that declare one of
+those scopes in the `X-Offload-Scope` header, and publishes the list as `admit_scopes` in `/fleet/health`. The check
+runs in `authorizeGated` right after the bearer, so it covers every door that passes through it (dispatch, the media
+job, vision, text, forecast, the stt upload, compose, the PAIR relay) and the cascade chat lane, and it refuses before a
+body is read or a job created: `403 {"status":"error","refusal":"scope_not_admitted","admit_scopes":[...]}`, with one
+throttled journal line (reason `scope`). Fetching a finished job's output (`media-file`) is not gated: it belongs to a job
+the node already admitted. Unset, every asker is admitted and the health payload carries no `admit_scopes`, so the
+node is byte-identical to before.
+
+The asker sends the header from the scope its own config load resolved (`internal/callscope`: the working directory of
+the Claude Code session it serves, judged against `caller_scope_roots`, or `LOCAL_OFFLOAD_SCOPE`), only for `business`
+or `personal`; an asker that resolved nothing sends nothing and is refused. This is the backstop: the delegator's own
+filter (`delegate_remote_scopes`, OPERATOR-GUIDE) already removes such a node from every node list of a caller it does
+not admit, so the 403 fires only for a stale or misconfigured delegator. Not gated here yet: the kvslot door, the fleet
+queue holder's submit and a claim loop's pick (no box runs a queue holder today).
+
 ### Health advertisement — four agent fields, fail-closed residency
 
 All four are additive and `omitempty` (`schema_version` stays 1; a lane-off node emits a

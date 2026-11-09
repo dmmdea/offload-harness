@@ -60,10 +60,11 @@ func windowOf(cfg config.Config, w Wait) time.Duration {
 	return time.Duration(cfg.GPUWaitMs) * time.Millisecond
 }
 
-// effectiveCfg is cfg with delegate_remotes re-read from the roster file when it changed.
+// effectiveCfg is cfg with delegate_remotes re-read from the roster file when it changed, filtered by the
+// caller-scope policy again (config.WithRoster) so a re-read never restores a node the load excluded.
 func effectiveCfg(cfg config.Config, rosterFile string) config.Config {
 	if remotes, ok := rosterFromFile(rosterFile); ok {
-		cfg.DelegateRemotes = remotes
+		cfg = cfg.WithRoster(remotes)
 	}
 	return cfg
 }

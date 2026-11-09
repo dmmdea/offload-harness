@@ -1032,6 +1032,7 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// roster with dead members made the one verb an operator runs to find out what is wrong slow
 	// in proportion to what was wrong. The version rows and the token rows below read that one answer.
 	fleetRoster := rosterprobe.Probe(context.Background(), cfg.DelegateRemotes, cfg.FleetAuthToken, doctorFleetProbeTimeout)
+	writeCallerScopeSection(w, cfg)
 	writeFleetSkewSection(w, cfg, buildinfo.Version, rosterVersionReader(fleetRoster))
 	// Whether the nodes accept THIS box's fleet token: health ignores the bearer, so a wrong or
 	// missing token reads healthy everywhere above and first shows as a 401 on dispatch.

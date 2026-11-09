@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/callscope"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
@@ -2120,6 +2121,31 @@ type Config struct {
 	// load by name, because a typo here would otherwise read as "private-ok" and send private work out. Like
 	// delegate_remotes it is read once per process: restart the MCP server after changing it.
 	DelegateRemoteClasses map[string]string `json:"delegate_remote_classes,omitempty"`
+	// DelegateRemoteScopes declares which CALLERS a machine may be given work by (2026-11-09), keyed by a node
+	// base URL; the key names the MACHINE (host only, a DNS name cut to its first label), so one entry covers the
+	// node's fleet port, its seat endpoints and its cascade lanes. Values: "business" and/or "personal". A machine
+	// that is not listed takes every caller's work, as before the key. A listed machine takes only the listed
+	// scopes and never a caller whose scope is unknown: the caller's scope is resolved once per process from
+	// caller_scope_roots (internal/callscope), and the load removes every excluded machine from delegate_remotes,
+	// cascade_remote_lanes, seat_endpoints and fleet_queue_holder, so no lane can reach it. A key that names no
+	// node of those lists, and any scope word other than the two, fails the load by name. List a node under every
+	// spelling (name and IP) the node lists use. Read once per process, like delegate_remotes.
+	DelegateRemoteScopes map[string][]string `json:"delegate_remote_scopes,omitempty"`
+	// CallerScopeRoots maps a caller scope ("business", "personal") to directory prefixes: a process serving a
+	// Claude Code session is judged by that session's working directory, any other process by its own, and the
+	// scope is the one whose root is the longest prefix. A directory under no root, or under roots of both scopes
+	// at the same depth, is "unknown". A root starting "*:" matches any drive letter. LOCAL_OFFLOAD_SCOPE
+	// (business|personal) overrides the judgement for a process that knows whose work it does.
+	CallerScopeRoots map[string][]string `json:"caller_scope_roots,omitempty"`
+	// FleetAdmitScopes is the NODE side of the same policy (fleet-serve only): when set, this node refuses a job
+	// whose asker does not declare one of these scopes (the X-Offload-Scope header) with a typed 403, and
+	// publishes the list in /fleet/health. Empty admits every asker, as before. It is a backstop behind the
+	// delegator's own filter: a delegator that resolves no scope sends no header and is refused.
+	FleetAdmitScopes []string `json:"fleet_admit_scopes,omitempty"`
+	// CallerScope is the caller scope this process resolved at load, and ScopeExcluded every node base the
+	// policy removed from this config's node lists (ForScope). Never serialized: they describe the process.
+	CallerScope   callscope.Scope  `json:"-"`
+	ScopeExcluded []ScopeExclusion `json:"-"`
 	// RetiredKeys are the retired config keys the FILE this value was loaded
 	// from still carries, sorted. Never serialized: it describes the file, not
 	// the settings. Load fills it from the raw bytes so `doctor` can print one
@@ -2557,6 +2583,9 @@ func Load(path string) (Config, error) {
 // value without a call before each return.
 func loadArmed(path string) (Config, error) {
 	c, err := load(path)
+	// The caller-scope policy filters every node list before any exit below returns the value (scope.go): a
+	// one-shot verb proceeds on a config that failed to load, and it must not proceed on an unfiltered one.
+	c = applyCallerScope(c)
 	// The policy for an overdue lease is installed before anything below can return early, on every exit
 	// and the error ones included: a one-shot verb proceeds on a config that failed to load, and a value
 	// that never got installed would leave it on the default for a key the operator did set. An
@@ -2783,6 +2812,9 @@ func load(path string) (Config, error) {
 		return c, err
 	}
 	if err := validateRemoteClasses(c); err != nil {
+		return c, err
+	}
+	if err := validateCallerScope(c); err != nil {
 		return c, err
 	}
 	// A policy for an overdue lease nobody implements is refused by name: there is no automatic mode,

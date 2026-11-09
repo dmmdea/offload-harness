@@ -556,6 +556,10 @@ func candidateBases(cfg config.Config, remotes []string) ([]string, error) {
 	}
 	for _, b := range asked {
 		if !allowed[b] {
+			// A node the caller-scope policy removed reads "not in delegate_remotes" otherwise; say why instead.
+			if err := cfg.ScopeRefusal(b); err != nil {
+				return nil, &contractError{err.Error()}
+			}
 			return nil, &contractError{fmt.Sprintf("remote %s is not in delegate_remotes: a call may narrow the configured fleet, never extend it", b)}
 		}
 	}
