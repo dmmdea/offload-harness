@@ -113,6 +113,19 @@ func (r *runner) pairTerminal(jobID string, pr *PlacedResult) {
 	// card at the delegator on completion — so the wire name is only an
 	// alias behind the dispatch host, and a local placement keeps "" (this
 	// box) or the endpoint host the in-flight frame named (C-58).
+	// A subtask that completed cleanly ran, even when its card never turned "running" (no progress
+	// report crossed seatWorking before it finished). PAIR's desktop reads a null start as "Sent to
+	// <node>": a job a node ran for minutes closed as if it had never started (2026-11-09). It starts
+	// where the node's own run wall says it did, never before the card was created; a failure keeps
+	// the start it had.
+	now := time.Now().UnixMilli()
+	started := pr.pairStarted
+	if started == 0 && state == "completed" {
+		started = pr.pairCreated
+		if w := pr.Result.WallMs; w > 0 && now-w > started {
+			started = now - w
+		}
+	}
 	node, aliases := pr.pairNode, append([]string(nil), pr.pairAliases...)
 	if pr.ranBase != "" {
 		if h := pairNodeName(pr.ranBase, ""); h != "" && h != node {
@@ -135,8 +148,8 @@ func (r *runner) pairTerminal(jobID string, pr *PlacedResult) {
 		Error:       errText,
 		Requester:   pairworkloads.Requester(ledger.ProcessOrigin().Session),
 		CreatedAt:   pr.pairCreated,
-		StartedAt:   pr.pairStarted,
-		CompletedAt: time.Now().UnixMilli(),
+		StartedAt:   started,
+		CompletedAt: now,
 	})
 }
 
