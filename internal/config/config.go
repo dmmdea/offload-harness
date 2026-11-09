@@ -3833,7 +3833,7 @@ func (c Config) MediaInputsAdmissible() bool {
 	if !c.FleetMediaInputs || c.FleetAuthToken == "" {
 		return false
 	}
-	return c.ImageGenAdvertisable() || c.VideoGenBound() || c.AnimateGenBound() ||
+	return c.ImageGenAdvertisable() || c.EditAdvertisable() || c.VideoGenBound() || c.AnimateGenBound() ||
 		c.VoiceGenBound() || c.MusicGenBound() || c.RunGraphScript != ""
 }
 

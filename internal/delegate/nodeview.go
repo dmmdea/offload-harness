@@ -115,6 +115,11 @@ type NodeView struct {
 	// the node's image-gen task carries an explicit refine=false.
 	ImageRecipes   []ImageRecipeView
 	RefineHonoured bool
+	// EditRecipes is the same for the node's generative-edit bindings (health `edit_recipes`): each row is the node's CAPABILITY for
+	// the edit lane (graph, UNet, text encoder, VAE and the set of LoRA files it holds, each with its content fingerprint), with the
+	// lane tag "edit". The per-request knobs (preset, steps, cfg, megapixels, placement, seed) are not in it. nil on a node that
+	// predates it, that has no edit binding, or that does not take edit inputs (fleet_media_inputs): "cannot be matched".
+	EditRecipes []ImageRecipeView
 	// MediaRecipes are the family rows of the node's video, animation and audio bindings (health `media_recipes`, ADR 0082
 	// Amendment 3): which family each binding names and how big each weight file is on the node (-1: not there). A row carries no
 	// digest in this release, so it is never an identity. nil on a node that predates it or binds none of the three lanes through
@@ -474,6 +479,7 @@ type ImageRecipeView struct {
 	Digest        string                `json:"digest"`
 	Engine        string                `json:"engine"`
 	Graph         string                `json:"graph"`
+	Lane          string                `json:"lane"` // "edit" on an edit_recipes row; empty on an image row
 	Files         []ImageRecipeFileView `json:"files"`
 	Preset        string                `json:"preset"`
 	Steps         int                   `json:"steps"`
@@ -668,6 +674,8 @@ type healthWire struct {
 	// Additive (ADR 0082): what each image family on the node is, and whether its image-gen carries refine.
 	ImageRecipes   []ImageRecipeView `json:"image_recipes"`
 	RefineHonoured bool              `json:"refine_honoured"`
+	// Additive: the generative-edit lane's recipes (health `edit_recipes`), same row shape as image_recipes.
+	EditRecipes []ImageRecipeView `json:"edit_recipes"`
 	// Additive (ADR 0082 Amendment 3): the family rows of the node's video, animation and audio bindings.
 	MediaRecipes []MediaRecipeView `json:"media_recipes"`
 	// Additive (ADR 0072): the stt upload door's capability. Absent on an older node.
@@ -766,6 +774,7 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		Layers:        w.Layers,
 
 		ImageRecipes:   w.ImageRecipes,
+		EditRecipes:    w.EditRecipes,
 		MediaRecipes:   w.MediaRecipes,
 		RefineHonoured: w.RefineHonoured,
 

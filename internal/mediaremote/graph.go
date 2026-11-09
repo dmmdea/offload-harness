@@ -274,6 +274,9 @@ func matchFor(local localID, v delegate.NodeView, n need) (nodeMatch, bool) {
 	if n.graph != nil {
 		return matchGraph(v, n)
 	}
+	if n.edit {
+		return matchEditNode(local, v)
+	}
 	return matchNode(local, v, n)
 }
 

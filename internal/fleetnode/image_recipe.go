@@ -123,10 +123,16 @@ type recipeMismatchError struct {
 	// changed. A delegator reads it to tell a node that has only not finished reading its weight files, which is a wait,
 	// from one that is not what it published, which is a difference, without matching a sentence.
 	cause string
+	// lane is "edit" for the generative-edit lane's refusal (edit_task.go), empty for an image-gen one: it changes the words of the
+	// sentence and nothing else.
+	lane string
 }
 
 func (e *recipeMismatchError) Error() string {
 	name := e.family
+	if e.lane == mediacap.RecipeLaneEdit {
+		return e.editError()
+	}
 	if name == "" {
 		name = "(the default binding)"
 	}

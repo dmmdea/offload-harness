@@ -161,7 +161,7 @@ func (s *Server) handleExtractImage(ctx context.Context, req *mcp.CallToolReques
 
 func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Image string `json:"image"`
+		Image   string   `json:"image"`
 		Brief   string   `json:"brief"`
 		Route   string   `json:"route"`
 		Remotes []string `json:"remotes"`
@@ -307,11 +307,23 @@ func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToo
 		Family      string   `json:"family"`
 		Images      []string `json:"images"`
 		Transparent bool     `json:"transparent"`
+		// Per request, not config-only: the working canvas and the placement of THIS edit.
+		Megapixels *float64 `json:"megapixels"`
+		Placement  string   `json:"placement"`
+		Route      string   `json:"route"`
+		Remotes    []string `json:"remotes"`
+		WaitS      *int     `json:"wait_s"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
 	params := map[string]any{}
+	if in.Megapixels != nil {
+		params["megapixels"] = *in.Megapixels
+	}
+	if in.Placement != "" {
+		params["placement"] = in.Placement
+	}
 	if in.Image != "" {
 		params["image"] = in.Image
 	}
@@ -344,7 +356,10 @@ func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToo
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.runTask(ctx, core.Request{Task: core.TaskEditImageGenerative, Door: "offload_edit_image_generative", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)}))
+	// The default route is auto: this machine's lane when it has one and it is free, else a ticket on the first lane that frees,
+	// here or on a fleet node holding the same edit recipe (ADR 0082, ADR 0083). With no fleet configured it is the call it always was.
+	return result(mediaremote.RunWith(ctx, s.mediaCfg(), runTaskAs{s}, core.Request{Task: core.TaskEditImageGenerative, Door: "offload_edit_image_generative", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)},
+		in.Route, in.Remotes, s.imageWait(in.WaitS)))
 }
 
 func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {

@@ -66,7 +66,7 @@ type MediaJobPayload struct {
 
 // mediaJobTasks are the inner tasks the door carries, and mediaJobFields the payload fields of each that
 // may arrive as a file (every other field of every task is plain data).
-var mediaJobTasks = []string{"image-gen", "video-gen", "animate", "audio-gen", "run-graph"}
+var mediaJobTasks = []string{"image-gen", ImageEditTask, "video-gen", "animate", "audio-gen", "run-graph"}
 
 type mediaKind int
 
@@ -84,6 +84,8 @@ var mediaJobFields = map[string]map[string]mediaKind{
 	"video-gen": {"still": kindImage},
 	"animate":   {"ref": kindImage, "driver": kindVideo},
 	"audio-gen": {"clone": kindAudio},
+	// image-edit: the target and the references (edit_task.go)
+	ImageEditTask: editInputFields,
 }
 
 // MediaJobBodyCap is the largest body the door reads: the bundle cap in base64 plus room for the rest of
@@ -407,7 +409,7 @@ func buildMediaJob(ctx context.Context, v *mediaView, loopbackListener bool, pay
 				log.Printf("fleet: media-job: removing %s: %v (the startup sweep retries it)", dir, rerr)
 			}
 		}
-		lim := composebundle.Limits{MaxFiles: 8, MaxFileBytes: max, MaxTotal: max}
+		lim := composebundle.Limits{MaxFiles: mediaJobMaxFiles(task), MaxFileBytes: max, MaxTotal: max}
 		if err := composebundle.Extract(raw, dir, lim); err != nil {
 			removeDir()
 			if errors.Is(err, composebundle.ErrIO) {
@@ -439,13 +441,26 @@ func buildMediaJob(ctx context.Context, v *mediaView, loopbackListener bool, pay
 		}
 		cleanup = removeDir
 	}
+	if task == ImageEditTask {
+		if err := foldEditImages(inner, in.Inputs); err != nil {
+			cleanup()
+			return core.Request{}, noop, err
+		}
+	}
 
 	rewritten, err := json.Marshal(inner)
 	if err != nil {
 		cleanup()
 		return core.Request{}, noop, fmt.Errorf("media-job payload: %w", err)
 	}
-	req, innerCleanup, err := buildRequestIn(ctx, v, loopbackListener, task, rewritten)
+	var req core.Request
+	var innerCleanup func()
+	if task == ImageEditTask {
+		// image-edit is built only here (buildRequestIn refuses it on /fleet/dispatch): its recipe is compared before anything else.
+		req, innerCleanup, err = buildImageEdit(ctx, cfg, rewritten)
+	} else {
+		req, innerCleanup, err = buildRequestIn(ctx, v, loopbackListener, task, rewritten)
+	}
 	if err != nil {
 		innerCleanup()
 		cleanup()
@@ -476,7 +491,7 @@ func buildMediaJob(ctx context.Context, v *mediaView, loopbackListener bool, pay
 // file through this door, and so renders nothing from the caller's private bytes.
 func mediaJobOutputExt(task string, params map[string]any) string {
 	switch task {
-	case "image-gen":
+	case "image-gen", ImageEditTask:
 		return "png"
 	case "video-gen", "animate":
 		return "mp4"

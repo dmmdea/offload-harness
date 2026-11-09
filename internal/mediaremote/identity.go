@@ -122,11 +122,13 @@ type need struct {
 	graph *graphNeed
 	// vram is the caller's min_vram_gb on a video or animation call (graph.go); nil when the call asked for none.
 	vram *vramNeed
+	// edit: the call is a generative edit, matched on the edit recipe a node publishes (edit.go).
+	edit bool
 }
 
 func needOf(req core.Request) need {
 	_, steps := posInt(req.Params, "steps")
-	return need{refineOff: refineOff(req.Params), steps: steps, graph: graphNeedOf(req), vram: vramNeedOf(req)}
+	return need{refineOff: refineOff(req.Params), steps: steps, graph: graphNeedOf(req), vram: vramNeedOf(req), edit: req.Task == core.TaskEditImageGenerative}
 }
 
 // nodeMatch is the verdict of one node's published recipes against this machine's.

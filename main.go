@@ -93,6 +93,8 @@ func main() {
 		err = runRunGraph(args)
 	case "edit-image":
 		err = runEditImage(args)
+	case "edit-image-generative":
+		err = runEditImageGenerative(args)
 	case "media":
 		err = runMedia(args)
 	case "compose-video":
@@ -304,6 +306,13 @@ Usage:
                                          what is missing or does not prove itself; rows go to r.jsonl.partial and over r.jsonl when the batch
                                          ends. exit 0 every job has its picture (or a busy lane deferred the whole warm batch: rows queued),
                                          4 some job failed (the JSON and the results file name them), 1 it stopped, errored or was interrupted
+  local-offload edit-image-generative --image <src> --prompt "..." [--ref <img>]... [--out path] [--negative "..."] [--seed N] [--steps N] [--cfg F] [--preset P] [--megapixels F] [--placement single|multicard] [--family NAME] [--route auto|local|remote] [--remote URL] [--dry-run]
+  local-offload edit-image-generative --batch rows.jsonl [--results r.jsonl] [--resume] [--jobs N] [--spill] [flags above as row defaults]
+                                         rewrite a whole image from a text instruction (Qwen-Image-Edit; NOT edit-image, the PIL editor). Rows:
+                                         {image, refs?, prompt, out, negative?, seed?, steps?, cfg?, preset?, megapixels?, placement?}; --seed S gives a row
+                                         without a seed S plus its 0-based index. Runs here when this machine has the lane, else on a fleet node holding the
+                                         same edit recipe; one still per process, so a batch spills one row at a time. --dry-run prints the resolved rows,
+                                         this machine's edit digest and every node's match, and renders nothing
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale] [--node ID|URL] [--min-vram-gb N]
