@@ -86,6 +86,12 @@ binding can never name a seat that was not rendered:
 | `qwen3-vl-8b` | ocr | `ocr_model` | `Qwen3VL-8B-Instruct-Q8_0.gguf` | swappable |
 | `whisper-stt` | stt | `stt_model` | `ggml-large-v3-turbo.bin` | resident |
 | `timestral-209m` | forecast | `forecast_model` | `timestral-209m` | resident |
+| `flux3-pup` | upsampler | — (named by the family) | `flux3-klein-pup/flux-3-image-klein-pup-Q6_K.gguf` | swappable |
+
+An `upsampler` seat (`flux3-pup`) is the FLUX 3 Klein prompt upsampler: a text-only llama-server seat the
+flux3-klein image family calls before its render lease. It writes no config key: the key that names it is the
+family's own `imagegen_upsampler`, and a flat key would change every other image family. Name it on the family (for
+example `imagegen_families.flux3-klein.imagegen_upsampler`) once that family is bound on this node.
 
 A seat still needs its weights on the box — model downloads stay out-of-band, as with
 every seed.

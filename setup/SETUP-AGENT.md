@@ -262,8 +262,10 @@ The sd.cpp files go to `<OFFLOAD_HOME>/models/flux3-klein/` (the seeds' paths): 
 publishes.
 sd.cpp must be master-1000 or later (the floor in `setup/floors.json`; the Windows installer takes the newest complete
 release, which is past it; `amd-gcn`'s seed names its own sd.cpp build directory). The fast upsampler seat for a ComfyUI node is BFL's PUP as a GGUF,
-`unsloth/flux-3-image-klein-pup-GGUF` (`main`), served by llama-swap (hand-wired: no
-tier renders it yet).
+`unsloth/flux-3-image-klein-pup-GGUF` (`main`), served by llama-swap under the name `flux3-pup`. The two-card and larger CUDA tiers
+(`ampere-2x16`, `blackwell-2x16`, `blackwell-3x16`) declare it as an `upsampler` media seat, so `install render` writes it; on any other tier it is
+hand-wired. Either way the weights are fetched by hand
+(`flux3-klein-pup/flux-3-image-klein-pup-Q6_K.gguf` under the models dir) and the flux3-klein family names the seat in `imagegen_upsampler`.
 8GB tiers: **VERIFIED** — O1 bf16 @2048 runs on an 8GB 3070 with 64GB RAM (5.9 min/render,
 an 8GB 3070 + 64GB RAM box, 2026-07-16). **J4: this binding is now AUTOMATIC on fresh installs** —
 `ampere-8`/`blackwell-8` carry a `config_seed_ram_mid_high` layer that install.ps1 merges only when
