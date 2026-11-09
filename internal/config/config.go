@@ -1304,6 +1304,17 @@ type Config struct {
 	// resolution for the driver resize (0 = the builder's 482x854 template default).
 	AnimateGenWidth  int `json:"animategen_width,omitempty"`
 	AnimateGenHeight int `json:"animategen_height,omitempty"`
+	// AnimateGenPlacement is the placement of the WAN-Animate-2 animate seat ("" or "single" = one render card, today's; "multicard" = the card-only
+	// placement on the box's two non-display cards, render/wan-multicard.mjs: no host RAM). The distilled int8 DiT is 15.5 GiB, which one 16 GB card
+	// cannot hold with the sampler's activations and a --gpu-only node cannot stream, so the door leases the pair, passes --placement multicard to
+	// render/comfy-animate.mjs and drops the single-card pin and dynamic VRAM, the way videogen_placement does for the video door. The DiT is split over
+	// the pair with the compute card as cuda:0, the umt5 encoder and clip_vision_h and the VAE sit on the storage card, and the encoder is released after
+	// the prompt is encoded. It needs a .safetensors int8 DiT (animategen_unet unset is the builder's own int8 file); the sd.cpp engine (animategen_engine
+	// "sdcpp") never reads it. The recipe row the fleet advertises (wan-animate2: name and files) does not carry it. An unknown value is a config error.
+	AnimateGenPlacement string `json:"animategen_placement,omitempty"`
+	// AnimateGenResidentGB is animategen_placement multicard's --resident-gb: the GiB of the DiT kept on the compute card (0 = the runner's own default,
+	// 5; the arithmetic for two 14.996 GiB cards is render/wan-multicard.mjs checkAnimateResident). 0..64.
+	AnimateGenResidentGB float64 `json:"animategen_resident_gb,omitempty"`
 	// --- iGPU media engines (CT-49): animate / voice / music on a Vulkan iGPU ---
 	// Every key below is optional and a box that sets none of them behaves exactly as
 	// before. The engines are spawn-per-job native CLIs under the media lease, and NO
@@ -3160,6 +3171,7 @@ func warnMediaGenBindingTrapsTo(c Config, w io.Writer) {
 	warnImageBindingTo(c, w, "")
 	warnEditBindingTo(c, w, "")
 	warnMusicBindingTo(c, w)
+	warnAnimateBindingTo(c, w)
 	// The pooled VIDEO seat carries the IDENTICAL MultiGPU #191 requirement
 	// (docs/tiers/blackwell-2x16.md; render/wf-ltx25-i2v.mjs). Un-pooled, an
 	// int8 DiT that upcasts to ~39 GB at compute no longer fits the virtual pool
@@ -3313,6 +3325,9 @@ func (c Config) MulticardLaunchNotes() []string {
 	if c.MusicMulticard() {
 		seats = append(seats, "musicgen_placement")
 	}
+	if c.AnimateMulticard() {
+		seats = append(seats, "animategen_placement")
+	}
 	for _, name := range sortedFamilyNames(c.ImageGenFamilies) {
 		if cp, _, _, err := applyOverlay(c, name, c.ImageGenFamilies[name], imageOverlay); err == nil && cp.ImageMulticard() {
 			seats = append(seats, fmt.Sprintf("imagegen_families[%q]", name))
@@ -3368,11 +3383,33 @@ func (c Config) MusicMulticard() bool {
 	return strings.TrimSpace(c.MusicGenPlacement) == PlacementMulticard
 }
 
-// The values of imagegen_placement, gen_edit_placement and musicgen_placement: "" and "single" are the one-card lease every box has always taken.
+// AnimateMulticard reports an animate binding that asks for the card-only placement (animategen_placement: multicard). The sd.cpp engine is another
+// route and never reads it (runAnimateCharacter hands that engine the call before the placement is looked at).
+func (c Config) AnimateMulticard() bool {
+	return strings.TrimSpace(c.AnimateGenPlacement) == PlacementMulticard && c.AnimateGenEngine != EngineSdcpp
+}
+
+// The values of imagegen_placement, gen_edit_placement, musicgen_placement, videogen_placement and animategen_placement: "" and "single" are the one-card lease every box has always taken.
 const (
 	PlacementSingle    = "single"
 	PlacementMulticard = "multicard"
 )
+
+// warnAnimateBindingTo carries the animate seat's traps: the card-only placement is a ComfyUI placement of the int8 WAN-Animate-2 DiT, and it needs the lease to
+// name its two cards.
+func warnAnimateBindingTo(c Config, w io.Writer) {
+	if strings.TrimSpace(c.AnimateGenPlacement) != PlacementMulticard {
+		return
+	}
+	if c.AnimateGenEngine == EngineSdcpp {
+		fmt.Fprintf(w, "warning: animategen_placement is multicard but animategen_engine is %q — the card-only placement is a ComfyUI placement; the sd.cpp runner never reads it\n", c.AnimateGenEngine)
+		return
+	}
+	if u := strings.ToLower(strings.TrimSpace(c.AnimateGenUnet)); u != "" && (!strings.HasSuffix(u, ".safetensors") || strings.Contains(u, "bf16") || strings.Contains(u, "fp16")) {
+		fmt.Fprintf(w, "warning: animategen_placement is multicard but animategen_unet is %q — the card-only placement runs the int8 .safetensors DiT (a GGUF, bf16 or fp16 file is refused by the runner by name), so EVERY animate call will be refused after the pair was held; bind the int8 file or unset the placement\n", c.AnimateGenUnet)
+	}
+	warnMulticardLaunchTo(c, w, "", "animategen_placement", "animate")
+}
 
 // warnMusicBindingTo carries the music seat's traps: the card-only placement is a ComfyUI placement of one recipe (ACE-Step 1.5 XL turbo bf16), and it needs the
 // lease to name its two cards.

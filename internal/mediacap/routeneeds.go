@@ -308,6 +308,16 @@ func animateNeeds(cfg config.Config) []needFile {
 	}
 }
 
+// animateNodeClasses: the custom-node classes the animate graph names. The single-card graph is core nodes only; a card-only binding (animategen_placement: multicard,
+// render/wan-multicard.mjs) loads the DiT, the text encoder, clip vision and the VAE through MultiGPU's loaders. The harness's own classes (render/comfyui-ext) are not
+// custom_nodes and not listed. This is a route check only: the recipe row the fleet advertises (name and files, lane_rows.go) is the same with either placement.
+func animateNodeClasses(cfg config.Config) []string {
+	if cfg.AnimateMulticard() {
+		return []string{"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "CLIPVisionLoaderMultiGPU", "VAELoaderMultiGPU"}
+	}
+	return nil
+}
+
 // musicNeeds: ACE-Step 1.5's files. No config key binds them; the builder defaults are
 // what every music render loads.
 func musicNeeds() []needFile {
@@ -419,6 +429,8 @@ var classPacks = map[string][]string{
 	"CLIPLoaderDisTorch2MultiGPU": {"ComfyUI-MultiGPU"},
 	// the card-only music recipe's two-encoder loader (the stock DualCLIPLoader plus `device`)
 	"DualCLIPLoaderMultiGPU": {"ComfyUI-MultiGPU"},
+	// the card-only animate graph's clip vision loader (render/wf-wan-animate2.mjs, animategen_placement: multicard)
+	"CLIPVisionLoaderMultiGPU": {"ComfyUI-MultiGPU"},
 }
 
 // NodeCheck answers "can this ComfyUI build these node classes?".

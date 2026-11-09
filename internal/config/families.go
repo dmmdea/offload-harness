@@ -461,7 +461,7 @@ var cudaDeviceRe = regexp.MustCompile(`^\d+(,\d+)*$`)
 // config door — never as a runner exit 2 on every render. where prefixes the key
 // ("" at the top level, `imagegen_families["x"].` inside an overlay).
 func validateMediaEnums(c Config, where string) error {
-	for _, kv := range [][2]string{{"imagegen_placement", c.ImageGenPlacement}, {"gen_edit_placement", c.GenEditPlacement}, {"musicgen_placement", c.MusicGenPlacement}, {"videogen_placement", c.VideoGenPlacement}} {
+	for _, kv := range [][2]string{{"imagegen_placement", c.ImageGenPlacement}, {"gen_edit_placement", c.GenEditPlacement}, {"musicgen_placement", c.MusicGenPlacement}, {"videogen_placement", c.VideoGenPlacement}, {"animategen_placement", c.AnimateGenPlacement}} {
 		switch strings.TrimSpace(kv[1]) {
 		case "", PlacementSingle, PlacementMulticard:
 		default:
@@ -509,6 +509,9 @@ func validateMediaEnums(c Config, where string) error {
 	}
 	if g := c.VideoGenWanResidentGB; math.IsNaN(g) || g < 0 || g > 64 {
 		return fmt.Errorf("%svideogen_wan_resident_gb: %g must be 0 (the runner's default) or a number of GiB up to 64", where, g)
+	}
+	if g := c.AnimateGenResidentGB; math.IsNaN(g) || g < 0 || g > 64 {
+		return fmt.Errorf("%sanimategen_resident_gb: %g must be 0 (the runner's default) or a number of GiB up to 64", where, g)
 	}
 	return nil
 }

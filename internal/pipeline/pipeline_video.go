@@ -381,14 +381,30 @@ func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, me
 		args = append(args, "--vae", p.cfg.AnimateGenVAE)
 	}
 
+	// animategen_placement multicard: the card-only placement on the lease's two cards, no host RAM. The runner owns the placement and its ComfyUI instance;
+	// --resident-gb is the GiB of the DiT kept on the compute card (unset = the runner's default).
+	multicard := p.cfg.AnimateMulticard()
+	if multicard {
+		args = append(args, "--placement", config.PlacementMulticard)
+		if p.cfg.AnimateGenResidentGB > 0 {
+			args = append(args, "--resident-gb", strconv.FormatFloat(p.cfg.AnimateGenResidentGB, 'f', -1, 64))
+		}
+	}
+
 	timeout := time.Duration(p.cfg.AnimateGenTimeoutSec) * time.Second
-	grant, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait(), singleCardNeed(p.cfg, paramStr(req.Params, "waiter_token")).declaresRAM(routeRAM(hostneed.RouteAnimate, p.cfg)).resumableBy(req))
+	grant, lerr := p.acquireMediaLease(ctx, "animate", timeout, p.gpuWait(), animateNeed(p.cfg, paramStr(req.Params, "waiter_token")).resumableBy(req))
 	if lerr != nil {
 		return p.deferForLease(lerr, req.Task, meta, len(req.Input), start)
 	}
 	defer grant.Release()
-	// Single-card route: the device pin applies (comfyLaunch), or the instance bound to the card.
-	env := append(p.comfyGenEnvFor(grant, true), grant.Env...)
+	var env []string
+	if multicard {
+		// two cards: no pin, no dynamic VRAM (the runner drops both for the launch anyway); the operator's extra args stay
+		env = append(append(p.genEnv(), multicardLaunch(p.cfg).Env()...), grant.Env...)
+	} else {
+		// Single-card route: the device pin applies (comfyLaunch), or the instance bound to the card.
+		env = append(p.comfyGenEnvFor(grant, true), grant.Env...)
+	}
 	if timeout > 0 {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(timeout/time.Second)))
 	}

@@ -150,6 +150,39 @@ func videoMulticardNeed(cfg config.Config, token, renderFamily string, over host
 	return n
 }
 
+// animateUnetRefusal is the sentence for a DiT the card-only WAN-Animate-2 placement cannot run, "" for one it can: the runner loads a .safetensors file through the DisTorch2
+// loader (a GGUF file is not one), and the bf16 or fp16 DiT (about 33 GiB) does not fit the two cards. An unnamed file is the builder's default, the int8 one. The runner refuses the
+// same two (render/wan-multicard.mjs refuseUnmeasuredAnimate) only after the pair was held.
+func animateUnetRefusal(name string) string {
+	name = strings.TrimSpace(name)
+	lower := strings.ToLower(name)
+	switch {
+	case name == "":
+		return ""
+	case !strings.HasSuffix(lower, ".safetensors"):
+		return fmt.Sprintf("animategen_placement is multicard, but animategen_unet %q is not a .safetensors file, which the card-only WAN-Animate-2 placement loads through the DisTorch2 loader: the runner would refuse it by name after the pair was held, so nothing was leased; bind the int8 .safetensors DiT, or unset animategen_placement", name)
+	case strings.Contains(lower, "bf16"), strings.Contains(lower, "fp16"):
+		return fmt.Sprintf("animategen_placement is multicard, but animategen_unet %q is a bf16 or fp16 WAN-Animate-2 DiT (about 33 GiB), which does not fit two 16 GiB cards: the runner would refuse it by name after the pair was held, so nothing was leased; bind the int8 DiT, or unset animategen_placement", name)
+	}
+	return ""
+}
+
+// animateMulticardNeed is multicardNeed for the animate door (animategen_placement: multicard). The animate door has no recipe row in render/multicard-recipes.json: the runner
+// (render/wan-multicard.mjs) sizes the placement itself, so the door leases the pair, declares the host RAM that placement earns (hostneed.ForAnimateCardOnly: 0 when both cards
+// hold their stage) and refuses, before any lease, the one thing the runner would refuse after it: a DiT the placement cannot run (animateUnetRefusal).
+func animateMulticardNeed(cfg config.Config, token string) mediaNeed {
+	n := mediaNeed{Kind: needMulticard, Token: token, PlacementKey: "animategen_placement"}
+	n.RAMPair = func(vramGiB float64, cardsGiB []float64) hostneed.Need {
+		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vramGiB, CardsGiB: cardsGiB, Placement: hostneed.PlacementMulticard}
+		if need, ok := hostneed.ForAnimateCardOnly(cfg, cfg.AnimateGenResidentGB, f); ok {
+			return need
+		}
+		return hostneed.ClassDefault(f)
+	}
+	n.Refusal = animateUnetRefusal(cfg.AnimateGenUnet)
+	return n
+}
+
 // qwenImageDefaultSide is the side of the canvas a qwen-image call renders when the request names none (render/comfy-render.mjs, the qwen-image builder's
 // 1328): 1328 x 1328 is 1.76 MP, above the image row's cap, so a card-only call that names no size is refused too.
 const qwenImageDefaultSide = 1328

@@ -120,6 +120,10 @@ node render/comfy-video.mjs out.mp4 still.png "<prompt>" --high-unet <fp8 high> 
      # (WAN-OOM ends the wait when its prompt worker died of an out-of-memory error); a plain decode that ComfyUI retried tiled fails
      # the run (WAN-DECODE-FALLBACK, the clip kept as <out>.seamed.<ext>); docs/systems/media-generation.md, "Card-only Wan"
 node render/preflight-graph.mjs hunyuan   # validate a graph vs a running ComfyUI, no gen
+node render/comfy-animate.mjs out.mp4 ref.png driver.mp4 "<prompt>" --placement multicard   # WAN-Animate-2 on the TWO non-display cards of a lease, no host RAM
+     # run it under `local-offload gpu reserve --devices <a>,<b> --class media --ram 0 -- ...` or pass --cards <a>,<b>; [--resident-gb 5]: GiB of the 15.5 GiB int8 DiT kept on the compute card (3.9 to 7.1 fit two
+     # 14.996 GiB cards at 482x854x81; a share outside what a card holds is refused before ComfyUI starts); --print-graph prints the resolved graph as JSON and exits (nothing staged, leased or contacted);
+     # docs/systems/media-generation.md, "Card-only animate"
 ```
 
 ## 8 GB hard-won settings (don't regress)

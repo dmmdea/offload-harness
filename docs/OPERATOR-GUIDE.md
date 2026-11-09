@@ -721,6 +721,25 @@ the difference — stop that instance (or start it with the binding's flags) and
 passes `--wan-resident-gb 0`; see "Sage attention" in `docs/systems/media-generation.md`), and a kept ComfyUI that runs sage is not reused by a call
 sized for the default attention.
 
+### Run character animation on two 16 GB cards (card-only placement)
+
+The WAN-Animate-2 DiT (`wan_animate_2_distill_int8_convrot.safetensors`) is 15.5 GiB, which a 16 GB card cannot hold beside the sampler, and a node that runs ComfyUI with
+`--gpu-only` cannot stream it. On a node with two non-display 16 GB cards (the 2x16 tier) set
+
+```json
+"animategen_placement": "multicard",
+"animategen_resident_gb": 0
+```
+
+`animategen_placement` is `""`/`single` (the default, one card) or `multicard`: the `animate_character` call then leases the box's two non-display cards as a set, splits the DiT over them
+(`animategen_resident_gb` GiB on the compute card, the rest on the storage card; 0 is the runner's 5), puts the text encoder, clip vision and the VAE on the storage card and takes the encoder off the cards
+before the DiT lands. It needs the int8 `.safetensors` DiT (an unset `animategen_unet` is that file), card-scoped leases on after a green reader audit, and ComfyUI-MultiGPU installed; `doctor` names a
+missing class. A node that takes `animate` jobs from the fleet runs them with its own setting, so the placement is a node's config and nothing a caller sends. By hand, under a lease:
+`local-offload gpu reserve --devices <a>,<b> --class media --ram 0 -- node render/comfy-animate.mjs out.mp4 ref.png driver.mp4 "<prompt>" --placement multicard`
+(`--cards <a>,<b>` outside a lease, `--resident-gb N` to move the share; `--print-graph` prints the graph the call would submit and exits). A share a card cannot hold is refused before ComfyUI starts,
+with the arithmetic. No animate run was ever made on two cards, so the sizes are chosen and the first run is the measurement; see "Card-only animate" in
+[systems/media-generation.md](systems/media-generation.md).
+
 ### Deterministic post-production (edit-image op pack) ✅
 
 ```powershell

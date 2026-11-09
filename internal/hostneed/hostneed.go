@@ -288,6 +288,17 @@ const wanStorageOverheadGiB = 0.8
 // render/wf-ltx25-i2v.mjs LTX25_RESIDENT_GB_DEFAULT. Measured on one run at 1280x704x121: the compute card peaked at 11.54 GiB, the storage card at 12.71.
 const ltxResidentDefaultGiB = 9.0
 
+// The WAN-Animate-2 card-only placement's figures (render/comfy-animate.mjs --placement multicard; render/wan-multicard.mjs ANIMATE_*, which states the arithmetic and which of them are
+// file sizes and which are chosen). NO animate run was ever made on two cards, so every figure but the file sizes is a choice, and the Detail of the Need says so. The activations are the
+// default clip's (482x854x81 = 36,828 tokens at 0.20 GiB per thousand, 7.4 GiB): this sizing reads no geometry, like the Wan one above, and the runner refuses a share its own geometry
+// cannot hold before ComfyUI starts. The two files the graph puts beside the donor blocks on the storage card are clip_vision_h (1.18 GiB) and the Wan VAE (0.24 GiB), rounded up.
+const (
+	animateResidentDefaultGiB = 5.0
+	animateActivationsGiB     = 7.4
+	animateClipVisionGiB      = 1.2
+	animateVAEGiB             = 0.3
+)
+
 // ltxUpscalerGiB is the x2 latent upscaler (0.93 GiB), which has no device input and loads on the compute card; ltxStorageVAEsGiB is the video and audio VAE
 // (1.37 + 0.34 GiB, rounded up), which the graph puts on the storage card. render/wan-multicard.mjs LTX_UPSCALER_GIB and LTX_STORAGE_VAES_GIB.
 // The LTX-2.5 stages leave the sampler's activations out (about 1.6 GiB with the context at 1280x704x121, unmeasured above it), so this sizing and the
@@ -301,6 +312,8 @@ const (
 type CardOnly struct {
 	// LTX is true for the LTX-2.5 graph: one DiT (not two experts) split over the pair with the compute card first, sized by ltx* above.
 	LTX bool
+	// Animate is true for the WAN-Animate-2 graph (--placement multicard on render/comfy-animate.mjs): one int8 DiT split over the pair with the compute card first, sized by animate* above.
+	Animate bool
 	// ResidentGiB is --wan-resident-gb: the share of each expert (of the DiT, for LTX) kept on the compute card; 0 is the family's default.
 	ResidentGiB float64
 	// SageAttention is true when COMFY_EXTRA_ARGS carries --use-sage-attention (or an argparse prefix of it): the runner then sizes the compute card's
@@ -397,6 +410,16 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		// ceiling, and with the film-size run's 12.2 GiB it would refuse the call that run measured (3.0 + 12.2 = 15.2 > 14.9). It stays the storage
 		// card's margin.
 		reserve := f.reserve()
+		if co.Animate {
+			// The WAN-Animate-2 stages: the compute card holds its share of the DiT, the sampler's activations and the context; the storage card the rest of the DiT, clip_vision_h, the
+			// VAE and the context. The text encoder is off the cards before the DiT lands (OffloadFreeAfterEncode), so it is no stage of either card.
+			compute := co.ResidentGiB + animateActivationsGiB + wanComputeContextGiB
+			storage := expert - co.ResidentGiB + animateClipVisionGiB + animateVAEGiB + wanStorageOverheadGiB
+			if expert > 0 && small > 0 && storage <= small-reserve && compute <= large {
+				return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB DiT + %.1f GiB of the default clip's sampler activations + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB of clip vision + %.1f GiB of VAE + %.1f GiB for the context = %.1f GiB (of %.1f usable), so each card fits its stage, the text encoder is taken off the cards before the DiT lands, and the weights are mapped read-only: no weights stream from RAM (sizes chosen, not measured: no animate run was made on two cards; the set is %s)", family, small, large, co.ResidentGiB, expert, animateActivationsGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, animateClipVisionGiB, animateVAEGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+			}
+			return fitToCard(src, family, set, total, f, ""), true
+		}
 		if co.LTX {
 			// The LTX-2.5 stages: the compute card holds its share of the DiT, the latent upscaler and the context; the storage card the rest of the DiT, both VAEs and the
 			// context. The text encoder is off the cards before the DiT lands (OffloadFreeAfterEncode), so it is no stage. The activations are unmeasured and not in it.
@@ -479,6 +502,17 @@ func ForRoute(route Route, cfg config.Config, f Facts) (Need, bool) {
 		return estimatePlaced(RouteMusic, "acestep", mediacap.MusicModelFiles(), f)
 	}
 	return Need{}, false
+}
+
+// ForAnimateCardOnly is ForRoute(RouteAnimate) for a call that asked for the card-only placement (animategen_placement: multicard, which passes --placement multicard to
+// render/comfy-animate.mjs): the stage rule estimateWith applies to the animate graph. residentGiB is --resident-gb (0 = the runner's default share, 5). Anything that is not exactly two
+// cards each holding its stage is the ordinary estimate, which counts the whole set.
+func ForAnimateCardOnly(cfg config.Config, residentGiB float64, f Facts) (Need, bool) {
+	f.Cfg = withDir(f.Cfg, cfg)
+	if residentGiB <= 0 {
+		residentGiB = animateResidentDefaultGiB
+	}
+	return estimateWith("wan-animate2", mediacap.AnimateModelFiles(cfg), f, &CardOnly{Animate: true, ResidentGiB: residentGiB})
 }
 
 // ForVideo is the video route's estimate for the family that will render: renderFamily is the
