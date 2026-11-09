@@ -432,7 +432,7 @@ func runGPUReserve(args []string) (retErr error) {
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card (0 = not declared)")
 	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the job will TOUCH (its working set), declared on the lease and admitted against the RAM that is available (0 = needs no host RAM). Unset, it is estimated: from the model files of a render helper call whose weights do not fit the card (render/comfy-generate.mjs, comfy-edit, comfy-video, comfy-inpaint, comfy-render), else for a media lease the largest ComfyUI render family this box binds (an sd.cpp binding is not counted: a node that binds only sd.cpp declares 0), and 0 for a text lease. A grant waits, in the same queue, while the available RAM less this and what running leases have yet to touch would fall under gpu_host_ram_headroom_gib, or while the commit charge + the job's commit + what running leases have yet to touch would exceed physical RAM less that headroom (the OS commit limit instead, with what running leases have yet to be charged, when --ram-commit states the commit). With --unload-seat the host is asked AFTER the seat is unloaded, while the cards are held, because the memory it needs may be the seat's own")
 	ramCommitFlag := fs.Float64("ram-commit", 0, ramCommitHelp)
-	holdMaxFlag := fs.Duration("ram-hold-max", 0, "with --unload-seat: the most the lease may hold its cards waiting for the host to have the RAM it declared, counted from the unload; past it the lease is released (the seat warmed back), the command never runs and the reserve exits non-zero. Unset = config gpu_hostram_hold_max_sec (default 600 s); 0 = no bound, --wait alone ends the wait")
+	holdMaxFlag := fs.Duration("ram-hold-max", 0, "with --unload-seat: the most the lease may hold its cards waiting for the host to have the RAM it declared, counted from the unload; past it the lease is released (the seat warmed back) and the command never runs; a wrapper reserve with --wait time left then queues again (one line says so) and exits non-zero only when --wait is spent, a --detach reserve exits non-zero at once. Unset = config gpu_hostram_hold_max_sec (default 600 s); 0 = no bound, --wait alone ends the wait")
 	owner := addOwnershipFlags(fs)
 	releaseAtExpiry := fs.Bool("release-at-expiry", false, "with --detach: the hidden holder releases the card at --for, as it did before leases had terms (default: it renews its term while the owner vouches for the job, else labels the lease expired and keeps holding; nothing is ever released by a deadline)")
 	dieWithWrapper := fs.Bool("die-with-wrapper", false, "wrapper form: end the command's whole process tree when this wrapper exits or dies (Windows: the job object is created kill-on-close). Off by default, because it makes the wrapper a single point of failure for a long render; without it a dead wrapper's job keeps running and its lease keeps the cards as a tree-orphan until the job ends. Refused where the platform has no handle whose closing ends a tree, and when the command cannot be put in the job. A ComfyUI instance another lease took over is spared and the guarantee stops at it (the job stops killing on close once something is spared)")
@@ -828,9 +828,35 @@ func runGPUReserve(args []string) (retErr error) {
 			}
 			var bound *errHostRAMHoldBound
 			if errors.As(merr, &bound) && sw.Signal() == nil {
-				// The hold bound passed: never a lease to take again. The lease is still ours (the wait only ends on
-				// its own bound), the deferred finish stops the kept instances, warms the seat back and releases it,
-				// and the reserve ends here with the bound's failure: nothing runs and nothing re-queues.
+				// The hold bound passed. While --wait has time left the cards are let go and the reserve takes its place in the
+				// line again (gpu_hostram_requeue.go), one line saying so; the cards held idle behind a figure the host could not
+				// meet are what the bound ends, not the caller's wait. Not counted in requeues (--wait is its bound).
+				if left := holdBoundRequeueBudget(queuedAt, *wait, time.Now()); left > 0 {
+					fmt.Fprintln(os.Stderr, holdBoundRequeueLine(bound, left))
+					if rerr := releaseLeaseConfirmed(m, lease); rerr == nil {
+						next, aerr := acquireQueued(m, gpulease.Class(*class), opts, left)
+						if aerr == nil {
+							lease = next
+							heldSince = time.Now()
+							requeues-- // the loop's own requeues++ must not count this one
+							continue
+						}
+						if sig := sw.Signal(); sig != nil && errors.Is(aerr, gpulease.ErrCancelled) {
+							endedOnTerm = endsGraceBounded(sig)
+							endedAt = stageQueued
+							err := endedBySignal(sig, stageQueued)
+							card.finish(err)
+							return err
+						}
+						err := fmt.Errorf("the host RAM hold bound passed and the cards could not be taken again: %w", aerr)
+						card.finish(err)
+						return err
+					}
+					// The cards could not be let go: the deferred finish tries again and says so; the bound's failure stands.
+				}
+				// --wait is spent (or was 0), or the release failed: the lease is still ours (the wait only ends on its own
+				// bound), the deferred finish stops the kept instances, warms the seat back and releases it, and the reserve
+				// ends here with the bound's failure: nothing runs.
 				card.finish(merr)
 				return merr
 			}
