@@ -403,6 +403,16 @@ func videoNeed(cfg config.Config, token, renderFamily string, over hostneed.Vide
 	return singleCardNeed(cfg, token).declaresRAM(videoRAM(cfg, renderFamily, over)).withFootprint(foot)
 }
 
+// animateNeed is the need of the animate route (WAN-Animate-2 on ComfyUI): two cards under the card-only placement (animategen_placement: multicard, mediamulticard.go),
+// else one card like image generation. The placement is a node's own config and never part of the recipe row the fleet advertises (mediacap.AnimateRowName: name and files).
+func animateNeed(cfg config.Config, token string) mediaNeed {
+	if cfg.AnimateMulticard() {
+		// The card-only placement ignores the pin: the pair is the lease's.
+		return animateMulticardNeed(cfg, token)
+	}
+	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteAnimate, cfg))
+}
+
 // mediaGrant is what a call holds while it renders.
 type mediaGrant struct {
 	// Env hands the lease down to the runner (GPU_LEASE_*).

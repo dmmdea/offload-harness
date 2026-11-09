@@ -211,7 +211,10 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 			return withNeeds(r, cfg.ComfyDir, vFiles, vClasses, vOptional, nodes)
 		}},
 		{"animate_character", "comfyui", "animategen_script", cfg.AnimateGenScript, true, func(r Route) Route {
-			return withNeeds(r, cfg.ComfyDir, animateNeeds(cfg), nil, nil, nodes)
+			if cfg.AnimateMulticard() && r.State == Configured {
+				r.Detail += "; placement=multicard (card-only: the int8 DiT split over two leased cards, the text encoder, clip vision and the VAE on the storage card)"
+			}
+			return withNeeds(r, cfg.ComfyDir, animateNeeds(cfg), animateNodeClasses(cfg), nil, nodes)
 		}},
 		{"generate_audio:voice", "chatterbox-tts", "voicegen_script", cfg.VoiceGenScript, false, func(Route) Route {
 			return voiceRoute(cfg, exeDir)

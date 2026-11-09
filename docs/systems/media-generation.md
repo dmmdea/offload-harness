@@ -525,6 +525,7 @@ Bound per machine through flat config keys, so the same code serves different ha
 | Generative edit | `gen_edit_script`, `gen_edit_unet`, `gen_edit_preset` (`full`/`lightning8`/`lightning4`), `gen_edit_clip/vae/lora/lora_strength`, `gen_edit_steps/cfg/sampler/scheduler`, `gen_edit_megapixels` (0 = follow the source, held within 0.9-2.0), `gen_edit_timeout_sec` |
 | Upscale | `upscale_script` (shipped default `render/comfy-upscale.mjs`), `upscale_model` (ComfyUI `upscale_models/` filename; empty = `videogen_upscale_model`), `upscale_timeout_sec` (600) |
 | Video | `videogen_family` (`""`/`wan22` = Wan 2.2; `ltx25` = LTX-2.5 joint-AV), `videogen_unet_high`, `videogen_unet_low`, `videogen_text_encoder`, `videogen_upscale_model`, `videogen_wan_virtual_vram_gb`, `videogen_wan_decode` (`tiled` default; `plain`/`auto` opt-in), `videogen_placement` (`""`/`single` or `multicard`: the card-only Wan placement, "Card-only Wan") and `videogen_wan_resident_gb` (0 = the runner's 3; at most 64) (Wan keys; `placement` / `wan_resident_gb` in a `videogen_families` entry); `videogen_transformer`, `videogen_video_vae`, `videogen_audio_vae`, `videogen_latent_upscaler`, `videogen_fps`, `videogen_pool_vvram_gb/pool_compute/pool_donor` (LTX-2.5 keys) |
+| Animate (ComfyUI) | `animategen_script`, `animategen_unet`, `animategen_text_encoder`, `animategen_clip_vision`, `animategen_vae`, `animategen_width`/`animategen_height`, `animategen_placement` (`""`/`single` or `multicard`: the card-only WAN-Animate-2 placement on a node of two 16 GB cards, "Card-only animate"; a flat key) and `animategen_resident_gb` (0 = the runner's 5; at most 64); the `animategen_sdcpp_*` keys are the iGPU engine's |
 | Audio | `voicegen_*`, `musicgen_script`, `musicgen_placement` (`""`/`single` or `multicard`: the card-only ACE-Step placement on a node of two equal cards, "Card-only music"; a flat key, not a family-overlay key); `tts_endpoint` / `tts_model` (default `tts-1`) / `tts_voice` / `tts_api_key` (0.113.25: an OpenAI-compatible speech SERVER for `generate_audio kind=voice` — `voice: endpoint`, or the default on a box with no `voicegen_script`; `internal/ttsclient` POSTs `/v1/audio/speech`, writes the WAV atomically, defers naming the server's words on any non-audio answer, takes no media lease because the server owns its GPU; e.g. VoiceStudio on `http://127.0.0.1:3900`) |
 | Qwen-Image-2.1 (family `qwen-image-2.1`) | `imagegen_ckpt` + `imagegen_clip` + `imagegen_vae` (all three REQUIRED — the builder has no defaults), `imagegen_schedule` (`official` default / `comfy`), `imagegen_steps/cfg` (both or neither; official 40 / 1.0); edit: `gen_edit_family: "qwen-image-2.1"`, `gen_edit_unet/clip/vae`, `gen_edit_resolution` (0 = 1024), `gen_edit_cache_device` (`auto`/`gpu`/`cpu`/`off`) |
 | Named families + license (ADR 0058) | `imagegen_families`, `gen_edit_families` (name → overlay + `license` + `commercial_use`); `imagegen_license`/`imagegen_commercial_use`, `gen_edit_license`/`gen_edit_commercial_use` (the default binding's own tag, both or neither) |
@@ -923,6 +924,54 @@ retried tiled after all: the run fails, the clip is kept as `<name>.seamed<ext>`
 console could not be read to the end, so whether it was retried is unknown); `WAN-OOM` (the prompt worker died of an out-of-memory error
 and the wait ended; ComfyUI must be restarted); `WAN-OOM-WATCH` (the console cannot be watched); `WAN-WAIT-NOTE` (the default budget
 was used).
+
+**Card-only animate: `animategen_placement` = `multicard`** (`render/comfy-animate.mjs --placement multicard`, `render/wf-wan-animate2.mjs`,
+`render/wan-multicard.mjs`, `internal/pipeline/mediamulticard.go`; **not measured on two cards**). The distilled int8 WAN-Animate-2 DiT is
+16,653,175,528 bytes (15.5 GiB). A 16 GB card holds about 15 GiB, and a node that runs ComfyUI with `--gpu-only` (the whole model must land on a card; no
+host-RAM streaming) cannot run the single-card graph at all, so the animate lane could not run on a node of two 16 GB cards. The placement is the LTX-2.5 shape at a
+smaller size: ONE int8 DiT split over the lease's two non-display cards through ComfyUI-MultiGPU's DisTorch2 loader, with no host RAM. `single`, the default, is
+today's graph and launch, byte for byte (the single graph is compared with the one before this change, node for node).
+
+| Surface | What it does |
+|---|---|
+| `animategen_placement` | `""`/`single` (default) or `multicard`. A flat key (not a family-overlay key), read by `config.AnimateMulticard()`; the sd.cpp engine (`animategen_engine: "sdcpp"`) never reads it. An unknown value is a config error, and `multicard` beside `sdcpp`, beside a `.gguf`, bf16 or fp16 `animategen_unet`, or on a host that does not lease cards warns at load. |
+| `animategen_resident_gb` | GiB of the DiT kept on the compute card (0, the default, is the runner's 5; 0 to 64). Passed as `--resident-gb`. |
+| `--placement single\|multicard`, `--resident-gb N`, `--cards <a>,<b>` | The runner's own flags (not the `--wan-*` ones the video runner takes). `--cards` names the two cards (nvidia-smi indices or UUIDs) for a call made outside a lease; under a lease the lease's cards (`GPU_LEASE_DEVICES`) are the authority and `--cards` can only confirm them. Spelled `--flag value`: `--flag=value` is refused, as for the video placement. |
+| `--print-graph` | Prints the resolved API graph as JSON on stdout and exits: no input is staged, no lease is taken, no ComfyUI is started or contacted. Under `--placement multicard` it still plans the pair (it reads the driver's card table with `nvidia-smi`) and refuses what the real run would refuse. |
+
+The cards and their roles are the video placement's (`wan-multicard.mjs`: `resolveWanCards`, `chooseRoles`, `WAN_COMPUTE_UUID`, `multicardEnv`, `confirmWithLease`); a display
+card, a card whose display state is unknown, a lease that does not hold the named cards and a node pack that is missing are refused before anything starts. The launch lists the
+COMPUTE card first (`CARD_ORDER_COMPUTE_FIRST`): cuda:0 computes and cuda:1 stores, because this is the same int8 convrot kind of DiT as LTX-2.5's and an int8 DiT that
+computes on any other device faults (ComfyUI-MultiGPU #220). The instance has the compute-first key and port of its pair.
+
+| Node | Placement under multicard |
+|---|---|
+| DiT (239) | `UNETLoaderDisTorch2MultiGPU`, `cuda:0,<R>gb;cuda:1,*`, `donor_device` `cpu` (the donor is the storage card, never RAM), `virtual_vram_gb` 0 |
+| umt5 text encoder (9), 6,735,906,897 bytes | `CLIPLoaderMultiGPU` on cuda:1 |
+| clip_vision_h (75), 1,264,219,396 bytes | `CLIPVisionLoaderMultiGPU` on cuda:1; no node frees it, so it stays there |
+| wan_2.1_vae (7), 253,815,318 bytes | `VAELoaderMultiGPU` on cuda:1 |
+| `OffloadFreeAfterEncode` (35) | Wired AFTER `WanAnimate2ToVideo` (247), the node that consumes the positive, negative and motion-prompt encodes and both clip-vision encodes, so every use of the encoder is done when it takes the encoder off the cards; the sampler reads its conditioning through it, so the DiT is placed only afterwards |
+| `OffloadFreeForDecode` (36), `check` false | Between the trim and the decode: frees the cards of the DiT before the plain `VAEDecode` and reports them; it does not refuse a decode that ComfyUI may retry tiled |
+
+**The fit check, with its arithmetic** (`checkAnimateResident`; every figure but the file sizes is chosen, not measured, and the plan says so once as `ANIMATE-PLACEMENT-NOTE`).
+Two 14.996 GiB cards, the runner's default `--reserve-vram` of 1 GiB and the default clip, 482x854x81: 31 x 54 patches x (21 + 1 reference) latent frames = 36,828 tokens, at
+0.20 GiB of activations per thousand tokens (the Wan 2.2 two-card benchmark reserved 5.50 GiB at 32,400 tokens and 12.2 GiB at 75,600, both under 0.17; 0.20 is that rounded up) is 7.4 GiB.
+The compute card holds the share, the activations and 0.5 GiB of context: 5 + 7.4 + 0.5 = 12.9 GiB of 14.996, and at most 14.996 - 7.4 - 0.5 = 7.1 GiB of the DiT can stay there.
+The storage card holds the donor blocks, clip vision (1.2 GiB), the VAE (0.3 GiB) and 0.8 GiB of context: (15.6 - 5) + 1.2 + 0.3 + 0.8 = 12.9 GiB of 14.996 - 1 = 14.0, and at least
+15.6 + 1.2 + 0.3 + 0.8 - 14.0 = 3.9 GiB of the DiT must be resident. So 3.9 to 7.1 GiB fits and the default 5 sits inside it. The encode stage on the storage card (umt5 6.3 + clip vision 1.2 + VAE 0.3 + 0.8 = 8.6 GiB)
+is smaller than the sampling stage for every share that passes. A share outside the window, or a clip whose window is empty, is refused with these figures before ComfyUI starts, for example
+`--resident-gb 12` ("at most 8.1 GiB of the DiT can stay resident there" on 15.9 GiB cards) or `--resident-gb 0` (17.9 GiB against 14.9 usable on the storage card). A `.gguf`, bf16 or fp16 `--unet` is
+refused by name (the placement runs the int8 `.safetensors` file).
+
+**The door and the plan.** `animateNeed` (`internal/pipeline/mediaadmit.go`) leases the box's two non-display cards as a set under `animategen_placement: multicard`
+(`animateMulticardNeed`; the same queueing, refusals and `gpu_lease_unavailable` answers as the video and image doors), passes `--placement multicard` (and `--resident-gb` when
+`animategen_resident_gb` is set) to the runner, and drops the single-card pin and dynamic VRAM from the launch. It refuses, before any lease is spent, a `.gguf`, bf16 or fp16 `animategen_unet`.
+`hostneed.ForAnimateCardOnly` declares **0 host GiB** when each leased card fits its stage (the figures above, with the default clip's activations: the sizing reads no geometry, and the runner
+refuses a share its own geometry cannot hold); anything else is the ordinary estimate, which counts the whole set. The placement is a node's own config. A fleet node that takes an `animate`
+job runs it through the same door with its own `animategen_*` keys, so a node of two 16 GB cards serves the lane and nothing on the wire changes: the recipe row it advertises
+(`wan-animate2`, `mediacap/lane_rows.go`) is its name and files with either placement. `doctor` derives the `animate_character` route from the files and, under multicard, the four MultiGPU classes
+(`UNETLoaderDisTorch2MultiGPU`, `CLIPLoaderMultiGPU`, `CLIPVisionLoaderMultiGPU`, `VAELoaderMultiGPU`). Not done: a hand run under `gpu reserve --devices <a>,<b>` is sized by the class default
+(the animate runner is not one of the helpers `hostneed.ParseRenderCall` reads), so it passes `--ram 0` itself, as the video placement's hand runs do.
 
 **Card-only image and edit: `imagegen_placement` / `gen_edit_placement` = `multicard`** (`render/multicard-image.mjs`,
 `render/multicard-recipes.json`, `internal/pipeline/mediamulticard.go`; [ADR 0039](../architecture/decisions/0039-a-held-card-is-a-place-in-line.md),
@@ -2445,7 +2494,7 @@ verdict now covers what the script loads (`internal/mediacap/routeneeds.go`):
 - **Model files** of the route's graph: every file the config binds AND the builder default it falls
   back to when a key is unset (`videogen_text_encoder` unset still loads umt5; the Wan VAE has no key
   at all). The video set follows `videogen_family` exactly as the runner dispatches (Wan 2.2, `ltx25`,
-  `h3`, `hunyuan`); animate checks the four WAN-Animate-2 files, music the four ACE-Step files. Files
+  `h3`, `hunyuan`); animate checks the four WAN-Animate-2 files (and, under `animategen_placement: multicard`, the four MultiGPU classes its graph names), music the four ACE-Step files. Files
   only a per-request mode loads (Wan `fast=true`'s lightx2v LoRAs) are named when absent, never a
   failure. `TestRouteNeedsMirrorTheRenderBuilders` parses the `render/wf-*.mjs` defaults so the two
   cannot drift.
@@ -2609,6 +2658,11 @@ recorded as known offenders with their reason rather than silently skipped — a
   (`--wan-placement multicard`): the card table with the board power (`queryCardsRanked`), the choice and refusal of the two cards and their roles (`resolveWanCards`, `chooseRoles`, `WAN_COMPUTE_UUID`), the ComfyUI launch
   it needs (`multicardLaunch`, `multicardEnv`), the device check (`checkComfyDevices`) and `planMulticard`, the one call the
   runner makes before anything starts; [`render/wan-multicard.test.mjs`](../../render/wan-multicard.test.mjs) pins it
+- [`render/comfy-animate.mjs`](../../render/comfy-animate.mjs) /
+  [`render/wf-wan-animate2.mjs`](../../render/wf-wan-animate2.mjs) — the WAN-Animate-2 runner and graph; `--placement multicard` (and `--print-graph`) is the card-only variant, planned by
+  `planMulticard({ isAnimateGraph: true })` in `wan-multicard.mjs` (`checkAnimateResident`, the `ANIMATE_*` sizes); the door side is `animateNeed` in
+  [`internal/pipeline/mediaadmit.go`](../../internal/pipeline/mediaadmit.go) and `animateMulticardNeed` in [`internal/pipeline/mediamulticard.go`](../../internal/pipeline/mediamulticard.go), the host RAM it declares is
+  `hostneed.ForAnimateCardOnly`
 - [`render/comfyui-ext/extra_model_paths.yaml`](../../render/comfyui-ext/extra_model_paths.yaml) and
   [`render/comfyui-ext/nodes/offload_multicard/__init__.py`](../../render/comfyui-ext/nodes/offload_multicard/__init__.py) — the
   harness-owned ComfyUI code the placement loads through `--extra-model-paths-config`: the read-only safetensors reader, the lazy DiT build,
