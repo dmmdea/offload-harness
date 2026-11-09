@@ -57,6 +57,13 @@ const (
 	// `forecast_model`. It runs on the GPU, so it is a media seat and not an accelerator
 	// (ADR 0024). It is not a chat model and answers only POST /v1/forecast.
 	KindForecast = "forecast"
+	// KindUpsampler is the flux3-klein prompt upsampler: a plain text llama-server seat (BFL's PUP as a
+	// GGUF) the image family calls BEFORE its render lease when it names the seat in imagegen_upsampler.
+	// It writes NO config binding (BindingKey answers ""): the key is a per-family one, so a flat
+	// write would change every other image family, and a tier that seeds no flux3-klein family has no
+	// overlay to put it in. The family names the seat; the tier only guarantees the seat exists under
+	// the one name every node's recipe digest agrees on.
+	KindUpsampler = "upsampler"
 )
 
 // The task names a seat may declare in Seat.Tasks. The first three are the fleet vision
@@ -405,7 +412,7 @@ func Validate(seats []Seat, tier string) error {
 				"unconstrained_seats and text_tasks, so the seat would not be the bind-free extra it claims to be")
 		}
 		switch s.Kind {
-		case KindVision, KindSTT, KindOCR, KindRKLLM, KindForecast:
+		case KindVision, KindSTT, KindOCR, KindRKLLM, KindForecast, KindUpsampler:
 			if k := s.BindingKey(); k != "" {
 				writers[k] = append(writers[k], where)
 			}
@@ -415,9 +422,9 @@ func Validate(seats []Seat, tier string) error {
 				writers["text_tasks"] = append(writers["text_tasks"], where)
 			}
 		case "":
-			problems = append(problems, where+": no kind (want "+KindVision+", "+KindSTT+", "+KindOCR+", "+KindRKLLM+" or "+KindForecast+")")
+			problems = append(problems, where+": no kind (want "+KindVision+", "+KindSTT+", "+KindOCR+", "+KindRKLLM+", "+KindForecast+" or "+KindUpsampler+")")
 		default:
-			problems = append(problems, fmt.Sprintf("%s: unknown kind %q (want %s, %s, %s, %s or %s)", where, s.Kind, KindVision, KindSTT, KindOCR, KindRKLLM, KindForecast))
+			problems = append(problems, fmt.Sprintf("%s: unknown kind %q (want %s, %s, %s, %s, %s or %s)", where, s.Kind, KindVision, KindSTT, KindOCR, KindRKLLM, KindForecast, KindUpsampler))
 		}
 		switch {
 		case s.Name == "":
@@ -509,6 +516,20 @@ func Validate(seats []Seat, tier string) error {
 			if s.ChatTemplate != "" || s.Temp != nil {
 				problems = append(problems, where+": chat_template/temp are llama-server flags (vision/ocr only) and are "+
 					"ignored on an stt seat")
+			}
+		}
+		if s.Kind == KindUpsampler {
+			// A plain text llama-server seat with a fixed flag shape (-ngl 999, flash attention on,
+			// --jinja, --reasoning off, --cache-ram 0): every vision, whisper, sampler and split knob is
+			// one the renderer would silently drop.
+			if s.CtxSize <= 0 {
+				problems = append(problems, where+": an upsampler seat needs its own ctx_size — the caption window is not the chat tier's")
+			}
+			if s.MMProj != "" || s.VADModel != "" || s.Bin != "" || s.LibDir != "" || s.ImageMaxTokens > 0 || s.ImageMinTokens > 0 ||
+				s.NoContextShift || s.NoMmprojOffload || s.NoFlashAttn || s.ChatTemplate != "" || s.Temp != nil ||
+				s.TopP != nil || s.TopK != nil || s.SplitMode != "" || s.TensorSplit != "" || s.Extra {
+				problems = append(problems, where+": mmproj/vad_model/bin/lib_dir/image_*_tokens/no_*/chat_template/temp/top_p/top_k/"+
+					"split_mode/tensor_split/extra are ignored on an upsampler seat (a text-only llama-server seat that binds no route)")
 			}
 		}
 		if s.Kind == KindForecast {
@@ -625,7 +646,7 @@ func checkTasks(s Seat, where string) []string {
 		}
 	}
 	switch {
-	case s.Kind == KindSTT || s.Kind == KindOCR || s.Kind == KindForecast:
+	case s.Kind == KindSTT || s.Kind == KindOCR || s.Kind == KindForecast || s.Kind == KindUpsampler:
 		problems = append(problems, where+": tasks are read only for a vision or rkllm seat and are ignored on a "+s.Kind+" seat")
 	case hasText && s.Kind != KindRKLLM:
 		problems = append(problems, where+": a text task (classify/extract) is served by the node's own cascade on an unconstrained seat, "+

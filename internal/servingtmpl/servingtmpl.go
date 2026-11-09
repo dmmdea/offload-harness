@@ -1138,7 +1138,7 @@ func matrixJoin(role string) string {
 // be alphanumeric and 1-8 characters (verified against the binary: a key of
 // "embeddinggemma" is rejected outright), so the seat's own name — which carries
 // hyphens and is usually longer — can never be the key. The kind picks the base id
-// (vis, stt, ocr, rkllm, fc), which keeps it stable. It is not unique on its own: a tier
+// (vis, stt, ocr, rkllm, fc, pup), which keeps it stable. It is not unique on its own: a tier
 // may declare more than one seat of a kind, because a registered extra (Seat.Extra)
 // and a text-only rkllm seat write no binding key. The first seat of a kind takes the
 // base id; the second and later ones, in declaration order, take the numbered ids
@@ -1146,7 +1146,7 @@ func matrixJoin(role string) string {
 func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
 	base := map[string]string{
 		mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr", mediaseat.KindRKLLM: "rkllm",
-		mediaseat.KindForecast: "fc",
+		mediaseat.KindForecast: "fc", mediaseat.KindUpsampler: "pup",
 	}[s.Kind]
 	if base == "" {
 		return "", fmt.Errorf("seat %q: no matrix var id for kind %q", s.Name, s.Kind)
@@ -1350,6 +1350,31 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 		fmt.Fprintf(&b, "    cmd: >-\n"+
 			"      %s forecast-serve --forecast-dir %s --model __MODELS__/%s --port ${PORT}\n",
 			p.seatExpand(s.Bin), p.seatExpand(tokenHome+"/forecast"), s.Model)
+	case mediaseat.KindUpsampler:
+		// The flux3-klein prompt upsampler: a plain text llama-server seat (no projector, no KV-type
+		// pin, no parallel cap) in the shape the reference hand-wired seat runs. --cache-ram 0 is
+		// deliberate: the harness unloads the seat before the render, and a prompt cache would hold
+		// host RAM the render's lease admission then counts as resident.
+		var envEntries []string
+		if env != "" {
+			envEntries = append(envEntries, fmt.Sprintf("%q", env))
+		}
+		envEntries = append(envEntries, flowItems(s.GPUEnv)...) // per-seat device pin
+		if len(envEntries) > 0 {
+			fmt.Fprintf(&b, "    env: [%s]\n", strings.Join(envEntries, ", "))
+		}
+		exe := ""
+		if p.GOOS == "windows" {
+			exe = ".exe"
+		}
+		gpuFlags, fa := " -ngl 999", " --flash-attn on"
+		if p.Backend == "cpu" {
+			gpuFlags, fa = "", ""
+		}
+		fmt.Fprintf(&b, "    cmd: >-\n"+
+			"      __LLAMA_BIN__/llama-server%s --model __MODELS__/%s\n"+
+			"     %s -c %d%s --jinja --reasoning off --cache-ram 0\n"+
+			"      --port ${PORT} --host 127.0.0.1\n", exe, s.Model, gpuFlags, s.CtxSize, fa)
 	case mediaseat.KindRKLLM:
 		// No env line and no GPU flags, on purpose: `env` is the llama.cpp loader path and
 		// -ngl/--flash-attn are llama-server flags, while the NPU is neither — the launcher

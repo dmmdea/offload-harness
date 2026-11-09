@@ -292,11 +292,14 @@ func renderTier(name string, p Profile, reports []string) string {
 				bind = "`" + k + "`"
 			} else if s.Extra {
 				bind = "— (extra)"
+			} else if s.Kind == mediaseat.KindUpsampler {
+				bind = "— (named by the family)"
 			}
 			fmt.Fprintf(&b, "| `%s` | %s | %s | `%s` | %s |\n", s.Name, s.Kind, bind, s.Model, s.Residency)
 		}
 		b.WriteString(extraSeatNote(p.MediaSeats))
 		b.WriteString(rkllmSeatNote(p.MediaSeats))
+		b.WriteString(upsamplerSeatNote(p.MediaSeats))
 		b.WriteString("\nA seat still needs its weights on the box — model downloads stay out-of-band, as with\nevery seed.\n\n")
 	}
 	if len(mediaMidHigh) > 0 {
@@ -431,6 +434,26 @@ func extraSeatNote(seats []mediaseat.Seat) string {
 		"template's flag shape (--reasoning off, -ngl 99, the tier's KV type), which can differ from a hand-wired entry\n" +
 		"for the same model, so measure the rendered form before treating it as that entry's replacement:\n\n" +
 		strings.Join(lines, "\n") + "\n"
+}
+
+// upsamplerSeatNote explains the `upsampler` row of a tier's seat table: a text llama-server seat
+// the flux3-klein image family calls before its render lease, bound to no config key because the
+// key that names it is a per-family one. "" when the tier declares none, so every other tier's
+// page is unchanged.
+func upsamplerSeatNote(seats []mediaseat.Seat) string {
+	var names []string
+	for _, s := range seats {
+		if s.Kind == mediaseat.KindUpsampler {
+			names = append(names, "`"+s.Name+"`")
+		}
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	return "\nAn `upsampler` seat (" + strings.Join(names, ", ") + ") is the FLUX 3 Klein prompt upsampler: a text-only llama-server seat the\n" +
+		"flux3-klein image family calls before its render lease. It writes no config key: the key that names it is the\n" +
+		"family's own `imagegen_upsampler`, and a flat key would change every other image family. Name it on the family (for\n" +
+		"example `imagegen_families.flux3-klein.imagegen_upsampler`) once that family is bound on this node.\n"
 }
 
 // rkllmSeatNote describes the seats a table row cannot: an rkllm seat is not a llama.cpp

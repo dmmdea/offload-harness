@@ -662,7 +662,14 @@ the model without one) and steps and cfg set together (the family is in the pair
 
 or, faster, names a llama-swap seat serving BFL's PUP as a GGUF (`"imagegen_upsampler": "flux3-pup"`): the harness writes
 the caption before the lease at llama.cpp speed (86 tok/s on a 5070 Ti, against 4-8 tok/s in-graph) and unloads the
-seat before the render. An sd.cpp node has only the model form:
+seat before the render. A two-card or larger CUDA tier (`ampere-2x16`, `blackwell-2x16`, `blackwell-3x16`) declares that
+seat itself: its `media_seats` carry an `upsampler` seat named `flux3-pup` (alias `flux3-klein-pup`, weights
+`flux3-klein-pup/flux-3-image-klein-pup-Q6_K.gguf` under the models dir, swappable, pinned to the tier's utility card, the one that holds its whisper seat), so
+`install render` writes it into the stamped llama-swap config and an audit says MATCH instead of HAND-EDITED. The seat writes
+no config key: it binds nothing, because `imagegen_upsampler` is a flux3-klein family key and a flat write would change every
+other image family. Name it yourself on the family (`"imagegen_upsampler": "flux3-pup"`, as above) once you bind that family; every
+node uses the same name because the family's recipe digest includes it. The weights are still fetched by hand (the installer
+downloads no model); `install render` warns that the file is missing until they are on the box. An sd.cpp node has only the model form:
 
 ```json
 "imagegen_families": {

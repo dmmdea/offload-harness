@@ -1454,7 +1454,12 @@ full scene captions, and a short prompt sent as typed gives generic output. `ima
   file. On an 8 GB Ampere card with dynamic VRAM off (`<node-a>`, the `ampere-8` seed) it is the other way round: the
   in-graph file's generation buffer took the card ("0.00 MB loaded, 6411.81 MB offloaded, 5869.94 MB buffer reserved"),
   its weights streamed for every token and a render took 304-488 s; the tier's `qwen3.5-9b-agent` seat in the model form
-  took it to 64-78 s, the same image quality with plainer captions. BFL's card allows any LLM given their prompt; the sd.cpp nodes use `qwen3.5-4b-agent`.
+  took it to 64-78 s, the same image quality with plainer captions. BFL's card allows any LLM given their prompt; the sd.cpp nodes use `qwen3.5-4b-agent`. The PUP seat is tier-declared on
+  the two-card and larger CUDA tiers (`ampere-2x16`, `blackwell-2x16`, `blackwell-3x16`): a `media_seats` entry of kind `upsampler` named
+  `flux3-pup` renders a plain llama-server entry (`-ngl 999 -c 8192 --flash-attn on --jinja --reasoning off --cache-ram 0`, ttl 300) into the
+  stamped llama-swap config, as a swappable alternative of the tier's heavy seats, pinned to the utility card (the one that holds the whisper seat). It writes no config key (the family names it,
+  a flat key would change every other family), and the weights stay out of band. Every node calls it `flux3-pup`, because the recipe digest
+  includes the model name.
 - `refine: false` (per request) renders the prompt verbatim on both engines: a caller that sends a finished caption.
 
 **ComfyUI graph:** `UNETLoader` + `CLIPLoader(type "flux3")` + `VAELoader` → `CLIPTextEncode` ×2 →

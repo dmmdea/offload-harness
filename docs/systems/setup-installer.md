@@ -926,6 +926,10 @@ live-captured log lines, cosine). Go-side config round-tripping is covered by
   whisper-server seat (with its own loader path, since it is a separate binary) into the models map,
   and writes `stt_model` at the same time. A tier that declares no seat leaves `stt_model` empty and
   the route defers — it does not name an upstream nothing serves.
+- Expecting the `upsampler` seat to bind a key. The flux3-klein prompt upsampler (`flux3-pup`, declared by `ampere-2x16`,
+  `blackwell-2x16` and `blackwell-3x16`) renders a plain llama-server entry and writes NO config key: `imagegen_upsampler`
+  is a per-family key, so the operator names the seat on the flux3-klein family and a seat-less node behaves the same as a seat-full
+  one for every other family. Its weights are fetched by hand like every seed.
 - Expecting a second vision seat to bind. A tier may declare at most one seat per bound key, but a seat
   flagged `extra: true` (a registered extra, e.g. blackwell-8's `lfm2.5-vl` and `gemma4-e4b-vision`) writes no
   key and is not counted: it renders into llama-swap with its aliases and answers to them, and nothing
