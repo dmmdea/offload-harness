@@ -141,6 +141,15 @@ every lane (`rosterprobe.Narrow`, `NarrowConfig`, `NarrowLane`; `mediaremote` us
 When the transcript carries word times the result also has `words_reliable` and `words_drift_sec`: `false` means the
 first word of some segment starts 0.5 s or more away from its segment (issue #169, see
 [offload-pipeline.md](offload-pipeline.md)), so audio should not be cut at word boundaries from those times.
+`words: true` adds the per-word timing of the transcript: `words[]` (`word`, `start` and `end` in seconds, `offsets{from,to}` in
+milliseconds under the keys whisper.cpp's JSON uses, `probability`; the first 2000 inline with `words_truncated` set when cut,
+`num_words` counts all of them) and `words_path`, the whole list as a whisper.cpp `-oj` file (`transcription[].offsets`, the text with
+its leading space, one word to an entry). The decode is deterministic: temperature 0 and no temperature fallback, so the same audio
+gives the same words on a rerun (a call without `words` keeps the seat's usual fallback). `vad: "on" | "off"` switches the
+voice-activity detector for that one call (a per-request `vad` field the whisper server reads over its own `--vad` flag): `off`
+decodes the whole file, silence included, the way `whisper-cli` does; `on` needs `stt_vad`. Neither exists on the `hq` tier when it is
+served over the OpenAI protocol (one full-span segment, no word times, no VAD switch) or under `engine: "npu"`: asked there, the call
+defers by name. The same two keys travel to a fleet node on the stt upload door. CLI: `local-offload transcribe --words --vad off`.
 `select` still projects the result here, whichever box ran it. `engine: "npu"` is this box's own Hailo sidecar and never
 travels: a route named there other than `local` is refused (an omitted route is not a request to travel). The CLI
 `local-offload transcribe --route` carries the same vocabulary and defaults to `local`. See

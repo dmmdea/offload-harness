@@ -2221,6 +2221,13 @@ state (`task_type "video-gen" is bound on this node but its route is not ready: 
 every delegator re-places; a task that is not bound at all keeps the `400 unsupported task_type`. A delegator reads `media_routes` through
 `delegate.NodeView` (`MediaRoutes`, `RouteState`); an absent field is unknown, never "no route".
 
+**Voice sampling knobs (`voice_sampling_honoured`).** A node that serves `audio-gen` publishes `voice_sampling_honoured: true`: its
+audio-gen payload decoder reads `cfg_weight`, `exaggeration`, `temperature`, `repetition_penalty`, `min_p` and `top_p` (numbers, each
+validated against its range; absent means the engine default) and hands them to the voice script. The payload is not decoded strictly,
+so a node that predates the knobs would drop them silently; a delegator that has to send one therefore requires the key (`need.voiceSampling`
+in `internal/mediaremote`), and a node without it is a named miss in the placement, never a render with different sampling. Additive; absent
+on an older node.
+
 **Image recipes and `refine` (ADR 0082).** A node that serves `image-gen` also publishes `refine_honoured: true` (its image-gen
 task decodes `refine` the way the MCP handler does, so an explicit `refine=false` reaches the pipeline) and `image_recipes[]`:
 one row per ComfyUI image binding, default first then named families in name order, that names a checkpoint

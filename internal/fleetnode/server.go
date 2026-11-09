@@ -1375,6 +1375,10 @@ type healthPayload struct {
 	// skips the node's prompt refiner. A delegator that sends refine=false requires it, so a node that predates it
 	// is a named miss instead of one that silently refines. Additive; published by a node that serves image-gen.
 	RefineHonoured bool `json:"refine_honoured,omitempty"`
+	// VoiceSamplingHonoured says this node's audio-gen task carries the voice sampling knobs (cfg_weight, exaggeration, temperature,
+	// repetition_penalty, min_p, top_p) to the voice worker. A delegator that sends one requires it, so a node that predates it is a
+	// named miss instead of one that renders the take with its own defaults. Additive; published by a node that serves audio-gen.
+	VoiceSamplingHonoured bool `json:"voice_sampling_honoured,omitempty"`
 	// QueueDepth keeps its ORIGINAL meaning and shape across the 0.100.0
 	// backlog/concurrency split: accepted + running, i.e. every job this node
 	// owns that has not reached a terminal state. Every existing reader (the
@@ -1857,6 +1861,12 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 			if isStale {
 				stale.note(staleImageRecipes, age)
 			}
+			break
+		}
+	}
+	for _, t := range tasks {
+		if t == "audio-gen" {
+			payload.VoiceSamplingHonoured = true
 			break
 		}
 	}

@@ -287,12 +287,13 @@ Usage:
   local-offload video-describe <video-path> --question "..." [--json]
   local-offload video-watch <video-path> --question "..." [--window-sec 8] [--fps 1] [--max-frames N] [--frame-width N] [--start S] [--end S] [--no-synthesize] [--json]
                                          watch the WHOLE file window by window (video-describe sees only its first frames)
-  local-offload transcribe <audio-path> [--language es] [--hq] [--json]
+  local-offload transcribe <audio-path> [--language es] [--hq] [--words] [--vad on|off] [--json]
   local-offload forecast  (--series JSON | --series-path FILE.csv|.json) --prediction-length N [--target-columns A,B] [--past-covariate-columns ..] [--known-covariate-columns ..] [--quantiles 0.1,0.5,0.9] [--out-path F] [--route local|auto|remote] [--select a,b] [--compact]
   local-offload ocr       <image-path> [--json]
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N] [--node ID|URL]
+                                         [--cfg-weight F] [--exaggeration F] [--temperature F] [--repetition-penalty F] [--min-p F] [--top-p F]  (voice sampling; unset keeps the engine default)
                                          a bare -- ends the flags, so text that starts with a dash is kept: generate-audio out.wav -- "--- Intro ---"
                                          (the same for generate-video, animate-character and the verbs that take one file, text or prompt)
   local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]

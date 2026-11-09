@@ -291,6 +291,16 @@ by a build older than the check, or a node older than the check), never `true`. 
 and an asker of different builds keep working. The `.segments.json` file stays a bare segment array and carries no
 verdict: a reader that takes only the file path out of the payload has to read `words_reliable` from the payload.
 
+**Word timing and VAD per request.** `words` and `vad` are request parameters (`internal/pipeline/pipeline_audio_words.go`).
+`words=true` flattens the segments' `words[]` into `words` (`sttclient.FlatWords`), writes `<stem>.words.json` in whisper.cpp's `-oj`
+shape and decodes with `temperature_inc=0` besides the usual `temperature=0`: whisper-server's own default steps the temperature up
+by 0.2 when a segment trips the entropy or log-probability check, which is the one place a rerun of the same audio can differ, so a
+words call has no such retry (a call without `words` keeps it). A transcript that comes back with no word times is a defer, not an empty
+list. `vad=off` sends `vad=false` on that one request (a seat started with `--vad` honours the per-request field); `vad=on` needs
+`stt_vad`. The hq tier over the OpenAI protocol has neither word times nor a VAD switch, so both are refused there with a `contract`
+defer. Both are part of the result-cache key (they are request params), and a call that sets either gets its own `.srt` / `.txt` /
+`.segments.json` stem so it never overwrites the files of the usual decode. `words_reliable` still applies to the words returned.
+
 ### The forecast lane (Timestral-209M)
 
 `offload_forecast` forecasts time series on Mistral AI's Timestral-209M: zero-shot, probabilistic, 21 quantile levels

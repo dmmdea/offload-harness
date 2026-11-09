@@ -201,6 +201,9 @@ func (n need) releaseRefuses(v delegate.NodeView) string {
 // refuses says why node v cannot take this call by the two rules above, "" when it can. It reads only what health
 // publishes: gpu_devices[] (nil is unknown, and unknown is never enough).
 func (n need) refuses(v delegate.NodeView) string {
+	if why := n.voiceSamplingRefuses(v); why != "" {
+		return why
+	}
 	if n.vram != nil {
 		return largestCardRefuses(v, n.vram.gb, n.vram.why)
 	}

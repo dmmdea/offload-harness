@@ -122,11 +122,13 @@ type need struct {
 	graph *graphNeed
 	// vram is the caller's min_vram_gb on a video or animation call (graph.go); nil when the call asked for none.
 	vram *vramNeed
+	// voiceSampling: an audio call that names a voice sampling knob (cfg_weight ... top_p), which only a node that carries it may be given.
+	voiceSampling bool
 }
 
 func needOf(req core.Request) need {
 	_, steps := posInt(req.Params, "steps")
-	return need{refineOff: refineOff(req.Params), steps: steps, graph: graphNeedOf(req), vram: vramNeedOf(req)}
+	return need{refineOff: refineOff(req.Params), steps: steps, graph: graphNeedOf(req), vram: vramNeedOf(req), voiceSampling: req.Task == core.TaskGenerateAudio && core.VoiceSamplingGiven(req.Params)}
 }
 
 // nodeMatch is the verdict of one node's published recipes against this machine's.
