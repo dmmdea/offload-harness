@@ -21,7 +21,8 @@ package main
 //     same words, inside the same --wait AND the hold bound (gpu_hostram_hold_max_sec, default 600 s, --ram-hold-max,
 //     0 = none), and the figure becomes the lease's declared need in the same critical section that admitted it;
 //     when the bound passes first the lease is released (the seat warmed back as for any release), nothing runs, and
-//     the reserve fails with one line (errHostRAMHoldBound);
+//     the reserve fails with one line (errHostRAMHoldBound), except that the wrapper form, while --wait has time left,
+//     goes back to the queue instead of failing (gpu_hostram_requeue.go);
 //  5. the command starts.
 //
 // Every other lease is untouched and compares in the grant: a lease without --unload-seat (--drain alone frees no host
@@ -245,7 +246,11 @@ func awaitHostRAMBounded(ctx context.Context, await func(gpulease.AwaitHostRAMOp
 			}
 			bound := ""
 			if !boundAt.IsZero() {
-				bound = fmt.Sprintf("; if the host still lacks the room then, the lease is released and nothing runs under it (hold bound %s: --ram-hold-max, config gpu_hostram_hold_max_sec)", roundHold(h.max))
+				then := "the lease is released and nothing runs under it"
+				if !h.failClosed {
+					then = "the cards are released and this reserve queues again while --wait lasts"
+				}
+				bound = fmt.Sprintf("; if the host still lacks the room then, %s (hold bound %s: --ram-hold-max, config gpu_hostram_hold_max_sec)", then, roundHold(h.max))
 			}
 			fmt.Fprintf(out, "gpu reserve: %s — the drain and the unload are done and the cards are held%s; waiting up to %s for the host to have the room%s\n",
 				e.Error(), freed, time.Until(effective).Round(time.Second), bound)

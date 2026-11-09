@@ -47,7 +47,7 @@ func holdBoundReserve(t *testing.T, loaded, keepFloor bool, extra ...string) (cf
 // THE INCIDENT. The unload frees too little (70 stay committed), so the host never has the room; the bound passes. The lease
 // is released and the seat warmed back, the command never ran, and the line names everything the operator needs.
 func TestTheHoldBoundReleasesTheCardsAndRunsNothingWhenTheHostNeverHasTheRoom(t *testing.T) {
-	_, m, f, epochFile, args := holdBoundReserve(t, true, true, "--ram-hold-max", "200ms")
+	_, m, f, epochFile, args := holdBoundReserve(t, true, true, "--ram-hold-max", "200ms", "--wait", "0") // --wait 0: fail fast, so the bound ends the reserve (with --wait left it re-queues)
 	start := time.Now()
 	var err error
 	stderr := captureStderr(t, func() { err = runGPUReserve(args) })
@@ -103,7 +103,7 @@ func TestTheHoldBoundReleasesTheCardsAndRunsNothingWhenTheHostNeverHasTheRoom(t 
 
 // The bound comes from the config key when no flag is given.
 func TestTheHoldBoundComesFromTheConfigKey(t *testing.T) {
-	cfgPath, m, _, epochFile, args := holdBoundReserve(t, true, false)
+	cfgPath, m, _, epochFile, args := holdBoundReserve(t, true, true, "--wait", "0") // --wait 0 (with the drain floor kept): fail fast, so the bound ends the reserve
 	setConfigKey(t, cfgPath, "gpu_hostram_hold_max_sec", 1)
 	start := time.Now()
 	var err error
