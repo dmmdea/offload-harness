@@ -101,6 +101,9 @@ func runImageBatchVerb(fs *flag.FlagSet, a imageBatchArgs) error {
 	if a.dryRun {
 		return printBatchDryRun(cfg, a, jobs)
 	}
+	if err := refuseBrokenConfig("generate-image --batch", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err

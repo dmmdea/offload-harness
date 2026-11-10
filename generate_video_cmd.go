@@ -335,7 +335,10 @@ func runGenerateVideo(args []string) error {
 		return err
 	}
 
-	cfg := loadCfg(c.fs)
+	cfg, src := loadCfgWithSource(c.fs)
+	if err := refuseBrokenConfig("generate-video", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
@@ -371,7 +374,10 @@ func runAnimateCharacter(args []string) error {
 		return err
 	}
 
-	cfg := loadCfg(c.fs)
+	cfg, src := loadCfgWithSource(c.fs)
+	if err := refuseBrokenConfig("animate-character", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
