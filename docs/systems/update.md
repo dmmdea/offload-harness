@@ -103,6 +103,12 @@ the real path of the generation's executable, which is what the OS reports for a
 
 ## Algorithm
 
+0. **Owner check** (Linux, macOS). A run that changes something (not `--dry-run`, not `--resolve-only`) as root
+   against an install root that another user owns is refused before the lock: exit 2, nothing written, and the message
+   names the command to use instead, `sudo -u <owner> local-offload update ...`. A root run would leave a root-owned
+   generation, link and `installed.json` in that root and would run the downloaded build as root. A root-owned root, a
+   missing root and Windows are not refused. For `llama-swap`, where root is wanted only for the service restart, set
+   `update.restart.llama-swap.command` to `sudo systemctl restart llama-swap.service` and run the verb unprivileged.
 1. **Lock** `<home>/update.lock`. Busy: exit 0, say so. A lock whose process is gone, or older than three hours (a
    pid reused after a crash or a reboot), is taken over.
 2. **Resolve** from the publisher (GitHub releases, `per_page=10`, paged; npm `latest`) with `If-None-Match` from
