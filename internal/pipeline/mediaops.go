@@ -22,12 +22,14 @@ import (
 func (p *Pipeline) editConfig() mediaops.EditConfig {
 	timeout := time.Duration(p.cfg.EditTimeoutSec) * time.Second
 	worker := ""
-	if p.cfg.ImageGenScript != "" {
-		// render/edit_image.py lives beside the render scripts this machine already
-		// resolved (imagegen_script is an absolute path on configured boxes).
-		worker = filepath.Join(filepath.Dir(p.cfg.ImageGenScript), "edit_image.py")
+	// imagegen_script may be absolute or the relative default (render/comfy-generate.mjs). A relative path is resolved
+	// against the executable's directory, as every other runner does, never against the caller's working directory.
+	if script, err := gpugen.ResolveScript(p.cfg.ImageGenScript); p.cfg.ImageGenScript != "" && err == nil {
+		// render/edit_image.py lives beside the render scripts this machine already resolved.
+		worker = filepath.Join(filepath.Dir(script), "edit_image.py")
 	} else if script, err := gpugen.ResolveScript(filepath.Join("render", "edit_image.py")); err == nil {
-		// An sd.cpp tier binds no imagegen_script, and the route read CONFIGURED while every call deferred.
+		// An sd.cpp tier binds no imagegen_script (or one that does not resolve), and the route read CONFIGURED while
+		// every call deferred.
 		worker = script
 	}
 	return mediaops.EditConfig{
