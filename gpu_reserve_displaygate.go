@@ -37,6 +37,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
 // displayGatePollEvery is how often a named request waiting for the display card reads it again. The operator's idle
@@ -49,11 +50,16 @@ type acquireFn func(opts gpulease.Options, wait time.Duration) (*gpulease.Lease,
 
 // acquireNamedCards is acquire, with the display card's rule put first to a named set that includes that card. build
 // reads the allocator's input with the request's declared footprint (buildAllocInput); prefix leads every line this
-// writes ("gpu reserve", "gpu hold").
-func acquireNamedCards(opts gpulease.Options, wait time.Duration, build func() (gpulease.AllocInput, error),
+// writes ("gpu reserve", "gpu hold"). known is a card table the caller already read (the plan's), or nil: a set it
+// shows clear of the display card (and of a reading that could not say which card that is) goes straight to the line
+// with no further read, so a reserve that never names the screen's card costs nothing more than it did.
+func acquireNamedCards(opts gpulease.Options, wait time.Duration, known []gpuprobe.Card, build func() (gpulease.AllocInput, error),
 	acquire acquireFn, out io.Writer, sleep func(time.Duration), now func() time.Time, prefix string) (*gpulease.Lease, error) {
 	if len(opts.Devices) == 0 || build == nil {
 		return acquire(opts, wait) // the whole node, or no way to read the cards: as before
+	}
+	if known != nil && !cardsNameDisplay(known, opts.Devices) {
+		return acquire(opts, wait)
 	}
 	if wait < 0 {
 		wait = 0
@@ -139,8 +145,13 @@ func acquireNamedCards(opts gpulease.Options, wait time.Duration, build func() (
 // namesDisplayCard reports whether ids include the display card, or a card of a reading that could not say which card
 // the monitor is on.
 func namesDisplayCard(in gpulease.AllocInput, ids []string) bool {
+	return cardsNameDisplay(in.Cards, ids)
+}
+
+// cardsNameDisplay is namesDisplayCard over a card table the caller already holds.
+func cardsNameDisplay(cards []gpuprobe.Card, ids []string) bool {
 	want := idSet(ids)
-	for _, c := range in.Cards {
+	for _, c := range cards {
 		if (c.Display || c.DisplayUnknown) && want[c.LeaseID()] {
 			return true
 		}

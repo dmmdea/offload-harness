@@ -721,7 +721,7 @@ func runGPUReserve(args []string) (retErr error) {
 	// lost lease held when it queues again) is put to the display card's rule first (gpu_reserve_displaygate.go): a set
 	// that includes the operator's screen waits for it to open, as an allocated one does.
 	takeNamed := func(o gpulease.Options, w time.Duration) (*gpulease.Lease, error) {
-		return acquireNamedCards(o, w, buildAlloc, func(o gpulease.Options, w time.Duration) (*gpulease.Lease, error) {
+		return acquireNamedCards(o, w, planCards, buildAlloc, func(o gpulease.Options, w time.Duration) (*gpulease.Lease, error) {
 			return acquireQueued(m, gpulease.Class(*class), o, w)
 		}, os.Stderr, sw.Sleep, time.Now, "gpu reserve")
 	}
@@ -1550,7 +1550,7 @@ func runGPUHold(args []string) (retErr error) {
 		// turn that comes after the operator is back is refused like the foreground reserve's (gpu_reserve_displaygate.go).
 		holdCfg := loadCfg(fs)
 		holdFlags := reserveDeviceFlags{vramGiB: *vramFlag, ramGiB: *ramFlag, ramCommitGiB: *ramCommitFlag}
-		lease, err = acquireNamedCards(holdOpts, *wait,
+		lease, err = acquireNamedCards(holdOpts, *wait, nil,
 			func() (gpulease.AllocInput, error) {
 				return buildAllocInput(context.Background(), m, holdCfg, holdFlags)
 			},
