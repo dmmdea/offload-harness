@@ -30,6 +30,7 @@ const ALLOWED = {
   "gpu-lock.mjs": [{ writeFileSync: 1 }, "the lease's unload marker"],
   "igpu-engine.mjs": [{ writeFileSync: 1, renameSync: 1 }, "the owner file; deliverFile, the staged-partial rename the other lanes share"],
   "manifest-satisfy.mjs": [{ writeFileSync: 3, createWriteStream: 1, renameSync: 1 }, "node-pack and model installs (publisher-digest-gated bookkeeping; a download goes to a .part file and is renamed into place only once verified), not a render output"],
+  "sdcpp-upscale.mjs": [{ copyFileSync: 1 }, "stages sd-cli's png into the runner's own partial file when no resample is asked; commitPartial renames it onto out only after the size check"],
   "templates-catalog.mjs": [{ writeFileSync: 1 }, "the dev tool that writes the template catalog"],
 };
 
