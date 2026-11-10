@@ -1214,6 +1214,8 @@ function Invoke-ModelInstall {
 #   kv_k, kv_v  [string]  --cache-type-k / -v (kept symmetric = kv_type)
 #   flash_attn  [string]  on|off
 #   agent_ctx   [int]     the agent's -ctx-tokens (matches ctx)
+#   agent_ctx_profile [int] the profile's own agent_ctx_tokens (ctx_size when it names none); a ctx override moves
+#                         agent_ctx only when this equals ctx
 #   backend     [string]  cuda|vulkan|cpu|dual-cuda (which template to render)
 #   dual        [bool]    dual-gpu two-resident render
 #   include_26b [bool]    keep the 26B model+group-member AFTER the ram gate
@@ -1239,7 +1241,7 @@ function Resolve-ProfileParams {
     $d = $defaults[$B]
     if (-not $d) { $d = $defaults['cuda'] }
     return @{ known = $false; ctx = $d.ctx; kv_k = $d.kv; kv_v = $d.kv; flash_attn = $d.fa;
-      agent_ctx = [int]$d.ctx; backend = $B; dual = $false; resident_tier = $d.resident;
+      agent_ctx = [int]$d.ctx; agent_ctx_profile = [int]$d.ctx; backend = $B; dual = $false; resident_tier = $d.resident;
       include_26b = [bool]$d.inc; moe_26b = $d.moe; moe_mode = 'template'; notes = 'fallback: backend defaults (unknown profile)' }
   }
   if (-not $ProfileId) { return (New-Fallback -B $Backend) }
@@ -1311,6 +1313,7 @@ function Resolve-ProfileParams {
     kv_v          = $p.kv_type
     flash_attn    = $p.flash_attn
     agent_ctx     = [int]$p.ctx_size
+    agent_ctx_profile = $(if ($p.PSObject.Properties['agent_ctx_tokens']) { [int]$p.agent_ctx_tokens } else { [int]$p.ctx_size })
     backend       = $p.backend
     dual          = [bool]$p.dual_resident
     resident_tier = $p.resident_tier
@@ -2138,6 +2141,206 @@ function Get-ConfigEnvShadow {
     "To keep it on purpose, set OFFLOAD_ALLOW_CONFIG_ENV=1 for this run.")
 }
 
+# Per-box swap ports. The stack's llama-swap listens on 127.0.0.1:OFFLOAD_SWAP_PORT (default 11436) and hands its
+# children ports from OFFLOAD_SWAP_START_PORT up (unset: llama-swap's own 5800). A box whose WSL runs in MIRRORED
+# networking shares the Windows loopback port space with it, and a server inside WSL holds a port there without
+# showing in the Windows listener table (Get-NetTCPConnection, netstat). Only a connect probe sees it.
+function Get-SwapPortDefault { return 11436 }
+
+# One setting's raw env text -> Set (a value), Clear (the word `default`) or neither (unset). PURE.
+# Kinds: port (1024..65535), startport (1024..64000), ctx (8192 16384 32768 65536 131072), kv (f16 q8_0).
+function ConvertTo-BoxOverride {
+  param([string]$Name, [string]$Kind, [string]$Raw)
+  $r = [pscustomobject]@{ Name = $Name; Set = $false; Clear = $false; Value = $null; Error = '' }
+  if ($null -eq $Raw -or -not $Raw.Trim()) { return $r }
+  $t = $Raw.Trim()
+  if ($t -ieq 'default') { $r.Clear = $true; return $r }
+  switch ($Kind) {
+    'kv' {
+      if ($t -in @('f16', 'q8_0')) { $r.Set = $true; $r.Value = $t }
+      else { $r.Error = "$Name='$t' is not one of f16, q8_0 (or 'default' to clear it)" }
+    }
+    default {
+      $lo = 1024; $hi = 65535; $want = '1024..65535'
+      if ($Kind -eq 'startport') { $hi = 64000; $want = '1024..64000' }
+      if ($t -notmatch '^\d{1,6}$') { $r.Error = "$Name='$t' is not a whole number ($want, or 'default' to clear it)"; return $r }
+      $n = [int]$t
+      if ($Kind -eq 'ctx') {
+        if ($n -notin @(8192, 16384, 32768, 65536, 131072)) { $r.Error = "$Name=$n is not one of 8192, 16384, 32768, 65536, 131072 (or 'default' to clear it)"; return $r }
+      } elseif ($n -lt $lo -or $n -gt $hi) { $r.Error = "$Name=$n is out of range ($want, or 'default' to clear it)"; return $r }
+      $r.Set = $true; $r.Value = $n
+    }
+  }
+  return $r
+}
+
+# The per-box choices an earlier install left in the stamp of its llama-swap.yaml (`# basis: {json}`): the listen port,
+# the start port, and the ctx / kv overrides `install render` records under render.ctx_override / render.kv_override.
+# A re-run with the variables unset reads them back, so it renders what the last run chose and the audit keeps saying
+# MATCH. No file, no stamp or unreadable json = nothing stored. PURE (reads one file).
+function Get-StoredBoxOverrides {
+  param([string]$YamlPath)
+  $o = @{ swap_port = 0; start_port = 0; ctx_override = 0; kv_override = '' }
+  if (-not $YamlPath -or -not (Test-Path -LiteralPath $YamlPath)) { return $o }
+  try {
+    $line = @(Get-Content -LiteralPath $YamlPath -TotalCount 16 -Encoding UTF8 | Where-Object { $_ -match '^# basis: ' }) | Select-Object -First 1
+    if (-not $line) { return $o }
+    $b = ([string]$line).Substring('# basis: '.Length) | ConvertFrom-Json
+    if ($b.params -and $b.params.PSObject.Properties['listen'] -and "$($b.params.listen)" -match ':(\d{2,5})$') { $o.swap_port = [int]$Matches[1] }
+    if ($b.params -and $b.params.PSObject.Properties['start_port']) { $o.start_port = [int]$b.params.start_port }
+    if ($b.render -and $b.render.PSObject.Properties['ctx_override']) { $o.ctx_override = [int]$b.render.ctx_override }
+    if ($b.render -and $b.render.PSObject.Properties['kv_override']) { $o.kv_override = "$($b.render.kv_override)" }
+  } catch { }
+  return $o
+}
+
+# The four settings resolved: the variable if set, `default` clears, else what the previous install stored, else the
+# default. EnvText is a hashtable of the raw variable text. Errors lists every bad value. PURE.
+function Resolve-BoxOverrides {
+  param([hashtable]$EnvText, [hashtable]$Stored)
+  $errs = New-Object System.Collections.ArrayList
+  $out = @{ SwapPort = (Get-SwapPortDefault); SwapPortExplicit = $false; StartPort = 0; CtxOverride = 0; KvOverride = ''; Source = @{}; Errors = @() }
+  $defs = @(
+    @{ Var = 'OFFLOAD_SWAP_PORT'; Kind = 'port'; Key = 'SwapPort'; Stored = [int]$Stored.swap_port; Default = (Get-SwapPortDefault); Name = 'swap_port' },
+    @{ Var = 'OFFLOAD_SWAP_START_PORT'; Kind = 'startport'; Key = 'StartPort'; Stored = [int]$Stored.start_port; Default = 0; Name = 'start_port' },
+    @{ Var = 'OFFLOAD_CTX_SIZE'; Kind = 'ctx'; Key = 'CtxOverride'; Stored = [int]$Stored.ctx_override; Default = 0; Name = 'ctx_size' },
+    @{ Var = 'OFFLOAD_KV_TYPE'; Kind = 'kv'; Key = 'KvOverride'; Stored = "$($Stored.kv_override)"; Default = ''; Name = 'kv_type' }
+  )
+  foreach ($d in $defs) {
+    $c = ConvertTo-BoxOverride -Name $d.Var -Kind $d.Kind -Raw "$($EnvText[$d.Var])"
+    if ($c.Error) { [void]$errs.Add($c.Error); continue }
+    if ($c.Set) { $out[$d.Key] = $c.Value; $out.Source[$d.Name] = "$($d.Var)" }
+    elseif ($c.Clear) { $out[$d.Key] = $d.Default; $out.Source[$d.Name] = "$($d.Var)=default" }
+    elseif ($d.Stored) { $out[$d.Key] = $d.Stored; $out.Source[$d.Name] = 'kept from the previous install' }
+    if ($d.Var -eq 'OFFLOAD_SWAP_PORT' -and ($c.Set -or $c.Clear)) { $out.SwapPortExplicit = $true }
+  }
+  $out.Errors = @($errs)
+  return [pscustomobject]$out
+}
+
+# One OVERRIDE line per active override, so a reader of the log sees why the render differs from the profile. PURE.
+function Get-BoxOverrideLines {
+  param($Ov, [string]$ProfileCtx, [string]$ProfileKv)
+  $lines = New-Object System.Collections.ArrayList
+  if ($Ov.CtxOverride -gt 0) { [void]$lines.Add("OVERRIDE ctx_size=$($Ov.CtxOverride) (profile $ProfileCtx; $($Ov.Source['ctx_size']))") }
+  if ($Ov.KvOverride) { [void]$lines.Add("OVERRIDE kv_type=$($Ov.KvOverride) (profile $ProfileKv; $($Ov.Source['kv_type']))") }
+  if ($Ov.SwapPort -ne (Get-SwapPortDefault)) { [void]$lines.Add("OVERRIDE swap_port=$($Ov.SwapPort) (default $(Get-SwapPortDefault); $($Ov.Source['swap_port']))") }
+  if ($Ov.StartPort -gt 0) { [void]$lines.Add("OVERRIDE start_port=$($Ov.StartPort) (llama-swap default 5800; $($Ov.Source['start_port']))") }
+  return @($lines)
+}
+
+# The ctx / kv override applied to the resolved profile params. The agent window follows the ctx override only when the
+# profile's own agent_ctx_tokens equals its ctx_size: a tier whose agent window comes from another seat is left alone. PURE.
+function Set-ProfileParamOverrides {
+  param($Pp, $Ov)
+  if ($Ov.CtxOverride -gt 0) {
+    $follows = ([int]$Pp.agent_ctx_profile -eq [int]$Pp.ctx)
+    $Pp.ctx = "$($Ov.CtxOverride)"
+    if ($follows) { $Pp.agent_ctx = [int]$Ov.CtxOverride }
+  }
+  if ($Ov.KvOverride) { $Pp.kv_k = $Ov.KvOverride; $Pp.kv_v = $Ov.KvOverride }
+}
+
+# TCP connect to 127.0.0.1:Port with a short timeout. True when something accepts. Sees a server inside WSL (mirrored
+# networking) that the Windows listener table does not show.
+function Test-LoopbackAnswers {
+  param([int]$Port, [int]$TimeoutMs = 250)
+  $c = New-Object System.Net.Sockets.TcpClient
+  try {
+    $iar = $c.BeginConnect('127.0.0.1', $Port, $null, $null)
+    if (-not $iar.AsyncWaitHandle.WaitOne($TimeoutMs)) { return $false }
+    try { $c.EndConnect($iar) } catch { return $false }
+    return [bool]$c.Connected
+  } catch { return $false } finally { $c.Close() }
+}
+
+# The image paths of the processes that own a Windows listener on the port. Empty when none shows, and when the listener
+# table is not readable.
+function Get-ListenerImagePaths {
+  param([int]$Port)
+  $paths = New-Object System.Collections.ArrayList
+  # Every socket with this LOCAL port belongs to the server that holds it (or to a connection it accepted), so the state
+  # is not filtered on the query: some stacks report a listener with an empty state. Process 0 is a closing socket.
+  try { $conns = @(Get-NetTCPConnection -LocalPort $Port -ErrorAction Stop | Where-Object { -not $_.State -or "$($_.State)" -eq 'Listen' }) } catch { return @() }
+  foreach ($owner in @($conns | ForEach-Object { $_.OwningProcess } | Where-Object { $_ -gt 0 } | Sort-Object -Unique)) {
+    $img = $null
+    try { $img = (Get-Process -Id $owner -ErrorAction Stop).Path } catch { }
+    if (-not $img) { try { $img = (Get-CimInstance Win32_Process -Filter "ProcessId=$owner" -ErrorAction Stop).ExecutablePath } catch { } }
+    if ($img) { [void]$paths.Add([string]$img) }
+  }
+  return @($paths)
+}
+
+# Is Path inside Root? Case-insensitive, whole path segments. PURE.
+function Test-PathUnder {
+  param([string]$Path, [string]$Root)
+  if (-not $Path -or -not $Root) { return $false }
+  $r = $Root.TrimEnd('\', '/') + '\'
+  return $Path.Replace('/', '\').StartsWith($r, [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# True when the port answers and no process whose image is under the install home owns a Windows listener on it: someone
+# else holds it. A port that answers because THIS stack's llama-swap (or one of its children) runs is not taken.
+function Test-PortTakenByOther {
+  param([int]$Port, [string]$InstallHome, [int]$TimeoutMs = 250)
+  if (-not (Test-LoopbackAnswers -Port $Port -TimeoutMs $TimeoutMs)) { return $false }
+  foreach ($img in (Get-ListenerImagePaths -Port $Port)) { if (Test-PathUnder -Path $img -Root $InstallHome) { return $false } }
+  return $true
+}
+
+function Get-PortTakenSentence {
+  param([int]$Port)
+  return ("127.0.0.1:$Port already answers and is not this stack's. On WSL mirrored networking a server inside WSL holds the Windows loopback port without showing in the Windows listener table (Get-NetTCPConnection, netstat); only a connect probe sees it.")
+}
+
+# The early stop: the swap port is held by someone else. Returns '' when it is free or this stack's own.
+function Get-SwapPortPreflight {
+  param([int]$Port, [string]$InstallHome)
+  if (-not (Test-PortTakenByOther -Port $Port -InstallHome $InstallHome)) { return '' }
+  return ((Get-PortTakenSentence -Port $Port) + " Set OFFLOAD_SWAP_PORT (and OFFLOAD_SWAP_START_PORT) to free ports and run the installer again.")
+}
+
+# How many models of a rendered llama-swap.yaml take a ${PORT}: a model whose cmd names it, or uses a macro that does.
+# llama-swap hands them consecutive ports from the start port, so this is the length of the children span. PURE.
+function Get-ModelPortCount {
+  param([string]$YamlPath)
+  $lines = @(Get-Content -LiteralPath $YamlPath -Encoding UTF8)
+  $section = ''; $macros = @{}; $models = @{}; $cur = $null
+  foreach ($l in $lines) {
+    if ($l -match '^\s*#') { continue }
+    if ($l -match '^(\S[^:#]*):') { $section = $Matches[1]; $cur = $null; continue }
+    if ($section -eq 'macros' -or $section -eq 'models') {
+      if ($l -match '^  ("?[^\s:"]+"?):') { $cur = $Matches[1]; if ($section -eq 'macros') { $macros[$cur] = '' } else { $models[$cur] = '' }; continue }
+      if ($cur) { if ($section -eq 'macros') { $macros[$cur] += "`n$l" } else { $models[$cur] += "`n$l" } }
+    }
+  }
+  $portMacros = @($macros.Keys | Where-Object { $macros[$_] -match '\$\{PORT\}' })
+  $n = 0
+  foreach ($k in $models.Keys) {
+    $body = $models[$k]
+    $hit = $body -match '\$\{PORT\}'
+    foreach ($m in $portMacros) { if (-not $hit -and $body.Contains('${' + $m + '}')) { $hit = $true } }
+    if ($hit) { $n++ }
+  }
+  return $n
+}
+
+# The children span's check: each port from StartPort (else 5800) for Count ports. A port that answers with no listener
+# of this install is a seat that can never load. Returns the taken ports.
+function Get-TakenChildPorts {
+  param([int]$StartPort, [int]$Count, [string]$InstallHome)
+  $first = $StartPort; if ($first -le 0) { $first = 5800 }
+  $taken = New-Object System.Collections.ArrayList
+  for ($p = $first; $p -lt ($first + $Count); $p++) { if (Test-PortTakenByOther -Port $p -InstallHome $InstallHome) { [void]$taken.Add($p) } }
+  return @($taken)
+}
+
+# Rewrite the harness config's endpoint to this stack's swap port (a text edit, so the file keeps its shape). PURE.
+function Set-ConfigTextEndpointPort {
+  param([string]$Text, [int]$Port)
+  return [regex]::Replace($Text, '("endpoint"\s*:\s*")http://127\.0\.0\.1:\d+(")', ('${1}http://127.0.0.1:' + $Port + '${2}'))
+}
+
 # The source rows behind a tier's declared seats (first-class rule 3: no hand-placed weights). A seat names its files
 # by the local names the rendered yaml expects, so the row is found by dest. Several tiers save a different projector
 # as mmproj-F16.gguf, so a row that is one seat's projector says so with forModel. A file with no row is returned, not
@@ -2265,6 +2468,21 @@ if (-not $RenderOnly) {
   }
   if (@($toolCaches.Keys).Count -gt 0) { Write-Host "      tool caches and temp: $(Join-Path $HOME_DIR 'cache')" -ForegroundColor DarkGray }
 }
+# The per-box choices (swap port, start port, ctx, kv): the variables, else what the previous install left in the stamp of
+# its llama-swap.yaml, else the defaults. Resolved before anything is downloaded, so a bad value stops here.
+$boxOv = Resolve-BoxOverrides -EnvText @{
+    OFFLOAD_SWAP_PORT = $env:OFFLOAD_SWAP_PORT; OFFLOAD_SWAP_START_PORT = $env:OFFLOAD_SWAP_START_PORT
+    OFFLOAD_CTX_SIZE = $env:OFFLOAD_CTX_SIZE; OFFLOAD_KV_TYPE = $env:OFFLOAD_KV_TYPE
+  } -Stored (Get-StoredBoxOverrides -YamlPath (Join-Path $HOME_DIR 'llama-swap.yaml'))
+if ($boxOv.Errors.Count -gt 0) { throw ("bad setting: " + ($boxOv.Errors -join '; ')) }
+$swapPort = [int]$boxOv.SwapPort
+$swapListen = "127.0.0.1:$swapPort"
+$swapBaseUrl = "http://127.0.0.1:$swapPort"
+# Stop before any download when the swap port is held by someone else (see Get-SwapPortPreflight).
+if (-not $RenderOnly) {
+  $swapPreflight = Get-SwapPortPreflight -Port $swapPort -InstallHome $HOME_DIR
+  if ($swapPreflight) { throw $swapPreflight }
+}
 # HAILO_HOME must ALWAYS be non-empty (Task 5 review finding: an empty value expands
 # __HAILO_HOME__ to "" and silently produces the plausible-wrong "/hailo-http.cmd").
 # Set here, beside HOME_DIR, so EVERY path that can reach the seed merge has it.
@@ -2367,6 +2585,8 @@ Write-Host "OK    backend = $backend | profile = $(if ($profileId) { $profileId 
 # is pure (profiles.json + the detect verdict); Step 6 reuses $pp as is.
 $profilesJson = Join-Path (Join-Path $scriptDir 'templates') 'profiles.json'
 $pp = Resolve-ProfileParams -ProfileId $profileId -RamTier $ramTier -BigRam $bigRam -ProfilesJsonPath $profilesJson -Backend $backend
+foreach ($ovLine in (Get-BoxOverrideLines -Ov $boxOv -ProfileCtx "$($pp.ctx)" -ProfileKv "$($pp.kv_k)")) { Write-Host $ovLine -ForegroundColor Yellow }
+Set-ProfileParamOverrides -Pp $pp -Ov $boxOv
 
 # -RenderOnly skips all artifact acquisition (Steps 2-5): it renders the config
 # from the templates + profiles.json only. Test-Go126 is defined outside the guard
@@ -2788,10 +3008,14 @@ function Get-RenderArgs {
     '--llama-bin', $llamaDir.Replace('\', '/'),
     '--models', $modelDir.Replace('\', '/'),
     '--home', $HOME_DIR.Replace('\', '/'),
-    '--listen', '127.0.0.1:11436',
+    '--listen', $swapListen,
     '--out', $yamlDest,
     '--root', (Split-Path -Parent $scriptDir)
   )
+  # The per-box overrides, only when one is in force: none set renders what the profile says.
+  if ($boxOv.StartPort -gt 0) { $renderArgs += @('--start-port', "$($boxOv.StartPort)") }
+  if ($boxOv.CtxOverride -gt 0) { $renderArgs += @('--ctx-size', "$($boxOv.CtxOverride)") }
+  if ($boxOv.KvOverride) { $renderArgs += @('--kv-type', $boxOv.KvOverride) }
   # The embeddinggemma2 entry's own build (OFFLOAD_EG2_LLAMA_BIN), only when the operator set one.
   if ($eg2Bin) { $renderArgs += @('--llama-bin-eg2', $eg2Bin) }
   # An unknown/absent profile still renders: the binary carries the same off-matrix
@@ -2919,6 +3143,21 @@ if ($RenderOnly) {
   exit 0
 }
 
+# The children span: llama-swap hands each model that takes a ${PORT} the next port from the start port (else 5800).
+# A port in that span that answers with no listener of this install is held by someone else (on WSL mirrored networking
+# a server inside WSL does that without showing in the Windows listener table), and the seat on it can never load.
+$childCount = Get-ModelPortCount -YamlPath $yamlDest
+$childFirst = 5800; if ($boxOv.StartPort -gt 0) { $childFirst = [int]$boxOv.StartPort }
+$childTaken = @(Get-TakenChildPorts -StartPort $childFirst -Count $childCount -InstallHome $HOME_DIR)
+if ($childTaken.Count -gt 0) {
+  foreach ($tp in $childTaken) {
+    Write-Host "FAIL  child port $tp (span $childFirst..$($childFirst + $childCount - 1), $childCount models): $(Get-PortTakenSentence -Port $tp) The seat on it can never load. Set OFFLOAD_SWAP_START_PORT to the start of a free span of $childCount ports and run the installer again." -ForegroundColor Red
+  }
+  try { Stop-Transcript | Out-Null } catch {}
+  exit 1
+}
+Write-Host "OK    child ports $childFirst..$($childFirst + $childCount - 1) ($childCount models): none held by another program" -ForegroundColor Green
+
 # ---------------------------------------------------------------------------
 # Step 7: build Go harness + agent into $harnessDir
 # ---------------------------------------------------------------------------
@@ -2931,8 +3170,14 @@ function Get-RepoCommit {
   $prevEapGit = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try {
-    $sha = "$(& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1)".Trim()
-    if ($LASTEXITCODE -eq 0 -and $sha -match '^[0-9a-f]{40,64}$') { return $sha }
+    # Drain the output, read the exit code, THEN take the first line. Piping into Select-Object -First 1 stops the
+    # pipeline early, which under Windows PowerShell 5.1 can kill git and leave $LASTEXITCODE at -1 with the sha
+    # already printed (a race: the same lines gave 0 on another box), so no .built-from was written and every
+    # re-run rebuilt.
+    $out = @(& git -C $repoRoot rev-parse HEAD 2>$null)
+    $rc = $LASTEXITCODE
+    $sha = if ($out.Count) { "$($out[0])".Trim() } else { '' }
+    if ($rc -eq 0 -and $sha -match '^[0-9a-f]{40,64}$') { return $sha }
   } catch { } finally { $ErrorActionPreference = $prevEapGit }
   return ''
 }
@@ -3074,6 +3319,7 @@ if ($env:OFFLOAD_WITH_FORECAST -eq '1') {
 $cfgDir  = Join-Path $HOME '.local-offload'
 $cfgDest = Join-Path $cfgDir 'config.json'
 $script:dataHomeChoice = $null   # set by Step 8 when it writes a fresh config; recorded in installed.json
+$cfgExisted = Test-Path $cfgDest
 Step 'harness config -> ~/.local-offload/config.json' `
   { Test-Path $cfgDest } `
   {
@@ -3263,9 +3509,29 @@ Step 'harness config -> ~/.local-offload/config.json' `
     $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ home = $dh.Home })
     $script:dataHomeChoice = $dh
     Write-Host "      data home: $($dh.Home) ($($dh.Because))" -ForegroundColor DarkGray
+    # A fresh config points at THIS stack's swap (the template names the default port).
+    $cfgText = Set-ConfigTextEndpointPort -Text $cfgText -Port $swapPort
     $noBomCfg = New-Object System.Text.UTF8Encoding($false)
     [System.IO.File]::WriteAllText($cfgDest, $cfgText, $noBomCfg)
   }
+
+# An EXISTING config is kept as it is, with two exceptions that follow a setting given on purpose: its endpoint follows
+# OFFLOAD_SWAP_PORT (when it names a loopback port), and its agent_ctx_tokens follows OFFLOAD_CTX_SIZE when the agent
+# window followed the ctx. Each is said in one line.
+if ($cfgExisted -and (Test-Path $cfgDest)) {
+  $noBomCfg2 = New-Object System.Text.UTF8Encoding($false)
+  $cfgNow = [System.IO.File]::ReadAllText($cfgDest)
+  $cfgNew = $cfgNow
+  if ($boxOv.SwapPortExplicit -and $cfgNow -match '"endpoint"\s*:\s*"http://127\.0\.0\.1:(\d+)"' -and [int]$Matches[1] -ne $swapPort) {
+    $cfgNew = Set-ConfigTextEndpointPort -Text $cfgNew -Port $swapPort
+    Write-Host "      $cfgDest : endpoint http://127.0.0.1:$($Matches[1]) -> $swapBaseUrl (OFFLOAD_SWAP_PORT is set)" -ForegroundColor Yellow
+  }
+  if ($boxOv.Source['ctx_size'] -like 'OFFLOAD_CTX_SIZE*' -and $boxOv.CtxOverride -gt 0 -and [int]$agentCtxTokens -eq [int]$boxOv.CtxOverride -and $cfgNew -match '"agent_ctx_tokens"\s*:\s*(\d+)' -and [int]$Matches[1] -ne [int]$agentCtxTokens) {
+    $cfgNew = [regex]::Replace($cfgNew, '("agent_ctx_tokens"\s*:\s*)\d+', ('${1}' + [int]$agentCtxTokens))
+    Write-Host "      $cfgDest : agent_ctx_tokens $($Matches[1]) -> $agentCtxTokens (OFFLOAD_CTX_SIZE is set)" -ForegroundColor Yellow
+  }
+  if ($cfgNew -ne $cfgNow) { [System.IO.File]::WriteAllText($cfgDest, $cfgNew, $noBomCfg2) }
+}
 
 # An EXISTING config is never rewritten, so a box whose config names no home is told
 # how to move its data off the OS drive (the copy is `local-offload data migrate`).
@@ -3388,7 +3654,7 @@ if ($forecastBound -and -not (Test-Path -LiteralPath $forecastVenv)) {
 }
 Write-Host ""
 Write-Host "Start the stack with:" -ForegroundColor White
-Write-Host "  & '$swapExe' --config '$yamlDest' --listen 127.0.0.1:11436" -ForegroundColor White
+Write-Host "  & '$swapExe' --config '$yamlDest' --listen $swapListen" -ForegroundColor White
 Write-Host ""
 # Deliverable 4: the agent's compaction budget must match the served window. The
 # profile's agent_ctx_tokens is the -ctx-tokens value; the served --ctx-size in
@@ -3412,10 +3678,10 @@ if ($profileId -and (Test-Path $profilesJson)) {
   }
 }
 if ($derivedSeat) {
-  Write-Host "  & '$agentExe' `"<objective>`" -base http://127.0.0.1:11436 -ctx-tokens $agentCtxTokens" -ForegroundColor White
+  Write-Host "  & '$agentExe' `"<objective>`" -base $swapBaseUrl -ctx-tokens $agentCtxTokens" -ForegroundColor White
   Write-Host "  (the config already binds the agent seat: agent_model='$derivedSeat' derived from resident_tier; -model is an override, not required)" -ForegroundColor White
 } else {
-  Write-Host "  & '$agentExe' `"<objective>`" -base http://127.0.0.1:11436 -model $($pp.resident_tier) -ctx-tokens $agentCtxTokens" -ForegroundColor White
+  Write-Host "  & '$agentExe' `"<objective>`" -base $swapBaseUrl -model $($pp.resident_tier) -ctx-tokens $agentCtxTokens" -ForegroundColor White
 }
 Write-Host ""
 $verdict = @{ installed = $true; backend = $backend; render_backend = $tplBackend; profile = $profileId;

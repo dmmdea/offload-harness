@@ -444,9 +444,10 @@ newer build takes this chapter's canaries again.
    `receipt.canaries.*` against the table below. When the media tier is installed, the **media
    leg** (`receipt.media`: reference render + gpu-vae trial) also runs — see the Media tier
    section.
-4. Apply the **authorized promotions** (next section) to the rendered `llama-swap.yaml` +
-   `installed.json`'s `agent_ctx_tokens`, restart llama-swap, re-run `selftest.ps1` once to
-   confirm the promoted config still passes.
+4. Apply the **authorized promotions** (next section) by setting `OFFLOAD_KV_TYPE` / `OFFLOAD_CTX_SIZE`
+   and re-running `install.ps1` (`-RenderOnly` is enough), restart llama-swap, re-run `selftest.ps1`
+   once to confirm the promoted config still passes. Do not hand-edit the rendered `llama-swap.yaml`
+   for these: the next re-render drops the edit and `audit-yaml --against-render` stops matching.
 5. **Send the receipt back** (last section). Until the receipts land upstream, every number in
    this tier stays PROJECTED.
 
@@ -470,12 +471,17 @@ a dedicated vision canary exists and passes — this is a named non-binding, lik
 
 | Decision | Gate | Action |
 |---|---|---|
-| KV `f16 → q8_0` | `fa_q8kv.status:"pass"` (which requires `fa_confirmed:"on"`) | Set `--cache-type-k/v q8_0` in the rendered yaml (K and V stay symmetric). |
-| ctx `16384 → 32768` | `ctx_sweep.max_ok_ctx ≥ 32768` | Raise `--ctx-size` and `installed.json`→`agent_ctx_tokens` to 32768 together. |
+| KV `f16 → q8_0` | `fa_q8kv.status:"pass"` (which requires `fa_confirmed:"on"`) | Set `OFFLOAD_KV_TYPE=q8_0` and run `install.ps1` again (`-RenderOnly` is enough). K and V stay symmetric. |
+| ctx `16384 → 32768` | `ctx_sweep.max_ok_ctx ≥ 32768` | Set `OFFLOAD_CTX_SIZE=32768` and run `install.ps1` again. `--ctx-size` and `installed.json`→`agent_ctx_tokens` move together. |
 | Vulkan device index | `--list-devices` shows the wrong device 0 | Edit `GGML_VK_VISIBLE_DEVICES` to the correct index. |
 
 Apply promotions ONE at a time, re-running selftest after the set — a combined failure you cannot
-attribute is worse than a slower verified config.
+attribute is worse than a slower verified config. After the render, restart llama-swap and run
+`selftest.ps1` once. The installer prints one `OVERRIDE ...` line per promotion in force, remembers
+it in the stamp of `llama-swap.yaml` (a re-run with the variable unset keeps it), and
+`audit-yaml --against-render` says MATCH. `OFFLOAD_CTX_SIZE=default` / `OFFLOAD_KV_TYPE=default`
+takes a promotion back. A hand edit of the rendered file is dropped by the next re-render and
+makes the audit stop matching.
 
 **HARD FORBIDDEN (no canary overrides these):** updating/downgrading the GPU driver or Adrenalin
 (**always** STOP-and-ask); ROCm/HIP or WSL2 for inference (dead ends — Hard rules); substituting
@@ -508,7 +514,7 @@ else any file drop the human prefers):
 
 Maintainer side: those numbers replace this chapter's "expect" ranges and `profiles.json`'s
 PROJECTED notes with MEASURED values (same-PR docs), and this box joins the harness's
-real-hardware validation set — seven tiers as of 2026-09-07 (`blackwell-2x16`, `blackwell-16`, `blackwell-8`, `ampere-8`, `ampere-6`, `ampere-16`, `amd-gcn`).
+real-hardware validation set — seven tiers as of 2026-09-07 (`blackwell-2x16`, `blackwell-16`, `blackwell-8`, `ampere-8`, `ampere-6`, `ampere-16`, `amd-gcn`), and `amd-rdna3` since 2026-11-10: its first receipt, from a 780M box with 64 GB, is `docs/tiers/reports/amd-rdna3-node-j.md`, and the tier notes in `profiles.json` carry its numbers.
 
 ### Media tier (J2) — image generation via stable-diffusion.cpp
 
@@ -661,6 +667,9 @@ Two validated **non-bindings** (as load-bearing as the bindings):
 #   $env:OFFLOAD_DATA_HOME='D:\local-offload'           # where a FRESH config's `home` points (data: cache, ledger, media);
 #                                                       #   default: a directory on the data drive `install volumes --data` picks
 #   $env:OFFLOAD_ALLOW_OS_DATA='1'                      # keep that data on the OS drive on purpose (one-disk machine)
+#   $env:OFFLOAD_SWAP_PORT='11437'                      # the loopback port the stack's llama-swap listens on (default 11436)
+#   $env:OFFLOAD_SWAP_START_PORT='5900'                 # first port llama-swap gives its models (default: unset, llama-swap's 5800)
+#   $env:OFFLOAD_CTX_SIZE='32768'; $env:OFFLOAD_KV_TYPE='q8_0'   # per-box promotions (AMD RDNA3 chapter); 'default' clears one
 pwsh -NoProfile -File setup\install.ps1
 ```
 
@@ -668,6 +677,21 @@ pwsh -NoProfile -File setup\install.ps1
 `OK` / `SKIP`. **Duration:** the model pull dominates — expect **several minutes to ~30 min** on a
 normal link for the full family (~21 GB), less for `OFFLOAD_WITH_FAMILY=0`. Progress lines print at
 ≤60 s intervals (bytes/percent), so a quiet gap is not a hang.
+
+**A box where 11436 or 5800 and up are taken.** The stack's llama-swap listens on `127.0.0.1:11436`
+and gives each model a port from 5800 up (one per model, so a tier of seven models uses 5800..5806).
+On a box whose WSL runs in **mirrored networking**, WSL and Windows share the loopback port space,
+and a server inside WSL holds its port **without showing in the Windows listener table**
+(`Get-NetTCPConnection`, `netstat` list nothing for it). Only a connect probe sees it:
+`(New-Object Net.Sockets.TcpClient).Connect('127.0.0.1', 11436)` succeeds when something answers.
+The installer probes `OFFLOAD_SWAP_PORT` before it downloads anything and stops when the port
+answers and no process under the install home owns a listener on it. After the render it probes
+the model ports the same way and prints `FAIL` for a taken one. Set `OFFLOAD_SWAP_PORT` (and
+`OFFLOAD_SWAP_START_PORT`, a span as long as the number of models) to free ports and run it again.
+The choice is recorded in the stamp of `llama-swap.yaml`, so a re-run with the variables unset keeps
+it; `default` clears one. A new `config.json` gets `endpoint = http://127.0.0.1:<port>`; an existing
+one is changed only when `OFFLOAD_SWAP_PORT` is set. Do not add `startPort:` to the yaml by hand: the
+next re-render drops it and the audit stops matching.
 
 **Profile-driven serving (H2).** Install reads the detected `profile` + `ram_tier` and renders the
 llama-swap yaml from `setup/templates/profiles.json` — substituting the profile's `--ctx-size`, KV
