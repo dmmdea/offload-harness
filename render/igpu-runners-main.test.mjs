@@ -415,8 +415,11 @@ function audioSetup(sb, kind, spec, extra = []) {
   const pid = join(sb.work, "engine.pid");
   const bin = makeStub(sb.work, "audiocpp_cli", { record: rec, pidFile: pid, ...spec });
   const out = join(sb.work, "deep", `${kind}.wav`);
+  // audio.cpp's Chatterbox has no voice of its own and the runner refuses a voice call with no speaker reference,
+  // so a voice case that names none gets one here.
+  const ref = kind === "voice" && !extra.includes("--clone") ? ["--clone", sb.f("ref.wav")] : [];
   const args = ["--kind", kind, "--bin", bin, "--family", kind === "music" ? "ace_step" : "chatterbox", "--model", sb.f("model.gguf"),
-    "--backend", "vulkan", "--device", "0", "--seed", "5", "--no-lock", ...extra, "--", out, "--- Intro --- warm lo-fi bed"];
+    "--backend", "vulkan", "--device", "0", "--seed", "5", "--no-lock", ...ref, ...extra, "--", out, "--- Intro --- warm lo-fi bed"];
   return { rec, pid, out, args };
 }
 
