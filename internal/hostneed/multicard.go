@@ -20,7 +20,8 @@ import (
 //     "basis" in render/multicard-recipes.json (a test pins the two together). The 0 is a Linux figure: the read-only map's pages are clean file
 //     pages MemAvailable counts. A Windows host keeps the map's pages in the working set while a plain loader copies the DiT to the card and charges
 //     the card allocations to commit, so a row measured there carries WindowsHostGiB/WindowsCommitGiB and declares them, stated, on Windows
-//     (Facts.GOOS); a row that carries none declares 0 on every host, as before. A measured figure covers the load its run made: a flux3-klein
+//     (Facts.GOOS); a row that carries none declares 0 on a Linux host only, and on Windows it keeps the ordinary estimate until a run there has measured it (the
+//     0 was measured on Linux, and a krea2 card-only render held 27 GiB resident and 31 GiB of commit on a Windows host). A measured figure covers the load its run made: a flux3-klein
 //     call whose graph loads the prompt-upsampler FILE (the row was measured with the prompt upsampled outside ComfyUI) keeps the ordinary estimate.
 //  2. the row's per-card peaks fitting the TWO cards the lease holds, each less the runner's --reserve-vram: the larger card computes, the other stores
 //     (within 1 percent of one size the runner gives the role to the faster board instead, render/wan-multicard.mjs chooseRoles, so the card that
@@ -98,6 +99,13 @@ func estimatePlaced(route Route, family string, files []mediacap.ModelFile, f Fa
 		// commit limit like a stated --ram-commit, and the working set against physical RAM.
 		return Need{GiB: row.WindowsHostGiB, CommitGiB: row.WindowsCommitGiB, CommitStated: true, Source: SourceMeasured,
 			Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard, recipe %s) on 2 leased cards (%.1f + %.1f GiB): %s; on a Windows host the read-only map's pages sit in the working set while the DiT is copied to the card and WDDM commits the card allocations, measured at %.1f GiB touched and %.1f GiB of commit (a Linux host declares 0 for the same row)", family, row.ID, small, large, peaks, row.WindowsHostGiB, row.WindowsCommitGiB)}, true
+	}
+	if f.goos() == "windows" {
+		// A measured row with no Windows figures: its 0 is a Linux measurement (the map's pages are clean file pages MemAvailable counts). On Windows the
+		// same render holds real memory (this project's own footprint records: a krea2 card-only render at 27 GiB resident and 31 GiB of commit, a
+		// qwen-image one at 16.6 and 24.5), so declaring 0 there admitted renders the host could not hold. Until a run on Windows has measured the row,
+		// the ordinary estimate stands: it errs toward waiting for the host's room, never toward admitting on a figure from the other system.
+		return note(fmt.Sprintf("the card-only recipe %s fits the two leased cards (%.1f + %.1f GiB): %s; but its 0 was measured on a Linux host and no run has measured what a Windows host holds for it (the read-only map's pages in the working set, the card allocations in commit), so the call declares the set until a run has (render/multicard-recipes.json, hostWindowsGiB)", row.ID, small, large, peaks))
 	}
 	return Need{GiB: 0, Source: n.Source, CardOnly: true, Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard, recipe %s) on 2 leased cards (%.1f + %.1f GiB): %s, measured with the read-only safetensors loader, so no weights stream from RAM", family, row.ID, small, large, peaks)}, true
 }
