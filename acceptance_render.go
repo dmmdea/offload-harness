@@ -631,9 +631,17 @@ func (e *renderEnv) runStep(ctx context.Context, s renderStep) (string, error) {
 }
 
 // runRender runs every wanted group and returns one Check per group.
-// writeNoCacheConfig writes a copy of the config beside the outputs with the result cache off ("" = no cache, cli_support.go)
-// and returns its absolute path. The file may hold the fleet token, so it is private and the caller removes it.
-func writeNoCacheConfig(path, dir string) (string, error) {
+// writeNoCacheConfig writes a copy of the config with the result cache off ("" = no cache, cli_support.go) and returns its
+// absolute path. The copy may hold the fleet token, so it is written BESIDE the config it copies: that folder is the user's
+// own and already holds the same secret, while the outputs folder is the caller's choice (a data drive, a share) and is kept.
+// The caller removes the copy; one a killed run left behind is removed by the next run.
+const (
+	gateConfigPrefix = "gate-config-"
+	// gateConfigStale is longer than any gate run (the per-call bound is 30 minutes and a full gate is a few hours).
+	gateConfigStale = 24 * time.Hour
+)
+
+func writeNoCacheConfig(path string) (string, error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
@@ -647,7 +655,15 @@ func writeNoCacheConfig(path, dir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	p := filepath.Join(dir, "gate-config.json")
+	home := filepath.Dir(path)
+	if old, _ := filepath.Glob(filepath.Join(home, gateConfigPrefix+"*.json")); len(old) > 0 {
+		for _, f := range old {
+			if fi, err := os.Stat(f); err == nil && time.Since(fi.ModTime()) > gateConfigStale {
+				_ = os.Remove(f)
+			}
+		}
+	}
+	p := filepath.Join(home, fmt.Sprintf("%s%d.json", gateConfigPrefix, os.Getpid()))
 	if err := os.WriteFile(p, b, 0o600); err != nil {
 		return "", err
 	}
@@ -670,10 +686,13 @@ func runRender(ctx context.Context, cfg config.Config, src config.Source, routes
 		return []acceptance.Check{{Name: "render outputs", Status: acceptance.Fail, Detail: "cannot write the assets into " + dir + ": " + err.Error()}}
 	}
 	e := newRenderEnv(cfg, src, routes, dir, true)
+	// Builds before this one wrote the no-cache config copy into the outputs folder; one a killed run left there holds the
+	// fleet token where other accounts may read it.
+	_ = os.Remove(filepath.Join(dir, "gate-config.json"))
 	// An answer must come from this run. The gate asks the same questions of the same assets every time, so a second run read
 	// its vision answer from the result cache in 0.2 s and proved nothing about the seat.
 	if src.Loaded() {
-		p, err := writeNoCacheConfig(src.Path, dir)
+		p, err := writeNoCacheConfig(src.Path)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "acceptance: keeping the result cache on: %v\n", err)
 		} else {

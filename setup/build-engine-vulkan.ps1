@@ -128,10 +128,18 @@ if (-not $haveTools) {
     $prevProgress = $ProgressPreference
     $ProgressPreference = 'SilentlyContinue'   # Windows PowerShell's progress bar slows a download by an order of magnitude
     try { Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $sfx -UseBasicParsing -TimeoutSec 1800 } finally { $ProgressPreference = $prevProgress }
-    if ($asset.PSObject.Properties['digest'] -and "$($asset.digest)" -match '^sha256:([0-9a-f]{64})$') {
-      $want = $Matches[1]
-      $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $sfx).Hash.ToLower()
-      if ($got -ne $want) { throw "$sfx hash $got is not the publisher's $want" }
+    # The file is run on the next line, so it is never run unverified: no sha256 in the release API's answer, no run
+    # (the installer treats a failed engine build as a WARN, so the rest of the install goes on).
+    $want = ''
+    if ($asset.PSObject.Properties['digest'] -and "$($asset.digest)" -match '^sha256:([0-9a-f]{64})$') { $want = $Matches[1] }
+    if (-not $want) {
+      Remove-Item -LiteralPath $sfx -Force -ErrorAction SilentlyContinue
+      throw "the MSYS2 release publishes no sha256 for $($asset.name); an unverified installer is not run"
+    }
+    $got = (Get-FileHash -Algorithm SHA256 -LiteralPath $sfx).Hash.ToLower()
+    if ($got -ne $want) {
+      Remove-Item -LiteralPath $sfx -Force -ErrorAction SilentlyContinue
+      throw "$sfx hash $got is not the publisher's $want"
     }
     $rc = Invoke-Native $sfx @('-y', "-o$toolRoot")
     if ($rc -ne 0 -or -not (Test-Path -LiteralPath $bash)) { throw "MSYS2 did not extract (exit $rc)" }
