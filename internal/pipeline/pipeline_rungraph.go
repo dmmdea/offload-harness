@@ -21,6 +21,10 @@ import (
 	"github.com/dmmdea/offload-harness/internal/rungraph"
 )
 
+// runGraphNodeClassRefused is the runner's defer code for a graph that holds a node class that executes caller-supplied code
+// (render/refused-node-classes.json).
+const runGraphNodeClassRefused = "NODE_CLASS_REFUSED"
+
 // runGraphTemplateName is what a template name looks like: the file name of a template of the package, never a path or a flag.
 var runGraphTemplateName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
@@ -148,6 +152,16 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 	// fix #4: a handled failure inside the mjs now arrives as a typed DEFER in the envelope
 	// (the mjs exits 0 so gpugen succeeds). Surface the typed code to the caller.
 	if env.Deferred {
+		// A graph that holds a node class that executes caller-supplied code is the caller's contract refused: the same graph is
+		// refused again on every node and every retry, so it is a contract defer, never a capacity "try later".
+		if env.Code == runGraphNodeClassRefused {
+			meta.LatencyMs = time.Since(start).Milliseconds()
+			reason := env.Code + ": " + env.Detail
+			p.recordDeferClassed(req.Task, meta, len(req.Input), reason, core.DeferClassContract)
+			res := core.Deferf(reason, "", meta)
+			res.DeferClass = core.DeferClassContract
+			return res
+		}
 		return p.deferGen(req, meta, start, len(req.Input), env.Code+": "+env.Detail)
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()

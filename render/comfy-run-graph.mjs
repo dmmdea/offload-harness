@@ -18,6 +18,7 @@ import { satisfyManifest, defaultSatisfyDeps, verifyTofuModels, defaultTofuDeps 
 import { convertForRun, loadTemplate, unlistedModels } from "./template-run.mjs";
 import { leaseBeat } from "./lease-progress.mjs";
 import { preflightGraph } from "./preflight-graph-file.mjs";
+import { checkGraphClasses } from "./refused-node-classes.mjs";
 import { allOutputsByNode } from "./comfy-output.mjs";
 import { readOwner as _readOwner, writeOwner as _writeOwner } from "./comfy-ownership.mjs";
 import { resolveCli, submitGraph, pollOutputs, fetchView, finalizeRun, comfyUnusableClassLine } from "./comfy-submit.mjs";
@@ -75,6 +76,13 @@ export async function runGraphFlow(args, deps) {
     await writeResult(resultPath, out);
     return out;
   };
+
+  // A node class that executes caller-supplied code (render/refused-node-classes.json) is refused by name, before anything is read,
+  // provisioned or started: a refused graph costs no start. (A template run has no graph yet; its converted graph is checked below.)
+  if (graph) {
+    const refused = checkGraphClasses(graph);
+    if (refused) return await writeDefer(refused);
+  }
 
   const m = parseManifest(manifest);
   const wantHash = manifestHash(m);
@@ -138,6 +146,9 @@ export async function runGraphFlow(args, deps) {
         return await writeDefer({ code: "TEMPLATE_CONVERT_REFUSED", ref: converted.refusal.code, detail: converted.refusal.message });
       }
       graph = converted.graph;
+      // The converted graph is the one that will be posted, so it is read against the refused classes too (ComfyUI is up by now, and goes down with the defer).
+      const refusedConverted = checkGraphClasses(graph);
+      if (refusedConverted) return await writeDefer(refusedConverted);
       // The manifest and the graph are two readers' answers (the catalog's and the converter's). A model file the graph loads that the manifest
       // does not name is one the licence gate, the FLUX bar, trust on first use and the host-RAM figure never saw: defer before preflight, and
       // before anything is posted. An embedding the prompt text names (`embedding:<name>`) is such a file too, as models/embeddings/<name>.

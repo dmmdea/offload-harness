@@ -97,6 +97,28 @@ test("preflight missing required input → DEFER PREFLIGHT_MISSING_INPUTS", asyn
   assert.equal(r.ref, "SaveImage");
 });
 
+test("a graph holding a node class that executes caller code is a typed defer NODE_CLASS_REFUSED before any satisfy or start; the same graph without it is not refused", async () => {
+  const evil = { ...graph, "3": { class_type: "ModelTest", inputs: { code: "print('x')" } } };
+  const refusing = baseDeps({
+    satisfy: async () => { throw new Error("satisfy must NOT run for a refused class"); },
+    comfyUp: async () => { throw new Error("ComfyUI must NOT be contacted for a refused class"); },
+    postGraph: async () => { throw new Error("POST must not run for a refused class"); },
+  });
+  const r = await runGraphFlow({ ...ARGS, graph: evil }, refusing);
+  assert.deepEqual([r.deferred, r.code, r.ref], [true, "NODE_CLASS_REFUSED", "ModelTest"]);
+  assert.match(r.detail, /ModelTest.*ComfyUI-Image-Filters.*exec\(\).*remove the ModelTest node/);
+  assert.equal(refusing._calls.ensureComfy, 0);
+  assert.deepEqual(refusing._calls.lastResult, { deferred: true, code: "NODE_CLASS_REFUSED", ref: "ModelTest", detail: r.detail });
+  // A template's converted graph is read too: it is the one that would be posted (ComfyUI is already up then, and is torn down).
+  const viaTemplate = baseDeps({ convert: async () => ({ ok: true, graph: evil }), postGraph: async () => { throw new Error("POST must not run"); } });
+  const t = await runGraphFlow({ template: "tt_open", manifest: {}, outDir: "OUT", resultPath: "R", api: "A", comfyDir: "C" }, viaTemplate);
+  assert.deepEqual([t.deferred, t.code, t.ref], [true, "NODE_CLASS_REFUSED", "ModelTest"]);
+  assert.equal(viaTemplate._calls.freeComfy, 1);
+  // Not a refusal of this check: the plain graph runs, and a case-different spelling is another class.
+  const ok = await runGraphFlow({ ...ARGS, graph: { ...graph, "3": { class_type: "modeltest", inputs: {} } } }, baseDeps());
+  assert.equal(ok.deferred, undefined);
+});
+
 test("a satisfy fail-open warning is surfaced on stderr (SATISFY WARN)", async () => {
   // The warning is the ONLY operator-visible signal that the coherence check was skipped.
   const seen = [];
