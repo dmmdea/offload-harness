@@ -450,6 +450,14 @@ func applyOverlay(base Config, name string, ov FamilyOverlay, kind overlayKind) 
 			f.SetString(ExpandTilde(f.String(), home))
 		}
 	}
+	// The overlay's instance keys are checked as a pair with the base's: an overlay that pins a card
+	// under a named instance (or sets a bad name or port) is refused here, by name, at load and at call
+	// time. A base that is already invalid is reported by its own check, not blamed on the overlay.
+	if base.validateComfyInstance() == nil {
+		if err := cp.validateComfyInstance(); err != nil {
+			return base, "", false, fmt.Errorf("%s: %w", where, err)
+		}
+	}
 	return cp, license, commercial, nil
 }
 

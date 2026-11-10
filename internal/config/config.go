@@ -46,7 +46,8 @@ type PipelineSpec struct {
 	// Load() rejects an entry whose script is empty.
 	Script string `json:"script"`
 	// Workdir is the cwd for the child process (the pipeline repo root).
-	// Required — Load() rejects an entry whose workdir is empty.
+	// Required and absolute — Load() rejects an entry whose workdir is empty or relative
+	// (a leading "~/" is expanded first).
 	Workdir string `json:"workdir"`
 	// TimeoutSec bounds one run of this pipeline. Required, > 0 — this is a
 	// PER-PIPELINE timeout (NOT imagegen's shared 720s default): a scene-swap
@@ -2639,8 +2640,9 @@ func loadArmed(path string) (Config, error) {
 	// one-shot verb proceeds on a config that failed to load, and it must not proceed on an unfiltered one.
 	c = applyCallerScope(c)
 	// The harness's own ComfyUI endpoint is installed for gpugen's post-run /free, on every exit: a
-	// config with comfy_instance never has its runs free the owner's ComfyUI on 8188. Unset or
-	// invalid installs "", which keeps the order gpugen always had.
+	// config with comfy_instance never has its runs free the owner's ComfyUI on 8188, and that holds
+	// when the instance keys are invalid too (the endpoint fails closed, never 8188). Unset installs
+	// "", which keeps the order gpugen always had.
 	gpugen.SetOwnInstanceAPI(c.ComfyInstanceEndpoint())
 	// The policy for an overdue lease is installed before anything below can return early, on every exit
 	// and the error ones included: a one-shot verb proceeds on a config that failed to load, and a value
@@ -2781,6 +2783,10 @@ func load(path string) (Config, error) {
 		return c, err
 	}
 	if err := c.validateComfyInstance(); err != nil {
+		return c, err
+	}
+	// The GPU lease root (state_dir, gpu_lock_path) is machine-wide: a relative one is refused by name.
+	if err := validateLeaseRoots(c); err != nil {
 		return c, err
 	}
 	// The iGPU media engines (CT-49): a cpu or unset backend is refused here, so
@@ -3567,6 +3573,11 @@ func validatePipelines(pipelines map[string]PipelineSpec) error {
 			return fmt.Errorf("pipelines[%q]: script must be an absolute path (got %q)", key, spec.Script)
 		case strings.TrimSpace(spec.Workdir) == "":
 			return fmt.Errorf("pipelines[%q]: workdir is required", key)
+		case !filepath.IsAbs(spec.Workdir):
+			// Workdir feeds cmd.Dir unchanged, so a relative one is resolved against the
+			// serving process's own cwd: a chdir error where that cwd lacks the directory,
+			// the script run in the wrong tree where it happens to hold a same-named one.
+			return fmt.Errorf("pipelines[%q]: workdir must be an absolute path (got %q)", key, spec.Workdir)
 		case spec.TimeoutSec <= 0:
 			return fmt.Errorf("pipelines[%q]: timeout_sec must be > 0", key)
 		case len(spec.Artifacts) == 0:
@@ -3707,13 +3718,17 @@ const defaultComfyPort = 8188
 func (c Config) ComfyInstanceName() string { return strings.TrimSpace(c.ComfyInstance) }
 
 // ComfyInstanceEndpoint is the endpoint of the harness's own ComfyUI instance, or "" when
-// comfy_instance is unset or the instance keys do not pass validateComfyInstance.
+// comfy_instance is unset. It fails closed: a named instance whose keys do not pass
+// validateComfyInstance keeps its name and gets an endpoint that is never port 8188 (the
+// configured port when it is a usable one, else the default), so the caller still carries
+// COMFY_INSTANCE and the runner refuses the bad pair or name instead of driving the owner's
+// default instance. The load error itself is still reported by validateComfyInstance.
 func (c Config) ComfyInstanceEndpoint() string {
-	if c.ComfyInstanceName() == "" || c.validateComfyInstance() != nil {
+	if c.ComfyInstanceName() == "" {
 		return ""
 	}
 	port := c.ComfyInstancePort
-	if port == 0 {
+	if port == 0 || port == defaultComfyPort || port < 1024 || port > 65535 {
 		port = DefaultComfyInstancePort
 	}
 	return "http://127.0.0.1:" + strconv.Itoa(port)
@@ -3729,6 +3744,31 @@ func (c Config) ComfyInstanceEnv() []string {
 		return nil
 	}
 	return []string{"COMFY_INSTANCE=" + c.ComfyInstanceName(), "COMFY_API=" + api}
+}
+
+// validateLeaseRoots refuses a relative state_dir or gpu_lock_path by name, after tilde expansion.
+// The lease resolver (internal/gpulease) makes a relative root absolute against the caller's own
+// working directory, so the MCP server and a shell started elsewhere would each get a different
+// lease directory and never contend for the card: a relative lease root splits the machine-wide
+// lock per working directory. A path that is absolute on either OS passes (a config is copied
+// between nodes of both kinds); only a path that names no root at all is refused. The environment
+// forms (LOCAL_OFFLOAD_STATE_DIR, GPU_LOCK) are not looked at here.
+func validateLeaseRoots(c Config) error {
+	for _, k := range []struct{ key, value string }{
+		{"state_dir", c.StateDir},
+		{"gpu_lock_path", c.GPULockPath},
+	} {
+		v := strings.TrimSpace(k.value)
+		if v == "" || filepath.IsAbs(v) || strings.HasPrefix(v, "/") || strings.HasPrefix(v, `\`) {
+			continue
+		}
+		if len(v) >= 3 && (v[1] == ':') && (v[2] == '/' || v[2] == '\\') &&
+			(v[0] >= 'a' && v[0] <= 'z' || v[0] >= 'A' && v[0] <= 'Z') {
+			continue
+		}
+		return fmt.Errorf("%s: %q must be an absolute path; a relative lease root splits the machine-wide lock per working directory (the MCP server and a shell started elsewhere would each lock a different directory and never contend for a card)", k.key, k.value)
+	}
+	return nil
 }
 
 // validateComfyInstance refuses a bad comfy_instance or comfy_instance_port by name at load,

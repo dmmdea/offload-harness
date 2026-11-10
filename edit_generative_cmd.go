@@ -228,6 +228,9 @@ func runEditImageGenerative(args []string) error {
 	if *dryRun {
 		return editDryRun(cfg, rows, *family, *route, remotes, *batchFile != "")
 	}
+	if err := refuseBrokenConfig("edit-image-generative", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err

@@ -49,6 +49,25 @@ func loadCfgWithSource(fs *flag.FlagSet) (config.Config, config.Source) {
 	return cfg, src
 }
 
+// refuseBrokenConfig is the refusal of a ComfyUI-routed CLI verb on a config file that was named
+// or found but could not be used: a file that could not be parsed (the process runs on built-in
+// defaults, which carry the ComfyUI scripts and comfy_dir but not comfy_instance, so the runner
+// would drive the owner's default instance), one that failed validation, or an explicit
+// --config/$LOCAL_OFFLOAD_CONFIG path with no file behind it. It is the same refusal the MCP
+// server's config gate and fleet-serve apply, in the same wording family. A fresh install has no
+// config file at all (src.Path == "") and is not refused: its verbs defer on the empty bindings.
+func refuseBrokenConfig(verb string, src config.Source) error {
+	switch {
+	case src.Path == "":
+		return nil
+	case src.NotFound:
+		return fmt.Errorf("%s: refusing to run: config file %s was named (--config or $LOCAL_OFFLOAD_CONFIG) but does not exist; a ComfyUI run on built-in defaults would not carry the instance settings. Fix the path", verb, src.Path)
+	case src.LoadErr != nil:
+		return fmt.Errorf("%s: refusing to run: config at %s %s: %w", verb, src.Path, config.LoadFailure(src.LoadErr), src.LoadErr)
+	}
+	return nil
+}
+
 // resolveCfgPath picks the config file by precedence: explicit --config flag >
 // $LOCAL_OFFLOAD_CONFIG > ./config.json if it exists (LO-4: the README
 // quickstart says `cp config.example.json config.json`, which was never read) >
