@@ -541,7 +541,7 @@ func TestATakenResultGoesAfterCollectedKeepAndIsNotListed(t *testing.T) {
 	}
 	stamp("mq-takenfresh001", collectedKeep/4)
 	stamp("mq-takenold00001", collectedKeep*4)
-	if rows := Queue(e.cfg); len(rows) != 0 {
+	if rows := Queue(e.cfg, nil); len(rows) != 0 {
 		t.Errorf("a ticket whose result was taken is not a ticket in the status listing: %+v", rows)
 	}
 	st.sweep(st.list())

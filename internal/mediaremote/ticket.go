@@ -747,8 +747,9 @@ type QueueRow struct {
 	// Created is when the call arrived (RFC 3339, UTC) and AgeSec how long ago.
 	Created string `json:"created"`
 	AgeSec  int    `json:"age_s"`
-	// Owner says whether the process that runs the ticket is alive; a dead owner's waiting ticket is swept by the next scan
-	// and its placed one is adopted by the next identical call.
+	// Owner says whether the process that runs the ticket is alive. A dead owner's waiting ticket is debris: the listing
+	// sweeps it before it reads, so it never shows here. A dead owner's ticket that was placed on a node (or is in flight)
+	// still shows, owner_alive false, until deadKeep has passed: the next identical call adopts it.
 	OwnerAlive bool `json:"owner_alive"`
 	// Place says whether the ticket holds a place in this machine's own line.
 	Place bool `json:"holds_place"`
@@ -758,10 +759,18 @@ type QueueRow struct {
 
 // Queue lists the tickets of the machine, oldest first. nil when there are none (and when the machine keeps no queue), so a
 // box that never queued answers offload_status byte-identically to before.
-func Queue(cfg config.Config) []QueueRow {
+//
+// It sweeps before it lists. A scan cycle sweeps only inside a process that has a waiting ticket of its own, so on a machine
+// where nobody queues for weeks a dead caller's waiting ticket would stay on file and be listed as a place in line. The
+// places the sweep returns are dropped from the lease line through runner, as the scan cycle does (nil: the machine keeps no
+// place, or the caller cannot reach one).
+func Queue(cfg config.Config, runner any) []QueueRow {
 	st, ok := storeFor(cfg)
 	if !ok {
 		return nil
+	}
+	for _, tok := range st.sweep(st.list()) {
+		core.DropPlace(runner, tok)
 	}
 	var out []QueueRow
 	for _, t := range st.list() {
