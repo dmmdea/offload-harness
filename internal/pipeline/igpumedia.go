@@ -652,11 +652,11 @@ func (p *Pipeline) runAnimateCharacterSdcpp(ctx context.Context, req core.Reques
 // runUpscaleSdcpp enlarges an image through render/sdcpp-upscale.mjs (upscale_engine sdcpp):
 // `sd-cli -M upscale` with the bound ESRGAN-family weight, no ComfyUI. The caller (runUpscaleImage) has
 // validated the request and checks the written size afterwards; this runs the engine and returns the
-// path, or the typed defer result. A bound CPU backend, screened extra args and an unset key are typed
+// path and the grant the call ran under (its declared host RAM goes into the answer), or the typed defer result. A bound CPU backend, screened extra args and an unset key are typed
 // defers before anything is leased.
-func (p *Pipeline) runUpscaleSdcpp(ctx context.Context, req core.Request, meta *core.Meta, start time.Time, image, out string, w, h int, scale float64) (string, *core.Result) {
+func (p *Pipeline) runUpscaleSdcpp(ctx context.Context, req core.Request, meta *core.Meta, start time.Time, image, out string, w, h int, scale float64) (string, mediaGrant, *core.Result) {
 	cfg := p.cfg
-	fail := func(res core.Result) (string, *core.Result) { return "", &res }
+	fail := func(res core.Result) (string, mediaGrant, *core.Result) { return "", mediaGrant{}, &res }
 	if err := config.CPUBackendRefusal(cfg.UpscaleSdcppBackend); err != nil {
 		return fail(p.deferCPUBackend(req, *meta, start, "image upscale", err))
 	}
@@ -695,16 +695,16 @@ func (p *Pipeline) runUpscaleSdcpp(ctx context.Context, req core.Request, meta *
 	}
 	flags = append(flags, extraArgsFlag(cfg.UpscaleSdcppExtraArgs)...)
 	flags = append(flags, timeoutArgs(timeout)...)
-	outPath, dres := p.runIGPU(ctx, req, meta, start, igpuRun{
+	outPath, grant, dres := p.runIGPU(ctx, req, meta, start, igpuRun{
 		leaseReason: "upscale (sdcpp)", failVerb: "upscale failed",
 		fpFamily: upscaleSdcppFootprintFamily, fpQuant: quantFromModelFile(cfg.UpscaleSdcppModel), fpTask: "upscale",
 		script: script, args: runnerArgs(flags, out, image), out: out, timeout: timeout,
 		ram: sdcppDeclared(p.cfg, upscaleSdcppFootprintFamily, []hostneed.SdcppFile{{Label: "upscale_sdcpp_model", Path: cfg.UpscaleSdcppModel}}, cfg.UpscaleSdcppExtraArgs),
 	})
 	if dres != nil {
-		return "", dres
+		return "", mediaGrant{}, dres
 	}
-	return outPath, nil
+	return outPath, grant, nil
 }
 
 // runInpaintImageSdcpp repaints the masked region through render/sdcpp-inpaint.mjs (inpaint_engine
@@ -802,7 +802,7 @@ func (p *Pipeline) runInpaintImageSdcpp(ctx context.Context, req core.Request, m
 	flags = append(flags, extraArgsFlag(cfg.InpaintSdcppExtraArgs)...)
 	flags = append(flags, timeoutArgs(timeout)...)
 	imgFamily, imgQuant := imageFootprintKey(cfg)
-	outPath, dres := p.runIGPU(ctx, req, &meta, start, igpuRun{
+	outPath, grant, dres := p.runIGPU(ctx, req, &meta, start, igpuRun{
 		leaseReason: "inpaint (sdcpp)", failVerb: "inpaint failed",
 		fpFamily: imgFamily, fpQuant: imgQuant, fpTask: "inpaint",
 		script: script, args: runnerArgs(flags, out, image, mask, prompt), out: out, timeout: timeout,
@@ -812,7 +812,9 @@ func (p *Pipeline) runInpaintImageSdcpp(ctx context.Context, req core.Request, m
 		return *dres
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(map[string]any{"image_path": outPath, "seed": seed})
+	payload := map[string]any{"image_path": outPath, "seed": seed}
+	grant.name(payload) // the host RAM the lane declared; an iGPU lane holds no card pair, so no cards are named
+	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
