@@ -7,6 +7,98 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.215.0] - 2026-11-10 - the installer takes a swap port, a model port span and ctx/KV promotions, comfy_instance keeps the harness off an owner's ComfyUI, tier amd-rdna3 has its first receipt, and two selftest fixes
+
+### Fixed - a box can keep the harness off its owner's own ComfyUI with `comfy_instance`
+
+- **What was wrong.** On a box whose owner runs their own ComfyUI on port 8188, nothing in the config said "use the harness's own". The render runners talked to whatever answered on 127.0.0.1:8188, reused it and sent it `/free` after a run, so a harness media call landed on the owner's ComfyUI whenever it was running. The only way out was `COMFY_INSTANCE` and `COMFY_API` in the environment of every process that runs the harness, which does not reach an MCP session or a service that is already configured and can leak into the owner's own tools.
+- **What it does.** New keys `comfy_instance` (1 to 48 letters, digits, `-`, `_`) and `comfy_instance_port` (0 = 8189; 1024 to 65535; never 8188). With `comfy_instance` set, every ComfyUI-backed runner (image, image batch, inpaint, upscale, generative edit, video, animate, music, run-graph) gets `COMFY_INSTANCE` and `COMFY_API=http://127.0.0.1:<port>` after the inherited environment, so the config wins. The post-run `/free`, the `doctor` node-class check and `update --component comfy-packs` use the same endpoint, and nothing the harness does reaches 8188. A call on a card's instance and the two-card placement keep their own instance. `doctor` names the instance and endpoint on the `comfyui` row. A port without a name, a bad name, port 8188 and `comfy_cuda_device` beside `comfy_instance` are config errors. With the key unset nothing changes.
+- **Checks.** `local-offload doctor` on a config with `comfy_instance` prints `comfy_dir=...; instance harness on http://127.0.0.1:8189`; the bad values are refused at load with the key named. `resolveInstance` in `render/comfy-lifecycle.mjs` returns `{key: "harness", port: 8189}` for the pair the harness emits. The real run against a live ComfyUI is on the box that has the owner's instance.
+
+### Fixed - `edit-image` finds its worker when the image script path in the config is relative
+
+- **What was wrong.** `edit-image` took the worker (`edit_image.py`) from the directory of `imagegen_script` as written. On a box that keeps the relative default `render/comfy-generate.mjs` that gave `render\edit_image.py`, which python resolved against the caller's working directory, so every call from any other directory failed with `can't open file '<cwd>\render\edit_image.py'`. The comment claimed the path is absolute on configured boxes.
+- **What it does.** `imagegen_script` is resolved with `gpugen.ResolveScript` like every other runner (a relative path is taken against the executable's directory), and the worker is taken beside the resolved path. When it does not resolve, the worker is looked up as `render/edit_image.py` beside the executable, as it already was for a tier with no `imagegen_script`.
+- **Checks.** With `imagegen_script` set to `render/comfy-generate.mjs`, `local-offload edit-image` run from an unrelated directory resizes a 64x48 PNG to 32x24.
+
+### Fixed - the installer records the commit a build came from, so a re-run no longer rebuilds
+
+- **What was wrong.** `Get-RepoCommit` in `setup/install.ps1` piped `git rev-parse HEAD` into `Select-Object -First 1` and then required `$LASTEXITCODE -eq 0`. Under Windows PowerShell 5.1 the early stop of the pipeline can end the native process, which leaves `$LASTEXITCODE` at -1 although the sha arrived (a race: the same lines gave 0 on another machine). The helper returned an empty string, no `<exe>.built-from` was written after a successful build, and every re-run rebuilt.
+- **What it does.** The helper collects the output, reads the exit code, then takes the first line, the way `Get-HarnessExeVersion` already does. The other places in `setup/*.ps1` that pipe a native command into `Select-Object -First 1` (`build-engine-vulkan.ps1` `git ls-remote`, `detect.ps1` `nvidia-smi`, `install.ps1` `node --version`) never read the exit code afterwards, so they are left as they are.
+- **Checks.** Twenty runs of the real `Get-RepoCommit`, `Save-BuiltFrom` and `Test-BuiltFromHead` under `powershell.exe` (5.1) each returned the commit, wrote the record and found it equal to HEAD.
+
+### Fixed - the selftest's `fa_q8kv` canary no longer reads an empty text as a divergence
+
+- **What was wrong.** `fa_q8kv` loads the resident model twice (f16 KV, then q8_0 KV), generates the same prompt at temp 0 and compares the two texts by word overlap. A run that came back with no text scored overlap 0, and the canary reported `q8_0-KV text diverged from f16 (word overlap 0 < 0.80) - stay on the f16 floor`. On `<node-h>` (blackwell-16, which ships q8_0 KV and whose resident is the 26B) the selftest said exactly that while the live q8_0 seat answered the canary's own prompt correctly and every acceptance gate passed. A text can be empty two ways: a thinking model spends the probe's 160 tokens on reasoning and returns an empty `content`, or the warm decode fails and the probe still returns `ok` with an empty text. Neither is a divergence.
+- **What it does.** The two `fa_q8kv` probes ask for 512 tokens instead of 160 (the other callers keep 160, so no timing changes), and the probe takes `reasoning_content` when `content` is empty, since that text is decoded under the same KV type. When either text is still empty the canary reports `warn` with both lengths and both probes' own details (`overlap not comparable this run; not a divergence, and not a promotion`) instead of `fail`. A real divergence, two non-empty texts under 0.80 overlap, still fails. The promotion still needs `pass`.
+- **Checks.** On `<node-h>` through the live seat: the canary's prompt returns `2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37` (43 tokens, `finish_reason` stop) at both 160 and 512 tokens with q8_0 KV. Which of the two empty-text paths the selftest's bare probe took there is not isolated; the canary now names the lengths and the probe detail, so the next receipt says it.
+
+### Fixed - the selftest probes load the 26B at the tier's shipped expert placement
+
+- **What it does.** On a tier whose profile says `moe_26b: n_cpu_moe` (blackwell-16, N=14) the ctx probe, the cold-swap timing, the `fa_q8kv` and `ctx_sweep` loads and the `bench` run now start the 26B with `--n-cpu-moe N -ngl 999`, the placement the installer renders for that tier, instead of full offload. Before, a display card either ran out of memory and the probe printed a false "apply ctx 16384" recommendation, or spilled and reported a slow number. Tiers with `moe_26b: gpu` and every other model load exactly as before.
+
+### Fixed - the selftest and installer wording about expert placement is true again
+
+- **What it does.** The serving-template header, `SETUP-AGENT.md`, `OPERATOR-GUIDE.md`, the setup-installer doc and the selftest's own comments, receipt strings and step titles no longer say that a 16 GB tier places experts on the card or that the installer places none in host RAM, and no longer list the retired `moe_full_offload` canary as "not run". The blackwell-16 report states its margin correctly: 1794 MiB under the heaviest desktop seen (16303 - 9109 - 5400 MiB), 2.6 GB at the 4546 MiB desktop.
+
+### Fixed - `local-offload install forecast` builds in the install root by default
+
+- **What it does.** With no `--home` the verb resolves the install root the way `update` does (`$OFFLOAD_HOME`, else the nearest `installed.json`) and only then falls back to `~/.local-offload`, so the venv lands where the forecast seat looks for it. The first progress line names the home it chose and where that came from; the `--home` help and `SETUP-AGENT.md` say so, and the checkpoint size is stated with its unit (837 MB on disk, decimal; the 804 MiB in `profiles.json` is the weights on the card).
+
+### Added - `OFFLOAD_WITH_FORECAST=1` builds the forecast runtime during a Windows install
+
+- **What it does.** After the harness is built, `install.ps1` runs `install forecast --home <root> --models <root>\models` for a profile that declares a `forecast` seat, and prints a one-line SKIP when `uv` or `git` is missing or the profile has no seat. Without the switch, when the seat is bound and `<root>\forecast\venv` is absent, the closing summary prints one line with the exact command. `install.sh` has no such leg.
+
+### Fixed - `install.ps1 -RenderOnly` without `-RenderOut` no longer deletes the live `llama-swap.yaml`
+
+- **What it does.** The render goes to a file beside the live yaml and replaces it only after the render succeeded, keeping the previous file as `llama-swap.yaml.prev-<stamp>`. With `-RenderOut` the behaviour is unchanged.
+
+### Fixed - the standalone `detect.ps1` does not call the profile drive the install target
+
+- **What it does.** With `OFFLOAD_HOME` unset, `detect.ps1` measures free disk on the profile drive and its line now says that this is a fallback and that `install.ps1` picks a data volume; with the variable set it still says "install target". `setup-installer.md` also records how an upgrade picks up `--slot-save-path` (the Step 6 `--state` check re-renders an unedited yaml; a hand-edited or unstamped one is kept until the operator replaces it).
+
+### Fixed - the render gate calls the generative-edit and run-graph doors
+
+- **What was wrong.** `acceptance --render` listed `gen-edit` and `run-graph` as a permanent SKIP even when their routes were bound. It said generative edit has no CLI verb (`edit-image-generative` exists) and that run-graph has no sensible embedded graph, so a node could pass the gate with both doors never called.
+- **What it does.** When `edit_image_generative` is bound, `gen-edit` runs `edit-image-generative` on the embedded sign (`make the circle green`, seed 7) with the `gen_edit_timeout_sec` limit. When `run_graph` is bound, `run-graph` writes a two-node ComfyUI core graph (an empty 64x64 image and a SaveImage) into the gate's out dir and runs `run-graph --graph <file> --out-dir <subfolder>`. Both stay a SKIP with the route reason when the route is not bound. `docs/systems/fleet-node.md` lists them.
+- **Checks.** `gen-edit` passes when the output PNG decodes; `run-graph` passes when the answer's `image_path` is a PNG that decodes to 64x64. `acceptance --list` prints both commands.
+
+### Fixed - the installer's run-graph step reads the ComfyUI folder from the existing config
+
+- **What was wrong.** Step 8b chose `COMFY_DIR`, else `C:/ComfyUI`. A node whose config already said `"comfy_dir": "D:/ComfyUI"` printed `SKIP run-graph deps (no ComfyUI at C:/ComfyUI ...)` and its run-graph tooling was never ensured.
+- **What it does.** The folder is now `COMFY_DIR`, else the `comfy_dir` of the existing harness config, else `C:/ComfyUI`. The config is read once for this and for the `run_graph_script` check. Every other branch of the step is unchanged.
+- **Checks.** A replay of the chosen lines against a temp config gave `E:/FromEnv` with the variable set, `D:/ComfyUI` with only the config, and `C:/ComfyUI` with neither.
+
+### Fixed - the installer rebuilds the binaries when the checkout moved, not only when VERSION changed
+
+- **What was wrong.** A re-run of `install.ps1` from a newer commit with the same `VERSION` kept the old `local-offload.exe` and `local-agent.exe`, because the build steps decided "up to date" from the version alone.
+- **What it does.** After each build the installer writes the checkout's `git rev-parse HEAD` to `<exe>.built-from` beside the binary. The build is skipped only when the version matches and that file holds the current HEAD. A missing file, a missing `git` or a tree that is not a git checkout means the commit is unknown, so it rebuilds (go's build cache keeps that quick). `install.sh` installs a binary it is given and builds nothing, so it is unchanged.
+- **Checks.** A replay of the decision: same commit skips; a different commit, no record and a non-git folder all rebuild.
+
+### Fixed - the Ubuntu release in sd.cpp's Linux asset names is matched, never named, so `update` finds the current build again
+
+- **What was wrong.** stable-diffusion.cpp names its Linux zips with the Ubuntu release they were built on, and moved from `Ubuntu-24.04` to `Ubuntu-26.04` at `master-1044`. The asset table in `internal/update/resolve.go` named `Ubuntu-24.04` literally, so on a Linux Vulkan node `local-offload update --resolve sdcpp` printed one `skipped: incomplete (sd-master-<sha>-bin-Linux-Ubuntu-24.04-x86_64-vulkan.zip)` note per newer release and settled on `master-1043`, the last tag that carried the old name. `update --component sdcpp` installed that build and reported success, 36 tags behind, and a fleet sweep that compares against upstream could never read the row as current.
+- **What it does.** The two Linux rows of the sd.cpp table use the `<V>` token the CUDA rows already use (`sd-master-<SHA7>-bin-Linux-Ubuntu-<V>-x86_64-vulkan.zip`, and the same without `-vulkan` for the CPU build), so the Ubuntu release is matched as an anchored regular expression over the asset names and a new one needs no edit. When a release carries builds for two Ubuntu releases the highest wins and the candidate's notes say so. Whether a build made on a newer Ubuntu starts on the node is decided where it was already decided: the offline self-check runs the staged program before the swap and a build that does not start is rejected with the live one untouched.
+- **Checks.** `local-offload update --resolve sdcpp` on an Ubuntu 26.04 Vulkan node names the newest `master-` tag that carries the 26.04 Vulkan zip, with no `skipped: incomplete` note for it.
+
+### Fixed - the stack's llama-swap can live on another port, with its models on another span, and the installer notices when the usual ones are taken
+
+- **What was wrong.** A box whose WSL runs in mirrored networking shares the Windows loopback port space with it. A llama-swap inside WSL held `127.0.0.1:11436` and two model ports from 5800, and the Windows listener table (`Get-NetTCPConnection`, `netstat`) showed nothing for them. The installer finished, wrote an `endpoint` that named someone else's swap, could not bind its own, and put the first two models of the stack on taken ports, so those seats could never load. The only way out was to hand-edit `llama-swap.yaml`, which made `audit-yaml --against-render` stop saying MATCH and which the next installer run dropped.
+- **What it does.** `install.ps1` takes `OFFLOAD_SWAP_PORT` (default 11436, host always `127.0.0.1`) and `OFFLOAD_SWAP_START_PORT` (default unset, llama-swap's 5800). They reach `install render` as `--listen` and the new `--start-port N`, which adds one top-level `startPort:` line after the template is expanded (no template text changes, so no existing stamp or `template_sha256` moves). Every command the installer prints or runs, and a new config's `endpoint`, use the chosen port; an existing config's `endpoint` changes only when `OFFLOAD_SWAP_PORT` is set. A TCP-connect preflight stops the install before any download when the swap port answers and no process under the install home owns a listener on it. After the render, every port of the models' span (start port, then one per model that takes a `${PORT}`) is probed the same way, and a taken one prints `FAIL` with the WSL cause and the `OFFLOAD_SWAP_START_PORT` remedy and exits 1. The stack's own running llama-swap and children are fine. A re-run with the variables unset reads the choice back from the `# basis:` line of the existing yaml; the value `default` clears it. `install.sh` is unchanged.
+- **Checks.** Rendering `amd-rdna3` with `--start-port 5900 --listen 127.0.0.1:11437` writes exactly one `startPort: 5900` line and `audit-yaml --against-render` says MATCH; the render without them is byte-identical to the one `origin/main` writes (bar `rendered_at`) and says MATCH. A replay of the installer's probe and resolution functions under Windows PowerShell 5.1 reads a free port as free, a port held by a program outside the install home as taken by someone else, and rejects `abc`, `80` and `70000`.
+
+### Added - ctx and KV promotions are first class: `OFFLOAD_CTX_SIZE` and `OFFLOAD_KV_TYPE`
+
+- **What was wrong.** The AMD RDNA3 runbook told the installing agent to apply the selftest-authorised promotions (KV `f16 -> q8_0`, ctx `16384 -> 32768`) by hand-editing the rendered `llama-swap.yaml` and `installed.json`. The render is stamped, so a hand edit made `audit-yaml --against-render` stop matching and the installer's stale re-render dropped it.
+- **What it does.** `OFFLOAD_CTX_SIZE` (8192, 16384, 32768, 65536, 131072) and `OFFLOAD_KV_TYPE` (`f16`, `q8_0`) override the profile's `ctx_size` and `kv_type` for the render, through the new `install render --ctx-size` and `--kv-type`. K and V stay symmetric. The agent window (`agent_ctx_tokens`) follows the ctx override only when the profile's own equals its `ctx_size`. The stamp records the two overrides under `render.ctx_override` and `render.kv_override`, only when set, so existing stamps are byte-identical; the re-run reads them back with the ports, and `default` clears any of the four. The installer prints one `OVERRIDE ...` line per setting in force. `SETUP-AGENT.md` and `docs/systems/setup-installer.md` replace the hand edits with the variables.
+- **Checks.** `amd-rdna3` (ram tier mid) rendered with `--ctx-size 32768 --kv-type q8_0` shows `--ctx-size 32768` and `--cache-type-k/v q8_0` where the default render shows 16384 and `f16`; `audit-yaml --against-render` says MATCH on both files.
+
+### Changed - `amd-rdna3` has its first receipt: the tier notes carry measured numbers from a 780M box
+
+- **What changed.** A Radeon 780M mini-PC with 64 GB (`<node-j>`) was installed by `install.ps1` and ran the selftest with the canaries on, the acceptance gates and every render gate. The `amd-rdna3` notes in `profiles.json` now state what that box measured where they said PROJECTED: the 26B on the iGPU at 23.5 tok/s (cold load 23 s), E4B at 24.1 tok/s, E2B at 44.7 tok/s, the ctx sweep clean at 8K, 16K and 32K, `fa_q8kv` passing with flash attention on, and the image, inpaint, upscale, voice, music, video and animate lanes at the gate's sizes. The report is `docs/tiers/reports/amd-rdna3-node-j.md`, with the hand-run measurements in its operator section, and the tier page links it.
+- **What did not change.** The tier default stays the floor (f16 KV, 16K ctx, VAE on the CPU), because one box is not the class; the q8_0 KV, the 32K ctx and the GPU VAE are per-box promotions that box's own canaries passed. The agent seat keeps its projected label: the box ran the gate's known-answer step and one grounded task per seat, all correct, and that is not an agent contract. Production-size video and animate, remote agent work and a 32 GB box of the class are unmeasured, and the notes say so.
+- **Check.** `go generate ./...` rebuilds `docs/tiers/amd-rdna3.md` with the report attached and leaves no other tier page changed.
+
 ## [0.214.0] - 2026-11-10 - a measured render states its commit, retry_after_sec under a door call is the line's cadence, acceptance --render proves each bound route, and tier amd-rdna3 binds media and the agent lane on 64 GB boxes
 
 ### Fixed - a render the node has measured states its commit, so a node with free RAM and a high commit charge no longer refuses it
