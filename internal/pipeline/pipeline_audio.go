@@ -580,11 +580,12 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 	}
 	// Passive fleet footprint: acestep for the ComfyUI music worker, chatterbox
 	// for the TTS voice paths (incl. finetuned — same engine family).
-	audioFamily := "chatterbox"
+	// music records the card-only placement under its own quant (musicNeed carries the same key); voice keeps the empty one.
+	audioFamily, audioQuant := "chatterbox", ""
 	if kind == "music" {
-		audioFamily = "acestep"
+		audioFamily, audioQuant = musicFootprintKey(p.cfg)
 	}
-	p.footprintSampling(audioFamily, "", "audio-gen").ApplyTo(&spec)
+	p.footprintSampling(audioFamily, audioQuant, "audio-gen").ApplyTo(&spec)
 	outPath, gerr := gpugen.Generate(ctx, spec)
 	if gerr != nil {
 		meta.ErrClass = gpugen.ClassifyErr(gerr)

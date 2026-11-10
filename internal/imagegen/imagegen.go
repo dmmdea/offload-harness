@@ -625,6 +625,7 @@ type EditRequest struct {
 	Params   map[string]any
 	Model    EditModel
 	Timeout  time.Duration
+	Sampling *gpugen.Sampling
 	ExtraEnv []string
 }
 
@@ -636,7 +637,7 @@ func Edit(ctx context.Context, req EditRequest) (string, error) {
 		env = append(env, "COMFY_WAIT_SEC="+strconv.Itoa(int(req.Timeout/time.Second)))
 	}
 	env = append(env, req.Model.Launch.Env()...)
-	return gpugen.Generate(ctx, gpugen.Spec{
+	spec := gpugen.Spec{
 		Exe:      req.Node,
 		Script:   req.Script,
 		Args:     editArgs(req.Out, req.Image, req.Prompt, req.Params, req.Model),
@@ -645,7 +646,9 @@ func Edit(ctx context.Context, req EditRequest) (string, error) {
 		Timeout:  req.Timeout,
 		ComfyAPI: req.Model.Launch.API,
 		CardUUID: req.Model.Launch.CardUUID,
-	})
+	}
+	req.Sampling.ApplyTo(&spec)
+	return gpugen.Generate(ctx, spec)
 }
 
 // InpaintRequest is everything Inpaint takes besides the context. Image is the source
