@@ -1329,7 +1329,12 @@ export async function ensureComfy(opts = {}) {
     if (keptOurs) {
       // Launched for an earlier job whose shape was another (a warm session against single renders, another --reserve-vram):
       // restart it rather than run on the old shape, unless the process that launched it, or any other client, is still at work on it.
-      const gap = launchShapeGap(keptOurs.args, { warm, reserveVram });
+      // The extra args are the tail of the launch argv, so a --reserve-vram in them is the one ComfyUI runs with whatever this call
+      // asked for (launchFlags pushes them last). The kept instance is compared against that value: comparing against the call's
+      // own made a box whose extras carry the reserve restart its kept instance on every call (launched with the extras' value,
+      // "needs" the call's), and left a box whose extras gained one on the old reserve until the instance idled out.
+      const extraReserve = argvFlagValue(String(env.COMFY_EXTRA_ARGS || "").split(/\s+/).filter(Boolean), "--reserve-vram");
+      const gap = launchShapeGap(keptOurs.args, { warm, reserveVram: extraReserve ?? reserveVram });
       const ownerBusy = typeof keptOurs.ownerPid === "number" && keptOurs.ownerPid !== process.pid && alive(keptOurs.ownerPid);
       if (gap && !ownerBusy) {
         const busy = await inUse(api, { queue: true });

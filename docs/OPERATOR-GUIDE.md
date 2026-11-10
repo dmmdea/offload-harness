@@ -445,7 +445,9 @@ exits the process after `COMFY_IDLE_EXIT_SEC` seconds with nothing queued or run
 `COMFY_IDLE_EXIT_SEC` in the runner's environment: unset is 300, `0` or `off` restores the old behaviour (kill the ComfyUI after
 every job), a whole number of seconds from 5 up is that bound, anything else is 300 with a `COMFY-IDLE-WARN` line. It is fixed when
 the instance is launched. A render that fails stops the instance it used, so a stuck CUDA error does not outlive the job. A render
-that needs another shape (warm against single, another `--reserve-vram`) restarts the instance once. An explicit `--keep-comfy`
+that needs another shape (warm against single, another `--reserve-vram`) restarts the instance once. A `--reserve-vram` in
+`COMFY_EXTRA_ARGS` is the one ComfyUI runs with, so it is the value the kept instance is compared against: a box that sets it there
+keeps its instance from call to call, and changing it there restarts the kept instance on the next call. An explicit `--keep-comfy`
 keeps its old meaning: the instance is kept whatever happens and has no process bound; its lease's holder (or you) stops it.
 A runner holds the instance for its whole job through `GET /offload/hold`, a response that sends one byte every 2 s and ends when
 the runner exits, so a long step that is not ComfyUI's (ffmpeg, a QA pass) does not let the bound fire. `curl
@@ -728,6 +730,20 @@ the difference — stop that instance (or start it with the binding's flags) and
 passes `--wan-resident-gb 0`; see "Sage attention" in `docs/systems/media-generation.md`), and a kept ComfyUI that runs sage is not reused by a call
 sized for the default attention.
 
+### A card that also drives the desktop (`--reserve-vram` in `comfy_extra_args`)
+
+The runners launch ComfyUI with `--reserve-vram 1.0`. On a card that also drives the displays the desktop holds more than
+that (2.5 to 5.4 GB was seen on a 16 GB card), ComfyUI places more than the card has free, the driver spills into shared
+memory and sampling slows by two orders of magnitude (measured on `blackwell-16`: 195-240 s/it against 3.5 s/it for the same
+generative edit). Raise the reserve for every ComfyUI lane of the box:
+
+```json
+"comfy_extra_args": "--reserve-vram 3.0"
+```
+
+The extra args are the tail of the launch argv, so this value wins over the runners' own. The `blackwell-16` tier seeds it on
+a fresh install; an existing config is never touched, so an installed box sets it by hand. A headless card does not need it.
+
 ### Keep the harness off the owner's own ComfyUI (`comfy_instance`)
 
 If the box's owner runs their own ComfyUI on the default port 8188, point `comfy_dir` at the
@@ -743,7 +759,9 @@ harness's ComfyUI and give it a name. Without a name every media call reaches wh
 The name is 1 to 48 letters, digits, `-` or `_`. The port is optional (0 = 8189, 1024 to 65535,
 never 8188) and needs the name. It cannot be combined with `comfy_cuda_device`. With the name set,
 every ComfyUI-backed route launches and talks to its own instance on that port, and
-`local-offload doctor` shows it on the `comfyui` row. Details:
+`local-offload doctor` shows it on the `comfyui` row. A runner started by hand under
+`local-offload gpu reserve -- node render/comfy-*.mjs ...` gets the same instance (`COMFY_INSTANCE` and
+`COMFY_API` are added to its environment) unless your shell already sets one of the two. Details:
 [systems/media-generation.md](systems/media-generation.md).
 
 ### Run character animation on two 16 GB cards (card-only placement)
