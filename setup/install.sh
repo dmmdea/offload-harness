@@ -377,7 +377,7 @@ elif loopback_answers "$LISTEN_PORT"; then
   if [ -n "$STORED_LISTEN" ] && [ "${STORED_LISTEN##*:}" = "$LISTEN_PORT" ]; then
     say "listen:    127.0.0.1:$LISTEN_PORT answers; the existing llama-swap.yaml of this install names it, so it is taken to be this install's own llama-swap"
   else
-    die "127.0.0.1:$LISTEN_PORT already answers and no earlier run of this install rendered for it, so it is another service's (a different product's llama-swap, or on WSL mirrored networking a server inside the other side). The harness would talk to it. Pass --listen 127.0.0.1:<free port> (and --start-port N for the models' ports) and run again"
+    die "127.0.0.1:$LISTEN_PORT already answers and no earlier run of this install rendered for it, so it reads as another service's (a different product's llama-swap, or on WSL mirrored networking a server inside the other side). The harness would talk to it. If it is another service: pass --listen 127.0.0.1:<free port> (and --start-port N for the models' ports) and run again. If it is this install's own llama-swap from a version that did not stamp its yaml: stop it, run again (the port then reads free), and start it afterwards"
   fi
 fi
 # ---- 2b. the fleet bearer ------------------------------------------------------
