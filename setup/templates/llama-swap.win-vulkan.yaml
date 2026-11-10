@@ -9,8 +9,8 @@
 # FA-on as the SAFE FLOOR (selftest's H3 canaries measure the promotions: ctx 32K,
 # q8_0 KV, 26B full-offload — the agent applies them canary-gated per SETUP-AGENT.md);
 # amd-rdna3-dgpu renders 32K/q8_0 (discrete card); amd-gcn renders 32K/f16/FA-on (32K + FA measured +4 % pp on <node-f> 2026-09-20)
-# (weakest path). If the selftest hits allocation failures, the 26B profile switches
-# to cpu-moe (experts in RAM).
+# (weakest path). If the selftest hits allocation failures it reports a downshifted ctx;
+# it never edits this file or moves experts to RAM.
 #
 # J1 invariants (frontier floor, 2026-07-24):
 #   * llama.cpp win-vulkan build must be >= Mar-2026 (the AMD scalar-FA Wave32 +

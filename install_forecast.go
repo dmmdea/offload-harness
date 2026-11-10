@@ -143,18 +143,19 @@ type forecastInstallResult struct {
 // It never loads the model and starts no server: the card is the seat's.
 func runInstallForecast(args []string) error {
 	fs := flag.NewFlagSet("install forecast", flag.ExitOnError)
-	home := fs.String("home", "", "install root; the lane lives in <home>/forecast (default: the resolved harness home)")
+	home := fs.String("home", "", "install root; the lane lives in <home>/forecast, where the seat looks for it (default: $OFFLOAD_HOME, else the nearest folder holding the installer's installed.json, as the update verb finds it, else ~/.local-offload)")
 	models := fs.String("models", "", "directory holding model files; the weights go to <models>/"+forecastModelDirName+" (default: <home>/models)")
 	ref := fs.String("ref", "", "git sha or branch of the timestral package to install (default: the head of its default branch, resolved now)")
 	backend := fs.String("torch-backend", "auto", "uv --torch-backend for torch (auto picks the build for this machine's driver)")
 	asJSON := fs.Bool("json", false, "print the result as one JSON line on stdout (progress goes to stderr)")
-	timeout := fs.Duration("timeout", 60*time.Minute, "give up after this long (the torch wheels and the 837 MB checkpoint included)")
+	timeout := fs.Duration("timeout", 60*time.Minute, "give up after this long (the torch wheels and the 837 MB (decimal) checkpoint included)")
 	_ = fs.Parse(args)
 
-	h := *home
+	h, hsrc := *home, "--home"
 	if h == "" {
-		h = config.DefaultBase()
+		h, hsrc = forecastHome()
 	}
+	fmt.Fprintf(os.Stderr, "forecast: home %s (%s); the lane is built in %s\n", h, hsrc, filepath.Join(h, "forecast"))
 	m := *models
 	if m == "" {
 		m = filepath.Join(h, "models")
@@ -178,6 +179,17 @@ func runInstallForecast(args []string) error {
 	fmt.Printf("OK    forecast lane ready in %s (torch %s, cuda_available=%t, timestral %s, weights %s verified)\n",
 		res.ForecastDir, res.Torch, res.CudaAvailable, res.Timestral, res.ModelDir)
 	return nil
+}
+
+// forecastHome is the install root `install forecast` builds in when --home is not given: the root the update verb
+// resolves (env OFFLOAD_HOME, else the nearest installed.json), because the forecast seat is rendered under it and
+// looks for <home>/forecast/venv there. Only when the verb finds no root does the lane go to the harness config
+// folder, as before. The second return value says where the answer came from.
+func forecastHome() (string, string) {
+	if root, src, err := updateRoot("", ""); err == nil {
+		return root, src
+	}
+	return config.DefaultBase(), "default: no install root found (no OFFLOAD_HOME, no installed.json)"
 }
 
 func installForecast(ctx context.Context, dir, models, ref, backend string, log io.Writer) (forecastInstallResult, error) {

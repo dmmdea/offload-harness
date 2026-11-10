@@ -8,10 +8,11 @@
 # / MOE-26B tokens in the common macro + 26B cmd from setup/templates/profiles.json,
 # keyed on the detected profile id. q8_0 V requires flash-attn on (satisfied
 # whenever a profile picks q8_0). Do NOT add --swa-full. MoE tier placement is
-# profile-driven: an 8GB profile keeps ALL experts in RAM (--cpu-moe); a 6GB
-# profile keeps only the top N expert layers in RAM (--n-cpu-moe N, the rest on
-# GPU); a 16GB+ profile places experts on the GPU (full offload). The __MOE_26B__
-# token carries whichever form the profile selected.
+# profile-driven; the MOE-26B token carries whichever form the profile selected:
+# -ngl 99 (experts on the card), --n-cpu-moe N -ngl 999 (the top N expert layers in
+# host RAM, the rest on the card; blackwell-16 ships N=14), or nothing when the tier
+# drops the 26B. A 16GB card that is also the display card cannot hold the full 26B
+# (~14.4 GB; docs/tiers/reports/blackwell-16-node-h.md), so blackwell-16 is not -ngl 99.
 # GGML_CUDA_DISABLE_GRAPHS is now a TIER decision (profiles.json `disable_cuda_graphs`),
 # not a template default. On sm_120 the flag cost 40-51% of generation on the 26B seats
 # for no recorded reason (2026-09-05, b10720, 3 fresh-serve reps, temp 0, output

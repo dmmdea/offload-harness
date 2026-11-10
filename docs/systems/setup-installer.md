@@ -38,7 +38,7 @@ Three scripts run in order, each ending with a machine-readable JSON line:
 3. **`selftest.ps1`** emits a receipt with verdict `pass | warn | fail`. On a Vulkan backend it
    also runs the **H3 canary suite** (`fa_q8kv`, `ctx_sweep`, `bench`, `swap_leak`, `embedder`,
    `whisper`; `moe_full_offload` stays in the receipt as a retired entry that is always `skipped`,
-   since the installer places no experts in host RAM) — promotion gates recorded in
+   since no tier promotes the 26B to full offload from a host-RAM floor (blackwell-16 ships a measured --n-cpu-moe 14)) — promotion gates recorded in
    `receipt.canaries`, never verdict-changing; `OFFLOAD_SELFTEST_CANARIES=1|0` forces them on/off
    anywhere.
 
@@ -237,7 +237,7 @@ seed the **sdcpp engine** (J2): `imagegen_engine:"sdcpp"` with the Apache-2.0 Z-
 set, full paths carried via the `__OFFLOAD_HOME__` token that `Merge-ConfigSeed` expands at install
 time. The media leg itself (Step 5b: the newest complete sd.cpp win-vulkan zip + roster downloads) defaults
 on for `amd-*` profiles only; `OFFLOAD_WITH_MEDIA=1|0` forces it on/off anywhere and
-`OFFLOAD_MEDIA_EXTRAS=1` adds the SD1.5/SDXL extras. `selftest.ps1` gains the first **media leg**
+`OFFLOAD_MEDIA_EXTRAS=1` adds the SD1.5/SDXL extras. The forecast runtime (Step 7c: `local-offload install forecast --home <root> --models <root>\models`, about 3 GB, needs `uv` and `git`) is opt-in with `OFFLOAD_WITH_FORECAST=1` and is skipped with a one-line reason on a profile with no `forecast` seat or a box without those tools; without the switch the closing summary prints a `NOTE` with the command whenever the seat is bound and `<root>\forecast\venv` is absent. `install.sh` has no such leg (run the command by hand). `selftest.ps1` gains the first **media leg**
 (`receipt.media`): a fixed-prompt reference render (non-blank gate: sampled distinct-colors) plus a
 gpu-vae promotion trial mirroring the H3 canary pattern.
 
@@ -939,6 +939,7 @@ live-captured log lines, cosine). Go-side config round-tripping is covered by
 - Adding a profile without its self-test assertion.
 - Expecting the `ampere-8` band to start at 8 GB. It starts at 7.
 - Treating the profile string as fleet routing input. It is not.
+- Expecting an upgrade to add KV slot retention (`--slot-save-path`) to a yaml that predates it. Step 6's re-run check is `install render --state`, which compares the file with what THIS install would render (the render reads the live llama build from `installed.json`): an installer-rendered, unedited yaml that lacks the flag on a llama build at or above the `kvslot` floor reads `STALE(params.llama_bin, params.slot_save)` and is re-rendered, the old file kept beside it. A yaml that was edited by hand reads HAND-EDITED and is KEPT with a WARN (re-rendering would discard the edit), and one that predates stamping reads UNSTAMPED and is kept (only the content probes ahead of the check can force a re-render of it). For a HAND-EDITED yaml set `OFFLOAD_RERENDER=1` and re-run the installer: it renders fresh and keeps the old file as `llama-swap.yaml.prev-<stamp>`. For an UNSTAMPED one move `llama-swap.yaml` aside and re-run the installer, or add `--slot-save-path <home>/kvslots` to the single-slot seats by hand. `local-offload audit-yaml --against-render` names the same verdict without changing anything.
 
 ## Source map
 

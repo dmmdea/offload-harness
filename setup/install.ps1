@@ -10,6 +10,8 @@
 # numbers a seat may need are FLOORS (the minimum build), and they live in setup/floors.json and nowhere else.
 #
 # Env overrides:  OFFLOAD_HOME (default $HOME\offload-stack) | OFFLOAD_WITH_FAMILY (default 1)
+#                 OFFLOAD_WITH_FORECAST=1 (opt-in: after the harness is built, run `local-offload install forecast` for a profile that
+#                 binds a forecast seat; needs uv and git on PATH, skips with a reason without them; off by default, torch is ~3 GB)
 #                 OFFLOAD_BACKEND (override detect.ps1: cuda|vulkan|cpu)
 #                 OFFLOAD_PROFILE / OFFLOAD_RAM_TIER / OFFLOAD_BIG_RAM (override the
 #                 detected serving profile — used by -RenderOnly and by testing a synthetic box)
@@ -2754,8 +2756,17 @@ $gatedSeats = [ordered]@{
   'qwen3.6-35b-a3b-agent' = $includeQwen3635B
   'embeddinggemma2' = $includeEmbeddingGemma2
 }
-# -RenderOnly always renders fresh: drop any stale output so the Step SKIP test can't short-circuit it.
-if ($RenderOnly -and (Test-Path $yamlDest)) { Remove-Item $yamlDest -Force }
+# -RenderOnly always renders fresh so the Step SKIP test can't short-circuit it. With -RenderOut the stale output is
+# dropped (the operator named a scratch file). Without it the target is the LIVE <home>\llama-swap.yaml: that file is
+# never deleted up front. The render goes to a file beside it ($yamlLive keeps the real path) and replaces it, keeping the
+# old one as .prev-<stamp>, only after the render succeeded; a refused render leaves the live yaml as it was.
+$yamlLive = $null
+if ($RenderOnly -and $RenderOut) { if (Test-Path $yamlDest) { Remove-Item $yamlDest -Force } }
+elseif ($RenderOnly) {
+  $yamlLive = $yamlDest
+  $yamlDest = Join-Path $HOME_DIR 'llama-swap.render-tmp.yaml'
+  if (Test-Path $yamlDest) { Remove-Item $yamlDest -Force }
+}
 # OFFLOAD_EG2_LLAMA_BIN: the embeddinggemma2 entry's OWN llama.cpp build, for a node whose main build is older
 # than the embeddinggemma2 floor in setup/floors.json and cannot load it (the entry's architecture is gemma-embedding2). Opt-in and operator-managed:
 # the build this installer resolves is held at or above the floor (setup/floors.json), so an installer-managed node needs no second build.
@@ -2891,6 +2902,15 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
 # compact JSON verdict describing the resolved profile so a test can assert on it.
 if ($RenderOnly) {
   Remove-TempRenderer
+  if ($yamlLive) {
+    if (Test-Path -LiteralPath $yamlLive) {
+      $yamlLivePrev = "$yamlLive.prev-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+      Copy-Item -LiteralPath $yamlLive -Destination $yamlLivePrev -Force
+      Write-Host "      old config kept as $yamlLivePrev" -ForegroundColor DarkGray
+    }
+    Move-Item -Force -LiteralPath $yamlDest -Destination $yamlLive
+    $yamlDest = $yamlLive
+  }
   $rv = @{ render_only = $true; backend = $backend; render_backend = $tplBackend;
     profile = $profileId; ram_tier = $ramTier; big_ram = $bigRam;
     agent_ctx_tokens = $agentCtxTokens; include_26b = [bool]$pp.include_26b;
@@ -2904,12 +2924,38 @@ if ($RenderOnly) {
 # ---------------------------------------------------------------------------
 $harnessExe = Join-Path $harnessDir 'local-offload.exe'
 $agentExe   = Join-Path $harnessDir 'local-agent.exe'
+# The commit a binary was built from is kept in <exe>.built-from. A newer checkout with the SAME
+# VERSION file kept the old binaries, so the skip also needs the recorded commit to equal this
+# checkout's HEAD. No record, no git, or not a git checkout: the commit is unknown, so rebuild.
+function Get-RepoCommit {
+  $prevEapGit = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $sha = "$(& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1)".Trim()
+    if ($LASTEXITCODE -eq 0 -and $sha -match '^[0-9a-f]{40,64}$') { return $sha }
+  } catch { } finally { $ErrorActionPreference = $prevEapGit }
+  return ''
+}
+function Test-BuiltFromHead {
+  param([string]$Exe)
+  $head = Get-RepoCommit
+  $rec = "$Exe.built-from"
+  if (-not $head -or -not (Test-Path -LiteralPath $rec)) { return $false }
+  return ("$(Get-Content -LiteralPath $rec -TotalCount 1)".Trim() -eq $head)
+}
+function Save-BuiltFrom {
+  param([string]$Exe)
+  $head = Get-RepoCommit
+  if ($head) { Set-Content -LiteralPath "$Exe.built-from" -Value $head -Encoding ascii }
+  else { Remove-Item -LiteralPath "$Exe.built-from" -Force -ErrorAction SilentlyContinue }
+}
 # SKIP requires the exe AND its version: a bare Test-Path let a re-install keep a
 # STALE local-offload.exe whose embedded templates/structs render the NEW on-disk
 # profiles.json wrong (silently - see the version-gate note above Resolve-HarnessExe).
-# The exe's own --version is the ground truth.
+# The exe's own --version is the ground truth. It also requires the checkout's commit to be
+# the one the exe was built from (a newer commit with an unchanged VERSION rebuilds).
 Step 'build local-offload.exe' `
-  { (Test-Path $harnessExe) -and ((Get-HarnessExeVersion $harnessExe) -eq $repoVersion) } `
+  { (Test-Path $harnessExe) -and ((Get-HarnessExeVersion $harnessExe) -eq $repoVersion) -and (Test-BuiltFromHead $harnessExe) } `
   {
     if (-not (Test-Go126)) { throw "Go >=1.26 not on PATH - cannot build" }
     Push-Location $repoRoot
@@ -2923,6 +2969,7 @@ Step 'build local-offload.exe' `
     } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
     if ($goRc -ne 0) { throw "go build (harness) failed (exit $goRc)" }
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
+    Save-BuiltFrom $harnessExe
   }
 Remove-TempRenderer
 $manifestComponents['local-offload'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
@@ -2946,7 +2993,7 @@ Step 'render runners -> harness\render' { $false } {
 # local-agent has no --version verb, so its rebuild gate uses the manifest version
 # idiom instead (same staleness class, same fix shape as a downloaded component).
 Step 'build local-agent.exe' `
-  { (Test-Path $agentExe) -and ((Get-OldVersion 'local-agent') -eq $repoVersion) } `
+  { (Test-Path $agentExe) -and ((Get-OldVersion 'local-agent') -eq $repoVersion) -and (Test-BuiltFromHead $agentExe) } `
   {
     if (-not (Test-Go126)) { throw "Go >=1.26 not on PATH - cannot build" }
     Push-Location $repoRoot
@@ -2955,6 +3002,7 @@ Step 'build local-agent.exe' `
       if ($LASTEXITCODE -ne 0) { throw "go build (agent) failed (exit $LASTEXITCODE)" }
     } finally { Pop-Location }
     if (-not (Test-Path $agentExe)) { throw "local-agent.exe not produced" }
+    Save-BuiltFrom $agentExe
   }
 $manifestComponents['local-agent'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
 
@@ -2983,6 +3031,41 @@ if ($hfSkipWhy) {
   $hfResult = Install-Hyperframes -RepoRoot $repoRoot -Dest (Join-Path $HOME_DIR 'hyperframes') -NodeExe $nodeCmd.Source
   $manifestComponents['hyperframes'] = $hfResult.version
   Write-Host "OK    hyperframes $($hfResult.version) (chrome-headless-shell $($hfResult.chrome) at $($hfResult.browser))" -ForegroundColor Green
+}
+
+# ---------------------------------------------------------------------------
+# Step 7c: the forecast lane's runtime (ADR 0098), OPT-IN. The seat is rendered and bound by the profile whatever
+# this step does; its venv, torch and weights are ~3 GB and optional, so they are built only when
+# OFFLOAD_WITH_FORECAST=1 (the closing summary says so when the seat is bound and the venv is absent). A skip or a
+# failed build never fails the install: the lane stays unbound at run time and `offload_forecast` forwards to a fleet node.
+# ---------------------------------------------------------------------------
+$forecastBound = $false
+if ($profileId -and (Test-Path $profilesJson)) {
+  try {
+    $fcRow = (Get-Content -Raw $profilesJson | ConvertFrom-Json).profiles.$profileId
+    $fcBind = Get-MediaSeatBindings -ProfileRow $fcRow
+    $forecastBound = [bool]($fcBind -and $fcBind.PSObject.Properties['forecast_model'])
+  } catch { $forecastBound = $false }
+}
+$forecastVenv = Join-Path (Join-Path $HOME_DIR 'forecast') 'venv'
+if ($env:OFFLOAD_WITH_FORECAST -eq '1') {
+  $fcSkipWhy = ''
+  if (-not $forecastBound) { $fcSkipWhy = "profile $(if ($profileId) { $profileId } else { '(none)' }) declares no forecast seat" }
+  elseif (-not (Get-Command uv -ErrorAction SilentlyContinue)) { $fcSkipWhy = 'uv is not on PATH (winget install astral-sh.uv)' }
+  elseif (-not (Get-Command git -ErrorAction SilentlyContinue)) { $fcSkipWhy = 'git is not on PATH' }
+  if ($fcSkipWhy) {
+    Write-Host "SKIP  forecast runtime (OFFLOAD_WITH_FORECAST=1): $fcSkipWhy" -ForegroundColor Yellow
+  } else {
+    Write-Host "DO    forecast runtime (install forecast --home $HOME_DIR --models $modelDir)" -ForegroundColor Cyan
+    $prevEapFc = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      & $harnessExe install forecast --home $HOME_DIR --models $modelDir 2>&1 | ForEach-Object { Write-Host "      $_" }
+      $fcRc = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prevEapFc }
+    if ($fcRc -eq 0) { Write-Host "OK    forecast runtime in $forecastVenv" -ForegroundColor Green }
+    else { Write-Host "WARN  forecast runtime: install forecast exited $fcRc; the seat stays bound without its runtime (re-run the same command to retry)" -ForegroundColor Yellow }
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -3207,12 +3290,21 @@ if ($hfResult -and (Test-Path $cfgDest)) {
 # Step 8b: run-graph satisfier tooling (best-effort). offload_run_graph provisions a
 # workflow's node manifest with git and uv; ensure uv (REQUIRED) and
 # comfy-cli (OPTIONAL convenience) are present in the ComfyUI venv. Only runs when a
-# ComfyUI install is discoverable (COMFY_DIR override, else config default C:/ComfyUI)
-# — a box without ComfyUI is unaffected (run-graph then simply DEFERs
+# ComfyUI install is discoverable (COMFY_DIR override, else the comfy_dir of the existing
+# config file, else C:/ComfyUI) — a box without ComfyUI is unaffected (run-graph then simply DEFERs
 # SATISFIER_UNAVAILABLE at call time, never crashes). A comfy-cli wheel-build failure
 # is a WARN and continues; a uv install failure fails LOUD.
 # ---------------------------------------------------------------------------
-if ($env:COMFY_DIR) { $comfyDir = $env:COMFY_DIR } else { $comfyDir = 'C:/ComfyUI' }
+# The existing config is read once: its comfy_dir picks the folder when COMFY_DIR is not set (a box whose
+# config says D:/ComfyUI was told there was no ComfyUI at C:/ComfyUI and its run-graph tooling was never ensured),
+# and its run_graph_script says whether this tier serves a run-graph route at all.
+$rgCfg = $null
+if (Test-Path $cfgDest) {
+  try { $rgCfg = Get-Content -Raw $cfgDest | ConvertFrom-Json } catch { $rgCfg = $null }
+}
+if ($env:COMFY_DIR) { $comfyDir = $env:COMFY_DIR }
+elseif ($rgCfg -and $rgCfg.PSObject.Properties['comfy_dir'] -and $rgCfg.comfy_dir) { $comfyDir = [string]$rgCfg.comfy_dir }
+else { $comfyDir = 'C:/ComfyUI' }
 if ($env:COMFY_PY)  { $comfyPy  = $env:COMFY_PY }  else { $comfyPy  = Join-Path $comfyDir '.venv/Scripts/python.exe' }
 # Discoverable means the venv's python answers, not that the directory exists: a box with a
 # bare or half-made C:/ComfyUI folder and no venv (the first fresh Windows install, an RTX 5080
@@ -3221,11 +3313,8 @@ if ($env:COMFY_PY)  { $comfyPy  = $env:COMFY_PY }  else { $comfyPy  = Join-Path 
 # A tier that blanks run_graph_script serves no run-graph route, so a ComfyUI on this box is the owner's own and this
 # installer has no reason to pip into it.
 $runGraphBlank = $false
-if (Test-Path $cfgDest) {
-  try {
-    $rgCfg = Get-Content -Raw $cfgDest | ConvertFrom-Json
-    $runGraphBlank = ($rgCfg.PSObject.Properties['run_graph_script'] -and -not $rgCfg.run_graph_script)
-  } catch { $runGraphBlank = $false }
+if ($rgCfg) {
+  try { $runGraphBlank = ($rgCfg.PSObject.Properties['run_graph_script'] -and -not $rgCfg.run_graph_script) } catch { $runGraphBlank = $false }
 }
 if ($runGraphBlank) {
   Write-Host "SKIP  run-graph deps (this tier serves no run-graph route; any ComfyUI on this box is left alone)" -ForegroundColor DarkGray
@@ -3293,6 +3382,10 @@ if ($script:StagedComponents.Count -gt 0) {
 # Step 9: start command + JSON verdict
 # ---------------------------------------------------------------------------
 $agentExe = Join-Path $harnessDir 'local-agent.exe'
+if ($forecastBound -and -not (Test-Path -LiteralPath $forecastVenv)) {
+  Write-Host ""
+  Write-Host "NOTE  forecast seat is bound, its runtime is not installed (offload_forecast forwards to a fleet node until it is). Install it with: & '$harnessExe' install forecast --home '$HOME_DIR' --models '$modelDir'   (or re-run this installer with OFFLOAD_WITH_FORECAST=1)" -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "Start the stack with:" -ForegroundColor White
 Write-Host "  & '$swapExe' --config '$yamlDest' --listen 127.0.0.1:11436" -ForegroundColor White
