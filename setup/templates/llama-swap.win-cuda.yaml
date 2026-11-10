@@ -8,7 +8,7 @@
 # / MOE-26B tokens in the common macro + 26B cmd from setup/templates/profiles.json,
 # keyed on the detected profile id. q8_0 V requires flash-attn on (satisfied
 # whenever a profile picks q8_0). Do NOT add --swa-full. MoE tier placement is
-# profile-driven; the __MOE_26B__ token carries whichever form the profile selected:
+# profile-driven; the MOE-26B token carries whichever form the profile selected:
 # -ngl 99 (experts on the card), --n-cpu-moe N -ngl 999 (the top N expert layers in
 # host RAM, the rest on the card; blackwell-16 ships N=14), or nothing when the tier
 # drops the 26B. A 16GB card that is also the display card cannot hold the full 26B
