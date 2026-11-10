@@ -34,7 +34,7 @@ import (
 
 // fleetTaskOrder is the advertisement order (stable for health payloads + error
 // messages). Membership is decided per-config by taskConfiguredFor.
-var fleetTaskOrder = []string{"image-gen", "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask, ForecastTask}
+var fleetTaskOrder = []string{"image-gen", ImageEditTask, "video-gen", "animate", "stt", STTUploadTask, "audio-gen", "run-graph", MediaJobTask, ComposeTask, ComposeProjectTask, "agent", "accel", VisionTask, TextTask, ForecastTask}
 
 // taskConfiguredFor reports whether THIS box actually serves taskType — the same
 // route gates the pipeline uses (empty script/model = the task defers there, so
@@ -65,6 +65,10 @@ func taskConfiguredIn(v *mediaView, taskType string, loopbackListener bool) bool
 		// fleet HTTP door can neither reach nor advertise a family doctor shows fully
 		// CONFIGURED (<node-f> wave session 5d227d30 §2a).
 		return cfg.ImageGenAdvertisable()
+	case ImageEditTask:
+		// The generative edit lane (edit_task.go): an edit binding that names the runner and a UNet (so the node has an
+		// edit recipe to publish) AND the media-job door open, the only door that carries the input images.
+		return cfg.EditAdvertisable() && cfg.MediaInputsAdmissible()
 	case "video-gen":
 		// Bound AND derived CONFIGURED by internal/mediacap (the script, the weights its graph loads
 		// and the custom nodes it names are on this machine): a bound script over a missing weight is
@@ -486,6 +490,9 @@ func buildRequestIn(ctx context.Context, v *mediaView, loopbackListener bool, ta
 	switch taskType {
 	case "image-gen":
 		return buildImageGen(ctx, cfg, payload)
+	case ImageEditTask:
+		// Carried only by /fleet/media-job (buildMediaJob builds it); a payload here would name image paths on this node.
+		return core.Request{}, noop, fmt.Errorf("task_type %q is carried only by /fleet/media-job (the images travel in its bundle)", taskType)
 	case "video-gen":
 		return buildVideoGen(payload)
 	case "animate":
@@ -555,6 +562,10 @@ func buildImageGen(ctx context.Context, cfg config.Config, payload json.RawMessa
 		// unknown one with the list it serves (health's image_families).
 		Family      string `json:"family"`
 		Transparent bool   `json:"transparent"`
+		// Placement is the delegator's per-call placement (generate-image --placement: single | multicard), laid over this node's
+		// own imagegen_placement for the family exactly as a local call lays it. Not part of the recipe digest, so it never changes
+		// whether the node matched.
+		Placement string `json:"placement"`
 		// Refine is a pointer so absent differs from false, as in the MCP handler: only an EXPLICIT false
 		// reaches the pipeline (the opt-in prompt refiner's one request-level knob). It used to be dropped here,
 		// which is why a delegator could not send refine=false (health's refine_honoured says this node carries it).
@@ -583,6 +594,9 @@ func buildImageGen(ctx context.Context, cfg config.Config, payload json.RawMessa
 	}
 	if in.Transparent {
 		params["transparent"] = true
+	}
+	if in.Placement != "" {
+		params["placement"] = in.Placement
 	}
 	if in.Negative != "" {
 		params["negative"] = in.Negative
@@ -737,6 +751,8 @@ func buildSTT(payload json.RawMessage) (core.Request, func(), error) {
 		Audio    string `json:"audio"`
 		Language string `json:"language"`
 		HQ       bool   `json:"hq"`
+		Words    bool   `json:"words"`
+		VAD      string `json:"vad"`
 	}
 	if err := json.Unmarshal(payload, &in); err != nil {
 		return core.Request{}, noop, fmt.Errorf("stt payload: %w", err)
@@ -750,6 +766,12 @@ func buildSTT(payload json.RawMessage) (core.Request, func(), error) {
 	}
 	if in.HQ {
 		params["hq"] = true
+	}
+	if in.Words {
+		params["words"] = true
+	}
+	if in.VAD != "" {
+		params["vad"] = in.VAD
 	}
 	return core.Request{Task: core.TaskTranscribe, Audio: in.Audio, Params: params}, noop, nil
 }
@@ -767,6 +789,13 @@ func buildAudioGen(payload json.RawMessage) (core.Request, func(), error) {
 		Seconds     int     `json:"seconds"`
 		Seed        int     `json:"seed"`
 		ReserveVRAM float64 `json:"reserve_vram"`
+		// the voice sampling knobs: a pointer, so that 0 (a real cfg_weight or min_p) differs from not sent
+		CfgWeight         *float64 `json:"cfg_weight"`
+		Exaggeration      *float64 `json:"exaggeration"`
+		Temperature       *float64 `json:"temperature"`
+		RepetitionPenalty *float64 `json:"repetition_penalty"`
+		MinP              *float64 `json:"min_p"`
+		TopP              *float64 `json:"top_p"`
 	}
 	if err := json.Unmarshal(payload, &in); err != nil {
 		return core.Request{}, noop, fmt.Errorf("audio-gen payload: %w", err)
@@ -795,6 +824,15 @@ func buildAudioGen(payload json.RawMessage) (core.Request, func(), error) {
 	}
 	if in.ReserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(in.ReserveVRAM, 'f', -1, 64)
+	}
+	for k, v := range map[string]*float64{"cfg_weight": in.CfgWeight, "exaggeration": in.Exaggeration, "temperature": in.Temperature,
+		"repetition_penalty": in.RepetitionPenalty, "min_p": in.MinP, "top_p": in.TopP} {
+		if v != nil {
+			params[k] = *v
+		}
+	}
+	if err := core.ValidateVoiceSampling(params); err != nil {
+		return core.Request{}, noop, fmt.Errorf("audio-gen payload: %w", err)
 	}
 	return core.Request{Task: core.TaskGenerateAudio, Input: in.Text, Params: params}, noop, nil
 }

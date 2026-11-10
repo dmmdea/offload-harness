@@ -76,6 +76,12 @@ server marks its requests resumable (`core.Request.Resumable`), and only those l
 a fleet node (`route: "remote"`, or `auto` that leaves this machine; ADR 0077) carries no `waiter_token`: the token
 names a place in line on this machine, and a resumed call that goes to a node gives that place up.
 
+**Generative edit on the fleet.** `offload_edit_image_generative` also takes `route` (`local`, `auto`, `remote`), `remotes`, `wait_s`,
+and, per request, `megapixels` (0.01 to 16) and `placement` (`single` or `multicard`). With `auto` a busy edit lane is a ticket that
+a fleet node holding the same edit recipe (`edit_recipes` in its health: graph, weights and the set of LoRA files, fingerprinted) can
+take, the source and reference images travelling in a hash-checked bundle
+([media-generation.md](media-generation.md#the-generative-edit-across-the-fleet)). The CLI twin is `edit-image-generative`.
+
 **Named media families (ADR 0058).** `offload_generate_image` and `offload_edit_image_generative`
 take a `family` param that selects one of the box's opt-in bindings beside its default one; the
 edit tool also takes `images` (multi-reference, qwen-image-2.1 families) and both take
@@ -131,9 +137,25 @@ local. `local` pins the call to this box (a held card then defers `gpu_busy` wit
 with none eligible, returns `deferred: true` with `defer_class: capacity` (or `config` with no remotes) without touching
 the local GPU. The audio is read on this box and sent as 16 kHz mono Opus; `srt_path`, `text_path` and `json_path` are
 always files this box wrote under its own `media_dir`, and `meta.node` / `meta.placement` say where the call ran.
+The spill lanes that take a `route` (`offload_transcribe`, the three vision tools, `offload_classify`, `offload_extract`,
+`offload_forecast`, `offload_compose_video`) also take `remotes`, the twin of the media doors' parameter: fleet node base
+URLs (tailnet-only) that a spill may use, each of which must be in `delegate_remotes`. It narrows the roster the lane probes
+for that one call and never extends it; a base outside `delegate_remotes` is refused as a contract defer
+(`defer_class: contract`) naming it, before anything is read or sent. It matters for `route: auto` and `remote`; `local`
+never leaves the box. The CLI `transcribe` verb takes the same as a repeatable `--remote`. One helper does the narrowing for
+every lane (`rosterprobe.Narrow`, `NarrowConfig`, `NarrowLane`; `mediaremote` uses the same rule).
 When the transcript carries word times the result also has `words_reliable` and `words_drift_sec`: `false` means the
 first word of some segment starts 0.5 s or more away from its segment (issue #169, see
 [offload-pipeline.md](offload-pipeline.md)), so audio should not be cut at word boundaries from those times.
+`words: true` adds the per-word timing of the transcript: `words[]` (`word`, `start` and `end` in seconds, `offsets{from,to}` in
+milliseconds under the keys whisper.cpp's JSON uses, `probability`; the first 2000 inline with `words_truncated` set when cut,
+`num_words` counts all of them) and `words_path`, the whole list as a whisper.cpp `-oj` file (`transcription[].offsets`, the text with
+its leading space, one word to an entry). The decode is deterministic: temperature 0 and no temperature fallback, so the same audio
+gives the same words on a rerun (a call without `words` keeps the seat's usual fallback). `vad: "on" | "off"` switches the
+voice-activity detector for that one call (a per-request `vad` field the whisper server reads over its own `--vad` flag): `off`
+decodes the whole file, silence included, the way `whisper-cli` does; `on` needs `stt_vad`. Neither exists on the `hq` tier when it is
+served over the OpenAI protocol (one full-span segment, no word times, no VAD switch) or under `engine: "npu"`: asked there, the call
+defers by name. The same two keys travel to a fleet node on the stt upload door. CLI: `local-offload transcribe --words --vad off`.
 `select` still projects the result here, whichever box ran it. `engine: "npu"` is this box's own Hailo sidecar and never
 travels: a route named there other than `local` is refused (an omitted route is not a request to travel). The CLI
 `local-offload transcribe --route` carries the same vocabulary and defaults to `local`. See
@@ -1407,6 +1429,15 @@ read-only unless deliberately widened. See
   load — occupancy stops at `/running` for a cold seat — and the render is bounded: a stalled
   probe degrades to the spec rows rather than dropping the table. See
   [composite-tier.md](composite-tier.md).
+- **What a node renders: `fleet.nodes[].media`.** A fleet node row carries `served_models`, which lists the node's llama-swap
+  chat seats only, so it says nothing about image, video, audio or speech. A caller once concluded a GPU node had no image or video
+  engine from that row alone. The row's `media` block answers it from what the node's `/fleet/health` publishes:
+  `task_types` (its `supported_task_types` filtered to the media set: `image-gen`, `video-gen`, `animate`, `audio-gen`, `stt`,
+  `stt-upload`, `run-graph`, `media-job`, `compose`, `compose-project`), `image_families` (the named image families and recipes),
+  `video_families`, `animate_families`, `audio_families`, `edit` (the state of the node's `edit_image` route; the node publishes no
+  edit-family list), `routes` (`configured` and `not_configured` route names, from `media_routes`) and `loadable_families` (its
+  `loadable_model_families`). A key appears only when the node published something for it, and the whole block is absent for a node that
+  published nothing media-shaped (an older node or a failed probe): unknown, never "has no media". The brief form carries it too.
 - **One block, or the brief form (0.137.0).** `offload_status` takes one optional argument,
   `section`. No argument (or `all`) is the whole payload, byte-identical to the answer before the
   argument existed. A block name (`local`, `media`, `remote`, `accelerators`, `reuse`, `fleet`,
@@ -1414,7 +1445,8 @@ read-only unless deliberately widened. See
   runs no nvidia-smi, the lease block probes no node. `accelerators` asked for by name on a box that
   lists none is `{}`, never `null`. `pair` is reported only with `pair_workloads_enabled` on: `{mode, relay?, reason?}`, which way
   this box's PAIR emitter reports (`local ingress`, `node-info fallback`, `relay` with the member's route URL, or `off` with
-  the reason; see [pair-workloads.md](pair-workloads.md)). `brief` is the sizing answer: the whole `fleet` block plus two
+  the reason; see [pair-workloads.md](pair-workloads.md)), plus, in the two ingress modes, `ingress_reachable` (a 1 s TCP dial to
+  the ingress; `false` adds `ingress_fix`). `brief` is the sizing answer: the whole `fleet` block plus two
   one-line strings under their own keys, so nothing that decodes `gpu_lease` or `local` as an object
   meets a string there. `gpu_lease_verdict` leads with the verdict word, then what the cards are
   doing, the holder and its reason, the queue length and the queue command. `local_verdict` gives

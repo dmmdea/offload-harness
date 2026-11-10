@@ -44,6 +44,7 @@ var (
 		"maxwell-3":       "3 GB sm_52: no vLLM wheel targets Maxwell (torch dropped sm_5x) and no sub-3 GB w4a16 candidate exists; the seat is llama.cpp CUDA through the sm_50 PTX",
 		"amd-gcn":         "ROCm build path not established for this box class; the only vLLM run was on the CPU, MEASURED 2026-09-20: Qwen3.5-4B bf16 only, 3.1 tok/s against 9.27 for llama.cpp CPU (about 0.3x), not seated",
 		"amd-rdna3":       "ROCm build path not established for this box class",
+		"ampere-2x16":     "two A2 cards on llama.cpp CUDA, every model pinned whole to one card (PIN, DON'T SPLIT): no vLLM venv on the reference box and no two-card vLLM measurement; the ampere-16 vLLM seat is declared and measured on one card (device 0) only",
 		"amd-rdna3-dgpu":  "ROCm build path not established for this box class",
 		"blackwell-8":     "8 GB + accelerator tier: MEASURED, not a path for the 9B (same weights as ampere-8; vLLM 0.30 under WSL sees 6.86 GiB free on the 5060 8 GB); owes a sub-6.8 GB candidate or an operator opt-out",
 		"blackwell-32":    "no box of this class online to measure on",

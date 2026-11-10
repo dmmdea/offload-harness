@@ -1045,7 +1045,8 @@ new is sampled (register C-05 stands: probing an unloaded seat through llama-swa
 | `vision_calls_running` | int, omitted when 0 | Single-shot vision calls (`vqa`, `ocr`, `assess_image`, a `video_describe` window) that OTHER processes on this box have on a seat right now: a CLI loop, an MCP server's `offload_vqa`. Counted from the `gpuactivity` records of kind `vision` whose pid is not this process (this process's own are its `/fleet/vision` jobs, already in `jobs_running`), in the same registry walk as `jobs_admitting`, and only on a node that binds a vision or OCR model. Not part of `jobs_running` and read by no placement rule: the delegator's `offload_status` adds it to the node row's `in_flight` and publishes it beside it. Before it existed, a script that looped one CLI call per image kept a node's vision seat busy for hours while every delegator read the node as idle. |
 | `jobs_withdrawn` | int, omitted when 0 | Jobs a delegator took back out of this node's backlog (`DELETE /fleet/jobs/{id}`) since the process started. The call that flipped a job counts once; a repeat does not. ADR 0064. |
 | `jobs_reaped` | int, omitted when 0 | Accepted agent jobs the poll-lease reaper took because nobody was polling them, since the process started. A drain's never-started marks count in neither. ADR 0064. |
-| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. Served from the 30 s residency cache; a read older than two windows or never taken waits (bounded by `residencyWaitBound`, 1.5 s) for a fresh `/running` before answering; an agent contract that completed a call on this seat writes the loaded state straight into the cache (0.128.2, below). |
+| `stale_reads` | list of `{name, age_ms}`, omitted when empty | Parts of this payload served from their last known value because a fresh one was not ready in time, each with the value's age in ms. `name` is `media_routes` (what `supported_task_types`, `loadable_model_families` and `media_routes` are derived from), `image_recipes`, `media_recipes`, or `agent_residency` (the cached roster answer is past its 30 s window while its refresh is in the air). The disk reads behind the first three are memoised for a minute; a request that finds one expired waits for the rebuild up to 250 ms (`healthReadBound`) and otherwise serves the previous value and says so here, so a node whose disk is busy loading weights still answers a probe in well under a second. A part never read before is waited for in full. Read a named part as "as of `age_ms` ago", not as a failure. |
+| `seat_loaded` | bool, omitted when unread | llama-swap's `/running` says the agent seat is loaded. Served from the 30 s residency cache; a read older than two windows or never taken waits (bounded by `residencyWaitBound`, 400 ms, and only the first request of a refresh cycle) for a fresh `/running` before answering; an agent contract that completed a call on this seat writes the loaded state straight into the cache (0.128.2, below). |
 | `seat_starting` | bool, omitted when unread | …and is still LOADING (llama-swap holds `/upstream/<seat>/…` for the whole load — 4m08s on the 27B TP2 seat, register D-92), so "loaded" is not yet "ready". |
 | `lease_exclusive` | bool, omitted when false | The held lease FENCES the cards: no model may be loaded onto them for its duration. |
 | `lease_draining` | bool, omitted when false | The held lease is still draining the seat. |
@@ -1093,10 +1094,12 @@ seat whose admission wait was 6 ms (`chosen eta 326 s (cold 28 + 298 gen)`), bec
 between the smoke that warmed the seat and the census was the census's own, two minutes later, and it got
 the pre-smoke answer. Now a read inside one more window (30–60 s old) keeps that shape; a read older than
 that, or one on a never-probed node, waits for the refresh it kicked, bounded by `residencyWaitBound`
-(1.5 s — sized for a responsive llama-swap, whose three refresh legs answer in milliseconds, and under every
+(400 ms, down from 1.5 s — sized for a responsive llama-swap, whose three refresh legs answer in milliseconds, and under every
 health client's budget: the accelerator router's 2 s, the fleet UI poller's 5 s, the delegator's 15 s), and
 serves whatever is published when the wait ends — the previous answer if llama-swap is slow or hung, said
-once per refresh cycle on the node's log. Separately, the dispatch path reads the one fact a finished agent
+once per refresh cycle on the node's log. Only the first request of a cycle waits: the ones behind it serve the
+previous answer at once, so a hung llama-swap costs one request 400 ms, not every request the full bound.
+Separately, the dispatch path reads the one fact a finished agent
 contract proves about the advertised seat — `steps > 0` on a result whose `seat` IS `agent_seat`, i.e. at
 least one completed call on it — and writes `seat_loaded:true` / `seat_starting:false` straight into the
 cache, no probe. Nothing else counts: a defer that never reached the seat (roster-unserved, config,
@@ -1792,7 +1795,8 @@ remote reasoning is quarantined from the caller's context by construction.
 | `seat_config_sha256` / `seat_config_basis` | string | A1 config pinning, SERVER side: a stable hash over a closed field set from the seat's live `/upstream/{model}/props` (build, weights path, quant, `n_ctx`, slots, server sampler defaults, `reasoning_format`, chat-template hash, modalities), plus a one-line human-readable basis for "what changed?". The probe runs post-loop against a resident seat and gives up in 3 s — it must never cold-start a model as a telemetry side effect — so an evicted seat honestly leaves the pin absent. The per-request `seed` default is deliberately excluded. |
 | `trace` / `rules_fired` | array / int | The step trace (0.113.22, ADR 0036): per tool call `{step, tool, status, obs_chars, rule}` (+ `setup` on replayed calls, 0.113.24; + `note`, ≤ 160 bytes of what the model was told, on calls that did NOT commit, 0.113.26 — the rigger's evidence) — what ran, what became of it, how much the model read, which environment rule decided — and the count of rule hits. Set before the defer branches. Omitempty: a pre-0.113.22 node emits neither, and readers must treat absence as "no trace", never as "no calls". |
 | `setup_ran` | int | 0.113.24: how many of the run's setup actions (the contract's `setup_actions` plus this node's seeded context reads) EXECUTED before the first model turn — committed or failed; a refused, unknown-tool or over-budget action is not counted and its step-0 `trace` entry (`setup: true`) says why. Absent = no replay happened, which on a node one release behind is the silence to read. |
-| `prefill_steps` / `prefill_tokens` / `cache_tokens` / `prefill_ms` | int/float | The run's T2-B prefill accounting, previously node-ledger-only — a REMOTE run's prefill economics never reached the delegator's standing corpus. Budget-stopped runs carry them too (they burn the most steps). Zero/absent = not measured, never "zero prefill". |
+| `prefill_steps` / `prefill_tokens` / `cache_tokens` / `prefill_ms` | int/float | The run's T2-B prefill accounting, previously node-ledger-only — a REMOTE run's prefill economics never reached the delegator's standing corpus. Budget-stopped runs carry them too (they burn the most steps). Zero/absent = not measured, never "zero prefill". A vLLM seat sends no `timings`, so its steps are counted from `usage.prompt_tokens_details.cached_tokens` when the server reports it. Those steps carry no `prefill_ms`, and an unreported `cached_tokens` leaves the step unmeasured. |
+| `prefill_source` | string | Where the prefill accounting came from: `timings` (llama.cpp), `usage` (vLLM) or `mixed`. Absent when no step was measured. |
 | `pager` | object | Unreleased: the loop's context-pager report, `{basis, evictions, evicted_bytes, distinct_evicted, refetched_distinct, compaction_passes}`. Present (zeros included) on every run the loop returned from, a write-class deferral included (the object is attached right after the loop returns, ahead of the write door), so `compaction_passes: 0` is a measured run that never compacted; ABSENT on a node that predates the field and on a run that never reached the loop, which a reader treats as unrecorded, never as zero. The delegation log keeps the object only if the delegator that writes the row carries the field too (it decodes the answer into its own wire result and encodes it again): the row's `delegator_version` and the result's `harness_version` name the two builds (the node stamps `harness_version` only after a loop that returned without an error and a write door that closed cleanly, so a pre-loop deferral, a loop-error deferral, a lost-workspace-root deferral and a write-class deferral lack it even where they carry `pager`). The re-fetch rate is not carried: a reader pools `refetched_distinct` over `distinct_evicted` (`local-offload trace-corpus`). |
 
 ### Defer shapes and their classes
@@ -1975,6 +1979,24 @@ so `notes.md`, `notes.md ` and `Notes.MD` cannot shadow one another. Raw string 
 those pairs through as "distinct", and the second write then overwrote the first with nothing
 reporting it. `COM10`/`LPT10` and names that merely *start* like a device (`console.md`,
 `nullify.go`) are ordinary files and stay legal.
+
+### Caller scope (which askers a node takes work from, 2026-11-09)
+
+A node whose config sets `fleet_admit_scopes` (`["personal"]`, say) takes work only from askers that declare one of
+those scopes in the `X-Offload-Scope` header, and publishes the list as `admit_scopes` in `/fleet/health`. The check
+runs in `authorizeGated` right after the bearer, so it covers every door that passes through it (dispatch, the media
+job, vision, text, forecast, the stt upload, compose, the PAIR relay) and the cascade chat lane, and it refuses before a
+body is read or a job created: `403 {"status":"error","refusal":"scope_not_admitted","admit_scopes":[...]}`, with one
+throttled journal line (reason `scope`). Fetching a finished job's output (`media-file`) is not gated: it belongs to a job
+the node already admitted. Unset, every asker is admitted and the health payload carries no `admit_scopes`, so the
+node is byte-identical to before.
+
+The asker sends the header from the scope its own config load resolved (`internal/callscope`: the working directory of
+the Claude Code session it serves, judged against `caller_scope_roots`, or `LOCAL_OFFLOAD_SCOPE`), only for `business`
+or `personal`; an asker that resolved nothing sends nothing and is refused. This is the backstop: the delegator's own
+filter (`delegate_remote_scopes`, OPERATOR-GUIDE) already removes such a node from every node list of a caller it does
+not admit, so the 403 fires only for a stale or misconfigured delegator. Not gated here yet: the kvslot door, the fleet
+queue holder's submit and a claim loop's pick (no box runs a queue holder today).
 
 ### Health advertisement — four agent fields, fail-closed residency
 
@@ -2173,7 +2195,8 @@ Three additions to the media tasks, all additive on the wire.
 `audio-gen` or `run-graph` job together with the input files it reads, from a holder of the fleet token. The body is
 `{job_id, task_type, payload, bundle?, bundle_sha256?, inputs?}`: `payload` is the inner task's payload exactly as
 `/fleet/dispatch` takes it, `bundle` is base64 of a gzip-tar of the files, and `inputs` maps a payload field to a bare name
-in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`, `animate.driver` and `audio-gen.clone`.
+in the bundle. The fields that may be files are `video-gen.still`, `animate.ref`, `animate.driver`, `audio-gen.clone` and, for
+`image-edit`, `image` and `images_1` to `images_9` (see [Generative edit](#the-generative-edit-lane-on-a-node-image-edit-and-edit_recipes)).
 
 - It is open only when `fleet_media_inputs` is true, `fleet_auth_token` is set and a media task is bound
   (`config.MediaInputsAdmissible`; "bound" is the advertisement's own notion, a script, the speech endpoint or the sd.cpp /
@@ -2243,6 +2266,13 @@ state (`task_type "video-gen" is bound on this node but its route is not ready: 
 every delegator re-places; a task that is not bound at all keeps the `400 unsupported task_type`. A delegator reads `media_routes` through
 `delegate.NodeView` (`MediaRoutes`, `RouteState`); an absent field is unknown, never "no route".
 
+**Voice sampling knobs (`voice_sampling_honoured`).** A node that serves `audio-gen` publishes `voice_sampling_honoured: true`: its
+audio-gen payload decoder reads `cfg_weight`, `exaggeration`, `temperature`, `repetition_penalty`, `min_p` and `top_p` (numbers, each
+validated against its range; absent means the engine default) and hands them to the voice script. The payload is not decoded strictly,
+so a node that predates the knobs would drop them silently; a delegator that has to send one therefore requires the key (`need.voiceSampling`
+in `internal/mediaremote`), and a node without it is a named miss in the placement, never a render with different sampling. Additive; absent
+on an older node.
+
 **Image recipes and `refine` (ADR 0082).** A node that serves `image-gen` also publishes `refine_honoured: true` (its image-gen
 task decodes `refine` the way the MCP handler does, so an explicit `refine=false` reaches the pipeline) and `image_recipes[]`:
 one row per ComfyUI image binding, default first then named families in name order, that names a checkpoint
@@ -2271,6 +2301,37 @@ reads `/fleet/health` decodes the rows (`delegate.NodeView.ImageRecipes`, `Refin
 lease block's class, reason and remaining seconds (`LeaseClass`, `LeaseReason`, `LeaseRemainingSec`) and, when it lists more than
 one lease, the first one's epoch (it names the holder in a ticket's answer). See
 [media-generation.md](media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).
+
+### The generative edit lane on a node: `image-edit` and `edit_recipes`
+
+A node with a generative edit binding (the default `gen_edit_script` and `gen_edit_unet`, or a named `gen_edit_families` entry that resolves
+to them) and `fleet_media_inputs` on lists the task `image-edit` in `supported_task_types` (`config.EditAdvertisable`; and
+`MediaInputsAdmissible` now counts an edit binding as a bound media task, so an edit-only node opens the door). It also publishes
+`edit_recipes[]` in `/fleet/health`, additive and omitted otherwise: one row per edit family, default first then named families in
+name order, in the shape of an `image_recipes` row plus `lane: "edit"` (`internal/fleetnode/edit_task.go`, from
+`mediacap.EditRecipeWith`, memoised and read through the fingerprint cache without waiting, exactly as the image rows). A row is the
+node's CAPABILITY for the lane and nothing one request chooses: the edit graph (`qwen-image-edit-2511`, or `qwen-image-2.1`), the UNet
+(`gen_edit_unet`), the text encoder, the VAE and the SET of LoRA files the node holds, each with `bytes` and the content `fingerprint`.
+The LoRA set is the binding's own LoRA (`gen_edit_lora`, else its preset's; listed with bytes `-1` when the file is missing) and, on the
+2511 graph, the other preset LoRAs a request may select, listed only when the node holds them. `preset`, `steps`, `cfg`, `sampler`,
+`megapixels`, `placement`, `seed` and `negative` are not in the digest; they travel in the request. `lane` enters the digest only when
+set, so every `image_recipes` digest is byte for byte what it was. A row with a missing or unhashed file has an empty `digest`.
+
+`image-edit` is carried ONLY by `POST /fleet/media-job` (a payload sent to `/fleet/dispatch` is answered `400`: its `image` would be a
+path on the node). The inner payload is `{prompt, recipe_digest, family?, negative?, preset?, steps?, cfg?, seed?, transparent?,
+megapixels?, placement?}`; the target travels as the file `image` and up to nine references as `images_1`..`images_9` (a bundle of up
+to ten files for this task, eight for every other; each is sniffed by magic bytes as PNG, JPEG or WebP, and the bundle cap is
+`fleet_media_inputs_max_mb`). `recipe_digest` is required: the builder (`buildImageEdit`) recomputes the digest of the edit family the
+payload names from the files on disk, waiting for fingerprints it lacks, and answers **`412`** on a mismatch, a missing file, a file it
+cannot fingerprint or a family it does not serve, with the same `cause` word as the image refusal, before anything is queued, leased or
+rendered. Then it refuses what can never render (`400`): references on a family that is not `qwen-image-2.1`, more than ten images in
+all, `transparent` on a family that renders opaque, `preset` on `qwen-image-2.1`, `megapixels` outside 0.01 to 16 or on
+`qwen-image-2.1`, a `placement` other than `single` or `multicard`, and a multicard `megapixels` above the card-only recipe's largest
+canvas (2.0). The request is the one the local door builds (`core.TaskEditImageGenerative`, run by `runEditImageGenerative` and its
+argv `imagegen.editArgs`); a per-request `megapixels` or `placement` replaces `gen_edit_megapixels` or `gen_edit_placement` for that
+call (`mediacap.ApplyEditRequestKnobs`, which the pipeline applies for the local door too). The seed is not changed: the noise mixes it with
+the source bytes by design (`render/noise-seed.mjs`). The output comes back as an `image_path` and `artifacts`, as an image-gen media
+job's does, under the door's own `mediajob-<hex>.png` name.
 
 **Video, animation and audio rows (ADR 0082 Amendment 3).** `/fleet/health` also carries `media_recipes[]`, additive: one row
 `{lane, name, default, engine, digest, files:[{role, name, bytes}], license, commercial_use}` per family a ComfyUI or sd.cpp binding of
@@ -2329,6 +2390,10 @@ died is still on the node under its job id; the next identical call from that ma
   the honest advertisement and `media_routes`
 - [`internal/fleetnode/image_recipe.go`](../../internal/fleetnode/image_recipe.go) — the `image_recipes` rows
   (memoised, fingerprints read without waiting), the `recipe_digest` check and the 412
+- [`internal/fleetnode/edit_task.go`](../../internal/fleetnode/edit_task.go) — the `edit_recipes` rows, the `image-edit` builder,
+  its digest check and the folding of the bundle's reference images
+- [`internal/mediacap/edit_recipe.go`](../../internal/mediacap/edit_recipe.go) and
+  [`edit_request_knobs.go`](../../internal/mediacap/edit_request_knobs.go) — the edit recipe, and the per-request canvas and placement
 - [`internal/fleetnode/media_recipes.go`](../../internal/fleetnode/media_recipes.go) — the `media_recipes` rows of the video,
   animation and audio bindings (sizes, no fingerprint; memoised)
 - [`internal/mediaremote/`](../../internal/mediaremote/) — the client that places a media job on a node, and (ADR 0082) the

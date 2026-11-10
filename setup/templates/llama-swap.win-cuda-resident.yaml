@@ -20,7 +20,7 @@ logLevel: info
 
 macros:
   common: >-
-    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
     --jinja --reasoning off --port ${PORT} --host 127.0.0.1
 
 models:
@@ -29,7 +29,7 @@ models:
     aliases: [gemma4-e4b]
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
-      -ngl 99 --parallel 1 ${common}
+      -ngl 99 --parallel 1 __SLOT_SAVE__ ${common}
   gemma4-e2b:
     ttl: 300  # operator rule 2026-09-08/10: every idle model unloads at 5 minutes, every engine, every tier (was: resident, no ttl)
     cmd: >-
@@ -40,7 +40,7 @@ models:
     env: [__M26_GRAPHS__]
     cmd: >-
       __LLAMA_BIN__/llama-server.exe -m __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
-      __MOE_26B__ --parallel 1 ${common}
+      __MOE_26B__ --parallel 1 __SLOT_SAVE__ ${common}
   # CODER + AGENT seat: Seat Frontier Leg 1 winner (2026-08-14) — Qwen3.8-27B
   # UD-Q4_K_XL, single-card here (no -sm layer: the whole file fits a 48/72GB
   # card). Thinking model: it must NOT take ${common} (the macro pins

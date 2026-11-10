@@ -6,7 +6,8 @@
       "embeddinggemma2": 11452,
       "qwen3.6-35b-a3b-agent": 10964,
       "mimo-9b-agent": 11102,
-      "lfm3": 11938
+      "lfm3": 11938,
+      "kvslot": 11506
     }
   },
   "whisper.cpp": { "harness": "1.8.3" },

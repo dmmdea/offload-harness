@@ -219,13 +219,19 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 			return withNeeds(r, cfg.ComfyDir, vFiles, vClasses, vOptional, nodes)
 		}},
 		{"animate_character", "comfyui", "animategen_script", cfg.AnimateGenScript, true, func(r Route) Route {
-			return withNeeds(r, cfg.ComfyDir, animateNeeds(cfg), nil, nil, nodes)
+			if cfg.AnimateMulticard() && r.State == Configured {
+				r.Detail += "; placement=multicard (card-only: the int8 DiT split over two leased cards, the text encoder, clip vision and the VAE on the storage card)"
+			}
+			return withNeeds(r, cfg.ComfyDir, animateNeeds(cfg), animateNodeClasses(cfg), nil, nodes)
 		}},
 		{"generate_audio:voice", "chatterbox-tts", "voicegen_script", cfg.VoiceGenScript, false, func(Route) Route {
 			return voiceRoute(cfg, exeDir)
 		}},
 		{"generate_audio:music", "acestep", "musicgen_script", cfg.MusicGenScript, true, func(r Route) Route {
-			return withNeeds(r, cfg.ComfyDir, musicNeeds(), nil, nil, nodes)
+			if cfg.MusicMulticard() && r.State == Configured {
+				r.Detail += "; placement=multicard (card-only recipe acestep/xl-turbo-bf16: the DiT on one leased card, the text encoders and the VAE on the other)"
+			}
+			return withNeeds(r, cfg.ComfyDir, musicNeeds(), musicNodeClasses(cfg), nil, nodes)
 		}},
 		{"run_graph", "comfyui", "run_graph_script", cfg.RunGraphScript, true, nil},
 	} {

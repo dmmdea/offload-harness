@@ -185,6 +185,44 @@ test("queryCards asks for display_attached and falls back to display_active alon
   assert.throws(() => M.queryCards(() => ({ status: 0, stdout: "no cards here" })), /listed no card/);
 });
 
+// The reading that failed for real on node-i (headless Linux, two NVIDIA A2, driver 615.71): both datacenter cards answer
+// display_attached Yes with no connector at all, and the multicard placement refused the pair as "drives a display".
+test("queryCards reads a Yes on a card the kernel shows with no display connector as No (Linux), and leaves every other case alone", () => {
+  const A = "GPU-1111aaaa-0000-0000-0000-000000000001", B = "GPU-2222bbbb-0000-0000-0000-000000000002";
+  const table = `0, ${A}, NVIDIA A2, 15356, 14241, Disabled, Yes\n1, ${B}, NVIDIA A2, 15356, 15017, Disabled, Yes\n`;
+  const spawn = (cmd, args) => /pci\.bus_id/.test(args[0])
+    ? { status: 0, stdout: `${A}, 00000000:01:00.0\n${B}, 00000000:03:00.0\n` }
+    : { status: 0, stdout: table };
+  // /sys/bus/pci/devices/<bus id>/{vendor,drm/cardN[/cardN-<connector>]} as measured: the A2s have a card node and no connector, the iGPU has connectors.
+  const tree = {
+    "/s/bus/pci/devices": ["0000:01:00.0", "0000:03:00.0", "0000:00:02.0"],
+    "/s/bus/pci/devices/0000:01:00.0/drm": ["card0", "renderD128"], "/s/bus/pci/devices/0000:01:00.0/drm/card0": ["device", "power"],
+    "/s/bus/pci/devices/0000:03:00.0/drm": ["card1", "renderD129"], "/s/bus/pci/devices/0000:03:00.0/drm/card1": ["device", "power"],
+    "/s/bus/pci/devices/0000:00:02.0/drm": ["card2"], "/s/bus/pci/devices/0000:00:02.0/drm/card2": ["card2-DP-1", "card2-HDMI-A-1"],
+  };
+  const vendors = { "0000:01:00.0": "0x10de", "0000:03:00.0": "0x10de", "0000:00:02.0": "0x8086" };
+  const sysfs = {
+    root: "/s",
+    readdirSync: (d) => { if (!(d in tree)) throw new Error("ENOENT " + d); return tree[d]; },
+    readFileSync: (f) => { const m = /devices\/([^/]+)\/vendor$/.exec(f); if (!m) throw new Error("ENOENT " + f); return vendors[m[1]] + "\n"; },
+  };
+  const cards = M.queryCards(spawn, { sysfs, platform: "linux" });
+  assert.deepEqual(cards.map((c) => c.display), [false, false], "no connector: the driver's Yes is ignored");
+  assert.equal(cards[0].displayAttached, "No");
+  assert.equal(cards[0].attachedIgnored, "no display connectors");
+  assert.doesNotThrow(() => M.resolveWanCards({ tokens: ["0", "1"], source: "--wan-cards", cards }));
+  // not Linux, or the DRM node absent: the driver's answer stands
+  assert.deepEqual(M.queryCards(spawn, { sysfs, platform: "win32" }).map((c) => c.display), [true, true]);
+  const noDrm = { ...sysfs, readdirSync: (d) => { if (d.endsWith("/drm")) throw new Error("ENOENT " + d); return sysfs.readdirSync(d); } };
+  assert.deepEqual(M.queryCards(spawn, { sysfs: noDrm, platform: "linux" }).map((c) => c.display), [true, true]);
+  // a card WITH connectors keeps display_attached as reported (the monitor with its screen asleep)
+  const iGpu = (cmd, args) => (/pci\.bus_id/.test(args[0]) ? { status: 0, stdout: `${A}, 00000000:00:02.0\n` } : { status: 0, stdout: table });
+  assert.equal(M.queryCards(iGpu, { sysfs, platform: "linux" })[0].display, true);
+  // display_active Enabled stays authoritative
+  const lit = (cmd, args) => (/pci\.bus_id/.test(args[0]) ? spawn(cmd, args) : { status: 0, stdout: table.replace("Disabled, Yes", "Enabled, Yes") });
+  assert.equal(M.queryCards(lit, { sysfs, platform: "linux" })[0].display, true);
+});
+
 test("wanCardTokens: --wan-cards, then the lease, then a UUID CUDA_VISIBLE_DEVICES; nothing says nothing", () => {
   const none = () => [];
   assert.deepEqual(M.wanCardTokens({ flags: { "wan-cards": "2, 0" }, env: { GPU_LEASE_DEVICES: "gpu-x" }, leaseDevicesFn: () => ["gpu-x"] }), { tokens: ["2", "0"], source: "--wan-cards" });
@@ -778,6 +816,26 @@ test("portNote names the port a multicard instance falls back to when no --api o
   assert.match(M.portNote({}, {}, "http://127.0.0.1:8189"), /no --api or COMFY_API.*127\.0\.0\.1:8189.*--api http:\/\/127\.0\.0\.1:<port>/);
   assert.equal(M.portNote({ api: "http://127.0.0.1:18852" }, {}, "http://127.0.0.1:18852"), "");
   assert.equal(M.portNote({}, { COMFY_API: "http://127.0.0.1:18852" }, "http://127.0.0.1:18852"), "");
+});
+
+test("every multicard instance key of a two-card node gets a port no other key and no per-card instance holds", () => {
+  // the failure that happened: krea2 (storage-first) then qwen-image-2.1 (compute-first) on the same two cards shared one port, and the idle first run refused the second
+  const table = [{ index: 0, uuid: U0, name: "A2", totalMiB: 15360, freeMiB: 15000, display: false }, { index: 1, uuid: U2, name: "A2", totalMiB: 15360, freeMiB: 15000, display: false }];
+  const opts = { comfyDir: "/c", packDirsFn: () => ["ComfyUI-MultiGPU"] };
+  const [a, b] = [table[0], table[1]];
+  const ports = new Map();
+  for (const [storage, compute] of [[a, b], [b, a]]) {
+    for (const order of [M.CARD_ORDER_STORAGE_FIRST, M.CARD_ORDER_COMPUTE_FIRST]) {
+      const launch = M.multicardLaunch({ storage, compute }, { ...opts, order });
+      const env = M.multicardEnv({}, launch, table);
+      ports.set(launch.key, env.COMFY_API);
+    }
+  }
+  assert.equal(ports.size, 4);
+  assert.equal(new Set(ports.values()).size, 4, JSON.stringify([...ports]));
+  for (const api of ports.values()) assert.ok(Number(api.split(":").pop()) > 8189 + 1, `${api} is above the per-card range 8189..8190`);
+  assert.equal(ports.get("mc-" + U0.slice(4, 12).toLowerCase() + "-" + U2.slice(4, 12).toLowerCase()), "http://127.0.0.1:8192");
+  assert.equal(M.multicardEnv({ COMFY_API: "http://127.0.0.1:18852" }, M.multicardLaunch({ storage: a, compute: b }, opts), table).COMFY_API, "http://127.0.0.1:18852", "the caller's own port wins");
 });
 
 test("packDirs keeps the reason a custom_nodes listing failed", () => {

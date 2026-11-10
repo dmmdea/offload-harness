@@ -60,6 +60,13 @@ var archRules = []struct {
 	{regexp.MustCompile(`(?i)\bVega\b`), "gcn"},
 	{regexp.MustCompile(`(?i)\b(Barcelo|Cezanne|Lucienne|Renoir|Picasso|Raven)\b`), "gcn"},
 	{regexp.MustCompile(`(?i)\bGCN\b`), "gcn"},
+	// NVIDIA data-center and workstation Ampere (sm_86/sm_80), named without an "RTX 30xx"
+	// marketing number: the A2 (the 16 GB inference card, "NVIDIA A2"), A10, A16, A30, A40 and
+	// A100, and the "RTX A4000/A5000/A6000" line. Without these an A2 fell to the "other"
+	// fallback below, so a PAIR of them could not satisfy allArchs(f, "ampere"). The label only
+	// names the generation: a single such card still lands in the same VRAM band as before.
+	{regexp.MustCompile(`(?i)\bNVIDIA\s+A(2|10|16|30|40|100)\b`), "ampere"},
+	{regexp.MustCompile(`(?i)\bRTX\s+A\d{4}\b`), "ampere"},
 	// A recognised vendor whose generation we do not classify.
 	{regexp.MustCompile(`(?i)NVIDIA|GeForce|Quadro|Tesla|AMD|Radeon`), "other"},
 }

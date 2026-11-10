@@ -76,6 +76,9 @@ func probeNvidiaSMI() Facts {
 		gb := mib / 1024
 		f.GPUCount++
 		f.Archs = append(f.Archs, ArchFromName(name))
+		if f.MinVRAMGb == 0 || gb < f.MinVRAMGb {
+			f.MinVRAMGb = gb
+		}
 		if gb > f.VRAMGb {
 			f.VRAMGb, f.GPUName, f.Arch = gb, name, ArchFromName(name)
 			if len(cols) >= 3 {

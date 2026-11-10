@@ -67,7 +67,18 @@ func TestAgentWindowMatchesWhatTheAgentSeatServes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// A cuda-pair tier renders from its own template, whose pooled agent seat carries a literal
+	// window; reading the Windows template for it would compare against a window it never serves.
+	pairTmplRaw, err := os.ReadFile(filepath.Join("setup", "templates", "llama-swap.linux-cuda-pair.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	seatCtxByBackend := map[string]map[string]string{
+		"cuda-pair": {
+			"qwen3.5-4b-agent": ctxExprFor(t, string(pairTmplRaw), "qwen3.5-4b-agent"),
+			"qwen38-27b-agent": ctxExprFor(t, string(pairTmplRaw), "qwen38-27b-agent"),
+			"qwen38-27b-pool":  ctxExprFor(t, string(pairTmplRaw), "qwen38-27b-pool"),
+		},
 		"vulkan": {
 			"qwen3.5-4b-agent": ctxExprFor(t, string(vulkanTmplRaw), "qwen3.5-4b-agent"),
 			"qwen3.5-9b-agent": ctxExprFor(t, string(vulkanTmplRaw), "qwen3.5-9b-agent"),

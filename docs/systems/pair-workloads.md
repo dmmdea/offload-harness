@@ -87,7 +87,7 @@ harness uses the two it has:
 
 | Call ended | Card closes | `startedAt` | `error` |
 |---|---|---|---|
-| succeeded | `completed` | when the lane held the engine | null |
+| succeeded | `completed` | when the lane held the engine; for a task whose lane never marks it (`tasksThatNeverMarkWorking`: `transcribe`), the call's `createdAt`, since a null start reads "Sent to <node>" on the desktop (`ranStart`, unreleased) | null |
 | **held back by another job's hold on what it needed** (`core.CardHeld`: `err_class` `gpu_queued`, `gpu_busy` or `compose_busy`) and its lane never held the engine | `completed`, a quiet card | null (never started) | the defer reason |
 | anything else that did not succeed (a render that broke, a configuration fault such as `gpu_lease_unavailable`, a deferral with no held class) | `failed`, red | when the lane held the engine, else null | the reason |
 | the lane panicked (a remote lane included: `core.CloseOnPanic`) | `failed` | as above | `panic: <value>`, posted before the panic goes on |
@@ -157,7 +157,11 @@ by its terminal relayed frame or the age cap, as before.
    that is still loading. A remote run reads it from the poll's `progress`, a local run from its
    own progress reports (`core.WithProgressReport`, `pairStartGate`); a run that reports no
    progress at all turns `running` after `pairNoProgressGrace` (30 s). A run that never worked
-   closes with `startedAt` null. `attempt()`'s `finish` emits the terminal frame with the
+   and did not complete closes with `startedAt` null. **A run that completed did run** even when no
+   poll caught the seat working (a short job answered between two polls): its terminal frame carries
+   `startedAt` = `completedAt` minus the node's `wall_ms`, never before `createdAt` (or `createdAt` when
+   the node reports no wall), because PAIR's desktop labels a card with a null start "Sent to <node>"
+   and a finished job read as one that never ran (unreleased, 2026-11-09). `attempt()`'s `finish` emits the terminal frame with the
    verdict the ledger row carries (a wire failure, a defer or a failed acceptance check is
    `failed`). The model and engine are **fixed at the first frame and carried on the
    `PlacedResult`** (`pairModel`, `pairEngine`, `pairCreated`, `pairStarted`): the node may end
@@ -365,7 +369,14 @@ printable text of at most 64 characters (`core.SanitizeAsker`) before it is used
 
 The emitter (`internal/pairworkloads.Emitter`) is fire-and-forget: a goroutine per frame with
 a 2 s timeout, one warning per process on the first failure, nothing ever changes a harness
-result. PAIR being absent (no `node-id.json`) or down is normal.
+result. The one-shot command-line emitters (`gpu reserve`, every verb that opens a pipeline) set `Config.WarnQuiet`
+(`pairworkloads.OneShotConfig`, 6 h): they warn only when no command has under the same resolved state root in that window,
+tracked by the mtime of `<state root>/pair-ingress-warned`; any error reading or writing the marker (or a marker dated in the
+future) makes it warn, so a throttle that cannot be trusted never hides the signal. The MCP server, the fleet node, the delegate
+runner, the seat watcher and the orphan sweeper keep the plain once-per-process warning (`openPipelineLongRunning` for the first
+two). `local-offload doctor` prints a `pair ingress:` row (a 1 s TCP dial to the endpoint, `OK` or `WARN` with the fix: enable the
+ingress listener or set `pair_workloads_enabled=false`), and `offload_status` carries `ingress_reachable` in its `pair` block, because
+`Enabled()` proves an identity, not a listener. PAIR being absent (no `node-id.json`) or down is normal.
 
 **Frames of one job are not ordered on the wire.** Each frame is posted on its own goroutine, so
 a run that ends within milliseconds of its queued frame (a defer, a local run's error, a node's
@@ -535,7 +546,8 @@ stayed invisible. A **relay** closes the gap with the same frames: a fleet-serve
   markers for the pass and goes on to the markers of the other relays and of the local ingress; the skipped ones are retried
   by the next sweep (before this, the first failed post ended the pass for every marker behind it, until the 48 h give-up).
 - `offload_status` has a `pair` block (absent unless `pair_workloads_enabled` is on): `mode` is `local ingress`,
-  `node-info fallback`, `relay` (with the route URL) or `off` (with the reason).
+  `node-info fallback`, `relay` (with the route URL) or `off` (with the reason). In the two ingress modes it also carries
+  `ingress_reachable` (a 1 s TCP dial to the ingress; `false` adds `ingress_fix`).
 
 Trust: a holder of the fleet token can make this member post a card named for any asker, on any node PAIR knows. The frame
 carries no prompt, context or output, and the member checks its shape, namespaces its id, bounds its rate and the cards it leaves open; the token is
@@ -634,6 +646,16 @@ side can know the producer died, so the harness retires its own orphans:
   (temp + rename) on the caller's goroutine, so a job's markers follow its frames in order; every
   error is swallowed (a marker that cannot be written only means a card that cannot be closed after
   a crash — never a failed or slowed job).
+- **A refused in-flight frame is sent again** (unreleased, `resend.go`). Only a terminal frame is parked
+  when its post fails, and a sweep leaves a live producer's in-flight marker alone, so a `queued` or
+  `running` frame posted while PAIR's ingress was down was lost: the card appeared with the job's next
+  frame, often its terminal one (2026-11-09: PAIR was restarted mid-delegation and a node ran two
+  subtasks for 13 minutes with no card, line or ring). The emitter now keeps the latest refused in-flight
+  frame of each job (`Emitter.unsent`) and posts it again every `inflightRetryInterval` (10 s), and at
+  once after any post that lands, until it is delivered, the job's next frame supersedes it, or it is
+  older than `OpenMaxAge`. A rejected frame (HTTP 400/413/422) is not retried. A late resend cannot
+  regress a card: the broker store only moves a job's state forward
+  (`TestInFlightFrameRefusedWhilePairIsDownIsResent`).
 - **Sweep.** A marker is an orphan when its pid is dead (`gpulease.PIDAlive`), its pid now belongs
   to a different process (`gpulease.ProcessStart` differs), or it is older than 24 h
   (`OpenMaxAge`, the leak cap). The sweep sends the terminal frame the producer never sent — state

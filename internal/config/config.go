@@ -18,6 +18,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/callscope"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
@@ -488,10 +489,12 @@ type Config struct {
 	// says so), "auto" (console session locked ⇒ away; else last input idle
 	// ≥ operator_idle_sec and the shell not busy/fullscreen ⇒ away). Defaults
 	// to present — the display card fails closed until the operator has read
-	// the probe's readings in offload_status and set auto or away. The layer's
-	// presence guard is the key's only reader since 0.183.0: the card allocator (gpu
-	// reserve --cards, an auto-placed media call) no longer reads presence, it admits
-	// the display card by gpu_display_cap_pct (GPUDisplayCapPct) at all times.
+	// the probe's readings in offload_status and set auto or away. That default is the
+	// display layer's. The card allocator (gpu reserve --cards, an auto-placed media call,
+	// gpu display-check) reads the key too since 2026-11-07 (AllocatorPresenceMode): unset
+	// means auto there, so the display card takes jobs, within gpu_display_cap_pct, only
+	// while the operator is away and the card is not busy (operator rule 2026-11-07, "only
+	// up to 60% of the 5070ti card WHEN IDLE"). From 0.183.0 to then it read no presence.
 	OperatorPresence string `json:"operator_presence,omitempty"`
 	// OperatorIdleSec is the last-input idle threshold behind presence mode
 	// "auto". 0 = 900 (15 min): long enough that a coffee break does not admit
@@ -1327,6 +1330,17 @@ type Config struct {
 	// resolution for the driver resize (0 = the builder's 482x854 template default).
 	AnimateGenWidth  int `json:"animategen_width,omitempty"`
 	AnimateGenHeight int `json:"animategen_height,omitempty"`
+	// AnimateGenPlacement is the placement of the WAN-Animate-2 animate seat ("" or "single" = one render card, today's; "multicard" = the card-only
+	// placement on the box's two non-display cards, render/wan-multicard.mjs: no host RAM). The distilled int8 DiT is 15.5 GiB, which one 16 GB card
+	// cannot hold with the sampler's activations and a --gpu-only node cannot stream, so the door leases the pair, passes --placement multicard to
+	// render/comfy-animate.mjs and drops the single-card pin and dynamic VRAM, the way videogen_placement does for the video door. The DiT is split over
+	// the pair with the compute card as cuda:0, the umt5 encoder and clip_vision_h and the VAE sit on the storage card, and the encoder is released after
+	// the prompt is encoded. It needs a .safetensors int8 DiT (animategen_unet unset is the builder's own int8 file); the sd.cpp engine (animategen_engine
+	// "sdcpp") never reads it. The recipe row the fleet advertises (wan-animate2: name and files) does not carry it. An unknown value is a config error.
+	AnimateGenPlacement string `json:"animategen_placement,omitempty"`
+	// AnimateGenResidentGB is animategen_placement multicard's --resident-gb: the GiB of the DiT kept on the compute card (0 = the runner's own default,
+	// 5; the arithmetic for two 14.996 GiB cards is render/wan-multicard.mjs checkAnimateResident). 0..64.
+	AnimateGenResidentGB float64 `json:"animategen_resident_gb,omitempty"`
 	// --- iGPU media engines (CT-49): animate / voice / music on a Vulkan iGPU ---
 	// Every key below is optional and a box that sets none of them behaves exactly as
 	// before. The engines are spawn-per-job native CLIs under the media lease, and NO
@@ -1392,6 +1406,12 @@ type Config struct {
 	// "audiocpp" = render/audiocpp-generate.mjs --kind music (audio.cpp's ace_step
 	// family, `--task gen`).
 	MusicGenEngine string `json:"musicgen_engine,omitempty"`
+	// MusicGenPlacement asks the typed music door for the CARD-ONLY placement ("multicard"; ""/"single" = today's one-card lease): ACE-Step 1.5 XL's DiT
+	// (9.29 GiB) and its two text encoders and VAE (9.2 GiB) do not fit one 16 GB card together, so on a node of two equal cards it runs on two leased
+	// non-display cards, the DiT whole on one and the encoders and VAE on the other, every weight in VRAM and none in host RAM
+	// (render/multicard-recipes.json, row acestep/xl-turbo-bf16). Only the ComfyUI engine reads it. UNSET by default on every box
+	// (docs/systems/media-generation.md, "Card-only music").
+	MusicGenPlacement string `json:"musicgen_placement,omitempty"`
 	// AudiocppScript is the runner for both audio kinds (default
 	// render/audiocpp-generate.mjs). AudiocppBin is audiocpp_cli (full path).
 	// AudiocppBackend (required, never cpu) and AudiocppDevice (a device index; "" = 0)
@@ -1477,9 +1497,11 @@ type Config struct {
 	// GPUDisplayCapPct (A-RAM-15, default 60) is how much of the display card's total VRAM jobs may use, the
 	// desktop's own memory included: the card allocator (`gpu reserve --cards`, the media admission path) takes the
 	// screen's card only while the VRAM in use now plus the job's declared footprint stays at or under this share of
-	// the card. The operator's rule of 2026-10-11: the display card may be used up to 60 percent at all times unless
-	// he says he needs it, so no presence reading opens or closes it any more; 0 is the "I need it" switch and keeps
-	// the card closed to the allocator. A pointer because unset (60) and 0 (closed) must differ; 1..100 are shares, and
+	// the card. The share is the operator's rule of 2026-10-11; since 2026-11-07 it applies only WHILE THE CARD IS IDLE
+	// ("only up to 60% of the 5070ti card WHEN IDLE so i can always keep it interactive"): the allocator's idle gate
+	// (gpualloc.DisplayBusy: the operator away by the presence probe, and the card under 15 % busy) closes the card
+	// otherwise, which supersedes the 10-11 "at all times, no presence reading" wording. 0 is the "I need it" switch
+	// and keeps the card closed to the allocator whatever the gate reads. A pointer because unset (60) and 0 (closed) must differ; 1..100 are shares, and
 	// a value outside 0..100 refuses the load by name (and reads as closed where a caller goes on with it anyway). The
 	// switch is read from this file as it is when the allocator builds its input or a status surface prints the card
 	// table (LiveGPUDisplayCap), not as it was at start, so a 0 written while a request is in line or a server is running takes effect. It bounds ADMISSION only: nothing limits a job after it is placed, and a job that declares no footprint (`--vram`)
@@ -2082,6 +2104,11 @@ type Config struct {
 	FleetSTTMaxConcurrent int `json:"fleet_stt_max_concurrent,omitempty"`
 	// KVSlotCapGiB bounds the node's kvslots/ directory (ADR 0056 Layer 2); 0 = 8 GiB.
 	KVSlotCapGiB int `json:"kvslot_cap_gib,omitempty"`
+	// AgentKVSlotRetention switches the agent loop's own use of those slot files (ADR 0100): a run restores the KV of
+	// a prompt this node already paid for, saves a prompt on its second sighting, and saves around a tool call long
+	// enough for the seat to unload. *bool because it defaults ON wherever the running seat supports it (a
+	// --slot-save-path in its command, one slot) and an absent key must not read as an opt-out; false turns it off.
+	AgentKVSlotRetention *bool `json:"agent_kvslot_retention,omitempty"`
 	// FleetAgentEnabled opts this NODE into executing fleet "agent" tasks
 	// (docs/specs/2026-08-16-multi-node-agent-delegation.md). Default false:
 	// the agent lane runs a coding-agent loop on caller-supplied contracts, so
@@ -2131,6 +2158,31 @@ type Config struct {
 	// load by name, because a typo here would otherwise read as "private-ok" and send private work out. Like
 	// delegate_remotes it is read once per process: restart the MCP server after changing it.
 	DelegateRemoteClasses map[string]string `json:"delegate_remote_classes,omitempty"`
+	// DelegateRemoteScopes declares which CALLERS a machine may be given work by (2026-11-09), keyed by a node
+	// base URL; the key names the MACHINE (host only, a DNS name cut to its first label), so one entry covers the
+	// node's fleet port, its seat endpoints and its cascade lanes. Values: "business" and/or "personal". A machine
+	// that is not listed takes every caller's work, as before the key. A listed machine takes only the listed
+	// scopes and never a caller whose scope is unknown: the caller's scope is resolved once per process from
+	// caller_scope_roots (internal/callscope), and the load removes every excluded machine from delegate_remotes,
+	// cascade_remote_lanes, seat_endpoints and fleet_queue_holder, so no lane can reach it. A key that names no
+	// node of those lists, and any scope word other than the two, fails the load by name. List a node under every
+	// spelling (name and IP) the node lists use. Read once per process, like delegate_remotes.
+	DelegateRemoteScopes map[string][]string `json:"delegate_remote_scopes,omitempty"`
+	// CallerScopeRoots maps a caller scope ("business", "personal") to directory prefixes: a process serving a
+	// Claude Code session is judged by that session's working directory, any other process by its own, and the
+	// scope is the one whose root is the longest prefix. A directory under no root, or under roots of both scopes
+	// at the same depth, is "unknown". A root starting "*:" matches any drive letter. LOCAL_OFFLOAD_SCOPE
+	// (business|personal) overrides the judgement for a process that knows whose work it does.
+	CallerScopeRoots map[string][]string `json:"caller_scope_roots,omitempty"`
+	// FleetAdmitScopes is the NODE side of the same policy (fleet-serve only): when set, this node refuses a job
+	// whose asker does not declare one of these scopes (the X-Offload-Scope header) with a typed 403, and
+	// publishes the list in /fleet/health. Empty admits every asker, as before. It is a backstop behind the
+	// delegator's own filter: a delegator that resolves no scope sends no header and is refused.
+	FleetAdmitScopes []string `json:"fleet_admit_scopes,omitempty"`
+	// CallerScope is the caller scope this process resolved at load, and ScopeExcluded every node base the
+	// policy removed from this config's node lists (ForScope). Never serialized: they describe the process.
+	CallerScope   callscope.Scope  `json:"-"`
+	ScopeExcluded []ScopeExclusion `json:"-"`
 	// RetiredKeys are the retired config keys the FILE this value was loaded
 	// from still carries, sorted. Never serialized: it describes the file, not
 	// the settings. Load fills it from the raw bytes so `doctor` can print one
@@ -2570,6 +2622,9 @@ func Load(path string) (Config, error) {
 // value without a call before each return.
 func loadArmed(path string) (Config, error) {
 	c, err := load(path)
+	// The caller-scope policy filters every node list before any exit below returns the value (scope.go): a
+	// one-shot verb proceeds on a config that failed to load, and it must not proceed on an unfiltered one.
+	c = applyCallerScope(c)
 	// The policy for an overdue lease is installed before anything below can return early, on every exit
 	// and the error ones included: a one-shot verb proceeds on a config that failed to load, and a value
 	// that never got installed would leave it on the default for a key the operator did set. An
@@ -2796,6 +2851,9 @@ func load(path string) (Config, error) {
 		return c, err
 	}
 	if err := validateRemoteClasses(c); err != nil {
+		return c, err
+	}
+	if err := validateCallerScope(c); err != nil {
 		return c, err
 	}
 	// A policy for an overdue lease nobody implements is refused by name: there is no automatic mode,
@@ -3140,6 +3198,8 @@ func (s bindingTrapSink) Write(p []byte) (int, error) {
 func warnMediaGenBindingTrapsTo(c Config, w io.Writer) {
 	warnImageBindingTo(c, w, "")
 	warnEditBindingTo(c, w, "")
+	warnMusicBindingTo(c, w)
+	warnAnimateBindingTo(c, w)
 	// The pooled VIDEO seat carries the IDENTICAL MultiGPU #191 requirement
 	// (docs/tiers/blackwell-2x16.md; render/wf-ltx25-i2v.mjs). Un-pooled, an
 	// int8 DiT that upcasts to ~39 GB at compute no longer fits the virtual pool
@@ -3268,8 +3328,11 @@ func warnImageBindingTo(c Config, w io.Writer, where string) {
 func warnMulticardLaunchTo(c Config, w io.Writer, where, key, seat string) {
 	if !c.GPUCardScopedLeases {
 		noun := "render"
-		if seat == "edit" {
+		switch seat {
+		case "edit":
 			noun = "edit"
+		case "music":
+			noun = "music render"
 		}
 		fmt.Fprintf(w, "warning: %s%s is multicard but gpu_card_scoped_leases is off — the call holds the whole node and names no cards, so the runner refuses it and EVERY %s will be refused; turn card-scoped leases on (after a green reader audit) or unset the placement\n", where, key, noun)
 	}
@@ -3286,6 +3349,12 @@ func (c Config) MulticardLaunchNotes() []string {
 	}
 	if c.EditMulticard() {
 		seats = append(seats, "gen_edit_placement")
+	}
+	if c.MusicMulticard() {
+		seats = append(seats, "musicgen_placement")
+	}
+	if c.AnimateMulticard() {
+		seats = append(seats, "animategen_placement")
 	}
 	for _, name := range sortedFamilyNames(c.ImageGenFamilies) {
 		if cp, _, _, err := applyOverlay(c, name, c.ImageGenFamilies[name], imageOverlay); err == nil && cp.ImageMulticard() {
@@ -3337,11 +3406,50 @@ func (c Config) EditMulticard() bool {
 	return strings.TrimSpace(c.GenEditPlacement) == PlacementMulticard
 }
 
-// The values of imagegen_placement and gen_edit_placement: "" and "single" are the one-card lease every box has always taken.
+// MusicMulticard reports a music binding that asks for the card-only placement (musicgen_placement: multicard).
+func (c Config) MusicMulticard() bool {
+	return strings.TrimSpace(c.MusicGenPlacement) == PlacementMulticard
+}
+
+// AnimateMulticard reports an animate binding that asks for the card-only placement (animategen_placement: multicard). The sd.cpp engine is another
+// route and never reads it (runAnimateCharacter hands that engine the call before the placement is looked at).
+func (c Config) AnimateMulticard() bool {
+	return strings.TrimSpace(c.AnimateGenPlacement) == PlacementMulticard && c.AnimateGenEngine != EngineSdcpp
+}
+
+// The values of imagegen_placement, gen_edit_placement, musicgen_placement, videogen_placement and animategen_placement: "" and "single" are the one-card lease every box has always taken.
 const (
 	PlacementSingle    = "single"
 	PlacementMulticard = "multicard"
 )
+
+// warnAnimateBindingTo carries the animate seat's traps: the card-only placement is a ComfyUI placement of the int8 WAN-Animate-2 DiT, and it needs the lease to
+// name its two cards.
+func warnAnimateBindingTo(c Config, w io.Writer) {
+	if strings.TrimSpace(c.AnimateGenPlacement) != PlacementMulticard {
+		return
+	}
+	if c.AnimateGenEngine == EngineSdcpp {
+		fmt.Fprintf(w, "warning: animategen_placement is multicard but animategen_engine is %q — the card-only placement is a ComfyUI placement; the sd.cpp runner never reads it\n", c.AnimateGenEngine)
+		return
+	}
+	if u := strings.ToLower(strings.TrimSpace(c.AnimateGenUnet)); u != "" && (!strings.HasSuffix(u, ".safetensors") || strings.Contains(u, "bf16") || strings.Contains(u, "fp16")) {
+		fmt.Fprintf(w, "warning: animategen_placement is multicard but animategen_unet is %q — the card-only placement runs the int8 .safetensors DiT (a GGUF, bf16 or fp16 file is refused by the runner by name), so EVERY animate call will be refused after the pair was held; bind the int8 file or unset the placement\n", c.AnimateGenUnet)
+	}
+	warnMulticardLaunchTo(c, w, "", "animategen_placement", "animate")
+}
+
+// warnMusicBindingTo carries the music seat's traps: the card-only placement is a ComfyUI placement of one recipe (ACE-Step 1.5 XL turbo bf16), and it needs the
+// lease to name its two cards.
+func warnMusicBindingTo(c Config, w io.Writer) {
+	if !c.MusicMulticard() {
+		return
+	}
+	if c.MusicGenEngine != "" {
+		fmt.Fprintf(w, "warning: musicgen_placement is multicard but musicgen_engine is %q — the card-only placement is a ComfyUI placement; the audio.cpp runner never reads it\n", c.MusicGenEngine)
+	}
+	warnMulticardLaunchTo(c, w, "", "musicgen_placement", "music")
+}
 
 // warnEditBindingTo carries the edit seat's traps for one (effective) binding.
 func warnEditBindingTo(c Config, w io.Writer, where string) {
@@ -3791,7 +3899,7 @@ func (c Config) MediaInputsAdmissible() bool {
 	if !c.FleetMediaInputs || c.FleetAuthToken == "" {
 		return false
 	}
-	return c.ImageGenAdvertisable() || c.VideoGenBound() || c.AnimateGenBound() ||
+	return c.ImageGenAdvertisable() || c.EditAdvertisable() || c.VideoGenBound() || c.AnimateGenBound() ||
 		c.VoiceGenBound() || c.MusicGenBound() || c.RunGraphScript != ""
 }
 
@@ -4193,6 +4301,11 @@ func (c Config) EnsureDirs() error {
 		}
 	}
 	return nil
+}
+
+// AgentKVSlotRetentionOn reports whether the agent loop's KV-slot retention may attach: on unless the key is false.
+func (c Config) AgentKVSlotRetentionOn() bool {
+	return c.AgentKVSlotRetention == nil || *c.AgentKVSlotRetention
 }
 
 // CascadeSeatGuardOn reports whether the cascade seat guard runs: on unless

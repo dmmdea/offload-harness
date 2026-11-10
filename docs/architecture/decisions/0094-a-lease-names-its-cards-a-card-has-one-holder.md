@@ -93,8 +93,9 @@ for it (`devices.go:17-24`, `44-47`).
   (`internal/modelaffinity/seatscope.go:141-167`, `ScopeToPins`, `ScopeToModel`; `internal/modelaffinity/gpuwait.go:227-242`,
   `blocksLoad`). The exemption for "this process runs under the lease" is per lease, compared by epoch
   (`gpuwait.go:284-291`, `insideLease`).
-- `gpu reserve --cards N` chooses cards with one pure function: not claimed, not quarantined, the display card only within its
-  cap, no foreign compute process, the declared VRAM and host RAM fitting, a card with no resident seat first
+- `gpu reserve --cards N` chooses cards with one pure function: not claimed, not quarantined, the display card only while it is
+  idle and within its cap (ADR 0039, amendment 2026-11-07), no foreign compute process, the declared VRAM and host RAM
+  fitting, the non-display cards first and then a card with no resident seat first
   (`internal/gpulease/allocator.go:3-29`, `169`, `Allocate`). Allocating and claiming are one loop, so two reserves that read
   the same free card do not both take it (`gpu_reserve_devices.go:30-32`).
 - The drain and the unload act on the seats that sit on the leased cards (`gpu_drain.go:784`, `maintainSeatScoped`; `696`,

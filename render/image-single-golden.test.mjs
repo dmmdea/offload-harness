@@ -18,7 +18,7 @@ const names = Object.keys(golden);
 
 const rebuild = (e, extraFlags = {}) => {
   if (e.via === "render") return buildRenderGraph({ pos: e.pos, flags: { ...e.flags, ...extraFlags }, env: e.env, random: () => 0.5 });
-  const plan = planEdit({ pos: e.pos, flags: { ...e.flags, ...extraFlags }, refs: e.refs, measure: () => ({ width: 928, height: 1664 }), exists: () => true, random: () => 0.5 });
+  const plan = planEdit({ pos: e.pos, flags: { ...e.flags, ...extraFlags }, refs: e.refs, measure: () => ({ width: 928, height: 1664 }), exists: () => true, random: () => 0.5, noiseSeed: (s) => s });
   return plan.build(["staged_0.png"]);
 };
 

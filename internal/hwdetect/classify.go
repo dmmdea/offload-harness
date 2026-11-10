@@ -28,9 +28,13 @@ type Facts struct {
 	// VRAMGb is the DEDICATED VRAM of the primary GPU. On an AMD iGPU this is the
 	// BIOS carve-out (0.5-4 GB), not the usable UMA pool — which is exactly why the
 	// AMD branch bands on it rather than trusting it as capacity.
-	VRAMGb   float64 `json:"vram_gb"`
-	GPUCount int     `json:"gpu_count"`
-	RAMGb    int     `json:"ram_gb"`
+	VRAMGb float64 `json:"vram_gb"`
+	// MinVRAMGb is the DEDICATED VRAM of the SMALLEST detected NVIDIA card; 0 when the probe did
+	// not capture every card's size. Only a rule that needs EVERY card in a band reads it
+	// (ampere-2x16): VRAMGb is the largest card's, so it cannot tell a 16+16 pair from a 16+8 one.
+	MinVRAMGb float64 `json:"min_vram_gb,omitempty"`
+	GPUCount  int     `json:"gpu_count"`
+	RAMGb     int     `json:"ram_gb"`
 	// UMA marks a GPU with no memory of its own: an SoC whose GPU and NPU allocate
 	// from the same RAM as the CPU. VRAMGb is 0 there and the usable capacity is a
 	// share of RAMGb — which is what separates it from an AMD iGPU, whose BIOS
@@ -138,6 +142,20 @@ func classifyProfile(f Facts) Verdict {
 		f.VRAMGb >= 12 && f.VRAMGb < 24 {
 		return Verdict{Profile: "blackwell-2x16", BigRAM: f.RAMGb >= 120,
 			Reason: "2 GPUs, both Blackwell, 16GB band -> the homogeneous dual-sm_120 tier"}
+	}
+
+	// A homogeneous PAIR of 16GB-class Ampere cards (2x NVIDIA A2, RTX A4000) on LINUX is the
+	// two-card pinned tier: no NVLink, every model pinned whole to one card (the
+	// llama-swap.linux-cuda-pair template). STRICT like the Blackwell rule: every card's arch
+	// captured and ampere, AND every card (MinVRAMGb, not just the largest) in the band. The
+	// floor is 14, not 15: an A2 reports 15,356 MiB = 14.996 GiB, and the 27B seat needs ~12.4
+	// GiB plus KV; the ceiling keeps 24 GB pairs (3090, A5000) and the 22.5 GB A10 on dual-gpu.
+	// Linux only: there is no Windows cuda-pair template, so a Windows pair keeps the dual-cuda
+	// render it has always had.
+	if f.GPUCount == 2 && vendor == "nvidia" && strings.EqualFold(f.OS, "linux") && allArchs(f, "ampere") &&
+		f.MinVRAMGb >= 14 && f.VRAMGb < 20 {
+		return Verdict{Profile: "ampere-2x16",
+			Reason: "2 GPUs, both Ampere, every card in the 14-20GB band (A2 / RTX A4000 class), Linux -> the two-card pinned tier"}
 	}
 
 	// Multi-GPU with at least one NVIDIA outranks any single-card band: the

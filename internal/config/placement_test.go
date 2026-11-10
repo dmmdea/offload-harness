@@ -205,6 +205,8 @@ func TestThePlacementWarningKnowsExactlyTheFamiliesThatHaveARecipe(t *testing.T)
 			img[r.Family] = true
 		case "edit":
 			edit[r.Family] = true
+		case "music":
+			// ACE-Step has the one recipe; the music warning (warnMusicBindingTo) names no family, so there is no set to pin
 		default:
 			t.Fatalf("a recipe for the route %q", r.Route)
 		}

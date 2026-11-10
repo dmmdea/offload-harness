@@ -75,6 +75,9 @@ type audioFlags struct {
 	seconds     int
 	seed        int
 	reserveVRAM float64
+	// sampling holds the voice sampling knobs the caller named, by params key (core.VoiceSamplingKnobs); a knob not
+	// given is absent, so the engine keeps its own default (0 is a real value for cfg_weight and min_p).
+	sampling map[string]float64
 }
 
 // buildAudioParams maps the parsed CLI flags to the pipeline params map for a
@@ -112,7 +115,35 @@ func buildAudioParams(f audioFlags) map[string]any {
 	if f.reserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(f.reserveVRAM, 'f', -1, 64)
 	}
+	for k, v := range f.sampling {
+		params[k] = v
+	}
 	return params
+}
+
+// parseVoiceSamplingFlags reads the six sampling flags (--cfg-weight ... --top-p) of generate-audio. A flag left
+// empty was not given; one given is a number in its range or an error that names it, before any render.
+func parseVoiceSamplingFlags(vals map[string]*string) (map[string]float64, error) {
+	got := map[string]float64{}
+	probe := map[string]any{}
+	for _, k := range core.VoiceSamplingKnobs {
+		raw := strings.TrimSpace(*vals[k.Param])
+		if raw == "" {
+			continue
+		}
+		v, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return nil, fmt.Errorf("generate-audio: %s must be a number, got %q", k.Flag, raw)
+		}
+		got[k.Param], probe[k.Param] = v, v
+	}
+	if err := core.ValidateVoiceSampling(probe); err != nil {
+		return nil, fmt.Errorf("generate-audio: %w", err)
+	}
+	if len(got) == 0 {
+		return nil, nil
+	}
+	return got, nil
 }
 
 // runGenerateAudio handles `local-offload generate-audio <out> "<text>"
@@ -175,12 +206,19 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 	remotes := new(repeatedFlag)
 	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	node := fs.String("node", "", nodeFlagUsage)
+	// voice sampling knobs (kind voice, the Chatterbox worker; refused by name for music and for a speech-server or audio.cpp voice).
+	// Strings so that "not given" differs from 0, which is a real value for cfg-weight and min-p.
+	sampling := map[string]*string{}
+	for _, k := range core.VoiceSamplingKnobs {
+		sampling[k.Param] = fs.String(strings.TrimPrefix(k.Flag, "--"), "", "voice: "+k.Param+" "+voiceSamplingRange(k)+" (unset keeps the engine default)")
+	}
 
 	// generate-audio takes TWO positionals (out path, text); the rest are flags.
 	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
 		"config": true, "kind": true, "voice": true, "clone": true, "lang": true,
 		"seconds": true, "seed": true, "reserve-vram": true, "tts-voice": true,
 		"route": true, "remote": true, "node": true, // generate-audio
+		"cfg-weight": true, "exaggeration": true, "temperature": true, "repetition-penalty": true, "min-p": true, "top-p": true,
 	})
 	if err := fs.Parse(flagArgs); err != nil {
 		return generateAudioCLI{}, err
@@ -189,15 +227,27 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 	if out == "" || text == "" {
 		return generateAudioCLI{}, fmt.Errorf("generate-audio requires an output path and text: local-offload generate-audio <out.wav> \"<text>\" [--kind voice|music] [--lang es]")
 	}
+	knobs, err := parseVoiceSamplingFlags(sampling)
+	if err != nil {
+		return generateAudioCLI{}, err
+	}
 	return generateAudioCLI{
 		fs: fs,
 		audio: audioFlags{
 			node: *node, kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
-			seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM,
+			seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM, sampling: knobs,
 		},
 		text: text, asJSON: *asJSON, compact: *compactFlag,
 		route: *route, remotes: *remotes,
 	}, nil
+}
+
+// voiceSamplingRange is a knob's accepted range for help text.
+func voiceSamplingRange(k core.VoiceSamplingKnob) string {
+	if k.MinExclusive {
+		return "above " + core.FormatVoiceSampling(k.Min) + ", up to " + core.FormatVoiceSampling(k.Max)
+	}
+	return core.FormatVoiceSampling(k.Min) + " to " + core.FormatVoiceSampling(k.Max)
 }
 
 // laneTargetParams puts the --node and --min-vram-gb of a lane verb into the request's params, only when they were given (an

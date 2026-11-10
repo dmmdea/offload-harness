@@ -143,7 +143,7 @@ func (e *Emitter) Begin(task, door string) (callID string, working func(), end f
 		}
 		state, errText := CardOutcome(res, started != 0)
 		e.EmitSync(Event{JobID: c.jobID, Model: task, Engine: c.engine, State: state, Error: errText,
-			Requester: c.requester, CreatedAt: c.created, StartedAt: started,
+			Requester: c.requester, CreatedAt: c.created, StartedAt: ranStart(task, started, c.created, state, errText),
 			CompletedAt: e.now().UnixMilli()})
 	}
 	return c.callID(), working, end
@@ -247,11 +247,24 @@ func closeWith(ev Event, c *openCall, started int64) Event {
 	ev.Engine = c.engine
 	ev.Node = ""
 	ev.CreatedAt = c.created
-	ev.StartedAt = started
+	ev.StartedAt = ranStart(c.task, started, c.created, ev.State, ev.Error)
 	if ev.Requester == "" || ev.Requester == "offload-harness" {
 		ev.Requester = c.requester
 	}
 	return ev
+}
+
+// ranStart is the start a call's closing frame carries. A lane that never marks its work started
+// (tasksThatNeverMarkWorking) leaves started 0 even when the call ran and succeeded, and PAIR's
+// desktop reads a null start as "Sent to <node>", never "Ran on <node>": every successful
+// transcription closed as if it had not run (2026-11-09). A clean success of such a task ran, so it
+// carries its creation time. A held-back call (completed with its reason in error) and every
+// failure keep the start as it was, because a null start is what marks a call that ran nothing.
+func ranStart(task string, started, created int64, state, errText string) int64 {
+	if started == 0 && tasksThatNeverMarkWorking[task] && state == "completed" && errText == "" {
+		return created
+	}
+	return started
 }
 
 // CardOutcome is the terminal state and error text of the PAIR card of a call that ended with res;

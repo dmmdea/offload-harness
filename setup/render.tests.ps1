@@ -105,7 +105,7 @@ if ($macro -match '--ctx-size 32768')                          { Ok 'ampere-8/mi
 if ($macro -match '--cache-type-k q8_0' -and $macro -match '--cache-type-v q8_0') { Ok 'ampere-8/mid KV=q8_0 (symmetric)' } else { Bad 'ampere-8/mid KV q8_0' }
 if ($macro -match '--flash-attn on')                           { Ok 'ampere-8/mid flash-attn on' }    else { Bad 'ampere-8/mid flash-attn' }
 if ($macro -match '--cache-ram 16384')                         { Ok 'ampere-8/mid cache-ram 16384 (ADR 0056, never below the 8192 upstream default)' } else { Bad "ampere-8/mid cache-ram (got: $macro)" }
-if ($macro -notmatch '--slot-save-path')                      { Ok 'ampere-8/mid renders NO slot-save-path (ADR 0056: llama-server REFUSES TO START when the path is missing, and the par8 seat has 8 slots)' } else { Bad "ampere-8/mid must not render slot-save-path (got: $macro)" }
+if ($macro -notmatch '--slot-save-path')                      { Ok 'ampere-8/mid renders NO slot-save-path while the llama.cpp build is unknown (it renders only when the install home is known, the build is at or above the kvslot floor in setup/floors.json and the entry runs one slot; the render creates the directory, since llama-server REFUSES TO START on a missing one)' } else { Bad "ampere-8/mid must not render slot-save-path with no known llama.cpp build (got: $macro)" }
 # RAM is overflow only (operator rule 2026-09-10; wiring-debt W4, 0.132.4): an 8 GB card cannot hold the
 # 26B without parking its experts in RAM, and --cpu-moe parks ALL of them. This block used to assert the
 # opposite - that ampere-8/mid renders the 26B WITH --cpu-moe - which is how <node-a> served it live.
@@ -246,7 +246,7 @@ if ($r.yaml -match '(?m)^\s{2}bge-reranker-v2-m3:')             { Ok 'b2x16 rera
 # The two-card concurrency contract: fast-card seats are alternatives, the STT seat
 # joins as a CONJUNCTION so it may run concurrently from the other card.
 $setLines = @($r.yaml -split "`r?`n" | Where-Object { $_ -match '^\s{4}(text|residents):' }) -join ' / '
-if ($r.yaml -match '(?m)^\s{4}text:\s*"\+residents & \(e4b \| e2b \| m26 \| a26 \| q38 \| q38p \| vis\) & stt & fc"') { Ok 'b2x16 matrix: one fast-card model (incl. 26b-agent, qwen3.8 and its --parallel 8 fan-out twin as alternatives) + concurrent STT + the forecast seat + residents' } else { Bad "b2x16 matrix set (got: $setLines)" }
+if ($r.yaml -match '(?m)^\s{4}text:\s*"\+residents & \(e4b \| e2b \| m26 \| a26 \| q38 \| q38p \| vis \| pup\) & stt & fc"') { Ok 'b2x16 matrix: one fast-card model (incl. 26b-agent, qwen3.8 and its --parallel 8 fan-out twin as alternatives) + concurrent STT + the forecast seat + residents' } else { Bad "b2x16 matrix set (got: $setLines)" }
 if ($r.yaml -match '(?m)^\s{2}qwen3\.8-27b:')                   { Ok 'b2x16 qwen3.8 coder/agent seat present (include_qwen38)' } else { Bad 'b2x16 qwen3.8 seat missing' }
 if ($r.yaml -match '(?m)^\s{2}gemma-4-26b-agent:')              { Ok 'b2x16 26b-agent rollback seat present' } else { Bad 'b2x16 26b-agent seat missing' }
 if ($r.yaml -notmatch '__[A-Z0-9_]+__')                         { Ok 'b2x16 no unsubstituted tokens' } else { Bad 'b2x16 leftover tokens' }

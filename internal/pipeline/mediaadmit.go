@@ -9,8 +9,9 @@ package pipeline
 //   - a single-card route (image, edit, inpaint, upscale, animate, music, un-pooled video) asks
 //     the allocator for ONE card, holds a lease on it, and runs in the ComfyUI instance bound to
 //     that card (its own port, directories and launch marker, pinned by GPU uuid). Two such calls
-//     run on two cards at once; the display card is open to the allocator only up to the
-//     operator's cap (gpu_display_cap_pct) and to a call that declares a VRAM footprint, which a
+//     run on two cards at once; the display card is open to the allocator only while it is
+//     idle (rule 2026-11-07), up to the operator's cap (gpu_display_cap_pct), and to a call that
+//     declares a VRAM footprint, which a
 //     media call does not yet, so it is not auto-assigned to one today (which card is the display
 //     card is the shared rule in gpuprobe, which reads display_attached as well as
 //     display_active);
@@ -26,7 +27,9 @@ package pipeline
 //     it holds the whole node (a graph in the default instance sees every card, so a lease on
 //     some of them would not confine it);
 //   - everything else (sdcpp, voice, a host with card-scoped leases off or no card table) takes
-//     the whole-node lease exactly as before, byte for byte.
+//     the whole-node lease as before. A whole-node call whose worker drives no ComfyUI (sdcpp and
+//     the Chatterbox voice worker, mediaNeed.OffDisplay) also has its own CUDA work kept off the
+//     screen's card unless the allocator would give that card an undeclared job (offDisplayEnv).
 //
 // A call that cannot get a card inside its window does not fail with "gpu busy". It leaves a
 // place-keeping token (gpulease/tokens.go) and answers with it, its position and an ETA; the
@@ -78,7 +81,7 @@ const (
 	needSingle                     // one card: the allocator's, or the explicit pin's
 	needPooled                     // the cards a pool's keys name
 	needDeclared                   // cards the operator declared (run-graph `devices`)
-	needMulticard                  // the box's two non-display cards, leased as a set (imagegen_placement / gen_edit_placement: multicard)
+	needMulticard                  // the box's two non-display cards, leased as a set (imagegen_placement / gen_edit_placement / musicgen_placement: multicard)
 )
 
 // mediaNeed is what one media call asks of the GPU.
@@ -116,6 +119,17 @@ type mediaNeed struct {
 	Refusal string
 	// Row is the card-only recipe the binding matched (needMulticard, nil = none), kept so forCanvas can hold the request's canvas to the row's cap.
 	Row *mediacap.MulticardRow
+	// OffDisplay marks a whole-node call whose worker starts no ComfyUI and computes on ONE CUDA device (sd.cpp, the
+	// Chatterbox voice worker): its children are shown only the non-display cards unless the display card would take an
+	// undeclared job now (offDisplayEnv). A route that drives ComfyUI never sets it: the default instance's --cuda-device
+	// is an index into every card, which a narrower CUDA_VISIBLE_DEVICES would renumber.
+	OffDisplay bool
+}
+
+// offDisplay marks a whole-node need as one whose worker stays off the display card (mediaNeed.OffDisplay).
+func (n mediaNeed) offDisplay() mediaNeed {
+	n.OffDisplay = true
+	return n
 }
 
 // footKey is a footprint-store identity: family, quant, task.
@@ -337,6 +351,42 @@ func editNeed(cfg config.Config, token string) mediaNeed {
 	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteEdit, cfg))
 }
 
+// musicNeed is the need of the music route (ACE-Step on ComfyUI) for the resolved binding: two cards under the card-only placement, else one.
+func musicNeed(cfg config.Config, token string) mediaNeed {
+	if cfg.MusicMulticard() {
+		return multicardNeed(hostneed.RouteMusic, cfg, token)
+	}
+	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteMusic, cfg))
+}
+
+// voiceNeed is the need of the Chatterbox voice worker (no ComfyUI instance). With card-scoped leases on and a green reader audit (onCard, p.cardScopedOn) it asks for ONE card, the allocator's pick with no pin (comfy_cuda_device pins ComfyUI, not
+// this worker), so a voice render runs beside a render on another card; otherwise it holds the whole node with its worker kept off the display card, as it
+// always did.
+func voiceNeed(onCard bool, token string) mediaNeed {
+	if onCard {
+		// offDisplay is read only when the card path falls back to the whole node (the card table unreadable, or an inherited lease that names no card):
+		// that fallback grant holds no card, so the worker is pinned by the off-display rule, never left on cuda:0.
+		return mediaNeed{Kind: needSingle, Token: token}.offDisplay()
+	}
+	return wholeNeed(token).offDisplay()
+}
+
+// cardScopedOn says whether this host leases cards: gpu_card_scoped_leases is on and the reader audit is green (the lease manager's CardScoped, the predicate
+// acquireCardScoped asks before it plans a single-card call).
+func (p *Pipeline) cardScopedOn() bool {
+	m, err := p.scopedManager()
+	return err == nil && m.CardScoped()
+}
+
+// voiceCardEnv pins a voice worker to the card its grant holds: the card by uuid (never an index, which a narrower CUDA_VISIBLE_DEVICES would renumber),
+// in PCI bus order, so the worker sees exactly that card as cuda:0. A grant that holds no card (the whole-node fallback) pins nothing.
+func voiceCardEnv(g mediaGrant) []string {
+	if g.Card == nil || g.Card.UUID == "" {
+		return nil
+	}
+	return []string{"CUDA_VISIBLE_DEVICES=" + g.Card.UUID, "CUDA_DEVICE_ORDER=PCI_BUS_ID"}
+}
+
 // videoNeed is the need of the video route: pooled, or a single card like image generation.
 func videoNeed(cfg config.Config, token, renderFamily string, over hostneed.VideoOverrides) mediaNeed {
 	// The key the video route's sampling hook records under (runGenerateVideo): the family that renders and the
@@ -351,6 +401,16 @@ func videoNeed(cfg config.Config, token, renderFamily string, over hostneed.Vide
 		return pooledNeed(token, cfg.VideoGenPoolCompute, cfg.VideoGenPoolDonor).declaresRAM(videoRAM(cfg, renderFamily, over)).withFootprint(foot)
 	}
 	return singleCardNeed(cfg, token).declaresRAM(videoRAM(cfg, renderFamily, over)).withFootprint(foot)
+}
+
+// animateNeed is the need of the animate route (WAN-Animate-2 on ComfyUI): two cards under the card-only placement (animategen_placement: multicard, mediamulticard.go),
+// else one card like image generation. The placement is a node's own config and never part of the recipe row the fleet advertises (mediacap.AnimateRowName: name and files).
+func animateNeed(cfg config.Config, token string) mediaNeed {
+	if cfg.AnimateMulticard() {
+		// The card-only placement ignores the pin: the pair is the lease's.
+		return animateMulticardNeed(cfg, token)
+	}
+	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteAnimate, cfg))
 }
 
 // mediaGrant is what a call holds while it renders.
@@ -622,7 +682,9 @@ func (p *Pipeline) unloadEnv(ctx context.Context, ids []string, cards []gpuprobe
 
 // instanceEndpoint is the endpoint of the ComfyUI instance bound to a card: the base port plus
 // the card's nvidia-smi index (8189, 8190, 8191 on the 3-card box). Stable per card, because the
-// render layer refuses to reuse an instance whose marker records another port.
+// render layer refuses to reuse an instance whose marker records another port. A card-only (multicard)
+// instance is not here: its roles and card order, which name its key, are chosen in the runner, so the
+// runner gives it a port above this range (render/wan-multicard.mjs multicardPort).
 func (p *Pipeline) instanceEndpoint(c gpuprobe.Card) string {
 	if p.instanceAPI != nil {
 		return p.instanceAPI(c)
@@ -721,7 +783,62 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	if place != nil {
 		place.m.DropToken(place.tok.ID) // served: the place is spent (a grant without a wait never consumed it)
 	}
+	if need.OffDisplay {
+		env = append(env, p.offDisplayEnv(ctx, readTable)...)
+	}
 	return mediaGrant{Env: env, Release: release}, nil
+}
+
+// offDisplayEnv keeps a whole-node call's own CUDA work off the operator's screen (operator rule 2026-11-07: the display
+// card takes jobs only while it is idle, and the other cards are used first). The call holds every card, but its worker
+// (sd.cpp, the Chatterbox voice worker) computes on cuda:0, and CUDA's default fastest-first order makes that the fastest
+// card, which on the `blackwell-3x16` reference box is the display card: before this, those workers ran on the screen's
+// card whatever the operator was doing, with no cap. The answer is the allocator's own rule for a job that declares no
+// footprint (gpulease.DisplayAdmits, the idle gate and the cap read live): where it would not give the display card such
+// a job, the children see only the other cards (CUDA_VISIBLE_DEVICES by UUID, in nvidia-smi order). Nothing is set when
+// this process already carries CUDA_VISIBLE_DEVICES (an operator's or an outer lease's pin), when the table cannot be
+// read, names no display card or cannot say which card the monitor is on, or when no other card exists. table is the
+// table the admission read (nil = read it here; empty = it could not be read).
+func (p *Pipeline) offDisplayEnv(ctx context.Context, table []gpuprobe.Card) []string {
+	if strings.TrimSpace(os.Getenv("CUDA_VISIBLE_DEVICES")) != "" {
+		return nil
+	}
+	if table == nil {
+		t, _, err := p.alloc.CardTable(ctx, p.cfg)
+		if err != nil {
+			log.Printf("media admission: the card table could not be read (%v), so this whole-node call's worker is not kept off the display card", err)
+			return nil
+		}
+		table = t
+	}
+	var others []string
+	display := false
+	for _, c := range table {
+		if c.DisplayUnknown {
+			log.Printf("media admission: the card table cannot say which card the monitor is on, so this whole-node call's worker is not kept off the display card")
+			return nil
+		}
+		if c.Display {
+			display = true
+			continue
+		}
+		others = append(others, c.UUID)
+	}
+	if !display || len(others) == 0 {
+		return nil
+	}
+	in := gpulease.AllocInput{Cards: table, DisplayCapPct: p.cfg.LiveGPUDisplayCap(), DisplayFloorGiB: p.cfg.DisplayFloorGiB()}
+	if in.DisplayCapPct > 0 {
+		busy := p.alloc.DisplayBusy
+		if busy == nil {
+			busy = gpualloc.DisplayBusy
+		}
+		in.DisplayBusy = busy(p.cfg, table)
+	}
+	if ok, _ := gpulease.DisplayAdmits(in); ok {
+		return nil
+	}
+	return []string{"CUDA_VISIBLE_DEVICES=" + strings.Join(others, ",")}
 }
 
 // acquireMediaLeaseHeld is acquireMediaLease for a caller that waits a long time for its card (a batch with nowhere else to

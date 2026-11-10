@@ -349,6 +349,20 @@ func (c Config) PresenceMode() string {
 	return m
 }
 
+// AllocatorPresenceMode is operator_presence as the CARD ALLOCATOR reads it (gpualloc.DisplayBusy; operator rule
+// 2026-11-07: the display card takes jobs, within gpu_display_cap_pct, only WHEN IDLE). Unlike PresenceMode, a key
+// left unset reads as "auto" here: the rule needs a live reading of the desk, and the layer's "present" default
+// would close the display card to the allocator for good. A "present" the operator wrote still closes it (he is at
+// the desk and says so), and "away" still opens it whatever the probe reads. The display layer's twins keep
+// PresenceMode's default: they stay off until the operator opts in (ADR 0075 D7).
+func (c Config) AllocatorPresenceMode() string {
+	m := strings.ToLower(strings.TrimSpace(c.OperatorPresence))
+	if m == "" {
+		return "auto"
+	}
+	return m
+}
+
 // OperatorIdle is the last-input threshold for presence mode "auto" with the
 // 15-minute default applied (operator_idle_sec 0 = default, never "0 seconds",
 // which would read every keystroke gap as away).

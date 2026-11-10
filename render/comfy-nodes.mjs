@@ -20,13 +20,16 @@
 // the same table for `doctor` (internal/mediacap/routeneeds.go); a class missing here is
 // still reported, just without the pack hint.
 // ComfyUI-MultiGPU archives upstream 2026-09-30 (issue #223, no successor endorsed).
-// The mirror's default branch carries one local Windows P2P/cudart
-// fix already carried by the fleet, on top of upstream's last code commit; mirrored privately at dmmdea/ComfyUI-MultiGPU-mirror
+// The mirror's default branch carries two local fixes on top of upstream's last code commit: the Windows P2P/cudart load,
+// and (2026-11-09) the comfy_kitchen DLPack guard staging relative to torch's current device — ComfyUI d07dff45 and later run the
+// Flux2 VAE's fused group_norm through comfy_kitchen on the VAE's card, and upstream's guard staged the inputs to the compute card
+// while the kernel ran on the VAE's (an illegal memory access that killed the prompt worker whenever the VAE was not on the compute
+// card). Mirrored privately at dmmdea/ComfyUI-MultiGPU-mirror
 // (a clone of this repository has no access to it: the installer, manifest-satisfy.mjs makeEnsurePack, falls back to the public upstream
 // when the clone of the repository a manifest names fails; both are rows of node-packs.json). See
 // docs/systems/media-generation.md "Archival".
 const MULTIGPU_ARCHIVAL_NOTE =
-  " — ARCHIVED upstream 2026-09-30 (no successor, still public and cloneable); the maintainer's mirror https://github.com/dmmdea/ComfyUI-MultiGPU-mirror is PRIVATE (it carries one local Windows P2P/cudart fix): install from it only with access to it, otherwise from the public upstream https://github.com/pollockjj/ComfyUI-MultiGPU";
+  " — ARCHIVED upstream 2026-09-30 (no successor, still public and cloneable); the maintainer's mirror https://github.com/dmmdea/ComfyUI-MultiGPU-mirror is PRIVATE (it carries two local fixes: the Windows P2P/cudart load, and the comfy_kitchen DLPack staging that ComfyUI d07dff45+ needs for a VAE on a non-compute card): install from it only with access to it, otherwise from the public upstream https://github.com/pollockjj/ComfyUI-MultiGPU";
 
 export const NODE_PACKS = Object.freeze({
   VHS_VideoCombine: "ComfyUI-VideoHelperSuite (https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite)",
@@ -43,6 +46,10 @@ export const NODE_PACKS = Object.freeze({
   // registered by the same pack (its NODE_CLASS_MAPPINGS names them).
   UNETLoaderMultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
   CLIPLoaderDisTorch2MultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
+  // the card-only music recipe's two-encoder loader (the stock DualCLIPLoader plus `device`)
+  DualCLIPLoaderMultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
+  // the card-only animate graph's clip vision loader (wf-wan-animate2.mjs, comfy-animate.mjs --placement multicard)
+  CLIPVisionLoaderMultiGPU: `ComfyUI-MultiGPU (https://github.com/pollockjj/ComfyUI-MultiGPU)${MULTIGPU_ARCHIVAL_NOTE}`,
   // The harness's own pack (render/comfyui-ext), which --wan-placement multicard adds through --extra-model-paths-config and
   // never installs into custom_nodes. Missing means the pack failed to import: the reason is in ComfyUI's console log.
   OffloadFreeForDecode: "offload_multicard, the harness's own pack in render/comfyui-ext (loaded by --wan-placement multicard; when it is missing it failed to import, see ComfyUI's console log)",

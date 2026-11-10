@@ -415,6 +415,8 @@ type payload struct {
 	AudioExt string `json:"audio_ext,omitempty"`
 	Language string `json:"language,omitempty"`
 	HQ       bool   `json:"hq,omitempty"`
+	Words    bool   `json:"words,omitempty"`
+	VAD      string `json:"vad,omitempty"`
 }
 
 func dispatch(ctx context.Context, cfg config.Config, base, node string, req core.Request, ext string, raw []byte, hq bool, h core.RemoteAttribution) (string, error) {
@@ -423,6 +425,10 @@ func dispatch(ctx context.Context, cfg config.Config, base, node string, req cor
 		return "", infra("job id: %v", err)
 	}
 	p := payload{JobID: "stt-" + hex.EncodeToString(rnd[:]), AudioB64: base64.StdEncoding.EncodeToString(raw), AudioExt: ext, HQ: hq}
+	// words and vad travel as the asker named them; a node that predates them refuses the unknown key (its strict decode) with a
+	// 400 the placement error carries, so the call is never answered by a decode that ignored them.
+	p.Words = paramBool(req.Params, "words")
+	p.VAD = paramStr(req.Params, "vad")
 	// The asker's own language setting decides, as it does for a local call: the request's, else
 	// stt_language. "auto" is sent as such so the node detects instead of applying its own default.
 	if lang := paramStr(req.Params, "language"); lang != "" {
@@ -542,6 +548,12 @@ type nodeResult struct {
 	// then neither is published: absent means not checked.
 	WordsReliable *bool   `json:"words_reliable,omitempty"`
 	WordsDriftSec float64 `json:"words_drift_sec,omitempty"`
+	// The per-word timing of a words=true call (pipeline's transcribeResult): built HERE from the full segment list, whatever
+	// the node inlined, and the whole list written as whisper.cpp -oj JSON to WordsPath.
+	Words          []sttclient.WordTiming `json:"words,omitempty"`
+	NumWords       int                    `json:"num_words,omitempty"`
+	WordsTruncated bool                   `json:"words_truncated,omitempty"`
+	WordsPath      string                 `json:"words_path,omitempty"`
 }
 
 func answerDefer(node, format string, a ...any) core.Result {
@@ -585,7 +597,16 @@ func materialize(ctx context.Context, cfg config.Config, base, node string, req 
 		}
 	}
 	full := strings.Join(texts, " ")
-	stem := outputBase(cfg.MediaDir, req.Audio, raw, res.Meta.Model)
+	// a words or vad=off transcript is a different decode: its files never overwrite the plain one's
+	variant := ""
+	if paramStr(req.Params, "vad") == "off" {
+		variant += "|vad=off"
+	}
+	wantWords := paramBool(req.Params, "words")
+	if wantWords {
+		variant += "|words"
+	}
+	stem := outputBase(cfg.MediaDir, req.Audio, raw, res.Meta.Model+variant)
 	srtPath, txtPath, jsonPath := stem+".srt", stem+".txt", stem+".segments.json"
 	_ = os.MkdirAll(filepath.Dir(stem), 0o755)
 	srtPath = writeOutput(srtPath, []byte(sttclient.SRT(segs)))
@@ -608,6 +629,17 @@ func materialize(ctx context.Context, cfg config.Config, base, node string, req 
 		Language: nr.Language, DurationSec: nr.DurationSec, NumSegments: len(segs), Gist: gist,
 		Segments: inline, SegmentsTruncated: truncated, SRTPath: srtPath, TextPath: txtPath, JSONPath: jsonPath,
 		WordsReliable: nr.WordsReliable, WordsDriftSec: nr.WordsDriftSec,
+	}
+	if wantWords {
+		words := sttclient.FlatWords(segs)
+		if len(words) == 0 {
+			return answerDefer(node, "it returned no word timings although words was asked for")
+		}
+		out.Words, out.WordsTruncated = sttclient.CapWords(words)
+		out.NumWords = len(words)
+		if b, werr := sttclient.WhisperCppJSON(words); werr == nil {
+			out.WordsPath = writeOutput(stem+".words.json", b)
+		}
 	}
 	data, err := json.Marshal(out)
 	if err != nil {

@@ -55,6 +55,10 @@ var projectedAgentSeats = map[string]agentSeatLabel{
 		Why:             "projected from the discrete-card tiers; no agent contract has run on this class",
 		FailedElsewhere: "gemma-4-26b-agent",
 	},
+	"ampere-2x16": {
+		Seat: "qwen38-27b-pool",
+		Why:  "the Qwen3.8-27B that beat the seat it replaces 24 of 24 blind judgements on the same silicon (sm_86, a 16 GB A2, ampere-16, ADR 0047), at UD-Q6_K pooled across both cards of the pair (2026-11-07: known-answer correct, 10.34 tok/s decode, MTP acceptance 63 %); no agent contract has run on the pair itself, and the single-card 27B and the 4B stay rendered as the alternatives the lane does not bind",
+	},
 	"blackwell-32": {
 		Seat:            "gemma4-26b-a4b",
 		Why:             "projected: the 26B resident doubles as the agent seat on a 32 GB card; no box of this class is online",

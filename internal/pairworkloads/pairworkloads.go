@@ -24,6 +24,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -97,6 +98,11 @@ type Config struct {
 	// card. It is not the same as Enabled=false for a box that does not use PAIR: a suppressed run also asks
 	// no fleet node to card its jobs (SetWireHeaders), where an ordinary disabled asker does.
 	Suppressed bool
+	// WarnQuiet, when positive, throttles the "PAIR ingress unreachable" warning ACROSS processes: a process warns only
+	// when no process has under the resolved state root within this window (a timestamp marker, settle/warnDue). Zero,
+	// the default, is the plain once-per-process warning a long-running server wants. Only the one-shot CLI emitters
+	// (OneShotConfig) set it, because each short-lived command is a new process and printed the warning every time.
+	WarnQuiet time.Duration
 }
 
 // UnderLeaseEnv is set by `gpu reserve -- <cmd>` on the command it wraps. The
@@ -128,6 +134,22 @@ func FromConfig(cfg config.Config) Config {
 	return Config{Enabled: enabled, Endpoint: ep, Suppressed: suppressed,
 		VLLMSeats: cfg.VLLMSeats, SwapEndpoint: cfg.Endpoint, StateDir: cfg.StateDir,
 		NodeInfoURL: nodeInfoURLFor(cfg), Relay: RelayFromConfig(cfg)}
+}
+
+// OneShotWarnQuiet is the window a one-shot CLI emitter keeps the ingress warning quiet for after any process warned.
+const OneShotWarnQuiet = 6 * time.Hour
+
+// warnMarkerName is the file under the state root whose mtime is the last time a one-shot emitter printed the warning.
+const warnMarkerName = "pair-ingress-warned"
+
+// OneShotConfig is FromConfig for the emitter of a short-lived CLI command (gpu reserve, the task verbs): the same
+// emitter, with the ingress warning limited to once per OneShotWarnQuiet across commands instead of once per process.
+// The long-running servers (MCP, fleet node, delegate runner, seat watcher, orphan sweeper) keep FromConfig and warn once
+// per process.
+func OneShotConfig(cfg config.Config) Config {
+	c := FromConfig(cfg)
+	c.WarnQuiet = OneShotWarnQuiet
+	return c
 }
 
 // nodeInfoURLFor is the node-info URL the identity fallback uses: the configured
@@ -227,6 +249,16 @@ type Emitter struct {
 	selfOnce    sync.Once
 	selfStart   int64
 	sweepOnce   sync.Once
+	// Refused in-flight frames kept for resending (resend.go), under unsentMu: frameSeq is the
+	// newest planned frame of each job in flight, unsent its latest frame PAIR did not take.
+	unsentMu   sync.Mutex
+	frameN     int64
+	frameSeq   map[string]int64
+	unsent     map[string]unsentFrame
+	resending  bool
+	resendWake chan struct{}
+	// retryEvery is the resend interval; inflightRetryInterval unless a test sets it.
+	retryEvery time.Duration
 	// Open running cards for long tool calls (calls.go), by task.
 	callMu sync.Mutex
 	calls  map[string][]*openCall
@@ -814,13 +846,15 @@ func (e *Emitter) Emit(ev Event) {
 	e.SweepOrphansAsync()
 	pl, err := e.plan(ev)
 	done := ""
+	var n int64
 	if err == nil {
 		done = e.track(ev, pl)
+		n = e.noteFrame(ev)
 	}
 	e.inflight.Add(1)
 	go func() {
 		defer e.inflight.Done()
-		e.settle(pl, done, err)
+		e.settle(ev.JobID, n, pl, done, err)
 	}()
 }
 
@@ -838,28 +872,68 @@ func (e *Emitter) EmitSync(ev Event) {
 	e.SweepOrphansAsync()
 	pl, err := e.plan(ev)
 	done := ""
+	var n int64
 	if err == nil {
 		done = e.track(ev, pl)
+		n = e.noteFrame(ev)
 	}
-	e.settle(pl, done, err)
+	e.settle(ev.JobID, n, pl, done, err)
 }
 
-// settle posts a planned frame (unless planning already failed with err), settles its marker, and
-// warns once per process when PAIR could not be reached. Emit runs it on a background goroutine,
-// EmitSync inline.
-func (e *Emitter) settle(pl sendPlan, done string, err error) {
-	if err == nil {
+// settle posts a planned frame (unless planning already failed with err), settles its marker, books an
+// in-flight frame PAIR refused for resending (resend.go; n is its noteFrame number), and warns once per
+// process when PAIR could not be reached. Emit runs it on a background goroutine, EmitSync inline.
+func (e *Emitter) settle(jobID string, n int64, pl sendPlan, done string, err error) {
+	planned := err == nil
+	if planned {
 		err = e.deliver(context.Background(), pl)
 	}
 	// The terminal marker goes only after the post was attempted: a
 	// process killed in between still leaves a marker to close the card,
 	// and a post that failed leaves the terminal frame for the sweep.
 	e.untrack(done, pl, err)
+	if planned {
+		e.settleInflight(jobID, n, pl, err)
+	}
 	if err != nil {
 		e.warnOnce.Do(func() {
-			log.Printf("pairworkloads: PAIR ingress unreachable; harness jobs will not appear in PAIR's Jobs list (%v)", err)
+			if e.warnDue() {
+				log.Printf("pairworkloads: PAIR ingress unreachable; harness jobs will not appear in PAIR's Jobs list (%v)", err)
+			}
 		})
 	}
+}
+
+// warnDue reports whether the unreachable-ingress warning should print now. With WarnQuiet unset it always does (the
+// once-per-process guard in settle is the only limit). With it set, the warning prints only when the marker file under
+// the resolved state root is missing or older than WarnQuiet, and printing it refreshes the marker. Any filesystem
+// error, an unresolvable root, an unwritable marker or a marker dated in the future, answers true: the warning is the
+// operator's only signal, so a throttle that cannot be trusted must not hide it.
+func (e *Emitter) warnDue() bool {
+	if e.cfg.WarnQuiet <= 0 {
+		return true
+	}
+	root, err := gpulease.ResolveStateRoot(e.cfg.StateDir)
+	if err != nil {
+		return true
+	}
+	marker := filepath.Join(root, warnMarkerName)
+	now := e.now()
+	if fi, err := os.Stat(marker); err == nil {
+		if age := now.Sub(fi.ModTime()); age >= 0 && age < e.cfg.WarnQuiet {
+			return false
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return true
+	}
+	if err := os.WriteFile(marker, []byte(now.UTC().Format(time.RFC3339)), 0o644); err != nil {
+		return true
+	}
+	_ = os.Chtimes(marker, now, now)
+	return true
 }
 
 // Wait blocks until every background Emit has finished (tests, shutdown).

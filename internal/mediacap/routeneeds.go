@@ -308,6 +308,16 @@ func animateNeeds(cfg config.Config) []needFile {
 	}
 }
 
+// animateNodeClasses: the custom-node classes the animate graph names. The single-card graph is core nodes only; a card-only binding (animategen_placement: multicard,
+// render/wan-multicard.mjs) loads the DiT, the text encoder, clip vision and the VAE through MultiGPU's loaders. The harness's own classes (render/comfyui-ext) are not
+// custom_nodes and not listed. This is a route check only: the recipe row the fleet advertises (name and files, lane_rows.go) is the same with either placement.
+func animateNodeClasses(cfg config.Config) []string {
+	if cfg.AnimateMulticard() {
+		return []string{"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "CLIPVisionLoaderMultiGPU", "VAELoaderMultiGPU"}
+	}
+	return nil
+}
+
 // musicNeeds: ACE-Step 1.5's files. No config key binds them; the builder defaults are
 // what every music render loads.
 func musicNeeds() []needFile {
@@ -344,6 +354,17 @@ func imageNodeClasses(cfg config.Config) []string {
 	return nil
 }
 
+// musicNodeClasses: the custom-node classes the music graph names. ACE-Step's single-card graph is core nodes only; a card-only binding
+// (musicgen_placement: multicard) loads through the recipe's MultiGPU classes.
+func musicNodeClasses(cfg config.Config) []string {
+	if cfg.MusicMulticard() {
+		if row := FindMulticardRow("music", "acestep", MusicModelFiles()); row != nil {
+			return row.NodeClasses()
+		}
+	}
+	return nil
+}
+
 func editNodeClasses(cfg config.Config) []string {
 	if cfg.EditMulticard() {
 		fam := cfg.GenEditFamily
@@ -373,9 +394,12 @@ type nodePack struct {
 }
 
 // pollockjj/ComfyUI-MultiGPU archives 2026-09-30 (issue #223, no successor endorsed).
-// The head of upstream is its last code commit; the mirror's default branch carries one local fix already carried by the
-// fleet ("fix(p2p): platform-aware cudart load + fail-closed P2P on Windows/WDDM", the first-stage fix for upstream
-// issue #220's libcudart.so-on-Windows crash). Mirrored (private) at dmmdea/ComfyUI-MultiGPU-mirror since upstream
+// The head of upstream is its last code commit; the mirror's default branch carries two local fixes ("fix(p2p): platform-aware
+// cudart load + fail-closed P2P on Windows/WDDM", the first-stage fix for upstream issue #220's libcudart.so-on-Windows crash,
+// and "fix(dlpack): stage comfy_kitchen inputs relative to torch's current device", 2026-11-09: ComfyUI d07dff45 and later run
+// the Flux2 VAE's fused group_norm through comfy_kitchen on the VAE's card, and upstream's guard staged the inputs to the compute
+// card while the kernel ran on the VAE's, an illegal memory access that killed the prompt worker whenever the VAE was not on the
+// compute card). Mirrored (private) at dmmdea/ComfyUI-MultiGPU-mirror since upstream
 // becomes read-only; the fleet installs from it, and anyone without access to the private mirror installs the public
 // upstream instead (both are rows of node-packs.json). No commit is named: the node installs the head
 // of the default branch and records it. See docs/systems/media-generation.md "Archival".
@@ -384,7 +408,7 @@ const multiGPUMirrorURL = "https://github.com/dmmdea/ComfyUI-MultiGPU-mirror"
 const multiGPUUpstreamURL = "https://github.com/pollockjj/ComfyUI-MultiGPU"
 
 var multiGPUArchivalNote = " — ARCHIVED upstream 2026-09-30 (no successor, still public and cloneable); the maintainer's mirror " + multiGPUMirrorURL +
-	" is PRIVATE (it carries one local Windows P2P/cudart fix): install from it only with access to it, otherwise from the public upstream " + multiGPUUpstreamURL
+	" is PRIVATE (it carries two local fixes: the Windows P2P/cudart load, and the comfy_kitchen DLPack staging that ComfyUI d07dff45+ needs for a VAE on a non-compute card): install from it only with access to it, otherwise from the public upstream " + multiGPUUpstreamURL
 
 var nodePacks = map[string]nodePack{
 	"ComfyUI-VideoHelperSuite": {"ComfyUI-VideoHelperSuite", "https://github.com/Kosinkadink/ComfyUI-VideoHelperSuite", "VHS_VideoCombine", ""},
@@ -406,6 +430,10 @@ var classPacks = map[string][]string{
 	// the card-only image and edit recipes (multicard.go): the plain DiT pin and the DisTorch2 text-encoder loader
 	"UNETLoaderMultiGPU":          {"ComfyUI-MultiGPU"},
 	"CLIPLoaderDisTorch2MultiGPU": {"ComfyUI-MultiGPU"},
+	// the card-only music recipe's two-encoder loader (the stock DualCLIPLoader plus `device`)
+	"DualCLIPLoaderMultiGPU": {"ComfyUI-MultiGPU"},
+	// the card-only animate graph's clip vision loader (render/wf-wan-animate2.mjs, animategen_placement: multicard)
+	"CLIPVisionLoaderMultiGPU": {"ComfyUI-MultiGPU"},
 }
 
 // NodeCheck answers "can this ComfyUI build these node classes?".

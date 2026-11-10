@@ -62,6 +62,10 @@ func CanonicalRosterRemotes(cfg config.Config, named []string) ([]string, error)
 	for _, base := range named {
 		spelled, ok := known[rosterKey(base)]
 		if !ok {
+			// A node the caller-scope policy removed from this config is refused with the policy's reason.
+			if err := cfg.ScopeRefusal(base); err != nil {
+				return nil, fmt.Errorf("remotes: %w", err)
+			}
 			outside = append(outside, fmt.Sprintf("%q", base))
 			continue
 		}

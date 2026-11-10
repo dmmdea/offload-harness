@@ -145,6 +145,11 @@ type Params struct {
 	// suffix. Both matter only when Seats is non-empty.
 	Home string
 	GOOS string
+	// SlotSave is the caller's verdict that the llama.cpp build this render points at is at or above the
+	// kvslot floor in setup/floors.json (a build that keeps a hybrid model's context checkpoints across a
+	// slot save/restore, upstream #26004). The renderer cannot read a build, so the caller decides and the
+	// decision is hashed with the rest; false (every older caller, an unreadable build) renders no flag.
+	SlotSave bool
 	// RknpuHome is the rknpu accelerator's home, substituted for __RKNPU_HOME__ in seat
 	// paths (an rkllm seat's default launcher lives there). Empty falls back to
 	// <Home>/rknpu, the layout `install seed` uses when no RKNPU_HOME says otherwise.
@@ -239,6 +244,19 @@ type Params struct {
 	// embeddinggemma2 and the kNN pre-filter is off by default. Requires IncludeEG2 (the
 	// embedder the aliases move to) and a template whose residents set names `emb`.
 	OmitEmbed300M bool
+
+	// HeavyCard and UtilityCard name the physical card each ROLE of a two-card pinned template
+	// (llama-swap.linux-cuda-pair.yaml) runs on: a CUDA index ("0") or a "GPU-<uuid>" the pin
+	// rule can read by identity. The HEAVY card carries the 27B agent and vision seats; the
+	// UTILITY card carries the memory stack, the cascade, STT and the forecaster, beside it.
+	// Empty means the template default (heavy 0, utility 1); when only one is given and it is
+	// a numeric index, the other is the opposite index (PairCards). They exist so a box whose
+	// card 0 runs hot renders heavy 1 / utility 0 without post-processing the yaml. Meaningful
+	// only on a template that carries the __HEAVY_CARD__ / __UTILITY_CARD__ tokens: set against
+	// one that does not, Render refuses. Omitted from the stamp when empty, so every other
+	// tier keeps the spec hash it had.
+	HeavyCard   string
+	UtilityCard string
 }
 
 // seatAnchors is the TEMPLATE's own declaration of which residency roles it can
@@ -604,40 +622,54 @@ func Render(tmpl string, p Params) (string, error) {
 	e4bLead, e4bAnd := "e4b | ", " & e4b"
 	if p.OmitE4B {
 		if !strings.Contains(out, "__E4B_LEAD__") && !strings.Contains(out, "__E4B_AND__") {
-			return "", fmt.Errorf("this tier sets omit_e4b but the target serving template carries no "+
-				"__E4B_LEAD__ / __E4B_AND__ set token, so the `e4b` var it removes would stay referenced in a set "+
+			return "", fmt.Errorf("this tier sets omit_e4b but the target serving template carries no " +
+				"__E4B_LEAD__ / __E4B_AND__ set token, so the `e4b` var it removes would stay referenced in a set " +
 				"(a config llama-swap rejects at startup) — tokenize the template's e4b set membership, or drop omit_e4b from the tier")
 		}
 		e4bLead, e4bAnd = "", ""
 	}
+	// The two-card roles. Resolved on every render so a set value against a template with no
+	// token is refused by name (a flag that silently did nothing would leave a hot card in
+	// service), and an invalid pair is refused before any token expands.
+	heavyCard, utilityCard, err := PairCards(p.HeavyCard, p.UtilityCard)
+	if err != nil {
+		return "", err
+	}
+	if (p.HeavyCard != "" || p.UtilityCard != "") && !strings.Contains(out, tokenHeavyCard) && !strings.Contains(out, tokenUtilityCard) {
+		return "", fmt.Errorf("heavy/utility card set (%q/%q) but the target serving template pins no card roles "+
+			"(it carries neither %s nor %s): only a two-card pinned template takes them", p.HeavyCard, p.UtilityCard, tokenHeavyCard, tokenUtilityCard)
+	}
 	for from, to := range map[string]string{
-		"__E4B_LEAD__":          e4bLead,
-		"__E4B_AND__":           e4bAnd,
-		"__EG2_AND__":           eg2and,
-		"__M26_ALT__":           m26alt,
-		"__M26_AND__":           m26and,
-		"__Q38_ALT__":           q38alt,
-		"__Q38_AND__":           q38and,
-		"__Q354B_ALT__":         q354balt,
-		"__Q354B_AGENT_ALIAS__": q354bAgentAlias,
-		"__Q359B_ALT__":         q359balt,
-		"__Q359B_AGENT_ALIAS__": q359bAgentAlias,
-		"__MIMO9B_ALT__":        mimo9balt,
-		"__Q3827B_ALT__":        q3827balt,
-		"__Q3635B_ALT__":        q3635balt,
-		"__SEATS_SWAPPABLE__":   seatFrag[roleSwappable],
-		"__SEATS_RESIDENT__":    seatFrag[roleResident],
-		"__LLAMA_BIN__":         strings.TrimRight(p.LlamaBin, "/"),
-		"__MODELS__":            strings.TrimRight(p.ModelsDir, "/"),
-		"__LISTEN__":            p.Listen,
-		"__CTX__":               fmt.Sprint(p.Ctx),
-		"__KV_K__":              p.KVType,
-		"__KV_V__":              p.KVType,
-		"__FLASH_ATTN__":        p.FlashAttn,
-		"__MOE_26B__":           p.MoE26B,
-		"__NTHREADS__":          fmt.Sprint(p.Threads),
-		"__CACHE_RAM__":         fmt.Sprint(p.cacheRAMMiB()),
-		"__SLOT_SAVE__":         p.slotSaveFlag(),
+		"__E4B_LEAD__":             e4bLead,
+		"__E4B_AND__":              e4bAnd,
+		"__EG2_AND__":              eg2and,
+		"__M26_ALT__":              m26alt,
+		"__M26_AND__":              m26and,
+		"__Q38_ALT__":              q38alt,
+		"__Q38_AND__":              q38and,
+		"__Q354B_ALT__":            q354balt,
+		"__Q354B_AGENT_ALIAS__":    q354bAgentAlias,
+		"__Q359B_ALT__":            q359balt,
+		"__Q359B_AGENT_ALIAS__":    q359bAgentAlias,
+		"__MIMO9B_ALT__":           mimo9balt,
+		"__Q3827B_ALT__":           q3827balt,
+		"__Q3635B_ALT__":           q3635balt,
+		"__SEATS_SWAPPABLE__":      seatFrag[roleSwappable],
+		"__SEATS_RESIDENT__":       seatFrag[roleResident],
+		"__SEATS_RESIDENT_NOSTT__": seatFrag[fragResidentNoSTT],
+		"__LLAMA_BIN__":            strings.TrimRight(p.LlamaBin, "/"),
+		"__MODELS__":               strings.TrimRight(p.ModelsDir, "/"),
+		"__LISTEN__":               p.Listen,
+		"__CTX__":                  fmt.Sprint(p.Ctx),
+		"__KV_K__":                 p.KVType,
+		"__KV_V__":                 p.KVType,
+		"__FLASH_ATTN__":           p.FlashAttn,
+		"__MOE_26B__":              p.MoE26B,
+		"__NTHREADS__":             fmt.Sprint(p.Threads),
+		"__CACHE_RAM__":            fmt.Sprint(p.cacheRAMMiB()),
+		"__SLOT_SAVE__":            p.slotSaveFlag(),
+		tokenHeavyCard:             heavyCard,
+		tokenUtilityCard:           utilityCard,
 	} {
 		out = strings.ReplaceAll(out, from, to)
 	}
@@ -672,6 +704,59 @@ func (p Params) servesWithoutLlama() bool {
 		}
 	}
 	return true
+}
+
+// The two-card template's role tokens, and the defaults they take when a render names no card.
+const (
+	tokenHeavyCard   = "__HEAVY_CARD__"
+	tokenUtilityCard = "__UTILITY_CARD__"
+	defaultHeavyCard = "0"
+	defaultUtilCard  = "1"
+)
+
+var (
+	cardIndexRe = regexp.MustCompile(`^[0-9]+$`)
+	cardUUIDRe  = regexp.MustCompile(`^(GPU|MIG)-[A-Za-z0-9-]+$`)
+)
+
+// PairCards resolves the heavy and utility card of a two-card render. Both empty is the template
+// default (heavy 0, utility 1). Exactly one given: if it is the index 0 or 1 the other is the
+// opposite index; any other single value is refused, because the machine's other card cannot be
+// guessed from a UUID. Each value must be a CUDA index or a GPU-/MIG- UUID (it lands inside a
+// CUDA_VISIBLE_DEVICES pin), and the two must differ: both roles on one card is the layout this
+// tier exists to avoid.
+func PairCards(heavy, utility string) (string, string, error) {
+	heavy, utility = strings.TrimSpace(heavy), strings.TrimSpace(utility)
+	for _, c := range []struct{ flag, v string }{{"heavy card", heavy}, {"utility card", utility}} {
+		if c.v != "" && !cardIndexRe.MatchString(c.v) && !cardUUIDRe.MatchString(c.v) {
+			return "", "", fmt.Errorf("%s %q is neither a CUDA index nor a GPU-<uuid>", c.flag, c.v)
+		}
+	}
+	other := func(v string) string {
+		switch v {
+		case "0":
+			return "1"
+		case "1":
+			return "0"
+		}
+		return ""
+	}
+	switch {
+	case heavy == "" && utility == "":
+		heavy, utility = defaultHeavyCard, defaultUtilCard
+	case utility == "":
+		if utility = other(heavy); utility == "" {
+			return "", "", fmt.Errorf("heavy card %q given without a utility card, and only the indices 0 and 1 imply the other card: name both", heavy)
+		}
+	case heavy == "":
+		if heavy = other(utility); heavy == "" {
+			return "", "", fmt.Errorf("utility card %q given without a heavy card, and only the indices 0 and 1 imply the other card: name both", utility)
+		}
+	}
+	if heavy == utility {
+		return "", "", fmt.Errorf("heavy and utility card are both %q: the two roles must sit on different cards (pin, don't split)", heavy)
+	}
+	return heavy, utility, nil
 }
 
 // validateEG2Bin refuses an own build the render cannot honour: one set for an entry the render does not
@@ -880,6 +965,12 @@ func insertSeats(tmpl string, p Params) (string, map[string]string, error) {
 			return "", nil, err
 		}
 		frag[s.Residency] += matrixJoin(s.Residency) + id
+		// The same resident members without a speech-to-text seat, for a set that must leave STT
+		// out (__SEATS_RESIDENT_NOSTT__): a pooled model that fills the utility card cannot stay
+		// beside whisper.
+		if s.Residency == roleResident && s.Kind != mediaseat.KindSTT {
+			frag[fragResidentNoSTT] += matrixJoin(s.Residency) + id
+		}
 	}
 	if p.VLLMSeat != nil || len(p.vllmExtras()) > 0 {
 		var err error
@@ -988,8 +1079,10 @@ func insertVLLMSeat(out string, p Params, anchors seatAnchors, taken map[string]
 	}
 	if len(ids) == 1 {
 		frag[roleResident] += matrixJoin(roleResident) + ids[0]
+		frag[fragResidentNoSTT] += matrixJoin(roleResident) + ids[0]
 	} else {
 		frag[roleResident] += matrixJoin(roleResident) + "(" + strings.Join(ids, " | ") + ")"
+		frag[fragResidentNoSTT] += matrixJoin(roleResident) + "(" + strings.Join(ids, " | ") + ")"
 	}
 	return out, frag, nil
 }
@@ -1028,6 +1121,10 @@ const (
 	roleResident  = mediaseat.Resident
 )
 
+// fragResidentNoSTT keys the resident-seat fragment that omits speech-to-text seats; it is not a
+// residency role, only a second view of the resident members.
+const fragResidentNoSTT = "resident-nostt"
+
 // matrixJoin is the set operator a role's members are combined with. Swappable
 // members are alternatives (one at a time); residents are conjunctions (all at once).
 func matrixJoin(role string) string {
@@ -1041,7 +1138,7 @@ func matrixJoin(role string) string {
 // be alphanumeric and 1-8 characters (verified against the binary: a key of
 // "embeddinggemma" is rejected outright), so the seat's own name — which carries
 // hyphens and is usually longer — can never be the key. The kind picks the base id
-// (vis, stt, ocr, rkllm, fc), which keeps it stable. It is not unique on its own: a tier
+// (vis, stt, ocr, rkllm, fc, pup), which keeps it stable. It is not unique on its own: a tier
 // may declare more than one seat of a kind, because a registered extra (Seat.Extra)
 // and a text-only rkllm seat write no binding key. The first seat of a kind takes the
 // base id; the second and later ones, in declaration order, take the numbered ids
@@ -1049,7 +1146,7 @@ func matrixJoin(role string) string {
 func seatVarID(s mediaseat.Seat, taken map[string]bool) (string, error) {
 	base := map[string]string{
 		mediaseat.KindVision: "vis", mediaseat.KindSTT: "stt", mediaseat.KindOCR: "ocr", mediaseat.KindRKLLM: "rkllm",
-		mediaseat.KindForecast: "fc",
+		mediaseat.KindForecast: "fc", mediaseat.KindUpsampler: "pup",
 	}[s.Kind]
 	if base == "" {
 		return "", fmt.Errorf("seat %q: no matrix var id for kind %q", s.Name, s.Kind)
@@ -1253,6 +1350,31 @@ func seatBlock(s mediaseat.Seat, p Params, a seatAnchors) (string, error) {
 		fmt.Fprintf(&b, "    cmd: >-\n"+
 			"      %s forecast-serve --forecast-dir %s --model __MODELS__/%s --port ${PORT}\n",
 			p.seatExpand(s.Bin), p.seatExpand(tokenHome+"/forecast"), s.Model)
+	case mediaseat.KindUpsampler:
+		// The flux3-klein prompt upsampler: a plain text llama-server seat (no projector, no KV-type
+		// pin, no parallel cap) in the shape the reference hand-wired seat runs. --cache-ram 0 is
+		// deliberate: the harness unloads the seat before the render, and a prompt cache would hold
+		// host RAM the render's lease admission then counts as resident.
+		var envEntries []string
+		if env != "" {
+			envEntries = append(envEntries, fmt.Sprintf("%q", env))
+		}
+		envEntries = append(envEntries, flowItems(s.GPUEnv)...) // per-seat device pin
+		if len(envEntries) > 0 {
+			fmt.Fprintf(&b, "    env: [%s]\n", strings.Join(envEntries, ", "))
+		}
+		exe := ""
+		if p.GOOS == "windows" {
+			exe = ".exe"
+		}
+		gpuFlags, fa := " -ngl 999", " --flash-attn on"
+		if p.Backend == "cpu" {
+			gpuFlags, fa = "", ""
+		}
+		fmt.Fprintf(&b, "    cmd: >-\n"+
+			"      __LLAMA_BIN__/llama-server%s --model __MODELS__/%s\n"+
+			"     %s -c %d%s --jinja --reasoning off --cache-ram 0\n"+
+			"      --port ${PORT} --host 127.0.0.1\n", exe, s.Model, gpuFlags, s.CtxSize, fa)
 	case mediaseat.KindRKLLM:
 		// No env line and no GPU flags, on purpose: `env` is the llama.cpp loader path and
 		// -ngl/--flash-attn are llama-server flags, while the NPU is neither — the launcher
@@ -1833,7 +1955,25 @@ func dropEmbed300M(tmpl string) (string, error) {
 // dropModel removes one model block AND the matrix var naming it, with a
 // post-check that nothing functional still references it.
 func dropModel(tmpl, model string) (string, error) {
-	return dropModelWith(tmpl, model, func(l string) bool { return strings.Contains(l, model) })
+	return dropModelWith(tmpl, model, func(l string) bool { return namesWholeID(l, model) })
+}
+
+// namesWholeID reports whether line names the model id as a WHOLE id: an occurrence followed by
+// an id character is another entry that merely starts with it (gemma4-26b-a4b-pool is not a
+// reference to gemma4-26b-a4b), so it is not a dangling reference after the shorter id is dropped.
+func namesWholeID(line, model string) bool {
+	for rest, off := line, 0; ; {
+		i := strings.Index(rest, model)
+		if i < 0 {
+			return false
+		}
+		end := off + i + len(model)
+		if end >= len(line) || !strings.ContainsRune("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-", rune(line[end])) {
+			return true
+		}
+		off += i + 1
+		rest = line[off:]
+	}
 }
 
 // dropModelWith is dropModel with the caller's own test for a line that still names the model, for
@@ -1943,26 +2083,31 @@ func (p Params) cacheRAMMiB() int {
 	return 8192
 }
 
-// slotSaveFlag renders NOTHING, on purpose, and the token stays wired so that
-// turning it back on is this one function (ADR 0056 Layer 2).
+// SlotSaveDir is the directory the slot files live in on this render: <install home>/kvslots, spelled the way the
+// templates spell every other home-relative path (forward slashes, unquoted). "" when the render does not turn the
+// feature on: SlotSave unset, no install home, or a home with whitespace in it (the templates leave paths unquoted,
+// so the flag's value would split into two arguments).
+func (p Params) SlotSaveDir() string {
+	if !p.SlotSave || strings.TrimSpace(p.Home) == "" || strings.ContainsAny(p.Home, " \t") {
+		return ""
+	}
+	return strings.TrimRight(strings.ReplaceAll(p.Home, `\`, "/"), "/") + "/kvslots"
+}
+
+// slotSaveFlag is `--slot-save-path <home>/kvslots` on a render that may carry it, "" otherwise (ADR 0056
+// Layer 2; ADR 0100). It lets llama-server write one slot's KV to a file and read it back, which is how a
+// session's context survives the five-minute idle unload. It is gated on three things, each a way to hurt a node:
 //
-// MEASURED 2026-09-21 on <node-f> (llama.cpp b9934), the two reasons:
-//
-//  1. llama-server REFUSES TO START when the path does not exist —
-//     `error while handling argument "--slot-save-path": not a directory: …`.
-//     A node that renders the flag against a directory nobody created loses
-//     EVERY chat and agent seat, not just this lane. The node's slot directory
-//     comes from OFFLOAD_HOME at runtime while the flag comes from the render's
-//     --home, and the Windows fleet-node launcher sets neither, so those two
-//     agreeing is a coincidence rather than a guarantee.
-//  2. `qwen3.8-27b-par8` on both Blackwell pair templates runs --parallel 8,
-//     where slot 0 belongs to whichever of eight concurrent requests last held
-//     it — so a save there stores someone else's context under this key.
-//
-// Neither is worth carrying while the capability the flag exists for is itself
-// inert (a restore buys zero prefill on this build; upstream #25913). When a
-// build with #26004 beats the cold baseline, this returns the flag again AND
-// the render must create the directory it names.
+//  1. The install home is known (SlotSaveDir) and the llama.cpp build clears the kvslot floor (Params.SlotSave,
+//     decided by the caller from setup/floors.json). Below the floor a restore buys no prefill on a hybrid model.
+//  2. The directory exists. llama-server REFUSES TO START on a missing one, which would take down every seat on the
+//     node, so `install render` creates it before it writes the config.
+//  3. The entry runs one slot. The templates drop the token from every --parallel > 1 entry, and AuditSlotSave
+//     refuses a render that carries both: at --parallel 8 slot 0 belongs to whichever request last held it.
 func (p Params) slotSaveFlag() string {
-	return ""
+	dir := p.SlotSaveDir()
+	if dir == "" {
+		return ""
+	}
+	return "--slot-save-path " + dir
 }

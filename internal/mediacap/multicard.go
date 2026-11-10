@@ -10,7 +10,7 @@ import "regexp"
 //
 // Measured is true only for a row whose host growth was read in a run that used the read-only safetensors loader (a card-only run that charged no
 // weight file to host commit). The 2511 fp8mixed edit, the 2512 Q5_1 GGUF, the krea2 bf16 DiT, the qwen-image-2.1 bf16 and int8_convrot DiTs and the
-// qwen-image-2.1 bf16 edit are measured; the 2511 Q5_1 GGUF edit and the qwen-image-2.1 int8_convrot edit rows are predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
+// qwen-image-2.1 bf16 and int8_convrot edits, the ACE-Step 1.5 XL music row and the FLUX 3 Klein bf16 image row are measured; the 2511 Q5_1 GGUF edit row is predicted. A live run with the read-only loader promotes a row: flip Measured here and "basis" in the JSON.
 //
 // A row can be held back (Blocked): it stays in the table, but it is no recipe to FindMulticardRow. No row is held back today. The qwen-image-2.1 rows'
 // 16.33 GiB bf16 text encoder is bigger than a card, and under --gpu-only ComfyUI would build the whole of it on one card before a DisTorch2 split
@@ -27,12 +27,24 @@ type MulticardRow struct {
 	// the storage card), distorch2 (a split encoder that fits one card while it is built) or distorch2-host (a bf16 encoder too big for one card, built off
 	// the cards and split over both by the harness's own loader).
 	UnetLoader, ClipLoader string
+	// ClipDual: the recipe loads two text encoders through one DualCLIPLoader of the row's clipType (the ACE-Step music row; the JSON's clip.dual), both
+	// whole on the storage card. Only the plain clip loader builds it.
+	ClipDual bool
 	// ResidentGiB is the share of a split DiT kept on the compute card; ClipResidentGiB the share of a split text encoder.
 	ResidentGiB, ClipResidentGiB float64
 	// ComputeGiB and StorageGiB are the per-card VRAM peaks a call on this row is held to.
 	ComputeGiB, StorageGiB float64
 	// Measured: the row's host growth was read in a run that used the read-only loader.
 	Measured bool
+	// WindowsHostGiB and WindowsCommitGiB are what the render's process tree was measured to hold on a WINDOWS host during a render of this row,
+	// read by the harness's own footprint sampler (gpulease.TreeMemory, every 500 ms; a slower poll of one process misses the instant the VAE
+	// decode's buffers land while the DiT is still committed): the working-set peak (the read-only map's file pages are resident while a plain loader copies the whole DiT to the card, and Windows counts
+	// them against Available until it trims them) and the private-commit peak (WDDM backs the card allocations with system commit). On Linux the
+	// same pages are clean file pages MemAvailable already counts, so a measured row declares 0 there; on Windows it declares these two figures,
+	// stated, when they are set; a row that carries none (0, 0) declares 0 on every host, as it did before these fields existed. The figures cover
+	// the load the run made: for flux3-klein the prompt upsampled outside ComfyUI (hostneed keeps the ordinary estimate for an in-graph upsampler
+	// file). The JSON's "hostWindowsGiB" {touched, commit}.
+	WindowsHostGiB, WindowsCommitGiB float64
 	// MaxMegapixels is the largest edit canvas the compute peak is scaled to (0 = the row has none). The runner refuses a pinned canvas above it
 	// (render/comfy-edit.mjs planEdit), and so does the typed door before it leases the pair (internal/pipeline multicardNeed).
 	MaxMegapixels float64
@@ -64,7 +76,7 @@ var multicardRows = []MulticardRow{
 	{ID: "krea2/bf16", Route: "image", Family: "krea2", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16", DefaultClip: "qwen3vl_4b_bf16.safetensors",
 		UnetLoader: "distorch2", ResidentGiB: 11, ClipLoader: "plain", ComputeGiB: 13.2, StorageGiB: 13.1, Measured: true, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "flux3-klein/bf16", Route: "image", Family: "flux3-klein", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16",
-		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 13.5, StorageGiB: 6.5, MaxPixels: 1572864, Packs: []string{"multigpu"}},
+		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 13.5, StorageGiB: 7.0, Measured: true, WindowsHostGiB: 13, WindowsCommitGiB: 19, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "flux3-klein/nvfp4", Route: "image", Family: "flux3-klein", Quant: "nvfp4", UnetMatch: `nvfp4.*\.safetensors$`, ClipMatch: "bf16",
 		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 12.5, StorageGiB: 6.5, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/fp8mixed", Route: "edit", Family: "qwen-image-edit-2511", Quant: "fp8mixed", UnetMatch: `fp8mixed.*\.safetensors$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
@@ -72,9 +84,12 @@ var multicardRows = []MulticardRow{
 	{ID: "qwen-image-edit-2511/gguf-q5_1", Route: "edit", Family: "qwen-image-edit-2511", Quant: "gguf-q5_1", UnetMatch: `Q5_1\.gguf$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
 		UnetLoader: "gguf-distorch2", ResidentGiB: 3, ClipLoader: "plain", ComputeGiB: 5.6, StorageGiB: 12.6, MaxMegapixels: 2.0, LoraLoader: "LoraLoaderModelOnly", Packs: []string{"multigpu", "gguf"}},
 	{ID: "qwen-image-2.1-edit/int8_convrot", Route: "edit", Family: "qwen-image-2.1", Quant: "int8_convrot", UnetMatch: `int8.*\.safetensors$`, ClipMatch: "bf16",
-		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 5, ComputeGiB: 13.9, StorageGiB: 8.0, MaxPixels: 4194304, Packs: []string{"multigpu"}},
+		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 5, ComputeGiB: 12.9, StorageGiB: 7.5, Measured: true, MaxPixels: 4194304, Packs: []string{"multigpu"}},
 	{ID: "qwen-image-2.1-edit/bf16", Route: "edit", Family: "qwen-image-2.1", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16",
 		UnetLoader: "distorch2", ResidentGiB: 8, ClipLoader: "distorch2-host", ClipResidentGiB: 8, ComputeGiB: 14.5, StorageGiB: 11.0, Measured: true, MaxPixels: 4194304, Packs: []string{"multigpu"}},
+	// ACE-Step 1.5 XL turbo (route "music"): predicted from file sizes, not yet run card-only (render/multicard-recipes.json, basis predicted)
+	{ID: "acestep/xl-turbo-bf16", Route: "music", Family: "acestep", Quant: "xl-turbo-bf16", UnetMatch: `acestep_v1\.5_xl.*bf16\.safetensors$`, ClipMatch: "ace15", DefaultClip: "qwen_4b_ace15.safetensors",
+		UnetLoader: "plain", ClipLoader: "plain", ClipDual: true, ComputeGiB: 9.6, StorageGiB: 9.2, Measured: true, Packs: []string{"multigpu"}},
 }
 
 // multicardMatchers are the rows' regular expressions, compiled once, in the rows' order.
@@ -162,5 +177,8 @@ func matchMulticardRow(route, family string, files []ModelFile) *MulticardRow {
 func (r MulticardRow) NodeClasses() []string {
 	unet := map[string]string{"plain": "UNETLoaderMultiGPU", "distorch2": "UNETLoaderDisTorch2MultiGPU", "gguf-distorch2": "UnetLoaderGGUFDisTorch2MultiGPU"}[r.UnetLoader]
 	clip := map[string]string{"plain": "CLIPLoaderMultiGPU", "distorch2": "CLIPLoaderDisTorch2MultiGPU", "distorch2-host": "CLIPLoaderDisTorch2MultiGPU"}[r.ClipLoader]
+	if r.ClipLoader == "plain" && r.ClipDual {
+		clip = "DualCLIPLoaderMultiGPU"
+	}
 	return []string{unet, clip, "VAELoaderMultiGPU"}
 }

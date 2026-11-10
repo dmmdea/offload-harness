@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/callscope"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
 )
@@ -408,6 +409,11 @@ func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model 
 		// a local or seat-pinned call stays byte-identical to before.
 		if ep.token != "" {
 			req.Header.Set("Authorization", "Bearer "+ep.token)
+			// A node lane is fleet work: it carries this process's caller scope like every other fleet request,
+			// so a node that admits only some callers (fleet_admit_scopes) can tell who is asking.
+			if s, ok := callscope.Process(); ok && s.Known() {
+				req.Header.Set(callscope.Header, s.Name)
+			}
 		}
 		// The machine-wide GPU lease governs what loads into THIS box's VRAM. A
 		// request bound for another box (a cascade lane, a pinned remote seat)

@@ -103,6 +103,33 @@ function Invoke-CrashCleanup {
   "[$(Get-Date -Format s)] WARN: the crash cleanup wait ended after 200 rounds without a verdict (the clock did not move?) - exiting anyway" | Out-File -Append $log
 }
 "[$(Get-Date -Format s)] start requested" | Out-File -Append $log
+# The display-card gate (operator rule 2026-11-07: the display card takes jobs only while it is idle, and then only up to
+# gpu_display_cap_pct of its VRAM). A seat whose row declares DisplayVramGiB puts that much on the display card outside any
+# lease (a three-card seat's stage on the screen's card), so it asks the harness's own rule (`gpu display-check`, the
+# allocator's display-card check) before anything starts, and starts nothing on a refusal or on a check that could not run:
+# exit 6, which llama-swap reports as a failed load. A row without the key is not asked. The rule judges ADMISSION, as the
+# allocator does: a seat started while the card was idle runs until llama-swap unloads it (ttl). From session 0 (llama-swap
+# runs as SYSTEM) the operator's input cannot be read, so "idle" there means the console is locked, or operator_presence away.
+if ($want.DisplayVramGiB -gt 0) {
+  if (-not $want.Harness -or -not (Test-Path -LiteralPath $want.Harness)) {
+    "[$(Get-Date -Format s)] display gate: not started - the harness binary '$($want.Harness)' is not there, so the display card cannot be shown idle" | Out-File -Append $log
+    exit 6
+  }
+  # The operator's config, not SYSTEM's defaults: without it the check would open SYSTEM's own state and could not see a
+  # lease on the display card, so a row that names no config starts nothing either.
+  if (-not $want.HarnessConfig -or -not (Test-Path -LiteralPath $want.HarnessConfig)) {
+    "[$(Get-Date -Format s)] display gate: not started - the harness config '$($want.HarnessConfig)' is not there" | Out-File -Append $log
+    exit 6
+  }
+  $gateArgs = @('gpu', 'display-check', '--vram', "$($want.DisplayVramGiB)", '--config', $want.HarnessConfig)
+  $gate = & $want.Harness @gateArgs 2>&1
+  $gateRc = $LASTEXITCODE
+  if ($gateRc -ne 0) {
+    "[$(Get-Date -Format s)] display gate: not started (display-check exit $gateRc): $(@($gate) -join ' ')" | Out-File -Append $log
+    exit 6
+  }
+  "[$(Get-Date -Format s)] display gate: $(@($gate) -join ' ')" | Out-File -Append $log
+}
 try { Start-ScheduledTask -TaskName $task -ErrorAction Stop } catch {
   "[$(Get-Date -Format s)] Start-ScheduledTask $task failed: $($_.Exception.Message)" | Out-File -Append $log
   exit 2

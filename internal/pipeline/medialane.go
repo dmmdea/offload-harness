@@ -144,22 +144,35 @@ func (l *laneFaultLog) due(key string, now time.Time) bool {
 // the card table, a plan the table cannot make): there the lane is in question and the box could not look at it, which the
 // router must not take for a free lane (core.LaneVerdict.Unjudged). The others say the lane is not in question at all.
 func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf, why string, unread bool) {
-	if req.Task != core.TaskGenerateImage {
-		return ln, "only image generation is probed", false
+	if req.Task != core.TaskGenerateImage && req.Task != core.TaskEditImageGenerative {
+		return ln, "only image generation and generative edits are probed", false
 	}
 	if strings.TrimSpace(req.Input) == "" {
 		return ln, "the request has no prompt", false
 	}
-	// The binding the call would render with, resolved the way runGenerateImage resolves it.
-	cfg, _, ferr := p.cfg.ResolveImageFamily(paramStr(req.Params, "family"))
-	if ferr != nil {
-		return ln, ferr.Error(), false
-	}
-	if cfg.ImageGenEngine == "sdcpp" || cfg.ImageGenScript == "" {
-		return ln, "this binding is not a ComfyUI one", false
-	}
+	kind := "image"
 	ln.token = paramStr(req.Params, "waiter_token")
-	ln.need = imageNeed(cfg, ln.token).forCanvas(req.Params)
+	if req.Task == core.TaskEditImageGenerative {
+		kind = "edit"
+		need, nwhy := p.editLaneNeed(req, ln.token)
+		if nwhy != "" {
+			return ln, nwhy, false
+		}
+		ln.need = need
+	} else {
+		// The binding the call would render with, resolved the way runGenerateImage resolves it.
+		cfg, _, ferr := p.cfg.ResolveImageFamily(paramStr(req.Params, "family"))
+		if ferr == nil {
+			cfg, ferr = cfg.WithImagePlacement(paramStr(req.Params, "placement")) // a per-call placement, as runGenerateImage lays it
+		}
+		if ferr != nil {
+			return ln, ferr.Error(), false
+		}
+		if cfg.ImageGenEngine == "sdcpp" || cfg.ImageGenScript == "" {
+			return ln, "this binding is not a ComfyUI one", false
+		}
+		ln.need = imageNeed(cfg, ln.token).forCanvas(req.Params)
+	}
 	if ln.need.Refusal != "" {
 		return ln, ln.need.Refusal, false // the admission refuses it before any lease; the lane is not in question
 	}
@@ -175,7 +188,7 @@ func (p *Pipeline) resolveLane(ctx context.Context, req core.Request) (ln laneOf
 	ln.m = m
 	// The card table, read under the probe's bounds (laneCardTable). It sizes the host-RAM need (the call declares what does
 	// not fit its card) and, on a card-scoped host, fixes the plan.
-	table, terr := p.laneCardTable(ctx, "image")
+	table, terr := p.laneCardTable(ctx, kind)
 	if terr != nil {
 		return ln, "the card table could not be read (" + terr.Error() + "); the call reads it itself", true
 	}

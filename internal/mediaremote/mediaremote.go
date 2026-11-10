@@ -144,6 +144,8 @@ func LocalConfigured(cfg config.Config, req core.Request) bool {
 		return routes["run_graph"]
 	case core.TaskGenerateAudio:
 		return anyRoute(routes, audioRoutes(req.Params))
+	case core.TaskEditImageGenerative:
+		return editLaneConfigured(cfg, routes, str(req.Params, "family"))
 	}
 	return false
 }
@@ -273,6 +275,8 @@ func laneName(req core.Request) string {
 		return "audio"
 	case core.TaskRunGraph:
 		return "graph"
+	case core.TaskEditImageGenerative:
+		return "edit"
 	}
 	return string(req.Task)
 }
@@ -353,6 +357,10 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, remotes 
 		if err := os.MkdirAll(pl.outDir, 0o755); err != nil {
 			return core.Result{}, &contractError{fmt.Sprintf("out_dir %s: %v", pl.outDir, err)}
 		}
+	}
+	if pl.fleetTask == taskEdit {
+		// An edit is matched on its edit recipe and sent with its images in the media-job bundle (edit.go).
+		return callEdit(ctx, cfg, req, pl, bases, h, start)
 	}
 	rawPayload, err := json.Marshal(pl.payload)
 	if err != nil {
@@ -534,30 +542,21 @@ func normBase(b string) string { return strings.TrimRight(strings.TrimSpace(b), 
 // delegate_remotes, so a call can narrow the fleet but never reach past the operator's list) or, when it
 // gave none, delegate_remotes.
 func candidateBases(cfg config.Config, remotes []string) ([]string, error) {
-	allowed := map[string]bool{}
 	var configured []string
 	for _, b := range cfg.DelegateRemotes {
 		if b = normBase(b); b != "" {
-			allowed[b] = true
 			configured = append(configured, b)
 		}
 	}
-	var asked []string
-	for _, b := range remotes {
-		if b = normBase(b); b != "" {
-			asked = append(asked, b)
-		}
+	asked, err := rosterprobe.NarrowFor(cfg, remotes)
+	if err != nil {
+		return nil, &contractError{err.Error()}
 	}
 	if len(asked) == 0 {
 		if len(configured) == 0 {
 			return nil, &placementError{core.DeferClassConfig, "no delegate_remotes configured: there is no fleet node to run the job on"}
 		}
 		return configured, nil
-	}
-	for _, b := range asked {
-		if !allowed[b] {
-			return nil, &contractError{fmt.Sprintf("remote %s is not in delegate_remotes: a call may narrow the configured fleet, never extend it", b)}
-		}
 	}
 	return asked, nil
 }
@@ -603,7 +602,7 @@ func buildBundle(cfg config.Config, inputs []input) ([]byte, []string, error) {
 	// Every way Pack refuses a file (not regular, over a limit, too many) was ruled out above (plan checked
 	// each input is a regular file, checkInputSizes the total), so what is left of a Pack error is this
 	// machine failing to read what it just copied.
-	bundle, err := packFn(tmp, composebundle.Limits{MaxFiles: 8, MaxFileBytes: max, MaxTotal: max})
+	bundle, err := packFn(tmp, composebundle.Limits{MaxFiles: bundleFileLimit(inputs), MaxFileBytes: max, MaxTotal: max})
 	if err != nil {
 		return nil, nil, &placementError{core.DeferClassInfrastructure, "packing the input files on this machine: " + err.Error()}
 	}
@@ -683,7 +682,7 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 	// never a dial), the probes run concurrently in configured order, and the shared memo and negative
 	// cache keep a dead node from costing a bound on every call. Reading.Index is the entry's slot in the
 	// list probed here, which is what "config order" breaks ties by.
-	for _, r := range rosterprobe.Probe(ctx, bases, cfg.FleetAuthToken, healthTimeout) {
+	for _, r := range probeRosterRetrying(ctx, bases, cfg.FleetAuthToken, healthTimeout) {
 		b, v := r.Base, r.View
 		if r.Err != nil {
 			misses = append(misses, r.Miss())

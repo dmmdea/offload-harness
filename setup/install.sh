@@ -44,6 +44,8 @@ PREFIX=""
 LLAMA_BIN=""
 LLAMA_BIN_CPU=""
 LLAMA_BIN_EG2=""
+HEAVY_CARD="${OFFLOAD_HEAVY_CARD:-}"
+UTILITY_CARD="${OFFLOAD_UTILITY_CARD:-}"
 MODELS=""
 LISTEN="127.0.0.1:11436"
 NODE_ID="$(hostname)"
@@ -151,6 +153,13 @@ Usage: install.sh [options]
                       (default: --llama-bin). For a node whose main build is below the embeddinggemma2
                       seat floor in setup/floors.json, which cannot load that entry; only for a tier
                       that renders it (include_embeddinggemma2)
+  --heavy-card ID     a two-card tier (ampere-2x16): the card, a CUDA index or GPU-<uuid>, that
+                      carries the 27B agent and vision seats (default 0; env OFFLOAD_HEAVY_CARD).
+                      The other index becomes the utility card unless --utility-card says otherwise.
+                      Pick the card with the better cooling and slot power; the choice is rendered
+                      into the yaml, never patched into it afterwards
+  --utility-card ID   a two-card tier: the card that carries the memory stack, the cascade, STT and
+                      the forecaster beside the heavy seat (default 1; env OFFLOAD_UTILITY_CARD)
   --models DIR        directory holding the GGUF files (default: <prefix>/models)
   --listen ADDR       llama-swap listen address (default 127.0.0.1:11436)
   --node-id NAME      fleet node id (default: hostname)
@@ -184,6 +193,8 @@ while [ $# -gt 0 ]; do
     --llama-bin) LLAMA_BIN="${2:?}"; shift 2 ;;
     --llama-bin-cpu) LLAMA_BIN_CPU="${2:?}"; shift 2 ;;
     --llama-bin-eg2) LLAMA_BIN_EG2="${2:?}"; shift 2 ;;
+    --heavy-card) HEAVY_CARD="${2:?}"; shift 2 ;;
+    --utility-card) UTILITY_CARD="${2:?}"; shift 2 ;;
     --models) MODELS="${2:?}"; shift 2 ;;
     --listen) LISTEN="${2:?}"; shift 2 ;;
     --node-id) NODE_ID="${2:?}"; shift 2 ;;
@@ -546,7 +557,7 @@ fi
 # ---- 5. the serving config --------------------------------------------------
 SWAP_YAML="$PREFIX/etc/llama-swap.yaml"
 if [ "$DRY_RUN" -eq 1 ]; then
-  say "  would render $SWAP_YAML for tier $TIER${LLAMA_BIN:+ --llama-bin $LLAMA_BIN}${LLAMA_BIN_CPU:+ --llama-bin-cpu $LLAMA_BIN_CPU}${LLAMA_BIN_EG2:+ --llama-bin-eg2 $LLAMA_BIN_EG2}"
+  say "  would render $SWAP_YAML for tier $TIER${LLAMA_BIN:+ --llama-bin $LLAMA_BIN}${LLAMA_BIN_CPU:+ --llama-bin-cpu $LLAMA_BIN_CPU}${LLAMA_BIN_EG2:+ --llama-bin-eg2 $LLAMA_BIN_EG2}${HEAVY_CARD:+ --heavy-card $HEAVY_CARD}${UTILITY_CARD:+ --utility-card $UTILITY_CARD}"
 else
   # --home is load-bearing: a tier's media seats name their binaries under the
   # install root, and without it the render REFUSES — after step 4 has already
@@ -555,7 +566,7 @@ else
     --rknpu-home "${RKNPU_HOME:-$PREFIX/rknpu}" --ram-tier "$RAM_TIER" \
     --vllm-user "$SERVICE_USER" --vllm-proxy-host "$TS_IP" \
     --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" \
-    ${LLAMA_BIN:+--llama-bin "$LLAMA_BIN"} ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} ${LLAMA_BIN_EG2:+--llama-bin-eg2 "$LLAMA_BIN_EG2"} --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
+    ${LLAMA_BIN:+--llama-bin "$LLAMA_BIN"} ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} ${LLAMA_BIN_EG2:+--llama-bin-eg2 "$LLAMA_BIN_EG2"} ${HEAVY_CARD:+--heavy-card "$HEAVY_CARD"} ${UTILITY_CARD:+--utility-card "$UTILITY_CARD"} --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
 fi
 
 # ---- 5b. the persistent vLLM agent seat (ADR 0035), when this box can run it ----

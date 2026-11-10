@@ -545,6 +545,79 @@ func fsNativeReachability(k *config.KVCacheServer, view map[string]any) {
 // run concurrently, so this is the wall for the section, not per node.
 const fleetProbeTimeout = 8 * time.Second
 
+// nodeMediaTasks is the subset of a node's supported_task_types that renders, transcribes or composes media.
+var nodeMediaTasks = map[string]bool{
+	"image-gen": true, "video-gen": true, "animate": true, "audio-gen": true, "stt": true, "stt-upload": true,
+	"run-graph": true, "media-job": true, "compose": true, "compose-project": true,
+}
+
+// nodeMediaSummary is the compact media block of a fleet node row: which media tasks the node advertises, the image,
+// video, animate and audio families it names, the state of its edit route, which file-backed media routes it reports
+// configured and which not, and the model families it can load. It answers "what media can this node render", which
+// served_models (llama-swap chat seats only) cannot. nil when the node published nothing media-shaped: an older node
+// or a failed probe is UNKNOWN, never "no media".
+func nodeMediaSummary(v delegate.NodeView) map[string]any {
+	out := map[string]any{}
+	var tasks []string
+	for _, t := range v.Tasks {
+		if nodeMediaTasks[t] {
+			tasks = append(tasks, t)
+		}
+	}
+	if len(tasks) > 0 {
+		out["task_types"] = tasks
+	}
+	seen := map[string]bool{}
+	var image []string
+	addImage := func(name string) {
+		if name != "" && !seen[name] {
+			seen[name] = true
+			image = append(image, name)
+		}
+	}
+	for _, f := range v.ImageFamilies {
+		addImage(f.Name)
+	}
+	for _, r := range v.ImageRecipes {
+		addImage(r.Name)
+	}
+	if len(image) > 0 {
+		out["image_families"] = image
+	}
+	lanes := map[string][]string{}
+	for _, r := range v.MediaRecipes {
+		if r.Name != "" {
+			lanes[r.Lane] = append(lanes[r.Lane], r.Name)
+		}
+	}
+	for lane, key := range map[string]string{"video-gen": "video_families", "animate": "animate_families", "audio-gen": "audio_families"} {
+		if names := lanes[lane]; len(names) > 0 {
+			out[key] = names
+		}
+	}
+	if state, known := v.RouteState("edit_image"); known {
+		out["edit"] = state
+	}
+	if v.MediaRoutesKnown {
+		configured, notConfigured := []string{}, []string{}
+		for _, r := range v.MediaRoutes {
+			if r.State == string(mediacap.Configured) {
+				configured = append(configured, r.Route)
+			} else {
+				notConfigured = append(notConfigured, r.Route)
+			}
+		}
+		out["routes"] = map[string]any{"configured": configured, "not_configured": notConfigured}
+	}
+	if len(v.LoadableFamilies) > 0 {
+		out["loadable_families"] = v.LoadableFamilies
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // fleetView is the LIVE delegation roster: who the delegation seats are and
 // what they can take RIGHT NOW.
 //
@@ -570,6 +643,14 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 			"Size contracts from ctx_tokens here, never from a written figure.",
 	}
 	out["local_agent_seat"] = localSeatView(ctx, cfg)
+	// Whose work this server does and which nodes the caller-scope policy keeps it off (config scope.go): a node
+	// missing from nodes[] for that reason is listed here, so it never reads as an outage or a misconfiguration.
+	if cfg.CallerScope.Name != "" {
+		out["caller_scope"] = cfg.CallerScope
+	}
+	if len(cfg.ScopeExcluded) > 0 {
+		out["scope_excluded"] = cfg.ScopeExcluded
+	}
 	// How callers narrowed placement (ADR 0078). This server's own counters, so the window is stated in the block; the
 	// ledger rows carry pin_reason and route_asked for any longer one. Absent when delegation is off: there is
 	// no door to pin through.
@@ -584,6 +665,10 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 	case !cfg.AgentDelegationEnabled:
 		out["nodes"] = []any{}
 		out["reason"] = "agent_delegation_enabled is false in the config THIS server loaded — agent_delegate is absent from tools/list and no node can be placed on"
+		return out
+	case len(cfg.DelegateRemotes) == 0 && len(cfg.ScopeExcluded) > 0:
+		out["nodes"] = []any{}
+		out["reason"] = "every delegate_remotes node admits only other callers than this one (delegate_remote_scopes; see caller_scope and scope_excluded) — delegation can only run on the local seat for this caller"
 		return out
 	case len(cfg.DelegateRemotes) == 0:
 		out["nodes"] = []any{}
@@ -641,6 +726,11 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 		n["jobs_queued"] = r.view.JobsQueued
 		n["max_concurrent_jobs"] = r.view.MaxConcurrentJobs
 		n["served_models"] = r.view.ServedModels
+		// served_models lists llama-swap chat seats only. What the node renders (image, video, audio, stt, compose)
+		// rides the media block, so a node with no chat seat for an image model is not read as having no engine.
+		if m := nodeMediaSummary(r.view); m != nil {
+			n["media"] = m
+		}
 		if r.view.GpuUtilKnown {
 			n["gpu_util_pct"] = r.view.GpuUtilPct
 		}

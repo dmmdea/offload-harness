@@ -16,6 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/composeremote"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/mediaremote"
+	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 	"github.com/dmmdea/offload-harness/internal/sttremote"
 	"github.com/dmmdea/offload-harness/internal/visionremote"
 )
@@ -61,9 +62,15 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 		Engine   string   `json:"engine"`
 		Select   []string `json:"select"`
 		Route    string   `json:"route"`
+		Remotes  []string `json:"remotes"`
+		Words    bool     `json:"words"`
+		VAD      string   `json:"vad"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
+	}
+	if (in.Words || in.VAD != "") && in.Engine == "npu" {
+		return jsonResult(map[string]any{"deferred": true, "reason": "words and vad apply to engine gpu only (the NPU whisper-base sidecar returns 5 s chunks with no word times and has no VAD switch)"})
 	}
 	// STT ownership mirrors OCR's (2026-08-23): the GPU whisper seat is the
 	// quality primary; the NPU's whisper-base is the caller's EXPLICIT fast
@@ -119,6 +126,12 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 	if in.HQ {
 		params["hq"] = true
 	}
+	if in.Words {
+		params["words"] = true
+	}
+	if in.VAD != "" {
+		params["vad"] = in.VAD
+	}
 	// A transcription of long audio is silent for minutes, like a delegation. With a progress
 	// token the client hears an opening notification and a heartbeat while the call runs;
 	// without one nothing is sent (register C-89).
@@ -134,7 +147,12 @@ func (s *Server) handleTranscribe(ctx context.Context, req *mcp.CallToolRequest)
 	if run == nil {
 		run = sttremote.Run
 	}
-	res := run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: in.Audio, Params: params}, route)
+	// remotes pins the spill to named fleet nodes (each in delegate_remotes) for route auto and remote.
+	cfg, refused, ok := rosterprobe.NarrowLane(s.p.Cfg(), in.Remotes)
+	if !ok {
+		return result(refused)
+	}
+	res := run(ctx, cfg, s.p, core.Request{Task: core.TaskTranscribe, Door: "offload_transcribe", Audio: in.Audio, Params: params}, route)
 	if len(in.Select) > 0 {
 		res.Data = core.ProjectFields(res.Data, in.Select)
 	}
@@ -154,9 +172,10 @@ func (s *Server) handleExtractImage(ctx context.Context, req *mcp.CallToolReques
 
 func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Image string `json:"image"`
-		Brief string `json:"brief"`
-		Route string `json:"route"`
+		Image   string   `json:"image"`
+		Brief   string   `json:"brief"`
+		Route   string   `json:"route"`
+		Remotes []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -165,14 +184,15 @@ func (s *Server) handleAssessImage(ctx context.Context, req *mcp.CallToolRequest
 	if in.Brief != "" {
 		params["brief"] = in.Brief
 	}
-	return result(s.visionRun(ctx, core.Request{Task: core.TaskAssessImage, Door: "offload_assess_image", Image: in.Image, Params: params}, in.Route))
+	return result(s.visionRun(ctx, core.Request{Task: core.TaskAssessImage, Door: "offload_assess_image", Image: in.Image, Params: params}, in.Route, in.Remotes))
 }
 
 func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	var in struct {
-		Image  string `json:"image"`
-		Engine string `json:"engine"`
-		Route  string `json:"route"`
+		Image   string   `json:"image"`
+		Engine  string   `json:"engine"`
+		Route   string   `json:"route"`
+		Remotes []string `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -182,7 +202,7 @@ func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 	// read stylised text differently and a silent switch would change results.
 	switch in.Engine {
 	case "", "gpu":
-		return result(s.visionRun(ctx, core.Request{Task: core.TaskOCR, Door: "offload_ocr", Image: in.Image}, in.Route))
+		return result(s.visionRun(ctx, core.Request{Task: core.TaskOCR, Door: "offload_ocr", Image: in.Image}, in.Route, in.Remotes))
 	case "npu":
 		if r, ok := visionremote.NormalizeRoute(in.Route); !ok || r != visionremote.RouteLocal {
 			// The route places the GPU vision model; the NPU path is this box's
@@ -215,6 +235,7 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 		Refine      *bool    `json:"refine"`
 		Family      string   `json:"family"`
 		Transparent bool     `json:"transparent"`
+		Placement   string   `json:"placement"`
 		Route       string   `json:"route"`
 		Remotes     []string `json:"remotes"`
 		WaitS       *int     `json:"wait_s"`
@@ -223,6 +244,14 @@ func (s *Server) handleGenerateImage(ctx context.Context, req *mcp.CallToolReque
 		return bad, nil
 	}
 	params := map[string]any{}
+	// A per-call placement (single | multicard) lies over the family's imagegen_placement; absent = the binding's own.
+	if p := strings.ToLower(strings.TrimSpace(in.Placement)); p != "" {
+		if p != "single" && p != "multicard" {
+			res, _ := jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("bad arguments: placement %q is not one of single, multicard", in.Placement)})
+			return res, nil
+		}
+		params["placement"] = p
+	}
 	// Named family (ADR 0058): absent = the default binding, byte-for-byte what a
 	// call without it rendered before families existed.
 	if in.Family != "" {
@@ -298,11 +327,23 @@ func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToo
 		Family      string   `json:"family"`
 		Images      []string `json:"images"`
 		Transparent bool     `json:"transparent"`
+		// Per request, not config-only: the working canvas and the placement of THIS edit.
+		Megapixels *float64 `json:"megapixels"`
+		Placement  string   `json:"placement"`
+		Route      string   `json:"route"`
+		Remotes    []string `json:"remotes"`
+		WaitS      *int     `json:"wait_s"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
 	params := map[string]any{}
+	if in.Megapixels != nil {
+		params["megapixels"] = *in.Megapixels
+	}
+	if in.Placement != "" {
+		params["placement"] = in.Placement
+	}
 	if in.Image != "" {
 		params["image"] = in.Image
 	}
@@ -335,7 +376,10 @@ func (s *Server) handleEditImageGenerative(ctx context.Context, req *mcp.CallToo
 	if in.Out != "" {
 		params["out"] = in.Out
 	}
-	return result(s.runTask(ctx, core.Request{Task: core.TaskEditImageGenerative, Door: "offload_edit_image_generative", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)}))
+	// The default route is auto: this machine's lane when it has one and it is free, else a ticket on the first lane that frees,
+	// here or on a fleet node holding the same edit recipe (ADR 0082, ADR 0083). With no fleet configured it is the call it always was.
+	return result(mediaremote.RunWith(ctx, s.mediaCfg(), runTaskAs{s}, core.Request{Task: core.TaskEditImageGenerative, Door: "offload_edit_image_generative", Input: in.Prompt, Params: withMediaPlace(req.Params.Arguments, params)},
+		in.Route, in.Remotes, s.imageWait(in.WaitS)))
 }
 
 func (s *Server) handleInpaintImage(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
@@ -714,12 +758,28 @@ func (s *Server) handleGenerateAudio(ctx context.Context, req *mcp.CallToolReque
 		Route       string   `json:"route"`
 		Remotes     []string `json:"remotes"`
 		Node        string   `json:"node"`
+		// the voice sampling knobs: a pointer, so that 0 (a real cfg_weight or min_p) differs from not given
+		CfgWeight         *float64 `json:"cfg_weight"`
+		Exaggeration      *float64 `json:"exaggeration"`
+		Temperature       *float64 `json:"temperature"`
+		RepetitionPenalty *float64 `json:"repetition_penalty"`
+		MinP              *float64 `json:"min_p"`
+		TopP              *float64 `json:"top_p"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
 	}
 	params := map[string]any{}
 	laneTargeting(params, in.Node, nil)
+	for k, v := range map[string]*float64{"cfg_weight": in.CfgWeight, "exaggeration": in.Exaggeration, "temperature": in.Temperature,
+		"repetition_penalty": in.RepetitionPenalty, "min_p": in.MinP, "top_p": in.TopP} {
+		if v != nil {
+			params[k] = *v
+		}
+	}
+	if err := core.ValidateVoiceSampling(params); err != nil {
+		return jsonResult(map[string]any{"deferred": true, "reason": err.Error()})
+	}
 	if in.Kind != "" {
 		params["kind"] = in.Kind
 	}
@@ -838,6 +898,7 @@ func (s *Server) handleComposeVideo(ctx context.Context, req *mcp.CallToolReques
 		Strict      *bool          `json:"strict"`
 		Snapshots   []float64      `json:"snapshots"`
 		Route       string         `json:"route"`
+		Remotes     []string       `json:"remotes"`
 	}
 	if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
 		return bad, nil
@@ -864,5 +925,9 @@ func (s *Server) handleComposeVideo(ctx context.Context, req *mcp.CallToolReques
 	if len(in.Snapshots) > 0 {
 		params["snapshots"] = in.Snapshots
 	}
-	return result(composeremote.Run(ctx, s.p.Cfg(), s.p, core.Request{Task: core.TaskComposeVideo, Door: "offload_compose_video", Params: params}, in.Route))
+	cfg, refused, ok := rosterprobe.NarrowLane(s.p.Cfg(), in.Remotes)
+	if !ok {
+		return result(refused)
+	}
+	return result(composeremote.Run(ctx, cfg, s.p, core.Request{Task: core.TaskComposeVideo, Door: "offload_compose_video", Params: params}, in.Route))
 }

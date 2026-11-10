@@ -131,6 +131,21 @@ type Entry struct {
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
+	// PrefillSource: "timings" | "usage" | "mixed" (see core.Meta.PrefillSource).
+	PrefillSource string `json:"prefill_source,omitempty"`
+
+	// KV-slot retention (ADR 0100): what the node-side save/restore did for this run. Flat kvslot_* fields, omitted when
+	// the node attached no store. KVSlotRestore is the run-start restore judged on the next completion ("hit", "miss",
+	// "skip:<reason>"; empty = none attempted); KVSlotAdmit the presence-admission verdict when none was.
+	KVSlotRestore          string `json:"kvslot_restore,omitempty"`
+	KVSlotRestoredTokens   int    `json:"kvslot_restored_tokens,omitempty"`
+	KVSlotRestoreMS        int64  `json:"kvslot_restore_ms,omitempty"`
+	KVSlotAdmit            string `json:"kvslot_admit,omitempty"`
+	KVSlotSaves            int    `json:"kvslot_saves,omitempty"`
+	KVSlotSavedBytes       int64  `json:"kvslot_saved_bytes,omitempty"`
+	KVSlotToolWaitSaves    int    `json:"kvslot_toolwait_saves,omitempty"`
+	KVSlotToolWaitRestores int    `json:"kvslot_toolwait_restores,omitempty"`
+	KVSlotToolWaitHits     int    `json:"kvslot_toolwait_hits,omitempty"`
 	// Arm labels which experimental arm this row was recorded under — the
 	// LEDGER twin of the delegation log's field of the same name (see
 	// delegate.delegationLogLine.Arm for the full argument: once rows from an
@@ -155,6 +170,10 @@ type Entry struct {
 	OriginSession string `json:"origin_session,omitempty"`
 	OriginPID     int    `json:"origin_pid,omitempty"`
 	OriginPPID    int    `json:"origin_ppid,omitempty"`
+	// CallerScope is the caller scope ("business", "personal", "unknown") the recording process resolved when
+	// its config declares the scope keys (internal/callscope), stamped on the rows the process writes for its
+	// own caller; absent on a box without the keys and on a row a node writes for another asker.
+	CallerScope string `json:"caller_scope,omitempty"`
 	// Door names the SURFACE that admitted the call (register A-102): an MCP
 	// tool name ("offload_summarize"), a CLI command ("cli:summarize"), or
 	// "fleet" for a request a fleet node ran for a delegator. Origin* above

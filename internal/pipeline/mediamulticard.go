@@ -47,12 +47,17 @@ func (e *errMulticard) Error() string { return e.why }
 // gpuReserveHint is the way out the refusals share: lease the two cards by hand and run the call inside the lease.
 const gpuReserveHint = "lease the two you mean with `local-offload gpu reserve --devices <card>,<card> -- <command>`"
 
-// multicardNeed is the need of a binding that asks for the card-only placement on route (image or edit).
+// multicardNeed is the need of a binding that asks for the card-only placement on route (image, edit or music).
 func multicardNeed(route hostneed.Route, cfg config.Config, token string) mediaNeed {
 	n := mediaNeed{Kind: needMulticard, Token: token, RAMPair: multicardRAM(route, cfg)}
 	var family string
 	var files []mediacap.ModelFile
 	switch route {
+	case hostneed.RouteMusic:
+		// ACE-Step's files are the builder's defaults (no key binds them); the recipe row is the one XL turbo bf16 DiT
+		n.PlacementKey = "musicgen_placement"
+		family = "acestep"
+		files = mediacap.MusicModelFiles()
 	case hostneed.RouteEdit:
 		n.PlacementKey = "gen_edit_placement"
 		if family = strings.TrimSpace(cfg.GenEditFamily); family == "" {
@@ -142,6 +147,39 @@ func videoMulticardNeed(cfg config.Config, token, renderFamily string, over host
 			break
 		}
 	}
+	return n
+}
+
+// animateUnetRefusal is the sentence for a DiT the card-only WAN-Animate-2 placement cannot run, "" for one it can: the runner loads a .safetensors file through the DisTorch2
+// loader (a GGUF file is not one), and the bf16 or fp16 DiT (about 33 GiB) does not fit the two cards. An unnamed file is the builder's default, the int8 one. The runner refuses the
+// same two (render/wan-multicard.mjs refuseUnmeasuredAnimate) only after the pair was held.
+func animateUnetRefusal(name string) string {
+	name = strings.TrimSpace(name)
+	lower := strings.ToLower(name)
+	switch {
+	case name == "":
+		return ""
+	case !strings.HasSuffix(lower, ".safetensors"):
+		return fmt.Sprintf("animategen_placement is multicard, but animategen_unet %q is not a .safetensors file, which the card-only WAN-Animate-2 placement loads through the DisTorch2 loader: the runner would refuse it by name after the pair was held, so nothing was leased; bind the int8 .safetensors DiT, or unset animategen_placement", name)
+	case strings.Contains(lower, "bf16"), strings.Contains(lower, "fp16"):
+		return fmt.Sprintf("animategen_placement is multicard, but animategen_unet %q is a bf16 or fp16 WAN-Animate-2 DiT (about 33 GiB), which does not fit two 16 GiB cards: the runner would refuse it by name after the pair was held, so nothing was leased; bind the int8 DiT, or unset animategen_placement", name)
+	}
+	return ""
+}
+
+// animateMulticardNeed is multicardNeed for the animate door (animategen_placement: multicard). The animate door has no recipe row in render/multicard-recipes.json: the runner
+// (render/wan-multicard.mjs) sizes the placement itself, so the door leases the pair, declares the host RAM that placement earns (hostneed.ForAnimateCardOnly: 0 when both cards
+// hold their stage) and refuses, before any lease, the one thing the runner would refuse after it: a DiT the placement cannot run (animateUnetRefusal).
+func animateMulticardNeed(cfg config.Config, token string) mediaNeed {
+	n := mediaNeed{Kind: needMulticard, Token: token, PlacementKey: "animategen_placement"}
+	n.RAMPair = func(vramGiB float64, cardsGiB []float64) hostneed.Need {
+		f := hostneed.Facts{Cfg: cfg, VRAMGiB: vramGiB, CardsGiB: cardsGiB, Placement: hostneed.PlacementMulticard}
+		if need, ok := hostneed.ForAnimateCardOnly(cfg, cfg.AnimateGenResidentGB, f); ok {
+			return need
+		}
+		return hostneed.ClassDefault(f)
+	}
+	n.Refusal = animateUnetRefusal(cfg.AnimateGenUnet)
 	return n
 }
 

@@ -393,9 +393,11 @@ func TestRemoteCardTurnsRunningOnWork(t *testing.T) {
 			if started != tc.wantStarted {
 				t.Fatalf("running frame sent = %v, want %v: %v", started, tc.wantStarted, frames)
 			}
+			// The job completed with an answer, so it ran whether or not a poll caught the seat working:
+			// its terminal frame carries a start either way, or PAIR labels a finished job "Sent to".
 			done := pairInfo(byMethod["workload:completed"])
-			if (done["startedAt"] != nil) != tc.wantStarted {
-				t.Fatalf("terminal startedAt = %v, want set only when the seat worked", done["startedAt"])
+			if done["startedAt"] == nil {
+				t.Fatalf("a completed job's terminal frame carries no start: %v", done)
 			}
 		})
 	}

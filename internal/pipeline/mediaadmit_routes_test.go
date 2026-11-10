@@ -460,8 +460,9 @@ func TestLaunchProfileOnACardScopedHostBindsEverySingleCardRoute(t *testing.T) {
 			}, admitOrder)
 			p := &Pipeline{cfg: cfg}
 			p.alloc = gpualloc.Deps{
-				Cards:      func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return devs, "", nil },
-				HostMemory: func() (gpuprobe.HostMemory, bool) { return roomyHostMem, true },
+				Cards:       func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return devs, "", nil },
+				HostMemory:  func() (gpuprobe.HostMemory, bool) { return roomyHostMem, true },
+				DisplayBusy: func(config.Config, []gpuprobe.Card) string { return "" },
 			}
 			// Port 1 refuses at once: the post-run /free is not part of this test and must not wait.
 			p.instanceAPI = func(c gpuprobe.Card) string { return fmt.Sprintf("http://127.0.0.1:1/card%d", c.NvidiaIndex) }

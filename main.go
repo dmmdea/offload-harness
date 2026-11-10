@@ -93,6 +93,8 @@ func main() {
 		err = runRunGraph(args)
 	case "edit-image":
 		err = runEditImage(args)
+	case "edit-image-generative":
+		err = runEditImageGenerative(args)
 	case "media":
 		err = runMedia(args)
 	case "compose-video":
@@ -151,6 +153,8 @@ func main() {
 		err = runData(args)
 	case "models":
 		err = runModels(args)
+	case "media-recipes":
+		err = runMediaRecipes(args)
 	case "calibrate":
 		err = runCalibrate(args)
 	case "health":
@@ -285,21 +289,31 @@ Usage:
   local-offload video-describe <video-path> --question "..." [--json]
   local-offload video-watch <video-path> --question "..." [--window-sec 8] [--fps 1] [--max-frames N] [--frame-width N] [--start S] [--end S] [--no-synthesize] [--json]
                                          watch the WHOLE file window by window (video-describe sees only its first frames)
-  local-offload transcribe <audio-path> [--language es] [--hq] [--json]
+  local-offload transcribe <audio-path> [--language es] [--hq] [--words] [--vad on|off] [--json]
   local-offload forecast  (--series JSON | --series-path FILE.csv|.json) --prediction-length N [--target-columns A,B] [--past-covariate-columns ..] [--known-covariate-columns ..] [--quantiles 0.1,0.5,0.9] [--out-path F] [--route local|auto|remote] [--select a,b] [--compact]
   local-offload ocr       <image-path> [--json]
   local-offload extract-image <image-path> --schema schema.json [--json]
   local-offload assess-image <image-path> [--brief "..."] [--json]
   local-offload generate-audio <out> "<text>" [--kind voice|music] [--voice generalist|finetuned|endpoint] [--tts-voice NAME] [--clone ref.wav] [--lang es] [--seconds N] [--seed N] [--node ID|URL]
+                                         [--cfg-weight F] [--exaggeration F] [--temperature F] [--repetition-penalty F] [--min-p F] [--top-p F]  (voice sampling; unset keeps the engine default)
                                          a bare -- ends the flags, so text that starts with a dash is kept: generate-audio out.wav -- "--- Intro ---"
                                          (the same for generate-video, animate-character and the verbs that take one file, text or prompt)
-  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent]
-  local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N]
+  local-offload generate-image "<prompt>" [--negative "..."] [--width N] [--height N] [--steps N] [--seed N] [--out path] [--refine=false] [--family NAME] [--transparent] [--placement single|multicard]
+  local-offload generate-image --batch jobs.jsonl [--family F] [--route auto|local|remote] [--results r.jsonl] [--resume] [--jobs N] [--spill] [--placement single|multicard] [--dry-run] [--negative ".."] [--width N] [--height N] [--steps N] [--seed N]
                                          N prompts: ONE warm ComfyUI session when this machine's lane is free, else each job a ticket on the
-                                         first matching lane that frees (fleet nodes included); a verdict per job; --resume re-renders only
+                                         first matching lane that frees (fleet nodes included); --spill (route auto): when the lane is free AND a
+                                         roster node renders the same recipe, run both at once over one queue (warm chunks here, one job at a time
+                                         per node, up to --jobs node workers), else it says why it did not; a verdict per job; --resume re-renders only
                                          what is missing or does not prove itself; rows go to r.jsonl.partial and over r.jsonl when the batch
                                          ends. exit 0 every job has its picture (or a busy lane deferred the whole warm batch: rows queued),
                                          4 some job failed (the JSON and the results file name them), 1 it stopped, errored or was interrupted
+  local-offload edit-image-generative --image <src> --prompt "..." [--ref <img>]... [--out path] [--negative "..."] [--seed N] [--steps N] [--cfg F] [--preset P] [--megapixels F] [--placement single|multicard] [--family NAME] [--route auto|local|remote] [--remote URL] [--dry-run]
+  local-offload edit-image-generative --batch rows.jsonl [--results r.jsonl] [--resume] [--jobs N] [--spill] [flags above as row defaults]
+                                         rewrite a whole image from a text instruction (Qwen-Image-Edit; NOT edit-image, the PIL editor). Rows:
+                                         {image, refs?, prompt, out, negative?, seed?, steps?, cfg?, preset?, megapixels?, placement?}; --seed S gives a row
+                                         without a seed S plus its 0-based index. Runs here when this machine has the lane, else on a fleet node holding the
+                                         same edit recipe; one still per process, so a batch spills one row at a time. --dry-run prints the resolved rows,
+                                         this machine's edit digest and every node's match, and renders nothing
   local-offload inpaint-image <image> --mask m.png --prompt "..."   re-render ONLY the masked region (white=repaint)
   local-offload upscale-image <image> [--scale F] [--width N --height N] [--method lanczos] [--model name] [--out path]   ESRGAN enlarge (this machine's upscale_model)
   local-offload generate-video <out.mp4> <still.png> "<prompt>" [--model hunyuan|wan] [--frames 49] [--seed N] [--reserve-vram F] [--fast] [--upscale] [--node ID|URL] [--min-vram-gb N]
@@ -351,6 +365,7 @@ Usage:
   local-offload data status [--json]     where this node keeps its data, and whether any of it is on the OS drive (C: holds Windows and program installs, never data). Exit 1 when it is and a data volume qualifies.
   local-offload data migrate [--from DIR] [--to DIR] [--apply] [--stopped] [--json]   COPY the data tree to a data drive (never a move, never a junction, source untouched; dry run unless --apply; bbolt stores only with --stopped), then print the "home" line to set
   local-offload models                   show configured offload model
+  local-offload media-recipes [--json]   print this machine's image (and video, animation, audio) family recipes as the fleet node publishes them: digest, files with bytes and fingerprint, unfingerprinted files
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
   local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C | contextbench   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench, ContextBench tasks
   local-offload gate <freeze|check|verdict|selftest|schema> [flags]   the one measurement gate: freeze a pre-registration, check it, judge a candidate against the incumbent (ADOPT/BLOCK/INCONCLUSIVE, paired interval over tasks), write a model judge's self-test receipt (selftest); exit 0 a verdict was produced, 1 non-ADOPT under --require-adopt or a scorer that failed its self-test, 2 a refusal (docs/systems/measurement-gate.md)
@@ -453,7 +468,7 @@ func runMCP(args []string) error {
 	// that shape before. It starts and says so instead: offload_status carries
 	// config_error and every other tool defers by name (mcpserver.WithConfigError).
 	cfg, src := loadCfgWithSource(fs)
-	p, cleanup, err := openPipeline(cfg)
+	p, cleanup, err := openPipelineLongRunning(cfg)
 	if err != nil {
 		return err
 	}
@@ -730,7 +745,7 @@ func runFleetServe(args []string) error {
 
 	// Same pipeline construction as the mcp verb, incl. the hot-reloader (this
 	// is a long-running server; nightly retrains must go live without a restart).
-	p, cleanup, err := openPipeline(cfg)
+	p, cleanup, err := openPipelineLongRunning(cfg)
 	if err != nil {
 		return err
 	}
@@ -1010,6 +1025,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// Endpoints that name a box by a private-range IP literal instead of a tailnet name: pure config, a
 	// warning only (never an exit code), and silent on a config with none.
 	writeLANIPEndpointsSection(w, cfg)
+	// Whether the PAIR ingress this box posts cards to accepts a connection: one 1 s dial, a warning only, silent when PAIR
+	// reporting is off. The command-line emitters throttle their own warning, so this is where it stays visible.
+	writePairIngressRow(w, cfg)
 	// Fourth in the band, for the same reason: where the data lives is config plus a
 	// volume list, so a serving layer that is down must not hide it (register C-92).
 	dataOnOS := writeDataHomeSection(w, data)
@@ -1034,6 +1052,7 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// roster with dead members made the one verb an operator runs to find out what is wrong slow
 	// in proportion to what was wrong. The version rows and the token rows below read that one answer.
 	fleetRoster := rosterprobe.Probe(context.Background(), cfg.DelegateRemotes, cfg.FleetAuthToken, doctorFleetProbeTimeout)
+	writeCallerScopeSection(w, cfg)
 	writeFleetSkewSection(w, cfg, buildinfo.Version, rosterVersionReader(fleetRoster))
 	// Whether the nodes accept THIS box's fleet token: health ignores the bearer, so a wrong or
 	// missing token reads healthy everywhere above and first shows as a 401 on dispatch.

@@ -77,7 +77,7 @@ const refusalNotCapable = "not_capable"
 
 // Seams: tests replace the roster reader, this machine's release, the clock and the jitter; production never does.
 var (
-	probeRoster  = rosterprobe.Probe
+	probeRoster  = probeRosterRetrying
 	localVersion = buildinfo.Version
 	placerNow    = time.Now
 	hostnameFn   = os.Hostname
@@ -442,32 +442,15 @@ func nodeShown(base, nodeID string) string {
 // the ticket on disk names the job from the instant it may be on the node (a process that ends in between leaves an id an
 // adopter can ask the node about).
 func attempt(ctx context.Context, cfg config.Config, req core.Request, pl planned, c candidate, local localID, start time.Time, jobID string, h core.RemoteAttribution) attemptResult {
-	payload := make(map[string]any, len(pl.payload)+2)
-	for k, v := range pl.payload {
-		payload[k] = v
-	}
 	// The node renders the family under ITS name for this recipe, never the caller's (a name binds different files on
 	// different nodes), and the digest lets it refuse a recipe it no longer holds. A graph has neither: it carries its own
-	// files' names, and the node refuses at its door when it lacks one.
-	if pl.fleetTask == taskImage {
-		delete(payload, "family")
-		if c.family != "" {
-			payload["family"] = c.family
-		}
-		payload["recipe_digest"] = local.recipe.Digest()
+	// files' names, and the node refuses at its door when it lacks one. An edit travels through the media-job door with its
+	// images in a bundle (wireFor, edit.go).
+	route, body, werr := wireFor(cfg, pl, c, local, jobID)
+	if werr != nil {
+		return attemptResult{kind: attemptFailed, err: werr}
 	}
-	raw, err := json.Marshal(payload)
-	if err != nil {
-		return attemptResult{kind: attemptFailed, err: &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}}
-	}
-	body, err := json.Marshal(map[string]any{"job_id": jobID, "task_type": pl.fleetTask, "payload": json.RawMessage(raw)})
-	if err != nil {
-		return attemptResult{kind: attemptFailed, err: &contractError{fmt.Sprintf("the %s request cannot be encoded for the wire: %v", pl.fleetTask, err)}}
-	}
-	if len(body) > maxDispatchBody {
-		return attemptResult{kind: attemptFailed, err: &contractError{fmt.Sprintf("the %s request is %d bytes, over the %d bytes a fleet dispatch carries", pl.fleetTask, len(body), maxDispatchBody)}}
-	}
-	res, serr := sendAndFetch(ctx, cfg, req, pl, c.base, c.node, "/fleet/dispatch", body, jobID, start, h, true)
+	res, serr := sendAndFetch(ctx, cfg, req, pl, c.base, c.node, route, body, jobID, start, h, true)
 	if serr == nil {
 		switch {
 		case !res.OK && core.CardHeld(res.Meta.ErrClass):

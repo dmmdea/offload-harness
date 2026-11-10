@@ -243,6 +243,14 @@ type Params struct {
 	VADThreshold  float64 // -vt
 	MaxLen        int     // -ml; subtitle-sized segments (chars)
 	SplitOnWord   bool    // -sow; split at word boundaries for clean SRT
+	// VADOff sends vad=false with the request, so a seat started with --vad decodes this one call without the voice
+	// activity detector (whisper-server reads a per-request vad field over its own flag). Only meaningful with VAD false;
+	// without it a VAD-less call omits the field and the server's own setting stands.
+	VADOff bool
+	// NoFallback sends temperature_inc=0: the decode runs at Temperature alone, with no retry at a higher one when a
+	// segment trips the entropy or log-probability check. whisper-server's own default steps up by 0.2, which makes a
+	// hard segment's text depend on the retry that happened to fire.
+	NoFallback bool
 }
 
 // DefaultParams returns the tuned profile for noisy EN/ES field audio.
@@ -452,6 +460,11 @@ func buildMultipart(wav []byte, filename string, p Params) (*bytes.Buffer, strin
 	if p.VAD {
 		fields["vad"] = "true"
 		fields["vad_threshold"] = strconv.FormatFloat(p.VADThreshold, 'g', -1, 64)
+	} else if p.VADOff {
+		fields["vad"] = "false"
+	}
+	if p.NoFallback {
+		fields["temperature_inc"] = "0"
 	}
 	if p.SplitOnWord {
 		fields["split_on_word"] = "true"

@@ -240,7 +240,16 @@ func (p *Pipeline) RunImageBatchAs(ctx context.Context, family string, jobs []Im
 // that place; 0 is the pipeline's own gpu_wait_ms window, the call RunImageBatchAs always was. The wait ends the moment ctx
 // does, with an error that says so and is not a busy answer (IsGPUBusy is false for it).
 func (p *Pipeline) RunImageBatchWaiting(ctx context.Context, family string, jobs []ImageBatchJob, wait time.Duration) ([]ImageBatchItem, error) {
+	return p.RunImageBatchPlaced(ctx, family, "", jobs, wait)
+}
+
+// RunImageBatchPlaced is RunImageBatchWaiting under a per-call placement (generate-image --placement): "single" or "multicard" lies over
+// the binding's own imagegen_placement for this batch, "" keeps the binding's.
+func (p *Pipeline) RunImageBatchPlaced(ctx context.Context, family, placement string, jobs []ImageBatchJob, wait time.Duration) ([]ImageBatchItem, error) {
 	cfg, fam, ferr := p.cfg.ResolveImageFamily(family)
+	if ferr == nil {
+		cfg, ferr = cfg.WithImagePlacement(placement)
+	}
 	if ferr != nil {
 		return nil, ferr
 	}

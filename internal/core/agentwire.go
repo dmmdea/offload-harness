@@ -295,6 +295,10 @@ const (
 const (
 	OriginHeader   = "X-Offload-Origin"
 	RunClassHeader = "X-Offload-Run-Class"
+	// ScopeHeader carries the asker's caller scope ("business" or "personal", internal/callscope) on every
+	// request that creates work on a fleet node. It is sent only when the asker resolved a known scope, so an
+	// absent header means unknown; a node with fleet_admit_scopes refuses an asker whose scope it does not admit.
+	ScopeHeader = "X-Offload-Scope"
 )
 
 // SanitizeAsker reduces an untrusted asker name to printable text of at most AskerMaxLen characters:
@@ -644,6 +648,22 @@ type AgentWireResult struct {
 	PrefillTokens int64   `json:"prefill_tokens,omitempty"`
 	CacheTokens   int64   `json:"cache_tokens,omitempty"`
 	PrefillMS     float64 `json:"prefill_ms,omitempty"`
+	// PrefillSource: "timings" | "usage" | "mixed" -- which server accounting the
+	// four counts came from (a vLLM seat has usage only, so no prefill_ms).
+	PrefillSource string `json:"prefill_source,omitempty"`
+
+	// KV-slot retention (ADR 0100): what the node-side save/restore did for this run. Flat kvslot_* fields, omitted when
+	// the node attached no store. KVSlotRestore is the run-start restore judged on the next completion ("hit", "miss",
+	// "skip:<reason>"; empty = none attempted); KVSlotAdmit the presence-admission verdict when none was.
+	KVSlotRestore          string `json:"kvslot_restore,omitempty"`
+	KVSlotRestoredTokens   int    `json:"kvslot_restored_tokens,omitempty"`
+	KVSlotRestoreMS        int64  `json:"kvslot_restore_ms,omitempty"`
+	KVSlotAdmit            string `json:"kvslot_admit,omitempty"`
+	KVSlotSaves            int    `json:"kvslot_saves,omitempty"`
+	KVSlotSavedBytes       int64  `json:"kvslot_saved_bytes,omitempty"`
+	KVSlotToolWaitSaves    int    `json:"kvslot_toolwait_saves,omitempty"`
+	KVSlotToolWaitRestores int    `json:"kvslot_toolwait_restores,omitempty"`
+	KVSlotToolWaitHits     int    `json:"kvslot_toolwait_hits,omitempty"`
 
 	// --- Context-pager gate and compaction passes. The loop measures both and
 	// the wire dropped them, so the delegation log could not say how often the compaction

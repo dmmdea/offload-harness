@@ -23,6 +23,7 @@ type recipeFile struct {
 			ResidentGb float64
 		}
 		PeakGiB        struct{ Compute, Storage float64 }
+		HostWindowsGiB struct{ Touched, Commit float64 }
 		ActivationsGiB float64
 		MaxMegapixels  float64
 		MaxPixels      int64
@@ -46,7 +47,7 @@ func readRecipes(t *testing.T) recipeFile {
 func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 	file := readRecipes(t)
 	rows := MulticardRows()
-	if len(rows) != len(file.Rows) || len(rows) != 10 {
+	if len(rows) != len(file.Rows) || len(rows) != 11 {
 		t.Fatalf("%d rows here, %d in render/multicard-recipes.json", len(rows), len(file.Rows))
 	}
 	measured, blocked := 0, 0
@@ -62,6 +63,12 @@ func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 		if r.Measured != (jr.Basis == "measured") {
 			t.Errorf("row %s: measured %v here, basis %q there", jr.ID, r.Measured, jr.Basis)
 		}
+		if r.WindowsHostGiB != jr.HostWindowsGiB.Touched || r.WindowsCommitGiB != jr.HostWindowsGiB.Commit {
+			t.Errorf("row %s: Windows host figures %.1f/%.1f here, hostWindowsGiB %.1f/%.1f there", jr.ID, r.WindowsHostGiB, r.WindowsCommitGiB, jr.HostWindowsGiB.Touched, jr.HostWindowsGiB.Commit)
+		}
+		if (r.WindowsHostGiB > 0 || r.WindowsCommitGiB > 0) && !r.Measured {
+			t.Errorf("row %s: a Windows host figure belongs to a measured row", jr.ID)
+		}
 		if r.Blocked != jr.Blocked {
 			t.Errorf("row %s: held back for %q here, %q there", jr.ID, r.Blocked, jr.Blocked)
 		}
@@ -72,8 +79,8 @@ func TestTheMulticardRowsAreTheRunnersRecipes(t *testing.T) {
 			measured++
 		}
 	}
-	if measured != 6 {
-		t.Errorf("%d measured rows; the 2512 Q5_1, krea2 bf16 and qwen-image-2.1 bf16 and int8_convrot image rows and the 2511 fp8mixed and qwen-image-2.1 bf16 edit rows ran card-only", measured)
+	if measured != 9 {
+		t.Errorf("%d measured rows; the 2512 Q5_1, krea2 bf16, qwen-image-2.1 bf16 and int8_convrot and FLUX 3 Klein bf16 image rows and the 2511 fp8mixed and qwen-image-2.1 bf16 and int8_convrot edit rows and the ACE-Step 1.5 XL music row ran card-only", measured)
 	}
 	if blocked != 0 {
 		t.Errorf("%d held-back rows; every row has had a card-only run, so none is held back", blocked)
@@ -146,6 +153,7 @@ func TestARowsNodeClassesAreItsLoadersClasses(t *testing.T) {
 		"flux3-klein/nvfp4":                {"UNETLoaderMultiGPU", "CLIPLoaderDisTorch2MultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-edit-2511/fp8mixed":    {"UNETLoaderDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 		"qwen-image-edit-2511/gguf-q5_1":   {"UnetLoaderGGUFDisTorch2MultiGPU", "CLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
+		"acestep/xl-turbo-bf16":            {"UNETLoaderMultiGPU", "DualCLIPLoaderMultiGPU", "VAELoaderMultiGPU"},
 	}
 	for _, r := range MulticardRows() {
 		if got := r.NodeClasses(); !reflect.DeepEqual(got, want[r.ID]) {

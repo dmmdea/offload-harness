@@ -19,11 +19,13 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/buildinfo"
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/floors"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hwdetect"
 	"github.com/dmmdea/offload-harness/internal/mediaseat"
 	"github.com/dmmdea/offload-harness/internal/servingtmpl"
 	"github.com/dmmdea/offload-harness/internal/tierseed"
+	"github.com/dmmdea/offload-harness/internal/update"
 	"github.com/dmmdea/offload-harness/internal/vllmseat"
 	"gopkg.in/yaml.v3"
 )
@@ -416,6 +418,9 @@ type gatedModelSet struct {
 	IncludeQ3635B       bool
 	IncludeEG2          bool
 	IncludeEG2Projector bool
+	// IncludePooled is the two-card template's unconditional pooled seats (backend cuda-pair):
+	// three models whose weights and projectors the Linux install leaves out-of-band.
+	IncludePooled bool
 }
 
 // warnMissingGatedModels is warnMissingSeatModels' sibling for the flag-gated
@@ -478,6 +483,14 @@ func warnMissingGatedModelsTo(set gatedModelSet, modelsDir, target string, w io.
 		if set.IncludeEG2Projector {
 			check("embeddinggemma2", "mmproj", "mmproj-embeddinggemma-2-Q8_0.gguf")
 		}
+	}
+	if set.IncludePooled {
+		check("qwen38-27b-pool", "model", "Qwen3.8-27B-UD-Q6_K.gguf")
+		check("qwen38-27b-pool", "mmproj", "mmproj-F16.gguf")
+		check("gemma4-26b-a4b-pool", "model", "gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf")
+		check("gemma4-26b-a4b-pool", "mmproj", "mmproj-gemma-4-26B-A4B-it-F16.gguf")
+		check("gemma4-31b-pool", "model", "gemma-4-31B-it-qat-UD-Q4_K_XL.gguf")
+		check("gemma4-31b-pool", "mmproj", "mmproj-gemma-4-31B-it-F16.gguf")
 	}
 	if len(missing) == 0 {
 		return
@@ -543,12 +556,20 @@ type renderRequest struct {
 	// deriveRender normalises it, so the value the stamp records and the replay re-derives from is
 	// the cleaned one.
 	EG2LlamaBin string
+	// HeavyCard / UtilityCard (--heavy-card, --utility-card) place the two roles of a two-card
+	// pinned template on physical cards (a CUDA index or a GPU-<uuid>); empty is the template
+	// default (heavy 0, utility 1). Only a tier whose template pins card roles accepts them.
+	HeavyCard, UtilityCard string
 	// PinnedVLLM, when set, REPLACES the vLLM seat resolution instead of running
 	// it. Only the replay sets it: vllmSeatFor inspects the LOCAL box (does this
 	// machine have the hand-built venv and the snapshot?), so re-running the
 	// detection while auditing another node's config would render the llama.cpp
 	// fallback and report a false drift on every node that has the seat.
 	PinnedVLLM *pinnedVLLM
+	// SlotSave is the write-time verdict that the llama.cpp build is at or above the kvslot floor
+	// (slotSaveBuildOK). Like PinnedVLLM it is an input, never a probe: a replay on another machine
+	// takes it from the stamp instead of judging that machine's files.
+	SlotSave bool
 }
 
 type pinnedVLLM struct {
@@ -723,6 +744,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		IncludeEG2:    p.IncludeEmbeddingGemma2,
 		EG2TextOnly:   p.eg2TextOnly(),
 		EG2LlamaBin:   eg2Bin,
+		SlotSave:      req.SlotSave,
 		Seats:         p.MediaSeats, Home: req.Home, RknpuHome: req.RknpuHome, GOOS: target, GPUEnv: p.GPUEnv, Backend: p.Backend,
 		AltCPULlamaBin:    req.AltLlamaBinCPU,
 		DisableCUDAGraphs: p.DisableCUDAGraphs,
@@ -730,6 +752,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		DisplayLayer:  displayLayerOf(layers),
 		OmitE4B:       p.OmitE4B,
 		OmitEmbed300M: p.OmitEmbeddingGemma,
+		HeavyCard:     req.HeavyCard, UtilityCard: req.UtilityCard,
 	}
 	rendered, err := servingtmpl.Render(tmpl, params)
 	if err != nil {
@@ -759,6 +782,8 @@ func runInstallRender(args []string) error {
 	llamaBin := fs.String("llama-bin", "", "directory holding llama-server and its shared objects")
 	altLlamaBinCPU := fs.String("llama-bin-cpu", "", "directory of a CPU llama-server build: renders the tier's CPU seat family beside its GPU seats (tier must declare alt_backends [cpu])")
 	eg2LlamaBin := fs.String("llama-bin-eg2", "", "directory of the llama.cpp build that serves ONLY the embeddinggemma2 entry (default: --llama-bin)")
+	heavyCard := fs.String("heavy-card", "", "two-card tiers: the card (CUDA index or GPU-<uuid>) that carries the 27B agent and vision seats (default 0; the utility card defaults to the other index)")
+	utilityCard := fs.String("utility-card", "", "two-card tiers: the card that carries the memory stack, the cascade, STT and the forecaster beside the heavy seat (default 1)")
 	modelsDir := fs.String("models", "", "directory holding the GGUF model files")
 	listen := fs.String("listen", "127.0.0.1:11436", "llama-swap listen address")
 	threads := fs.Int("threads", 0, "--threads per server (default: half the logical CPUs)")
@@ -790,7 +815,10 @@ func runInstallRender(args []string) error {
 		RknpuHome:      homeOr(*rknpuHome, "RKNPU_HOME", *home, "rknpu"),
 		AltLlamaBinCPU: *altLlamaBinCPU,
 		EG2LlamaBin:    *eg2LlamaBin,
+		HeavyCard:      *heavyCard,
+		UtilityCard:    *utilityCard,
 		VLLM:           vllmRuntimeFlags{user: *vllmUser, proxyHost: *vllmProxy, venv: *vllmVenv, seatDir: *vllmSeatDir, hfHome: *hfHome},
+		SlotSave:       slotSaveBuildOK(*llamaBin, *home),
 	})
 	if err != nil {
 		return err
@@ -823,6 +851,7 @@ func runInstallRender(args []string) error {
 		IncludeQ3635B:       res.Params.IncludeQ3635B,
 		IncludeEG2:          res.Params.IncludeEG2,
 		IncludeEG2Projector: !res.Params.EG2TextOnly,
+		IncludePooled:       res.Params.Backend == "cuda-pair",
 	}, *modelsDir, target)
 
 	// The provenance stamp (K-02) rides on every rendered config from here on.
@@ -837,6 +866,9 @@ func runInstallRender(args []string) error {
 	if *out == "" {
 		fmt.Print(stamped)
 		return nil
+	}
+	if err := ensureSlotSaveDir(res.Params); err != nil {
+		return err
 	}
 	if err := os.WriteFile(*out, []byte(stamped), 0o644); err != nil {
 		return err
@@ -894,6 +926,9 @@ func renderGate(res renderResult) error {
 	if vs := servingtmpl.Audit(res.Config); len(vs) != 0 {
 		return fmt.Errorf("tier %s: the rendered config breaks %d operator rule(s) (INV-1/INV-2) — not written:\n%s", res.TierID, len(vs), servingtmpl.Violations(vs))
 	}
+	if vs := servingtmpl.AuditSlotSave(res.Config); len(vs) != 0 {
+		return fmt.Errorf("tier %s: the rendered config puts --slot-save-path beside more than one slot (ADR 0056) — not written:\n%s", res.TierID, servingtmpl.Violations(vs))
+	}
 	if vs := spillViolations(res); len(vs) != 0 {
 		return fmt.Errorf("tier %s: the rendered config spills experts to the CPU beyond the tier's measured spill (INV-1) — not written:\n%s", res.TierID, servingtmpl.Violations(vs))
 	}
@@ -926,6 +961,8 @@ var nineBAgentSeatEntries = []string{"mimo-9b-agent", "qwen3.5-9b-agent"}
 // llama.cpp fails (register A-07); the tier's agent answer is the 27B GSQ seat, with the 4B as its fallback.
 var noNineBAgentSeatTiers = map[string]string{
 	"ampere-16": "measured on the A2: the 9B under llama.cpp fails, and the 9B under vLLM only ties the 4B (register A-07)",
+	// The same silicon twice (two A2s, one 16 GB card per role): the 27B and 4B seats are measured there, the 9B never was.
+	"ampere-2x16": "two A2 cards, same sm_86 silicon as ampere-16: the 9B under llama.cpp fails there, and the 9B under vLLM only ties the 4B (register A-07)",
 }
 
 // refuseLlamaCppNineBAgentSeat is the render-time form of register A-40, which recorded the A2 prohibition and
@@ -957,6 +994,76 @@ func refuseLlamaCppNineBAgentSeat(res renderResult) error {
 }
 
 const eg2MinLlamaBuild = 11452
+
+// kvSlotFloorSeat is the key of the slot save/restore floor in setup/floors.json (upstream llama.cpp #26004, which
+// keeps a hybrid model's context checkpoints across a slot restore). A floor, never a pin: any newer build clears it.
+const kvSlotFloorSeat = "kvslot"
+
+// slotSaveBuildOK is the write-time verdict that --slot-save-path may be rendered: an install home is known and the
+// llama.cpp build is at or above the kvslot floor. The build is the one the directory name states (llamaBuildOf), else
+// the one installed.json records for the live llama path the render points at (the installer's directory is called
+// `llama`, so its name states nothing). A build neither source states is unknown and renders nothing; the renderer
+// never runs llama-server to ask.
+func slotSaveBuildOK(llamaBin, home string) bool {
+	if strings.TrimSpace(home) == "" || strings.TrimSpace(llamaBin) == "" {
+		return false
+	}
+	build, ok := llamaBuildOf(llamaBin)
+	if !ok {
+		build, ok = installedLlamaBuild(llamaBin, home)
+	}
+	if !ok {
+		return false
+	}
+	set, err := floors.Parse(floorsJSON)
+	if err != nil {
+		return false
+	}
+	floor, err := strconv.Atoi(set["llama.cpp"].Seats[kvSlotFloorSeat])
+	return err == nil && floor > 0 && build >= floor
+}
+
+// installedLlamaBuild reads the live llama build from <home>/installed.json (schema 2, written by the installer
+// and the update verb), but only when llamaBin IS that component's live path: a render pointed at some other
+// directory says nothing about the build installed.json describes.
+func installedLlamaBuild(llamaBin, home string) (int, bool) {
+	man, err := update.LoadManifest(filepath.Join(home, "installed.json"))
+	if err != nil || !man.Has(update.Llama) {
+		return 0, false
+	}
+	st := man.State(update.Llama)
+	if st.Current == nil {
+		return 0, false
+	}
+	live := st.Live
+	if live == "" {
+		live = filepath.Join(home, update.Llama)
+	}
+	norm := func(p string) string { return strings.ToLower(strings.TrimRight(filepath.ToSlash(filepath.Clean(p)), "/")) }
+	if norm(live) != norm(llamaBin) {
+		return 0, false
+	}
+	key := floors.Key(st.Current.ID)
+	if len(key) != 1 || key[0] <= 0 {
+		return 0, false
+	}
+	return key[0], true
+}
+
+// ensureSlotSaveDir creates the directory a rendered --slot-save-path names. llama-server refuses to start on a
+// missing one, and that would take down every seat on the node, so a config that names it is never written until
+// it exists. Only for a render aimed at the machine doing the rendering: another machine's tree is its own
+// installer's to create.
+func ensureSlotSaveDir(p servingtmpl.Params) error {
+	dir := p.SlotSaveDir()
+	if dir == "" || p.GOOS != runtime.GOOS {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.FromSlash(dir), 0o755); err != nil {
+		return fmt.Errorf("creating the slot directory %s that the rendered config names (llama-server will not start without it) — not written: %w", dir, err)
+	}
+	return nil
+}
 
 // eg2FloorUncheckedTail ends the note a build whose name states no build gets. setup/install.ps1 keys on it
 // to leave out the note about the build it installed itself (a test holds the two in step).
@@ -1458,12 +1565,15 @@ func replayRequest(b servingtmpl.SpecBasis) (renderRequest, bool) {
 		// replay that dropped one re-rendered the entry or the family on the main build and read STALE for
 		// a path the node chose itself, which no re-render by this binary could ever fix.
 		AltLlamaBinCPU: b.Params.AltCPULlamaBin, EG2LlamaBin: b.Params.EG2LlamaBin,
+		// The card roles are a per-BOX choice (which card runs hot), so a replay re-derives them from the stamp.
+		HeavyCard: b.Params.HeavyCard, UtilityCard: b.Params.UtilityCard,
 		// The vLLM deployment half is a per-BOX fact (the account, the bound
 		// address, where the venv lives), never a seed. Pinned from the stamp so
 		// the replay measures seed drift and not "the auditing box is not the
 		// node". A change to the tier's own vllm_seat block is still caught —
 		// it moves profiles_entry_sha256, which the basis diff names.
 		PinnedVLLM: &pinnedVLLM{Seat: b.Params.VLLMSeat, Runtime: b.Params.VLLMRuntime, Extras: b.Params.ExtraVLLMSeats},
+		SlotSave:   b.Params.SlotSave,
 	}
 	if b.Render.FallbackBackend != "" {
 		// Off-matrix: the stamped tier id is the human label

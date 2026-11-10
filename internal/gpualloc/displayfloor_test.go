@@ -108,8 +108,8 @@ func TestBuildInputCarriesTheLayersDesktopFloor(t *testing.T) {
 func TestPickAutoDoesNotHandOutTheDisplayCardBelowTheLayersFloor(t *testing.T) {
 	m := scratchManager(t)
 	cards := threeCards()
-	// The pair seat is loaded on cards 0 and 2, so the display card is the one with no resident
-	// seat: the card the order would put first.
+	// The pair seat is loaded on cards 0 and 2. The display card sorts after them, so the request takes
+	// every card that qualifies (one to three) and the display card is in the pick only where the floor holds.
 	pairLoaded := func(context.Context, config.Config, []gpuprobe.Card) map[string]gpulease.ResidentInfo {
 		return ResidentFrom(displayCfg(), cards, map[string]bool{"agent-pool": true})
 	}
@@ -128,11 +128,11 @@ func TestPickAutoDoesNotHandOutTheDisplayCardBelowTheLayersFloor(t *testing.T) {
 			build := func() (gpulease.AllocInput, error) {
 				return BuildInput(context.Background(), m, displayCfg(), Need{VRAMGiB: tc.vram}, deps)
 			}
-			ids, _, err := PickAuto(Plan{Min: 1, Max: 1}, time.Minute, build, io.Discard, func(time.Duration) {}, time.Now)
+			ids, _, err := PickAuto(Plan{Min: 1, Max: 3}, time.Minute, build, io.Discard, func(time.Duration) {}, time.Now)
 			if err != nil {
 				t.Fatal(err)
 			}
-			got := len(ids) == 1 && ids[0] == cards[1].LeaseID()
+			got := containsID(ids, cards[1].LeaseID())
 			if got != tc.wantCard1 {
 				t.Fatalf("display card handed out = %v, want %v (picked %v)", got, tc.wantCard1, ids)
 			}

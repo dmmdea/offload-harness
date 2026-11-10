@@ -1,0 +1,331 @@
+# llama-swap.linux-cuda-pair.yaml — offload-harness family on the llama.cpp CUDA backend, TWO
+# identical 16 GB cards, every model pinned WHOLE to one of them (Linux; the ampere-2x16 tier).
+# Rendered by `local-offload install render`, which substitutes the __CTX__ / __KV_K__ /
+# __KV_V__ / __FLASH_ATTN__ / __LLAMA_BIN__ / __MODELS__ / __NTHREADS__ / __LISTEN__ tokens from
+# the tier, and the two card-role tokens below from the box.
+#
+# PIN, DON'T SPLIT (the win-dual-blackwell pattern, on Linux): the cards share no NVLink, and
+# one of them sits behind a chipset x4 slot, so a model split across them would pay a PCIe
+# round trip per layer for nothing. Every model fits one card and is pinned whole to it:
+#
+#   HEAVY card    the Qwen3.8-27B agent and the tier's swappable seats (vision), one 12 GB model
+#                 at a time (ALTERNATIVES in the heavy set).
+#   UTILITY card  the memory stack (embedders, reranker), the resident media seats (STT,
+#                 forecaster) and the cascade (e4b | e2b | the 4B agent) as alternatives.
+#                 These join the heavy seat as CONJUNCTIONS in the `both` set, so the cascade
+#                 and the memory stack keep running while the 27B answers.
+#   POOLED seats  the one exception to "pin whole": three models that DO span both cards
+#                 (qwen38-27b-pool, gemma4-26b-a4b-pool, gemma4-31b-pool), for work whose
+#                 quality is worth more than a free second card. They pin BOTH cards
+#                 explicitly (utility card first, heavy card second: the utility card is
+#                 the one that carries the resident memory stack, and layer-split puts the
+#                 larger share on the card listed last), split by layer (see the entries for
+#                 why not tensor), and live in their own sets (`pooled`, and `pooled27` for the 27B): a pooled seat takes
+#                 both cards, so it never shares a set with the cascade or a single-card
+#                 seat.
+#
+# The roles are tokens, not literals: __HEAVY_CARD__ and __UTILITY_CARD__ expand to a CUDA
+# index (heavy 0, utility 1 by default) or a GPU-<uuid>, chosen per box at render time
+# (`install render --heavy-card N [--utility-card M]`). A box whose card 0 runs hot, or whose
+# card 0 sits in a power-limited slot, swaps the roles by re-rendering, never by editing the
+# yaml. The indices follow CUDA_DEVICE_ORDER=PCI_BUS_ID, which the tier's gpu_env puts on
+# every entry (without it CUDA numbers the cards fastest-first and an index pin names a
+# different card than nvidia-smi does). Two identical cards cannot be told apart by name, so
+# the audit reads an index pin here as a note, not a violation; pass GPU-<uuid> values to
+# pin by identity.
+#
+# Serving invariants (grammar reliability — do NOT change): --jinja, --flash-attn on,
+# no MTP on the cascade seats, reasoning off — the reasoning-off invariant binds the CASCADE
+# seats; the *-agent entries below are explicitly agent-loop seats.
+#
+# LINUX-SPECIFIC AND LOAD-BEARING: every seat carries LD_LIBRARY_PATH pointing at the
+# llama.cpp build dir. A self-built llama-server links its own shared objects; without
+# it the process dies at exec with a loader error that looks nothing like a config
+# problem.
+#
+# This file serves the tier that carries include_qwen38_27b: the heavy set names the `q3827`
+# var literally. The single-card 26B, the 9B agent seats and the RAM-spill seat of
+# linux-cuda.yaml are not here: none was measured on a two-card box. The pooled entries are
+# unconditional (this template only ever renders for a two-card box) and carry their own
+# literal ctx and flags, the configuration each was measured under.
+healthCheckTimeout: 300
+logLevel: info
+listen: __LISTEN__
+
+macros:
+  common: >-
+    --ctx-size __CTX__ --flash-attn __FLASH_ATTN__ --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__
+    --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+  ld: "LD_LIBRARY_PATH=__LLAMA_BIN__:${LD_LIBRARY_PATH:-}"
+
+models:
+  offload-e4b:
+    aliases: [gemma4-e4b, offload]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf
+      --n-gpu-layers 99 --parallel 1 __SLOT_SAVE__ ${common}
+    checkEndpoint: /health
+    ttl: 300
+  gemma4-e2b:
+    aliases: [e2b]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-E2B-it-qat-UD-Q4_K_XL.gguf
+      --n-gpu-layers 99 ${common}
+    checkEndpoint: /health
+    ttl: 300
+  # AGENT seat for the SMALL tiers: Qwen3.5-4B. Gated on the tier's
+  # include_qwen35_4b, exactly as the 26B agent entry rides include_26b — the
+  # renderer strips this block, its matrix var and its set membership together.
+  # MEASURED 2026-08-17 (6GB-tier bake-off, RTX 3050): the only candidate of 15 that
+  # is strong on BOTH task shapes — 67% extraction recall vs the e4b incumbent's 50%,
+  # and 4/5 on search+reason where the higher-scoring 2B collapses to 1/5. 3681 MiB at
+  # ctx 32768 q8_0, so it fits a 6GB card beside the resident support tier.
+  # CEILING MEASURED 2026-10-29 on the 6 GB reference box (RTX 3050), beside the support tier
+  # (reranker + embeddinggemma2 with its projector, the 300M omitted) on a 29,914-token
+  # prompt, q8_0 K and V: ctx 49152 loads and leaves 216 MiB free after the prompt; ctx 57344
+  # leaves 40 MiB; ctx 65536 does NOT load (its compute buffer, 380 MiB at the default ubatch and
+  # 318 MiB at --ubatch-size 256, no longer fits), and a q4_0 V cache lets 65536 load with
+  # 120 MiB free but changes the cache the bake-off measured. So the window this entry
+  # renders (the tier's ctx_size, 32768) is inside the measured fit; a node that wants more window raises the tier's ctx_size
+  # to no more than 49152 and keeps q8_0 K and V. With the 300M embedder AND the other two support
+  # models resident, neither heavy seat (this one or the E4B media seat) loaded at all.
+  #
+  # Flags are written EXPLICITLY instead of via ${common} for one measured reason:
+  # ${common} pins `--reasoning off`, and every score this seat was chosen on was
+  # measured under llama.cpp's DEFAULT reasoning behaviour. Shipping a flag the
+  # measurement never exercised would be shipping an unmeasured configuration.
+  # NO sampling flags on purpose: the agent loop sends `temperature: 0` on every
+  # request (internal/agent/client.go wireReq — the field has no omitempty and is
+  # never assigned), so a server-side --temp/--top-p is inert on this lane.
+  #
+  # The Q354B_AGENT_ALIAS token below drops this entry's claim on `agent-seat` when
+  # mimo-9b-agent ALSO renders (2026-09-24), or when the Qwen3.6-35B-A3B spill seat
+  # below renders (2026-10-09): they share the alias, and this seat stays as the
+  # tier's un-aliased ROLLBACK (an opt-in entry the lane can be pointed back at)
+  # rather than being refused outright — the mirror of qwen3.5-9b-agent's own
+  # Q359B_AGENT_ALIAS token below.
+  qwen3.5-4b-agent:
+    aliases: [qwen35-4b__Q354B_AGENT_ALIAS__]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.5-4B-UD-Q4_K_XL.gguf
+      --n-gpu-layers 99 --parallel 1 --ctx-size __CTX__ --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__ --threads __NTHREADS__
+      --jinja --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # AGENT seat for the 16GB class: Qwen3.8-27B UD-IQ3_S with the MTP head embedded in
+  # the same GGUF (blk.64.nextn.*), drafted at depth 3. Gated on the tier's
+  # include_qwen38_27b. It deliberately does NOT claim `agent-seat`: the 4B/9B entry
+  # keeps that alias as the fallback, and the lane binds here through
+  # config_seed.agent_model. The --ctx-size is a LITERAL, not __CTX__: 49,152 is the
+  # window measured to fit (14,410 MiB of a 15,356 MiB card, INCLUDING the ~456 MiB
+  # memory-stack embedder already resident) on the ampere-16 reference box. A larger
+  # window aborts at load with CUDA out-of-memory. --reasoning off is the policy the
+  # seat was measured under (ADR 0047); q8_0 KV holds the drafter at its measured
+  # 0.59 acceptance on free text.
+  qwen38-27b-agent:
+    aliases: [qwen38-27b, 27b-agent]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__HEAVY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.8-27B-UD-IQ3_S.gguf
+      --spec-type draft-mtp --spec-draft-n-max 3
+      --n-gpu-layers 999 --parallel 1 --ctx-size 49152 --flash-attn __FLASH_ATTN__
+      --cache-type-k __KV_K__ --cache-type-v __KV_V__ --cache-ram __CACHE_RAM__ __SLOT_SAVE__ --threads __NTHREADS__
+      --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # POOLED 27B, the tier's quality seat: Qwen3.8-27B UD-Q6_K (22.0 GB, the quant the single
+  # card cannot hold) split by layer across BOTH cards, with the MTP head drafted at depth 3 and
+  # the same repo's mmproj-F16 so it also reads images. Does not claim `agent-seat`; the lane
+  # binds here through config_seed.agent_model / reasoning_model. MEASURED 2026-11-07 on two
+  # NVIDIA A2 (llama.cpp b12192 sm_86, llama-swap v270): loaded in 18 s; 12,504 MiB on the first
+  # card and 13,594 MiB on the second; known-answer correct; decode 10.34 tok/s with MTP
+  # acceptance 293/465 (63 %); a 3,672-token prefill ran at 237 tok/s; resident beside the
+  # embedder through llama-swap (12,964 + 13,594 MiB). For comparison the single-card 27B
+  # above (UD-IQ3_S, ctx 49152) decodes 8.4 tok/s. `--split-mode tensor` decoded 10.71 tok/s but
+  # its prefill fell to 138 tok/s (and one card was thermally throttled during that run), so
+  # layer is the shipped mode. MEASURED later with the embedder (438 MiB), reranker (324 MiB)
+  # and forecaster (926 MiB) loaded on the utility card: 14,230 of 15,356 MiB there (12,516 MiB
+  # of it this seat's share) and 13,620 MiB on the other card; a 3,668-token prompt prefilled at
+  # 209.7 tok/s and decode was 8.1 tok/s. That leaves 1.1 GiB free on the utility card, less
+  # than whisper large-v3-turbo needs, so this seat is NOT co-resident with whisper: it sits in
+  # the `pooled27` set, which carries the memory stack and every resident seat EXCEPT the speech
+  # seat. A transcription request evicts it. The utility card is
+  # listed FIRST so the lighter share lands beside the residents; the two --tensor-split
+  # weights are equal because the cards are identical.
+  qwen38-27b-pool:
+    aliases: [27b-pool, pooled-27b]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__,__HEAVY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/Qwen3.8-27B-UD-Q6_K.gguf
+      --mmproj __MODELS__/mmproj-F16.gguf
+      --spec-type draft-mtp --spec-draft-n-max 3
+      --n-gpu-layers 999 --split-mode layer --tensor-split 1,1 --parallel 1 --ctx-size 65536
+      --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 1024
+      --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # POOLED Gemma 4 26B-A4B (QAT UD-Q4_K_XL, 14.2 GB, mixture-of-experts with 4B active) across
+  # both cards with its mmproj-F16: the fast pooled seat. Same flags as the 27B pool minus MTP,
+  # at ctx 32768. MEASURED 2026-11-07 (same hosts, builds and layer split): decode 11.92 tok/s,
+  # prefill 234 tok/s, 9,012 MiB + 7,250 MiB. Measured with one card thermally
+  # throttled, so these are a LOWER BOUND. With the embedder, reranker and forecaster resident on
+  # the utility card: 10,744 + 7,278 MiB, prefill 357 tok/s, decode 17.0 tok/s. It fits beside
+  # whisper, so it keeps the full residents. (The single-card 26B stays out of this tier: it
+  # measured 1/8 on the A2, ampere-16.)
+  gemma4-26b-a4b-pool:
+    aliases: [26b-pool, pooled-26b]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__,__HEAVY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-26B-A4B-it-qat-UD-Q4_K_XL.gguf
+      --mmproj __MODELS__/mmproj-gemma-4-26B-A4B-it-F16.gguf
+      --n-gpu-layers 999 --split-mode layer --tensor-split 1,1 --parallel 1 --ctx-size 32768
+      --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 1024
+      --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # POOLED Gemma 4 31B (QAT UD-Q4_K_XL, 17.3 GB, dense) across both cards with its mmproj-F16:
+  # the ESCALATION seat (config_seed.escalation_model), the largest model the pair can hold.
+  # Same flags as the 26B pool, ctx 32768. MEASURED with the embedder, reranker and forecaster
+  # resident: 12,834 + 9,954 MiB, prefill 59 tok/s, decode 2.2 tok/s. THAT SPEED IS A THERMAL
+  # ARTEFACT, not the seat's: the utility card throttled to 210 MHz at 86 C on a host cooling
+  # fault while the other card held 1770 MHz (an earlier throttled run read 2.38 tok/s). It
+  # AWAITS A MEASUREMENT ON A COOLED PAIR before any speed is claimed for it. Whisper loaded and
+  # transcribed beside it plus all residents with no eviction, so it keeps the full residents.
+  gemma4-31b-pool:
+    aliases: [31b-pool, pooled-31b]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__,__HEAVY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/gemma-4-31B-it-qat-UD-Q4_K_XL.gguf
+      --mmproj __MODELS__/mmproj-gemma-4-31B-it-F16.gguf
+      --n-gpu-layers 999 --split-mode layer --tensor-split 1,1 --parallel 1 --ctx-size 32768
+      --flash-attn on --cache-type-k q8_0 --cache-type-v q8_0 --cache-ram 1024
+      --threads __NTHREADS__ --jinja --reasoning off --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  embeddinggemma:
+    aliases: [text-embedding, local-embed]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/embeddinggemma-300M-Q8_0.gguf
+      --embeddings --pooling mean --ctx-size 2048 --batch-size 2048 --ubatch-size 2048
+      --n-gpu-layers 99 --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+  # SECOND memory-stack embedder: EmbeddingGemma-2 Q8_0 with its multimodal projector (text,
+  # image and short-video embeddings in one space), the embedder the memory stack is moving to.
+  # Gated on the tier's include_embeddinggemma2 and a MEMBER OF THE STACK'S RESIDENCY SET (`emb & rer & eg2`): resident beside
+  # the swappable seats, never swapped by them. The entry as written is the memory AUTHORITY's (ampere-6,
+  # the card it was measured on). A tier whose embeddinggemma2_projector is false (ampere-8 and
+  # blackwell-3x16: replicas that only embed text, on cards the projector does not fit beside their
+  # seats) renders the SAME entry with its one projector argument (flag and GGUF path) stripped at
+  # render (servingtmpl dropEG2Projector): every other flag stays, --ubatch-size 2048 included (the stack's
+  # hot budget is 1,900 tokens; a smaller ubatch returns HTTP 500 on long memories). The projector's
+  # filename stays below so the gated-weight contract test keeps pinning it against install.ps1.
+  # No aliases: the memory stack selects the id (a tier that sets omit_embeddinggemma gets the
+  # 300M entry's generic aliases here, handed over at render). The embeddinggemma (300M) entry
+  # above renders on every tier that does not set omit_embeddinggemma, for the callers of
+  # text-embedding / local-embed and for a tier whose memory_stack still names it. A tier that
+  # sets it (ampere-6) renders without it: the memory authority and the wiki embed with this
+  # entry, the harness kNN pre-filter is off by default (knn_prefilter_enabled false) and, when an
+  # operator turns it on, embeds with this entry through MemoryStack[0] (config EmbedModel()), and
+  # on the 6 GB reference box the 300M's 464 MiB beside the reranker and this entry left neither
+  # heavy seat able to load. Like that entry it bypasses ${common} (an embedder: no --jinja, no reasoning
+  # flag). Flags are the measured configuration; MEASURED on the reference 6 GB node: 1,196 MiB
+  # loaded, 1,466 MiB peak after image embeds, 1,536 MiB after a short video; without the
+  # projector 460 MiB loaded and 482 MiB peak at --ubatch-size 2048. REQUIRES llama.cpp >= b11452 (the gemma-embedding2 architecture,
+  # upstream PR #30054, merged 2026-10-06); b11490 is the build it was proven on.
+  embeddinggemma2:
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__"]
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/embeddinggemma-2-Q8_0.gguf
+      --mmproj __MODELS__/mmproj-embeddinggemma-2-Q8_0.gguf --embeddings --pooling mean
+      --ctx-size 4096 --batch-size 4096 --ubatch-size 2048 --n-gpu-layers 99 --flash-attn on
+      --host 127.0.0.1 --port ${PORT}
+    checkEndpoint: /health
+    ttl: 300
+  bge-reranker-v2-m3:
+    aliases: [reranker-v2-m3]
+    env: ["${ld}", "CUDA_VISIBLE_DEVICES=__UTILITY_CARD__"]
+    # GPU weights (2026-09-10 operator rule: no CPU inference; RAM is overflow only).
+    # A-122b (measured 2026-10-01): each pair the memory stack scores (<= ~2,000 tokens) is ONE non-causal sequence that must fit one ubatch; 8192/4096/4096 failed to start beside the loaded ampere-16 agent seat 7 times (639 MiB free; 1,369 MiB at 4096/2048/2048).
+    cmd: >-
+      __LLAMA_BIN__/llama-server --model __MODELS__/bge-reranker-v2-m3-Q4_K_M.gguf
+      --reranking --pooling rank --ctx-size 4096 --batch-size 2048 --ubatch-size 2048
+      --n-gpu-layers 99 --port ${PORT} --host 127.0.0.1
+    checkEndpoint: /health
+    ttl: 300
+
+# This template accepts tier-declared media seats. A tier declares a residency ROLE,
+# never a set or group name: those are per-template, while a tier is a hardware class
+# that renders into several templates. The SEATS_SWAPPABLE / SEATS_RESIDENT markers in
+# the set expressions below (each wrapped in double underscores) say WHERE a seat of
+# that role joins the matrix; this directive says WHICH roles are accepted at all.
+# `env` is the macro a llama-backed seat carries —
+# the loader path, which only this file needs. A template WITHOUT this directive
+# renders no seats and refuses by name rather than dropping them silently.
+# offload-seats: swappable resident env=${ld}
+# RESIDENCY IS DECLARED WITH `matrix:`, NOT `groups:`. llama-swap replaced groups with
+# matrix in v202; a config must use one or the other, never both. This is not a style
+# preference — it is a MEASURED failure. On the workstation node, under `groups:`, an
+# `exclusive: true` group evicted a `persistent: true` group anyway (verified live
+# 2026-07-26): the reranker could not start, a rerank returned HTTP 000 after 90 s, and
+# the memory stack silently degraded to dense-only ordering with no error anywhere.
+# `persistent` did not do what its name promises. Matrix states the valid CONCURRENT
+# COMBINATIONS instead of a priority the solver may reinterpret.
+#
+# Sets ARE those combinations. Residents appear in EVERY set, so the solver may never
+# evict them to satisfy anything else — the property the old topology only approximated
+# with swap:false, and the one the Windows templates got outright wrong.
+#
+# The rest is still MEASURED, not assumed. Two earlier shapes were tried on a 6 GB card
+# sharing a live desktop and both broke the box:
+#   1. an exclusive media group — the image seat evicted everything and NOTHING evicted
+#      it, so every chat request returned 502 for the full 5-minute TTL after a render.
+#   2. the embedder/reranker inside the swapping tier — loading the embedder DROPPED
+#      free VRAM 3655 -> 1005 MiB because it had evicted the chat model, so one RAG
+#      query paid three full model loads.
+#
+# REQUIRES llama-swap >= v202. Verified against the real binary: `vars` is mandatory,
+# a var key must be alphanumeric and 1-8 characters, and a set expression may reference
+# ONLY var ids — never a model id.
+matrix:
+  vars:
+    emb: embeddinggemma
+    rer: bge-reranker-v2-m3
+    eg2: embeddinggemma2
+    e4b: offload-e4b
+    e2b: gemma4-e2b
+    q354: qwen3.5-4b-agent
+    q3827: qwen38-27b-agent
+    p27: qwen38-27b-pool
+    g26: gemma4-26b-a4b-pool
+    g31: gemma4-31b-pool
+  # The memory stack is the most expensive thing on this box to lose and the cheapest to
+  # keep: make it maximally expensive to stop, so if the solver ever does have a choice
+  # it stops something else first.
+  evict_costs:
+    emb: 1000
+    rer: 1000
+    eg2: 1000
+  # The two-card sets. `residents` is the utility card's standing load (the memory stack and the
+  # tier's resident seats) and is in EVERY set. `utility` is the cascade beside it; `heavy` is
+  # the 27B (and the swappable seats, as alternatives of it) beside it; `both` is the cascade
+  # AND the heavy seat together, which only two cards can hold: the property this tier exists for.
+  # `pooled` is one model spanning BOTH cards beside the residents: the cascade and the single-card
+  # seats are deliberately not in it (a pooled seat leaves neither card free for them), and a pooled
+  # var appears in no other set, so no single-card big seat can ever be co-scheduled with one.
+  # `pooled` (the two Gemma pools) keeps the full residents, speech-to-text included: measured to fit.
+  # `pooled27` (the 27B pool) is the one set WITHOUT `+residents`: it lists the memory stack and the
+  # resident seats except speech-to-text, because the 27B's share leaves the utility card 1.1 GiB
+  # free, less than whisper needs. Its resident fragment is the NOSTT twin of the one in `residents`.
+  sets:
+    residents: "emb & rer__EG2_AND____SEATS_RESIDENT__"
+    utility: "+residents & (__E4B_LEAD__e2b__Q354B_ALT__)"
+    heavy: "+residents & (q3827__SEATS_SWAPPABLE__)"
+    both: "+residents & (__E4B_LEAD__e2b__Q354B_ALT__) & (q3827__SEATS_SWAPPABLE__)"
+    pooled: "+residents & (g26 | g31)"
+    pooled27: "emb & rer__EG2_AND____SEATS_RESIDENT_NOSTT__ & p27"

@@ -1,4 +1,11 @@
-// wan-multicard.mjs — the card-only placement for Wan 2.2 14B fp8 I2V and for LTX-2.5 22B int8 (comfy-video.mjs --wan-placement multicard [--model ltx25]).
+// wan-multicard.mjs — the card-only placement for Wan 2.2 14B fp8 I2V and for LTX-2.5 22B int8 (comfy-video.mjs --wan-placement multicard [--model ltx25]), and for the
+// WAN-Animate-2 distilled int8 character-animation graph (comfy-animate.mjs --placement multicard: planMulticard({ isAnimateGraph: true }), the ANIMATE_* sizes below).
+//
+// WAN-Animate-2 (comfy-animate.mjs) is the LTX shape again at a smaller size: ONE int8 convrot DiT (15.5 GiB) split over the two cards with the compute card first
+// (cuda:0 computes: ComfyUI-MultiGPU #220), a resident share on the compute card and the donor blocks on the storage card; the umt5 encoder and clip_vision_h on the
+// storage card for the encode, the encoder taken off the cards before the DiT lands; the VAE on the storage card. Its flags are the animate runner's own
+// (--placement, --resident-gb, --cards), not the --wan-* ones, and every request it cannot honour is refused here, before anything starts, like the other two. NOTHING
+// of it was measured on two cards: the ANIMATE_* figures below are chosen from the Wan 2.2 benchmark's large-clip end and the stated file sizes, and say so.
 //
 // LTX-2.5 (--model ltx25) is the same placement with the roles' device numbers REVERSED: its int8 DiT must compute on cuda:0 (ComfyUI-MultiGPU #220), so its
 // launch lists the COMPUTE card first (multicardLaunch, order "compute-first"), under an instance key of its own (multicardInstanceKey), and the graph
@@ -32,13 +39,14 @@
 // It reads the lease's cards from gpu-lock.mjs and the sage-attention token rule from comfy-lifecycle.mjs, and nothing else of the harness; the card table and the
 // pack scan are injectable for tests.
 import { spawnSync as nodeSpawnSync } from "node:child_process";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { leaseDevices } from "./gpu-lock.mjs";
-import { isSageAttentionToken } from "./comfy-lifecycle.mjs";
+import { isSageAttentionToken, COMFY_PORT_BASE } from "./comfy-lifecycle.mjs";
 import { WAN_PLACEMENTS, WAN_PLACEMENT_DEFAULT, WAN_RESIDENT_GB_DEFAULT, WAN_STORAGE_DEVICE, WAN_COMPUTE_DEVICE } from "./wf-wan22-i2v.mjs";
 import { LTX25_RESIDENT_GB_DEFAULT, LTX25_TE_ALLOCATION_DEFAULT, LTX25_COMPUTE_DEVICE, LTX25_STORAGE_DEVICE } from "./wf-ltx25-i2v.mjs";
+import { ANIMATE_RESIDENT_GB_DEFAULT, ANIMATE_COMPUTE_DEVICE, ANIMATE_STORAGE_DEVICE, ANIMATE_DEFAULT_WIDTH, ANIMATE_DEFAULT_HEIGHT, ANIMATE_DEFAULT_FRAMES } from "./wf-wan-animate2.mjs";
 
 /** Where the harness-owned ComfyUI-side code lives (next to this file): the yaml ComfyUI is pointed at, and the node folder it names. */
 export const EXT_DIR = join(dirname(fileURLToPath(import.meta.url)), "comfyui-ext");
@@ -143,8 +151,9 @@ export function parseCardTable(text) {
  * queryCards asks the driver for the card table. A failed query is asked once more before a driver is taken to lack
  * display_attached (a transient failure is not a missing column); the fallback without it leaves every card's display state
  * unknown, which the selection refuses. The planners read the table through queryCardsRanked, which adds the board power.
+ * On Linux a Yes on a card the kernel shows with no display connector is read as No (ignorePhantomAttached).
  */
-export function queryCards(spawnSync = nodeSpawnSync) {
+export function queryCards(spawnSync = nodeSpawnSync, { sysfs = SYSFS, platform = process.platform } = {}) {
   const ask = (fields) => spawnSync("nvidia-smi", [`--query-gpu=${fields}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true });
   const failed = (r) => !r || r.status !== 0 || !r.stdout;
   let r = ask(QUERY);
@@ -153,9 +162,64 @@ export function queryCards(spawnSync = nodeSpawnSync) {
   if (!r || r.status !== 0 || !r.stdout) {
     throw placementError("nvidia-smi gave no card table, so the two cards cannot be told from the display card" + (r && r.error ? ` (${r.error.message})` : ""));
   }
-  const cards = parseCardTable(r.stdout);
+  // the bus-id query is built here, where spawnSync is called with its options, and handed over as a function
+  const busIds = () => spawnSync("nvidia-smi", ["--query-gpu=uuid,pci.bus_id", "--format=csv,noheader"], { encoding: "utf8", timeout: 30000, windowsHide: true });
+  const cards = ignorePhantomAttached(parseCardTable(r.stdout), busIds, { sysfs, platform });
   if (cards.length === 0) throw placementError("nvidia-smi listed no card");
   return cards;
+}
+
+/** The kernel's PCI/DRM tree, injectable so a test can feed a layout (root "" turns the connector check off). */
+const SYSFS = { root: "/sys", readdirSync, readFileSync };
+
+/**
+ * connectorlessNvidia: the sysfs bus ids (lower case, "0000:01:00.0") of NVIDIA PCI devices that have a DRM card node
+ * (<root>/bus/pci/devices/<bus id>/drm/cardN) with ZERO connector entries (cardN-<connector>) under it: a card that cannot drive
+ * a display. A device with no DRM node (nvidia-drm not loaded) or one that cannot be read is not in the set (unknown stays unknown).
+ * The same rule as internal/gpuprobe (maskPhantomAttached), see the measured table in internal/gpuprobe/display.go.
+ */
+export function connectorlessNvidia({ root = "/sys", readdirSync: ls = readdirSync, readFileSync: rd = readFileSync } = {}) {
+  const out = new Set();
+  if (!root) return out;
+  const base = `${root}/bus/pci/devices`;
+  let devices;
+  try { devices = ls(base); } catch { return out; }
+  for (const bus of devices) {
+    try {
+      if (String(rd(`${base}/${bus}/vendor`, "utf8")).trim().toLowerCase() !== "0x10de") continue;
+      const cards = ls(`${base}/${bus}/drm`).filter((n) => /^card\d+$/.test(n));
+      if (cards.length === 0) continue;
+      if (cards.every((c) => ls(`${base}/${bus}/drm/${c}`).every((k) => !k.startsWith(`${c}-`)))) out.add(String(bus).toLowerCase());
+    } catch { /* unreadable: the driver's answer stands */ }
+  }
+  return out;
+}
+
+/**
+ * ignorePhantomAttached: on Linux, a card whose display_attached is Yes but whose PCI device has a DRM card node with no
+ * connector cannot drive a display (an A2 has no display connector at all, and the driver answers Yes anyway; measured on node-i,
+ * driver 615.71: it made every card a display card and refused every multicard placement). Its Yes is read as No, with
+ * `attachedIgnored` saying why; display_active Enabled stays authoritative, and a card WITH connectors, a card with no DRM node,
+ * and any failure to learn the bus id keep what the driver said. The bus ids come from a separate best-effort query
+ * (uuid,pci.bus_id), asked only when a card says Yes AND the kernel tree shows an NVIDIA card without connectors, so the
+ * display ladder above never depends on it.
+ */
+function ignorePhantomAttached(cards, busIds, { sysfs, platform }) {
+  if (platform !== "linux" || !cards.some((c) => c.displayAttached.toLowerCase() === "yes")) return cards;
+  const phantom = connectorlessNvidia(sysfs);
+  if (phantom.size === 0) return cards;
+  let r;
+  try { r = busIds(); } catch { return cards; }
+  if (!r || r.status !== 0 || !r.stdout) return cards;
+  const bus = new Map();
+  for (const raw of String(r.stdout).split(/\r?\n/)) {
+    const cols = raw.split(",").map((c) => c.trim());
+    if (cols.length === 2 && /^GPU-/i.test(cols[0])) bus.set(cols[0].toLowerCase(), cols[1].toLowerCase().replace(/^[0-9a-f]{8}:/, (m) => m.slice(4)));
+  }
+  return cards.map((c) => {
+    if (c.displayAttached.toLowerCase() !== "yes" || !phantom.has(bus.get(c.uuid.toLowerCase()))) return c;
+    return { ...c, displayAttached: "No", display: c.displayActive.toLowerCase() === "enabled", attachedIgnored: "no display connectors" };
+  });
 }
 
 /** What the board-power query asks for: the UUID to join on, and the board's design power (not the operator-adjustable power.limit). */
@@ -183,10 +247,10 @@ function parsePowerTable(text) {
  * rungs. A power that cannot be read at all leaves every card at 0, which ranks nothing: the roles are then the ones the planner always gave, and the
  * placement is never refused for it. Every ask hides its console window on Windows (windowsHide).
  */
-export function queryCardsRanked(spawnSync = nodeSpawnSync) {
+export function queryCardsRanked(spawnSync = nodeSpawnSync, opts) {
   // forwarded through a rest parameter, not handed over as a value: queryCards' own calls carry windowsHide, and the
   // no-visible-windows scan can only judge a call it can see
-  const cards = queryCards((...a) => spawnSync(...a));
+  const cards = queryCards((...a) => spawnSync(...a), opts);
   const askPower = () => { try { return spawnSync("nvidia-smi", [`--query-gpu=${POWER_QUERY}`, "--format=csv,noheader,nounits"], { encoding: "utf8", timeout: 30000, windowsHide: true }); } catch { return null; } };
   let r = askPower();
   if (!r || r.status !== 0 || !r.stdout) r = askPower();
@@ -409,14 +473,43 @@ export function multicardLaunch(pair, { comfyDir, packDirsFn = packDirs, yaml = 
 }
 
 /**
+ * multicardPort: the port of a multicard instance, one that no other instance key can hold. The per-card instances own
+ * COMFY_PORT_BASE + the card's nvidia-smi index (base .. base + n - 1, n = the cards of the node), so a multicard instance
+ * sits above them: base + n + block * n * n + first * n + second, where first and second are the nvidia-smi indexes of the two
+ * cards in the order the launch lists them (the order ComfyUI numbers them in) and block is 0 for the storage-first launch
+ * and 1 for the compute-first one. The key spells that same ordered pair and order (multicardInstanceKey), so one key has one
+ * port and two keys never share one. A two-card node: storage-first 0,1 is base + 3 and 1,0 is base + 4; compute-first
+ * 0,1 is base + 7 and 1,0 is base + 8. n is the highest index of the driver's whole table plus one (a display card or a
+ * gap in the indexes still counts). 0 when it cannot be worked out (a card absent from the table, a COMFY_PORT_BASE that
+ * is no port, a port past 65535): the instance then falls back to the key's own port, as before.
+ */
+export function multicardPort(launch, table, env = {}) {
+  const cards = Array.isArray(launch && launch.cards) ? launch.cards : [];
+  const indexOf = (uuid) => (table || []).find((c) => String(c.uuid).toLowerCase() === String(uuid).toLowerCase());
+  const [a, b] = cards.map(indexOf);
+  if (cards.length !== 2 || !a || !b || !(table || []).length) return 0;
+  const n = Math.max(...table.map((c) => c.index)) + 1;
+  const raw = String(env.COMFY_PORT_BASE ?? "").trim();
+  const base = raw ? Number(raw) : COMFY_PORT_BASE;
+  if (!Number.isInteger(base) || base < 1024 || base > 65535) return 0;
+  const block = launch.order === CARD_ORDER_COMPUTE_FIRST ? 1 : 0;
+  const port = base + n + block * n * n + a.index * n + b.index;
+  return port > 65535 ? 0 : port;
+}
+
+/**
  * multicardEnv: the environment ensureComfy launches with. The film's driver (and any caller) may carry settings that
  * contradict a two-card --gpu-only launch: a single card pin (COMFY_CARD_UUID, COMFY_CUDA_DEVICE) and dynamic VRAM
  * (COMFY_DYNAMIC_VRAM=on). They are dropped here, for the launch only, and the instance key is set so the instance has
- * its own port (the caller's COMFY_API when it gave one), directories and marker.
+ * its own port (the caller's COMFY_API when it gave one, else multicardPort from the card table), directories and marker.
  */
-export function multicardEnv(env, launch) {
+export function multicardEnv(env, launch, table = []) {
   const out = { ...env, COMFY_INSTANCE: launch.key, COMFY_CARD_UUID: "", COMFY_CUDA_DEVICE: "", COMFY_DYNAMIC_VRAM: "" };
   delete out.CUDA_VISIBLE_DEVICES; // ensureComfy sets it from the launch
+  if (!String(env && env.COMFY_API || "").trim()) {
+    const port = multicardPort(launch, table, env || {});
+    if (port) out.COMFY_API = `http://127.0.0.1:${port}`;
+  }
   return out;
 }
 
@@ -649,6 +742,117 @@ function checkLtxResident(residentGb, pair, flags) {
   }
 }
 
+// ---- WAN-Animate-2 (comfy-animate.mjs --placement multicard) --------------------------------------------
+
+/** The animate runner's own flags for the placement (the Wan and LTX ones are --wan-placement, --wan-resident-gb and --wan-cards). */
+export const ANIMATE_OWN_FLAGS = Object.freeze(["placement", "resident-gb", "cards"]);
+
+/** animatePlacementMode parses --placement of comfy-animate.mjs: absent is the single-card path, today's, byte for byte; anything else than single|multicard is refused. */
+export function animatePlacementMode(flags) {
+  if (!("placement" in flags)) return WAN_PLACEMENT_DEFAULT;
+  const raw = flags.placement;
+  if (!WAN_PLACEMENTS.includes(raw)) {
+    throw new Error(`--placement must be ${WAN_PLACEMENTS.join("|")}, got ${JSON.stringify(raw)}`);
+  }
+  return raw;
+}
+
+/** animateResidentGb parses --resident-gb of comfy-animate.mjs: GiB of the DiT kept on the compute card (default ANIMATE_RESIDENT_GB_DEFAULT; 0 to 64; 0 puts all of it on the storage card, which the fit check refuses on two 16 GB cards). */
+export function animateResidentGb(flags) {
+  if (!("resident-gb" in flags)) return ANIMATE_RESIDENT_GB_DEFAULT;
+  const raw = flags["resident-gb"];
+  const n = Number(raw);
+  if (raw === undefined || raw === "" || !Number.isFinite(n) || n < 0 || n > 64) {
+    throw new Error(`--resident-gb must be a number of GiB from 0 to 64, got ${JSON.stringify(raw)}`);
+  }
+  return n;
+}
+
+/**
+ * The stage sizes of the animate placement (internal/hostneed declares against the same figures: a comment there points here). The file sizes are the bytes of the files the recipe
+ * binds, rounded up to one decimal; the rest are CHOSEN and not measured, because no animate run was ever made on two cards:
+ *   ANIMATE_DIT_GIB            the distilled int8 convrot DiT, 16,653,175,528 bytes = 15.51 GiB;
+ *   ANIMATE_TE_GIB             the umt5 text encoder (fp8 scaled), 6,735,906,897 bytes = 6.27 GiB: on the storage card for the encode, gone before the DiT lands;
+ *   ANIMATE_CLIP_VISION_GIB    clip_vision_h, 1,264,219,396 bytes = 1.18 GiB: on the storage card, and it stays there (no node frees it);
+ *   ANIMATE_VAE_GIB            the Wan 2.1 VAE, 253,815,318 bytes = 0.24 GiB, on the storage card;
+ *   ANIMATE_ACTIVATIONS_GIB_PER_1000_TOKENS   what the compute card holds beyond the resident share per thousand sampler tokens. The Wan 2.2 two-card benchmark (the same 14B
+ *                              DiT class) reserved 5.50 GiB at 32,400 tokens (0.17 per thousand) and the film clip 12.2 GiB at 75,600 (0.16); 0.20 is that, rounded up. The Wan
+ *                              planner's own 0.31 is an envelope fitted to the small clips of that benchmark and would refuse the default clip on a 15 GiB card for a margin the
+ *                              large clips never showed. The animate DiT also reads a pose-conditioned latent beside the clip, which adds no tokens, and a reference frame, which
+ *                              adds one latent frame (animateGeometry counts it);
+ * the compute card keeps WAN_COMPUTE_CONTEXT_GIB (0.5) free beyond that and the storage card holds WAN_STORAGE_OVERHEAD_GIB (0.8: the CUDA context and the allocator's slack,
+ * measured on the Wan benchmark pair) beside its stage. The storage card's stages are, in time order: the ENCODE (umt5 + clip_vision + VAE + overhead = 8.6 GiB), the
+ * SAMPLING (the donor blocks + clip_vision + VAE + overhead, the encoder gone) and the DECODE (the DiT freed by OffloadFreeForDecode); only the sampling one can fail a
+ * share, so that is the one checked.
+ */
+export const ANIMATE_DIT_GIB = 15.6;
+export const ANIMATE_TE_GIB = 6.3;
+export const ANIMATE_CLIP_VISION_GIB = 1.2;
+export const ANIMATE_VAE_GIB = 0.3;
+export const ANIMATE_ACTIVATIONS_GIB_PER_1000_TOKENS = 0.2;
+
+/**
+ * animateGeometry: the sampler's tokens for a clip from the flags the builder reads (defaults 482x854, 81 frames): the latent is 1/8 per side, the patches 2x2 and a latent frame
+ * holds 4 frames, plus the one latent frame of the reference image, so the default clip is 31 x 54 x (21 + 1) = 36,828 tokens.
+ */
+export function animateGeometry(flags) {
+  const w = Number(flags.width) || ANIMATE_DEFAULT_WIDTH, h = Number(flags.height) || ANIMATE_DEFAULT_HEIGHT, f = Number(flags.frames) || ANIMATE_DEFAULT_FRAMES;
+  return { w, h, f, tokens: Math.ceil(w / 16) * Math.ceil(h / 16) * (Math.floor((f - 1) / 4) + 2) };
+}
+
+/** animateActivationsGib: the sampler's activations on the compute card at this many tokens (ANIMATE_ACTIVATIONS_GIB_PER_1000_TOKENS, never under ACTIVATIONS_FLOOR_GIB). */
+export function animateActivationsGib(tokens) {
+  return Math.max(ACTIVATIONS_FLOOR_GIB, (tokens / 1000) * ANIMATE_ACTIVATIONS_GIB_PER_1000_TOKENS);
+}
+
+/**
+ * refuseUnmeasuredAnimate: the DiT the placement sizes is the int8 convrot one (15.5 GiB) loaded as a .safetensors file through the DisTorch2 loader, so a GGUF file (another loader) and
+ * a bf16 or fp16 file (about 33 GiB, which the two cards do not hold) are refused by name before anything starts.
+ */
+function refuseUnmeasuredAnimate(flags) {
+  const name = typeof flags.unet === "string" ? flags.unet.trim() : "";
+  if (name && !/\.safetensors$/i.test(name)) {
+    throw new Error(`--placement multicard places the WAN-Animate-2 DiT as a .safetensors file through the DisTorch2 loader; --unet ${JSON.stringify(name)} is not one: use --placement single for it`);
+  }
+  if (/bf16|fp16/i.test(name)) {
+    throw new Error(`--placement multicard places the int8 WAN-Animate-2 DiT (15.5 GiB); --unet ${JSON.stringify(name)} is a bf16 or fp16 one (about 33 GiB), which does not fit two 16 GiB cards: use --placement single for it`);
+  }
+}
+
+/**
+ * checkAnimateResident: the animate DiT's resident share against the two cards (checkResident's counterpart). The ARITHMETIC, for two 14.996 GiB cards, the default 5 GiB share and the default
+ * clip (482x854x81 = 36,828 tokens, animateGeometry), with the runner's default --reserve-vram of 1 GiB:
+ *   compute card  = share + activations + context = 5 + 7.4 (0.20 GiB x 36.828) + 0.5 = 12.9 GiB, against the card's 14.996: 2.1 GiB to spare; the largest share is 14.996 - 7.4 - 0.5 = 7.1;
+ *   storage card  = donor blocks + clip_vision + VAE + overhead = (15.6 - 5) + 1.2 + 0.3 + 0.8 = 12.9 GiB, against the card less the reserve, 14.996 - 1 = 14.0: 1.1 GiB to spare; the least
+ *                   share is 15.6 + 1.2 + 0.3 + 0.8 - 14.0 = 3.9.
+ * So 3.9 to 7.1 GiB fits a pair of 14.996 GiB cards at the default clip and 5 sits inside it. A share outside it is refused with the figures, and a clip whose window is empty (the activations
+ * of a bigger clip push the largest share under the least) is refused as "no resident share fits". The compute card is judged by its own size, the storage card by its size less --reserve-vram,
+ * which is ComfyUI's model-load margin and not an activation ceiling (the rule checkResident states). The encode stage (8.6 GiB on the storage card) is below the sampling stage for every
+ * share that passes, so it is not a check of its own.
+ */
+function checkAnimateResident(residentGb, pair, flags) {
+  const reserveRaw = Number(flags["reserve-vram"]);
+  const reserve = Number.isFinite(reserveRaw) && reserveRaw > 0 ? reserveRaw : DEFAULT_RESERVE_GIB;
+  const computeGib = pair.compute.totalMiB / 1024, storageGib = pair.storage.totalMiB / 1024;
+  const { w, h, f, tokens } = animateGeometry(flags);
+  const activations = animateActivationsGib(tokens);
+  const most = computeGib - activations - WAN_COMPUTE_CONTEXT_GIB;
+  const fixed = ANIMATE_CLIP_VISION_GIB + ANIMATE_VAE_GIB + WAN_STORAGE_OVERHEAD_GIB;
+  const usable = storageGib - reserve;
+  const least = ANIMATE_DIT_GIB + fixed - usable;
+  const both = `a --resident-gb of at least ${Math.max(0, least).toFixed(1)} and at most ${Math.max(0, most).toFixed(1)}`;
+  if (residentGb > most) {
+    const way = least <= most ? both + " fits both cards at this clip" : "no resident share fits both cards at this clip: lease two larger cards or ask for a smaller clip";
+    throw placementError(`--resident-gb ${residentGb} leaves the compute card (idx ${pair.compute.index}, ${computeGib.toFixed(1)} GiB) ${(computeGib - residentGb).toFixed(1)} GiB for the sampler's activations at ${w}x${h}x${f} (${tokens} tokens, about ${activations.toFixed(1)} GiB) and ${WAN_COMPUTE_CONTEXT_GIB} GiB for the CUDA context: at most ${Math.max(0, most).toFixed(1)} GiB of the DiT can stay resident there; ${way} (the default is ${ANIMATE_RESIDENT_GB_DEFAULT})`);
+  }
+  const donor = ANIMATE_DIT_GIB - residentGb;
+  const stored = donor + fixed;
+  if (stored > usable) {
+    const way = least <= most ? both + " keeps enough of the DiT on the compute card" : "no resident share fits both cards at this clip: lease two larger cards or ask for a smaller clip";
+    throw placementError(`--resident-gb ${residentGb} leaves the storage card (idx ${pair.storage.index}, ${storageGib.toFixed(1)} GiB) ${donor.toFixed(1)} GiB of donor blocks + ${ANIMATE_CLIP_VISION_GIB} GiB of clip vision + ${ANIMATE_VAE_GIB} GiB of VAE + ${WAN_STORAGE_OVERHEAD_GIB} GiB for the context = ${stored.toFixed(1)} GiB against ${usable.toFixed(1)} GiB usable (the card less ${reserve} GiB of --reserve-vram): ${way}`);
+  }
+}
+
 /**
  * geometryNote: what the planner says about a clip bigger than the film's (720x1280x81), "" at the film's size and under. Nothing above that size was
  * measured: wanActivationsGib holds the film's 12.2 GiB there while the sampler's activations are expected to grow with the tokens, so the resident-share
@@ -675,8 +879,8 @@ export function confirmWithLease(pair, held, cardsFlag = "wan-cards") {
 }
 
 /**
- * portNote: a multicard instance with no --api and no COMFY_API listens where its instance key falls back to (COMFY_PORT_BASE + index,
- * the port the per-card instances use too). A ComfyUI already holding it stops the run, closed (COMFY-PORT-TAKEN / COMFY-PROFILE-MISMATCH),
+ * portNote: a multicard instance with no --api and no COMFY_API listens on the port multicardPort works out for its card pair; only when that
+ * cannot be worked out does it fall back to where its instance key falls back to (COMFY_PORT_BASE + index, the port the per-card instances use too). A ComfyUI already holding it stops the run, closed (COMFY-PORT-TAKEN / COMFY-PROFILE-MISMATCH),
  * so the caller is told which port it got and how to pick its own. "" when the caller gave one.
  */
 export function portNote(flags, env, api, label = "wan-placement") {
@@ -693,7 +897,9 @@ export function portNote(flags, env, api, label = "wan-placement") {
  * (injectable); `isWanGraph` says whether this invocation builds the Wan 2.2 graph; `isLtxGraph` whether it builds the LTX-2.5 one (--model ltx25: the same
  * placement with the compute card first, its own sizes and no experts, --fast or GGUF to refuse); `leaseDevicesFn` names the cards the lease holds.
  */
-export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, isLtxGraph = false, spawnSync: smiRun, cards = () => queryCardsRanked(smiRun), launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
+export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, isLtxGraph = false, isAnimateGraph = false, spawnSync: smiRun, cards = () => queryCardsRanked(smiRun), launchFn = multicardLaunch, leaseDevicesFn = leaseDevices, say = () => {} }) {
+  // WAN-Animate-2 (comfy-animate.mjs) has its own flags (--placement, --resident-gb, --cards) and its own plan below; the Wan and LTX flags are not read for it.
+  if (isAnimateGraph) return planAnimateMulticard({ flags, env, comfyDir, cards, launchFn, leaseDevicesFn, say });
   refuseEqualsSpelling(flags);
   const mode = wanPlacementMode(flags);
   if (mode !== "multicard") return null;
@@ -704,7 +910,8 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   if (ltx) refuseUnmeasuredLtx(flags); else refuseUnmeasuredWan(flags);
   const residentGb = ltx ? wanResidentGb(flags, LTX25_RESIDENT_GB_DEFAULT) : wanResidentGb(flags);
   const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn });
-  const pair = resolveWanCards({ tokens, source, cards: cards(), compute: computeOverride(env) });
+  const table = cards();
+  const pair = resolveWanCards({ tokens, source, cards: table, compute: computeOverride(env) });
   if (source === "--wan-cards") confirmWithLease(pair, leaseDevicesFn(env));
   if (ltx) {
     // The LTX-2.5 launch lists the compute card first (cuda:0 computes: ComfyUI-MultiGPU #220), loads the MultiGPU pack and the harness's own and nothing else (the graph
@@ -712,7 +919,7 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
     checkLtxResident(residentGb, pair, flags);
     say("LTX-PLACEMENT-NOTE: one LTX-2.5 run was made on the two cards: 1280x704x121 with the default " + LTX25_RESIDENT_GB_DEFAULT + " GiB share peaked at 11.54 GiB on the compute card and 12.71 GiB on the storage card, 124 s of ComfyUI time; a larger share or clip is unmeasured and can run out of memory in the first sampler step (lower --wan-resident-gb if it does), and the " + MULTICARD_WAIT_SEC + " s default wait is the Wan film's (pass --wait-sec to change it)");
     const launch = launchFn(pair, { comfyDir, packDirsFn: (d) => packDirs(d, undefined, [PACK_MULTIGPU]), order: CARD_ORDER_COMPUTE_FIRST });
-    const plan = { pair, launch, residentGb, family: "ltx25", env: multicardEnv(env, launch) };
+    const plan = { pair, launch, residentGb, family: "ltx25", env: multicardEnv(env, launch, table) };
     const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
     say(`ltx25-placement: multicard on ${source}: ${line("compute", LTX25_COMPUTE_DEVICE, pair.compute)}; ${line("storage", LTX25_STORAGE_DEVICE, pair.storage)}; ${residentGb} GiB of the DiT resident on the compute card; text encoder split ${LTX25_TE_ALLOCATION_DEFAULT}, released from the cards after the prompt is encoded; ${computeChosen(pair)}`);
     return plan;
@@ -726,10 +933,34 @@ export function planMulticard({ flags, env = process.env, comfyDir, isWanGraph, 
   const gguf = wanIsGguf(flags);
   const launchOpts = gguf ? { comfyDir, packDirsFn: (d) => packDirs(d, undefined, [...REQUIRED_PACKS, PACK_GGUF]) } : { comfyDir };
   const launch = { ...launchFn(pair, launchOpts), sage: attention === "sage", ...(gguf ? { gguf: true } : {}) };
-  const plan = { pair, launch, residentGb, attention, env: multicardEnv(env, launch) };
+  const plan = { pair, launch, residentGb, attention, env: multicardEnv(env, launch, table) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
   const sageClause = attention === "sage" ? `; sage attention (COMFY_EXTRA_ARGS): activations sized at ${wanActivationsGib(wanGeometry(flags).tokens, attention).toFixed(1)} GiB` : "";
   say(`wan-placement: multicard on ${source}: ${line("storage", WAN_STORAGE_DEVICE, pair.storage)}; ${line("compute", WAN_COMPUTE_DEVICE, pair.compute)}; ${residentGb} GiB of each expert resident on the compute card; ${computeChosen(pair)}${sageClause}`);
+  return plan;
+}
+
+/**
+ * planAnimateMulticard: planMulticard for the WAN-Animate-2 graph (isAnimateGraph). Null for the single-card path (the default, which reads no card table and touches nothing). Otherwise the
+ * same refusals as the other two graphs before anything starts (the placement's flags spelled with '=', a DiT the placement cannot run, no cards named, not two, a card the lease does not
+ * hold, a display card, a share one of the cards cannot hold, a missing pack) and the same plan: the launch lists the COMPUTE card first (cuda:0), loads the MultiGPU pack and the harness's own
+ * and nothing else (the graph writes its mp4 with core nodes), and the environment names the instance.
+ */
+function planAnimateMulticard({ flags, env, comfyDir, cards, launchFn, leaseDevicesFn, say }) {
+  refuseEqualsSpelling(flags, ANIMATE_OWN_FLAGS);
+  if (animatePlacementMode(flags) !== "multicard") return null;
+  refuseUnmeasuredAnimate(flags);
+  const residentGb = animateResidentGb(flags);
+  const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn, cardsFlag: "cards" });
+  const table = cards();
+  const pair = resolveWanCards({ tokens, source, cards: table, cardsFlag: "cards", compute: computeOverride(env) });
+  if (source === "--cards") confirmWithLease(pair, leaseDevicesFn(env), "cards");
+  checkAnimateResident(residentGb, pair, flags);
+  say("ANIMATE-PLACEMENT-NOTE: no WAN-Animate-2 run was ever made on two cards: the stage sizes are chosen from the Wan 2.2 benchmark and the file sizes (wan-multicard.mjs, ANIMATE_*), so a larger share or clip can run out of memory in the first sampler step (lower --resident-gb if it does)");
+  const launch = launchFn(pair, { comfyDir, packDirsFn: (d) => packDirs(d, undefined, [PACK_MULTIGPU]), order: CARD_ORDER_COMPUTE_FIRST });
+  const plan = { pair, launch, residentGb, family: "animate", env: multicardEnv(env, launch, table) };
+  const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
+  say(`animate-placement: multicard on ${source}: ${line("compute", ANIMATE_COMPUTE_DEVICE, pair.compute)}; ${line("storage", ANIMATE_STORAGE_DEVICE, pair.storage)}; ${residentGb} GiB of the DiT resident on the compute card; text encoder and clip vision on the storage card, the encoder released from the cards after the prompt is encoded; ${computeChosen(pair)}`);
   return plan;
 }
 

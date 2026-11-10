@@ -143,6 +143,10 @@ func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
 	if !s.authorizeLane(w, r, chatRefusalLabel, chatLaneTokenRequired) {
 		return
 	}
+	// A cascade lane carries the asker's text: the caller-scope backstop applies here as on every other door.
+	if !s.admitsScope(w, r, chatRefusalLabel) {
+		return
+	}
 	if !s.chatLane {
 		// Authorized, but this node has nothing to forward TO (no endpoint).
 		writeError(w, http.StatusNotFound, "chat lane is not enabled on this node (no llama-swap endpoint configured)")

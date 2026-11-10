@@ -447,7 +447,8 @@ that ended to `<state root>/gpu/faults.jsonl` and rewrites `<state root>/gpu/fau
 | `fleet_auth_token` | `""` | Bearer token for **every lane** of the node (a dispatch of any task type, the poll and withdraw of any job, the read of any artifact; `401` without it). Same value on every node and in every delegator's config. Empty = open on a loopback listener only; any other listener refuses everything with `403`, and `fleet-serve` will not start. See [Auth](#auth-every-lane-needs-the-fleet-bearer). |
 | `fleet_ingress_guard` | `""` (= `warn`) | The ingress guard in front of every route (register SF-16), against a web page in a browser reaching the node (a cross-site `text/plain` POST, DNS rebinding). `warn` (the default) logs a request `enforce` would refuse and serves it; `enforce` refuses a `Host` that is not loopback, a tailnet address, a dotless MagicDNS name or a name under a zone in `tailnet_suffix` / `tailnet_suffixes` (421), any `Origin` header (403) and a POST that is not `application/json` (415); `off` skips the checks. A mistyped mode fails the config load. The node prints `ingress guard: <mode>` at start. Detail and the edges to know before `enforce`: [systems/fleet-node.md](systems/fleet-node.md). |
 | `agent_ctx_tokens` | `0` | The agent seat's served context window, advertised in health for the delegator's placement arithmetic. From config, never probed (a live probe could cold-start a multi-GB model on the health cadence). `0` = not advertised = this node is never chosen for remote agent work. |
-| `kvslot_cap_gib` | `0` (= 8 GiB) | Cap on the node's `kvslots/` directory, the KV-slot files `POST /fleet/kvslot/save` writes (ADR 0056 Layer 2). An LRU sweep after every save deletes the least recently modified files past the cap. The directory is created by the installer; without it the lane answers `501` and the delegator falls through. |
+| `kvslot_cap_gib` | `0` (= 8 GiB) | Cap on the node's `kvslots/` directory, the KV-slot files `POST /fleet/kvslot/save` writes (ADR 0056 Layer 2). An LRU sweep after every save deletes the least recently modified files past the cap. The directory is created by the installer; without it the lane answers `501` and the delegator falls through. The agent loop's own saves (below) sweep under the same cap, and only harness-named `k1-<sha256>.bin` files are ever deleted. |
+| `agent_kvslot_retention` | `null` (= on) | The agent loop's KV-slot retention (ADR 0100). On a one-slot llama.cpp seat whose running command carries `--slot-save-path`, the loop does three things. It restores a run's first prompt from a slot file when that exact prefix ran here before. It saves a prefix on its second sighting. It saves the session beside a tool call whose cap is 240 s or more, restoring after the tool when the seat unloaded meanwhile. Each restore is judged on the next completion's cache share and lands on the ledger as `kvslot_restore` (`hit`, `miss` or `skip:<reason>`). `false` turns it off. The render emits `--slot-save-path` only at llama.cpp build `kvslot` in `setup/floors.json` (11506) or later. |
 
 ## Binding guidance (read before exposing anything)
 
@@ -659,6 +660,22 @@ being read, so it cannot say yet whether they changed; `unreadable`; `changed`) 
 digest is version 2, and a delegator compares recipes only between nodes on its own release, so upgrade the fleet before relying
 on a match. The cache is in memory (path, size, modification time); a restart reads each file's sample again (0.17 to 0.87 s per file on the one workstation measured, page cache not controlled; a cold or network disk was not measured).
 Details: [media-generation.md](systems/media-generation.md#overflow-a-busy-lane-places-an-image-call-on-the-fleet-adr-0082).
+
+### Generative edit recipes and the `image-edit` task
+
+A node with a generative edit binding and `fleet_media_inputs: true` (plus `fleet_auth_token`) lists `image-edit` in
+`supported_task_types` and publishes `edit_recipes[]` in `/fleet/health`, additive: one row per edit family in the shape of an
+`image_recipes` row plus `lane: "edit"`. A row is what the node can do for the lane, not one edit's settings: the edit graph, the UNet,
+the text encoder, the VAE and the set of LoRA files it holds, each with its size and content fingerprint (the same sampled sha256 as an
+image recipe, with the same `pending` / `unreadable` states and the same empty `digest` until every file is read). The preset, steps, cfg,
+megapixels, placement, seed and negative prompt are per request and are not in the digest. An edit has input images, so `image-edit` is
+carried only by `POST /fleet/media-job`, which needs the same `fleet_media_inputs` switch as every other job with input files; a
+payload sent to `/fleet/dispatch` is refused. The job must carry the `recipe_digest` it matched, and a node whose edit family digests
+differently answers `412` (cause `pending`, `unreadable` or `changed`, as for images) before anything is queued or rendered.
+A request may also carry `megapixels` (0.01 to 16; a multicard edit is held to 2.0) and `placement` (`single` or `multicard`), which
+replace `gen_edit_megapixels` and `gen_edit_placement` for that one edit. A node reads its config once at start, so turning
+`fleet_media_inputs` on, or changing an edit file, takes a restart, and the rows show `pending` until the files are read again.
+Details: [fleet-node.md](systems/fleet-node.md#the-generative-edit-lane-on-a-node-image-edit-and-edit_recipes).
 
 ## Pipeline-job task families
 
@@ -896,7 +913,7 @@ The rule is one rule for every route that does work or returns a result. Three c
 | empty | anything else | refused `403 fleet lanes require fleet_auth_token on a non-loopback listener`, and `fleet-serve` **will not start** in this state (it names `fleet_auth_token`, the listen address and the config file it read) |
 
 - **Every task type is gated**, not the agent lane alone: `agent`, `vision`, `text`, `stt`, `stt-upload`, `compose-project`,
-  `media-job`, the PAIR relay and every media task (`image-gen`, `video-gen`, `animate`, `audio-gen`, `run-graph`, `accel`,
+  `media-job`, the PAIR relay and every media task (`image-gen`, `image-edit`, `video-gen`, `animate`, `audio-gen`, `run-graph`, `accel`,
   `compose-video`), and any task type a later release adds (`tokenGated` returns true for all of them). Before this rule
   a media task was admitted with no check at all, so any peer that could reach a listener beyond loopback could dispatch a
   `run-graph` whose manifest names node packs for the node to clone and install.
@@ -1575,8 +1592,12 @@ have an idle node do it. The legacy `stt` task of `/fleet/dispatch` takes only a
 
 ```
 POST /fleet/stt   Content-Type: application/json   (the vision lane's bearer rule, see below)
-{"job_id": "stt-…", "audio_b64": "<base64 of the audio file>", "audio_ext": "ogg", "language": "es", "hq": false}
+{"job_id": "stt-…", "audio_b64": "<base64 of the audio file>", "audio_ext": "ogg", "language": "es", "hq": false, "words": false, "vad": "off"}
 ```
+
+`words` (boolean) and `vad` (`"on"` or `"off"`) are optional and mirror `offload_transcribe`: `words` returns per-word timing from a
+deterministic decode (temperature 0, no temperature fallback) and `vad` switches the voice-activity detector for the one job. A node
+built before them refuses the unknown field with a `400`, so the call is never answered by a decode that ignored them.
 
 `audio_ext` is 1 to 8 lowercase letters or digits (it only names the node's temp file; ffmpeg sniffs the content),
 `language` is `auto` or a language code, `hq` needs the node to have an `stt_model_hq` (else `400 … no stt_model_hq`).

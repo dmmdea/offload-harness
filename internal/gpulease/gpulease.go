@@ -754,6 +754,8 @@ type Manager struct {
 	// descendantsHeld). Production never sets them.
 	hostMem  func() (gpuprobe.HostMemory, bool)
 	workload func(holderPID int) (gpuprobe.HostLoad, bool)
+	// observedClock stamps the commit samples of hostram_observed.go (nil = the wall clock). A test seam: production never sets it.
+	observedClock func() time.Time
 	// readOnly marks a view made by ReadOnly: the readers that prune a record they find dead or expired leave it.
 	readOnly bool
 }

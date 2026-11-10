@@ -88,7 +88,11 @@ const agentResidencyMaxStale = 2 * agentResidencyTTL
 // a health request this much, once per refresh cycle, and then the previous
 // answer is served with a log line — never a client-side timeout. Any new
 // /fleet/health client must budget above this. A var so tests can shorten it.
-var residencyWaitBound = 1500 * time.Millisecond
+//
+// 400 ms (it was 1.5 s, paid by EVERY request while a slow probe was in the air, 2026-11): a
+// responsive llama-swap answers in milliseconds, and a node that is loading weights must still
+// answer its asker's probe well inside the 2 s budget above.
+var residencyWaitBound = 400 * time.Millisecond
 
 // errSeatStateUnresolved marks a /running reading that came back without an
 // error and without an ANSWER: the roster could not be read WHILE /running
@@ -234,6 +238,8 @@ type Server struct {
 	// recipeGen is the fingerprinter's generation the rows were built at: a read that settled since turns a pending row
 	// into its digest without waiting for the memo's minute.
 	recipeGen uint64
+	// editRecipes is the memoised edit_recipes advertisement (edit_task.go), rebuilt on the same terms.
+	editRecipes editRecipeMemo
 	// mediaRecipeMemo is the memoised media_recipes advertisement (media_recipes.go): re-read at most every mediaRoutesTTL.
 	mediaRecipeMu   sync.Mutex
 	mediaRecipeMemo []MediaRecipeHealth
@@ -354,6 +360,10 @@ type Server struct {
 	admittingLoggedOpen bool
 	admittingLoggedList bool
 	agentRes            agentResidency
+	// The slow, memoised reads of /fleet/health with the last value each returned (health_bounded.go).
+	healthRoutes       lastKnown[[]mediacap.Route]
+	healthImageRecipes lastKnown[[]ImageRecipeHealth]
+	healthMediaRecipes lastKnown[[]MediaRecipeHealth]
 	// backends / collectBackends: the cached per-lane and per-seat active_backend report
 	// (activebackend.go). collectBackends is a seam so tests drive the cache without a llama-swap;
 	// production always gets swapCollectBackends.
@@ -728,11 +738,17 @@ func (s *Server) agentResident() bool {
 		return v
 	}
 	previousAt := a.at
+	// A request already waited this refresh cycle's bound out (timeoutLogged is set then and reset when the
+	// refresh publishes): the next ones serve the previous answer at once instead of each paying the bound again
+	// while the same slow probe is still in the air.
+	alreadyWaited := a.timeoutLogged
 	a.mu.Unlock()
 	if owner {
 		go s.refreshAgentResidency()
 	}
-	a.awaitProbeFor(residencyWaitBound)
+	if !alreadyWaited {
+		a.awaitProbeFor(residencyWaitBound)
+	}
 	a.mu.Lock()
 	v := a.resident
 	if !a.at.After(previousAt) && !a.timeoutLogged {
@@ -1352,6 +1368,12 @@ type healthPayload struct {
 	// (image_recipe.go, ADR 0082). Additive; omitted on a node with no ComfyUI binding that names a checkpoint, and
 	// on a node that predates it, which a reader takes as "cannot be matched", never as "matches anything".
 	ImageRecipes []ImageRecipeHealth `json:"image_recipes,omitempty"`
+	// EditRecipes is the same for the generative-edit lane (edit_task.go): per edit family the node's CAPABILITY (graph, UNet, text
+	// encoder, VAE and the set of LoRA files it holds, each with its content fingerprint), lane "edit", and the digest an asker
+	// matches and sends back as recipe_digest on an image-edit media job. Per-request knobs are not in it. Additive; published
+	// only by a node that lists image-edit in supported_task_types (an edit binding AND fleet_media_inputs), omitted otherwise
+	// and on a node that predates it, which a reader takes as "cannot be matched".
+	EditRecipes []ImageRecipeHealth `json:"edit_recipes,omitempty"`
 	// MediaRecipes is what each video, animation and audio binding of this node names: the family, the weight files and how big each
 	// is here (-1: not there), with no digest and no fingerprint in this release (media_recipes.go, ADR 0082 Amendment 3). Additive;
 	// omitted on a node with no ComfyUI install (comfy_dir is no directory on it) and no sd.cpp video family, and on a node that
@@ -1361,6 +1383,10 @@ type healthPayload struct {
 	// skips the node's prompt refiner. A delegator that sends refine=false requires it, so a node that predates it
 	// is a named miss instead of one that silently refines. Additive; published by a node that serves image-gen.
 	RefineHonoured bool `json:"refine_honoured,omitempty"`
+	// VoiceSamplingHonoured says this node's audio-gen task carries the voice sampling knobs (cfg_weight, exaggeration, temperature,
+	// repetition_penalty, min_p, top_p) to the voice worker. A delegator that sends one requires it, so a node that predates it is a
+	// named miss instead of one that renders the take with its own defaults. Additive; published by a node that serves audio-gen.
+	VoiceSamplingHonoured bool `json:"voice_sampling_honoured,omitempty"`
 	// QueueDepth keeps its ORIGINAL meaning and shape across the 0.100.0
 	// backlog/concurrency split: accepted + running, i.e. every job this node
 	// owns that has not reached a terminal state. Every existing reader (the
@@ -1650,6 +1676,14 @@ type healthPayload struct {
 	// its own can have its cards posted from here. Published exactly when the door would admit
 	// (PairRelayAdmissible); omitted otherwise, so a node without it is byte-identical to before.
 	PairRelay bool `json:"pair_relay,omitempty"`
+	// AdmitScopes is fleet_admit_scopes: the caller scopes this node takes work from (X-Offload-Scope). Omitted
+	// when the node admits every caller, so a node without the key is byte-identical to before.
+	AdmitScopes []string `json:"admit_scopes,omitempty"`
+	// StaleReads names the readings this payload served from their last known value because a fresh one was not ready
+	// within the health handler's bound, each with the age of the value in ms (health_bounded.go). Omitted when every
+	// reading is fresh, so a node that never lags is byte-identical to before. A reader treats a named part as
+	// "as of age_ms ago", not as a failure.
+	StaleReads []StaleRead `json:"stale_reads,omitempty"`
 	// ChatLane says POST /fleet/chat will admit here (C-41b), published under
 	// the same one-predicate rule as vision_model. It is what a delegator's
 	// cascade lane reads to tell a FLEET NODE base from a plain llama-swap
@@ -1734,7 +1768,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// lists are derived per request from the same cached readings the admission path consults.
 	// ONE view of the media verdicts for the whole request: the task list, the family list and
 	// media_routes below all read the same single reading of the cache.
+	// The verdicts are a disk read memoised for a minute; the request that finds the memo expired waits for the rebuild
+	// at most healthReadBound and otherwise serves the last verdicts, labelled in stale_reads (health_bounded.go).
+	var stale staleReads
 	mv := s.mediaView()
+	routes, routesAge, routesStale := s.healthRoutes.read(healthReadBound, func() []mediacap.Route { return s.mediaView().get() })
+	mv.routes, mv.read = routes, true
+	if routesStale {
+		stale.note(staleMediaRoutes, routesAge)
+	}
 	tasks := supportedTasksIn(mv, s.opts.LoopbackListener)
 	families := familiesOf(s.opts.Cfg, tasks)
 	if tasks == nil {
@@ -1822,14 +1864,34 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	for _, t := range tasks {
 		if t == "image-gen" {
 			payload.RefineHonoured = true
-			payload.ImageRecipes = s.imageRecipeRows()
+			rows, age, isStale := s.healthImageRecipes.read(healthReadBound, s.imageRecipeRows)
+			payload.ImageRecipes = rows
+			if isStale {
+				stale.note(staleImageRecipes, age)
+			}
+			break
+		}
+	}
+	for _, t := range tasks {
+		if t == "audio-gen" {
+			payload.VoiceSamplingHonoured = true
+			break
+		}
+	}
+	for _, t := range tasks {
+		if t == ImageEditTask {
+			payload.EditRecipes = s.editRecipeRows()
 			break
 		}
 	}
 	// The video, animation and audio family rows (ADR 0082 Amendment 3) come from a memo too. They are not gated on the tasks the node
 	// serves (a node whose weights are gone still lists them, with -1, so a refusal can name the files); a node with no ComfyUI
 	// install and no sd.cpp video family has none and the key is omitted (mediacap.LaneRows).
-	payload.MediaRecipes = s.mediaRecipeRows()
+	rows, age, isStale := s.healthMediaRecipes.read(healthReadBound, s.mediaRecipeRows)
+	payload.MediaRecipes = rows
+	if isStale {
+		stale.note(staleMediaRecipes, age)
+	}
 	// GPU utilization: advertise the busiest device's utilization when known.
 	// Omitted when no device has published a known utilization — absent ≠ idle.
 	for _, d := range snap.Devices {
@@ -1875,6 +1937,9 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.AgentSeat = s.agentSeat
 		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens
 		payload.AgentResident = s.agentResident()
+		if age, old := s.agentRes.ageBeyondTTL(); old {
+			stale.note(staleAgentResident, age)
+		}
 		payload.ServedModels = s.servedModels()
 		payload.SeatBudget = s.seatBudget()
 		payload.SeatRate = s.seatRate()
@@ -1917,6 +1982,8 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.STTHQ = &hq
 		payload.STTUploadMaxMB = int(s.opts.Cfg.EffectiveSTTUploadMaxBytes() >> 20)
 	}
+	// The callers this node admits (fleet_admit_scopes, scope.go); omitted when it admits every caller.
+	payload.AdmitScopes = s.opts.Cfg.FleetAdmitScopes
 	// Chat lane (C-41b): the delegator's cascade lane reads `chat_lane` to
 	// learn this base is a fleet node it may route through, and served_models
 	// to learn WHICH models it may route — so served_models must be published
@@ -1992,6 +2059,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if !s.holdsBearer(r, healthRefusalLabel) {
 		payload = payload.withoutPrivateFields()
 	}
+	payload.StaleReads = stale
 	writeJSON(w, http.StatusOK, payload)
 }
 
@@ -2516,10 +2584,12 @@ func (s *Server) handleText(w http.ResponseWriter, r *http.Request) {
 // node's lanes. The label is a fixed word for the door (the dispatch door passes dispatchRefusalLabel, since its
 // task type is in the body), never text the caller supplies.
 func (s *Server) authorizeGated(w http.ResponseWriter, r *http.Request, taskType string) bool {
+	// The caller-scope backstop (fleet_admit_scopes, scope.go) runs after the credential and before any body is
+	// read, on every door that passes through here.
 	if !tokenGated(s.opts.Cfg, taskType) {
-		return true
+		return s.admitsScope(w, r, taskType)
 	}
-	return s.authorizeLane(w, r, taskType, fleetTokenRequired)
+	return s.authorizeLane(w, r, taskType, fleetTokenRequired) && s.admitsScope(w, r, taskType)
 }
 
 // refusalLog writes the journal line for a refused request. A caller with no credential must not be able to grow the

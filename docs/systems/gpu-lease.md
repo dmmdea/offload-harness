@@ -29,7 +29,7 @@ other on a single shared card.
 | `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmitsLoad` (the ONE admission rule, over the working set a job touches and the commit it is charged, apart), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
-| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB` and `Options.HostRAMCommitGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases, per quantity (the working set less what the processes below the holder hold RESIDENT; the commit less what they hold PRIVATELY), `Manager.HostRAMPendingLoad`; and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
+| `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB` and `Options.HostRAMCommitGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases, per quantity (the working set less what the processes below the holder hold RESIDENT; the commit less what they hold PRIVATELY), `Manager.HostRAMPendingLoad` (a running lease is credited with the commit peak its tree has plateaued at: `hostram_observed.go`); and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
 | `internal/pipeline/mediahostram.go` | **F82 for the media path**: whether a render defers its host RAM until its own unload has run (`hostRAMDeferral`, shared by the grant and the lane probe), the Go-side clear under the lease (`clearForHostRAM`), the bound of the wait after it (`hostRAMWaitEnd`, `mediaHostRAMFloor`) and the step that runs both (`clearThenAdmitHostRAM`); [the media order](#a-render-lease-follows-the-same-order-the-media-path-the-incident-of-2026-10-24) |
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card (for its own `--graph`, the files that graph's loaders name), else the media class default (see "Host RAM") |
@@ -861,7 +861,7 @@ retry would hold the mutex against every other poller of the gate. What a media 
 | form | meaning |
 |---|---|
 | `gpu reserve --devices 0,GPU-aaaa ...` | exactly these cards (an nvidia-smi index or a UUID prefix of at least four characters; ambiguous or unknown is an error). The operator's word: the display card is allowed, and a busy card is a place in line, FIFO behind its holder. |
-| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). The display card is allocatable up to `gpu_display_cap_pct` (default 60 percent of its VRAM, the desktop's own use included) at any presence, only with a declared `--vram`, and never when the cap is 0 ("The display card is allocatable up to a cap", below). |
+| `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). The non-display cards are taken first. The display card is allocatable only while it is idle, up to `gpu_display_cap_pct` (default 60 percent of its VRAM, the desktop's own use included), only with a declared `--vram`, and never when the cap is 0 ("The display card is allocatable up to a cap", below). |
 | `gpu reserve --whole-node ...` | everything, as before. |
 | `gpu reserve ... -- <cmd>` | the cards `<cmd>` names itself: `CUDA_VISIBLE_DEVICES` (a UUID, or an index in PCI order when `CUDA_DEVICE_ORDER=PCI_BUS_ID`, else in ComfyUI order), else `--cuda-device N`, else `COMFY_CUDA_DEVICE`. Nothing named means the whole node. |
 
@@ -957,9 +957,23 @@ unreadable host-memory reading refuses only when a RAM need was declared, and a 
 request at once. On Windows (WDDM) nvidia-smi lists no per-process
 rows for compute apps, so `foreign-busy` is Linux-only evidence today.
 
-**The display card is allocatable up to a cap, at any presence (`gpu_display_cap_pct`, 0.183.0).** The operator's rule of
-2026-10-11: the display card may be used up to 60 percent at all times, unless he says he needs it. The allocator used to read
-`operator_presence` (never the card at the desk, the card above the layer's floor when away); it now reads no presence at all.
+**The display card is allocatable up to a cap, only while it is idle (`gpu_display_cap_pct`, 0.183.0; the idle gate since
+2026-11-07).** The operator's rule of 2026-11-07: "send 2 card jobs to the 5060s first and 3 card jobs follow the rule of only
+using up to 60% of the 5070ti card WHEN IDLE so i can always keep it interactive." It replaced the 2026-10-11 rule ("up to 60
+percent at all times"), so the cap below now sits behind an idle gate, and the allocator's order puts every non-display card
+first ([ADR 0039](../architecture/decisions/0039-a-held-card-is-a-place-in-line.md), amendment 2026-11-07).
+
+- **The idle gate.** Idle is both readings at once (`gpualloc.DisplayBusy`): the card's utilization known and under 15 percent
+  (`DisplayIdleUtilPct`), and the operator away by the presence probe read with `Config.AllocatorPresenceMode`
+  (`operator_presence` unset reads `auto` here: the console locked, or no input for `operator_idle_sec` with nothing
+  fullscreen; `away` overrides, `present` closes). An unreadable utilization or presence is busy; from session 0 the desk reads
+  unknown unless the console is locked. A closed card is skipped as `display` with the reason, the grant-time check reads it
+  again, and the display card's `display cap:` line in `gpu status` / `gpu cards` / the brief ends with `idle gate: open` or
+  `idle gate: CLOSED to jobs ... (<why>)` (JSON `idle_gate`, `idle_why`).
+- **`gpu display-check --vram GiB [--json]`** asks the same rule for a launcher that puts work on the display card outside a
+  lease: exit 0 admits, exit 3 refuses with the reason, exit 1 is a check that could not run. The vLLM seat stub
+  (`seat-cmd.ps1`) asks it for a seat whose row declares `DisplayVramGiB` (`Harness`, `HarnessConfig` beside it) and starts
+  nothing on a refusal (exit 6).
 One key, `gpu_display_cap_pct` (a whole number of percent, default 60 when unset, `0` closes the card to the allocator, `100` is
 the whole card, a value outside `0..100` refuses the load by name; unset and `0` are different values): the display card is
 allocatable while the VRAM in use now, **the desktop's own included**, plus the request's declared footprint is at most that share
@@ -970,8 +984,7 @@ there and a 7.5 GiB one cannot, and the skip names the cap. The cap applies to t
 the footprint, as it always was.
 
 - **`gpu_display_cap_pct: 0` is the operator's "I need the card" switch.** The card is skipped as `display` and the skip names the
-  key, whatever the desk is doing. Nothing watches the desk any more: a locked screen, an idle desk and a game on the card are one
-  question, answered by the VRAM in use at the moment of the pick.
+  key, whatever the desk is doing.
 - **A footprint is needed to be held to a share.** A job that gives no `--vram` is not given the display card under a cap below 100
   (the layer's guard refuses a seat with no display footprint the same way); a media call declares no VRAM footprint, so the typed
   media tools do not take the display card until a measured footprint is fed to the allocator. `--devices` names the card on the
@@ -979,9 +992,9 @@ the footprint, as it always was.
 - **An unknown display stays closed.** A reading that could not say which card the monitor is on marks every card `display-unknown`
   and none of them is handed out, whatever the cap.
 - **The cap bounds admission only.** Nothing limits a job after it is placed, so the footprint has to be a measured peak, and one
-  number per request cannot describe a donor slice beside a compute share. A display card with no resident seat sorts first (nothing
-  to evict), so with the pair seat loaded `gpu reserve --cards 1 --vram 6` now prefers the screen's card to an eviction;
-  `gpu_display_cap_pct: 0` restores the old order.
+  number per request cannot describe a donor slice beside a compute share. The display card sorts after every other card (since 2026-11-07;
+  before, a display card with no resident seat sorted first), so a job that fits elsewhere never lands on the screen's card,
+  and a job admitted while the card was idle is not evicted when the operator returns.
 - **A seat llama-swap pins onto the display card is not admitted by the cap at all.** The allocator places jobs; a llama-swap model
   that loads onto the card is outside it (a vLLM seat pinned onto the display card once put 13,281 MiB, 81 percent of a 16 GB card,
   there while the audit printed OK). What reports on the card afterwards is the display cap row of `gpu status` / `gpu cards` / the
@@ -2105,7 +2118,16 @@ commits, and neither condition sees a process that holds no lease.
   live then: their declared needs are read from the records there, so a grant that lands between the reading and the lock is
   counted (`TestAGrantThatLandsAfterTheReadingIsStillCountedInsideTheLock`); the early parts err the conservative way (a
   resident figure read a moment early is lower, so more of a declared need is still to load; a holder that appeared after the
-  reading counts as having loaded nothing), and a need of 0 reads nothing
+  reading counts as having loaded nothing, **except that a running lease is credited with the highest commit its tree has been
+  seen to hold once that peak has plateaued** (`hostram_observed.go`): four samples at least 2 s apart over at least 60 s in which the
+  commit never rose more than 0.5 GiB above where the run began. A job that declared 36 GiB of commit, peaked at 25 GiB while its
+  weights moved to the card and fell back to 8 GiB is then charged 36 - 25 = 11 GiB as still to load, not 28, so a second lane that
+  needs the room is no longer held behind memory the first one showed it would not take (the 2026-11 incident: 10 minutes of
+  `+28.0 GiB still to load` until the hold bound released the second lane). Before the plateau, and whenever the tree cannot be read,
+  the credit is the current reading alone, as before; the commit half only (a working set can be trimmed by the OS and says nothing
+  about what is charged); never below zero. The history lives in the process that looks (a waiting reserve, the card allocator, the
+  fleet node), so a reader that has just started, such as `gpu status`, shows the conservative figure until it has watched the tree for the
+  plateau span), and a need of 0 reads nothing
   (`TestTheHostReadingsAreTakenBeforeTheEpochLockAndOnlyComparedInside` counts the host and process-tree reads made while the
   lock file exists: none). A
   whole-node grant checks in `TryAcquire` before its epoch is bumped, so a refusal burns none; it needs no lock because a
@@ -2498,9 +2520,15 @@ host's admission:
    queued behind), and the lease goes. `--detach` form: `releaseAfterRAMWait` does what `gpu release --warm-seat --epoch N` does,
    because a detached hold is the form that can sit on the cards longest (a hidden holder renews its term while its owner vouches
    for it); its warm-back is attempted only if the lease owes it (see "Releasing on its own" below).
-2. **Nothing runs and nothing re-queues.** The command never starts; the bound's failure is not a lost lease, so the requeue branch
-   of the drain loop is never taken.
-3. **The reserve exits non-zero with one line** (`errHostRAMHoldBound`): the hold bound that passed; how long the cards were held
+2. **Nothing runs under that lease.** The command never starts. Wrapper form, while `--wait` has time left (`holdBoundRequeueBudget`,
+   counted from when the reserve began queueing): the reserve prints one line (`the host RAM hold bound passed (...) and the host still
+   lacks the room (...); releasing the cards and queueing again, N of --wait left`), lets the cards go without warming the seat back
+   (it stays cleared; the owed warm-back is paid by whoever releases next, or by this reserve's final release), takes its place at the
+   back of the queue for the same cards and starts over under the new lease: other work waiting for those cards runs first, and the
+   cards are no longer held idle for a figure the host cannot meet. These re-queues are bounded by `--wait`, not by
+   `maxLeaseRequeues` (the cap of a lease lost mid-drain). `--wait 0`, a `--wait` that is spent, and the `--detach` form (whose
+   caller was already given a lease number; a second holder would change it under them) take the exit in step 3 as before.
+3. **The reserve exits non-zero with one line** (`errHostRAMHoldBound`; for a wrapper reserve, only once `--wait` leaves no time to queue again): the hold bound that passed; how long the cards were held
    and how much of it was the wait after the unload; the host's own refusal, which carries the need, the figures of the condition that refused and the
    headroom (for a commit nobody stated the wording is still `waiting for host RAM: needs 46.8 GiB, committed 84.6 of 127.7 GiB physical, 8.0 GiB headroom`; the sentence names the condition that refused); that nothing ran
    under it and the lease **is being released** (the text is built before the release runs and claims no more; see "Releasing on its
@@ -2787,7 +2815,7 @@ Once admitted the row shows `host_ram_gib` alone.
   says otherwise); before the bound existed, until `--wait` ended it, 8 h by default.* When the memory is held by
   something the unload does not touch (another lane, a foreign process), or the seat was already cold and there was nothing to
   free (residency is not asked before the grant), the lease has done its unload and holds its cards,
-  exclusive, until the hold bound passes (then it is released, and fails with the bound's line) or `--wait` ends the wait (8 h by default,
+  exclusive, until the hold bound passes (then it is released and, for a wrapper with `--wait` left, queues again; otherwise it fails with the bound's line) or `--wait` ends the wait (8 h by default,
   which only a bound of 0 or a short `--wait` reaches; `--wait 0` still gets the drain floor, `hostRAMDeadline`; the lease is released
   then too, in both forms), its command never
   run and, when the seat had been loaded, its warm-back attempted at the release and refused by the same rule while the host stays

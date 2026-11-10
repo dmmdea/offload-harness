@@ -15,10 +15,10 @@ import assert from "node:assert/strict";
 import { createServer } from "node:net";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
-import { readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { readFileSync, writeFileSync, existsSync, readdirSync, utimesSync } from "node:fs";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn as spawnChild } from "node:child_process";
 import { withGpuSlot } from "./gpu-lock.mjs";
 import * as RG from "./comfy-run-graph.mjs";
 import * as L from "./comfy-lifecycle.mjs";
@@ -743,4 +743,79 @@ test("withGpuSlot: an unkeyed instance on another port is ensured on THAT endpoi
   }, async () => {});
   assert.deepEqual(endpointOpts(ensureOpts), { api: "http://localhost:8190" }, "ensureComfy is told the endpoint: an unkeyed launch has no --port, so left to itself it ensures 8188");
   assert.deepEqual(freeArgs, ["http://localhost:8190"], "the post-run free goes to the endpoint the runner talked to");
+});
+
+// ---- 12. a hung harness-launched instance is reaped; a foreign holder never is -----------------
+// The 2026-11 incident: a keyed instance stopped answering after a CUDA error but kept its port, and every following job failed
+// at once with COMFY-PORT-TAKEN until an operator killed the pid by hand. This runs it for real: a child process that listens
+// and never answers HTTP, a marker written the way the lifecycle writes it, and the real process and port introspection.
+// Only the launch of the replacement ComfyUI is injected.
+
+const freePort = async () => {
+  const s = createServer();
+  await new Promise((r) => s.listen({ port: 0, host: "127.0.0.1" }, r));
+  const p = s.address().port;
+  await new Promise((r) => s.close(r));
+  return p;
+};
+// A process whose command line carries what a ComfyUI launch carries (main.py --port N --output-directory D) and that accepts
+// connections and never replies.
+async function muteListener(port, outDir) {
+  const child = spawnChild(process.execPath, ["-e",
+    "require('net').createServer(() => {}).listen(Number(process.argv[3]), '127.0.0.1', () => console.log('listening'));",
+    "main.py", "--port", String(port), "--output-directory", outDir], { stdio: ["ignore", "pipe", "ignore"], windowsHide: true });
+  await new Promise((r) => child.stdout.once("data", r));
+  return child;
+}
+const gone = async (pid) => { for (let i = 0; i < 40 && O.pidAlive(pid); i++) await new Promise((r) => setTimeout(r, 250)); return !O.pidAlive(pid); };
+
+test("ensureComfy: a mute instance the marker records is killed and its port frees; a foreign holder is never killed", async (t) => {
+  const dir = scratch(t);
+  const key = "wedge";
+  const kids = [];
+  t.after(() => { for (const c of kids) { try { c.kill("SIGKILL"); } catch {} } });
+  const opts = (port, extra = {}) => {
+    const lines = []; let started = false; const spawns = [];
+    return { lines, spawns, o: {
+      api: `http://127.0.0.1:${port}`, comfyDir: dir, py: "py", pollMs: 1, log: (l) => lines.push(l), mkdirs: () => {},
+      env: { COMFY_INSTANCE: key, COMFY_UNRESPONSIVE_SEC: "3" }, envFor: () => process.env,
+      comfyUp: async () => started, report: {},
+      spawn: (py, args) => { started = true; spawns.push(args); return { pid: process.pid, kill() {} }; },
+      ...extra,
+    } };
+  };
+
+  // (1) our own instance, hung: the marker names its pid and port, its console log has been silent for a long while.
+  const port = await freePort();
+  const outDir = join(dir, "instances", key, "output");
+  const hung = await muteListener(port, outDir);
+  kids.push(hung);
+  O.writeLaunchOwner(dir, { pid: hung.pid, args: ["main.py", "--port", String(port), "--output-directory", outDir], key, port });
+  writeFileSync(L.comfyLogPath(dir, key), "last console line\n");
+  const old = new Date(Date.now() - 600_000);
+  utimesSync(L.comfyLogPath(dir, key), old, old);
+  assert.equal(await L.portIsFree(port, "127.0.0.1"), false, "the hung instance holds its port");
+  const a = opts(port);
+  await L.ensureComfy(a.o).catch((e) => { e.message += " | " + a.lines.join(" | "); throw e; });
+  assert.equal(a.spawns.length, 1, "the replacement was launched on the freed port");
+  assert.equal(a.o.report.reaped.pid, hung.pid);
+  assert.equal(a.o.report.reaped.port, port);
+  assert.equal(a.o.report.reaped.key, key);
+  assert.ok(a.lines.some((l) => l.startsWith(`COMFY-REAPED: killed harness-launched pid ${hung.pid} on http://127.0.0.1:${port} after `)), a.lines.join("\n"));
+  assert.equal(await gone(hung.pid), true, "the hung process is dead");
+  assert.equal(await L.portIsFree(port, "127.0.0.1"), true, "and its port is free");
+
+  // (2) a listener that is NOT recorded in any marker of this instance: refused as before, and left running.
+  const port2 = await freePort();
+  const foreign = await muteListener(port2, join(dir, "elsewhere"));
+  kids.push(foreign);
+  const b = opts(port2);
+  await assert.rejects(L.ensureComfy(b.o), /COMFY-PORT-TAKEN/);
+  assert.equal(b.spawns.length, 0);
+  assert.equal(O.pidAlive(foreign.pid), true, "a foreign holder is never killed");
+  // ... also when a marker for the instance exists but names another (dead) process: the listener is not the marker's.
+  O.writeLaunchOwner(dir, { pid: hung.pid, args: ["main.py", "--port", String(port2), "--output-directory", outDir], key, port: port2 });
+  const c = opts(port2);
+  await assert.rejects(L.ensureComfy(c.o), /COMFY-PORT-TAKEN/);
+  assert.equal(O.pidAlive(foreign.pid), true, "a marker that names another process does not make the listener ours");
 });

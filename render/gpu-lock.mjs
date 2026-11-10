@@ -22,7 +22,8 @@
 // No npm dependencies.
 import { writeFileSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
-import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance, DEFAULT_COMFY_PORT, COMFY_DIR, resolveIdleExit, openComfyHold, stopHarnessInstance } from "./comfy-lifecycle.mjs";
+import { ensureComfy as defaultEnsureComfy, tailComfyLog, comfyLogPath, COMFY_LOG_TAIL_LINES, resolveInstance, DEFAULT_COMFY_PORT, COMFY_DIR, resolveIdleExit, openComfyHold, stopHarnessInstance, bindHosts, waitPortsFree } from "./comfy-lifecycle.mjs";
+import { killProcessTree } from "./comfy-ownership.mjs";
 import { settleInstanceFamily, releaseInstanceFamily } from "./comfy-family.mjs";
 import { leaseBeat } from "./lease-progress.mjs";
 import { readSharedJson, readSharedSync } from "./lease-read.mjs";
@@ -520,6 +521,24 @@ export async function freeComfy(api = process.env.COMFY_API || "http://127.0.0.1
   return false;
 }
 
+// endLaunchedComfy: end the ComfyUI this runner launched, whole tree (a venv launcher's child python, a worker, holds the port and
+// the card as well as the pid we know), then check that its port is free again. A bare child.kill() ended only the one pid and
+// never looked: a hung instance kept the port, and every later job failed at once with COMFY-PORT-TAKEN. Said, never thrown:
+// COMFY-PORT-WEDGED when the port stays held. A child that already exited is not signalled by pid (the pid may have been reused).
+async function endLaunchedComfy(child, { instance, instanceEnv, treeKill, waitFree }) {
+  const pid = child && child.pid;
+  const running = typeof pid === "number" && child.exitCode == null && child.signalCode == null;
+  if (running) { try { treeKill(pid); } catch {} }
+  try { child.kill(); } catch {}
+  if (!running || !instance) return;
+  try {
+    const hosts = bindHosts(instanceEnv && instanceEnv.COMFY_EXTRA_ARGS);
+    if (!(await waitFree({ port: instance.port, hosts }))) {
+      console.error(`COMFY-PORT-WEDGED: port ${instance.port} is still held after ending the ComfyUI this runner launched (pid ${pid}, instance '${instance.key || "default"}'); the next job on this port will be refused until it is released`);
+    }
+  } catch {}
+}
+
 // withGpuSlot centralizes the single-slot GPU lifecycle every gen runner shares:
 //   1. REQUIRE a lease (inherited from the Go caller) unless noLock — this file no
 //      longer acquires, so a GPU job without one is a wiring error, not a cue to grab
@@ -575,6 +594,9 @@ export async function withGpuSlot(opts, fn) {
     resolveExit = resolveIdleExit,
     holdComfy = openComfyHold,
     stopFailed = stopHarnessInstance,
+    // treeKill / waitFree: how the ComfyUI this runner launched is ended (its whole process tree) and the port seen to be free again.
+    treeKill = killProcessTree,
+    waitFree = waitPortsFree,
     // family: the weights signature of this runner's job (comfy-family.mjs familySignature). When given,
     // the launch marker of the instance remembers it, and a kept instance whose marker names ANOTHER
     // family is freed before the first job, so it does not carry the previous family's weights into this
@@ -625,7 +647,7 @@ export async function withGpuSlot(opts, fn) {
       // Left running only when it ends itself (its pack reported the process bound) and the job went well, or when the caller
       // asked for it explicitly. Otherwise it goes, as every launch did before ADR 0097.
       const leave = keepComfy === true || (keep && !failed && Number(comfyChild.offloadIdleExitSec) > 0);
-      if (!leave) { try { comfyChild.kill(); } catch {} }
+      if (!leave) await endLaunchedComfy(comfyChild, { instance, instanceEnv, treeKill, waitFree });
     } else if (comfyManaged && failed && keep && keepComfy !== true && report && report.selfBounded) {
       // A job that failed on a self-bounded instance an earlier job kept: stop it (stopHarnessInstance proves it ours again first,
       // and leaves it to another runner that holds it; this runner's own hold is still open here).

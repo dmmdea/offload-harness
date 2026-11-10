@@ -20,18 +20,29 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 )
 
-// pairSeated puts the pair seat on the two non-display cards of the admission fixture, so the display
-// card is the one with nothing to evict and sorts first whenever the allocator lets it in.
+// pairSeated puts the pair seat on the two non-display cards of the admission fixture. The display card has
+// nothing to evict and still sorts after them (non-display cards first, operator rule 2026-11-07).
 func pairSeated() map[string]gpulease.ResidentInfo {
 	seat := gpulease.ResidentInfo{Seats: []string{"agent-pool"}, CostGiB: 15}
 	return map[string]gpulease.ResidentInfo{leaseIDOf(admitUUIDA): seat, leaseIDOf(admitUUIDC): seat}
 }
 
+// pickOne asks for every card that qualifies (one to three), so whether the screen's card is open to the call
+// shows in the pick: it sorts last, and a one-card request would never reach it.
 func pickOne(t *testing.T, in gpulease.AllocInput) (gpulease.Allocation, error) {
 	t.Helper()
-	in.Min, in.Max = 1, 1
+	in.Min, in.Max = 1, 3
 	in.Resident = pairSeated()
 	return gpulease.Allocate(in)
+}
+
+func hasLease(ids []string, id string) bool {
+	for _, x := range ids {
+		if x == id {
+			return true
+		}
+	}
+	return false
 }
 
 func TestMediaAdmitDoesNotForceTheDisplayCardClosed(t *testing.T) {
@@ -48,8 +59,8 @@ func TestMediaAdmitDoesNotForceTheDisplayCardClosed(t *testing.T) {
 		t.Fatalf("the door must hand the allocator the configured cap (the default 60), got %d", in.DisplayCapPct)
 	}
 	a, err := pickOne(t, in)
-	if err != nil || len(a.Devices) != 1 || a.Devices[0] != leaseIDOf(admitUUIDB) {
-		t.Fatalf("a call that declares 2 GiB stays under the cap on the screen's card, which has no seat to evict: %v %v (skipped %+v)", a.Devices, err, a.Skipped)
+	if err != nil || !hasLease(a.Devices, leaseIDOf(admitUUIDB)) {
+		t.Fatalf("a call that declares 2 GiB stays under the cap on the screen's card, and the desk is idle: %v %v (skipped %+v)", a.Devices, err, a.Skipped)
 	}
 
 	// The operator's switch: a cap of 0 in the config closes the card through the same door.
@@ -59,7 +70,7 @@ func TestMediaAdmitDoesNotForceTheDisplayCardClosed(t *testing.T) {
 	if err != nil || in.DisplayCapPct != 0 {
 		t.Fatalf("gpu_display_cap_pct 0 reaches the allocator: cap %d err %v", in.DisplayCapPct, err)
 	}
-	if a, err = pickOne(t, in); err != nil || a.Devices[0] == leaseIDOf(admitUUIDB) {
+	if a, err = pickOne(t, in); err != nil || hasLease(a.Devices, leaseIDOf(admitUUIDB)) {
 		t.Fatalf("with the card closed by the operator the call goes elsewhere: %v %v", a.Devices, err)
 	}
 }
@@ -83,7 +94,7 @@ func TestAPlacementFromAStaleTableKeepsTheDisplayCardClosed(t *testing.T) {
 		t.Errorf("the configured cap is not changed by a table that could not be re-read, got %d", in.DisplayCapPct)
 	}
 	a, err := pickOne(t, in)
-	if err != nil || a.Devices[0] == leaseIDOf(admitUUIDB) {
+	if err != nil || hasLease(a.Devices, leaseIDOf(admitUUIDB)) {
 		t.Fatalf("the cap is judged on VRAM in use now, which a stale table misstates: the call is placed off the screen's card: %v %v", a.Devices, err)
 	}
 	var shown *gpulease.Skip

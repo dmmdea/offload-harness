@@ -72,6 +72,56 @@ type Deps struct {
 	// HostMemory reads the host's memory (physical, available, commit): the reading the host-RAM
 	// rule is applied to, here and at the lease grant.
 	HostMemory func() (gpuprobe.HostMemory, bool)
+	// DisplayBusy says why the display card is not idle now, "" when it is (the operator away and the
+	// card not busy): DisplayBusy, the production reader, by default. Asked only when the table names a
+	// display card and the cap is open.
+	DisplayBusy func(cfg config.Config, cards []gpuprobe.Card) string
+}
+
+// DisplayIdleUtilPct is the display card's utilization at or above which the card is busy, not idle: a game,
+// a video or another application is drawing on it. A chosen figure, not a measurement: on the
+// `blackwell-3x16` reference box the desktop alone read 0-4 % and a game 37-41 % (2026-11-07), and a 3-card job sharing the
+// card with either is what the operator's rule keeps off it.
+const DisplayIdleUtilPct = 15
+
+// DisplayBusy is the production idle reader of the operator's 2026-11-07 rule ("only up to 60% of the 5070ti
+// card WHEN IDLE so i can always keep it interactive"): "" when every display card in cards is idle, else why
+// not. Idle is BOTH readings at once, because "idle" can name the desk or the card and either one at the desk
+// is a reason to keep off it: (1) the card is not busy, its utilization known and under DisplayIdleUtilPct;
+// (2) the operator is away by the presence probe in cfg.AllocatorPresenceMode() (unset = auto: the console
+// locked, or no input for operator_idle_sec with nothing fullscreen; "away" is the operator's override and
+// "present" his word that he is at the desk). Every failure to read is busy: an unknown utilization, and a
+// presence the probe could not establish (Known=false: off Windows, and from session 0 unless the console is
+// locked, placement/presence_windows.go).
+func DisplayBusy(cfg config.Config, cards []gpuprobe.Card) string {
+	display := false
+	for _, c := range cards {
+		if !c.Display {
+			continue
+		}
+		display = true
+		if !c.UtilKnown {
+			return fmt.Sprintf("card %d's utilization could not be read, so it cannot be shown idle", c.NvidiaIndex)
+		}
+		if c.UtilPct >= DisplayIdleUtilPct {
+			return fmt.Sprintf("card %d is %d %% busy (idle is under %d %%: something interactive is drawing on it)", c.NvidiaIndex, c.UtilPct, DisplayIdleUtilPct)
+		}
+	}
+	if !display {
+		return ""
+	}
+	p := placement.ProbePresence(cfg.AllocatorPresenceMode(), cfg.OperatorIdle())
+	switch {
+	case p.Mode == "away":
+		return ""
+	case p.Mode == "present":
+		return "operator_presence is present: the operator says he is at the desk"
+	case !p.Known:
+		return "the operator's presence could not be read (" + p.Note + "), so the desk cannot be shown idle"
+	case p.Locked || p.Away:
+		return ""
+	}
+	return "the operator is at the desk (" + p.Note + ")"
 }
 
 // DefaultDeps is the production wiring.
@@ -107,6 +157,9 @@ func (d Deps) withDefaults() Deps {
 	}
 	if d.HostMemory == nil {
 		d.HostMemory = gpuprobe.ReadHostMemory
+	}
+	if d.DisplayBusy == nil {
+		d.DisplayBusy = DisplayBusy
 	}
 	return d
 }
@@ -216,12 +269,29 @@ func BuildInput(ctx context.Context, m *gpulease.Manager, cfg config.Config, nee
 	}
 	in.WholeNodeHeld, in.Claimed = Claims(m, need)
 	in.HostMem, in.HostMemOK = deps.HostMemory()
-	// The display card is open up to the operator's cap at all times (gpu_display_cap_pct, default 60,
-	// A-RAM-15): the operator's presence is not read, so a locked screen, an idle desk and a game on the
-	// card are all the same question, answered by the VRAM in use now. 0 is his "I need the card" switch, and it is
-	// read from the config file as it is NOW (LiveGPUDisplayCap): the callers hold a Config read when they started,
-	// and a request queued for hours or a long-lived server would otherwise never see the switch.
+	// The display card is open up to the operator's cap (gpu_display_cap_pct, default 60, A-RAM-15) only WHILE
+	// IT IS IDLE (operator rule 2026-11-07): DisplayBusy reads the desk and the card and closes it otherwise.
+	// 0 is his "I need the card" switch, and it is read from the config file as it is NOW (LiveGPUDisplayCap):
+	// the callers hold a Config read when they started, and a request queued for hours or a long-lived server
+	// would otherwise never see the switch. The idle reading is made on every build for the same reason, and
+	// only of a display card no lease holds: a held card's utilization is the holder's job, not the operator's,
+	// and the allocator judges a held card as claimed (a queued request then waits on it in FIFO order, and the
+	// grant-time check, which rebuilds this input once the card is free, reads the desk again).
 	in.DisplayCapPct = cfg.LiveGPUDisplayCap()
+	if in.DisplayCapPct > 0 && !in.WholeNodeHeld {
+		var free []gpuprobe.Card
+		display := false
+		for _, c := range cards {
+			if in.Claimed[c.LeaseID()] {
+				continue
+			}
+			free = append(free, c)
+			display = display || c.Display
+		}
+		if display {
+			in.DisplayBusy = deps.DisplayBusy(cfg, free)
+		}
+	}
 	// The display layer's declared absolute floor (display_floor_gib), read from the same declaration,
 	// keeps holding when it is stricter than the cap, so the allocator and the layer cannot disagree about
 	// how much of that card is the desktop's.

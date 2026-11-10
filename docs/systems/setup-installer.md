@@ -54,6 +54,7 @@ paths that set `big_ram` (RAM ≥ 120 GB), and `hwdetect` carries the same table
 |---|---|
 | 2 NVIDIA GPUs, both Blackwell (an arch captured per card), largest card 12–23 GB | `blackwell-2x16` (checked before the generic multi-GPU rule) |
 | 3 NVIDIA GPUs, all Blackwell (an arch captured per card), largest card 12–23 GB | `blackwell-3x16` (checked before the generic multi-GPU rule; before this rule a 3× Blackwell rig classified as `dual-gpu`, a tier the installer refuses because CUDA 13 cannot compile sm_70) |
+| 2 NVIDIA GPUs, both Ampere (an arch captured per card), EVERY card 14–20 GB (smallest card from `MinVRAMGb`), **Linux only** | `ampere-2x16` (checked before the generic multi-GPU rule; the floor is 14 because an A2 is 15,356 MiB = 14.996 GiB; there is no Windows `cuda-pair` template, so a Windows pair stays `dual-gpu`; `detect.ps1` is not changed for it) |
 | ≥2 NVIDIA GPUs, anything else | `dual-gpu` — a mixed-arch rig, four or more cards, a pair or triple outside the 12–23 GB band, or one whose archs were not all captured (`Get-Profile`'s self-test asserts the mixed-arch, four-card, uncaptured-arch and out-of-band pair cases). |
 | NVIDIA Blackwell ≥64 GB | `blackwell-72` |
 | NVIDIA Blackwell ≥40 GB | `blackwell-48` |
@@ -77,7 +78,7 @@ exposes `AMD Radeon(TM) Graphics` next to its NVIDIA card, and counting it class
 `Get-OffloadGpuNames` holds the rule and the self-test covers the hybrid shapes; the Go twin takes
 nvidia-smi's row count, so it never saw the extra adapter.
 
-Sixteen bands. Linux adds one PowerShell has no row for: `hwdetect` (the Go classifier `install detect`
+Seventeen bands. Linux adds one PowerShell has no row for: `hwdetect` (the Go classifier `install detect`
 runs) reads the device tree's root `compatible` when no NVIDIA or AMD adapter answered, and a board
 that names the RK3588 SoC (`rockchip,rk3588` on the vendor kernel, `rockchip,rk3588s` on mainline)
 is `rockchip-rk3588` — a board with no PCI adapter would otherwise fall through to `cpu` and be handed
@@ -89,6 +90,19 @@ For AMD, `detect.ps1` also reads the **Adrenalin (Radeon Software) version** fro
 classifies it against the known deep-context Vulkan crash class (≤ 25.11.1, llama.cpp #17432) —
 the old generic "keep your driver current" warning is now a checked verdict, emitted as
 `amd_adrenalin` in the JSON.
+
+**Two-card pinned tier (`ampere-2x16`, Linux).** Its backend is `cuda-pair`, so it renders
+`llama-swap.linux-cuda-pair.yaml`: every model fits one card and is pinned whole to it (no split, no NVLink).
+The HEAVY card carries the 27B agent and the vision seat (alternatives), the UTILITY card carries the memory
+stack, STT, the forecaster and the cascade, and the `both` set runs the cascade beside the 27B. Which physical
+card plays which role is a render-time choice, not a profile field and not a post-processing step:
+`install render --heavy-card N [--utility-card M]` (a CUDA index or a `GPU-<uuid>`; default heavy `0`, utility
+`1`; naming only heavy `0` or `1` implies the other index; both on one card is refused). `install.sh` takes the
+same two flags and the `OFFLOAD_HEAVY_CARD` / `OFFLOAD_UTILITY_CARD` environment variables. Both values are
+recorded in the provenance stamp, so `audit-yaml --against-render` replays a flipped layout as `MATCH`. The flags
+are refused on any tier whose template pins no card roles. Indices follow `CUDA_DEVICE_ORDER=PCI_BUS_ID`, which
+the tier's `gpu_env` sets on every entry. Two identical cards cannot be told apart by name, so the pin audit
+reports an index pin as a note on a verbatim render; pass `GPU-<uuid>` values to pin by identity.
 
 `detect.ps1 -SelfTest` asserts this table against **20 synthetic configurations**, plus separate
 assertion families for architecture detection, RAM tiering, Adrenalin classification, and
@@ -912,6 +926,10 @@ live-captured log lines, cosine). Go-side config round-tripping is covered by
   whisper-server seat (with its own loader path, since it is a separate binary) into the models map,
   and writes `stt_model` at the same time. A tier that declares no seat leaves `stt_model` empty and
   the route defers — it does not name an upstream nothing serves.
+- Expecting the `upsampler` seat to bind a key. The flux3-klein prompt upsampler (`flux3-pup`, declared by `ampere-2x16`,
+  `blackwell-2x16` and `blackwell-3x16`) renders a plain llama-server entry and writes NO config key: `imagegen_upsampler`
+  is a per-family key, so the operator names the seat on the flux3-klein family and a seat-less node behaves the same as a seat-full
+  one for every other family. Its weights are fetched by hand like every seed.
 - Expecting a second vision seat to bind. A tier may declare at most one seat per bound key, but a seat
   flagged `extra: true` (a registered extra, e.g. blackwell-8's `lfm2.5-vl` and `gemma4-e4b-vision`) writes no
   key and is not counted: it renders into llama-swap with its aliases and answers to them, and nothing

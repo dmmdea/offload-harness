@@ -27,6 +27,7 @@ var rerankerSizing = []struct {
 	parallel int // slots: 1 when the template passes no --parallel
 }{
 	{"llama-swap.linux-cuda.yaml", 4096, 1},
+	{"llama-swap.linux-cuda-pair.yaml", 4096, 1},
 	{"llama-swap.linux-vulkan.yaml", 4096, 1},
 	{"llama-swap.win-dual-blackwell.yaml", 8192, 4},
 	{"llama-swap.win-triple-blackwell.yaml", 8192, 4},

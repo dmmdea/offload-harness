@@ -69,6 +69,11 @@ type PrefillStats struct {
 	// PredictedN is generated tokens. Carried so a reader can see prefill cost in
 	// proportion to the work the run actually produced.
 	PredictedN int64
+	// TimedSteps / UsageSteps split Observed by where the step's numbers came from:
+	// llama.cpp `timings`, or the OpenAI `usage` block a vLLM seat sends instead.
+	// PromptMS exists only on the first kind, so its average divides by TimedSteps.
+	TimedSteps int
+	UsageSteps int
 }
 
 // reset starts the accumulator over: the next report covers only what is observed after it.
@@ -76,6 +81,7 @@ func (p *PrefillStats) reset() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.Observed, p.CacheN, p.PromptN, p.PredictedN, p.PromptMS = 0, 0, 0, 0, 0
+	p.TimedSteps, p.UsageSteps = 0, 0
 }
 
 // Observe folds one completion's server accounting into the run total.
@@ -90,9 +96,33 @@ func (p *PrefillStats) Observe(s *ServeStats) {
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if s.CacheN == 0 && s.PromptN == 0 && s.PromptMS == 0 && s.UsagePromptTokens > 0 {
+		// No timings but a prompt size: a vLLM seat sends `usage` only. Its
+		// prompt_tokens_details.cached_tokens is the same quantity as CacheN, and
+		// prompt_tokens minus it is what was prefilled -- but ONLY when the server reported
+		// cached_tokens. Absent, a 0 would read as "nothing reused" and publish a
+		// fabricated 0% reuse, so the step is unmeasured.
+		if !s.UsageCachedReported {
+			return
+		}
+		cached := s.UsageCachedTokens
+		if cached < 0 {
+			cached = 0
+		}
+		if cached > s.UsagePromptTokens {
+			cached = s.UsagePromptTokens
+		}
+		p.Observed++
+		p.UsageSteps++
+		p.CacheN += int64(cached)
+		p.PromptN += int64(s.UsagePromptTokens - cached)
+		p.PredictedN += int64(s.UsageCompletionTokens)
+		return
+	}
 	// A backend can emit a `timings` block with everything zero. That is a real
 	// observation of a step that prefilled nothing, so it counts.
 	p.Observed++
+	p.TimedSteps++
 	p.CacheN += int64(s.CacheN)
 	p.PromptN += int64(s.PromptN)
 	p.PromptMS += s.PromptMS
@@ -125,9 +155,15 @@ type PrefillReport struct {
 	KVReusePct *float64 `json:"kv_reuse_pct"`
 	// Basis is the machine-readable discriminator: "measured" | "insufficient_data".
 	Basis string `json:"basis"`
+	// Source says where the observed steps' numbers came from: "timings" (llama.cpp),
+	// "usage" (vLLM usage.prompt_tokens_details.cached_tokens, no prompt_ms) or "mixed".
+	// Absent when nothing was observed.
+	Source string `json:"source,omitempty"`
 
 	// AvgPrefillPerStep sizes the prize in the unit T2-B would attack. nil when
-	// unmeasured, for the same reason as above.
+	// unmeasured, for the same reason as above. The ms average covers only steps that
+	// carried timings and is nil for a usage-only run: usage has no prompt_ms, and
+	// dividing by every observed step (or publishing 0) would invent a speed.
 	AvgPrefillTokensPerStep *float64 `json:"avg_prefill_tokens_per_step"`
 	AvgPrefillMSPerStep     *float64 `json:"avg_prefill_ms_per_step"`
 }
@@ -156,8 +192,18 @@ func (p *PrefillStats) Report() PrefillReport {
 	// Guarded separately from the ratio above: a run CAN observe steps that carried
 	// zero prompt tokens, and those still have a meaningful per-step average of 0.
 	tps := float64(p.PromptN) / float64(p.Observed)
-	mps := p.PromptMS / float64(p.Observed)
 	r.AvgPrefillTokensPerStep = &tps
-	r.AvgPrefillMSPerStep = &mps
+	if p.TimedSteps > 0 {
+		mps := p.PromptMS / float64(p.TimedSteps)
+		r.AvgPrefillMSPerStep = &mps
+	}
+	switch {
+	case p.TimedSteps > 0 && p.UsageSteps > 0:
+		r.Source = "mixed"
+	case p.UsageSteps > 0:
+		r.Source = "usage"
+	default:
+		r.Source = "timings"
+	}
 	return r
 }

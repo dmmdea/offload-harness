@@ -16,6 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
+	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/svgkit"
 	"github.com/dmmdea/offload-harness/internal/tasks"
 )
@@ -32,6 +33,10 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	// under its own config copy and tags the result with its license. Resolved BEFORE
 	// the engine seam: a family may bind a different engine than the default.
 	cfg, fam, ferr := p.cfg.ResolveImageFamily(paramStr(req.Params, "family"))
+	if ferr == nil {
+		// A per-call placement (generate-image --placement) lies over the binding's imagegen_placement.
+		cfg, ferr = cfg.WithImagePlacement(paramStr(req.Params, "placement"))
+	}
 	if ferr != nil {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		p.recordDefer(req.Task, meta, len(req.Input), ferr.Error())
@@ -659,6 +664,11 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 	meta.License = fam.License
 	if cfg.GenEditScript == "" || cfg.GenEditUnet == "" {
 		return defer1("no generative edit route configured")
+	}
+	// This request's own canvas (megapixels) and placement replace the binding's for this call (mediacap/edit_request_knobs.go).
+	var kerr error
+	if cfg, kerr = mediacap.ApplyEditRequestKnobs(cfg, req.Params); kerr != nil {
+		return defer1(kerr.Error())
 	}
 	prompt := strings.TrimSpace(req.Input)
 	if prompt == "" {

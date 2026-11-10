@@ -17,8 +17,9 @@
 #
 # Two calls, because the two failure shapes are different:
 #
-#   * On a pull request, BASE is the base branch tip. This catches "this branch
-#     removes a file that is on main".
+#   * On a pull request, BASE is the base branch tip and the tree compared with it is
+#     the MERGE RESULT of base and head. This catches "merging this branch removes a
+#     file that is on main", and stays quiet for a branch that only sits behind main.
 #   * On a push to main, BASE is HEAD's FIRST PARENT. This is the one that catches
 #     #324: a merge commit whose tree drops what its first parent carried. Nothing
 #     else looks at that relationship, which is exactly why it went unseen.
@@ -51,9 +52,24 @@ if ! git rev-parse --verify --quiet "$base^{commit}" >/dev/null; then
 	exit 2
 fi
 
-deleted="$(git diff --name-status --diff-filter=D "$base" "$head_ref" | cut -f2-)"
+# What the deletion diff is taken against. On a pull request BASE is the base branch TIP, and a
+# branch that merely sits behind it (main gained files after the branch forked) must not read as
+# deleting those files: a three-way merge keeps them. So the tree compared is the MERGE RESULT of
+# base and head (git merge-tree --write-tree), which is what main would hold after the merge; a
+# file main has that the merged tree lacks is a real deletion. When the merge-tree cannot be made
+# (conflicts, or a git too old for --write-tree), the comparison falls back to the merge-base, which
+# gives the same answer for every branch that deletes something of its own and never flags a
+# behind branch. On a push to main BASE is HEAD's first parent, an ancestor of HEAD, and the merge
+# result of an ancestor and its descendant IS the descendant's tree, so that shape is unchanged.
+compare_to="$head_ref"
+if merged="$(git merge-tree --write-tree "$base" "$head_ref" 2>/dev/null)" && [ -n "$merged" ]; then
+	compare_to="$merged"
+elif mb="$(git merge-base "$base" "$head_ref" 2>/dev/null)" && [ -n "$mb" ]; then
+	base="$mb"
+fi
+deleted="$(git diff --name-status --diff-filter=D "$base" "$compare_to" | cut -f2-)"
 if [ -z "$deleted" ]; then
-	echo "check-deletions: $base..$head_ref deletes no file — OK"
+	echo "check-deletions: $base..$head_ref deletes no file (merge result compared) — OK"
 	exit 0
 fi
 

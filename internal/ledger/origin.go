@@ -4,6 +4,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/dmmdea/offload-harness/internal/callscope"
 )
 
 // Origin is the identity of the PROCESS that recorded a row: the session it
@@ -118,10 +120,18 @@ func stampOrigin(e *Entry) {
 		return
 	}
 	o := ProcessOrigin()
-	if e.OriginSession == "" {
+	own := e.OriginSession == ""
+	if own {
 		e.OriginSession = o.Session
 	}
 	e.OriginPID, e.OriginPPID = o.PID, o.PPID
+	// The caller scope is this process's own caller's: a row a fleet node writes for another asker's session
+	// (the caller named the session) is not stamped with the node process's scope.
+	if own && e.CallerScope == "" {
+		if s, ok := callscope.Process(); ok {
+			e.CallerScope = s.Name
+		}
+	}
 }
 
 // cardsTokens is the row's tokens through the cards (see Entry.CardsTokens):

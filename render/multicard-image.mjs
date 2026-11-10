@@ -127,10 +127,11 @@ export function planImageMulticard({
   const tooBig = canvas ? canvasRefusal(recipe, canvas.width, canvas.height) : "";
   if (tooBig) throw placementError(tooBig);
   const residentGb = recipeResident(recipe, imageResidentGb(flags));
+  let table = [];
   const pair = relabel(() => {
     const { tokens, source } = wanCardTokens({ flags, env, leaseDevicesFn, cardsFlag: "cards" });
     // no card named: refused before the driver is asked anything
-    const table = tokens.length ? cards() : [];
+    table = tokens.length ? cards() : [];
     const found = resolveWanCards({ tokens, source, cards: table, cardsFlag: "cards", compute: computeOverride(env) });
     if (source === "--cards") confirmWithLease(found, leaseDevicesFn(env), "cards");
     return { ...found, source };
@@ -140,7 +141,7 @@ export function planImageMulticard({
   // a compute-first row (rowDevices) is launched with the compute card first, under that order's own instance key
   const devices = rowDevices(recipe);
   const launch = launchFn ? launchFn(pair, { comfyDir, recipe }) : relabel(() => multicardLaunch(pair, { comfyDir, packDirsFn: (d) => imagePackDirs(d, recipe, listFn), order: devices.order }));
-  const plan = { pair, launch, residentGb, recipe, comfyDir, env: multicardEnv(env, launch) };
+  const plan = { pair, launch, residentGb, recipe, comfyDir, env: multicardEnv(env, launch, table) };
   const line = (role, dev, c) => `${role} ${dev} = idx ${c.index} ${c.name} (${(c.totalMiB / 1024).toFixed(1)} GiB, ${c.uuid.slice(0, 12)})`;
   const share = residentGb === null ? "the whole DiT on the compute card" : `${residentGb} GiB of the DiT resident on the compute card`;
   const cardLines = devices.compute === "cuda:0"

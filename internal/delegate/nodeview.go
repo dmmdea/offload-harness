@@ -115,6 +115,14 @@ type NodeView struct {
 	// the node's image-gen task carries an explicit refine=false.
 	ImageRecipes   []ImageRecipeView
 	RefineHonoured bool
+	// VoiceSamplingHonoured is health `voice_sampling_honoured`: the node's audio-gen task carries the voice sampling knobs
+	// (cfg_weight, exaggeration, temperature, repetition_penalty, min_p, top_p). A node without it would drop them.
+	VoiceSamplingHonoured bool
+	// EditRecipes is the same for the node's generative-edit bindings (health `edit_recipes`): each row is the node's CAPABILITY for
+	// the edit lane (graph, UNet, text encoder, VAE and the set of LoRA files it holds, each with its content fingerprint), with the
+	// lane tag "edit". The per-request knobs (preset, steps, cfg, megapixels, placement, seed) are not in it. nil on a node that
+	// predates it, that has no edit binding, or that does not take edit inputs (fleet_media_inputs): "cannot be matched".
+	EditRecipes []ImageRecipeView
 	// MediaRecipes are the family rows of the node's video, animation and audio bindings (health `media_recipes`, ADR 0082
 	// Amendment 3): which family each binding names and how big each weight file is on the node (-1: not there). A row carries no
 	// digest in this release, so it is never an identity. nil on a node that predates it or binds none of the three lanes through
@@ -126,6 +134,12 @@ type NodeView struct {
 	// UNKNOWN, never "no route is configured".
 	MediaRoutes      []MediaRouteView
 	MediaRoutesKnown bool
+	// LoadableFamilies is health `loadable_model_families`: every model family the node can load for a task (image,
+	// video, animation, audio, whisper, the comfy graph). ImageFamilies is health `image_families`: the named image
+	// bindings a dispatcher can select. Both are nil on a node that predates them or publishes none, which a reader
+	// takes as UNKNOWN, never as "renders nothing".
+	LoadableFamilies []string
+	ImageFamilies    []ImageFamilyView
 	// LeaseBusy is the node's own "my card is spoken for long enough that you
 	// should place elsewhere" verdict (0.113.27), true for a LONG lease of any
 	// class. It exists because LeasedText alone left the harness's longest job
@@ -451,6 +465,14 @@ type MediaRouteView struct {
 	State  string `json:"state"`
 }
 
+// ImageFamilyView mirrors the identity columns of fleetnode.ImageFamily (health `image_families`): one image
+// binding a payload's `family` can select.
+type ImageFamilyView struct {
+	Name    string `json:"name"`
+	Family  string `json:"family"`
+	Default bool   `json:"default"`
+}
+
 // ImageRecipeView mirrors fleetnode.ImageRecipeHealth (and the mediacap.Recipe embedded in it): one ComfyUI image
 // binding a payload's `family` can select, and what it is. Mirrored here, not imported, as MediaRouteView mirrors
 // its row, so the delegator's decoder stays free of the media packages.
@@ -460,6 +482,7 @@ type ImageRecipeView struct {
 	Digest        string                `json:"digest"`
 	Engine        string                `json:"engine"`
 	Graph         string                `json:"graph"`
+	Lane          string                `json:"lane"` // "edit" on an edit_recipes row; empty on an image row
 	Files         []ImageRecipeFileView `json:"files"`
 	Preset        string                `json:"preset"`
 	Steps         int                   `json:"steps"`
@@ -648,9 +671,16 @@ type healthWire struct {
 	// Additive (ADR 0077): the node's media route verdicts. A pointer so an absent key (an older
 	// node) stays distinguishable from a published list.
 	MediaRoutes *[]MediaRouteView `json:"media_routes"`
+	// Additive: the model families the node can load and its named image families. Absent on an older node.
+	LoadableModelFamilies []string          `json:"loadable_model_families"`
+	ImageFamilies         []ImageFamilyView `json:"image_families"`
 	// Additive (ADR 0082): what each image family on the node is, and whether its image-gen carries refine.
 	ImageRecipes   []ImageRecipeView `json:"image_recipes"`
 	RefineHonoured bool              `json:"refine_honoured"`
+	// Additive: the audio-gen task carries the voice sampling knobs. Absent on an older node, which drops them.
+	VoiceSamplingHonoured bool `json:"voice_sampling_honoured"`
+	// Additive: the generative-edit lane's recipes (health `edit_recipes`), same row shape as image_recipes.
+	EditRecipes []ImageRecipeView `json:"edit_recipes"`
 	// Additive (ADR 0082 Amendment 3): the family rows of the node's video, animation and audio bindings.
 	MediaRecipes []MediaRecipeView `json:"media_recipes"`
 	// Additive (ADR 0072): the stt upload door's capability. Absent on an older node.
@@ -749,8 +779,14 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		Layers:        w.Layers,
 
 		ImageRecipes:   w.ImageRecipes,
+		EditRecipes:    w.EditRecipes,
 		MediaRecipes:   w.MediaRecipes,
 		RefineHonoured: w.RefineHonoured,
+
+		VoiceSamplingHonoured: w.VoiceSamplingHonoured,
+
+		LoadableFamilies: w.LoadableModelFamilies,
+		ImageFamilies:    w.ImageFamilies,
 
 		STTHQ:          w.STTHQ,
 		STTUploadMaxMB: w.STTUploadMaxMB,

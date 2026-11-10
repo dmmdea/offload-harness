@@ -7,6 +7,433 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.212.0] - 2026-11-09 - the flux3-klein/bf16 card-only recipe is measured on Linux and Windows, and a measured card-only row declares host RAM by operating system
+
+### Changed - the `flux3-klein/bf16` card-only recipe is measured on both operating systems, so a two-card Linux node with little host RAM admits FLUX 3 Klein and a Windows host declares what it was measured to hold
+
+- **What it does.** `render/multicard-recipes.json` and `internal/mediacap/multicard.go` promote the `flux3-klein/bf16` row from `predicted` to `measured` (storage peak 6.5 -> 7.0 GiB; compute stays 13.5). Under `--placement multicard` (or `imagegen_placement: multicard`) a FLUX 3 Klein bf16 call on two leased cards that fit the peaks now declares 0 host RAM on Linux instead of the 18.6 GiB weight set, so a host with 14.8 GiB of RAM admits it; on Windows it declares 12 GiB touched and 16 GiB of commit, the measured peaks rounded up to whole GiB.
+- **Measured** 2026-11-09 on node-i (two A2 16 GB, 14.8 GiB host RAM) with the read-only loader and the prompt upsampled by the `flux3-pup` llama-swap seat: 1024x1024, 16 steps, 117 s for the call (85.17 s on ComfyUI's clock, 3.6 s/it), per-card totals 11,148 MiB compute / 6,872 MiB storage (nvidia-smi, CUDA context included), ComfyUI anonymous RSS 1.65 GiB with every weight file-backed, MemAvailable never under 11.30 GiB; the output image inspected. Measured the same day on the Windows node (two 5060 Ti, 170.8 s, per-card totals 11,238 / 6,270 MiB): the ComfyUI working set peaked at 11.24 GiB while the plain loader copied the DiT from the read-only map to the card and its private commit at 15.45 GiB (WDDM backs the card allocations).
+- **A measured card-only row now declares by operating system.** New row fields `WindowsHostGiB`/`WindowsCommitGiB` (`internal/mediacap/multicard.go`; the JSON's `hostWindowsGiB` `{touched, commit}`, pinned by the parity test) and `hostneed.Facts.GOOS` (`""` = this process's `runtime.GOOS`). On Linux a measured row declares 0 as before (the read-only map's pages are clean file pages MemAvailable counts). On Windows a row that carries Windows figures declares them, stated: `flux3-klein/bf16` declares 12 GiB touched and 16 GiB of commit (the 11.24 and 15.45 GiB peaks rounded up; the commit is admitted against the commit limit, as a stated `--ram-commit` is), instead of the 18.6 GiB set it declared while predicted. The other eight measured rows carry no Windows figures and declare 0 on every host, exactly as before.
+- **An in-graph upsampler keeps the ordinary estimate.** The row was measured with the prompt upsampled outside ComfyUI (`imagegen_upsampler` naming a llama-swap model, the `flux3-pup` seat). A call whose graph loads the upsampler FILE (`imagegen_upsampler` ending in `.safetensors`, the runner's `--upsampler`) is a load no run measured with the read-only loader (the 2026-10-24 in-graph run held about the whole set in private bytes), so it declares the set with that file in it, on either system, and says why. `gpu reserve -- node render/comfy-generate.mjs ... --upsampler <file>` now counts that file: the command path read `--ckpt` and `--clip` but not `--upsampler`, so a hand-run runner command under-declared it by the file's size (9.08 GiB).
+- **Needs ComfyUI-MultiGPU from the mirror at `98eb6bd` or later on a ComfyUI past `d07dff45`** (2026-10-22, "Fuse and strip the Flux2 VAE through comfy-kitchen"): the Flux2 VAE decode then runs through comfy_kitchen on the storage card, and upstream's DLPack guard staged its inputs to the compute card — `cudaErrorIllegalAddress`, the prompt worker died, reported by the runner as `IMAGE-PLACEMENT-OOM`. The mirror's second local fix (PR #2) stages relative to torch's current device. The doctor's `MISSING_NODE` hint (`render/comfy-nodes.mjs`, `internal/mediacap/routeneeds.go`) and `docs/systems/media-generation.md` "Archival" name both fixes and the read-only deploy-key path a node without the operator's git credential uses to reach the private mirror.
+- **Unchanged.** The `flux3-klein/nvfp4` row stays predicted; every other row's figures and basis; the single-card placement; the recipe digest (none of this enters it).
+- **Details.** `docs/systems/media-generation.md` (FLUX 3 Image Klein card-only placement; Archival).
+
+## [0.211.0] - 2026-11-09 - a generative edit runs on fleet nodes, generate-image --batch gets row defaults and a snapped resume, fleet/health answers in milliseconds under a hung engine, gpu reserve admits by the lease's observed RAM, voice sampling knobs travel, the animate lane runs card-only on two cards, and the two-card tiers declare the flux3-klein upsampler seat
+
+### Added - the FLUX 3 Klein prompt-upsampler seat (`flux3-pup`) is declared by the two-card and larger CUDA tiers, so a rendered llama-swap config carries it
+
+- **What it does.** A new media seat kind, `upsampler`, renders a plain llama-server entry for BFL's prompt upsampler (`flux3-klein-pup/flux-3-image-klein-pup-Q6_K.gguf` under the models dir, alias `flux3-klein-pup`, `-ngl 999 -c 8192 --flash-attn on --jinja --reasoning off --cache-ram 0`, ttl 300). `ampere-2x16`, `blackwell-2x16` and `blackwell-3x16` declare it as a swappable seat named `flux3-pup`, pinned to the utility card (the one holding the tier's whisper seat; `__UTILITY_CARD__` on `ampere-2x16`, card 0 on `blackwell-2x16`, card 2 on `blackwell-3x16`), so `local-offload install render` writes it into the stamped config and a node's `audit-yaml --against-render` reports MATCH instead of HAND-EDITED.
+- **Why.** The flux3-klein family calls a llama-swap seat before its render lease when it names one in `imagegen_upsampler`, but that seat existed only as a hand-written block in one operator's unstamped config. A two-card node whose config is rendered could not have it: a hand edit moves the file to HAND-EDITED and the next render drops the block. The recipe digest includes the upsampler's model name, so every node has to call it by the same name, `flux3-pup`.
+- **Binding.** The seat writes no config key (`BindingKey` answers empty, like a registered extra). `imagegen_upsampler` is a flux3-klein family key; writing it flat would change every other image family, and these tiers seed no flux3-klein family to put it in. A node that binds that family names the seat itself (`"imagegen_upsampler": "flux3-pup"`), so a node with the seat and a node without it behave the same for every other family.
+- **Details.** The seat takes `model`, `ctx_size`, `residency`, `ttl`, `aliases` and `gpu_env`; mmproj, bin, sampler, split and `extra` fields are refused rather than silently dropped. It is placed by the existing `__SEATS_SWAPPABLE__` marker (an alternative of the heavy seats, never co-resident with them). Weights stay out of band like every seed; `install render` warns while the file is missing. The tier pages under `docs/tiers/` are regenerated, and `docs/OPERATOR-GUIDE.md`, `docs/systems/media-generation.md`, `docs/systems/setup-installer.md` and `setup/SETUP-AGENT.md` describe the seat.
+
+### Added - a card-only placement for character animation, so a node of two 16 GB cards can run the animate lane
+
+- **What it does.** `animategen_placement: multicard` (with `animategen_resident_gb`) runs WAN-Animate-2 on the two non-display cards of a lease with no host RAM. The int8 DiT (15.5 GiB) is split through ComfyUI-MultiGPU's DisTorch2 loader, a resident share on the compute card (cuda:0, the launch lists it first, as for LTX-2.5) and the rest on the storage card; the umt5 encoder, clip_vision_h and the VAE sit on the storage card, and the encoder is taken off the cards after the prompt is encoded and before the DiT is placed. `render/comfy-animate.mjs` takes `--placement single|multicard` (default `single`, the graph and launch as before, node for node), `--resident-gb` (default 5) and `--cards`; `--print-graph` prints the resolved graph and exits without staging, leasing or contacting ComfyUI. `single` is unchanged.
+- **Why.** One 16 GB card holds about 15 GiB and a node that runs ComfyUI with `--gpu-only` cannot stream the DiT through host RAM, so the animate lane could not run on a node of two 16 GB cards at all.
+- **Details.** The planner is `planMulticard({ isAnimateGraph: true })` in `render/wan-multicard.mjs` and reuses the video placement's cards, roles, instance key, launch environment and lease confirmation. Its fit check states the arithmetic: two 14.996 GiB cards, 1 GiB reserved and the default 482x854x81 clip fit a resident share of 3.9 to 7.1 GiB, and a share outside what a card holds (or a `.gguf`, bf16 or fp16 DiT) is refused before ComfyUI starts, with the figures. The door (`animateNeed`) leases the pair and `hostneed.ForAnimateCardOnly` declares 0 host GiB when each card fits its stage. The recipe row a node advertises (`wan-animate2`) is name and files and does not carry the placement. `doctor` checks the MultiGPU classes the graph names (`CLIPVisionLoaderMultiGPU` is added to both node-pack tables).
+- **Not measured.** No animate run was made on two cards: the file sizes are exact, the activation and overhead figures are chosen from the Wan 2.2 two-card benchmark, and the runner says so once (`ANIMATE-PLACEMENT-NOTE`). The first real run is the measurement.
+- **Check.** The single graph was compared with the one built before the change (identical); `--print-graph` with `--placement multicard --cards <a>,<b>` on a three-card box printed the DisTorch2, MultiGPU and release nodes with their devices, and `--resident-gb 12`, `0` and `2`, a display card, no cards and a `.gguf` DiT were each refused with the reason. Docs: `docs/systems/media-generation.md` ("Card-only animate"), `docs/OPERATOR-GUIDE.md`, `render/README.md`.
+
+### Added - a generative edit runs on a fleet node: `image-edit` task, `edit_recipes`, `route` on the MCP tool and the `edit-image-generative` verb
+
+- **What it does.** A node with a generative edit binding and `fleet_media_inputs` on now lists `image-edit` in `supported_task_types` and publishes `edit_recipes[]` in `/fleet/health` (additive, omitted otherwise). A row is the node's capability for the edit lane: the edit graph, the UNet, the text encoder, the VAE and the set of LoRA files it holds, each with its size and content fingerprint, plus `lane: "edit"` and a digest. The preset, steps, cfg, canvas, placement, seed and negative prompt are not in it. `POST /fleet/media-job` carries the job (the target as the file `image`, up to nine references as `images_1` to `images_9`, up to ten files in a bundle for this task); a payload sent to `/fleet/dispatch` is refused.
+- **Refusals before any render.** The job must carry the `recipe_digest` its asker matched. The node recomputes it from the files on disk and answers `412` (cause `pending`, `unreadable` or `changed`, as for images) on a mismatch, before anything is queued or leased. It then refuses with `400` what can never render: references on a family that is not `qwen-image-2.1`, more than ten images, `preset` on `qwen-image-2.1`, `megapixels` outside 0.01 to 16, and a multicard canvas above the card-only recipe's 2.0 MP.
+- **Per-request canvas and placement.** An edit may carry its own `megapixels` and `placement` (`single` or `multicard`), which replace `gen_edit_megapixels` and `gen_edit_placement` for that call. The local edit door honours them too; with neither present it behaves as before.
+- **Why.** Image generation spills to other nodes because a recipe, a task type and a 412 check exist for it. The edit lane had none of the three, so a second node with the same Qwen-Image-Edit files could not take an edit.
+- **The asker.** `offload_edit_image_generative` takes `route` (`local`, `auto` default, `remote`), `remotes`, `wait_s`, and per-request `megapixels` (0.01 to 16) and `placement` (`single` or `multicard`). It builds this machine's edit recipe with the function a node uses to publish its own and picks a node only when the digest is equal, the node serves `image-edit` and `media-job`, and it runs the same release; a node whose files differ (one LoRA of another size, say) is refused by name and never sent the job. A busy lane is a ticket, as for images; the source and reference images travel in a hash-checked `media-job` bundle (target plus up to nine references) and the output is fetched back verified.
+- **The verb.** `edit-image-generative` (not `edit-image`, the PIL editor): single mode (`--image`, `--ref` repeatable, `--prompt`, `--out`, `--negative`, `--seed`, `--steps`, `--cfg`, `--preset`, `--megapixels`, `--placement`, `--route`, `--remote`) and `--batch rows.jsonl` with `--results`, `--resume` and `--spill`. Flags are the default of each row and a row's own value wins; `--seed S` gives a row without a seed `S` plus its 0-based index, stable across `--resume`. The renderer makes one still per process, so a batch hands each side one row at a time. `--resume` skips a row whose file decodes as a PNG of the size the edit canvas rule gives for its source and megapixels (the rule the renderer applies). `--dry-run` prints each row's request, this machine's edit digest and every roster node's match verdict and renders nothing.
+- **Unchanged.** Every `image_recipes` digest: the lane field enters the digest only when set. `render/noise-seed.mjs` and the seed are untouched.
+- **Details.** `docs/systems/fleet-node.md` (the generative edit lane on a node), `docs/FLEET-NODE.md`, `docs/OPERATOR-GUIDE.md`, `docs/systems/media-generation.md` (the generative edit across the fleet), `docs/systems/mcp-server.md`, `README.md`.
+
+### Fixed - a busy fleet node answers its health probe in well under a second
+
+- **What happened.** Askers read a node's `/fleet/health` before placing image work. While a node was rendering and
+  loading weights, those probes timed out and the asker concluded that no node served image-gen. Two parts of the
+  handler could hold a probe for a long time: a request that found the node's llama-swap residency answer too old
+  waited up to 1.5 s for the refresh, and every request that arrived while a slow refresh was still running waited the
+  full 1.5 s again (measured: five probes in a row at 1.5 s against an unreachable engine). The disk reads behind the
+  media routes and the image and media recipe rows were rebuilt inline once a minute, so a busy disk stalled that
+  request as well.
+- **What changed.** The residency wait is now 400 ms and only the first request of a refresh cycle pays it; the rest
+  serve the previous answer at once. The three disk reads run one at a time on their own goroutine and a request waits
+  for a rebuild at most 250 ms, otherwise it serves the last known value. Nothing is served silently: the payload gains
+  an additive `stale_reads` list of `{name, age_ms}` (omitted when every part is fresh) naming each part served from an
+  older reading. No field is dropped or renamed. A part that has never been read is still waited for in full.
+- **Measured** on a scratch node with image families and an unreachable engine address: probes against the
+  unreachable engine went from 1.5 s per request for the first several seconds (and again each minute) to one 0.42 s
+  request at start and about 3 ms after, plus one request of about 0.5 s when the minute-old reads are rebuilt; a node
+  with reachable engines answers in about 3 to 8 ms warm.
+- **Where it shows.** `docs/systems/fleet-node.md` (the `stale_reads` row and the residency paragraph).
+
+### Fixed - a second media lane no longer waits behind host memory the first lane never took, and a hold bound no longer leaves its card idle
+
+- **What happened.** Two media lanes ran on one two-card node. The first declared 36 GiB of commit and peaked at about 25 GiB while its weights moved onto its card. The second (`gpu reserve --ram 28 --ram-commit 36`) was told `+28.0 GiB still to load by leases already running` for the whole ten minutes of the host RAM hold bound, long after the first had loaded, then failed with `the host never had the room` and exit 1. Its card sat idle until someone launched the command again by hand.
+- **What changed (admission).** A running lease is now credited with the highest commit its process tree has been seen to hold once that peak has plateaued: four samples at least 2 seconds apart over at least a minute, with no rise past half a GiB (`internal/gpulease/hostram_observed.go`, using the same process-tree measurement the guard already took). Its still-to-load figure is then its declared commit less that peak, never below zero: 36 declared and 25 observed leaves 11, not 28, and the wait line shows the 11. Before the plateau, or when the tree cannot be read, nothing changes: the lease is credited with what it holds now only, so a job still loading is never counted as finished. Only commit is credited, not the working set, which the OS can trim.
+- **What changed (hold bound).** When the host RAM hold bound passes, a `gpu reserve ... -- <command>` with `--wait` time left now prints one line, lets the cards go and queues again for the same cards (anything waiting for them goes first), instead of exiting. It exits non-zero only when `--wait` is spent, with the same message as before. `--wait 0` and `--detach` reserves still release and exit at once. The seat stays cleared between attempts and is warmed back when the reserve ends.
+- **Docs.** `docs/systems/gpu-lease.md`, `docs/OPERATOR-GUIDE.md` and the `--ram-hold-max` help text describe both changes.
+
+### Fixed - The deletion guard (H-51) no longer reads a pull request branch that only sits behind main as deleting the files main gained after the branch forked. On a pull request it now compares the base tip with the merge result of base and head (`git merge-tree --write-tree`, falling back to the merge-base when that tree cannot be made); a real undeclared deletion and a merge whose tree drops what its first parent carried are refused as before. Before, every open pull request went red each time another one merged a changelog fragment.
+
+### Fixed - `generate-image --batch` keeps the flags you typed, resumes at the size the family renders, and spills while the lane is busy
+
+- **Flags were dropped.** `--negative`, `--width`, `--height`, `--steps` and `--seed` were read on the batch verb and then ignored, so a batch
+  rendered without its negative. They are now the defaults of every row that does not set its own, on the warm session, the tickets, the spill
+  workers and the one-at-a-time path. A row's own value wins. With `--seed S`, a row without a seed gets `S + i` (its 0-based position in the
+  file), so the seeds stay the same on a `--resume`.
+- **`--resume` re-rendered every picture.** A job asked 1600x900, the family rendered 1600x896, and the resume check wanted 900. The size is now
+  snapped once, before anything is placed, to the grid the family renders at (16 px for `qwen-image`, 32 px for `qwen-image-2.1`), so the
+  asked size, the rendered size and the resume check agree and a finished picture is skipped.
+- **`--spill` needed a free lane.** It now also starts while this machine's lane is busy: the matching nodes work the shared queue at once, and
+  this machine's warm session joins when the lane frees (it asks the same lane probe the ticket scan uses, every 10 s). With no matching node
+  it behaves as before.
+- **Inherited lease.** Inside `gpu reserve`, a call that asked for `--spill` or typed `--route auto|remote` now prints one line on stderr saying
+  fleet ticketing and spill are off there and to run the call outside the lease to use them. The helper is `mediaremote.InheritedLeaseNotice`.
+- **A slow node health read.** A node whose cards are busy can answer its health read slowly; one timeout was taken as "no node serves image
+  generation" and the batch slept up to five minutes. That read is now asked once more after 2.5 s before the node is counted as absent.
+
+### Added - `--placement single|multicard` on `generate-image`, `offload_generate_image` and the fleet image payload, and `--dry-run` on the batch
+
+- **Per-call placement.** `generate-image --placement` (also on `--batch`), the `placement` parameter of `offload_generate_image`, and the
+  fleet image-gen payload lay a card placement over the family's own `imagegen_placement` for that call. The node builds the request with it
+  the way it reads its config. It is not part of the recipe digest, so it never changes which nodes match.
+- **`--dry-run`.** With `--batch`, prints the resolved rows (defaults applied, sizes snapped, seeds and outs fixed, and with `--resume` which
+  rows would be skipped) and exits. It renders nothing, asks no lane and contacts no node.
+
+### Fixed - voice sampling knobs are carried to the voice worker, and transcribe can return word times with VAD off
+
+- **Voice sampling was silently dropped.** `generate-audio` / `offload_generate_audio` take `cfg_weight`, `exaggeration`, `temperature`, `repetition_penalty`, `min_p` and `top_p` (CLI `--cfg-weight` and so on). The default (generalist) voice path used to send only `--clone` and `--lang`, so a `cfg_weight` of 0.3 changed nothing; now each knob given is sent to `render/tts.mjs` (which already takes all six), for the default and the fine-tuned engine, and a request's value replaces the fine-tuned recipe's. A knob not given keeps the engine default (0 is a real value for `cfg_weight` and `min_p`).
+- **Never dropped, always named.** A value out of range or not a number, a knob on `kind` music, and a knob on a voice lane that has no such control (the speech-server endpoint, the audio.cpp engine) come back as a refusal that names the knob and the range, before anything renders.
+- **Fleet.** The knobs travel in the fleet `audio-gen` plan and payload, and the node's builder reads them. They are part of the default output file name, so a retake with another `cfg_weight` is a different take. A node publishes `voice_sampling_honoured` in `/fleet/health` and a call that names a knob is placed only on a node that does, because an older node would drop them and render with its own defaults.
+- **Word-timed transcripts.** `local-offload transcribe --words` / `offload_transcribe words=true` adds `words[]` (`word`, `start`, `end` in seconds, `offsets{from,to}` in milliseconds as whisper.cpp writes them, `probability`) and `words_path`, a file in the shape of `whisper-cli -oj`. A words call decodes at temperature 0 with no temperature fallback (`temperature_inc=0`; the seat's default steps up by 0.2), so the same audio gives the same words on a rerun. A transcript with no word times is a defer, not an empty list.
+- **VAD per call.** `--vad on|off` / `vad` sends the whisper server's per-request `vad` field, so `off` decodes a file without the voice-activity detector even on a seat started with `--vad`; `on` needs `stt_vad`. Both options travel to a fleet node on the stt upload door (an older node refuses the unknown field with a 400), and are refused by name on the hq tier served over the OpenAI protocol and on `engine: npu`, which have no word times or VAD switch.
+- **Why.** A narration pipeline that moves its voice take and its word-timing gate onto the harness needs the same sampling it uses today and the same un-VAD'd, deterministic word times; both were silently different.
+
+## [0.210.0] - 2026-11-09 - a node can take only its operator's personal callers, a wedged ComfyUI is reaped, generate-image --batch --spill feeds matching nodes, node rows say what media they render, and the ampere-2x16 tier gets pooled two-card seats
+
+### Fixed - an edit at the seed that rendered its source no longer comes out burnt
+
+- **What it does.** `render/noise-seed.mjs` mixes the caller's seed with the bytes of every source image. That mix is the KSampler seed for both edit families (`render/comfy-edit.mjs`, `planEdit`) and both inpaint families (`render/comfy-inpaint.mjs`). The same seed and the same file give the same render. The result and the runner's `queued` line still carry the caller's seed, and the plan's `describe` names the noise seed.
+- **Why.** ComfyUI draws a KSampler's starting noise from its seed in the latent's own shape. A source rendered at seed S, then edited at seed S on the same canvas, starts from the noise that made the source, and Qwen-Image-Edit-2511 burns that edit: posterized colour and clipped channels. A pipeline that keeps one seed does exactly that, and so does a chain of edits at one seed.
+- **Check.** On node-i (two A2s), 2026-11-08, a card-only 2511 edit (fp8mixed, Lightning 8-step, 1.0 MP) of a source rendered at seed 7:
+  - at seed 7, 21.5 % of the pixels had a channel at 0 and 14.0 % one at 255;
+  - at seeds 8 and 1234, with nothing else changed, 1.1 % and 0.3 %, and both edits were clean when looked at.
+  - The burn stayed the same with the fp8 or the bf16 encoder, without the vision tower, under either reference method, as a Q3_K_M GGUF on one card, and at 40 steps without the LoRA. Without the reference latent, the graph rendered clean.
+
+### Changed - the qwen-image-2.1 int8 convrot edit is measured card-only, so a 16 GB host can run it through the typed door
+
+- **What it does.** The `qwen-image-2.1-edit/int8_convrot` row of `render/multicard-recipes.json` and `internal/mediacap/multicard.go` is now `measured`, with the peaks of a live run: 12.9 GiB on the compute card and 7.5 GiB on the storage card, at the DiT-sequence cap.
+  - Admission therefore declares no host RAM for that edit, as it does for every measured row.
+  - A predicted row declares the weight files' sum. That is more than a 16 GB host has, so the edit used to be refused at the door.
+  - The docs table also corrects the bf16 edit row's cell, which still read 14.4 / predicted although the row has been measured at 14.5 since 2026-10-20.
+- **Check.** On node-i (two A2 16 GB, 14.8 GiB of host RAM), compute-first, under a reservation of both cards with 0 GiB host RAM declared: the turbo int8 DiT, the bf16 Qwen3-VL-8B encoder and one 1024x1024 source.
+  - **At `--resolution 1440`** (4.15 MP, just under the cap): the encoder phase peaked at 12.82 GiB (compute) and 7.47 GiB (storage), the sampler at 8.76 GiB, the decode at 3.29 GiB. The prompt took 227.6 s.
+  - **At `--resolution 1024`:** the peaks were 12.41 and 6.63 GiB, and the prompt took 88.8 s.
+  - **Host memory:** the encoder was filled from the read-only map with 0.0 MiB anonymous memory, ComfyUI's anonymous memory peaked at 1.60 GiB, and host free memory never fell under 11.24 GiB.
+  - **Output:** both edits were the asked edit, and none of their pixels were clipped at 255.
+
+### Added - `generate-image --batch --spill` feeds matching fleet nodes while the warm session runs
+
+- **What it does.** `local-offload generate-image --batch jobs.jsonl --route auto --spill` runs two ways at once when this machine's lane is free and at least one roster node renders the same image recipe (same digest and release, matched by the code the ticket path uses, from the roster the ticket path reads). The jobs go into one shared queue. This machine's warm session takes the queue in chunks (each chunk is one warm ComfyUI session; a chunk is the jobs left divided by the workers, at least 4, so the first is large and they shrink). Each matching node gets a worker that takes one job at a time through the single-render call pinned to that node. `--jobs N` bounds the node workers (default one per matching node). A node with no place for a job hands it back to the queue; a held local lane or a stopped warm session leaves the rest to the nodes. With no matching node, no fleet or a busy lane, `--spill` prints why on stderr and in the JSON (`spill_note`, with `cluster` naming each node's miss) and the batch runs as `--route auto` does without it. The JSON `mode` is `spill` when it spilled. Result rows (`i`, `out`, `node`, `family`, `verdict`, `ms`), `--resume` and the exit status are unchanged. `--spill` is refused with `--route local` or `--route remote`.
+- **Why.** Two GPU nodes rendered the identical krea2 recipe, but `--route auto` chose one mode at the start: a free local lane ran the whole file in one warm session and never used the matching node, and only a busy lane turned jobs into tickets. An operator wanting both busy had to split the jobs file by hand and run two commands.
+- **Warm session across chunks.** The warm call takes a fixed list written to a jobs file the render script reads once, so a session cannot be fed more jobs after it starts. `--spill` therefore runs one warm session per chunk (the checkpoint loads once per chunk, not once per picture) rather than changing the render script.
+
+### Added - `local-offload media-recipes [--json]` prints this machine's family recipes
+
+- **What it does.** A read-only verb that prints the image families as the fleet node publishes them in `/fleet/health` `image_recipes` (name, default, digest, each file with bytes and fingerprint, and any file with no fingerprint yet), and the video, animation and audio rows of `media_recipes`, plus the harness release. It uses the same functions the node's health uses (`fleetnode.ImageRecipesWith` now holds the row building; the node still passes the non-waiting fingerprint read, the CLI the blocking one). It loads no model.
+- **Why.** The only way to compare two machines' digests was a `curl` of `/fleet/health` with the bearer on each; `--spill` and the ticket queue match on that digest.
+- **Check.** `go build ./...`, then `go run . media-recipes --json` on a dev machine: six image families (krea2 default, flux3-klein, qwen-image, qwen-image-2.1, qwen-image-2.1-fast, qwen-image-2.1-turbo), each with a digest and all files fingerprinted, plus the five media rows. No spill batch was run (the GPUs were rendering production work); the existing `internal/mediaremote`, `internal/fleetnode` and root guard tests pass.
+- **Details.** `docs/systems/media-generation.md` (the image batch section), ADR 0083 decision 13, `docs/OPERATOR-GUIDE.md` (comparing recipe digests).
+
+### Added - fleet node rows say what media a node renders; every spill lane can pin a node; the PAIR ingress is checked
+
+Three changes from a media session's feedback.
+
+A caller concluded a GPU node had "no image or video engine" because the `offload_status` fleet row showed only `served_models`, which
+lists llama-swap chat seats. The row now carries a `media` block built from the node's own `/fleet/health`: its media task types, the
+image, video, animate and audio families, the state of its edit route, the configured and not configured route names, and its loadable
+model families (`loadable_model_families` and `image_families` are now decoded). The block is absent for a node that published nothing
+media-shaped, so an older node or a failed probe never reads as "no media". The tool description says so.
+
+`offload_transcribe` and the CLI `transcribe` verb (repeatable `--remote`) take `remotes`, as `offload_generate_image` does, and so do the other
+single-shot spill lanes that had a `route` and no `remotes`: `offload_vqa`, `offload_ocr`, `offload_assess_image`, `offload_classify`,
+`offload_extract`, `offload_forecast` and `offload_compose_video`. The bases narrow the fleet for that call and must each be in
+`delegate_remotes`; one outside it is a contract defer naming it. One helper (`rosterprobe.Narrow`) serves every lane, `mediaremote` included; a node that the caller-scope policy (`delegate_remote_scopes`) removed is refused with that policy and the caller's scope rather than as "not in delegate_remotes" (`rosterprobe.NarrowFor`).
+
+### Fixed - the PAIR ingress warning no longer prints on every short-lived command
+
+`local-offload gpu reserve` and the other one-shot commands printed `pairworkloads: PAIR ingress unreachable` every time, because the
+warning was once per process and each command is a new process. Those emitters now warn at most once per six hours per state directory
+(a marker file under the state root; any marker error means the warning prints). The MCP server, fleet node and delegate runner keep the
+once-per-process warning. `doctor` gains a `pair ingress:` row (a 1 s TCP dial, OK or WARN with the fix) and the `offload_status` `pair` block
+gains `ingress_reachable`, so the condition stays visible.
+
+Check: built the binary and ran it against a config with PAIR enabled and nothing listening: the first `gpu reserve` printed the warning, the
+second did not, `doctor` printed the WARN row and, with a listener up, the OK row; `offload_status` against a stub node showed the `media` block;
+`transcribe --remote` with a base outside `delegate_remotes` returned the contract defer. Details: `docs/systems/mcp-server.md` and
+`docs/systems/pair-workloads.md`.
+
+### Fixed - a node that must only take its operator's personal work can no longer be given another caller's
+
+- **What happened.** On a box that runs work for a business and the operator's own work side by side, a business
+  session's speech-to-text (`offload_transcribe route:"remote"`) and image work was placed on a fleet node that must
+  never hold that business's data. Nothing in placement could tell the two callers apart: the only per-node rule
+  (`delegate_remote_classes`) is enforced in the agent lane alone, the single-shot lanes (stt, vision, text, forecast,
+  compose, media) never consult it, the cascade's `cascade_remote_lanes` and `seat_endpoints` send completions to a
+  node outside `delegate_remotes` altogether, and the media ticket path re-reads `delegate_remotes` from the config file,
+  so a filter applied at load would have been undone by the next re-read.
+- **What changed.** Each process now resolves its caller scope once, when its config loads (`internal/callscope`):
+  `LOCAL_OFFLOAD_SCOPE` if set, else the working directory of the Claude Code session it serves (read from the
+  session's file under `~/.claude/sessions`, by the parent's pid or the session id), else its own working directory,
+  judged against the new `caller_scope_roots` by longest prefix. The new `delegate_remote_scopes` names which scopes a
+  machine admits (keyed by host, so one entry covers its fleet port, seat endpoints and cascade lanes), and the load
+  removes every machine that does not admit the caller from `delegate_remotes`, `cascade_remote_lanes`,
+  `seat_endpoints` and `fleet_queue_holder` at once, on every exit of the load, so no lane and no verb can reach it.
+  The media roster re-read applies the same filter (`Config.WithRoster`). A call that names an excluded machine in
+  `remotes` or `--remote` is refused with the node's policy and the caller's scope. The rule fails closed: a caller
+  whose scope cannot be established (no session file, a directory under no root, a misspelled override) is admitted
+  by no machine that lists scopes. A config without the new keys is unchanged.
+- **Node side, a backstop.** A node with `fleet_admit_scopes` refuses, with a typed 403 (`scope_not_admitted`)
+  before it reads a body, any job whose asker does not declare an admitted scope in the new `X-Offload-Scope`
+  header, on every door through `authorizeGated` and on the cascade chat lane, and publishes the list as
+  `admit_scopes` in `/fleet/health`. Askers send the header on every fleet request, cascade lanes included, only for a
+  known scope.
+- **Where it shows.** `doctor` prints `caller scope:` and every excluded node; `offload_status` carries
+  `fleet.caller_scope` and `fleet.scope_excluded`; ledger rows carry `caller_scope`.
+- **Check.** One test pins the contract (every list filtered for business and unknown callers, the roster re-read
+  cannot restore the node, naming it is refused, a missing session file never falls back to the process's directory),
+  and a real run on the delegating box: `doctor` from a business session's working directory lists the node as
+  excluded, and from the operator's own working directory keeps it. Details: `docs/OPERATOR-GUIDE.md` (the
+  `delegate_remote_scopes`, `caller_scope_roots` and `fleet_admit_scopes` rows), `docs/systems/fleet-node.md`
+  ("Caller scope").
+
+### Fixed - a hung ComfyUI the harness launched is killed instead of blocking its port for every later job
+
+- **What it does.** A keyed ComfyUI instance the harness itself launched that stops answering but keeps its port is now reaped. `reapOwnWedgedInstance` (`render/comfy-lifecycle.mjs`, proof primitives in `render/comfy-ownership.mjs`) kills the marker-recorded process tree, and nothing else, when: the marker names this key and port; the marker's `ownerPid` is not another live runner; the pid is alive, began no later than 10 s after the marker, and its command line is `main.py --port <port> --output-directory <dir>` (asked of the operating system, no HTTP); every listener of the port is that pid, a process it started, or an unnamed owner (pid 0); it answered none of 3 probes over `COMFY_UNRESPONSIVE_SEC` (default 60 s); and its `offload-comfyui-<key>.log` was not written in that window. It then polls the port free for up to 30 s, clears the marker and says `COMFY-REAPED: killed harness-launched pid <n> on <api> after <s>s unresponsive (<reason>)`, and the launch goes on. A port that stays held ends with `COMFY-PORT-WEDGED` (a `comfy_unusable` failure). It runs before `COMFY-PORT-TAKEN` in a keyed launch, in `stopHarnessInstance` when the failed job's instance does not answer, and at the end of a job that launched its own instance (which now ends the whole process tree and checks the port). The unkeyed default instance is never reaped, and a foreign holder keeps `COMFY-PORT-TAKEN` untouched.
+- **Go side.** `internal/comfyinst` stops an unanswering instance on the same operating-system proof (command line, listener, start-time guard), with a process-tree kill on Windows, and reports `COMFY-REAPED`. `internal/gpugen` reads a `COMFY-PORT-WEDGED` line as `comfy_unusable` and carries the last `COMFY-REAPED` line into the failure detail.
+- **Why.** A multicard edit hit a CUDA illegal-memory-access; the instance kept its port and answered nothing ("unreachable 241 s"). Both stop paths only killed after `/system_stats` returned a matching argv, which a hung instance cannot do, so every following job failed in under a second with `COMFY-PORT-TAKEN` (4 hangs and 10 instant failures in one day) until the operator killed the pid by hand.
+- **Check.** One real run: a child process listening on a free port and never answering HTTP, a launch marker written the way the lifecycle writes it, and the real process and port lookups. `ensureComfy` killed it, the port freed, `report.reaped` named the pid, and a second listener with no marker (and one whose marker named a dead pid) was refused with `COMFY-PORT-TAKEN` and left alive (`node --test --test-name-pattern="mute instance" render/comfy-instance.test.mjs`). The Go lookups were run once against a real listener (the proof held, and a wrong port was refused).
+- **Note.** On the Windows 11 build tested, `Get-NetTCPConnection -State Listen` returned nothing for a live listener, so the lookup asks by port and keeps the sockets with no remote end. Details: `docs/systems/media-generation.md`, `render/README.md`, `docs/OPERATOR-GUIDE.md`.
+- **Kill-time re-proof.** The kill re-reads the process from the operating system immediately before it and declines unless the start time and the launch marker (pid and start stamp) still match what was judged, so a pid reused during the probe window (a relaunch by another runner, a hand kill) is never killed; the marker is cleared only when it still names the judged process, so a new instance's marker is never deleted; and the Linux listener lookup now parses `ss` pids (its pattern had lost a backslash and read every named listener as unnamed).
+
+### Fixed - a card with no display connector is no longer a display card because the driver says display_attached Yes
+
+- **What it does.** On Linux, a card whose PCI device has a DRM card node (`/sys/bus/pci/devices/<bus id>/drm/cardN`) with zero connector entries under it cannot drive a display, so its `display_attached` Yes is read as No ("attached ignored: no display connectors", logged once per card). `display_active` Enabled stays authoritative; a card WITH connectors keeps `display_attached` as reported, connected or not (the monitor with its screen asleep); a card with no DRM node (nvidia-smi without `nvidia-drm`), an unreadable one, or a bus id that cannot be had keeps the driver's answer; Windows and macOS are untouched. The Go side applies it where the per-device reading is taken (`internal/gpuprobe`, so `DrivesDisplay`, `ScreenCardUUIDs`, the card table and the lease verdict's sampler all inherit it) and the render runner applies the same rule to its own card table (`queryCards` in `render/wan-multicard.mjs`, which `multicard-image.mjs` shares). The PCI bus ids come from a separate `uuid,pci.bus_id` query asked only when a card says Yes and the kernel tree shows an NVIDIA card without connectors, so no other box pays an extra call.
+- **Why.** Measured on node-i (headless Linux, driver 615.71 open modules, Intel iGPU): both NVIDIA A2 cards, datacenter boards with no display connector at all, answered `display_active Disabled, display_attached Yes`. Go then saw every card as a display card, so the single-card guard excluded none and admission leased both; the runner refused every multicard image, edit and video render with "card idx 0 (NVIDIA A2) drives a display". `/sys/class/drm` showed `card0` and `card1` (nvidia) with no connector entries and the iGPU's `card2` with DP/HDMI connectors, all disconnected.
+- **Check.** The measured two-A2 reading and sysfs layout, fed to `maskPhantomAttached` (Go, run on Linux) and `queryCards` (node), leave neither card a display card. The measured table in `internal/gpuprobe/display.go` has the new row.
+
+### Fixed - a PAIR card refused while PAIR is down is sent again, and a job that finished reads "Ran on", not "Sent to"
+
+- **What it does.**
+  - **Resend.** The workload emitter keeps the latest `queued` or `running` frame of each job whose post
+    failed. It posts that frame again every 10 s, and at once after any post that lands. It stops when
+    the frame is delivered, when the job's next frame supersedes it, or after `OpenMaxAge`. A frame
+    PAIR rejects (400/413/422) is not retried.
+  - **Delegation start.** A delegation that completed carries a start time even when no poll caught
+    its seat working. The start is the completion time minus the node's `wall_ms`, never before the
+    card was created, and the creation time when the node reports no wall.
+  - **Transcription start.** A successful transcription card carries its creation time as its start,
+    because its lane never marks the card working. Held-back calls and failures keep a null start.
+- **Why.** On 2026-11-09 PAIR was started while a delegation was already running on a remote node.
+  Both in-flight frames had been refused while PAIR was down, and nothing sent them again. The node
+  ran at full load for 13 minutes with no card, no line and no activity ring. Separately, PAIR's
+  desktop labels a card with a null start "Sent to <node>", so completed transcriptions, and
+  delegations short enough to finish between two polls, read as jobs that never ran.
+- **Check.** `TestInFlightFrameRefusedWhilePairIsDownIsResent` reproduces the outage. It posts a
+  running frame to an ingress that answers 503, then lets the ingress recover. It asserts the frame
+  arrives exactly once, unchanged, and that the job still closes normally. The delegate PAIR card
+  tests pass with `TestRemoteCardTurnsRunningOnWork` updated: a job that only ever reported loading
+  and then answered sends no running frame, but its terminal frame now carries a start. Details:
+  `docs/systems/pair-workloads.md`.
+
+### Added - card-only ACE-Step music (`musicgen_placement: multicard`) and a voice worker that takes one card
+
+- **What it does.** A node of two equal cards can now run music with every weight in VRAM. `musicgen_placement: "multicard"` (opt-in, unset by default)
+  puts ACE-Step 1.5 XL turbo's DiT whole on the compute card and its two text encoders (`DualCLIPLoaderMultiGPU`, type `ace`) and VAE on the storage
+  card, through a new `acestep/xl-turbo-bf16` row of `render/multicard-recipes.json` (route `music`, measured, mirrored in
+  `internal/mediacap/multicard.go`). `render/comfy-music.mjs` takes `--placement multicard [--cards a,b]` and makes the same plan, placement check
+  and pair launch as the image and edit runners; `render/wf-acestep.mjs` builds the recipe's loaders. The door leases the two non-display cards
+  (`musicNeed`), the doctor's `generate_audio:music` line names the placement, and `hostneed` sizes the route through the recipe table. The single
+  placement is unchanged.
+- **Voice.** With `gpu_card_scoped_leases` on and a green reader audit, the Chatterbox voice worker asks for one card instead of the whole node and is
+  pinned to the card it is granted (`CUDA_VISIBLE_DEVICES=<uuid>`, `CUDA_DEVICE_ORDER=PCI_BUS_ID`), so it can run beside a render on the other card.
+  With card-scoped leases off it behaves exactly as before.
+- **Why.** The XL DiT, encoders and VAE are 18.5 GiB, more than one 16 GB card, so the single placement streamed from host RAM and a 16 GB host refused it.
+- **Check.** `local-offload doctor` with `musicgen_placement: multicard` prints the `generate_audio:music` line with `placement=multicard` and the
+  `UNETLoaderMultiGPU, DualCLIPLoaderMultiGPU, VAELoaderMultiGPU` classes found in the installed pack; `render/comfy-music.mjs --placement multicard` on
+  a host that names no cards is refused before anything starts; the single-placement graph is byte-identical to the old one. A card-only render on two
+  16 GB A2 cards measured the row (see the next entries), so it declares 0 GiB of host RAM.
+  Documented in `docs/systems/media-generation.md` ("Card-only music").
+- Music loudness normalization keeps the render's own sample rate: ffmpeg's loudnorm resamples to 192 kHz internally and kept that rate for the output, so a 48 kHz ACE-Step render came back as a 192 kHz FLAC (four times the size).
+- The ACE-Step 1.5 XL card-only row is measured: on two 16 GB A2 cards a 30 s clip took 41 s, peaking at 9,774 MiB on the compute card and 9,364 MiB on the storage card, with 2.23 GiB of ComfyUI anonymous RSS and no weight in host RAM.
+
+### Fixed - a card-only (multicard) ComfyUI instance no longer shares a port with a per-card instance or another card-only key
+
+- **What it does.** A multicard instance with no `--api` / `COMFY_API` used to fall back to `COMFY_PORT_BASE` (8189) plus an index nobody set, which is the port of card 0's per-card instance. Both kinds of instance outlive their job by up to 300 s (ADR 0097), so back-to-back media jobs on a two-card node failed with `COMFY-PROFILE-MISMATCH` whenever the idle instance was another key: an inpaint on card 0, then a card-only krea2 render; or a storage-first krea2 render, then a compute-first qwen-image-2.1 render. The runner now derives the port from the instance's ordered card pair: `COMFY_PORT_BASE + n + block*n*n + first*n + second` (`n` = the node's highest nvidia-smi index plus one; `first` / `second` = the nvidia-smi indexes in the order ComfyUI numbers the cards; `block` = 0 storage-first, 1 compute-first). Each key has one port and no two keys share one, and the range sits above the per-card ports and clear of 8188. A two-card node uses 8192 / 8193 storage-first and 8196 / 8197 compute-first; a three-card node uses 8193 to 8195 and 8197 to 8199 storage-first, 8202 to 8204 and 8206 to 8208 compute-first. `--api` / `COMFY_API` still wins, and the reuse, refusal and restart rules are unchanged. The Go side sets nothing: the roles and the card order that name the key are chosen in the runner. Documented in `docs/systems/media-generation.md`.
+- **Check.** One test drives `multicardEnv` for both orders and both role assignments of a two-card table and asserts four distinct ports above the per-card range. The wan, image, edit, render, instance and gpu-lock render tests pass.
+
+### Fixed - a text encoder bigger than one card is no longer staged in host RAM while it loads
+
+- **What it does.** `OffloadCLIPLoaderDisTorch2` (`render/comfyui-ext/nodes/offload_multicard`) builds a plain-float encoder (bf16, fp16 or fp32, no quantization marker) on torch's `meta` device, which allocates nothing, and fills it by assignment from the read-only map (`OFFLOAD_RO_LOAD=1`), so its parameters are the file's pages and no host copy exists. DisTorch2 then places it block by block onto the two cards, as before.
+- **Refusals.** It refuses before any card is touched when a tensor got no weight from the file (`OFFLOAD-TE-UNFILLED`), when a weight sits in anonymous host memory (`OFFLOAD-TE-NOMAP`), or when the stock loader took a path the node did not see (`OFFLOAD-TE-UNJUDGED`). After the placement the 64 MiB host-weight check stays.
+- **Quantized encoders keep the earlier build.** The LTX-2.5 int8 convrot Gemma goes through ComfyUI's own quantized layers, which this path was not measured with, so it is still built on the CPU and placed at once.
+- **Why.** The earlier build allocated the whole encoder on the CPU and copied the file into it. The 16.33 GiB Qwen3-VL-8B encoder of qwen-image-2.1 ran a 16 GB host (node-i, 14.8 GiB of RAM) out of memory there: anon-rss 13.77 GB.
+- **Check.** On node-i, a card-only Qwen-Image-Edit-2511 edit loaded the bf16 Qwen2.5-VL-7B encoder (15.45 GiB file, 14.43 GiB loaded) this way:
+  - filled with 0.0 MiB anonymous memory and placed in 11.0 s (6.45 GiB on one card, 7.98 GiB on the other, 0.00 in host RAM), then released in 0.8 s;
+  - ComfyUI's anonymous memory peaked at 1.23 GiB for the whole job, and host free memory never fell under 11.63 GiB.
+- **Check, qwen-image-2.1.** The same node loaded the 16.33 GiB Qwen3-VL-8B (the encoder that ran the host out of memory) for a 2048x2048, 40-step card-only render through the harness lane:
+  - filled with 0.0 MiB anonymous memory, placed in 12.1 s (8.36 and 7.97 GiB, 0.00 in host RAM), released in 0.9 s;
+  - the call took 1,456 s, ComfyUI's anonymous memory peaked at 1.43 GiB, and host free memory never fell under 11.37 GiB;
+  - the turbo family (int8 convrot DiT, same encoder) took 254 s. Both images were checked by eye and by their clipped-pixel share (0.0 % and 1.0 %).
+
+### Added - pooled two-card seats on the `ampere-2x16` tier: the 27B at UD-Q6_K, a pooled 26B-A4B and a pooled 31B
+
+- **What it does.** `llama-swap.linux-cuda-pair.yaml` gains three models that span BOTH cards, for work where quality outranks a free second card: `qwen38-27b-pool` (Qwen3.8-27B UD-Q6_K, MTP draft depth 3, mmproj, ctx 65536), `gemma4-26b-a4b-pool` and `gemma4-31b-pool` (QAT UD-Q4_K_XL plus mmproj, ctx 32768). Each pins both cards explicitly (`CUDA_VISIBLE_DEVICES=<utility>,<heavy>`), splits by layer with `--tensor-split 1,1`, and lives in a matrix set no single-card seat shares: `pooled` (`+residents & (g26 | g31)`) for the two Gemma pools, and `pooled27` for the 27B pool, which carries the memory stack and every resident seat except speech-to-text (a new `__SEATS_RESIDENT_NOSTT__` fragment), because with the embedder, reranker and forecaster resident the 27B pool leaves 1.1 GiB free on the utility card, less than whisper needs. The tier now seeds `agent_model` and `reasoning_model` as `qwen38-27b-pool` and `escalation_model` as `gemma4-31b-pool`, and `agent_ctx_tokens` as 65536 to match the window the bound seat serves; the single-card 27B and the 4B stay rendered as alternatives for when one card is busy.
+- **Measured 2026-11-07** on two NVIDIA A2 (llama.cpp b12192, llama-swap v270): the pooled 27B decodes 10.34 tok/s (MTP acceptance 63 %) against 8.4 tok/s for the single-card IQ3_S 27B, prefills 237 tok/s on a 3,672-token prompt, and sits at 12,504 + 13,594 MiB, resident beside the embedder; the pooled 26B-A4B decodes 11.92 tok/s (one card throttled, a lower bound). The pooled 31B was only measured with a throttled card (2.38 tok/s) and awaits a cooled pair. `--split-mode tensor` decoded 10.71 tok/s but prefilled at 138 tok/s, so layer ships. Record: `docs/tiers/reports/ampere-2x16-node-i.md`.
+- **Renderer.** `install render` warns by name when any of the six pooled weight or projector files is missing on a `cuda-pair` tier (the Linux install leaves model downloads out-of-band). The 26B drop no longer reads `gemma4-26b-a4b-pool` as a leftover reference to the dropped `gemma4-26b-a4b` (the post-check matched by substring).
+- **With the resident stack loaded.** 27B pool 14,230 / 13,620 MiB, 209.7 tok/s prefill, 8.1 tok/s decode; 26B-A4B pool 10,744 + 7,278 MiB, 357 tok/s prefill, 17.0 tok/s decode; 31B pool 12,834 + 9,954 MiB, 2.2 tok/s decode, a thermal artefact of a throttled card, not the seat's speed. Whisper loaded and transcribed beside the 31B pool with no eviction.
+- **Not measured.** Image input through the pooled projectors; the 31B on a cooled pair.
+
+## [0.209.1] - 2026-11-08 - the slot-save flag renders only beside one slot, the 35B agent seat carries it, and loupe measures local runs' KV reuse again
+
+### Fixed - `--slot-save-path` renders only after `--parallel 1`, the 35B agent seat gets it, and the audit refuses an entry that states no slot count
+
+- **What it does.** Three changes to the 0.209.0 render:
+  - **Templates.** The `__SLOT_SAVE__` token leaves the shared `common` macro of all twelve llama.cpp
+    templates. It now sits right after `--parallel 1` in each entry that states one slot. The
+    `qwen3.6-35b-a3b-agent` entry on the Windows and Linux CUDA templates (the `ampere-6` RAM-spill
+    agent seat) gains it; it had none, because it does not use the macro.
+  - **Audit.** The render-time slot audit now also refuses the flag on an entry that states no
+    `--parallel` at all, as the agent loop and the `/fleet/kvslot` lane already did at run time.
+- **Why.** Through the macro, 0.209.0 rendered the flag on `gemma4-e2b`, which states no slot count and
+  so runs the server's default of several. Nothing was saved or restored there: both run-time doors
+  refuse such a seat (`not-eligible`). But the render broke its own rule that a slot directory sits
+  only beside one slot, and the audit only looked for a stated count above one. Live nodes are
+  unaffected: a deploy never rewrites a node's llama-swap.yaml.
+- **Check.** This branch's binary rendered every tier for both OSes into a scratch folder, with a
+  b11977 build directory:
+  - Of the 38 tier and OS combinations, 30 rendered. The other 8 have no template for that OS.
+  - 27 of the 30 carry the flag. `maxwell-3` and `rockchip-rk3588` have no one-slot llama.cpp chat or
+    agent entry.
+  - In every rendered config, after expanding the macros, each entry with the flag states `--parallel 1`.
+  - `ampere-6` now flags `qwen3.6-35b-a3b-agent`.
+  - The new audit refuses `gemma4-e2b` in the 0.209.0 renders of `ampere-8`/linux and
+    `blackwell-2x16`/windows, and passes the new renders.
+
+### Fixed - `loupe` reads the KV reuse of local delegations again
+
+- **What it does.** The `agent_prefill` section of `local-offload loupe` now reads every run row,
+  including the inner `agent` row that a delegator-local job writes beside its `agent_delegate` row.
+  Dispatch markers and refusal rows stay out. Job counters still read one row per job (register C-62).
+- **Why.** The report built its prefill figures from the job rows, and since 0.143.0 those drop the inner
+  row whenever its parent is present. The inner row is the only one carrying `prefill_*`, and it now also
+  carries `kvslot_*`. So every local delegation read as unmeasured: on the vLLM agent seat, the 0.209.0
+  reuse fix was in the ledger and nowhere in the report. The parent row carries no prefill steps, so
+  each run is still counted once.
+- **Check.** `loupe --since 1 --include-test-traffic --json` on `<node-b>`'s ledger:
+  - Released 0.209.0: `measured_rows 0`, `kv_reuse_pct null`, `insufficient_data`.
+  - This branch: `measured_rows 25`, `prefill_tokens 6235`, `cache_tokens 1568`, `kv_reuse_pct 20.09`.
+  - Over the whole ledger, measured rows go from 2,334 to 3,908, and reuse from 49.5 % to 48.9 %.
+
+## [0.209.0] - 2026-11-08 - a seat's KV context survives the idle unload on llama.cpp, vLLM agent runs report their reuse, and the ampere-2x16 tier
+
+### Fixed - vLLM agent runs report their KV reuse, the CUDA mimo seat takes the tier's host cache, nvfp4 KV is refused beside a cache server
+
+- **What it does.** Three fixes:
+  - **Reuse accounting on vLLM.** The agent loop's prefill instrument now reads vLLM's
+    `usage.prompt_tokens_details.cached_tokens` when a step carries no llama.cpp `timings`. When the server
+    does not report the field, the step stays unmeasured. A new `prefill_source` (`timings`, `usage` or
+    `mixed`) travels with the run's wire result and ledger row, and the per-step prefill milliseconds are
+    averaged only over steps that carried timings.
+  - **CUDA mimo seat.** The literal `mimo-9b-agent` entry on the Windows and Linux CUDA templates now
+    carries `--cache-ram __CACHE_RAM__ __SLOT_SAVE__` like every other agent seat and its Vulkan twin.
+  - **nvfp4 KV refusal.** A vLLM seat spec that pairs `kv_cache_dtype` nvfp4 with a `cache_server` binding
+    fails validation with the reason. A storeless nvfp4 seat stays allowed, and there is no dtype allowlist.
+- **Why.** These are the "what we store, how much work we reuse" lessons of ADR 0100.
+  - A vLLM seat sends `usage` and no `timings`, so every vLLM step counted as observed with zero cached and
+    zero prefilled tokens: a run read `measured` with no reuse, on the seat that carries the pair boxes'
+    agent work.
+  - The mimo entry ran at llama-server's 8,192 MiB default on every RAM tier, a 1 GiB box included.
+  - The LMCache overlay guard keys on an fp8 prefix, so an nvfp4 seat with a store rendered without it. vLLM
+    PR #46329 reports 8.8 vs 62 tok/s decode and every-second-request corruption for nvfp4 KV on two
+    RTX 5060 Ti.
+- **Check.** All on `<node-b>`:
+  - A local delegation on the vLLM agent seat wrote a ledger row with `prefill_steps 3, prefill_tokens 6235,
+    cache_tokens 1568, prefill_source "usage"` (20 % reuse measured). The previous row from the same seat
+    carried `prefill_steps 2` and no token counts.
+  - `install render --profile ampere-8 --ram-tier min` renders `--cache-ram 1024` on `mimo-9b-agent` for
+    both Windows and Linux.
+  - `Spec.Validate` refuses blackwell-2x16 with `kv_cache_dtype` nvfp4, citing the PR, and passes the shipped
+    fp8 spec.
+
+### Added - llama.cpp KV slot retention: a seat's context survives the idle unload (ADR 0056 Layer 2 reopened, ADR 0100)
+
+- **What it does.** Five parts:
+  - **Render.** On a node whose llama.cpp build is at or above the new floor `"kvslot": 11506` in
+    `setup/floors.json`, `install render` gives every one-slot chat and agent seat
+    `--slot-save-path <home>/kvslots` and creates that directory. The `--parallel 8` twins no longer carry the
+    token, and a new render audit refuses the flag beside a stated slot count above one. An unknown or older
+    build renders exactly what it rendered before.
+  - **Run start.** The agent loop keys the byte-exact prompt its first call sends: the seat's config pin, the
+    seat, the tool specs, and every message, recall and setup replay included. When a slot file for that key
+    is on the node, the loop restores it. A key is saved on its second sighting and restored from the third.
+  - **Tool waits.** Beside a tool call whose cap is 240 s or more, the loop saves the session under a
+    run-scoped key. If the seat unloaded during the tool, it warms the seat and restores. That file is
+    deleted when the run ends.
+  - **Verdicts.** Every restore is judged on the next completion: `hit` only when the cache served at least
+    80 % of what the restore could hold, and a missed start restore deletes its file. The run's
+    `kvslot_restore`, `kvslot_admit`, `kvslot_restored_tokens`, `kvslot_restore_ms`, `kvslot_saves`,
+    `kvslot_saved_bytes` and `kvslot_toolwait_*` travel on the wire result and the ledger row.
+  - **Shared core.** The loop and the bearer-gated `/fleet/kvslot/*` lane share one core, `internal/kvslot`.
+    It refuses a seat whose running command does not state one slot, skips a save with under 6 GiB free on
+    the slot volume, touches a restored file so the LRU sweep keeps it, and sweeps only `k1-<sha256>.bin`
+    files. The node reads the slot directory from the running seat's own command line. `agent_kvslot_retention:
+    false` turns the loop's retention off.
+- **Why.** Layer 2 was blocked because a restore bought zero prefill on b9934 (upstream #25913). The fix,
+  PR #26004, is tag b11506. On b11977 with a hybrid 9B on CUDA, every arm a new process, a restore turned a
+  3,279-token prefill into 4 tokens, and a follow-on turn into 26. The idle unload, a media job and a GPU
+  lease all drop a seat's context mid-session today; this is the memory wall's "move out and restore
+  instead of rebuild by compute" on hardware that has no coherent CPU-GPU link.
+- **Check.** On `<node-b>`, a scratch fleet node built from this branch served a Qwen3.5-9B seat with the
+  flag. The same contract was delegated three times, with the seat unloaded before the third
+  (`/running` empty):
+  - Run 1 was `first-sighting` (5,584 tokens prefilled, 1,886 ms).
+  - Run 2 was `repeat-saved` (one 241,593,408-byte file).
+  - Run 3 was `kvslot_restore: hit` (1,768 tokens restored in 304 ms; 3,845 prefilled, 1,282 ms).
+  - The answer was identical in all three.
+
+  The engine re-measure is recorded in the ADR 0056 amendment. The tool-wait save was not driven end to end:
+  no tool in the contract ran 240 s. Its save, restore and judge are the same core calls this run exercised.
+
+### Added - the `ampere-2x16` tier: two 16 GB Ampere cards, every model pinned whole to one card, card roles chosen at render time
+
+- **What it does.** `install detect` on Linux now classifies exactly two Ampere cards that are each 14-20 GB (two NVIDIA A2, RTX A4000 class) as `ampere-2x16` instead of `dual-gpu`, which has no Linux template. The tier renders the new `llama-swap.linux-cuda-pair.yaml` (backend `cuda-pair`): the Qwen3.8-27B agent and the vision seat sit on the HEAVY card as alternatives; the memory stack, whisper, the forecaster and the cascade (e4b | e2b | the 4B agent) sit on the UTILITY card; the `both` set runs the cascade beside the 27B. `install render --heavy-card N [--utility-card M]` (a CUDA index or a `GPU-<uuid>`; default heavy 0, utility 1) and the same flags on `install.sh` (also `OFFLOAD_HEAVY_CARD` / `OFFLOAD_UTILITY_CARD`) put the roles on physical cards, so a box whose card 0 runs hot renders heavy 1 without post-processing the yaml. Both values ride the provenance stamp, so `audit-yaml --against-render` replays a flipped layout as `MATCH`; the flags are refused on a tier whose template pins no roles, and on two roles that share a card.
+- **Detection.** `NVIDIA A2/A10/A16/A30/A40/A100` and `RTX A<4 digits>` now classify as arch `ampere` (an A2 was `other`), in `arch.go` and mirrored in `detect.ps1`. `Facts` gains `min_vram_gb` (the smallest card), so the pair rule needs EVERY card in the band; the floor is 14 GB because an A2 reports 14.996 GiB. The rule is Linux only (there is no Windows `cuda-pair` template) and no other box's tier changes: a single A2 stays `ampere-16`, a 24 GB or 22.5 GB pair and a mixed 16+8 pair stay `dual-gpu`.
+- **Measured 2026-11-07** on two NVIDIA A2 (llama.cpp b12192 sm_86 CUDA 13.4, llama-swap v270): the 27B agent 8.4 tok/s generation, 42.5 tok/s prompt, 13,956 MiB, on the slot-limited 35 W card (a lower bound: the 60 W card was thermally limited by its chassis fan header, a host airflow fault); e4b 4,430 MiB + embeddinggemma 452 MiB concurrently on the other card; whisper 1,624 MB, an 11 s clip exact in 6.7 s cold; timestral 54.5 ms, 934 MiB; every seat unloaded at ttl 300. Capability record: `docs/tiers/reports/ampere-2x16-node-i.md`.
+- **Check.** `install render --profile ampere-2x16 --os linux --heavy-card 1` reproduces the nine models, per-model card pins and ttl 300 of the hand-pinned config on that box; the only differences are the order of the two env entries and `whisper-stt` resident in every set rather than a conjunct of two.
+
+## [0.208.0] - 2026-11-07 - the display card takes jobs only while it is idle, and is picked last
+
+### Changed - the display card takes jobs only while it is idle, and is picked last
+
+- **What it does.** The card allocator (`gpu reserve --cards`, the media admission path, the grant-time check) opens the
+  display card only while it is idle: its utilization under 15 % and the operator away by the presence probe
+  (`operator_presence` unset reads `auto` for the allocator; the llama-swap twin guards keep their old reading). The 60 %
+  cap (`gpu_display_cap_pct`) then applies as before. Every non-display card now sorts ahead of the display card, so
+  `--cards 2` on the `blackwell-3x16` reference box takes the two 5060 Ti cards. A new verb, `gpu display-check --vram GiB [--json]`, asks the
+  same rule for a launcher outside a lease (exit 0 admits, 3 refuses), and the vLLM seat stub `seat-cmd.ps1` asks it for a seat
+  whose row declares `DisplayVramGiB` and starts nothing on a refusal. The display card's `display cap:` status line ends with
+  the gate's reading (`idle_gate`, `idle_why` in JSON). A whole-node media call whose worker drives no ComfyUI (sd.cpp, the
+  Chatterbox voice worker) used to compute on `cuda:0`, the display card under CUDA's fastest-first order; its children now see
+  only the non-display cards unless the display card would take an undeclared job now.
+- **Why.** The operator's rule of 2026-11-07, with the monitors back on the 5070 Ti: "send 2 card jobs to the 5060s first and 3
+  card jobs follow the rule of only using up to 60% of the 5070ti card WHEN IDLE so i can always keep it interactive." It
+  supersedes the 2026-10-11 "60 % at all times, no presence term" rule and the order that put an empty display card first.
+- **Check.** On `<node-b>` (`blackwell-3x16`) with the operator at the desk: `gpu display-check --vram 8.5` exited 3 ("card 1 is 20 % busy"),
+  `gpu cards` printed `idle gate: CLOSED to jobs`, and `gpu reserve --cards 2 --vram 1` held the two 5060 Ti cards. ADR 0039
+  and ADR 0075 amendments 2026-11-07, `docs/systems/gpu-lease.md`.
+
 ## [0.207.2] - 2026-11-04 - blackwell-16 measured on an RTX 5080 desktop: the 26B partial spill, a BOM-free manifest, the hybrid GPU count
 
 ### Fixed - `installed.json` is written without a BOM, and the Go readers tolerate one

@@ -445,7 +445,9 @@ unloaded within `display_watch_sec` like one the harness placed. It cannot stop 
   time-sharing the pair's cards?).
 - **`operator_presence`.** Until it is set to `auto` (or the override `away`), no layer placement touches the
   display card. `auto` is the supported mode. (The card allocator's share of that card is
-  `gpu_display_cap_pct`, at any presence; see above.)
+  `gpu_display_cap_pct`, open only while the card is idle; the allocator reads the unset key as `auto`
+  since 2026-11-07, ADR 0039 amendment 2026-11-07. A three-card seat whose stage sits on the display card
+  asks `gpu display-check` before it starts, through its seat-cmd row's `DisplayVramGiB`.)
 - **No installer path downloads three-card weights.** Any three-card seat is opt-in and
   operator-installed.
 

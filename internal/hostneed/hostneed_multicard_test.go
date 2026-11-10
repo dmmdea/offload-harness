@@ -10,7 +10,7 @@ import (
 
 // THE CARD-ONLY IMAGE AND EDIT PLACEMENT (comfy-generate.mjs / comfy-render.mjs / comfy-edit.mjs --placement multicard, render/multicard-recipes.json).
 // Two things must both hold before a call declares 0 host RAM: a recipe whose host growth was MEASURED with the read-only loader (the 2511 fp8mixed
-// edit, the 2512 Q5_1 GGUF, krea2 bf16 and the 2.1 bf16 and int8_convrot DiTs; the 2511 Q5_1 GGUF edit is still predicted) and its per-card peaks fitting
+// edit, the 2512 Q5_1 GGUF, krea2 bf16, the 2.1 bf16 and int8_convrot DiTs and both 2.1 edits; the 2511 Q5_1 GGUF edit is still predicted) and its per-card peaks fitting
 // the TWO cards the lease holds, each less the runner's reserve. A recipe that is only predicted, or does not fit, is the ordinary estimate, the honest
 // streaming figure, with the reason in the detail.
 
@@ -20,20 +20,23 @@ const (
 	img21Cmd    = "node render/comfy-generate.mjs o.png p --family qwen-image-2.1 --ckpt qwen_image_2.1_bf16.safetensors --clip qwen3vl_8b_bf16.safetensors --placement multicard"
 	img2512Cmd  = "node render/comfy-generate.mjs o.png p --family qwen-image --ckpt qwen-image-2512-Q5_1.gguf --placement multicard"
 	krea2McCmd  = "node render/comfy-generate.mjs o.png p --family krea2 --ckpt krea2_turbo_bf16.safetensors --placement multicard"
+	flux3McCmd  = "node render/comfy-generate.mjs o.png p --family flux3-klein --ckpt flux3-image-klein-bf16.safetensors --clip qwen3vl_4b_bf16.safetensors --placement multicard"
 )
 
 func imgFacts(t *testing.T, cards ...float64) Facts {
 	t.Helper()
 	dir, stat := comfyTree(t, map[string]float64{
-		"qwen_image_edit_2511_fp8mixed.safetensors": 19.12,
-		"qwen-image-edit-2511-Q5_1.gguf":            14.34,
-		"qwen_2.5_vl_7b_fp8_scaled.safetensors":     8.74,
-		"qwen_image_2.1_bf16.safetensors":           13.25,
-		"qwen_image_2.1_int8_convrot.safetensors":   6.76,
-		"qwen3vl_8b_bf16.safetensors":               16.33,
-		"qwen-image-2512-Q5_1.gguf":                 14.34,
-		"krea2_turbo_bf16.safetensors":              krea2UnetGiB,
-		"qwen3vl_4b_bf16.safetensors":               krea2TEGiB,
+		"qwen_image_edit_2511_fp8mixed.safetensors":                  19.12,
+		"qwen-image-edit-2511-Q5_1.gguf":                             14.34,
+		"qwen_2.5_vl_7b_fp8_scaled.safetensors":                      8.74,
+		"qwen_image_2.1_bf16.safetensors":                            13.25,
+		"qwen_image_2.1_int8_convrot.safetensors":                    6.76,
+		"qwen3vl_8b_bf16.safetensors":                                16.33,
+		"qwen-image-2512-Q5_1.gguf":                                  14.34,
+		"krea2_turbo_bf16.safetensors":                               krea2UnetGiB,
+		"qwen3vl_4b_bf16.safetensors":                                krea2TEGiB,
+		"flux3-image-klein-bf16.safetensors":                         10.34,
+		"qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors": 9.08,
 	})
 	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, CardsGiB: cards}
 	for _, c := range cards {
@@ -273,6 +276,41 @@ func TestOnlyAMeasuredCardOnlyDeclarationIsMarkedCardOnly(t *testing.T) {
 	} {
 		if n := need(t, c.cmd, c.f); n.CardOnly {
 			t.Errorf("%s: %+v is marked card-only, but it is not the measured zero", name, n)
+		}
+	}
+}
+
+// The flux3-klein/bf16 row was measured on both operating systems (2026-11-09): on Linux the read-only map's pages are clean file pages
+// MemAvailable counts (ComfyUI's anonymous RSS 1.65 GiB), so the call declares 0; on Windows the same pages sit in the working set while the plain
+// loader copies the DiT to the card and WDDM commits the card allocations (the render's process tree: 12.3 GiB resident, 18.3 GiB private, read
+// by the harness's footprint sampler), so the call declares those, rounded up to whole GiB (13 and 19), stated.
+func TestAMeasuredCardOnlyRowDeclaresItsWindowsFiguresOnlyOnAWindowsHost(t *testing.T) {
+	f := imgFacts(t, 15.9, 15.9)
+	f.GOOS = "linux"
+	if n := need(t, flux3McCmd, f); n.GiB != 0 || !n.CardOnly || n.CommitStated {
+		t.Fatalf("flux3-klein/bf16 card-only on a Linux host: %v, want 0 and card-only", n)
+	}
+	f.GOOS = "windows"
+	n := need(t, flux3McCmd, f)
+	if n.GiB != 13 || n.CommitGiB != 19 || !n.CommitStated || n.CardOnly || n.Source != SourceMeasured {
+		t.Fatalf("flux3-klein/bf16 card-only on a Windows host: %v, want 13 GiB touched and 19 GiB of stated commit, measured, not card-only", n)
+	}
+	for _, want := range []string{"flux3-klein/bf16", "Windows host", "13.0", "19.0", "Linux host declares 0"} {
+		if !strings.Contains(n.Detail, want) {
+			t.Errorf("the detail must say why (%q missing): %q", want, n.Detail)
+		}
+	}
+	// a row that carries no Windows figures declares 0 on a Windows host as it always did
+	if m := need(t, img2512Cmd, f); m.GiB != 0 || !m.CardOnly {
+		t.Fatalf("a multicard 2512 Q5_1 call on a Windows host: %v, want 0 and card-only", m)
+	}
+	// the row was measured with the prompt upsampled outside ComfyUI: a call whose graph loads the upsampler FILE keeps the ordinary estimate,
+	// the whole set with that file in it, on either system
+	for _, goos := range []string{"linux", "windows"} {
+		f.GOOS = goos
+		m := need(t, flux3McCmd+" --upsampler qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors", f)
+		if m.GiB < 27 || m.CardOnly || !strings.Contains(m.Detail, "upsampler file") {
+			t.Fatalf("flux3-klein/bf16 card-only with an in-graph upsampler on %s: %v, want the 27.7 GiB set and the reason", goos, m)
 		}
 	}
 }

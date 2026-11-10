@@ -1,6 +1,7 @@
 // render/comfy-ownership.mjs — durable marker so "did the harness start this ComfyUI?"
 // is decidable (spec §5). Makes the up-managed vs up-external restart branch sound.
 import { writeFileSync, readFileSync, rmSync, renameSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
 const MARKER = ".offload-owned.json";
@@ -137,4 +138,109 @@ export function sameArgv(a, b) {
  */
 export function harnessLaunched(marker, argv, alive = pidAlive) {
   return !!(marker && typeof marker.pid === "number" && alive(marker.pid) && sameArgv(marker.args, argv));
+}
+
+// --- ownership proof that needs no HTTP (a wedged instance cannot answer) -------------------
+//
+// harnessLaunched above needs the instance to report its argv over HTTP, which a hung ComfyUI never
+// does: the incident was a keyed instance that kept its port after a CUDA illegal-memory-access and
+// answered nothing, so no path could prove it ours and nothing ever stopped it. The primitives below
+// prove it from the operating system instead: the process's start time and command line, and who
+// listens on the port. Every one of them THROWS on an introspection error; the caller treats a throw
+// as "not proved" and kills nothing.
+const PS_TIMEOUT_MS = 15000;
+/** Pid-recycle slack, as the Go side (internal/comfyinst startSlackMs): the marker is written right after the spawn. */
+export const START_SLACK_MS = 10_000;
+
+// psArgs/psOut wrap one powershell.exe call; each call site makes the call itself, with windowsHide in its own options,
+// so the no-visible-windows scan can check it.
+const psArgs = (script) => ["-NoProfile", "-NonInteractive", "-Command", script];
+function psOut(r) {
+  if (!r || r.error || r.status !== 0) throw new Error(`powershell did not answer (${r && r.error ? r.error.message : "exit " + (r && r.status)})`);
+  return String(r.stdout || "").trim();
+}
+
+/**
+ * processInfo: { startMs, cmd, ppid } of a live process, or null when there is no such process. win32 asks
+ * Win32_Process (CreationDate, CommandLine, ParentProcessId); linux reads /proc/<pid>/stat (starttime, ppid) and
+ * /proc/<pid>/cmdline. Throws when the platform cannot say.
+ */
+export function processInfo(pid, { platform = process.platform, run = spawnSync } = {}) {
+  if (!Number.isInteger(pid) || pid <= 0) return null;
+  if (platform === "win32") {
+    const out = psOut(run("powershell.exe", psArgs(`$p = Get-CimInstance Win32_Process -Filter 'ProcessId=${pid}'; if ($p) { @{ startMs = [DateTimeOffset]::new($p.CreationDate).ToUnixTimeMilliseconds(); cmd = [string]$p.CommandLine; ppid = [int]$p.ParentProcessId } | ConvertTo-Json -Compress }`), { encoding: "utf8", timeout: PS_TIMEOUT_MS, windowsHide: true }));
+    if (!out) return null;
+    const j = JSON.parse(out);
+    return { startMs: Number(j.startMs), cmd: String(j.cmd || ""), ppid: Number(j.ppid) };
+  }
+  let stat;
+  try { stat = readFileSync(`/proc/${pid}/stat`, "utf8"); } catch (e) { if (e.code === "ENOENT" || e.code === "ESRCH") return null; throw e; }
+  // The command name sits in parentheses and may hold anything, so the fields are counted from the LAST ")".
+  const f = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+  const ppid = Number(f[1]), ticks = Number(f[19]);
+  if (!Number.isFinite(ppid) || !Number.isFinite(ticks)) throw new Error(`cannot parse /proc/${pid}/stat`);
+  const btime = Number((readFileSync("/proc/stat", "utf8").match(/^btime\s+(\d+)/m) || [])[1]);
+  if (!Number.isFinite(btime)) throw new Error("cannot read the boot time from /proc/stat");
+  const hz = Number(String(run("getconf", ["CLK_TCK"], { encoding: "utf8", timeout: 5000, windowsHide: true }).stdout || "").trim()) || 100;
+  const cmd = readFileSync(`/proc/${pid}/cmdline`, "utf8").split("\0").filter(Boolean).join(" ");
+  return { startMs: btime * 1000 + Math.round(ticks * 1000 / hz), cmd, ppid };
+}
+
+/**
+ * listenerPids: the pids that listen on a TCP port: [] when nothing does, 0 for a listener the system cannot name an
+ * owner for (the shape of the incident: a dead or stuck process whose socket the driver still holds). win32 asks
+ * Get-NetTCPConnection (the sockets with no remote end), linux `ss -ltnp`. Throws when it cannot ask.
+ */
+export function listenerPids(port, { platform = process.platform, run = spawnSync } = {}) {
+  if (platform === "win32") {
+    // By port alone, keeping the sockets with no remote end: `-State Listen` matched nothing for a live listener on a current Windows
+    // 11 build (the State column comes back empty), which would read as "no listener" and let a foreign holder look like a ghost.
+    // No socket at all is an ObjectNotFound error of the cmdlet (exit 1 even when silenced); any other error stays an error.
+    const out = psOut(run("powershell.exe", psArgs(`try { Get-NetTCPConnection -LocalPort ${Number(port)} -ErrorAction Stop | Where-Object { $_.RemotePort -eq 0 } | ForEach-Object { $_.OwningProcess } } catch { if ($_.CategoryInfo.Category -ne 'ObjectNotFound') { throw } }; exit 0`), { encoding: "utf8", timeout: PS_TIMEOUT_MS, windowsHide: true }));
+    return out.split(/\s+/).filter(Boolean).map(Number).filter(Number.isInteger);
+  }
+  const r = run("ss", ["-ltnp"], { encoding: "utf8", timeout: PS_TIMEOUT_MS, windowsHide: true });
+  if (!r || r.error || r.status !== 0) throw new Error(`ss did not answer (${r && r.error ? r.error.message : "exit " + (r && r.status)})`);
+  const pids = [];
+  for (const line of String(r.stdout || "").split("\n")) {
+    const cols = line.trim().split(/\s+/);
+    if (!/^LISTEN$/i.test(cols[0]) || !(cols[3] || "").endsWith(":" + port)) continue;
+    const ids = [...line.matchAll(/pid=(\d+)/g)].map((m) => Number(m[1]));
+    if (ids.length) pids.push(...ids); else pids.push(0);
+  }
+  return pids;
+}
+
+/**
+ * killProcessTree: end pid and everything it started. win32 `taskkill /T /F /PID`; posix SIGKILL to the process group
+ * (a detached launch leads its own), else to the pid. A process that is already gone is not an error.
+ */
+export function killProcessTree(pid, { platform = process.platform, run = spawnSync, kill = process.kill.bind(process) } = {}) {
+  if (platform === "win32") {
+    const r = run("taskkill", ["/T", "/F", "/PID", String(pid)], { encoding: "utf8", timeout: PS_TIMEOUT_MS, windowsHide: true });
+    // 128: no such process.
+    if (!r || r.error || (r.status !== 0 && r.status !== 128)) throw new Error(`taskkill failed (${r && r.error ? r.error.message : "exit " + (r && r.status)})`);
+    return;
+  }
+  try { kill(-pid, "SIGKILL"); return; } catch (e) { if (e.code !== "ESRCH" && e.code !== "EPERM") throw e; }
+  try { kill(pid, "SIGKILL"); } catch (e) { if (e.code !== "ESRCH") throw e; }
+}
+
+const norm = (s) => String(s).replace(/\\/g, "/").toLowerCase();
+
+/**
+ * wedgedProofGap: why a live process is NOT shown to be the instance this marker recorded ("" = shown), from the OS alone:
+ * it began no later than the marker plus the slack (else the pid was recycled), and its command line is ComfyUI's main.py
+ * with this instance's --port and --output-directory.
+ */
+export function wedgedProofGap({ marker, info, port, outputDir }) {
+  if (!info) return `process ${marker.pid} does not exist`;
+  if (marker.startedAt > 0 && Number.isFinite(info.startMs) && info.startMs > marker.startedAt + START_SLACK_MS) {
+    return `process ${marker.pid} began after the launch marker was written, so the pid was recycled`;
+  }
+  const cmd = norm(info.cmd);
+  if (!/(^|[\s"'/])main\.py($|[\s"'])/.test(cmd)) return `process ${marker.pid} is not running main.py`;
+  if (!new RegExp(`--port[ =]["']?${Number(port)}(["']|\\s|$)`).test(cmd)) return `process ${marker.pid} does not run with --port ${port}`;
+  if (!outputDir || !cmd.includes(norm(outputDir))) return `process ${marker.pid} does not run with --output-directory ${outputDir}`;
+  return "";
 }

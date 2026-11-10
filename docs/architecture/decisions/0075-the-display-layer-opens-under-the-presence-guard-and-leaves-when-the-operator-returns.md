@@ -166,3 +166,12 @@ Reading the code before opening it found five gaps, any of which would have turn
 `gpu_display_cap_pct` of its VRAM (default 60, the desktop's own use included) at any presence, for a request that
 declares its footprint, and never while the key is 0 ([ADR 0039](0039-a-held-card-is-a-place-in-line.md), amendment
 2026-10-12). The first gap above ("one key with two readers") describes the code before that change.
+
+## Amendment 2026-11-07 (the card allocator reads presence again, for its idle gate)
+
+The 2026-10-12 amendment's "one reader again" no longer holds. The card allocator reads the presence probe too, for
+the operator's 2026-11-07 rule that the display card takes jobs only while it is idle ([ADR 0039](0039-a-held-card-is-a-place-in-line.md),
+amendment 2026-11-07). The two readers differ on the unset key on purpose: the twin guards here read unset as
+`present` (the card never offered to the display layer), the allocator reads it as `auto` (`Config.AllocatorPresenceMode`:
+the console locked, or the operator idle with nothing fullscreen), because the operator's rule names idleness, not a
+switch he has to flip. `present` and `away` mean the same to both.

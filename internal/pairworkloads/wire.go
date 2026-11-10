@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/dmmdea/offload-harness/internal/callscope"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/ledger"
@@ -79,6 +80,12 @@ func (e *Emitter) SetWireHeaders(h http.Header) {
 	}
 	if c := ledger.CleanClass(class); c != "" {
 		h.Set(core.RunClassHeader, c)
+	}
+	// The caller scope this process resolved at load (internal/callscope), only when it is a known one: a node
+	// that admits only some scopes reads a missing header as unknown and refuses it, which is the fail-closed
+	// direction.
+	if s, ok := callscope.Process(); ok && s.Known() {
+		h.Set(core.ScopeHeader, s.Name)
 	}
 }
 
