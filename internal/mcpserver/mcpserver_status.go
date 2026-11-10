@@ -47,6 +47,9 @@ func (s *Server) handleStatus(ctx context.Context, req *mcp.CallToolRequest) (*m
 	if note := s.staleBinaryNote(buildinfo.Version); note != "" {
 		payload["stale_binary"] = note
 	}
+	if note := s.cfg.staleConfigNote(); note != "" {
+		payload["stale_config"] = note
+	}
 	// The guard that reports a swapped binary says when it cannot: absent while it is watching.
 	if state := s.exe.guardState(); state != "" {
 		payload["stale_binary_guard"] = state
