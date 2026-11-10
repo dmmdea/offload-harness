@@ -597,9 +597,12 @@ if ($vendor -ne 'none') {
   }
 }
 $ramGB  = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
-# Free disk is measured on the INSTALL TARGET drive: models/binaries go under
-# $env:OFFLOAD_HOME (default $HOME\offload-stack), not necessarily where this script lives.
+# Free disk is measured on the INSTALL TARGET drive when OFFLOAD_HOME names it. With OFFLOAD_HOME unset,
+# install.ps1 picks a data volume itself (Get-InstallHomeChoice over `local-offload install volumes`: never the OS
+# drive when another fixed one exists), which this script cannot ask before the harness is built; the drive
+# measured here is then the profile drive, a FALLBACK, and the line says so instead of calling it the target.
 $installRoot = if ($env:OFFLOAD_HOME) { $env:OFFLOAD_HOME } else { $HOME }
+$targetNote = if ($env:OFFLOAD_HOME) { 'install target, from OFFLOAD_HOME' } else { 'the profile drive, a fallback: with OFFLOAD_HOME unset install.ps1 picks a data volume, so this is not necessarily the install target' }
 $targetDrive = (Split-Path -Qualifier $installRoot).TrimEnd(':')
 $diskGB = [math]::Round((Get-PSDrive -Name $targetDrive).Free / 1GB)
 
@@ -658,7 +661,7 @@ $unrecognizedNvidiaWarning = Get-UnrecognizedNvidiaWarning -Vendor $vendor -GpuA
 if ($unrecognizedNvidiaWarning) { $warnings += $unrecognizedNvidiaWarning }
 
 if ($ramGB -lt 32) { $warnings += "RAM ${ramGB}GB < 32GB: install only the E4B workhorse tier (set OFFLOAD_WITH_FAMILY=0)" }
-if ($diskGB -lt 25) { Write-Error "Only ${diskGB}GB free on ${targetDrive}: (install target drive); need >=25GB for models + binaries."; exit 1 }
+if ($diskGB -lt 25) { Write-Error "Only ${diskGB}GB free on ${targetDrive}: ($targetNote); need >=25GB for models + binaries."; exit 1 }
 $amdAdrenalin = $null
 if ($vendor -eq 'amd') {
   $warnings += 'AMD path uses the llama.cpp VULKAN backend (native Windows). ROCm/HIP is NOT supported on RDNA3 iGPUs (gfx1103) and WSL2 cannot accelerate AMD iGPUs - do not attempt either.'
@@ -671,7 +674,7 @@ if ($vendor -eq 'amd') {
 }
 
 Write-Host "OS: windows | GPUs: $gpuNames"
-Write-Host "Vendor: $vendor | Arch: $gpuArch | GPUs(discrete): $gpuCount | Backend: $backend | Dedicated VRAM: ${vramGB}GB | RAM: ${ramGB}GB (tier=$ramTier) | Free disk: ${diskGB}GB on ${targetDrive}: (install target)"
+Write-Host "Vendor: $vendor | Arch: $gpuArch | GPUs(discrete): $gpuCount | Backend: $backend | Dedicated VRAM: ${vramGB}GB | RAM: ${ramGB}GB (tier=$ramTier) | Free disk: ${diskGB}GB on ${targetDrive}: ($targetNote)"
 Write-Host "Profile: $profileId$(if ($bigRam) { ' (big_ram)' } else { '' })"
 Write-Host "Accelerators: $(if ($accelerators.Count) { $accelerators -join ', ' } else { 'none' })"
 $warnings | ForEach-Object { Write-Host "WARN: $_" }

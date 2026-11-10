@@ -939,6 +939,7 @@ live-captured log lines, cosine). Go-side config round-tripping is covered by
 - Adding a profile without its self-test assertion.
 - Expecting the `ampere-8` band to start at 8 GB. It starts at 7.
 - Treating the profile string as fleet routing input. It is not.
+- Expecting an upgrade to add KV slot retention (`--slot-save-path`) to a yaml that predates it. Step 6's re-run check is `install render --state`, which compares the file with what THIS install would render (the render reads the live llama build from `installed.json`): an installer-rendered, unedited yaml that lacks the flag on a llama build at or above the `kvslot` floor reads `STALE(params.llama_bin, params.slot_save)` and is re-rendered, the old file kept beside it. A yaml that was edited by hand reads HAND-EDITED and is KEPT with a WARN (re-rendering would discard the edit), and one that predates stamping reads UNSTAMPED and is kept (only the content probes ahead of the check can force a re-render of it). For a HAND-EDITED yaml set `OFFLOAD_RERENDER=1` and re-run the installer: it renders fresh and keeps the old file as `llama-swap.yaml.prev-<stamp>`. For an UNSTAMPED one move `llama-swap.yaml` aside and re-run the installer, or add `--slot-save-path <home>/kvslots` to the single-slot seats by hand. `local-offload audit-yaml --against-render` names the same verdict without changing anything.
 
 ## Source map
 
