@@ -1499,8 +1499,12 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         $maxOk = $null
         foreach ($sc in @(8192, 16384, 32768)) {
           $rs = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $sc -KvType $sweepKv -FlashAttn $cnFa -WarmDecode -TimeoutSec 240
-          $sweepRes += ,([ordered]@{ ctx = $sc; ok = [bool]$rs.ok; tps = $rs.tps })
-          if ($rs.ok) { $maxOk = $sc; LogOk "ctx_sweep: ctx=$sc ok ($(if ($null -ne $rs.tps) { "$($rs.tps) tok/s" } else { 'tps n/a' }))" }
+          # A size counts only when the load came up AND the warm decode produced tokens: the probe returns ok for a server that
+          # answered /health even when the decode after it failed, and a ctx that loads but cannot generate is not a ctx to promote to.
+          $sweepOk = [bool]$rs.ok -and ($null -ne $rs.tps)
+          $sweepRes += ,([ordered]@{ ctx = $sc; ok = $sweepOk; tps = $rs.tps })
+          if ($sweepOk) { $maxOk = $sc; LogOk "ctx_sweep: ctx=$sc ok ($($rs.tps) tok/s)" }
+          elseif ($rs.ok) { LogWarn "ctx_sweep: ctx=$sc loaded but did not generate ($($rs.detail)) - stopping the sweep"; break }
           else { LogWarn "ctx_sweep: ctx=$sc FAILED ($($rs.detail)) - stopping the sweep"; break }
         }
         $cn.ctx_sweep.results = [object[]]@($sweepRes)

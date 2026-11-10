@@ -976,6 +976,12 @@ func runGPUReserve(args []string) (retErr error) {
 	if e := wrapperUnloadEnv(context.Background(), cfg, lease.Devices()); e != "" {
 		cmd.Env = append(cmd.Env, e)
 	}
+	// The harness's own ComfyUI instance (comfy_instance) travels with the command, as it does with every media
+	// route: a runner started by hand under the lease then drives that instance, never the unkeyed one on 8188,
+	// which on a shared box is the owner's. A caller whose env already names an instance or an endpoint keeps it.
+	if os.Getenv("COMFY_INSTANCE") == "" && os.Getenv("COMFY_API") == "" {
+		cmd.Env = append(cmd.Env, cfg.ComfyInstanceEnv()...)
+	}
 	// A lease holds cards; it does not confine the command. A reservation that named or
 	// allocated its cards pins the command to them unless the command pins itself (see
 	// confineWrapped); a pin of its own (COMFY_CUDA_DEVICE, COMFY_CARD_UUID) that falls outside them is
