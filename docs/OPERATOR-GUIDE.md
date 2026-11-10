@@ -867,7 +867,7 @@ measured. Any failure defers with a typed class (`BAD_INPUT`, `LINT_ERRORS`, `CH
 **Binding the lane.** The installer's hyperframes step does this on a box with Node >= 22. It
 installs the newest HyperFrames release from npm into `<home>/hyperframes` (`npm install --ignore-scripts`, each tarball verified against the registry's integrity field), runs `npm audit signatures` (fatal on failure) and
 `browser ensure`, and writes three keys into a FRESH config. An existing config is never rewritten,
-so the installer prints the three keys instead. To bind by hand:
+so the installer prints the three keys instead. On Windows, a refresh that fails (registry or disk trouble) while the installed HyperFrames already meets the floor in `setup/floors.json` warns and keeps that install, which `npm audit signatures` still checks; any other failure of this step warns and leaves the lane unbound without stopping the install. To bind by hand:
 
 ```json
 "compose_script": "render/compose-hyperframes.mjs",

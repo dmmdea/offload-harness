@@ -24,10 +24,15 @@ if ($env:OFFLOAD_HARNESS_EXE -and (Test-Path $env:OFFLOAD_HARNESS_EXE)) {
 } else {
   $renderExe = Join-Path $work 'local-offload-render.exe'
   Push-Location (Split-Path -Parent $here)
+  # A cold module cache makes go print "go: downloading ..." to stderr, which 'Stop' turns into a throw on 5.1;
+  # capture on Continue and judge by the exit code (same as install.ps1).
+  $prevBuildEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   try {
-    $bo = & go build -o $renderExe . 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "cannot build the renderer under test: $($bo -join ' ')" }
-  } finally { Pop-Location }
+    $bo = @(& go build -o $renderExe . 2>&1 | ForEach-Object { "$_" })
+    $buildRc = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $prevBuildEap; Pop-Location }
+  if ($buildRc -ne 0) { throw "cannot build the renderer under test: $($bo -join ' ')" }
   $env:OFFLOAD_HARNESS_EXE = $renderExe
   Write-Host "renderer under test: $renderExe (built)"
 }
@@ -744,10 +749,13 @@ $seedExe = $env:OFFLOAD_HARNESS_EXE
 if (-not (Test-Path $seedExe)) {
   $seedExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-seed-parity-" + [guid]::NewGuid().ToString("N").Substring(0,8) + ".exe")
   Push-Location (Split-Path -Parent $here)
+  $prevBuildEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
   try {
-    $bo = & go build -o $seedExe . 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "cannot build the seed resolver under test: $($bo -join ' ')" }
-  } finally { Pop-Location }
+    $bo = @(& go build -o $seedExe . 2>&1 | ForEach-Object { "$_" })
+    $buildRc = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $prevBuildEap; Pop-Location }
+  if ($buildRc -ne 0) { throw "cannot build the seed resolver under test: $($bo -join ' ')" }
 }
 # A native command writing to stderr becomes a TERMINATING error under
 # $ErrorActionPreference = 'Stop' (this file sets it, and install.ps1 documents
