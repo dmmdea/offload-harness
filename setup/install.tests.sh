@@ -127,11 +127,15 @@ bash "$INSTALL" --help 2>&1 | grep -q -- "--llama-bin-eg2 DIR" \
 #        a dry run says what it would do. The live runs use the stub for the binary and a stub node too old for the
 #        compose lane, so nothing is installed and no package manager is started.
 mkdir -p "$TMP/nodebin"
+# The live runs connect to the listen port first and stop when something already answers there, so they name a port
+# nothing holds on this machine (a box that runs its own llama-swap on 11436 would otherwise stop every one of them).
+FREE_PORT=40000
+while (exec 3<>"/dev/tcp/127.0.0.1/$FREE_PORT") 2>/dev/null; do FREE_PORT=$((FREE_PORT + 1)); done
 printf '#!/usr/bin/env bash\necho v0.0.0\n' >"$TMP/nodebin/node"; chmod +x "$TMP/nodebin/node"
 # run_live PREFIX BACKEND: a real (not dry) run against PREFIX; sets OUT and RC.
 run_live() {
   local prefix="$1" backend="$2"
-  OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND="$backend" bash "$INSTALL" --bin "$STUB" --prefix "$prefix" --no-service --llama-bin "$TMP/llama" 2>&1)"
+  OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND="$backend" bash "$INSTALL" --bin "$STUB" --prefix "$prefix" --no-service --listen "127.0.0.1:$FREE_PORT" --llama-bin "$TMP/llama" 2>&1)"
   RC=$?
 }
 OLD_MANIFEST='{"profile":"old-tier","backend":"vulkan","accelerators":["coral"],"alt_backends":["cpu"],"install_date":"2026-01-01"}'
@@ -224,7 +228,7 @@ OUT="$(STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/svc4" --no
 
 # A live run stores the key in the config, keeps the other keys, and prints no value.
 mkdir -p "$TMP/live-key/etc"; printf '{"home":"/srv/x","keep":1}' >"$TMP/live-key/etc/config.json"
-OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-key" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" 2>&1)"; RC=$?
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-key" --no-service --listen "127.0.0.1:$FREE_PORT" --llama-bin "$TMP/llama" --token-file "$NODE_KEY" 2>&1)"; RC=$?
 if [ "$RC" -eq 0 ] \
   && [ "$(jq -r '.fleet_auth_token' "$TMP/live-key/etc/config.json" 2>/dev/null)" = "$NODE_KEY_VALUE" ] \
   && [ "$(jq -r '.keep' "$TMP/live-key/etc/config.json" 2>/dev/null)" = "1" ] \
@@ -240,7 +244,7 @@ fi
 
 # A token file with nothing in it is refused, not stored as an empty key.
 : >"$TMP/empty-key"
-OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-empty" --no-service --llama-bin "$TMP/llama" --token-file "$TMP/empty-key" 2>&1)"; RC=$?
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-empty" --no-service --listen "127.0.0.1:$FREE_PORT" --llama-bin "$TMP/llama" --token-file "$TMP/empty-key" 2>&1)"; RC=$?
 [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "empty" && [ ! -e "$TMP/live-empty/etc/config.json" ] \
   && pass "an empty --token-file is refused before anything is written" || fail "an empty --token-file is refused before anything is written" "rc=$RC: $OUT"
 
@@ -256,20 +260,20 @@ bash "$INSTALL" --help 2>&1 | grep -A2 -- "--token-file" | grep -q "fleet_auth_t
 export SUDO_LOG="$TMP/sudo-log"; : >"$SUDO_LOG"
 printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\n" "$*" >>"$SUDO_LOG"' >"$TMP/nodebin/sudo"; chmod +x "$TMP/nodebin/sudo"
 mkdir -p "$TMP/live-user/etc"; printf '{"home":"/srv/x"}' >"$TMP/live-user/etc/config.json"
-OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-user" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" --user svc-account 2>&1)"; RC=$?
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-user" --no-service --listen "127.0.0.1:$FREE_PORT" --llama-bin "$TMP/llama" --token-file "$NODE_KEY" --user svc-account 2>&1)"; RC=$?
 [ "$RC" -eq 0 ] && grep -q -- "chown svc-account $TMP/live-user/etc/config.json" "$SUDO_LOG" \
   && pass "the config that holds the key is handed to another service identity" || fail "the config that holds the key is handed to another service identity" "rc=$RC sudo=$(cat "$SUDO_LOG") out=$OUT"
 
 : >"$SUDO_LOG"
 mkdir -p "$TMP/live-self/etc"; printf '{"home":"/srv/x"}' >"$TMP/live-self/etc/config.json"
-OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-self" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" 2>&1)"; RC=$?
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-self" --no-service --listen "127.0.0.1:$FREE_PORT" --llama-bin "$TMP/llama" --token-file "$NODE_KEY" 2>&1)"; RC=$?
 [ "$RC" -eq 0 ] && ! grep -q "chown" "$SUDO_LOG" \
   && pass "the installing user's own config is not handed over" || fail "the installing user's own config is not handed over" "rc=$RC sudo=$(cat "$SUDO_LOG") out=$OUT"
 
 # A hand-over that fails is not left unsaid.
 printf '%s\n' '#!/usr/bin/env bash' 'case "$*" in *chown*) exit 1 ;; esac' >"$TMP/nodebin/sudo"
 mkdir -p "$TMP/live-fail/etc"; printf '{"home":"/srv/x"}' >"$TMP/live-fail/etc/config.json"
-OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-fail" --no-service --llama-bin "$TMP/llama" --token-file "$NODE_KEY" --user svc-account 2>&1)"; RC=$?
+OUT="$(PATH="$TMP/nodebin:$PATH" STUB_BACKEND=cuda bash "$INSTALL" --bin "$STUB" --prefix "$TMP/live-fail" --no-service --listen "127.0.0.1:$FREE_PORT" --llama-bin "$TMP/llama" --token-file "$NODE_KEY" --user svc-account 2>&1)"; RC=$?
 [ "$RC" -ne 0 ] && printf '%s' "$OUT" | grep -q "could not hand" && printf '%s' "$OUT" | grep -q "svc-account" \
   && pass "a failed hand-over of the config stops the install, naming the account" || fail "a failed hand-over of the config stops the install, naming the account" "rc=$RC: $OUT"
 
