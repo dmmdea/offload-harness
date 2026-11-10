@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -58,6 +60,19 @@ func runAcceptance(args []string) error {
 	ctx := context.Background()
 	rep := acceptance.New()
 
+	// 0. The config the verdict is about. One that failed to load (or a named file that is not there) leaves every value below
+	//    on the defaults, and each render child would resolve its own config: say so, and start no child.
+	configBad := false
+	switch {
+	case src.LoadErr != nil:
+		configBad = true
+		rep.Add(acceptance.Check{Name: "config", Status: acceptance.Fail,
+			Detail: src.Path + " " + config.LoadFailure(src.LoadErr) + ": " + src.LoadErr.Error()})
+	case src.Path != "" && src.NotFound:
+		configBad = true
+		rep.Add(acceptance.Check{Name: "config", Status: acceptance.Fail, Detail: src.Path + ": file not found"})
+	}
+
 	// 1. The GPU lease: machine-wide by design, and the single most common way a
 	//    correctly-installed node still cannot execute anything.
 	if dir, err := gpulease.LeaseDir(cfg.GPULockPath, cfg.StateDir); err != nil {
@@ -89,24 +104,51 @@ func runAcceptance(args []string) error {
 
 	// 3. The derived media routes. A route bound to a file that is not there is a
 	//    promise this node cannot keep; one it never bound is a legitimate machine.
+	//    With --only, a route no requested group uses is out of scope: it is a SKIP, not a failure of the groups asked for.
+	scoped := "out of scope (--only " + *only + ")"
 	routes := mediacap.Routes(cfg)
 	if missing := mediacap.Missing(routes); len(missing) == 0 {
 		rep.Add(acceptance.Check{Name: "media routes", Status: acceptance.Pass,
 			Detail: fmt.Sprintf("%d route(s) derived; none bound to a missing file", len(routes))})
 	} else {
 		for _, r := range missing {
+			if doRender && !ropts.wantsRoute(r.Name) {
+				rep.Add(acceptance.Check{Name: "media route " + r.Name, Status: acceptance.Skip, Detail: scoped + ": " + r.Detail})
+				continue
+			}
 			rep.Add(acceptance.Check{Name: "media route " + r.Name, Status: acceptance.Fail, Detail: r.Detail})
 		}
 	}
 
 	// 4. The serving layer: every configured alias must be live, or the tasks that
-	//    route to it defer at call time.
-	rep.Add(aliasCheck2(ctx, cfg))
+	//    route to it defer at call time. A scoped run asked about named groups only; each group's own call proves its seat.
+	if ropts.only != nil {
+		rep.Add(acceptance.Check{Name: "model aliases live", Status: acceptance.Skip, Detail: scoped})
+	} else {
+		rep.Add(aliasCheck2(ctx, cfg))
+	}
 
 	// 5. --render: one real call per bound route through the real verbs (acceptance_render.go).
 	//    A node is installed only when every route it binds has produced real output.
-	if doRender {
+	if doRender && !configBad {
 		rep.Add(runRender(ctx, cfg, src, routes, ropts)...)
+	}
+
+	// What was exercised: the render rows that passed ("render outputs" only names the folder).
+	rendered, notBound := 0, 0
+	for _, c := range rep.Checks {
+		switch {
+		case c.Name == "render outputs" || !strings.HasPrefix(c.Name, "render "):
+		case c.Status == acceptance.Pass:
+			rendered++
+		case c.Status == acceptance.Skip:
+			notBound++
+		}
+	}
+	// A scoped run in which every requested group was skipped proved nothing: it is not READY.
+	nothing := ropts.only != nil && rep.Ready && rendered == 0
+	if nothing {
+		rep.Ready = false
 	}
 
 	if *asJSON {
@@ -115,6 +157,9 @@ func runAcceptance(args []string) error {
 			return err
 		}
 		fmt.Println(string(b))
+		if nothing {
+			return errors.New("nothing was exercised: every requested group was skipped")
+		}
 		if !rep.Ready {
 			return fmt.Errorf("%d acceptance check(s) failed", len(rep.Failures()))
 		}
@@ -128,11 +173,19 @@ func runAcceptance(args []string) error {
 		fmt.Fprintf(w, "%s\t%s\t%s\n", c.Status, c.Name, c.Detail)
 	}
 	_ = w.Flush()
+	if nothing {
+		fmt.Println("\nNOTHING EXERCISED — every requested group was skipped (see the SKIP rows above for why).")
+		return errors.New("nothing was exercised: every requested group was skipped")
+	}
 	if !rep.Ready {
 		fmt.Printf("\nNOT READY — %d check(s) failed. This node should not be handed work until they pass.\n", len(rep.Failures()))
 		return fmt.Errorf("%d acceptance check(s) failed", len(rep.Failures()))
 	}
-	fmt.Println("\nREADY — every bound capability was exercised as this identity.")
+	if !doRender {
+		fmt.Println("\nREADY — the lease and the interpreters ran as this identity; no route was rendered (pass --render).")
+		return nil
+	}
+	fmt.Printf("\nREADY — %d route group(s) rendered as this identity; %d not bound on this node.\n", rendered, notBound)
 	return nil
 }
 
