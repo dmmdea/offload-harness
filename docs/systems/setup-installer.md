@@ -38,7 +38,7 @@ Three scripts run in order, each ending with a machine-readable JSON line:
 3. **`selftest.ps1`** emits a receipt with verdict `pass | warn | fail`. On a Vulkan backend it
    also runs the **H3 canary suite** (`fa_q8kv`, `ctx_sweep`, `bench`, `swap_leak`, `embedder`,
    `whisper`; `moe_full_offload` stays in the receipt as a retired entry that is always `skipped`,
-   since the installer places no experts in host RAM) — promotion gates recorded in
+   since no tier promotes the 26B to full offload from a host-RAM floor (blackwell-16 ships a measured --n-cpu-moe 14)) — promotion gates recorded in
    `receipt.canaries`, never verdict-changing; `OFFLOAD_SELFTEST_CANARIES=1|0` forces them on/off
    anywhere.
 

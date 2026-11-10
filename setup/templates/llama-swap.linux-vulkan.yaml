@@ -4,7 +4,7 @@
 # `local-offload install render`, which substitutes the __CTX__ / __KV_K__ / __KV_V__ /
 # __FLASH_ATTN__ / __MOE_26B__ / __LLAMA_BIN__ / __MODELS__ / __NTHREADS__ / __LISTEN__
 # tokens from the detected tier and drops the 26B block entirely on a tier whose
-# include_26b is false (amd-gcn drops it; amd-rdna3 keeps it cpu-moe).
+# include_26b is false (amd-gcn drops it; amd-rdna3 keeps it card-resident (-ngl 99)).
 #
 # Added 2026-09-20: until then the ONLY Vulkan template was win-vulkan, so an AMD box
 # on Linux had a measured tier (amd-gcn, 2026-07-17) and no way to render it —

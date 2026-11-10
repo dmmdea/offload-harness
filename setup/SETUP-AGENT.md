@@ -83,7 +83,7 @@ The **`profile`** is the load-bearing new field: `install.ps1` keys the serving 
 vendor + arch + VRAM band + GPU count + RAM tier (the count is the offload targets: an AMD iGPU beside a
 discrete card is not a second GPU — an AM5 Ryzen desktop shows `AMD Radeon(TM) Graphics` next to its NVIDIA
 card and still bands by that card alone; the iGPU counts only when it is the box's only GPU; a heterogeneous NVIDIA pair → `dual-gpu`; RAM ≥
-~56 GB passes the RAM gate of the `cpu` tier's 26B; no tier with a card puts experts in host RAM, because RAM is overflow only). An unrecognized NVIDIA card falls back to an `ampere-*` band
+~56 GB passes the RAM gate of the `cpu` tier's 26B; no tier with a card parks EVERY expert in host RAM (RAM is overflow only); the one sanctioned spill is a measured partial `--n-cpu-moe N`, and blackwell-16 ships N=14 because its display card cannot hold the full 26B). An unrecognized NVIDIA card falls back to an `ampere-*` band
 by VRAM and **warns** — verify the template fits before relying on it. A profile id that `profiles.json` does not list (or none at all) renders the backend's off-matrix defaults: on CUDA that serves no 26B (no measurement says the card fits it, and RAM is overflow only), and a *fresh* `config.json` gets `escalation_model` and `reasoning_model` set to `""` to match, the outcome of every tier that drops the 26B. An existing `config.json` is never rewritten, so after re-running the installer over a yaml that 0.185.1 or earlier rendered for such a box (the re-run re-renders it without the 26B and without `--cpu-moe`), set those two keys to `""` by hand; `doctor` names them if you do not.
 
 Expected shapes:
@@ -106,7 +106,7 @@ Expected shapes:
 | Signal | Action |
 |---|---|
 | exit 0, `backend` + `profile` present | Proceed to Step 1. Remember `backend` and `profile`. |
-| `profile` is `blackwell-16` or `blackwell-8` | **Blackwell (sm_120).** Detect the installed CUDA and pick the build accordingly — see the [Blackwell note](#blackwell-sm_120--detect-the-installed-cuda-and-adapt-be-flexible) below. CUDA 13.x serves now (slower prefill); CUDA 12.8 is peak; the old 12.4 prebuilt won't run. Do not hard-require one version. |
+| `profile` is `blackwell-16` or `blackwell-8` | **Blackwell (sm_120).** Detect the installed CUDA and pick the build accordingly — see the [Blackwell note](#blackwell-sm_120--detect-the-installed-cuda-and-adapt-be-flexible) below. CUDA 13.x serves at full speed (b12110 measured on an RTX 5080, docs/tiers/reports/blackwell-16-node-h.md); CUDA 12.8 is optional; the old 12.4 prebuilt has no sm_120 and won't run. Do not hard-require one version. |
 | exit 1 + stderr `Only NGB free ... need >=25GB` | **STOP.** `disk_free_gb < 25` is a hard blocker. Ask the human to free disk on the install-target drive, then re-run. |
 | exit 1 + stderr `targets Windows` | Wrong OS. This runbook is Windows-only. Stop. |
 | `warnings[]` contains a `RAM ...< 32GB` note | Note it. You will set `OFFLOAD_WITH_FAMILY=0` in Step 1 (E4B workhorse only). |
@@ -129,7 +129,7 @@ projected per-profile serving choices — `selftest.ps1` measures and refines th
 | `blackwell-72` | #15 (RTX PRO 5000 72 GB; PRO 6000 96 GB) | **ALL-RESIDENT** (whole roster hot, no swap group, no ttl) | 128K | **f16** | full-GPU, resident |
 | `blackwell-48` | #14 (RTX PRO 5000 48 GB) | **ALL-RESIDENT** | 128K | **f16** | full-GPU, resident |
 | `blackwell-32` | #13 (RTX 5090 / RTX PRO 4500, 32 GB) | **ALL-RESIDENT** | 64K | q8_0 | full-GPU, resident |
-| `blackwell-16` | #1 (5060 Ti 16 GB) — MEASURED on <node-b> 2026-07-12..08-02 | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU — CUDA-13 serves (slower); 12.8 for peak |
+| `blackwell-16` | #1 (5060 Ti 16 GB) — MEASURED on <node-b> 2026-07-12..08-02 | `gemma4-26b-a4b` | 32K | q8_0 | `--n-cpu-moe 14 -ngl 999` (9.1 GB on the card, about 5 GB of experts in host RAM; full-GPU needs ~14.4 GB and spills on a display card, docs/tiers/reports/blackwell-16-node-h.md); CUDA-13 serves at full speed |
 | `blackwell-3x16` | #17 (3x 16 GB Blackwell; the 3-card reference workstation) | `gemma4-26b-a4b` + the vLLM agent seat | 128K (long twin 256K) | q8_0 | COMPOSITE (ADR 0052): also a complete `blackwell-16` and `blackwell-2x16`; placement picks the layer per task; device 1 is the display card and its layer ships dormant |
 | `volta-16` | #2 (V100 16 GB) | `gemma4-26b-a4b` | 32K | q8_0 | full-GPU |
 | `ampere-16` | 3090-class ≥12 GB (defensive) | `offload-e4b` (agent `qwen38-27b-agent` = Qwen3.8-27B UD-IQ3_S + embedded MTP head, `--ctx-size 49152`, `research`; 26B dropped) | 49K | q8_0 | 26B dropped — MEASURED 2026-09-04 on an A2 16 GB @ 40 W: 26B-A4B 1/8, 4B 8/8. SEAT RE-AUDITED 2026-09-16 (ADR 0047): the 27B+MTP beats the 4B 24/24 blind; `--ctx-size 49152` is the measured fit (14,410 MiB of 15,356, including the resident embedder) and a larger window aborts at load |
@@ -455,7 +455,7 @@ newer build takes this chapter's canaries again.
 | Canary | Proves | Does NOT prove | On fail |
 |---|---|---|---|
 | `fa_q8kv` | FA is genuinely ON (server log at `-lv 10`) and q8_0-KV text matches f16 at temp 0 (word overlap ≥ 0.80) on THIS gpu+driver | long-session stability at depth; other models | Stay on f16. `fa_confirmed:"off"` despite `-fa on` = the silent-disable mode — report it, do not force q8. |
-| `moe_full_offload` | RETIRED (0186 w4): always `status:"skipped"`. It trialled the 26B at `-ngl 99` against the `--cpu-moe` floor selftest used to fall back to; the installer places no experts in host RAM now (RAM is overflow only), so there is no floor to promote from and the trial could not run on any shipped tier. The key stays in the receipt so its shape does not change. | — | A 26B that does not fit the card is a tier failure with advice, not a canary. The only sanctioned expert placement in RAM is a MEASURED `--n-cpu-moe N` declared in the profile table (`n_cpu_moe` with `n_cpu_moe_max`). |
+| `moe_full_offload` | RETIRED (0186 w4): always `status:"skipped"`. It trialled the 26B at `-ngl 99` against the `--cpu-moe` floor selftest used to fall back to; no shipped tier promotes the 26B to full offload from a host-RAM floor, so the trial could not run; on blackwell-16 (shipped `--n-cpu-moe 14`) full offload is the placement that spills on a display card (17.0 tok/s measured), so there is nothing to promote to. The key stays in the receipt so its shape does not change. | — | A 26B that does not fit the card is a tier failure with advice, not a canary. The only sanctioned expert placement in RAM is a MEASURED `--n-cpu-moe N` declared in the profile table (`n_cpu_moe` with `n_cpu_moe_max`). |
 | `ctx_sweep` | the resident tier loads AND generates at 8/16/32K with the canary-chosen KV | quality at depth (SWA-1024 keeps KV modest; depth-quality is the model's own behavior) | The standing ctx probe/downshift result governs; serve the largest PASSING size. |
 | `bench` | pp512/tg128 on this exact build+driver (your regression baseline) | anything cross-machine | `tg < 8` = CPU-class → offload is broken; check FA state, device pin, and the Adrenalin warning before anything else. |
 | `swap_leak` | llama-swap evicts cleanly across a tier cycle (≤1 llama-server process after) | multi-hour TTL behavior on :11436 | Report; do not ship a leaking stack. |
@@ -869,11 +869,10 @@ Receipt schema (real fields):
 **`profile_measure` (H3 — measured-vs-projected).** selftest reads the active `profile` (from
 `installed.json`), pulls the PROJECTED serving params (`profiles.json`), then MEASURES on THIS box:
 does the projected ctx actually load without OOM (`ctx.measured_ctx_ok`, halving + retry if it
-OOMs → `downshifted:true`; the probe loads the resident model as the yaml serves it, so on a tier
-whose resident is the 26B it loads the card-resident 26B, which can OOM and downshift); per-tier
+OOMs → `downshifted:true`; the probe loads the resident model at the placement the installer renders, so on a tier
+whose resident is the 26B it loads the 26B at `--n-cpu-moe N -ngl 999` where the profile says `n_cpu_moe` (blackwell-16: 14), else card-resident, and can OOM and downshift); per-tier
 cold-swap latency (`cold_swap[]`); and whether q8_0 KV held. `moe26b` is retired and always
-`{applicable:false, src:"skipped"}`: the installer places no experts in host RAM, so there is no such
-decode number to take. The **`tuned`** block is the payload:
+`{applicable:false, src:"skipped"}`: selftest takes no 26B decode number at a host-RAM expert placement. Its load probes run the 26B at the shipped placement (`--n-cpu-moe N -ngl 999` on a tier that has one, blackwell-16: 14) and every other model at `-ngl 999`; the 26B placement sweep for that tier is in docs/tiers/reports/blackwell-16-node-h.md. The **`tuned`** block is the payload:
 `source:"measured"` means at least one value was measured on-device and should be applied OVER the
 projected profile; `source:"projected"` means nothing on this host could measure it (recorded
 honestly, never faked). Dual-GPU / Optane checks are marked `not-applicable-on-this-host` /

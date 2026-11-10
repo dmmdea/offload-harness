@@ -701,7 +701,7 @@ $receipt = [ordered]@{
       src           = 'not-attempted' # 'measured' | 'not-attempted'
       detail        = $null
     }
-    moe26b          = [ordered]@{ # step 3 (retired, 0186 w4): the installer places no experts in host RAM (INV-1), so there is no such decode number to take
+    moe26b          = [ordered]@{ # step 3 (retired, 0186 w4): no 26B host-RAM-expert decode number is taken; the load probes run the 26B at its shipped --n-cpu-moe N (blackwell-16: 14) but record no moe26b figure
       applicable    = $false      # always $false: no profile places every expert in RAM on a backend with a card
       installed     = $false      # the 26B gguf is on disk
       moe26b_tps    = $null       # always $null (the key stays so the receipt's shape does not change)
@@ -1264,9 +1264,8 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       }
     }
 
-    # 3. (retired, 0186 w4) The 26B --cpu-moe decode tok/s. The installer places no experts in host RAM
-    # (INV-1: the cards do the inference and RAM is overflow only), so there is no such placement to take a
-    # number from; the old probe launched a standalone 26B with its experts in RAM and recorded a figure for a
+    # 3. (retired, 0186 w4) The 26B host-RAM-expert decode tok/s. No decode number is taken at a host-RAM
+    # expert placement (the load probes run the 26B at the shipped --n-cpu-moe N, but record no moe26b figure); the old probe launched a standalone 26B with its experts in RAM and recorded a figure for a
     # placement the yaml does not serve. profile_measure.moe26b stays in the receipt (its shape is unchanged)
     # as installed + applicable $false + src 'skipped'.
     $moe26bId   = 'gemma4-26b-a4b'
@@ -1276,8 +1275,8 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
     $pm.moe26b.installed = $moe26bInstalled
     $pm.moe26b.applicable = $false
     $pm.moe26b.src = 'skipped'
-    $pm.moe26b.detail = 'no decode number is taken for the 26B with its experts in host RAM: the installer places none there (INV-1)'
-    Log "  26B host-RAM expert placement: not applicable (the installer places none)"
+    $pm.moe26b.detail = 'no decode number is taken for the 26B at a host-RAM expert placement: the load probes run it at the tier''s shipped placement (--n-cpu-moe N where the tier has one, blackwell-16: 14) but record no moe26b figure'
+    Log "  26B host-RAM expert placement: no decode number taken (the probes load the 26B at its shipped placement; moe26b stays retired)"
 
     # 4. Cold-swap time per installed tier (load-from-cold latency) - feeds the two-tier one-swap cost.
     if ($skipProbe) {
@@ -1370,10 +1369,10 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
   # Independent section (own try/catch; never changes the verdict rule). These canaries turn
   # the amd-rdna3 profile's SAFE FLOOR into evidence-backed promotions: each PASS authorizes
   # the installing agent to apply ONE config change per SETUP-AGENT.md (amd-rdna3 chapter) -
-  # ctx 16K->32K (ctx_sweep), f16->q8_0 KV (fa_q8kv). (moe_full_offload is retired: no host-RAM
-  # floor exists to promote from.) Nothing is auto-applied here. Default gate: vulkan backend;
+  # ctx 16K->32K (ctx_sweep), f16->q8_0 KV (fa_q8kv). (moe_full_offload is retired: no tier promotes the 26B
+  # to full offload from a host-RAM floor.) Nothing is auto-applied here. Default gate: vulkan backend;
   # OFFLOAD_SELFTEST_CANARIES=1 forces on any box, =0 forces off.
-  LogStep "H3 canaries: promotion gates (fa_q8kv / moe_full_offload / ctx_sweep / bench / swap_leak / embedder / whisper / vision)"
+  LogStep "H3 canaries: promotion gates (fa_q8kv / ctx_sweep / bench / swap_leak / embedder / whisper / vision; moe_full_offload is retired)"
   $cn = $receipt.canaries
   try {
     $canaryOn = $false
@@ -1459,12 +1458,12 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       }
 
       # (2) moe_full_offload - RETIRED (0186 w4). It was the upward mirror of the cpu-moe floor the selftest used
-      # to fall back to: trial the 26B at -ngl 99 and promote it over the host-RAM baseline. The installer places
-      # no experts in host RAM (INV-1: the cards do the inference and RAM is overflow only), so there is no floor
-      # to promote from, and the trial could not run on any shipped tier (the only tier with the 26B and a
+      # to fall back to: trial the 26B at -ngl 99 and promote it over the host-RAM baseline. No tier promotes the
+      # 26B to full offload from a host-RAM floor (RAM is overflow only; blackwell-16 ships a measured --n-cpu-moe 14, where
+      # full offload spills on a display card), so there is no floor to promote from, and the trial could not run on any shipped tier (the only tier with the 26B and a
       # non-gpu placement is the cpu tier, whose backend skipped it). The key stays in the receipt as 'skipped'
       # so its shape does not change.
-      $cn.moe_full_offload.detail = 'retired: the installer places no experts in host RAM (INV-1), so there is no host-RAM floor to promote from'
+      $cn.moe_full_offload.detail = 'retired: no tier promotes the 26B to full offload from a host-RAM floor; on blackwell-16 (shipped --n-cpu-moe 14) full offload spills on a display card (17.0 tok/s measured, docs/tiers/reports/blackwell-16-node-h.md)'
       LogWarn "moe_full_offload SKIPPED: $($cn.moe_full_offload.detail)"
 
       # (3) ctx_sweep - long-context SWA sweep 8K/16K/32K on the resident tier. KV type:
@@ -1915,7 +1914,7 @@ if ($pmf.optane.status -ne 'measured') {
 # J1 honesty: when the H3 promotion canaries did not run, no promotion (ctx/KV/26B
 # placement) is authorized - the floor stands and the receipt must say why.
 if (-not $receipt.canaries.ran) {
-  $d = "the H3 promotion canaries (fa_q8kv / moe_full_offload / ctx_sweep / bench / swap_leak / embedder): not run this pass ($($receipt.canaries.gate)) - no config promotion is authorized"
+  $d = "the H3 promotion canaries (fa_q8kv / ctx_sweep / bench / swap_leak / embedder; moe_full_offload is retired): not run this pass ($($receipt.canaries.gate)) - no config promotion is authorized"
   if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
 } else {
   # Individually skipped canaries prove nothing either - each lands its own line.

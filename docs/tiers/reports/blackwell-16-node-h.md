@@ -83,7 +83,7 @@ This retires the "CUDA-13 build serves Blackwell through a cuBLAS fallback, ~5.6
 | `--n-cpu-moe 8` | 1553 | 11563 | 3187 | 824 | 81.2 | 6.6 |
 | `--n-cpu-moe 14` | 1556 | 9109 | 5638 | 535 | 62.5 | 4.5 |
 
-Full GPU needs roughly 14.4 GB on the card, which a display card never has free while the desktop runs (the selftest saw 139 tok/s once at a near-empty card and 20 tok/s on the next run). `--n-cpu-moe 14` is the placement the tier ships from 0.207.2: it fits with 2.6 GB to spare under the heaviest desktop observed on this box (5.4 GB) and holds about 5 GB of experts in host RAM. N=8 fits only below a 4.5 GB desktop; N=4 only an empty card.
+Full GPU needs roughly 14.4 GB on the card, which a display card never has free while the desktop runs (the selftest saw 139 tok/s once at a near-empty card and 20 tok/s on the next run). `--n-cpu-moe 14` is the placement the tier ships from 0.207.2: it fits with 1794 MiB to spare under the heaviest desktop observed on this box (16303 MiB card - 9109 MiB placement - 5400 MiB desktop; the margin is 2.6 GB at the 4546 MiB desktop of the first table row) and holds about 5 GB of experts in host RAM. N=8 fits only below a 4.5 GB desktop; N=4 only an empty card.
 
 Qwen3.8-27B UD-IQ3_S at `-ngl 99`, ctx 32768, q8_0 KV: 12370 MiB on the card, 2103 free, pp 1347 tok/s, tg 59.4 tok/s, coherent with thinking. Not a tier seat on Windows (the tier's declared agent seat is the vLLM build, with the 26B agent entry as the fallback this box serves); recorded as a measured option.
 
