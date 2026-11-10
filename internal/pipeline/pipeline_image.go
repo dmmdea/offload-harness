@@ -528,10 +528,11 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		out = filepath.Join(p.cfg.MediaDir, "upscale-"+sha256hex(image + tasks.StableParamsKey(req.Params))[:8]+".png")
 	}
 	var outPath string
+	var sdcppGrant mediaGrant // the sd.cpp engine's grant: its declared host RAM is stated in the answer
 	if sdcppUpscale {
 		// upscale_engine sdcpp: sd-cli -M upscale, no ComfyUI (igpumedia.go). The size check below runs on its file too.
 		var dres *core.Result
-		if outPath, dres = p.runUpscaleSdcpp(ctx, req, &meta, start, image, out, w, h, scale); dres != nil {
+		if outPath, sdcppGrant, dres = p.runUpscaleSdcpp(ctx, req, &meta, start, image, out, w, h, scale); dres != nil {
 			return *dres
 		}
 	} else {
@@ -586,6 +587,7 @@ func (p *Pipeline) runUpscaleImage(ctx context.Context, req core.Request, meta c
 		// The resampler only meets a requested size; the model's own enlargement is not a resampler.
 		result["notes"] = []string{"method=" + paramStr(req.Params, "method") + " is accepted and ignored: no width, height or scale was requested, so no resample ran (the upscale model's own enlargement does not use it)"}
 	}
+	sdcppGrant.name(result) // the host RAM the sd.cpp engine declared; the ComfyUI engine's answer is unchanged
 	data, _ := json.Marshal(result)
 	p.record(req.Task, meta, 0)
 	return core.Result{OK: true, Data: data, Meta: meta}

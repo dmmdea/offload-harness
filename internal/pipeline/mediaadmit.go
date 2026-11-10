@@ -450,12 +450,26 @@ func (g mediaGrant) name(payload map[string]any) {
 	if len(g.Devices) > 0 {
 		payload["devices"] = g.Devices
 	}
-	if g.HostRAMDeclared {
-		payload["host_ram_declared_gib"] = round3(g.HostRAMGiB)
-		if g.HostRAMCommitGiB > 0 {
-			payload["host_ram_commit_declared_gib"] = round3(g.HostRAMCommitGiB)
+	if declared, commit := g.declaredGiB(); declared != nil {
+		payload["host_ram_declared_gib"] = *declared
+		if commit > 0 {
+			payload["host_ram_commit_declared_gib"] = commit
 		}
 	}
+}
+
+// declaredGiB is the host RAM the call declared as the answer states it (rounded the one way every answer rounds it): the touched figure
+// (nil = the call declared none, so the answer says nothing, a 0 being a figure and not "none") and the commit figure (0 = none stated).
+// name and the rows of an image batch (ImageBatchItem) both read it, so no answer words the figures twice.
+func (g mediaGrant) declaredGiB() (declared *float64, commit float64) {
+	if !g.HostRAMDeclared {
+		return nil, 0
+	}
+	d := round3(g.HostRAMGiB)
+	if g.HostRAMCommitGiB > 0 {
+		commit = round3(g.HostRAMCommitGiB)
+	}
+	return &d, commit
 }
 
 // launch applies the grant to a binding's launch profile: a call on a per-card instance is
