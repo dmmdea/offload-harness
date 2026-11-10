@@ -2294,7 +2294,14 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   below bites. The media admission reads them back (`Pipeline.calibratedRAM`) and **raises** a declaration to the measured
   resident figure once at least three runs exist (`hostPeakMinRuns`, chosen), for the image, generative edit (task `image-edit`), music and video routes; a card-only render of the image, edit or music route is recorded under its own `multicard` quant, apart from the single-card key. It only
   raises: the sampled tree can miss memory (a ComfyUI instance kept from an earlier lease and reused is not under the
-  runner that is sampled), and a render whose weights fit its card still declares 0. **The figure is not the all-time maximum**
+  runner that is sampled), and a render whose weights fit its card still declares 0. **The same runs state the commit** of a
+  declaration that stated none (`measuredCommit`): the private figure at the same percentile, so the call is judged against the
+  commit limit like any stated commit and not, as the touched figure standing in for a commit is, against physical RAM. A node
+  whose commit charge is high while its RAM is free (many idle processes) refused its own measured renders on that line: one
+  at 53.5 GiB of commit on 63.7 GiB of RAM with 27.9 GiB available deferred a 10 GiB render for twenty minutes, with 14 runs
+  of that render at 15.5 GiB private in its store. A private figure below the declared working set states nothing (it did not
+  see this load), a commit the estimate stated itself is left alone, and a key with fewer than three runs keeps the physical
+  line: its first runs on such a node need `gpu reserve --ram <GiB> --ram-commit <GiB>` around the call. **The figure is not the all-time maximum**
   (F56: one inflated run raised a family's declaration for good, until footprints.json was edited by hand): the store keeps the
   last twenty runs' host peaks of each key (`hostRecentRuns`, `host_recent` in the file) and the calibration reads their 90th
   percentile by nearest rank (`hostPeakPercentile`), so one outlier among ten or more runs is not the answer and a bad run
