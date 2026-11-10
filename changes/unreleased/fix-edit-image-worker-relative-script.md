@@ -1,5 +1,0 @@
-### Fixed - `edit-image` finds its worker when the image script path in the config is relative
-
-- **What was wrong.** `edit-image` took the worker (`edit_image.py`) from the directory of `imagegen_script` as written. On a box that keeps the relative default `render/comfy-generate.mjs` that gave `render\edit_image.py`, which python resolved against the caller's working directory, so every call from any other directory failed with `can't open file '<cwd>\render\edit_image.py'`. The comment claimed the path is absolute on configured boxes.
-- **What it does.** `imagegen_script` is resolved with `gpugen.ResolveScript` like every other runner (a relative path is taken against the executable's directory), and the worker is taken beside the resolved path. When it does not resolve, the worker is looked up as `render/edit_image.py` beside the executable, as it already was for a tier with no `imagegen_script`.
-- **Checks.** With `imagegen_script` set to `render/comfy-generate.mjs`, `local-offload edit-image` run from an unrelated directory resizes a 64x48 PNG to 32x24.
