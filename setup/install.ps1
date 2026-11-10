@@ -10,6 +10,8 @@
 # numbers a seat may need are FLOORS (the minimum build), and they live in setup/floors.json and nowhere else.
 #
 # Env overrides:  OFFLOAD_HOME (default $HOME\offload-stack) | OFFLOAD_WITH_FAMILY (default 1)
+#                 OFFLOAD_WITH_FORECAST=1 (opt-in: after the harness is built, run `local-offload install forecast` for a profile that
+#                 binds a forecast seat; needs uv and git on PATH, skips with a reason without them; off by default, torch is ~3 GB)
 #                 OFFLOAD_BACKEND (override detect.ps1: cuda|vulkan|cpu)
 #                 OFFLOAD_PROFILE / OFFLOAD_RAM_TIER / OFFLOAD_BIG_RAM (override the
 #                 detected serving profile — used by -RenderOnly and by testing a synthetic box)
@@ -2880,6 +2882,41 @@ if ($hfSkipWhy) {
 }
 
 # ---------------------------------------------------------------------------
+# Step 7c: the forecast lane's runtime (ADR 0098), OPT-IN. The seat is rendered and bound by the profile whatever
+# this step does; its venv, torch and weights are ~3 GB and optional, so they are built only when
+# OFFLOAD_WITH_FORECAST=1 (the closing summary says so when the seat is bound and the venv is absent). A skip or a
+# failed build never fails the install: the lane stays unbound at run time and `offload_forecast` forwards to a fleet node.
+# ---------------------------------------------------------------------------
+$forecastBound = $false
+if ($profileId -and (Test-Path $profilesJson)) {
+  try {
+    $fcRow = (Get-Content -Raw $profilesJson | ConvertFrom-Json).profiles.$profileId
+    $fcBind = Get-MediaSeatBindings -ProfileRow $fcRow
+    $forecastBound = [bool]($fcBind -and $fcBind.PSObject.Properties['forecast_model'])
+  } catch { $forecastBound = $false }
+}
+$forecastVenv = Join-Path (Join-Path $HOME_DIR 'forecast') 'venv'
+if ($env:OFFLOAD_WITH_FORECAST -eq '1') {
+  $fcSkipWhy = ''
+  if (-not $forecastBound) { $fcSkipWhy = "profile $(if ($profileId) { $profileId } else { '(none)' }) declares no forecast seat" }
+  elseif (-not (Get-Command uv -ErrorAction SilentlyContinue)) { $fcSkipWhy = 'uv is not on PATH (winget install astral-sh.uv)' }
+  elseif (-not (Get-Command git -ErrorAction SilentlyContinue)) { $fcSkipWhy = 'git is not on PATH' }
+  if ($fcSkipWhy) {
+    Write-Host "SKIP  forecast runtime (OFFLOAD_WITH_FORECAST=1): $fcSkipWhy" -ForegroundColor Yellow
+  } else {
+    Write-Host "DO    forecast runtime (install forecast --home $HOME_DIR --models $modelDir)" -ForegroundColor Cyan
+    $prevEapFc = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      & $harnessExe install forecast --home $HOME_DIR --models $modelDir 2>&1 | ForEach-Object { Write-Host "      $_" }
+      $fcRc = $LASTEXITCODE
+    } finally { $ErrorActionPreference = $prevEapFc }
+    if ($fcRc -eq 0) { Write-Host "OK    forecast runtime in $forecastVenv" -ForegroundColor Green }
+    else { Write-Host "WARN  forecast runtime: install forecast exited $fcRc; the seat stays bound without its runtime (re-run the same command to retry)" -ForegroundColor Yellow }
+  }
+}
+
+# ---------------------------------------------------------------------------
 # Step 8: harness config -> ~/.local-offload/config.json (no overwrite)
 # ---------------------------------------------------------------------------
 $cfgDir  = Join-Path $HOME '.local-offload'
@@ -3187,6 +3224,10 @@ if ($script:StagedComponents.Count -gt 0) {
 # Step 9: start command + JSON verdict
 # ---------------------------------------------------------------------------
 $agentExe = Join-Path $harnessDir 'local-agent.exe'
+if ($forecastBound -and -not (Test-Path -LiteralPath $forecastVenv)) {
+  Write-Host ""
+  Write-Host "NOTE  forecast seat is bound, its runtime is not installed (offload_forecast forwards to a fleet node until it is). Install it with: & '$harnessExe' install forecast --home '$HOME_DIR' --models '$modelDir'   (or re-run this installer with OFFLOAD_WITH_FORECAST=1)" -ForegroundColor Yellow
+}
 Write-Host ""
 Write-Host "Start the stack with:" -ForegroundColor White
 Write-Host "  & '$swapExe' --config '$yamlDest' --listen 127.0.0.1:11436" -ForegroundColor White

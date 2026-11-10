@@ -237,7 +237,7 @@ seed the **sdcpp engine** (J2): `imagegen_engine:"sdcpp"` with the Apache-2.0 Z-
 set, full paths carried via the `__OFFLOAD_HOME__` token that `Merge-ConfigSeed` expands at install
 time. The media leg itself (Step 5b: the newest complete sd.cpp win-vulkan zip + roster downloads) defaults
 on for `amd-*` profiles only; `OFFLOAD_WITH_MEDIA=1|0` forces it on/off anywhere and
-`OFFLOAD_MEDIA_EXTRAS=1` adds the SD1.5/SDXL extras. `selftest.ps1` gains the first **media leg**
+`OFFLOAD_MEDIA_EXTRAS=1` adds the SD1.5/SDXL extras. The forecast runtime (Step 7c: `local-offload install forecast --home <root> --models <root>\models`, about 3 GB, needs `uv` and `git`) is opt-in with `OFFLOAD_WITH_FORECAST=1` and is skipped with a one-line reason on a profile with no `forecast` seat or a box without those tools; without the switch the closing summary prints a `NOTE` with the command whenever the seat is bound and `<root>\forecast\venv` is absent. `install.sh` has no such leg (run the command by hand). `selftest.ps1` gains the first **media leg**
 (`receipt.media`): a fixed-prompt reference render (non-blank gate: sampled distinct-colors) plus a
 gpu-vae promotion trial mirroring the H3 canary pattern.
 

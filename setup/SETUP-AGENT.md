@@ -657,6 +657,7 @@ Two validated **non-bindings** (as load-bearing as the bindings):
 #   $env:OFFLOAD_HOME='C:\Users\<you>\offload-stack'   # default: $HOME\offload-stack
 #   $env:OFFLOAD_WITH_FAMILY='0'                        # RAM<32GB or to skip E2B+26B (~4.5GB vs ~21GB)
 #   $env:OFFLOAD_BACKEND='vulkan'                       # override detect (cuda|vulkan|cpu)
+#   $env:OFFLOAD_WITH_FORECAST='1'                    # also build the forecast runtime after the harness (see "Forecast lane"; needs uv + git)
 #   $env:OFFLOAD_DATA_HOME='D:\local-offload'           # where a FRESH config's `home` points (data: cache, ledger, media);
 #                                                       #   default: a directory on the data drive `install volumes --data` picks
 #   $env:OFFLOAD_ALLOW_OS_DATA='1'                      # keep that data on the OS drive on purpose (one-disk machine)
@@ -750,9 +751,11 @@ config up first).
 Optional runtime: a python venv with torch, the `timestral` package and the model weights, served by the tier's `forecast`
 media seat. Tiers with a seat: the 16 GB-and-up cards, `dual-gpu` and `ampere-16` (resident) and `ampere-8`, `blackwell-8`,
 `ampere-6` (swappable); the other tiers reach the model through the fleet and need none of this. It is NOT part of the
-installer's default steps and uses no card while installing (it never loads the model). It needs `uv` on PATH
+installer's default steps (opt in with `OFFLOAD_WITH_FORECAST=1`, below) and uses no card while installing (it never loads the model). It needs `uv` on PATH
 (`winget install astral-sh.uv`, or `curl -LsSf https://astral.sh/uv/install.sh | sh`) and about 3 GB of disk (the torch
-wheels, the venv and the 837 MB checkpoint).
+wheels, the venv and the checkpoint: about 837 MB in decimal megabytes for the file on disk; the 804 MiB in `profiles.json` and ADR 0098 is a different unit (binary MiB) and a different quantity, the weights resident on the card; the installer reads the exact byte count from the Hub at install time).
+
+With `OFFLOAD_WITH_FORECAST=1` the installer runs the command below itself, right after it builds the harness, for a profile that binds a `forecast` seat (`--home` is the install root, `--models` its `models` folder), and prints a one-line `SKIP` reason when `uv` or `git` is missing or the profile has no forecast seat. A failed build there is a warning, not a failed install. Without the switch, when the seat is bound and `<home>/forecast/venv` is absent, the closing summary prints a `NOTE` line with the exact command to run.
 
 ```powershell
 local-offload install forecast            # builds in the install root and prints it; --home / --models to relocate; --json prints one final result line
