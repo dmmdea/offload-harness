@@ -167,11 +167,15 @@ const hostPeakMaxRaise = 2.0
 //     the runtime's own baseline and, on a driver that charges card allocations to the process, the card's memory,
 //     neither of which the guard is for.
 //   - It is RESIDENT, not private, because a declaration is in RAM units and the touched half of the not-yet-loaded
-//     sum subtracts resident memory from it (gpulease.descendantsHeld). The private peak is recorded beside it for
-//     the commit question and not consumed here.
+//     sum subtracts resident memory from it (gpulease.descendantsHeld). The private peak is the COMMIT, and is stated
+//     beside it (measuredCommit).
 //
-// The unit that is still open is whether a declaration should ALSO cover the card memory a render's commit
-// carries; the commit term of the admission reads actual commit, so a lane already running is counted whole.
+// The same runs STATE THE COMMIT of a declaration that stated none (measuredCommit): the private bytes the render's
+// process tree was charged. A commit nobody stated is judged as the touched figure against physical RAM, a line that
+// refuses a render on a box whose commit charge is high while its RAM is free (measured: a node at 53.5 GiB of commit
+// on 63.7 GiB of RAM, 27.9 GiB available, deferred a 10 GiB render for twenty minutes; its own store held 14 runs of
+// that render at 15.5 GiB private). A measured commit is the caller's own figure, so it is judged where a stated one
+// is: against the commit limit.
 func (p *Pipeline) calibratedRAM(n hostneed.Need, k footKey) hostneed.Need {
 	if n.GiB <= 0 || k.task == "" {
 		return n
@@ -181,8 +185,11 @@ func (p *Pipeline) calibratedRAM(n hostneed.Need, k footKey) hostneed.Need {
 		return n
 	}
 	hp, ok := store.HostPeak(k.family, k.quant, k.task)
-	if !ok || hp.Runs < hostPeakMinRuns || hp.ResidentGiB <= n.GiB {
+	if !ok || hp.Runs < hostPeakMinRuns {
 		return n
+	}
+	if hp.ResidentGiB <= n.GiB {
+		return measuredCommit(n, hp)
 	}
 	// The figure is a high percentile of the last runs, not the all-time maximum (fleetnode.HostPeaks): one inflated run is
 	// not the declaration. And the raise is clamped (hostPeakMaxRaise).
@@ -195,9 +202,24 @@ func (p *Pipeline) calibratedRAM(n hostneed.Need, k footKey) hostneed.Need {
 	if runs == 0 {
 		runs = hp.Runs // a store written before the window existed: its maxima over its runs
 	}
-	return hostneed.Need{GiB: declared, Source: hostneed.SourceMeasured, CommitGiB: max(n.CommitGiB, declared), CommitStated: n.CommitStated,
+	return measuredCommit(hostneed.Need{GiB: declared, Source: hostneed.SourceMeasured, CommitGiB: max(n.CommitGiB, declared), CommitStated: n.CommitStated,
 		Detail: fmt.Sprintf("the resident memory of %s/%s renders measured %.1f GiB at the %dth percentile of the last %d runs (%d recorded, the largest %.1f GiB), above the %.1f GiB their model files add up to%s",
-			k.family, k.task, hp.ResidentGiB, fleetnode.HostPeakPercentile, runs, hp.Runs, hp.MaxResidentGiB, n.GiB, clamp)}
+			k.family, k.task, hp.ResidentGiB, fleetnode.HostPeakPercentile, runs, hp.Runs, hp.MaxResidentGiB, n.GiB, clamp)}, hp)
+}
+
+// measuredCommit states the commit of a declaration that stated none, from the runs calibratedRAM already holds enough of: the
+// private bytes the render's process tree was charged, at the store's percentile. Two limits keep a low reading from waving a
+// render through: a commit the estimate stated itself is left alone, and a private peak below the declared working set is no
+// measurement of this load (the sampled tree can miss a kept ComfyUI), so that declaration stays unstated and keeps the physical
+// line. The stated figure is therefore never below the touched figure that stood in for it. The sentence carries the figure and
+// no run count, so the once-per-figure note of an estimate does not become one line per render.
+func measuredCommit(n hostneed.Need, hp fleetnode.HostPeaks) hostneed.Need {
+	if n.CommitStated || n.GiB <= 0 || hp.PrivateGiB < n.GiB {
+		return n
+	}
+	n.CommitGiB, n.CommitStated = max(n.CommitGiB, hp.PrivateGiB), true
+	n.Detail += fmt.Sprintf("; the commit is stated from the same renders: %.1f GiB of private bytes at the %dth percentile of the recent runs", hp.PrivateGiB, fleetnode.HostPeakPercentile)
+	return n
 }
 
 // declaresHostRAM says the call declares host RAM for its lease (declaredLoad sizes it): the answer then states the figure, a 0 included.
