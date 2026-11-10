@@ -165,9 +165,26 @@ func (p *Pipeline) runRunGraph(ctx context.Context, req core.Request, meta core.
 		return p.deferGen(req, meta, start, len(req.Input), env.Code+": "+env.Detail)
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(env)
+	data, _ := json.Marshal(nameEnvelope(env, grant))
 	p.record(req.Task, meta, len(req.Input))
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// namedEnvelope is the runner's envelope as the answer carries it: the envelope's own keys, in the order they always had, then what the
+// call ran on and declared for its lease, worded as every media answer words them (the grant's Devices as mediaGrant.name states them, and
+// mediaGrant.declaredGiB, which name reads too). A call that holds no card pair and declared nothing adds nothing.
+type namedEnvelope struct {
+	rungraph.Envelope
+	Devices                  []string `json:"devices,omitempty"`
+	HostRAMDeclaredGiB       *float64 `json:"host_ram_declared_gib,omitempty"`
+	HostRAMCommitDeclaredGiB float64  `json:"host_ram_commit_declared_gib,omitempty"`
+}
+
+// nameEnvelope states the grant's cards and declared host RAM on the runner's envelope.
+func nameEnvelope(env rungraph.Envelope, grant mediaGrant) namedEnvelope {
+	n := namedEnvelope{Envelope: env, Devices: grant.Devices}
+	n.HostRAMDeclaredGiB, n.HostRAMCommitDeclaredGiB = grant.declaredGiB()
+	return n
 }
 
 // pipelineJobResult is the pipeline-job task family's wire result

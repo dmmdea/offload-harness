@@ -64,6 +64,12 @@ type ImageBatchItem struct {
 	// Devices are the two cards a batch on the card-only placement ran on (the lease ids, as the queued answer names them). Only a batch
 	// that held that pair carries them; every other item is byte-identical to what it was.
 	Devices []string `json:"devices,omitempty"`
+	// HostRAMDeclaredGiB and HostRAMCommitDeclaredGiB are the host RAM the lease this row rendered under declared, the keys the single image
+	// answer states them under (mediaGrant.declaredGiB). They sit on the row because a batch answer has no place of its own here (the
+	// call returns rows) and a batch run in chunks holds one lease per chunk, each with its own figure. The touched figure is a pointer so a
+	// 0 is stated (a card-only call on Linux declares 0); the commit figure is left out when the estimate stated none.
+	HostRAMDeclaredGiB       *float64 `json:"host_ram_declared_gib,omitempty"`
+	HostRAMCommitDeclaredGiB float64  `json:"host_ram_commit_declared_gib,omitempty"`
 }
 
 // tagLicense stamps a batch item with the rendering binding's family and license —
@@ -377,6 +383,8 @@ func (p *Pipeline) RunImageBatchPlaced(ctx context.Context, family, placement st
 		if len(grant.Devices) > 0 {
 			items[i].Devices = append([]string(nil), grant.Devices...)
 		}
+		// ...and the host RAM its one lease declared, on every row it rendered, exactly as the single answer states it.
+		items[i].HostRAMDeclaredGiB, items[i].HostRAMCommitDeclaredGiB = grant.declaredGiB()
 		// Refiner outcome onto the item (single-path result-key parity: with a
 		// refiner configured every item says refined true/false). Set BEFORE the
 		// ledger loop reads `items` so callers and records agree.

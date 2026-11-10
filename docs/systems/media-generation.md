@@ -1107,9 +1107,11 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
   lease they are the parent's two cards. A batch carries them on every item it rendered here, so the item `generate-image --batch` prints has them too. A call
   that did not hold the pair (the one-card lease, a pool that holds two cards, a named family without the key, `single`) adds no `devices`. The video, animate
   and music (audio-gen) answers carry `devices` the same way when their grant holds the pair.
-- *The finished answer states the host RAM it declared.* Every media door whose lease declares host RAM (generate-image on ComfyUI or sd.cpp, edit, inpaint, video on ComfyUI, animate, music) adds `host_ram_declared_gib` to its success answer: the touched figure the call declared for its lease, a `0` included (a card-only call on
+- *The finished answer states the host RAM it declared.* Every media door whose lease declares host RAM (generate-image on ComfyUI or sd.cpp, edit, inpaint, video on ComfyUI or sd.cpp, animate, music, run-graph) adds `host_ram_declared_gib` to its success answer: the touched figure the call declared for its lease, a `0` included (a card-only call on
   Linux declares 0, and the key is there to say so), and `host_ram_commit_declared_gib` when the estimate stated a commit. A door that declares nothing (upscale,
-  voice on a card) adds neither key.
+  voice on a card) adds neither key. Run-graph states them beside the runner's own envelope keys, which keep their order. An image batch states them on
+  every row it rendered, because the call returns rows and no answer of its own, and a batch run in chunks holds one lease per chunk, each with its own
+  figure; a row a remote node or a ticket rendered says nothing of the host's RAM.
 - *Under a parent lease* (`local-offload gpu reserve --devices <a>,<b> -- <command>`) the call runs inside it on both cards, if the lease holds exactly two
   non-display cards of this box; one card, the whole node and a lease that includes the display card are refused with the reason.
 - *The lane probe and the place-in-line keeper read the same named plan*, so a router sees a held card of the pair as a busy lane, and the differential
