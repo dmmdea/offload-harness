@@ -589,7 +589,7 @@ export function resolveUv(comfyPy, { platform = process.platform, env = process.
 const NO_PIP_RE = /No module named pip\b/;
 
 // torchIndexUrl: the PyTorch index the venv's torch build came from, read off its local version label
-// (`torch==2.15.0+cu134` gives .../whl/cu134), or null when torch is absent or carries no such label.
+// (a torch line ending in `+cu134` gives .../whl/cu134), or null when torch is absent or carries no such label.
 //
 // Off Windows a CUDA torch wheel depends on the CUDA runtime wheels (cuda-toolkit, nvidia-*), and the build of the same
 // number on PyPI can pin a different CUDA release than the one installed. Resolving the packs' lock against PyPI alone then
