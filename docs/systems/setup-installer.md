@@ -935,7 +935,11 @@ A re-run with the variables unset reads the four values back from the `# basis:`
 `<home>\llama-swap.yaml`, so it renders what the last run chose and the stale check does not drop it. The value `default`
 clears one. The installer prints one `OVERRIDE ...` line per setting in force. A new `config.json` gets
 `endpoint = http://127.0.0.1:<port>`; an existing one is changed only when `OFFLOAD_SWAP_PORT` is set (one line says so).
-`selftest.ps1` starts its transient swap on the installed yaml, so it inherits the start port.
+`selftest.ps1` does not inherit the start port. It starts its transient swap (port 18801) on a per-run copy of the
+installed yaml in the temp folder whose `startPort:` is 18820, so its children never take the child ports of the live
+stack's llama-swap, which numbers the same models from the installed start port. Before it starts, it probes every port
+of the span (18820 up, one per model that takes a `${PORT}`) with a TCP connect plus a bind check, and stops with the
+busy port named. The installed yaml is not touched, and the copy is removed at teardown.
 
 **Two probes (Windows).** On a box whose WSL runs in mirrored networking, WSL and Windows share the loopback port space,
 and a server inside WSL holds a port without showing in the Windows listener table. So the installer asks with a TCP
