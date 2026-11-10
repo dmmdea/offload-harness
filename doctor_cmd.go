@@ -33,7 +33,7 @@ func runDoctor(args []string) error {
 	// anything else is printed.
 	tainted := doctorConfigRow(src, os.Stdout)
 	doctorEnvShadowRow(src, os.Stdout)
-	err := doctorRunChecked(cfg, mediacap.RoutesChecked(cfg, mediacap.LiveNodeChecker(doctorComfyAPI(), 3*time.Second)), os.Stdout, liveDataReport(cfg))
+	err := doctorRunChecked(cfg, mediacap.RoutesChecked(cfg, mediacap.LiveNodeChecker(doctorComfyAPI(cfg), 3*time.Second)), os.Stdout, liveDataReport(cfg))
 	if err != nil {
 		return err
 	}
@@ -46,8 +46,13 @@ func runDoctor(args []string) error {
 // doctorComfyAPI is the ComfyUI endpoint doctor asks for its node classes: the one the
 // render runners use (COMFY_API, else ComfyUI's default port). doctor never starts
 // ComfyUI; when nothing answers there, the node classes are decided from
-// <comfy_dir>/custom_nodes on disk (mediacap.LiveNodeChecker).
-func doctorComfyAPI() string {
+// <comfy_dir>/custom_nodes on disk (mediacap.LiveNodeChecker). With comfy_instance set it is
+// that instance's endpoint, never 8188 (a box whose owner runs their own ComfyUI there) and
+// never an inherited COMFY_API, the same order the runners use.
+func doctorComfyAPI(cfg config.Config) string {
+	if api := cfg.ComfyInstanceEndpoint(); api != "" {
+		return api
+	}
 	if v := strings.TrimSpace(os.Getenv("COMFY_API")); v != "" {
 		return v
 	}

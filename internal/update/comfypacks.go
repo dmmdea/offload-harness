@@ -25,6 +25,7 @@ type ComfyPacksRun struct {
 	Resolve  bool // print the candidates and change nothing
 	Rollback bool
 	JSON     bool
+	Env      []string // appended after the process env, so it wins: config comfy_instance points the updater at the harness's own ComfyUI
 	Stdout   io.Writer
 	Stderr   io.Writer
 }
@@ -62,6 +63,7 @@ func RunComfyPacks(ctx context.Context, r ComfyPacksRun) int {
 	if r.ComfyDir != "" {
 		cmd.Env = append(cmd.Env, "COMFY_DIR="+r.ComfyDir)
 	}
+	cmd.Env = append(cmd.Env, r.Env...)
 	cmd.Stdout, cmd.Stderr = r.Stdout, r.Stderr
 	err := cmd.Run()
 	if err == nil {

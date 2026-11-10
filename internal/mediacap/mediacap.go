@@ -328,7 +328,7 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 		out = append(out, r)
 	}
 	if comfyUsed {
-		out = append(out, comfyDirRoute(cfg.ComfyDir))
+		out = append(out, comfyDirRoute(cfg.ComfyDir, cfg.ComfyInstanceName(), cfg.ComfyInstanceEndpoint()))
 	}
 	return out
 }
@@ -571,8 +571,10 @@ func ffprobeRoute(ffmpegPath string) Route {
 		Detail: "ffprobe not found next to ffmpeg_path=" + ffmpegPath + " or on PATH — offload_media probes and the music QA gate need it"}
 }
 
-// comfyDirRoute checks the ComfyUI install every comfy-backed route drives.
-func comfyDirRoute(dir string) Route {
+// comfyDirRoute checks the ComfyUI install every comfy-backed route drives. instance and api
+// are comfy_instance and its endpoint ("" when unset): the row names them, so an operator
+// sees which ComfyUI the harness talks to.
+func comfyDirRoute(dir, instance, api string) Route {
 	r := Route{Name: "comfyui", Engine: "runtime", Prereq: true}
 	switch fi, err := os.Stat(dir); {
 	case dir == "":
@@ -581,6 +583,9 @@ func comfyDirRoute(dir string) Route {
 		r.State, r.Detail = Configured, "comfy_dir="+dir
 	default:
 		r.State, r.Detail = BoundButMissing, "comfy_dir="+dir+" is not a directory on this machine"
+	}
+	if instance != "" && api != "" && dir != "" {
+		r.Detail += "; instance " + instance + " on " + api
 	}
 	return r
 }

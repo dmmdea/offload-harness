@@ -82,8 +82,16 @@ func imageModelFromConfig(cfg config.Config) imagegen.Model {
 // false); an un-pooled one now takes the pin like every other single-card route.
 //
 // Dynamic VRAM and the extra args are launch-wide and apply to every ComfyUI route.
+//
+// comfy_instance is launch-wide too: it names the harness's own ComfyUI instance and its
+// endpoint, so on a box whose owner runs their own ComfyUI on 8188 no route reaches it. Every
+// ComfyUI-backed route takes its launch from here, so this is the one place that applies it.
+// A card grant (mediaGrant.launch) and the multicard launch replace it with their own instance.
 func comfyLaunch(cfg config.Config, singleCard bool) imagegen.ComfyLaunch {
 	l := imagegen.ComfyLaunch{DynamicVRAM: cfg.ComfyDynamicVRAM, ExtraArgs: cfg.ComfyExtraArgs}
+	if api := cfg.ComfyInstanceEndpoint(); api != "" {
+		l.Instance, l.API = cfg.ComfyInstanceName(), api
+	}
 	if singleCard {
 		l.CudaDevice = strings.ReplaceAll(cfg.ComfyCudaDevice, " ", "")
 	}

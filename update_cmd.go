@@ -174,6 +174,7 @@ func runUpdateComfyPacks(cfg config.Config, comp, resolve, rollback string, dry,
 	code := update.RunComfyPacks(context.Background(), update.ComfyPacksRun{
 		Node: cfg.NodePath, Script: script, ComfyDir: cfg.ComfyDir,
 		DryRun: dry, Resolve: resolve != "", Rollback: rollback != "", JSON: asJSON,
+		Env:    cfg.ComfyInstanceEnv(),
 		Stdout: os.Stdout, Stderr: os.Stderr,
 	})
 	if code != 0 {

@@ -96,6 +96,10 @@ type ComfyLaunch struct {
 	// sets CUDA_VISIBLE_DEVICES to it). "" = not card-bound. A uuid pin replaces CudaDevice:
 	// an index counts in a different order, and the runner refuses a launch carrying both.
 	CardUUID string
+	// Instance is the name of the harness's own ComfyUI instance (COMFY_INSTANCE; config
+	// comfy_instance), with API its endpoint. "" = no named instance, exactly as before. A call
+	// on a card's instance clears it: that instance is keyed by the card.
+	Instance string
 }
 
 // Env renders the profile. COMFY_CUDA_DEVICE and COMFY_DYNAMIC_VRAM are ALWAYS set,
@@ -104,7 +108,8 @@ type ComfyLaunch struct {
 // entry per key). COMFY_EXTRA_ARGS is set only when bound, because inheriting it IS
 // the documented behaviour of an unbound box. COMFY_API and COMFY_CARD_UUID are set only
 // for a per-card instance (the default instance keeps the two-entry env it always had);
-// a card pin by uuid blanks the legacy index.
+// a card pin by uuid blanks the legacy index. COMFY_INSTANCE is set only when Instance is, and
+// comes last with COMFY_API, so it wins over a value inherited from the operator's shell.
 func (l ComfyLaunch) Env() []string {
 	cuda := l.CudaDevice
 	if l.CardUUID != "" {
@@ -119,6 +124,9 @@ func (l ComfyLaunch) Env() []string {
 	}
 	if l.CardUUID != "" {
 		env = append(env, "COMFY_CARD_UUID="+l.CardUUID)
+	}
+	if l.Instance != "" {
+		env = append(env, "COMFY_INSTANCE="+l.Instance)
 	}
 	return env
 }

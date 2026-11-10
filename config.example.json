@@ -78,6 +78,8 @@
   "imagegen_script": "",
   "node_path": "node",
   "comfy_dir": "C:/ComfyUI",
+  "comfy_instance": "",
+  "comfy_instance_port": 0,
   "comfy_cuda_device": "",
   "comfy_dynamic_vram": "",
   "comfy_extra_args": "",

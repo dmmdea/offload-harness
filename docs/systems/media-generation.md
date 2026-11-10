@@ -1712,6 +1712,48 @@ between the two 5060 Tis the B5:00.0 card is the operator's choice (2026-09-22) 
 far better (the 17:00.0 card, `cuda:1`, reached 82 °C under a 2.1 render). And `TestTripleBlackwellNeverSchedulesOntoTheDisplayCard` fails a tier that
 seeds a single-card ComfyUI route without a non-display pin.
 
+### A box whose owner runs their own ComfyUI (`comfy_instance`, `comfy_instance_port`)
+
+Some boxes are somebody's working PC: the owner runs their own ComfyUI on the default port 8188,
+with their own install and models, and the harness has a ComfyUI of its own (`comfy_dir`). The
+render runners talk to whatever answers on `127.0.0.1:8188` unless an instance key is set. Without
+one, a harness media call lands on the owner's ComfyUI whenever it is running: the runner reuses
+it, submits to it, and the post-run `/free` unloads its models.
+
+Set a name for the harness's own instance:
+
+```json
+"comfy_dir": "D:/ComfyUI",
+"comfy_instance": "harness",
+"comfy_instance_port": 8189
+```
+
+`comfy_instance` is 1 to 48 letters, digits, `-` or `_`. `comfy_instance_port` is optional: 0 or
+unset is 8189 (the runner's `COMFY_PORT_BASE` default); it must be 1024 to 65535 and never 8188.
+A port with no `comfy_instance` is a config error, because the runner keys an instance by its
+name. So is `comfy_cuda_device` beside `comfy_instance` (a named instance is never pinned by an
+index; the runner refuses the pair).
+
+With the key set, every ComfyUI-backed runner the harness starts gets `COMFY_INSTANCE=<name>` and
+`COMFY_API=http://127.0.0.1:<port>`: image generation and the image batch, inpaint, upscale,
+generative edit, video, animate, music and run-graph. The runner then launches its own instance on
+that port (own output, temp and database folders under `<comfy_dir>/instances/<name>`), and the
+post-run `/free`, `local-offload doctor`'s node-class check and `update --component comfy-packs`
+all use the same endpoint. The config wins over a `COMFY_INSTANCE` or `COMFY_API` in the process
+environment. 8188 is never contacted. `doctor` prints it on the `comfyui` row:
+`comfy_dir=D:/ComfyUI; instance harness on http://127.0.0.1:8189`.
+
+Two calls keep their own instance and the key does not apply to them. A call granted a card
+(per-card leases) runs on that card's instance, keyed by the card. The card-only (two-card)
+placement keys its own instance from the pair. Both launch on ports from `COMFY_PORT_BASE` up, so
+on a box that uses either, pick a `comfy_instance_port` outside that range, or move the range.
+Neither touches 8188.
+
+Without the key nothing changes: the default instance, the env a runner always had, and a
+`COMFY_INSTANCE` / `COMFY_API` in the operator's shell keeps working. The two environment
+variables are the only other way to get the same effect, and they do not reach an MCP session or a
+service that was configured before they were set.
+
 ### Per-card ComfyUI instances (plan P13a, render layer)
 
 One ComfyUI per card lets two media jobs run on two cards at once instead of queueing on one. The

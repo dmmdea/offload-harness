@@ -496,12 +496,13 @@ func (g mediaGrant) declaredGiB() (declared *float64, commit float64) {
 
 // launch applies the grant to a binding's launch profile: a call on a per-card instance is
 // pinned by the card's uuid at the instance's endpoint, and the legacy device index goes blank
-// (the runner refuses both).
+// (the runner refuses both). The instance is keyed by the card, so the configured one
+// (comfy_instance) and its endpoint do not apply: they are replaced here.
 func (g mediaGrant) launch(l imagegen.ComfyLaunch) imagegen.ComfyLaunch {
 	if g.Card == nil {
 		return l
 	}
-	l.CardUUID, l.API, l.CudaDevice = g.Card.UUID, g.API, ""
+	l.CardUUID, l.API, l.CudaDevice, l.Instance = g.Card.UUID, g.API, "", ""
 	return l
 }
 
