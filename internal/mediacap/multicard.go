@@ -36,8 +36,9 @@ type MulticardRow struct {
 	ComputeGiB, StorageGiB float64
 	// Measured: the row's host growth was read in a run that used the read-only loader.
 	Measured bool
-	// WindowsHostGiB and WindowsCommitGiB are what the ComfyUI process was measured to hold on a WINDOWS host during a render of this row: the
-	// working-set peak (the read-only map's file pages are resident while a plain loader copies the whole DiT to the card, and Windows counts
+	// WindowsHostGiB and WindowsCommitGiB are what the render's process tree was measured to hold on a WINDOWS host during a render of this row,
+	// read by the harness's own footprint sampler (gpulease.TreeMemory, every 500 ms; a slower poll of one process misses the instant the VAE
+	// decode's buffers land while the DiT is still committed): the working-set peak (the read-only map's file pages are resident while a plain loader copies the whole DiT to the card, and Windows counts
 	// them against Available until it trims them) and the private-commit peak (WDDM backs the card allocations with system commit). On Linux the
 	// same pages are clean file pages MemAvailable already counts, so a measured row declares 0 there; on Windows it declares these two figures,
 	// stated, when they are set; a row that carries none (0, 0) declares 0 on every host, as it did before these fields existed. The figures cover
@@ -75,7 +76,7 @@ var multicardRows = []MulticardRow{
 	{ID: "krea2/bf16", Route: "image", Family: "krea2", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16", DefaultClip: "qwen3vl_4b_bf16.safetensors",
 		UnetLoader: "distorch2", ResidentGiB: 11, ClipLoader: "plain", ComputeGiB: 13.2, StorageGiB: 13.1, Measured: true, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "flux3-klein/bf16", Route: "image", Family: "flux3-klein", Quant: "bf16", UnetMatch: `bf16.*\.safetensors$`, ClipMatch: "bf16",
-		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 13.5, StorageGiB: 7.0, Measured: true, WindowsHostGiB: 12, WindowsCommitGiB: 16, MaxPixels: 1572864, Packs: []string{"multigpu"}},
+		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 13.5, StorageGiB: 7.0, Measured: true, WindowsHostGiB: 13, WindowsCommitGiB: 19, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "flux3-klein/nvfp4", Route: "image", Family: "flux3-klein", Quant: "nvfp4", UnetMatch: `nvfp4.*\.safetensors$`, ClipMatch: "bf16",
 		UnetLoader: "plain", ClipLoader: "distorch2-host", ClipResidentGiB: 6, ComputeGiB: 12.5, StorageGiB: 6.5, MaxPixels: 1572864, Packs: []string{"multigpu"}},
 	{ID: "qwen-image-edit-2511/fp8mixed", Route: "edit", Family: "qwen-image-edit-2511", Quant: "fp8mixed", UnetMatch: `fp8mixed.*\.safetensors$`, ClipMatch: "fp8", DefaultClip: "qwen_2.5_vl_7b_fp8_scaled.safetensors",
