@@ -65,6 +65,7 @@ $TIER_SPEC = @(
 
 $script:swapProc  = $null
 $script:agentProc = $null
+$script:ProbeExpertSpill = 0   # N of --n-cpu-moe for the 26B probes (Get-ProbeExpertSpill); set once the profile is read
 
 # ---------------------------------------------------------------------------
 # Small helpers
@@ -497,6 +498,7 @@ function Get-ProjectedProfile {
     ctx_size      = [int]$p.ctx_size
     kv_type       = [string]$p.kv_type
     moe_26b       = [string]$p.moe_26b
+    n_cpu_moe     = $(if ($p.PSObject.Properties['n_cpu_moe']) { [int]$p.n_cpu_moe } else { 0 })
     flash_attn    = [string]$p.flash_attn
     resident_tier = [string]$p.resident_tier
     include_26b   = [bool]$p.include_26b
@@ -506,12 +508,25 @@ function Get-ProjectedProfile {
   }
 }
 
+# The N of the --n-cpu-moe flag the installer renders for the 26B on this profile, or 0 when the 26B is
+# not placed that way. It is the rule of Resolve-ProfileParams in install.ps1 (the __MOE_26B__ token):
+# the 26B must be kept (include_26b, and not dropped by a `min` RAM tier), moe_26b must be n_cpu_moe and
+# it must name an N. Every other placement (gpu, drop) returns 0: the probe loads exactly as before.
+function Get-ProbeExpertSpill {
+  param($Proj, [string]$RamTier)
+  if (-not $Proj) { return 0 }
+  if (-not $Proj.include_26b -or $Proj.moe_26b -ne 'n_cpu_moe' -or [int]$Proj.n_cpu_moe -le 0) { return 0 }
+  if ($RamTier -eq 'min') { return 0 }
+  return [int]$Proj.n_cpu_moe
+}
+
 # Load+serve a given model gguf on a standalone probe server at a specific ctx + KV type,
 # probe /health for readiness (records cold-load wall time), then OPTIONALLY run one warm
 # generation through it to measure decode tok/s, then tear it down. This is the H3 workhorse
 # for: the profile ctx-ceiling check (step 2), per-tier cold-swap time (step 4) and the canaries.
-# It NEVER touches the running swap/yaml (own port), and it never places experts in host RAM
-# (INV-1: the cards do the inference and RAM is overflow only; it has no -CpuMoe switch).
+# It NEVER touches the running swap/yaml (own port). It loads every model at -ngl 999, and the 26B also gets the
+# --n-cpu-moe N the installer renders for this tier (Get-ProbeExpertSpill; blackwell-16: 14); it never takes the
+# every-expert placement, and it has no switch for one.
 # Returns {ok=$bool; detail; cold_load_s; tps} (tps=$null unless -WarmDecode and it succeeds).
 #   -ModelFile   gguf filename under $modelDir
 #   -Ctx         --ctx-size to load at
@@ -545,6 +560,12 @@ function Invoke-ProbeLoad {
   $svArgs = New-Object System.Collections.Generic.List[string]
   $svArgs.AddRange([string[]]@('-m', $modelPath, '-c', "$Ctx"))
   if ($backend -ne 'cpu') { $svArgs.AddRange([string[]]@('-ngl', "$ngl")) }
+  # The 26B loads at the placement the installer renders for this tier (--n-cpu-moe N -ngl 999 where the
+  # profile says n_cpu_moe), not at full offload: a display card cannot hold that. Other models and other
+  # placements are unchanged.
+  $moe26bFile = ($TIER_SPEC | Where-Object { $_.id -eq 'gemma4-26b-a4b' } | Select-Object -First 1).file
+  $spillN = [int]$script:ProbeExpertSpill
+  if ($backend -ne 'cpu' -and $spillN -gt 0 -and $ModelFile -eq $moe26bFile) { $svArgs.AddRange([string[]]@('--n-cpu-moe', "$spillN")) }
   if ($FlashAttn -eq 'on' -and $backend -ne 'cpu') { $svArgs.AddRange([string[]]@('--flash-attn', 'on')) }
   $svArgs.AddRange([string[]]@('--cache-type-k', $KvType, '--cache-type-v', $KvType,
                              '--jinja', '--no-webui', '--parallel', '1',
@@ -598,6 +619,7 @@ function Invoke-ProbeLoad {
     $tps = $null
     $genText = ''
     $detail = "loaded+healthy at ctx=$Ctx kv=$KvType on a standalone probe server"
+    if ($backend -ne 'cpu' -and $spillN -gt 0 -and $ModelFile -eq $moe26bFile) { $detail = "$detail (26B at --n-cpu-moe $spillN, the shipped placement)" }
     if ($WarmDecode) {
       # One warm generation directly against the probe server's OpenAI endpoint; time the decode.
       $body = @{ model = 'probe'; messages = @(@{ role = 'user'; content = $GenPrompt });
@@ -1157,6 +1179,8 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       $pm.projected.resident_tier = $proj.resident_tier
       $pm.projected.include_26b   = $proj.include_26b
       $pm.projected.dual_resident = $proj.dual_resident
+      $script:ProbeExpertSpill = Get-ProbeExpertSpill -Proj $proj -RamTier $active.ram_tier
+      if ($script:ProbeExpertSpill -gt 0) { Log ("  26B probes load at the shipped placement: --n-cpu-moe {0} -ngl 999" -f $script:ProbeExpertSpill) }
       LogOk ("profile={0} (src={1}, ram_tier={2}) | PROJECTED ctx={3} kv={4} moe_26b={5} resident={6}" -f `
              $active.profile, $active.profile_src, $active.ram_tier, $proj.ctx_size, $proj.kv_type, $proj.moe_26b, $proj.resident_tier)
     } else {
@@ -1196,10 +1220,10 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       $kv = $proj.kv_type
       $fa = $proj.flash_attn
       $tryCtx = $proj.ctx_size
-      # The probe loads the resident model as the yaml serves it: no expert-placement flag for any model (INV-1).
-      # On a tier whose resident is the 26B that means the card-resident 26B at the projected ctx, which can OOM
-      # and take the downshift path below; before 0186 w4 this probe launched the 26B with its experts in RAM
-      # and recorded "ctx MEASURED ok" for a placement the yaml does not serve.
+      # The probe loads the resident model at the placement the installer renders for this tier (Invoke-ProbeLoad):
+      # the 26B at --n-cpu-moe N -ngl 999 where the profile says n_cpu_moe (blackwell-16: 14), at -ngl 999 with no
+      # expert flag where it says gpu, and every other model at -ngl 999. An OOM here therefore means the shipped
+      # placement does not fit, and the downshift below is advice about the ctx the yaml actually serves.
       LogStep ("  ctx probe: loading {0} at projected ctx={1} kv={2}" -f $residentId, $tryCtx, $kv)
       $r1 = Invoke-ProbeLoad -ModelFile $residentSpec.file -Ctx $tryCtx -KvType $kv -FlashAttn $fa -TimeoutSec 180
       if ($r1.ok) {
@@ -1261,7 +1285,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
     } else {
       LogStep "  cold-swap timing per installed tier (cold load-from-disk latency)"
       foreach ($tier in $installedTiers) {
-        # Every tier loads plain, as the yaml serves it (the 26B on the card: INV-1) - it just needs to
+        # Every tier loads as the yaml serves it (the 26B with its shipped --n-cpu-moe N where the tier has one) - it just needs to
         # load to time the cold swap, we don't decode here.
         $kvForTier = if ($proj) { $proj.kv_type } else { 'q8_0' }
         $faForTier = if ($proj) { $proj.flash_attn } else { 'on' }
@@ -1489,7 +1513,9 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         # A bounded child, not a pipe: this is the one call here with no timeout of its own, and a hung driver would
         # hang the whole selftest on the owner's display adapter.
         $benchOut = Join-Path $env:TEMP ("offload-selftest-bench-{0}.json" -f $PID)
-        $benchArgs = (@('-m', (Join-Path $modelDir $cnResidentSpec.file), '-p', '512', '-n', '128', '-o', 'json') |
+        $benchList = @('-m', (Join-Path $modelDir $cnResidentSpec.file), '-p', '512', '-n', '128', '-o', 'json')
+        if ($backend -ne 'cpu' -and [int]$script:ProbeExpertSpill -gt 0 -and $cnResidentSpec.id -eq 'gemma4-26b-a4b') { $benchList += @('--n-cpu-moe', "$($script:ProbeExpertSpill)") }
+        $benchArgs = ($benchList |
                        ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
         $benchProc = Start-Process -FilePath $benchExe -ArgumentList $benchArgs -PassThru -NoNewWindow `
                        -RedirectStandardOutput $benchOut -RedirectStandardError "$benchOut.err"
