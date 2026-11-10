@@ -158,8 +158,9 @@ func holderOf(l Info) holderKey {
 	return holderKey{pid: l.PID}
 }
 
-// heldOf is what the processes of a lease's job hold right now: below its holder (heldLoad), or, for a tree-orphan, the live
-// members the reader found for it and everything below them (membersHeld).
+// heldOf is what the processes of a lease's job hold right now: below its holder (heldLoad) plus the keyed ComfyUI instances
+// the lease is using from outside that tree (keyedInstancesHeld), or, for a tree-orphan, the live members the reader found for
+// it and everything below them (membersHeld).
 func (m *Manager) heldOf(l Info) (gpuprobe.HostLoad, bool) {
 	var held gpuprobe.HostLoad
 	var ok bool
@@ -167,9 +168,82 @@ func (m *Manager) heldOf(l Info) (gpuprobe.HostLoad, bool) {
 		held, ok = membersHeld(l.TreeLive)
 	} else {
 		held, ok = m.heldLoad(l.PID)
+		if ok {
+			inst := m.keyedInstancesHeld(l)
+			held.TouchGiB += inst.TouchGiB
+			held.CommitGiB += inst.CommitGiB
+		}
 	}
 	// The commit it has been seen to settle at (hostram_observed.go), so that memory a job loaded and let go is not charged again.
 	return m.creditObserved(l, held, ok), ok
+}
+
+// keyedInstancesHeld is what the keyed ComfyUI instances a live lease is using hold OUTSIDE its holder's process tree.
+//
+// A keyed instance is launched under one lease and kept: the next lease on the same cards reuses it, and its runner restamps
+// the instance's launch marker with that lease's epoch (render/comfy-ownership.mjs), but the python process stays below the
+// launcher that started it, which is not below the new holder. Read only below the holder, a render's whole declared need
+// stayed "still to load" for as long as it ran (2026-11-10 on the 3-card reference box: 29.9 GiB of commit still to load
+// four minutes into a video clip whose reused instance held 31.3 GiB private), so every other request on the box was judged
+// against that memory twice.
+//
+// A marker ties its instance to the lease when it names the epoch of a live lease of the same holder (a holder that holds
+// several leases is measured over all of them, as pendingLoad pools their declarations), its process is alive and did not
+// begin after the marker was written (a recycled pid, the tree reader's rule), and it is not already below the holder (an
+// instance this lease's own runner launched is counted once, by heldLoad). A marker with no epoch ties nothing here.
+func (m *Manager) keyedInstancesHeld(l Info) gpuprobe.HostLoad {
+	if m.workload != nil || l.PID <= 0 {
+		return gpuprobe.HostLoad{} // a test that stubs the holder's reading stubs the whole job
+	}
+	markers, _ := readLaunchMarkers(armedComfyDir())
+	var tied []launchMarker
+	others := false
+	for _, mk := range markers {
+		if mk.LeaseEpoch == nil || mk.PID <= 0 || !pidAlive(mk.PID) {
+			continue
+		}
+		tied = append(tied, mk)
+		others = others || *mk.LeaseEpoch != l.Epoch
+	}
+	if len(tied) == 0 {
+		return gpuprobe.HostLoad{}
+	}
+	epochs := map[uint64]bool{l.Epoch: true}
+	if others {
+		for _, o := range m.Leases() {
+			if !o.TreeOrphan && o.PID == l.PID {
+				epochs[o.Epoch] = true
+			}
+		}
+	}
+	own := map[int]bool{}
+	if tree, err := ProcessTree(l.PID); err == nil {
+		for _, p := range tree {
+			own[p.PID] = true
+		}
+	}
+	var roots []TreeMember
+	for _, mk := range tied {
+		if !epochs[*mk.LeaseEpoch] || own[mk.PID] {
+			continue
+		}
+		if m.procStart != nil {
+			if st, known := m.procStart(mk.PID); known {
+				if abs, ok := startUnixMsFn(st); ok && mk.StartedAt > 0 && abs > mk.StartedAt+treeMarkerSlack.Milliseconds() {
+					continue
+				}
+			}
+		}
+		roots = append(roots, TreeMember{PID: mk.PID})
+	}
+	if len(roots) == 0 {
+		return gpuprobe.HostLoad{}
+	}
+	load, ok := membersHeld(roots)
+	if !ok {
+		return gpuprobe.HostLoad{}
+	}
+	return load
 }
 
 const gibBytes = 1 << 30
