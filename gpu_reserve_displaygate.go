@@ -48,18 +48,39 @@ const displayGatePollEvery = 5 * time.Second
 // Acquire in the detached holder (whose stderr the parent reads back).
 type acquireFn func(opts gpulease.Options, wait time.Duration) (*gpulease.Lease, error)
 
+// displayHint is what the caller already knows about a named set and the display card, from a card table it read.
+type displayHint int
+
+const (
+	// displayUnknown: no table was read against the set (a hand-run holder). The gate reads one; when it cannot, the
+	// set takes its place in the line as it always did, because nothing shows it is the screen's card.
+	displayUnknown displayHint = iota
+	// displayClear: the caller's table shows the set clear of the display card: straight to the line, no further read,
+	// so a reserve that never names the screen's card costs nothing more than it did.
+	displayClear
+	// displayNamed: the caller's table shows the set includes the display card (or a card of a reading that could not
+	// say which card that is). A table the gate cannot read then takes nothing: it is tried again while --wait lasts.
+	displayNamed
+)
+
+// hintFrom is the hint a card table gives about ids; a nil table gives none.
+func hintFrom(cards []gpuprobe.Card, ids []string) displayHint {
+	switch {
+	case cards == nil:
+		return displayUnknown
+	case cardsNameDisplay(cards, ids):
+		return displayNamed
+	}
+	return displayClear
+}
+
 // acquireNamedCards is acquire, with the display card's rule put first to a named set that includes that card. build
 // reads the allocator's input with the request's declared footprint (buildAllocInput); prefix leads every line this
-// writes ("gpu reserve", "gpu hold"). known is a card table the caller already read (the plan's), or nil: a set it
-// shows clear of the display card (and of a reading that could not say which card that is) goes straight to the line
-// with no further read, so a reserve that never names the screen's card costs nothing more than it did.
-func acquireNamedCards(opts gpulease.Options, wait time.Duration, known []gpuprobe.Card, build func() (gpulease.AllocInput, error),
+// writes ("gpu reserve", "gpu hold"); hint is what the caller's own card table said about the set.
+func acquireNamedCards(opts gpulease.Options, wait time.Duration, hint displayHint, build func() (gpulease.AllocInput, error),
 	acquire acquireFn, out io.Writer, sleep func(time.Duration), now func() time.Time, prefix string) (*gpulease.Lease, error) {
-	if len(opts.Devices) == 0 || build == nil {
-		return acquire(opts, wait) // the whole node, or no way to read the cards: as before
-	}
-	if known != nil && !cardsNameDisplay(known, opts.Devices) {
-		return acquire(opts, wait)
+	if len(opts.Devices) == 0 || build == nil || hint == displayClear {
+		return acquire(opts, wait) // the whole node, no way to read the cards, or a set shown clear of the screen: as before
 	}
 	if wait < 0 {
 		wait = 0
@@ -91,9 +112,14 @@ func acquireNamedCards(opts gpulease.Options, wait time.Duration, known []gpupro
 			return nil, gpulease.ErrCancelled
 		}
 		in, err := build()
+		if err != nil && hint == displayUnknown && !waited {
+			// Only the card table fails a build. Nothing has shown this set to be the screen's card (no table was read
+			// against it before), so it takes its place in the line as it did before this rule.
+			return acquire(opts, wait)
+		}
 		if err != nil {
-			// Only the card table fails a build. Without it the request cannot be shown to stay off the operator's
-			// screen, so nothing is taken: the read is tried again while --wait lasts.
+			// A table showed this set includes the display card, and without a fresh one the request cannot be shown to
+			// stay within the rule, so nothing is taken: the read is tried again while --wait lasts.
 			why := "the card table could not be read (" + err.Error() + "), so these cards cannot be checked against the display card's rule"
 			if remaining() <= 0 {
 				return nil, fmt.Errorf("%s: %s; nothing was taken", prefix, why)

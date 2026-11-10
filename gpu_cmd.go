@@ -657,9 +657,10 @@ func runGPUReserve(args []string) (retErr error) {
 		switch {
 		case plan.Auto:
 			auto = &devFlags
-		case len(plan.IDs) > 0 && devFlags.vramGiB > 0:
-			// A named set carries only its footprint (cards ""), for the display card's rule in the holder.
-			auto = &reserveDeviceFlags{vramGiB: devFlags.vramGiB}
+		case len(plan.IDs) > 0 && (devFlags.vramGiB > 0 || hintFrom(planCards, plan.IDs) == displayNamed):
+			// A named set carries only its footprint (cards "") and whether the plan saw the display card in it, for the
+			// display card's rule in the holder.
+			auto = &reserveDeviceFlags{vramGiB: devFlags.vramGiB, displayNamed: hintFrom(planCards, plan.IDs) == displayNamed}
 		}
 		epoch, err := detachHolderFn(fs, *class, *dur, *wait, opts, auto, *asJSON, m)
 		if err != nil {
@@ -721,7 +722,7 @@ func runGPUReserve(args []string) (retErr error) {
 	// lost lease held when it queues again) is put to the display card's rule first (gpu_reserve_displaygate.go): a set
 	// that includes the operator's screen waits for it to open, as an allocated one does.
 	takeNamed := func(o gpulease.Options, w time.Duration) (*gpulease.Lease, error) {
-		return acquireNamedCards(o, w, planCards, buildAlloc, func(o gpulease.Options, w time.Duration) (*gpulease.Lease, error) {
+		return acquireNamedCards(o, w, hintFrom(planCards, o.Devices), buildAlloc, func(o gpulease.Options, w time.Duration) (*gpulease.Lease, error) {
 			return acquireQueued(m, gpulease.Class(*class), o, w)
 		}, os.Stderr, sw.Sleep, time.Now, "gpu reserve")
 	}
@@ -1461,6 +1462,9 @@ func holdArgs(class string, dur, wait time.Duration, opts gpulease.Options, auto
 		if auto != nil && auto.vramGiB > 0 {
 			args = append(args, "--vram", strconv.FormatFloat(auto.vramGiB, 'f', -1, 64))
 		}
+		if auto != nil && auto.displayNamed {
+			args = append(args, "--display-named")
+		}
 	}
 	if opts.Group != "" {
 		args = append(args, "--group", opts.Group)
@@ -1487,6 +1491,7 @@ func runGPUHold(args []string) (retErr error) {
 	devicesFlag := fs.String("devices", "", "the cards to hold, as lease ids (the parent resolved them; empty = the whole node)")
 	cardsFlag := fs.String("cards", "", "hold N cards (or MIN..MAX) chosen by the allocator, allocating and claiming in this process (the parent passes its --cards)")
 	vramFlag := fs.Float64("vram", 0, "with --cards: GiB of VRAM the job needs free on EACH card; with --devices: the footprint the display card's rule holds under its cap")
+	displayNamedFlag := fs.Bool("display-named", false, "with --devices: the parent's plan saw the display card in the set, so a card table this holder cannot read takes nothing (without it, an unreadable table takes the line as before)")
 	ramFlag := fs.Float64("ram", 0, "GiB of host RAM the lease declares (the parent resolved it: its --ram, the estimate, or the class default)")
 	ramCommitFlag := fs.Float64("ram-commit", 0, "GiB of commit the lease states beside --ram (0 = none stated; the parent passes it whenever one was stated)")
 	ramWaitCommitFlag := fs.Float64("ram-wait-commit", 0, "GiB of commit the lease will state to the host after the seat is unloaded, beside --ram-wait (0 = none stated)")
@@ -1550,7 +1555,11 @@ func runGPUHold(args []string) (retErr error) {
 		// turn that comes after the operator is back is refused like the foreground reserve's (gpu_reserve_displaygate.go).
 		holdCfg := loadCfg(fs)
 		holdFlags := reserveDeviceFlags{vramGiB: *vramFlag, ramGiB: *ramFlag, ramCommitGiB: *ramCommitFlag}
-		lease, err = acquireNamedCards(holdOpts, *wait, nil,
+		hint := displayUnknown
+		if *displayNamedFlag {
+			hint = displayNamed
+		}
+		lease, err = acquireNamedCards(holdOpts, *wait, hint,
 			func() (gpulease.AllocInput, error) {
 				return buildAllocInput(context.Background(), m, holdCfg, holdFlags)
 			},

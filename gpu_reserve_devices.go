@@ -59,6 +59,9 @@ type reserveDeviceFlags struct {
 	ramGiB    float64
 	// ramCommitGiB is the commit the job declares beside the working set ramGiB (0 = the same figure).
 	ramCommitGiB float64
+	// displayNamed: a named set the parent's plan saw include the display card, for the detached holder
+	// (gpu_reserve_displaygate.go), which then takes nothing on a card table it cannot read.
+	displayNamed bool
 }
 
 // devicePlan is the decision: a concrete set (IDs, nil = whole node), or an allocation
