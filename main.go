@@ -1022,6 +1022,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// Whether the GPU power limit and clock lock a box applies at boot were applied this boot, from the state record the applier
 	// writes: one file, informational (a WARN or UNKNOWN never changes the exit code), and one line where nothing is recorded.
 	writePowerProfileRow(w)
+	// A card that drives a display under a bound ComfyUI lane with no --reserve-vram in the launch: informational (never an exit code), silent unless a
+	// lane is bound and none is set, and the GPU read it makes comes last. It needs no endpoint.
+	writeDisplayReserveRow(w, cfg, routes)
 	// Endpoints that name a box by a private-range IP literal instead of a tailnet name: pure config, a
 	// warning only (never an exit code), and silent on a config with none.
 	writeLANIPEndpointsSection(w, cfg)
