@@ -393,6 +393,17 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	if admitNote != "" {
 		log.Printf("agent task: seat admission (%s): %s", seat, admitNote)
 	}
+	// The host-RAM gate on a load this contract would START (seathostram.go): a seat that is not ready, with no load in flight,
+	// is loaded by the warm-up below, so the host is asked first, by the warm-back's rule. A load already in flight or a seat
+	// already loaded is not refused here.
+	if !seatReady && loadSeen.IsZero() {
+		if m, err := p.scopedManager(); err == nil {
+			if why := SeatColdLoadRefusal(p.cfg, m, seat); why != "" {
+				log.Printf("agent task: seat %s not loaded: %s", seat, why)
+				return deferWire(core.DeferClassCapacity, "host RAM: "+why+"; the seat was not loaded, and this contract is re-placeable")
+			}
+		}
+	}
 	// Cold-load warm-up (0.115.11, register D-64): the pre-flight above settles
 	// ANOTHER model's swap, but a seat that is simply not loaded used to load on
 	// the loop's first call — INSIDE the wall. A vLLM seat's cold load is

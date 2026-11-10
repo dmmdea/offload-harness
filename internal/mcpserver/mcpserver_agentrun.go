@@ -708,10 +708,26 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// 0032); this one now calls the same function, on what is left of the same
 	// admission budget, and reports it under the same wire field names.
 	// Fail-open on a probe error, exactly as over there.
-	preflight, preNote := pipeline.AwaitSeatAdmission(ctx, cfg.Endpoint, model, time.Until(admitDeadline))
+	preflight, preNote, loadSeen, seatReady := pipeline.AwaitSeatAdmissionState(ctx, cfg.Endpoint, model, time.Until(admitDeadline))
 	admitted += preflight
 	if preNote != "" {
 		log.Printf("agent_run: seat admission (%s): %s", model, preNote)
+	}
+	// The host-RAM gate on a load this run would START (pipeline/seathostram.go), the delegation door's own: a seat that is
+	// not ready, with no load in flight, is loaded by the warm-up below, so the host is asked first, by the warm-back's rule.
+	if !seatReady && loadSeen.IsZero() {
+		if why := pipeline.SeatColdLoadRefusalFor(cfg, model); why != "" {
+			log.Printf("agent_run: seat %s not loaded: %s", model, why)
+			dout := map[string]any{
+				"deferred":    true,
+				"defer_class": string(core.DeferClassCapacity),
+				"reason":      "host RAM: " + why + "; the seat was not loaded, and this run is re-placeable",
+				"steps":       0,
+			}
+			withAdmission(dout, admitted, preNote)
+			withPlaced(dout, placed)
+			return deferSized(dout)
+		}
 	}
 	// Cold-load warm-up — the D-64 step the pipeline door has run since 0.115.11
 	// and this door never did. A seat that is not loaded loads HERE, on what is
