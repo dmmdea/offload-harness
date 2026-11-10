@@ -21,3 +21,21 @@
 ### Fixed - the standalone `detect.ps1` does not call the profile drive the install target
 
 - **What it does.** With `OFFLOAD_HOME` unset, `detect.ps1` measures free disk on the profile drive and its line now says that this is a fallback and that `install.ps1` picks a data volume; with the variable set it still says "install target". `setup-installer.md` also records how an upgrade picks up `--slot-save-path` (the Step 6 `--state` check re-renders an unedited yaml; a hand-edited or unstamped one is kept until the operator replaces it).
+
+### Fixed - the render gate calls the generative-edit and run-graph doors
+
+- **What was wrong.** `acceptance --render` listed `gen-edit` and `run-graph` as a permanent SKIP even when their routes were bound. It said generative edit has no CLI verb (`edit-image-generative` exists) and that run-graph has no sensible embedded graph, so a node could pass the gate with both doors never called.
+- **What it does.** When `edit_image_generative` is bound, `gen-edit` runs `edit-image-generative` on the embedded sign (`make the circle green`, seed 7) with the `gen_edit_timeout_sec` limit. When `run_graph` is bound, `run-graph` writes a two-node ComfyUI core graph (an empty 64x64 image and a SaveImage) into the gate's out dir and runs `run-graph --graph <file> --out-dir <subfolder>`. Both stay a SKIP with the route reason when the route is not bound. `docs/systems/fleet-node.md` lists them.
+- **Checks.** `gen-edit` passes when the output PNG decodes; `run-graph` passes when the answer's `image_path` is a PNG that decodes to 64x64. `acceptance --list` prints both commands.
+
+### Fixed - the installer's run-graph step reads the ComfyUI folder from the existing config
+
+- **What was wrong.** Step 8b chose `COMFY_DIR`, else `C:/ComfyUI`. A node whose config already said `"comfy_dir": "D:/ComfyUI"` printed `SKIP run-graph deps (no ComfyUI at C:/ComfyUI ...)` and its run-graph tooling was never ensured.
+- **What it does.** The folder is now `COMFY_DIR`, else the `comfy_dir` of the existing harness config, else `C:/ComfyUI`. The config is read once for this and for the `run_graph_script` check. Every other branch of the step is unchanged.
+- **Checks.** A replay of the chosen lines against a temp config gave `E:/FromEnv` with the variable set, `D:/ComfyUI` with only the config, and `C:/ComfyUI` with neither.
+
+### Fixed - the installer rebuilds the binaries when the checkout moved, not only when VERSION changed
+
+- **What was wrong.** A re-run of `install.ps1` from a newer commit with the same `VERSION` kept the old `local-offload.exe` and `local-agent.exe`, because the build steps decided "up to date" from the version alone.
+- **What it does.** After each build the installer writes the checkout's `git rev-parse HEAD` to `<exe>.built-from` beside the binary. The build is skipped only when the version matches and that file holds the current HEAD. A missing file, a missing `git` or a tree that is not a git checkout means the commit is unknown, so it rebuilds (go's build cache keeps that quick). `install.sh` installs a binary it is given and builds nothing, so it is unchanged.
+- **Checks.** A replay of the decision: same commit skips; a different commit, no record and a non-git folder all rebuild.
