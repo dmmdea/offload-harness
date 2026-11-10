@@ -203,6 +203,30 @@ type pipelineJobResult struct {
 // failure: "SCENE-SWAP-FAIL stage=<last completed stage or none>: <message>".
 const sceneSwapFailPrefix = "SCENE-SWAP-FAIL"
 
+// pipelineChildEnv is what a pipeline CLI needs from the node in order to call back into it:
+// LOCAL_OFFLOAD_BIN, this node's own harness binary (the CLI's nested run-graph and edit calls
+// must reach THIS node's harness, and the binary is on PATH on no service-installed node), and
+// COMFY_INPUT, the input folder of the ComfyUI install this node's run-graph drives (the folder
+// every render script uses, <comfy_dir>/input), where the CLI stages its images. Without them
+// a CLI falls back to its own defaults, which name a Windows path and a PATH lookup: on a
+// Linux node (binary in the service's own folder, not on the unit's PATH; no such input folder)
+// the task type was advertised while a job's first nested call had nothing to start.
+//
+// A name the node's own environment already sets is left out, so the operator's value is
+// inherited unchanged. An unset comfy_dir sets no COMFY_INPUT: the harness has no folder to name.
+func pipelineChildEnv(comfyDir string, getenv func(string) string, executable func() (string, error)) []string {
+	var env []string
+	if getenv("LOCAL_OFFLOAD_BIN") == "" {
+		if exe, err := executable(); err == nil && exe != "" {
+			env = append(env, "LOCAL_OFFLOAD_BIN="+exe)
+		}
+	}
+	if dir := strings.TrimRight(strings.TrimSpace(comfyDir), `/\`); dir != "" && getenv("COMFY_INPUT") == "" {
+		env = append(env, "COMFY_INPUT="+dir+"/input")
+	}
+	return env
+}
+
 // runPipelineJob runs an externally-provided pipeline CLI this node is
 // configured for (cfg.Pipelines[taskType], Task 4's PipelineSpec — e.g.
 // "scene-swap") by shelling out to spec.Script via gpugen, mirroring
@@ -275,6 +299,7 @@ func (p *Pipeline) runPipelineJob(ctx context.Context, req core.Request, meta co
 		Dir:     spec.Workdir,
 		Out:     filepath.Join(outRoot, jobID, spec.Artifacts[0]),
 		Timeout: timeout,
+		Env:     pipelineChildEnv(p.cfg.ComfyDir, os.Getenv, os.Executable),
 	}
 	// Passive fleet footprint (mirrors image-gen's plumbing): no family/quant
 	// claim — a pipeline job's sizing rides on its own task-scoped footprint
