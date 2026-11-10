@@ -21,9 +21,10 @@ func (noRunner) Run(context.Context, core.Request) core.Result { return core.Res
 // realNode serves the REAL fleet node handler, so the token probe is proved against the node's own
 // ordering (bearer first, envelope after), not against a stand-in that merely agrees with it.
 // loopback says whether the node believes its listener is loopback, the fact the 403 rests on.
-func realNode(t *testing.T, token string, loopback bool) (*httptest.Server, *fleetnode.Jobs) {
+// admit is the node's fleet_admit_scopes (none: every caller scope is admitted).
+func realNode(t *testing.T, token string, loopback bool, admit ...string) (*httptest.Server, *fleetnode.Jobs) {
 	t.Helper()
-	cfg := config.Config{FleetAuthToken: token, MediaDir: t.TempDir()}
+	cfg := config.Config{FleetAuthToken: token, MediaDir: t.TempDir(), FleetAdmitScopes: admit}
 	jobs := fleetnode.NewJobs(time.Hour, cfg.FleetConcurrencyLimit())
 	t.Cleanup(func() { jobs.DrainAndStop(2 * time.Second) })
 	s := fleetnode.New(noRunner{}, jobs, fleetnode.Options{
@@ -46,18 +47,23 @@ func TestCheckTokenReadsTheRealNodesThreeAnswers(t *testing.T) {
 		nodeToken  string
 		loopback   bool
 		bearer     string
+		admit      []string
 		wantStatus int
 		want       TokenState
 	}{
-		{"the node's token", "s3cret", false, "s3cret", http.StatusBadRequest, TokenAccepted},
-		{"a different token", "s3cret", false, "other", http.StatusUnauthorized, TokenMismatch},
-		{"no token sent", "s3cret", false, "", http.StatusUnauthorized, TokenMismatch},
-		{"a node with no token beyond loopback", "", false, "s3cret", http.StatusForbidden, TokenNodeHasNone},
-		{"a loopback node with no token", "", true, "s3cret", http.StatusBadRequest, TokenAccepted},
+		{"the node's token", "s3cret", false, "s3cret", nil, http.StatusBadRequest, TokenAccepted},
+		{"a different token", "s3cret", false, "other", nil, http.StatusUnauthorized, TokenMismatch},
+		{"no token sent", "s3cret", false, "", nil, http.StatusUnauthorized, TokenMismatch},
+		{"a node with no token beyond loopback", "", false, "s3cret", nil, http.StatusForbidden, TokenNodeHasNone},
+		{"a loopback node with no token", "", true, "s3cret", nil, http.StatusBadRequest, TokenAccepted},
+		// A node that admits only personal callers refuses the probe, which declares no scope, AFTER the
+		// bearer passed. Read as NO-TOKEN, doctor told the operator to set a token the node already held.
+		{"a personal-only node, its token", "s3cret", false, "s3cret", []string{"personal"}, http.StatusForbidden, TokenAccepted},
+		{"a personal-only node, another token", "s3cret", false, "other", []string{"personal"}, http.StatusUnauthorized, TokenMismatch},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, jobs := realNode(t, tc.nodeToken, tc.loopback)
+			srv, jobs := realNode(t, tc.nodeToken, tc.loopback, tc.admit...)
 			status, body, err := CheckToken(context.Background(), srv.URL, tc.bearer)
 			if err != nil {
 				t.Fatal(err)

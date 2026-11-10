@@ -89,7 +89,9 @@ every lane the harness has, and a roster entry must mean the same thing to all o
    then asks each reachable node the one question health cannot: an agent dispatch with no `job_id`
    (`rosterprobe.CheckToken`). The node answers after its bearer check and before it creates anything, so 401 is a
    different token, 403 is a node with none beyond loopback, and 400 `job_id required` is a bearer that passed; nothing
-   is queued on any of them. Rows are `OK`, `MISMATCH`, `NO-TOKEN`, `UNKNOWN`, `UNCHECKED` (refused or unreachable, not
+   is queued on any of them. A 403 carrying the typed refusal `scope_not_admitted` is also a bearer that passed: a node
+   that sets `fleet_admit_scopes` checks the bearer first and then refuses the probe, which declares no scope (it was
+   read as a node with no token until 0.223.0). Rows are `OK`, `MISMATCH`, `NO-TOKEN`, `UNKNOWN`, `UNCHECKED` (refused or unreachable, not
    asked), each named by its `delegate_remotes` slot; a box with no token prints one `NOT SET` line. The bearer goes
    only to a base the tailnet guard admits, in the `Authorization` header, and neither it nor a node's reply text is
    printed. Informational: the exit code does not change.
