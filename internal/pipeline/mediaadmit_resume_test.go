@@ -42,7 +42,8 @@ func busyNotQueued(t *testing.T, res core.Result) {
 	if res.OK || res.Meta.ErrClass != "gpu_busy" {
 		t.Fatalf("want the legacy busy answer, got ok=%v class=%q: %s", res.OK, res.Meta.ErrClass, res.Reason)
 	}
-	if res.Data != nil {
+	// The busy answer names its holder in data ({"holders":...}); what it must not carry is a place in line.
+	if strings.Contains(string(res.Data), "waiter_token") {
 		t.Errorf("a busy answer carries no place in line: %s", res.Data)
 	}
 }

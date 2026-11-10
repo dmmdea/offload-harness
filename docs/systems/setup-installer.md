@@ -204,7 +204,7 @@ confusion:
   build for the embeddinggemma2 entry" under "Serving config on Linux" below), and `install render` refuses a build it
   can read as older than b11452.
 - **The Windows llama.cpp build is never pinned** (ADR 0099): the installer takes the newest complete release, whose
-  pre-built assets are `win-cuda-12.4`, **`win-cuda-13.4`** (named `13.3` until b9934), `win-vulkan` and `win-cpu`, each
+  pre-built assets are `win-cuda-12.<V>`, **`win-cuda-13.<V>`** (the CUDA major is named, the minor is matched: it was `13.3`, then `13.4`, and is `13.5` today; a build zip and its cudart bundle must carry the same one and the highest wins), `win-vulkan` and `win-cpu`, each
   verified against the digest the GitHub release API publishes, with a floor per seat in `setup/floors.json`. `Select-CudaBuild` still keys on the DRIVER's CUDA
   major (13.0 or newer for the Blackwell serve path), so the selection logic did not move.
 - **The RAM-spill agent seat is a second, measured exception** (ADR 0080): `qwen3.6-35b-a3b-agent`

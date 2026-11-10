@@ -21,6 +21,11 @@ type Source struct {
 	Path     string // the resolved candidate ("" = nothing resolved, built-in defaults)
 	NotFound bool   // Path was explicit (--config/env) but no file exists there
 	LoadErr  error  // the file existed but failed: a *ParseError (nothing from it in effect, built-in defaults) or a validation refusal (its other settings in effect)
+
+	// ShadowedHome is the ~/.local-offload/config.json that was NOT read because Path came
+	// from ./config.json in the current directory (no flag, no env) and the two are
+	// different files. "" = nothing is shadowed.
+	ShadowedHome string
 }
 
 // Loaded reports whether cfg values actually came from Path.
@@ -54,7 +59,7 @@ func LoadWithSource(flagPath string) (Config, Source) {
 	home, _ := os.UserHomeDir()
 	exists := func(p string) bool { info, err := os.Stat(p); return err == nil && !info.IsDir() }
 	path := ResolvePath(flagPath, os.Getenv("LOCAL_OFFLOAD_CONFIG"), home, exists)
-	src := Source{Path: path}
+	src := Source{Path: path, ShadowedHome: shadowedHome(flagPath, os.Getenv("LOCAL_OFFLOAD_CONFIG"), path, home)}
 	if path != "" && !exists(path) {
 		// Load() maps IsNotExist to (defaults, nil) by design (fresh installs); for an
 		// EXPLICIT path that silence is the trap — record it so callers can warn.
@@ -63,6 +68,54 @@ func LoadWithSource(flagPath string) (Config, Source) {
 	cfg, err := Load(path)
 	src.LoadErr = err
 	return cfg, src
+}
+
+// shadowedHome returns the home config that a cwd-resolved path hides, or "". A checkout
+// of this repo keeps an untracked dev config.json at its root, so a command run there read
+// it instead of the machine's real config and reported the wrong bindings with no hint
+// which file it read. Same file (a symlink, or the cwd IS the home directory) is not a
+// shadow: os.SameFile compares the files, not the spellings.
+func shadowedHome(flagPath, envPath, path, home string) string {
+	if flagPath != "" || envPath != "" || path != "config.json" || home == "" {
+		return ""
+	}
+	def := filepath.Join(home, ".local-offload", "config.json")
+	homeInfo, err := os.Stat(def)
+	if err != nil || homeInfo.IsDir() {
+		return ""
+	}
+	cwdInfo, err := os.Stat(path)
+	if err != nil || os.SameFile(cwdInfo, homeInfo) {
+		return ""
+	}
+	return def
+}
+
+var (
+	shadowHomeMu   sync.Mutex
+	shadowHomeSeen bool
+)
+
+// WarnOnShadowedHomeOnce prints one stderr line, once per process, when src.ShadowedHome is
+// set, naming both files and the ways out. Callers pass stderr only: the MCP server's
+// stdout is the JSON-RPC stream. Returns whether it printed.
+func WarnOnShadowedHomeOnce(src Source, w io.Writer) bool {
+	if src.ShadowedHome == "" {
+		return false
+	}
+	shadowHomeMu.Lock()
+	seen := shadowHomeSeen
+	shadowHomeSeen = true
+	shadowHomeMu.Unlock()
+	if seen {
+		return false
+	}
+	cwdPath, err := filepath.Abs(src.Path)
+	if err != nil {
+		cwdPath = src.Path
+	}
+	fmt.Fprintf(w, "NOTE: config read from ./config.json in the current directory (%s); %s also exists and was NOT read. Pass --config <path>, set LOCAL_OFFLOAD_CONFIG, or run from another directory to use it.\n", cwdPath, src.ShadowedHome)
+	return true
 }
 
 // WarnOnDefaults prints one stderr-style warning when cfg is effectively built-in
@@ -149,6 +202,9 @@ func WarnOnShadowedAgentModelOnce(src Source, cfg Config, w io.Writer) bool {
 func SourceLine(src Source) string {
 	switch {
 	case src.Loaded():
+		if src.ShadowedHome != "" {
+			return "config:     " + src.Path + " (./config.json in the current directory; " + src.ShadowedHome + " also exists and was NOT read)"
+		}
 		return "config:     " + src.Path
 	case src.Path == "":
 		return "config:     BUILT-IN DEFAULTS (no config file found)"

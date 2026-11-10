@@ -75,21 +75,25 @@ $repoRoot  = Split-Path -Parent $scriptDir
 # SOURCES - where every component comes from. No tag, size or digest here: Resolve-Source reads them from the
 # publisher at run time. Fields: kind (github-release | hf-file), repo, and
 #   github-release: asset (a file-name pattern; <TAG> = the release tag, <N> = its number, <SHA7> = the commit
-#                   suffix of a master-<N>-<sha7> tag; a name that carries none is plain), tagRule
+#                   suffix of a master-<N>-<sha7> tag; <V> = one dotted version, digits and dots, whatever
+#                   it is: a CUDA row names the CUDA major and leaves the minor to <V>, e.g. cuda-13.<V>;
+#                   a name that carries none is plain), tagRule
 #                   (b-number | v-number | master-number: which tags are builds and how they order), dest
 #                   (the live directory under the install home).
 #   hf-file:        file (the path inside the repo, resolved at main), dest (the local file name under models\;
 #                   it may carry a subdirectory, which the download creates).
 # ---------------------------------------------------------------------------
 $SOURCES = @{
-  # llama.cpp backend binaries. The CUDA 13 asset family is cuda-13.4 (it was cuda-13.3 earlier), so the
-  # llama-cuda13 / llama-cudart13 names follow upstream's naming, not a literal build number.
+  # llama.cpp backend binaries. Upstream names its CUDA assets with the toolkit MINOR (cuda-13.3, then 13.4, now
+  # 13.5) and moves it between releases, so a row names only the CUDA major and <V> matches the minor: a new
+  # upstream minor needs no edit here. When a release carries two minors of one major the highest wins, and a
+  # build zip and its cudart bundle must carry the same one (Get-GitHubLatestTag).
   'llama-vulkan'   = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-vulkan-x64.zip' }
-  'llama-cuda'     = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-cuda-12.4-x64.zip' }
-  'llama-cudart'   = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'cudart-llama-bin-win-cuda-12.4-x64.zip' }
+  'llama-cuda'     = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-cuda-12.<V>-x64.zip' }
+  'llama-cudart'   = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'cudart-llama-bin-win-cuda-12.<V>-x64.zip' }
   # H4: the CUDA-13 build family - the Blackwell (sm_120) SERVE path.
-  'llama-cuda13'   = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-cuda-13.4-x64.zip' }
-  'llama-cudart13' = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'cudart-llama-bin-win-cuda-13.4-x64.zip' }
+  'llama-cuda13'   = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-cuda-13.<V>-x64.zip' }
+  'llama-cudart13' = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'cudart-llama-bin-win-cuda-13.<V>-x64.zip' }
   'llama-cpu'      = @{ kind = 'github-release'; repo = 'ggml-org/llama.cpp'; tagRule = 'b-number'; dest = 'llama'; asset = 'llama-<TAG>-bin-win-cpu-x64.zip' }
   # llama-swap release (windows_amd64 zip; the file name carries the bare number, not the v).
   'llama-swap'     = @{ kind = 'github-release'; repo = 'mostlygeek/llama-swap'; tagRule = 'v-number'; dest = 'llama-swap'; asset = 'llama-swap_<N>_windows_amd64.zip' }
@@ -329,9 +333,77 @@ function Get-GitHubReleases {
   return $script:GhReleaseCache[$Repo]
 }
 
+# <V> in an asset pattern = one dotted version (digits and dots). The CUDA minor (and patch) a release carries is
+# matched, never named: upstream moves it (cuda-13.3, 13.4, 13.5 ...) and a literal name goes stale. A pattern with
+# <V> is an anchored regex over the release's asset names (every literal part escaped); the CUDA MAJOR stays literal.
+$script:VersionToken = '<V>'
+$script:VersionExpr  = '[0-9]+(?:\.[0-9]+)*'
+
+# The numeric components of a dotted version ("5", "4.0"), $null when one does not fit.
+function ConvertTo-VersionParts {
+  param([string]$Text)
+  $parts = @()
+  foreach ($f in $Text.Split('.')) {
+    $n = [int64]0
+    if (-not [int64]::TryParse($f, [ref]$n)) { return $null }
+    $parts += $n
+  }
+  return ,$parts
+}
+
+# Component by component, so 13.10 is above 13.5; a missing component counts as 0. Returns 1, 0 or -1.
+function Compare-VersionParts {
+  param($A, $B)
+  $a2 = @($A); $b2 = @($B)
+  $len = [Math]::Max($a2.Count, $b2.Count)
+  for ($i = 0; $i -lt $len; $i++) {
+    $x = [int64]0; if ($i -lt $a2.Count) { $x = [int64]$a2[$i] }
+    $y = [int64]0; if ($i -lt $b2.Count) { $y = [int64]$b2[$i] }
+    if ($x -gt $y) { return 1 }
+    if ($x -lt $y) { return -1 }
+  }
+  return 0
+}
+
+# The usable assets of one release that satisfy one expanded pattern: @{ list; why }. A pattern without <V> is an
+# exact name; with it, every asset whose name matches is listed with its matched version. Usable = a sha256 digest
+# and fully uploaded; why says what stopped the first match from being usable (or that nothing matched).
+function Find-ReleaseAssets {
+  param($Assets, [string]$Name)
+  $list = @()
+  $why = ''
+  $matched = 0
+  $re = $null
+  if ($Name.Contains($script:VersionToken)) {
+    $lit = @($Name.Split(@($script:VersionToken), [StringSplitOptions]::None) | ForEach-Object { [regex]::Escape($_) })
+    $re = '^' + ($lit -join ('(' + $script:VersionExpr + ')')) + '$'
+  }
+  foreach ($a in @($Assets)) {
+    $ver = $null
+    if ($null -ne $re) {
+      $m = [regex]::Match([string]$a.name, $re)
+      if (-not $m.Success) { continue }
+      $ver = ConvertTo-VersionParts -Text $m.Groups[1].Value
+      if ($null -eq $ver) { continue }
+    } elseif ($a.name -ne $Name) { continue }
+    $matched++
+    $d = [string]$a.digest
+    if ($d -notmatch '^sha256:([0-9a-fA-F]{64})$') { if (-not $why) { $why = "$($a.name) has no sha256 digest" }; continue }
+    $digest = $Matches[1].ToLower()
+    if ($a.PSObject.Properties['state'] -and $a.state -and $a.state -ne 'uploaded') { if (-not $why) { $why = "$($a.name) is not fully uploaded" }; continue }
+    $vk = ''
+    if ($null -ne $ver) { $vk = ($ver -join '.') }
+    $list += [pscustomobject]@{ name = [string]$a.name; ver = $ver; verKey = $vk; url = [string]$a.browser_download_url; digest = $digest; size = [int64]$a.size }
+  }
+  if ($matched -eq 0) { $why = "$Name is not attached" }
+  return @{ list = $list; why = $why }
+}
+
 # The newest release of $Repo whose tag follows $TagRule, is not a draft and carries EVERY asset named by
 # $AssetPatterns with a non-empty sha256 digest. A newer release missing one (still uploading) is stepped back from.
-# Returns @{ tag; assets = @{ <pattern> = @{ url; digest; size } } }.
+# Patterns with <V> are matched, and must agree on one version (the highest every one of them carries); a release
+# where they do not is incomplete. Returns @{ tag; assets = @{ <pattern> = @{ url; digest; size; name } } }, name
+# being the matched asset's own.
 function Get-GitHubLatestTag {
   param([string]$Repo, [string]$TagRule, [string[]]$AssetPatterns)
   $cands = @()
@@ -346,17 +418,51 @@ function Get-GitHubLatestTag {
   foreach ($c in @($cands | Sort-Object -Property N -Descending)) {
     $found = @{}
     $why = ''
+    $lists = @()
+    $names = @()
     foreach ($pat in $AssetPatterns) {
       $name = Expand-AssetName -Pattern $pat -Tag $c.Tag -N $c.N
-      $a = @($c.Rel.assets | Where-Object { $_.name -eq $name })
-      if ($a.Count -eq 0) { $why = "$name is not attached"; break }
-      $d = [string]$a[0].digest
-      if ($d -notmatch '^sha256:([0-9a-fA-F]{64})$') { $why = "$name has no sha256 digest"; break }
-      if ($a[0].PSObject.Properties['state'] -and $a[0].state -and $a[0].state -ne 'uploaded') { $why = "$name is not fully uploaded"; break }
-      $found[$pat] = @{ url = [string]$a[0].browser_download_url; digest = $Matches[1].ToLower(); size = [int64]$a[0].size }
+      $r = Find-ReleaseAssets -Assets $c.Rel.assets -Name $name
+      if (@($r.list).Count -eq 0) { $why = $r.why; break }
+      $lists += ,@($r.list)
+      $names += $name
+    }
+    # The patterns that carry <V> must all carry the SAME version (a 13.5 build with a 13.4 runtime bundle is not a
+    # complete set); of the versions every one of them carries, the highest wins.
+    $chosen = @()
+    if (-not $why) {
+      $verKeys = @{}
+      foreach ($l in $lists) { foreach ($m in $l) { if ($null -ne $m.ver) { $verKeys[$m.verKey] = $m.ver } } }
+      if ($verKeys.Count -eq 0) {
+        foreach ($l in $lists) { $chosen += $l[0] }
+      } else {
+        $bestKey = $null
+        foreach ($vk in @($verKeys.Keys)) {
+          $pick = @()
+          foreach ($l in $lists) {
+            $hit = $null
+            foreach ($m in $l) { if ($null -eq $m.ver -or $m.verKey -eq $vk) { $hit = $m; break } }
+            if ($null -eq $hit) { break }
+            $pick += $hit
+          }
+          if ($pick.Count -ne $lists.Count) { continue }
+          if ($null -eq $bestKey -or (Compare-VersionParts -A $verKeys[$vk] -B $verKeys[$bestKey]) -gt 0) { $bestKey = $vk; $chosen = $pick }
+        }
+        if ($null -eq $bestKey) {
+          $seen = @()
+          for ($i = 0; $i -lt $lists.Count; $i++) { $seen += "$($names[$i]) matches only $(@($lists[$i] | ForEach-Object { $_.name }) -join ', ')" }
+          $why = "no one version is carried by every asset of the set: $($seen -join '; ')"
+        }
+      }
     }
     if (-not $why) {
       foreach ($s in $skipped) { Write-Host "NOTE  $Repo $s - using the previous release $($c.Tag)" -ForegroundColor Yellow }
+      for ($i = 0; $i -lt $lists.Count; $i++) {
+        if (@($lists[$i]).Count -gt 1 -and $null -ne $chosen[$i].ver) {
+          Write-Host "NOTE  $Repo $($c.Tag): $(@($lists[$i]).Count) assets match $($names[$i]) ($(@($lists[$i] | ForEach-Object { $_.name }) -join ', ')) - took the highest version every asset of the set carries, $($chosen[$i].name)" -ForegroundColor Yellow
+        }
+        $found[$AssetPatterns[$i]] = @{ url = $chosen[$i].url; digest = $chosen[$i].digest; size = $chosen[$i].size; name = $chosen[$i].name }
+      }
       return @{ tag = $c.Tag; assets = $found }
     }
     $skipped += "$($c.Tag) is incomplete ($why)"

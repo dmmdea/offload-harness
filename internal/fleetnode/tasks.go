@@ -893,6 +893,11 @@ func buildRunGraph(cfg config.Config, payload json.RawMessage) (core.Request, fu
 			return core.Request{}, noop, err
 		}
 	}
+	// A node class that executes caller-supplied code (render/refused-node-classes.json) is refused by name here, before a file
+	// is written, a job exists or a lease is taken; the runner refuses on the same table again, before it starts ComfyUI.
+	if err := mediacap.CheckGraphNodeClasses(in.Graph); err != nil {
+		return core.Request{}, noop, err
+	}
 	if nre := graphFilesRefusal(cfg, in.Graph, in.Manifest); nre != nil {
 		return core.Request{}, noop, nre
 	}

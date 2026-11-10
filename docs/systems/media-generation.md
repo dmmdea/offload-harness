@@ -787,8 +787,8 @@ context, 14.4 GiB on a 15.9 GiB card) and one that leaves the storage card more 
 took about 1.6 GiB with the context at 1280x704x121 and are unmeasured above it, so a larger share or clip can still run out of memory in the first sampler step (an `LTX-PLACEMENT-NOTE` says so every
 run; lower the share if it does). It also refuses a non-`.safetensors` or bf16 `--transformer` (about 39 GiB), `--pool-vvram-gb` (the other placement of the
 same DiT), and there is no expert, `--fast` or GGUF check, because the graph has none. The wait is 7200 s unless `--wait-sec` / `COMFY_WAIT_SEC` says otherwise. The typed door sizes the host RAM on the same stages (the DiT's share, the upscaler and the context on the compute
-card; the rest of the DiT, both VAEs and the context on the storage card; the encoder is gone before the DiT) and declares 0 GiB when both fit, and refuses a
-`.gguf` or bf16 transformer before any lease. The 2026-08-12 single-card-class timing of this family (247 s for a 5 s clip at 1920x1088) is a different placement.
+card; the rest of the DiT, both VAEs and the context on the storage card; the encoder is gone before the DiT) and declares 0 GiB when both fit on a Linux host, and refuses a
+`.gguf` or bf16 transformer before any lease. The 0 is a Linux figure. A Windows host holds the read-only map's pages in the working set while the DiT is copied to the card, and WDDM commits the card allocations, so there the call declares what a Windows run of the family measured (`videoWindowsFigures` in `internal/hostneed/hostneed.go`), stated: `ltx25` declares 24 GiB touched and 30 GiB of commit (2026-11-10, two 16 GiB cards, the int8 transformer and text encoder, a 448x832 clip of 49 frames from a cold instance: 23.0 GiB resident and 29.4 GiB of private bytes at the peak, while the door declared 0). The figures stand for a weight set no larger than the measured one (within 5 percent). A family with no entry (`wan22` today), or a larger set, keeps the ordinary estimate, the whole set, and the declaring line says why. A figure gets in by one render of the family through the door on a Windows host from a cold instance, read from the footprint store's entry for the run: private bytes peak for commit, resident peak for touched. The 2026-08-12 single-card-class timing of this family (247 s for a 5 s clip at 1920x1088) is a different placement.
 
 **The launch.** The runner starts its own ComfyUI, a keyed instance `mc-<storage uuid head>-<compute uuid head>`: its own port (from
 `--api` or `COMFY_API`, which must not be the unkeyed instance's 8188; with neither it falls back to the per-card port, and a ComfyUI
@@ -863,7 +863,7 @@ card's (with it on the compute card the measured call, 3.0 + 12.2 = 15.2 GiB, wo
 33 GiB set): a `--reserve-vram` above 4.7 GiB no longer fits the donor blocks on a 15.9 GiB storage card, and that call takes the ordinary
 estimate (the lease it needs then declares the whole set, or `--ram 0` explicitly). One card, three (a whole-node lease), no card table,
 no fit, another family or no flag keep the ordinary estimate, the whole set (33 GiB). Measured host growth in the benchmark was 2.3 GiB
-over ComfyUI's idle, inside the headroom the brake keeps anyway. The typed VIDEO door has one too (`videogen_placement: multicard`, "Q8_0 experts" below), as do the typed image and edit doors ("Card-only image and edit", below); the render helper can still be run by hand under an explicit `gpu reserve --devices`.
+over ComfyUI's idle, inside the headroom the brake keeps anyway, on a Linux node. The 0 is a Linux figure. A Windows host holds the read-only map's pages in the working set while the DiT is copied to the card, and WDDM commits the card allocations, so there the call declares what a Windows run of the family measured (`videoWindowsFigures` in `internal/hostneed/hostneed.go`), stated: `ltx25` declares 24 GiB touched and 30 GiB of commit (2026-11-10, two 16 GiB cards, the int8 transformer and text encoder, a 448x832 clip of 49 frames from a cold instance: 23.0 GiB resident and 29.4 GiB of private bytes at the peak, while the door declared 0). The figures stand for a weight set no larger than the measured one (within 5 percent). A family with no entry (`wan22` today), or a larger set, keeps the ordinary estimate, the whole set, and the declaring line says why. A figure gets in by one render of the family through the door on a Windows host from a cold instance, read from the footprint store's entry for the run: private bytes peak for commit, resident peak for touched. The typed VIDEO door has one too (`videogen_placement: multicard`, "Q8_0 experts" below), as do the typed image and edit doors ("Card-only image and edit", below); the render helper can still be run by hand under an explicit `gpu reserve --devices`.
 A driver script that wraps the helper is not itself a recognised render helper, so a lease around the script declares the media class
 default (the largest bound family's figure) whatever the helper inside it does; the verb says so on a second line (F71), and the way out
 is `--ram 0` on that `gpu reserve`, because the card-only placement keeps its weights on the two cards. The same `--ram 0` is the way out of the sage
@@ -970,7 +970,7 @@ refused by name (the placement runs the int8 `.safetensors` file).
 (`animateMulticardNeed`; the same queueing, refusals and `gpu_lease_unavailable` answers as the video and image doors), passes `--placement multicard` (and `--resident-gb` when
 `animategen_resident_gb` is set) to the runner, and drops the single-card pin and dynamic VRAM from the launch. It refuses, before any lease is spent, a `.gguf`, bf16 or fp16 `animategen_unet`.
 `hostneed.ForAnimateCardOnly` declares **0 host GiB** when each leased card fits its stage (the figures above, with the default clip's activations: the sizing reads no geometry, and the runner
-refuses a share its own geometry cannot hold); anything else is the ordinary estimate, which counts the whole set. The placement is a node's own config. A fleet node that takes an `animate`
+refuses a share its own geometry cannot hold); anything else is the ordinary estimate, which counts the whole set. The 0 is a Linux figure: no Windows run of a card-only animate call has been measured, and a Windows host holds the read-only map's pages in the working set while the DiT is copied to the card and WDDM commits the card allocations (an `ltx25` card-only clip held 23.0 GiB resident and 29.4 GiB of private bytes), so on a Windows host the call keeps the ordinary estimate, the whole set, and the declaring line says why, until a run there has measured it (`videoWindowsFigures` in `internal/hostneed/hostneed.go`, which has no `wan-animate2` entry today). For animate the 0 was never measured on two cards at all (sizes chosen, not measured). The placement is a node's own config. A fleet node that takes an `animate`
 job runs it through the same door with its own `animategen_*` keys, so a node of two 16 GB cards serves the lane and nothing on the wire changes: the recipe row it advertises
 (`wan-animate2`, `mediacap/lane_rows.go`) is its name and files with either placement. `doctor` derives the `animate_character` route from the files and, under multicard, the four MultiGPU classes
 (`UNETLoaderDisTorch2MultiGPU`, `CLIPLoaderMultiGPU`, `CLIPVisionLoaderMultiGPU`, `VAELoaderMultiGPU`). Not done: a hand run under `gpu reserve --devices <a>,<b>` is sized by the class default
@@ -1108,8 +1108,11 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
 - *The finished answer names the pair.* A generate-image, edit-image or batch that ran on the pair adds `devices` to its success answer: the two lease ids,
   sorted, the key and spelling the queued answer already uses (`TestAMulticardImageBindingLeasesTwoNonDisplayCardsAndPassesThePlacement`). Under a parent
   lease they are the parent's two cards. A batch carries them on every item it rendered here, so the item `generate-image --batch` prints has them too. A call
-  that did not hold the pair (the one-card lease, a pool that holds two cards, a named family without the key, `single`) adds nothing: its answer is byte for
-  byte what it was.
+  that did not hold the pair (the one-card lease, a pool that holds two cards, a named family without the key, `single`) adds no `devices`. The video, animate
+  and music (audio-gen) answers carry `devices` the same way when their grant holds the pair.
+- *The finished answer states the host RAM it declared.* Every media door whose lease declares host RAM (generate-image on ComfyUI or sd.cpp, edit, inpaint, video on ComfyUI, animate, music) adds `host_ram_declared_gib` to its success answer: the touched figure the call declared for its lease, a `0` included (a card-only call on
+  Linux declares 0, and the key is there to say so), and `host_ram_commit_declared_gib` when the estimate stated a commit. A door that declares nothing (upscale,
+  voice on a card) adds neither key.
 - *Under a parent lease* (`local-offload gpu reserve --devices <a>,<b> -- <command>`) the call runs inside it on both cards, if the lease holds exactly two
   non-display cards of this box; one card, the whole node and a lease that includes the display card are refused with the reason.
 - *The lane probe and the place-in-line keeper read the same named plan*, so a router sees a held card of the pair as a busy lane, and the differential
@@ -1141,7 +1144,7 @@ peaks fit the two leased cards, each less the runner's `--reserve-vram`, declare
 pipeline's log (once per key) and `gpu reserve` print it with its reason ("measured with the read-only safetensors loader ... so no weights stream from RAM"),
 because nothing can correct a 0 afterwards (`calibratedRAM` leaves 0 alone) and a false one would stream silently. A card-only image run records its VRAM peak and
 host growth under its own footprint key (the quant carries `+multicard`), not the single-card one. A call that pins an edit canvas above the recipe's cap, a lease of any number of cards but two, a recipe that does not fit,
-a *predicted* row, a flux3-klein call whose graph loads the prompt-upsampler file (the row was measured with the prompt upsampled outside ComfyUI) and a binding with no recipe keep the ordinary streaming figure, with the reason in the declaring line. The 0 is a Linux figure: on a Windows host a measured row that carries Windows figures (`hostWindowsGiB`; today `flux3-klein/bf16`, 13 GiB touched and 19 GiB of commit) declares those, stated, and the rows that carry none declare 0 there as before. A non-zero figure is a floor, not a ceiling: once three runs of the footprint key are recorded, `calibratedRAM` raises the declaration to the 90th percentile of the last 20 runs' resident peaks when that is higher, so a node whose window still holds runs of an older build declares their figure until they age out. Declaring the figure of a row
+a *predicted* row, a flux3-klein call whose graph loads the prompt-upsampler file (the row was measured with the prompt upsampled outside ComfyUI) and a binding with no recipe keep the ordinary streaming figure, with the reason in the declaring line. The 0 is a Linux figure: on a Windows host a measured row that carries Windows figures (`hostWindowsGiB`; today `flux3-klein/bf16`, 13 GiB touched and 19 GiB of commit) declares those, stated, and a measured row that carries none (every measured row but that one today) keeps the ordinary streaming estimate there, with the reason in the declaring line, until a run on Windows has measured it: its 0 was measured on Linux, and the box's own footprint records show a krea2 card-only render at 27 GiB resident and 31 GiB of commit, a qwen-image one at 16.6 and 24.5. A non-zero figure is a floor, not a ceiling: once three runs of the footprint key are recorded, `calibratedRAM` raises the declaration to the 90th percentile of the last 20 runs' resident peaks when that is higher, so a node whose window still holds runs of an older build declares their figure until they age out. Declaring the figure of a row
 nobody has measured would admit on a guess; this errs toward waiting for the host's room. `gpu reserve` around `comfy-generate.mjs`, `comfy-render.mjs` or
 `comfy-edit.mjs` with `--placement multicard` reads the same recipe (`Facts.Placement`, `--resident-gb`, `--megapixels`).
 
@@ -2264,6 +2267,16 @@ node, so it does not become a barrier) with the reason, and resumes it when the 
 could qualify however long it waited (all of them the screen, quarantined, foreign-busy) there is nothing to
 hold a place on, and every call gets the plain `gpu_busy` defer carrying the reason.
 
+**A busy answer names who holds the cards and when to come back.** A `gpu_busy` defer that has a lease behind it (the card-scoped admission's busy answer
+and the whole-node one; not the in-process or host-RAM forms, which have none) says it in the reason, `gpu busy: held by a media-class lease (epoch 1906,
+group nightly, cards <id>, <id>; 696s, reason "..."), its term ends in 512s`, and in its data: `{"holders":[{"epoch","class","reason","group","held_sec",
+"remaining_sec","expires_at","devices"}], "retry_after_sec":N}`. `devices` empty means the lease holds the whole node; `expires_at` (RFC 3339) and
+`retry_after_sec` (the lease's remaining term, a ceiling for a media lease, not a promise) are left out when the lease declared no term or it has passed:
+no figure is made up. When several leases are live the block describes the lowest epoch. The vision gate (`vqa`, `ocr`, `assess_image`, `video_watch`) answers
+the same way, with the seat's cards in the sentence: `gpu busy: the vision seat <model> sits on cards <id>, <id>; a media-class lease (epoch 1906, cards <id>,
+reason "...") has held them for 696s and its term ends in 512s`. A seat sits on one or more cards and is held when a lease touches ANY of them; the sentence
+says which. `video_watch` carries the block once, from the window that found the cards held.
+
 **Open acceptance of P13 (P13 is not complete until these are closed).** What the review pass could not close
 from a worktree, with no GPU and no live lease root:
 
@@ -2731,7 +2744,7 @@ recorded as known offenders with their reason rather than silently skipped — a
   hold (`GET /offload/hold`) ([tests](../../render/comfyui-ext/test_offload_idle.py), run by [`render/comfyui-ext.test.mjs`](../../render/comfyui-ext.test.mjs));
   the launcher side (`resolveIdleBound`, the yaml and whitelist splice in `launchFlags`, the child env, the probe) is in
   [`render/comfy-lifecycle.mjs`](../../render/comfy-lifecycle.mjs), pinned by [`render/comfy-idle.test.mjs`](../../render/comfy-idle.test.mjs)
-- [`internal/hostneed/hostneed.go`](../../internal/hostneed/hostneed.go) — `estimateWith`: a card-only Wan call declares 0 host RAM
+- [`internal/hostneed/hostneed.go`](../../internal/hostneed/hostneed.go) — `estimateWith`: a card-only Wan call declares 0 host RAM on a Linux host (the ordinary estimate on Windows, `videoWindowsFigures`)
   when each leased card fits its own stage (`CardOnly.SageAttention`: the activations at 15.2 GiB under `--use-sage-attention`)
 - [`render/multicard-recipes.json`](../../render/multicard-recipes.json) /
   [`render/multicard-recipes.mjs`](../../render/multicard-recipes.mjs) /

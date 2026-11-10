@@ -525,7 +525,7 @@ verified against the digest the publisher publishes (Hugging Face LFS, GitHub re
 optional assertion, and a model whose host publishes no digest is reported in
 `unverified_models[]`). Results are node-addressed (`outputs.<node_id>[]` with
 `path/type/kind/width/height`); every failure is a **typed defer**
-(`SATISFIER_UNAVAILABLE`, `VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`,
+(`SATISFIER_UNAVAILABLE`, `VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`, `NODE_CLASS_REFUSED`,
 `EXTERNAL_COMFY_NEEDS_PACKS`, …) so callers branch on `code`, never parse prose.
 Prerequisite (provisioned by `install.ps1`): **uv** in the ComfyUI venv (the pack satisfier's
 unified-resolve tool, the hard requirement) and git on PATH. ComfyUI-Manager and GitPython are not

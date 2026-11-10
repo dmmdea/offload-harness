@@ -41,7 +41,7 @@ func TestTicketQueueNeedsNoStateDirKey(t *testing.T) {
 	if _, err := os.Stat(file); err != nil {
 		t.Fatalf("the ticket %s is a file under the machine's state root: %v", a.Ticket, err)
 	}
-	if rows := Queue(e.cfg); len(rows) != 1 || rows[0].Ticket != a.Ticket {
+	if rows := Queue(e.cfg, nil); len(rows) != 1 || rows[0].Ticket != a.Ticket {
 		t.Errorf("offload_status lists the ticket of a machine with no state_dir: %+v", rows)
 	}
 	// An identical re-send attaches to it, as on a machine that sets state_dir.
@@ -163,7 +163,7 @@ func TestARefusedStateRootKeepsNoQueueAndSaysSo(t *testing.T) {
 			t.Fatalf("a cloud-synced root keeps no queue: %+v", st)
 		}
 	}
-	if rows := Queue(cfg); rows != nil {
+	if rows := Queue(cfg, nil); rows != nil {
 		t.Errorf("no queue, no rows: %+v", rows)
 	}
 	if len(lines) != 1 || !strings.Contains(lines[0], "cloud-sync") {

@@ -4,6 +4,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -152,9 +153,106 @@ func (e *errGPUBusy) Error() string {
 		return "gpu busy: " + e.detail
 	}
 	// The holder is a LEASE of a class ("held by a text-class lease"), never the bare class: "text holds
-	// the lease" read as a text seat (gpulease.Class.LeasePhrase, the phrase `gpu status` leads with).
-	return fmt.Sprintf("gpu busy: held by %s (%ds, reason %q)",
-		e.info.Class.LeasePhrase(), int(e.info.Age/time.Second), e.info.Reason)
+	// the lease" read as a text seat (gpulease.Class.LeasePhrase, the phrase `gpu status` leads with). It is named by its
+	// epoch, group and cards too, and when its declared term ends, so the caller can tell which lease it is and when to ask again.
+	who := ""
+	if parts := leaseWho(e.info); len(parts) > 0 {
+		who = strings.Join(parts, ", ") + "; "
+	}
+	s := fmt.Sprintf("gpu busy: held by %s (%s%ds, reason %q)",
+		e.info.Class.LeasePhrase(), who, int(e.info.Age/time.Second), e.info.Reason)
+	if t := leaseTermEnd(e.info, time.Now()); t != "" {
+		s += ", " + t
+	}
+	return s
+}
+
+// leaseWho is the identity of the lease a busy answer names: its epoch, its group when it has one, and the cards it claims (lease
+// ids; none = the whole node, said for a real lease, which always has an epoch). Info describes the lowest epoch when several
+// leases are live, and that is the one named: the others are not read.
+func leaseWho(info gpulease.Info) []string {
+	var parts []string
+	if info.Epoch != 0 {
+		parts = append(parts, fmt.Sprintf("epoch %d", info.Epoch))
+	}
+	if info.Group != "" {
+		parts = append(parts, "group "+info.Group)
+	}
+	switch {
+	case len(info.Devices) > 0:
+		parts = append(parts, "cards "+strings.Join(info.Devices, ", "))
+	case info.Epoch != 0:
+		parts = append(parts, "the whole node")
+	}
+	return parts
+}
+
+// leaseTermEnd says when the lease's declared term ends, counted from now; "" when it declared none. A term already past is said
+// as that: the holder is still there, and the caller must not read a time to come back from it.
+func leaseTermEnd(info gpulease.Info, now time.Time) string {
+	if info.ExpiresAt.IsZero() {
+		return ""
+	}
+	if s := int(info.ExpiresAt.Sub(now).Round(time.Second) / time.Second); s > 0 {
+		return fmt.Sprintf("its term ends in %ds", s)
+	}
+	return "its declared term has passed"
+}
+
+// laneHolderOf is a live lease as a busy answer and the lane probe name it: its epoch, class, group and reason, how long it had
+// been held, the cards it claims (none = the whole node) and when its declared term ends (empty = it declared none).
+// RemainingSec is the term still to run, set only while it is in the future.
+func laneHolderOf(l gpulease.Info, now time.Time) core.LaneHolder {
+	h := core.LaneHolder{Epoch: l.Epoch, Class: string(l.Class), Reason: l.Reason, Group: l.Group, HeldSec: int(l.Age / time.Second), Devices: l.Devices}
+	if !l.ExpiresAt.IsZero() {
+		h.ExpiresAt = l.ExpiresAt.UTC().Format(time.RFC3339)
+		if s := int(l.ExpiresAt.Sub(now).Round(time.Second) / time.Second); s > 0 {
+			h.RemainingSec = s
+		}
+	}
+	return h
+}
+
+// busyHolderData is the structured half of a busy deferral: {"holders":[<the lease in the way>], "retry_after_sec":N}. The
+// retry figure is the lease's remaining term and is left out when the lease declared none or its term has passed (no number is
+// made up). nil when there is no lease to name.
+func busyHolderData(info gpulease.Info, now time.Time) json.RawMessage {
+	if !info.Held {
+		return nil
+	}
+	h := laneHolderOf(info, now)
+	data, err := json.Marshal(struct {
+		Holders       []core.LaneHolder `json:"holders"`
+		RetryAfterSec int               `json:"retry_after_sec,omitempty"`
+	}{Holders: []core.LaneHolder{h}, RetryAfterSec: h.RemainingSec})
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// visionBusyReason is the reason of a vision call that waited its window while a lease sat on the cards of its seat. The seat's
+// cards (seat; nil = they cannot be said, read as the whole node) and the lease in the way are both named: the seat sits on
+// several cards, and a caller who saw one card held and another free read the gate as blind to card scope. The leading "gpu busy:"
+// is what callers and the ledger match on.
+func visionBusyReason(model string, seat []string, info gpulease.Info, now time.Time) string {
+	subject, cards := "the vision seat "+model, "the cards"
+	if len(seat) > 0 {
+		subject += " sits on cards " + strings.Join(seat, ", ")
+		cards = "them"
+	}
+	holder := info.Class.LeasePhrase()
+	if parts := leaseWho(info); len(parts) > 0 {
+		if info.Reason != "" {
+			parts = append(parts, fmt.Sprintf("reason %q", info.Reason))
+		}
+		holder += " (" + strings.Join(parts, ", ") + ")"
+	}
+	s := fmt.Sprintf("gpu busy: %s; %s has held %s for %ds", subject, holder, cards, int(info.Age/time.Second))
+	if t := leaseTermEnd(info, now); t != "" {
+		s += " and " + t
+	}
+	return s
 }
 
 // IsGPUBusy reports whether err means the card was legitimately held by someone else
@@ -194,7 +292,13 @@ func (p *Pipeline) deferForLease(err error, task core.TaskType, meta core.Meta, 
 		meta.ErrClass = core.ErrClassGPULeaseUnavailable
 	}
 	p.recordDefer(task, meta, inputChars, err.Error())
-	return core.Deferf(err.Error(), "", meta)
+	res := core.Deferf(err.Error(), "", meta)
+	if busy != nil && busy.detail == "" && busy.hostRAM == nil {
+		// A lease is in the way: the answer names it in data as well, so a caller reads who holds the cards and when to come back
+		// without parsing the sentence. The in-process and host-RAM forms have no lease to name and keep no data.
+		res.Data = busyHolderData(busy.info, time.Now())
+	}
+	return res
 }
 
 // acquireWholeNode takes the machine-wide, WHOLE-NODE MEDIA lease for one generation job and

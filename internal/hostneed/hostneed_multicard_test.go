@@ -38,7 +38,9 @@ func imgFacts(t *testing.T, cards ...float64) Facts {
 		"flux3-image-klein-bf16.safetensors":                         10.34,
 		"qwen3.5_9b_flux3_prompt_upsampler_int8_convrot.safetensors": 9.08,
 	})
-	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, CardsGiB: cards}
+	// The 0 these tests pin is the Linux figure (a Windows host declares the ordinary estimate for a row with no Windows figures), and an empty GOOS
+	// means the host the test runs on, so the helper says Linux; a test of the Windows branch sets f.GOOS itself.
+	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, CardsGiB: cards, GOOS: "linux"}
 	for _, c := range cards {
 		if c > f.VRAMGiB {
 			f.VRAMGiB = c
@@ -300,9 +302,21 @@ func TestAMeasuredCardOnlyRowDeclaresItsWindowsFiguresOnlyOnAWindowsHost(t *test
 			t.Errorf("the detail must say why (%q missing): %q", want, n.Detail)
 		}
 	}
-	// a row that carries no Windows figures declares 0 on a Windows host as it always did
+	// a measured row that carries no Windows figures declares 0 on a Linux host, and on a Windows host the ordinary estimate with the reason: its 0
+	// is a Linux measurement, and a Windows host holds the map's pages in the working set and the card allocations in commit
+	f.GOOS = "linux"
 	if m := need(t, img2512Cmd, f); m.GiB != 0 || !m.CardOnly {
-		t.Fatalf("a multicard 2512 Q5_1 call on a Windows host: %v, want 0 and card-only", m)
+		t.Fatalf("a multicard 2512 Q5_1 call on a Linux host: %v, want 0 and card-only", m)
+	}
+	f.GOOS = "windows"
+	m := need(t, img2512Cmd, f)
+	if m.GiB < 23 || m.CardOnly || m.CommitStated {
+		t.Fatalf("a multicard 2512 Q5_1 call on a Windows host: %v, want the ordinary 23.1 GiB set, not card-only", m)
+	}
+	for _, want := range []string{"qwen-image/gguf-q5_1", "fits the two leased cards", "measured on a Linux host", "no run has measured what a Windows host holds", "hostWindowsGiB"} {
+		if !strings.Contains(m.Detail, want) {
+			t.Errorf("the detail must say why (%q missing): %q", want, m.Detail)
+		}
 	}
 	// the row was measured with the prompt upsampled outside ComfyUI: a call whose graph loads the upsampler FILE keeps the ordinary estimate,
 	// the whole set with that file in it, on either system

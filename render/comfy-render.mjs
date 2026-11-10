@@ -56,6 +56,7 @@ import { readFileSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { checkGraphClasses } from "./refused-node-classes.mjs";
 import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import { assertNodeClasses } from "./comfy-nodes.mjs";
@@ -150,6 +151,10 @@ export function buildRenderGraph({ pos, flags, env = process.env, random = Math.
 
   if (flags.graph) {
     graph = JSON.parse(readFileSync(flags.graph, "utf8"));
+    // The caller's own workflow is read against the node classes that execute caller-supplied code (render/refused-node-classes.json)
+    // here, before anything is started: a refusal is a usage error naming the class.
+    const refused = checkGraphClasses(graph);
+    if (refused) throw new UsageError(`error: ${refused.code}: ${refused.detail}`);
   } else if (flags.family === "hidream-o1" || flags.family === "hidream-o1-dev") {
     // Model-family-correct graph (quality-first): the generic SDXL-shaped KSampler graph
     // is WRONG for HiDream-O1 (pixel-space DiT — wrong latent node, missing ModelNoiseScale

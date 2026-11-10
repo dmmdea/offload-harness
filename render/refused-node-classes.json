@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "note": "The ComfyUI node classes a run-graph door refuses by name, because the class executes caller-supplied code. A graph is data, but a node pack can ship a class that runs one of its string inputs as code; once that pack is installed in the ComfyUI instance the door uses, any submitted graph holding the class runs the caller's code on the node's host, with the ComfyUI process's rights. A graph that contains a class listed here (class_type in an API-format graph, type in a UI-format workflow, an exact case-sensitive match) is refused with NODE_CLASS_REFUSED before ComfyUI is started or contacted and before anything is provisioned (render/refused-node-classes.mjs, internal/mediacap/refusednodes.go). A row is added only for a class whose pack source was read and found to execute a caller-supplied input; nothing legitimate submits these classes through this door. A change to this file is a reviewed edit, with the Go copy in internal/mediacap/refusednodes.go changed with it (a test holds the two together).",
+  "classes": [
+    {
+      "class": "ModelTest",
+      "pack": "ComfyUI-Image-Filters",
+      "why": "runs its `code` STRING input through exec()"
+    }
+  ]
+}

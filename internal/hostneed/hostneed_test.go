@@ -310,8 +310,9 @@ const (
 )
 
 func ltxFacts(t *testing.T, vram float64) Facts {
+	// The card-only 0 these tests pin is the Linux figure (a Windows host declares the ordinary estimate for it), and an empty GOOS means the host the test runs on, so the helper says Linux.
 	dir, stat := comfyTree(t, map[string]float64{ltxInt8Transformer: 20.03, ltxBf16Transformer: 39.13, ltxGemma: 14.32})
-	return Facts{Cfg: config.Config{ComfyDir: dir}, VRAMGiB: vram, Stat: stat}
+	return Facts{Cfg: config.Config{ComfyDir: dir}, VRAMGiB: vram, Stat: stat, GOOS: "linux"}
 }
 
 // --graph POSTS THE CALLER'S OWN WORKFLOW: the helper's family flags are not read, so the call is as
@@ -553,7 +554,8 @@ const wanMulticardCmd = "node render/comfy-video.mjs o.mp4 s.png p --model wan -
 
 func wanFacts(t *testing.T, cards ...float64) Facts {
 	dir, stat := comfyTree(t, map[string]float64{"hi.safetensors": 13.3, "lo.safetensors": 13.4, "te.safetensors": 6.3})
-	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, CardsGiB: cards}
+	// The card-only 0 these tests pin is the Linux figure (a Windows host declares the ordinary estimate for it), and an empty GOOS means the host the test runs on, so the helper says Linux.
+	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, CardsGiB: cards, GOOS: "linux"}
 	for _, c := range cards {
 		if c > f.VRAMGiB {
 			f.VRAMGiB = c
@@ -684,6 +686,34 @@ func TestTheResidentShareIsReadFromTheCall(t *testing.T) {
 	ordinary("a 0 GiB share on 16 + 12 GiB", wanNeed(t, wanMulticardCmd+" --wan-resident-gb 0", wanFacts(t, 16, 12)))
 	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 13)); n.GiB != 0 {
 		t.Fatalf("the default 3 GiB share on 16 + 13 GiB (the 13 GiB card holds 11.2 GiB, 12 usable): %v, want 0", n)
+	}
+	// A call that asked for the card-only placement and was sized as the ordinary set says so, and why: the observed case was an LTX-2.5 call on two 15 GiB
+	// cards with a stray 2 GiB share, which leaves 18 GiB of the 20 GiB DiT on a storage card with 14 GiB usable and printed only "the weights stream from RAM"
+	// (the default 9 GiB share fits the same pair and is admitted card-only, so the share is the one thing to name).
+	ltx := ltxFacts(t, 15)
+	ltx.CardsGiB = []float64{15, 15}
+	const ltxCmd = "node render/comfy-video.mjs o.mp4 s.png p --model ltx25 --wan-placement multicard"
+	if n := wanNeed(t, ltxCmd, ltx); n.GiB != 0 {
+		t.Fatalf("premise: the default 9 GiB share of the LTX-2.5 DiT fits two 15 GiB cards, got %v", n)
+	}
+	// The same fitting call on a Windows host: its 0 is a Linux measurement, so it declares what a Windows run of this set measured (24 GiB touched, 30 GiB of commit), stated.
+	win := ltx
+	win.GOOS = "windows"
+	if w := wanNeed(t, ltxCmd, win); !near(w.GiB, 24) || !near(w.CommitGiB, 30) || !w.CommitStated || w.Source != SourceMeasured || !strings.Contains(w.Detail, "2 leased cards (15.0 + 15.0 GiB)") || !strings.Contains(w.Detail, "a Linux host declares 0") {
+		t.Fatalf("the fitting LTX-2.5 call on a Windows host: %v, want the measured Windows figures, stated", w)
+	}
+	n := wanNeed(t, ltxCmd+" --wan-resident-gb 2", ltx)
+	if !near(n.GiB, 20.03+14.32) {
+		t.Fatalf("a 2 GiB share of the LTX-2.5 DiT on two 15 GiB cards: %v, want the ordinary set", n)
+	}
+	for _, want := range []string{"the card-only placement was asked for", "ltx25 does not fit the two leased cards (15.0 + 15.0 GiB)", "compute card would peak at 3.5 GiB (of 15.0 GiB)", "storage card at 20.6 GiB (of 14.0 GiB usable)", "resident share is 2.0 GiB", "wan_resident_gb", "the family's own is 9.0 GiB", "18.0 GiB of the 20.0 GiB DiT"} {
+		if !strings.Contains(n.Detail, want) {
+			t.Errorf("the detail must say why (%q missing): %q", want, n.Detail)
+		}
+	}
+	// a Wan call whose share missed the compute card names its share too
+	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb 6", two); !strings.Contains(n.Detail, "resident share is 6.0 GiB") || !strings.Contains(n.Detail, "the family's own is 3.0 GiB") {
+		t.Errorf("a Wan call whose share missed the compute card says the share: %q", n.Detail)
 	}
 }
 

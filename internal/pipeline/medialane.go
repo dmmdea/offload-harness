@@ -287,13 +287,7 @@ func (r *laneReading) leasesIn(ids []string) {
 		if len(ids) != 0 && len(l.Devices) != 0 && !intersects(l.Devices, ids) {
 			continue
 		}
-		h := core.LaneHolder{Epoch: l.Epoch, Class: string(l.Class), Reason: l.Reason, Devices: l.Devices}
-		if !l.ExpiresAt.IsZero() {
-			if s := int(l.ExpiresAt.Sub(now).Round(time.Second) / time.Second); s > 0 {
-				h.RemainingSec = s
-			}
-		}
-		r.holders = append(r.holders, h)
+		r.holders = append(r.holders, laneHolderOf(l, now))
 	}
 	if len(r.holders) == before {
 		return

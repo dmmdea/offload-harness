@@ -57,6 +57,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { assertGraphClasses } from "./refused-node-classes.mjs";
 import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi, comfyLogPath, comfyLogCursor } from "./comfy-lifecycle.mjs";
 import { stageInput as stageToInput } from "./comfy-input.mjs";
@@ -177,6 +178,9 @@ export function buildGraphFromArgs(pos, flags, { stage = stageInput, vramTotalBy
   const model = flags.model || "wan";
   if (flags.graph) {
     graph = JSON.parse(readFileSync(flags.graph, "utf8"));
+    // The caller's own workflow is read against the node classes that execute caller-supplied code (render/refused-node-classes.json)
+    // before anything is started; a refusal throws NODE_CLASS_REFUSED naming the class.
+    assertGraphClasses(graph);
   } else if (flags.model === "ace") {
     // text-to-music (ACE-Step): no still is USED — but a caller may still SUPPLY one,
     // because the Go pipeline builds `<out> <still> <prompt>` whenever a still is
