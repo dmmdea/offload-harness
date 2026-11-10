@@ -142,7 +142,7 @@ The spill lanes that take a `route` (`offload_transcribe`, the three vision tool
 URLs (tailnet-only) that a spill may use, each of which must be in `delegate_remotes`. It narrows the roster the lane probes
 for that one call and never extends it; a base outside `delegate_remotes` is refused as a contract defer
 (`defer_class: contract`) naming it, before anything is read or sent. It matters for `route: auto` and `remote`; `local`
-never leaves the box. The CLI `transcribe` verb takes the same as a repeatable `--remote`. One helper does the narrowing for
+never leaves the box. The CLI `transcribe` verb takes the same as a repeatable `--remote`, and so do the CLI vision verbs (`vqa`, `ocr`, `assess-image`), which also take `--node`: the ONE fleet node that runs the call, named by the node id its `/fleet/health` publishes (any case) or by a `delegate_remotes` URL, resolved by the helper the media verbs use (`mediaremote.ResolveNamedBase`), so a script can pick a GPU node over a small NPU node. With either flag and no `--route` the verb runs on a node (route `remote`), `--route local` with either is a contract refusal, and a node id nobody publishes or a base outside `delegate_remotes` is refused with the media verbs' wording. One helper does the narrowing for
 every lane (`rosterprobe.Narrow`, `NarrowConfig`, `NarrowLane`; `mediaremote` uses the same rule).
 When the transcript carries word times the result also has `words_reliable` and `words_drift_sec`: `false` means the
 first word of some segment starts 0.5 s or more away from its segment (issue #169, see

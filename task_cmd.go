@@ -17,6 +17,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/mcpserver"
+	"github.com/dmmdea/offload-harness/internal/mediaremote"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/rosterprobe"
 	"github.com/dmmdea/offload-harness/internal/sttremote"
@@ -52,6 +53,62 @@ const sttRouteHelp = "where the whisper model runs: local (default), auto (a fle
 // (0.116.0) — the MCP tools carry the same vocabulary (visionremote).
 const visionRouteHelp = "where the vision model runs: local (default), auto (a fleet node when the local GPU lease is held or the local vision seat is busy), remote (force a fleet node; defers when none is eligible)"
 
+// visionRemoteHelp and visionNodeHelp are the --remote and --node flag texts shared by vqa / ocr / assess-image. They carry the
+// same meaning as on the media verbs (nodeFlagUsage) and as `remotes` on the MCP vision tools.
+const (
+	visionRemoteHelp = "fleet node base URL a remote placement may use (repeatable); must be one of delegate_remotes, narrows the fleet and never extends it. Without --route it implies --route remote; --route local with --remote is refused"
+	visionNodeHelp   = "name the ONE fleet node that runs this call: a node_id its /fleet/health publishes (any case) or one of the delegate_remotes URLs. No other node and not this machine is tried; a node that cannot take the call is refused with the reason. Without --route it implies --route remote; --route local with --node is refused"
+)
+
+// runCLIVision is visionremote.Run for a CLI verb that may pin the remote placement: remotes narrows delegate_remotes through
+// the one rule the MCP vision tools use (rosterprobe.NarrowLane), and node names the ONE fleet node (an id or a URL, resolved by
+// the helper the media verbs resolve it with) so the roster the lane places on is that node alone. Naming either leaves this
+// machine: --route local contradicts it and is refused as a contract error, and an unset route becomes remote (a named node is
+// never run here, and auto could fall back to this machine). With neither given the call is exactly visionremote.Run.
+func runCLIVision(ctx context.Context, cfg config.Config, runner visionremote.Runner, req core.Request, route string, remotes []string, node string) core.Result {
+	node = strings.TrimSpace(node)
+	pinned := node != ""
+	for _, r := range remotes {
+		if strings.TrimSpace(r) != "" {
+			pinned = true
+		}
+	}
+	if !pinned {
+		return visionremote.Run(ctx, cfg, runner, req, route)
+	}
+	contract := func(msg string) core.Result {
+		res := core.Deferf(msg, "", core.Meta{})
+		res.DeferClass = core.DeferClassContract
+		return res
+	}
+	r, ok := visionremote.NormalizeRoute(route)
+	if !ok {
+		return visionremote.Run(ctx, cfg, runner, req, route) // the lane's own unrecognized-route answer
+	}
+	if r == visionremote.RouteLocal && strings.TrimSpace(route) != "" {
+		if node != "" {
+			return contract(fmt.Sprintf("node %q names a fleet node and route local runs this call on this machine: drop one of them", node))
+		}
+		return contract("remote names fleet nodes and route local runs this call on this machine: drop one of them")
+	}
+	narrowed, refused, ok := rosterprobe.NarrowLane(cfg, remotes)
+	if !ok {
+		return refused
+	}
+	cfg = narrowed
+	if node != "" {
+		base, refused, ok := mediaremote.ResolveNamedBase(ctx, cfg, node, "vision")
+		if !ok {
+			return refused
+		}
+		cfg.DelegateRemotes = []string{base}
+		r = visionremote.RouteRemote // a named node is the only candidate: auto's fall back to this machine is not on offer
+	} else if r == visionremote.RouteLocal {
+		r = visionremote.RouteRemote
+	}
+	return visionremote.Run(ctx, cfg, runner, req, r)
+}
+
 // runVQA handles `local-offload vqa <image-path> --question "..." [--route local|auto|remote] [--json]`.
 // Unlike the text tasks, the positional argument is an IMAGE PATH (or data URI),
 // not stdin text; it is passed through Request.Image and resolved in the pipeline.
@@ -61,8 +118,11 @@ func runVQA(args []string) error {
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	question := fs.String("question", "", "the question to ask about the image")
 	route := fs.String("route", "", visionRouteHelp)
+	remotes := new(repeatedFlag)
+	fs.Var(remotes, "remote", visionRemoteHelp)
+	node := fs.String("node", "", visionNodeHelp)
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "question": true, "route": true,
+		"config": true, "question": true, "route": true, "remote": true, "node": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -80,12 +140,12 @@ func runVQA(args []string) error {
 	}
 	defer cleanup()
 
-	res := visionremote.Run(context.Background(), cfg, p, core.Request{
+	res := runCLIVision(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskVQA,
 		Door:   "cli:vqa",
 		Image:  positional,
 		Params: map[string]any{"question": *question},
-	}, *route)
+	}, *route, *remotes, *node)
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
@@ -452,8 +512,11 @@ func runOCR(args []string) error {
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	route := fs.String("route", "", visionRouteHelp)
+	remotes := new(repeatedFlag)
+	fs.Var(remotes, "remote", visionRemoteHelp)
+	node := fs.String("node", "", visionNodeHelp)
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "route": true,
+		"config": true, "route": true, "remote": true, "node": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -468,11 +531,11 @@ func runOCR(args []string) error {
 	}
 	defer cleanup()
 
-	res := visionremote.Run(context.Background(), cfg, p, core.Request{
+	res := runCLIVision(context.Background(), cfg, p, core.Request{
 		Task:  core.TaskOCR,
 		Door:  "cli:ocr",
 		Image: positional,
-	}, *route)
+	}, *route, *remotes, *node)
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
@@ -554,8 +617,11 @@ func runAssessImage(args []string) error {
 	asJSON := fs.Bool("json", false, "print full result JSON")
 	brief := fs.String("brief", "", "optional description the image should match")
 	route := fs.String("route", "", visionRouteHelp)
+	remotes := new(repeatedFlag)
+	fs.Var(remotes, "remote", visionRemoteHelp)
+	node := fs.String("node", "", visionNodeHelp)
 	positional, flagArgs := splitArgs(args, map[string]bool{
-		"config": true, "brief": true, "route": true,
+		"config": true, "brief": true, "route": true, "remote": true, "node": true,
 	})
 	_ = fs.Parse(flagArgs)
 
@@ -574,12 +640,12 @@ func runAssessImage(args []string) error {
 	if *brief != "" {
 		params["brief"] = *brief
 	}
-	res := visionremote.Run(context.Background(), cfg, p, core.Request{
+	res := runCLIVision(context.Background(), cfg, p, core.Request{
 		Task:   core.TaskAssessImage,
 		Door:   "cli:assess-image",
 		Image:  positional,
 		Params: params,
-	}, *route)
+	}, *route, *remotes, *node)
 	if *asJSON {
 		b, _ := json.MarshalIndent(res, "", "  ")
 		fmt.Println(string(b))
