@@ -188,15 +188,36 @@ func leaseWho(info gpulease.Info) []string {
 }
 
 // leaseTermEnd says when the lease's declared term ends, counted from now; "" when it declared none. A term already past is said
-// as that: the holder is still there, and the caller must not read a time to come back from it.
+// as that: the holder is still there, and the caller must not read a time to come back from it. A door call's lease is said as
+// what it is: it ends when that call returns, and its term is the ceiling of the call, not a time to come back at (retryAfterSec).
 func leaseTermEnd(info gpulease.Info, now time.Time) string {
 	if info.ExpiresAt.IsZero() {
 		return ""
 	}
-	if s := int(info.ExpiresAt.Sub(now).Round(time.Second) / time.Second); s > 0 {
-		return fmt.Sprintf("its term ends in %ds", s)
+	s := int(info.ExpiresAt.Sub(now).Round(time.Second) / time.Second)
+	switch {
+	case s <= 0:
+		return "its declared term has passed"
+	case info.Origin == doorCallOrigin:
+		return fmt.Sprintf("it is one door call and ends when that call returns, %ds at most", s)
 	}
-	return "its declared term has passed"
+	return fmt.Sprintf("its term ends in %ds", s)
+}
+
+// doorCallOrigin is the Origin a door's own call stamps on the lease it renders under.
+const doorCallOrigin = "pipeline"
+
+// retryAfterSec is the figure a caller sleeps on before it asks again, from the remaining declared term of the lease in the way. A
+// lease a caller reserved declares the window it plans to hold, and what is left of it is that figure. A door call's lease ends when
+// that one call returns and its term is only the ceiling of the call: a batch that renders call by call opens a gap after each, and
+// a caller that slept the ceiling (88 minutes, read on a real batch whose gaps came every few minutes) missed all of them. Under
+// such a holder the figure is the cadence of the line itself, the gpulease.TokenGrace a waiter has to ask again in, and never more
+// than the term.
+func retryAfterSec(info gpulease.Info, remaining int) int {
+	if grace := int(gpulease.TokenGrace / time.Second); info.Origin == doorCallOrigin && remaining > grace {
+		return grace
+	}
+	return remaining
 }
 
 // laneHolderOf is a live lease as a busy answer and the lane probe name it: its epoch, class, group and reason, how long it had
@@ -214,8 +235,9 @@ func laneHolderOf(l gpulease.Info, now time.Time) core.LaneHolder {
 }
 
 // busyHolderData is the structured half of a busy deferral: {"holders":[<the lease in the way>], "retry_after_sec":N}. The
-// retry figure is the lease's remaining term and is left out when the lease declared none or its term has passed (no number is
-// made up). nil when there is no lease to name.
+// holder carries the lease's remaining term (remaining_sec, expires_at) and the retry figure is when asking again has a chance
+// (retryAfterSec). Both are left out when the lease declared no term or its term has passed (no number is made up). nil when
+// there is no lease to name.
 func busyHolderData(info gpulease.Info, now time.Time) json.RawMessage {
 	if !info.Held {
 		return nil
@@ -224,7 +246,7 @@ func busyHolderData(info gpulease.Info, now time.Time) json.RawMessage {
 	data, err := json.Marshal(struct {
 		Holders       []core.LaneHolder `json:"holders"`
 		RetryAfterSec int               `json:"retry_after_sec,omitempty"`
-	}{Holders: []core.LaneHolder{h}, RetryAfterSec: h.RemainingSec})
+	}{Holders: []core.LaneHolder{h}, RetryAfterSec: retryAfterSec(info, h.RemainingSec)})
 	if err != nil {
 		return nil
 	}

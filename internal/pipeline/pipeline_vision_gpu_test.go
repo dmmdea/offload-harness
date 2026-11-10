@@ -35,7 +35,10 @@ import (
 // staleness rule, so a fixture in the old shape parses to no holder and the gate reports
 // the card FREE — which is precisely the class of bug (a second definition of the
 // record) that the collapse removed.
-func holdGPULock(t *testing.T) string {
+func holdGPULock(t *testing.T) string { return holdGPULockFrom(t, "") }
+
+// holdGPULockFrom is holdGPULock with the lease's Origin set ("pipeline" is a door's own call).
+func holdGPULockFrom(t *testing.T, origin string) string {
 	t.Helper()
 	lock := filepath.Join(t.TempDir(), "lease")
 	if err := os.MkdirAll(lock, 0o777); err != nil {
@@ -47,6 +50,7 @@ func holdGPULock(t *testing.T) string {
 		Class:        gpulease.ClassMedia,
 		Holder:       gpulease.Holder{PID: os.Getpid()},
 		Reason:       "test generation job",
+		Origin:       origin,
 		AcquiredAtMs: now.UnixMilli(),
 		RenewedAtMs:  now.UnixMilli(),
 		ExpiresAtMs:  now.Add(time.Hour).UnixMilli(),
@@ -113,6 +117,33 @@ func TestVisionGPULockHeldDefersWithDistinctReason(t *testing.T) {
 	// No model call happened, so the vision breaker must be untouched (closed).
 	if st := p.breakers.State("fake-vlm"); st != "closed" {
 		t.Errorf("breaker state = %q, want closed (no call was made)", st)
+	}
+}
+
+// TestBusyUnderADoorCallRetriesAtTheLinesCadence: the lease in the way is another door call's, with an hour of term left. That
+// term is the ceiling of the one call, so the figure to sleep on is the line's cadence and the term stays on the holder. Read on a
+// real batch: retry_after_sec 5309 while a gap opened every few minutes, and a caller that slept it would have missed them all.
+func TestBusyUnderADoorCallRetriesAtTheLinesCadence(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	cfg := baseVisionCfg(srv, "fake-vlm")
+	cfg.GPULockPath = holdGPULockFrom(t, "pipeline")
+	p := New(cfg, llamaclient.New(srv.URL, cfg.CompletionPath, "", 10*time.Second), nil, nil)
+	p.visionGPUWait, p.visionGPUPoll = 60*time.Millisecond, 20*time.Millisecond
+
+	res := p.Run(context.Background(), vqaReq())
+	var held struct {
+		Holders []core.LaneHolder `json:"holders"`
+		Retry   int               `json:"retry_after_sec"`
+	}
+	if err := json.Unmarshal(res.Data, &held); err != nil || len(held.Holders) != 1 {
+		t.Fatalf("data = %s (%v), want one holder", res.Data, err)
+	}
+	if grace := int(gpulease.TokenGrace / time.Second); held.Retry != grace || held.Holders[0].RemainingSec < 3000 {
+		t.Errorf("retry_after_sec = %d with %ds of term on the holder, want %d and the hour", held.Retry, held.Holders[0].RemainingSec, grace)
+	}
+	if !strings.Contains(res.Reason, "it is one door call and ends when that call returns") {
+		t.Errorf("reason = %q, want the door call said as one", res.Reason)
 	}
 }
 
