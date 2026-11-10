@@ -748,9 +748,12 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 	}
 	defer grant.Release()
 	m.Launch = grant.launch(m.Launch)
+	// Passive footprint like the image door: the VRAM peak and the host peaks of this render, under the key editNeed carries.
+	editFam, editQuant := editFootprintKey(cfg)
 	outPath, gerr := imagegen.Edit(ctx, imagegen.EditRequest{
 		Node: cfg.NodePath, Script: script, ComfyDir: cfg.ComfyDir, Out: out, Image: image, Prompt: prompt,
 		Params: req.Params, Model: m, Timeout: timeout, ExtraEnv: grant.Env,
+		Sampling: p.footprintSampling(editFam, editQuant, editFootprintTask),
 	})
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)

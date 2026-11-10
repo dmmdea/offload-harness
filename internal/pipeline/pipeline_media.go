@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/imagegen"
 )
 
@@ -162,13 +163,7 @@ func imageFootprintKey(cfg config.Config) (family, quant string) {
 	// them into a number true of neither. The precision is read from the bound DiT's
 	// basename, most specific token first.
 	if family == config.FamilyQwenImage21 {
-		base := strings.ToLower(filepath.Base(cfg.ImageGenCkpt))
-		for _, q := range []string{"nvfp4", "int8", "int4", "bf16", "fp16", "fp8"} {
-			if strings.Contains(base, q) {
-				quant = q
-				break
-			}
-		}
+		quant = qwenImage21Precision(cfg.ImageGenCkpt)
 	}
 	// The card-only placement peaks per card and its host growth is the read-only loader's: a bucket of its own, not the single-card one it would pull toward
 	// numbers true of neither (the VRAM peak, and the host p90 a single-card declaration is raised to).
@@ -180,6 +175,53 @@ func imageFootprintKey(cfg config.Config) (family, quant string) {
 		}
 	}
 	return family, quant
+}
+
+// qwenImage21Precision is the precision token of a qwen-image-2.1 DiT file, read from its basename and most specific token first ("" = none named).
+// The image door and the edit door share it so one file reads as one precision on both.
+func qwenImage21Precision(file string) string {
+	base := strings.ToLower(filepath.Base(file))
+	for _, q := range []string{"nvfp4", "int8", "int4", "bf16", "fp16", "fp8"} {
+		if strings.Contains(base, q) {
+			return q
+		}
+	}
+	return ""
+}
+
+// editFootprintTask is the task the generative edit door records its renders under: the fleet's own name for the edit task, so the store, the fleet
+// health rows and the media admission all spell it one way.
+const editFootprintTask = fleetnode.ImageEditTask
+
+// editFootprintKey is this call's generative-edit footprint identity: the edit family exactly as the edit need names it (hostneed and the card-only
+// recipe lookup: an unset gen_edit_family is the 2511 graph), the precision of the bound qwen-image-2.1 DiT, and the card-only placement as a bucket of its
+// own for the reason imageFootprintKey gives. It is what the door's sampling hook records under and what editNeed carries for calibratedRAM, so the
+// two cannot drift apart.
+func editFootprintKey(cfg config.Config) (family, quant string) {
+	family = strings.TrimSpace(cfg.GenEditFamily)
+	if family == "" {
+		family = config.EditFamily2511
+	}
+	if family == config.FamilyQwenImage21 {
+		quant = qwenImage21Precision(cfg.GenEditUnet)
+	}
+	if cfg.EditMulticard() {
+		if quant == "" {
+			quant = "multicard"
+		} else {
+			quant += "+multicard"
+		}
+	}
+	return family, quant
+}
+
+// musicFootprintKey is the music door's footprint identity: ACE-Step, with the card-only placement (musicgen_placement: multicard) a bucket of its own
+// (its peaks are per card and its host growth is the loader's) and the single-card placement under the empty quant it always had.
+func musicFootprintKey(cfg config.Config) (family, quant string) {
+	if cfg.MusicMulticard() {
+		quant = "multicard"
+	}
+	return "acestep", quant
 }
 
 // mintSeed returns a random positive seed (1..1e9) so an unspecified-seed render is still

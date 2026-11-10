@@ -344,4 +344,15 @@ func TestTheCardOnlyPlacementHasItsOwnFootprintKey(t *testing.T) {
 			t.Errorf("%s: the card-only need records under %+v, want the card-only key", ckpt, got)
 		}
 	}
+	// The edit and music doors record under the same identity their needs carry (calibratedRAM reads it back), the card-only placement apart from the single one.
+	ecfg := config.Default()
+	for placement, want := range map[string]string{"single": "", "multicard": "multicard"} {
+		ecfg.GenEditPlacement, ecfg.MusicGenPlacement = placement, placement
+		if fam, quant := editFootprintKey(ecfg); fam != config.EditFamily2511 || quant != want || editNeed(ecfg, "").Foot != (footKey{fam, quant, "image-edit"}) {
+			t.Errorf("edit placement %q: key (%q, %q), need records under %+v", placement, fam, quant, editNeed(ecfg, "").Foot)
+		}
+		if fam, quant := musicFootprintKey(ecfg); fam != "acestep" || quant != want || musicNeed(ecfg, "").Foot != (footKey{fam, quant, "audio-gen"}) {
+			t.Errorf("music placement %q: key (%q, %q), need records under %+v", placement, fam, quant, musicNeed(ecfg, "").Foot)
+		}
+	}
 }
