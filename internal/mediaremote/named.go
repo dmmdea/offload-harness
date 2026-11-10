@@ -134,71 +134,16 @@ func (p *namedPick) annotate(res core.Result) core.Result {
 // returns another node: a node that cannot take the call is a refusal or a capacity defer, and the caller decides what to do.
 func pickNamed(ctx context.Context, cfg config.Config, bases []string, name string, req core.Request, pl planned, doorTask string) (base, node string, pick *namedPick, err error) {
 	lane := pl.fleetTask
-	typed := name // what the caller typed; what is printed and filed is shownNode(typed)
-	name = shownNode(typed)
+	typedName := name // what the caller typed
+	name = shownNode(name)
 	refuse := func(class string, noNode bool, word, msg, family string, missing []string) *namedRefusal {
 		return &namedRefusal{class: class, noNode: noNode, msg: msg, Refusal: word, Node: name, Lane: lane, Family: family, Missing: missing}
 	}
-	byURL := strings.Contains(typed, "://")
-	var (
-		readings = rosterprobe.Probe(ctx, bases, cfg.FleetAuthToken, healthTimeout)
-		match    = -1
-		roster   []string
-		silent   []string // the entries that were dialled and gave no health: one of them may be the node the caller means
-		refused  []string // the entries the tailnet guard will not admit: never dialled, so none has an id to be meant by
-	)
-	for i, r := range readings {
-		id := r.Shown()
-		if r.Err == nil && strings.TrimSpace(r.View.NodeID) != "" {
-			id = r.View.NodeID
-		}
-		hit := (byURL && strings.EqualFold(normBase(typed), r.Base)) || (!byURL && r.Err == nil && strings.EqualFold(strings.TrimSpace(r.View.NodeID), typed))
-		if hit && match < 0 {
-			match = i
-		}
-		if r.Err != nil {
-			if r.Refused != nil {
-				refused = append(refused, r.Miss())
-			} else {
-				silent = append(silent, r.Miss())
-			}
-			continue
-		}
-		roster = append(roster, id)
-	}
-	if match < 0 {
-		if !byURL && len(silent) > 0 {
-			// No node that answered has this id, but some entries did not answer: it may be one of them.
-			return "", "", nil, &placementError{core.DeferClassCapacity, fmt.Sprintf(
-				"no node that answered is called %q; these entries did not answer and one of them may be it: %s", name, strings.Join(silent, "; "))}
-		}
-		why := fmt.Sprintf("node %q is not on this call's roster (%s): name a node_id its /fleet/health publishes or one of the delegate_remotes URLs", name, strings.Join(roster, ", "))
-		if len(refused) > 0 {
-			why += "; these entries were not dialled and so have no node id to name: " + strings.Join(refused, "; ")
-		}
-		e := refuse(core.DeferClassContract, false, refusalNodeUnknown, why, "", nil)
-		e.Roster = roster
-		return "", "", nil, e
-	}
-	r := readings[match]
-	if r.Err != nil {
-		if r.Refused != nil {
-			// The tailnet guard will not admit the entry, whatever the node is doing: a configuration fact that waiting does not
-			// change, filed the way pickNodeFor files such an entry.
-			return "", "", nil, &noNodeConfigured{&placementError{core.DeferClassCapacity, "the node you named is a roster entry this machine does not dial: " + r.Miss()}}
-		}
-		return "", "", nil, &placementError{core.DeferClassCapacity, "the node you named did not answer: " + r.Miss()}
+	r, id, who, err := resolveNamed(ctx, cfg, bases, typedName, lane)
+	if err != nil {
+		return "", "", nil, err
 	}
 	v := r.View
-	id := strings.TrimSpace(v.NodeID)
-	if id == "" {
-		id = r.Shown() // the node id reaches results and messages, so the redacted form
-	}
-	who := fmt.Sprintf("%s (%s)", r.Shown(), id)
-	if self := selfNodeID(cfg); self != "" && strings.EqualFold(strings.TrimSpace(v.NodeID), self) {
-		return "", "", nil, refuse(core.DeferClassContract, false, refusalNodeIsSelf, fmt.Sprintf(
-			"node %q is this machine's own node (%s): a call it would run itself is a local call (route local)", name, who), "", nil)
-	}
 
 	wanted, family, judged := wantedRow(req, lane, rowsOf(v, lane))
 	var missing []string
@@ -237,6 +182,95 @@ func pickNamed(ctx context.Context, cfg config.Config, bases []string, name stri
 		pick = &namedPick{family: wanted.Name, files: fileNames(*wanted)}
 	}
 	return r.Base, id, pick, nil
+}
+
+// resolveNamed finds the roster entry a call names, by node id (any case) or by base URL, and refuses it by a word when it cannot
+// be the node meant: not on the roster (node_unknown), a roster entry this machine does not dial, a node that did not answer, or
+// this machine's own node (node_is_self). It judges nothing about what the node serves: that is the lane's. who is the node as
+// messages print it. It is the ONE place a named node is resolved: pickNamed (media) and ResolveNamedBase (the vision verbs) both
+// call it, so the words and the wording of the refusals are the same.
+func resolveNamed(ctx context.Context, cfg config.Config, bases []string, typed, lane string) (r rosterprobe.Reading, id, who string, err error) {
+	name := shownNode(typed)
+	refuse := func(class string, noNode bool, word, msg string) *namedRefusal {
+		return &namedRefusal{class: class, noNode: noNode, msg: msg, Refusal: word, Node: name, Lane: lane}
+	}
+	byURL := strings.Contains(typed, "://")
+	var (
+		readings = rosterprobe.Probe(ctx, bases, cfg.FleetAuthToken, healthTimeout)
+		match    = -1
+		roster   []string
+		silent   []string // the entries that were dialled and gave no health: one of them may be the node the caller means
+		refused  []string // the entries the tailnet guard will not admit: never dialled, so none has an id to be meant by
+	)
+	for i, rd := range readings {
+		rid := rd.Shown()
+		if rd.Err == nil && strings.TrimSpace(rd.View.NodeID) != "" {
+			rid = rd.View.NodeID
+		}
+		hit := (byURL && strings.EqualFold(normBase(typed), rd.Base)) || (!byURL && rd.Err == nil && strings.EqualFold(strings.TrimSpace(rd.View.NodeID), typed))
+		if hit && match < 0 {
+			match = i
+		}
+		if rd.Err != nil {
+			if rd.Refused != nil {
+				refused = append(refused, rd.Miss())
+			} else {
+				silent = append(silent, rd.Miss())
+			}
+			continue
+		}
+		roster = append(roster, rid)
+	}
+	if match < 0 {
+		if !byURL && len(silent) > 0 {
+			// No node that answered has this id, but some entries did not answer: it may be one of them.
+			return r, "", "", &placementError{core.DeferClassCapacity, fmt.Sprintf(
+				"no node that answered is called %q; these entries did not answer and one of them may be it: %s", name, strings.Join(silent, "; "))}
+		}
+		why := fmt.Sprintf("node %q is not on this call's roster (%s): name a node_id its /fleet/health publishes or one of the delegate_remotes URLs", name, strings.Join(roster, ", "))
+		if len(refused) > 0 {
+			why += "; these entries were not dialled and so have no node id to name: " + strings.Join(refused, "; ")
+		}
+		e := refuse(core.DeferClassContract, false, refusalNodeUnknown, why)
+		e.Roster = roster
+		return r, "", "", e
+	}
+	r = readings[match]
+	if r.Err != nil {
+		if r.Refused != nil {
+			// The tailnet guard will not admit the entry, whatever the node is doing: a configuration fact that waiting does not
+			// change, filed the way pickNodeFor files such an entry.
+			return r, "", "", &noNodeConfigured{&placementError{core.DeferClassCapacity, "the node you named is a roster entry this machine does not dial: " + r.Miss()}}
+		}
+		return r, "", "", &placementError{core.DeferClassCapacity, "the node you named did not answer: " + r.Miss()}
+	}
+	id = strings.TrimSpace(r.View.NodeID)
+	if id == "" {
+		id = r.Shown() // the node id reaches results and messages, so the redacted form
+	}
+	who = fmt.Sprintf("%s (%s)", r.Shown(), id)
+	if self := selfNodeID(cfg); self != "" && strings.EqualFold(strings.TrimSpace(r.View.NodeID), self) {
+		return r, "", "", refuse(core.DeferClassContract, false, refusalNodeIsSelf, fmt.Sprintf(
+			"node %q is this machine's own node (%s): a call it would run itself is a local call (route local)", name, who))
+	}
+	return r, id, who, nil
+}
+
+// ResolveNamedBase is the base URL of the one fleet node a call names (an id its /fleet/health publishes, or a delegate_remotes
+// URL), for a lane that places the call itself and only needs to be pinned to that node (the vision verbs: the lane then places on
+// a roster of one and says why that node cannot take the call). A name that is wrong, unreachable or this machine's own comes back
+// as the deferred answer the media verbs give for it (data.refusal holds the word); ok is false then and the lane must not run.
+// cfg's delegate_remotes is the roster, so a caller narrows it first (rosterprobe.NarrowLane) to honour its remotes.
+func ResolveNamedBase(ctx context.Context, cfg config.Config, name, lane string) (base string, res core.Result, ok bool) {
+	name = strings.TrimSpace(name)
+	bases, err := candidateBases(cfg, nil)
+	if err == nil {
+		var r rosterprobe.Reading
+		if r, _, _, err = resolveNamed(ctx, cfg, bases, name, lane); err == nil {
+			return r.Base, core.Result{}, true
+		}
+	}
+	return "", placementDefer(err, "remote: named node "+shownNode(name)), false
 }
 
 func nameOf(row *delegate.MediaRecipeView, fallback string) string {
