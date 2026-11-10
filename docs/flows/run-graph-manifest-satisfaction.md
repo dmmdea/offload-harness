@@ -38,6 +38,22 @@ environment.
    command with the typed defer `NODE_PACK_NOT_ALLOWED` (`ref` = the pack). The table holds the packs the shipped graph builders
    need; a workflow that needs another adds a reviewed row to the file and to its Go copy.
 
+   The table lists these packs: `ComfyUI-VideoHelperSuite`, `ComfyUI-MultiGPU` (upstream and the archival mirror), `ComfyUI-GGUF`,
+   `ComfyUI-RMBG` (`https://github.com/1038lab/ComfyUI-RMBG`) and `ComfyUI-Image-Filters`
+   (`https://github.com/spacepxl/ComfyUI-Image-Filters`). The last two serve a scene-swap graph: a product cutout with the BiRefNet-HR model
+   (RMBG) and detail transfer with the `RestoreDetail` node (Image Filters).
+
+   *Why these two are admitted.* The source of each was read before its row was added.
+   - `ComfyUI-RMBG` (read at commit `a66a5e6`). Importing the pack loads its `py/*.py` files. The only thing it does at import is create
+     folders under `models/`: no network call, no subprocess, no `eval`, and no `install.py`. One hazard is documented and not removed.
+     When the model files are missing from `models/RMBG/BiRefNet/`, the `BiRefNetRMBG` node downloads them from the pack author's Hugging
+     Face repository at its newest revision and then runs the Python files it downloaded. So a node that will run this pack must have the
+     four BiRefNet files in `models/RMBG/BiRefNet/` before the first run: `BiRefNet-HR.safetensors`, `birefnet.py`, `BiRefNet_config.py`
+     and `config.json`. With them in place the node never fetches.
+   - `ComfyUI-Image-Filters` (read at commit `bbb3fb0`). Its `ModelTest` node runs a string it is given through `exec()`. The harness
+     already refuses that node class by name (step 1b: `NODE_CLASS_REFUSED`, at the fleet door, in the runner before ComfyUI starts, and on
+     a template's converted graph). That refusal is the condition for admitting the pack. The rest of the pack imports cleanly.
+
 1b. **Refuse any node class that executes caller-supplied code.** A graph is data, but a node pack can ship a class that runs one of its string
    inputs as code (`ModelTest` of `ComfyUI-Image-Filters` runs its `code` input through `exec()`); once that pack is installed, any submitted graph
    holding the class would run the caller's Python on the node. `render/refused-node-classes.json` lists such classes by name, each with its pack

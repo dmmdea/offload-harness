@@ -968,7 +968,8 @@ The rule is one rule for every route that does work or returns a result. Three c
   the repository gives it; a `commit` a manifest names is not read, and the node records the one it got). Anything else is refused `400`, naming the pack,
   before a job, a temp file or a lease exists (`buildRunGraph`), and again by the runner's satisfier before its first git
   command. The table holds the packs the shipped graph builders need: VideoHelperSuite, ComfyUI-MultiGPU (upstream and its
-  archival mirror) and ComfyUI-GGUF; adding a pack is a reviewed change to that file and to its copy in
+  archival mirror), ComfyUI-GGUF, ComfyUI-RMBG and ComfyUI-Image-Filters (why the last two are admitted: the
+  [manifest flow](flows/run-graph-manifest-satisfaction.md)); adding a pack is a reviewed change to that file and to its copy in
   `internal/mediacap/nodepacks.go`, which a test pins.
 - **A run-graph manifest's models land under `models/` and come from a listed host.** A manifest's `models[]` makes the node
   download each `source_url` to `path` inside the ComfyUI tree before ComfyUI starts, so a path that leaves `models/<class>/`

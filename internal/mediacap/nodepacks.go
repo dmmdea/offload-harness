@@ -31,6 +31,8 @@ var allowedNodePacks = []AllowedNodePack{
 	{"ComfyUI-MultiGPU", "https://github.com/pollockjj/ComfyUI-MultiGPU"},
 	{"ComfyUI-MultiGPU", multiGPUMirrorURL},
 	{"ComfyUI-GGUF", "https://github.com/city96/ComfyUI-GGUF"},
+	{"ComfyUI-RMBG", "https://github.com/1038lab/ComfyUI-RMBG"},
+	{"ComfyUI-Image-Filters", "https://github.com/spacepxl/ComfyUI-Image-Filters"},
 }
 
 // AllowedNodePacks returns the allowlisted packs.
