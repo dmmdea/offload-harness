@@ -685,6 +685,28 @@ func TestTheResidentShareIsReadFromTheCall(t *testing.T) {
 	if n := wanNeed(t, wanMulticardCmd, wanFacts(t, 16, 13)); n.GiB != 0 {
 		t.Fatalf("the default 3 GiB share on 16 + 13 GiB (the 13 GiB card holds 11.2 GiB, 12 usable): %v, want 0", n)
 	}
+	// A call that asked for the card-only placement and was sized as the ordinary set says so, and why: the observed case was an LTX-2.5 call on two 15 GiB
+	// cards with a stray 2 GiB share, which leaves 18 GiB of the 20 GiB DiT on a storage card with 14 GiB usable and printed only "the weights stream from RAM"
+	// (the default 9 GiB share fits the same pair and is admitted card-only, so the share is the one thing to name).
+	ltx := ltxFacts(t, 15)
+	ltx.CardsGiB = []float64{15, 15}
+	const ltxCmd = "node render/comfy-video.mjs o.mp4 s.png p --model ltx25 --wan-placement multicard"
+	if n := wanNeed(t, ltxCmd, ltx); n.GiB != 0 {
+		t.Fatalf("premise: the default 9 GiB share of the LTX-2.5 DiT fits two 15 GiB cards, got %v", n)
+	}
+	n := wanNeed(t, ltxCmd+" --wan-resident-gb 2", ltx)
+	if !near(n.GiB, 20.03+14.32) {
+		t.Fatalf("a 2 GiB share of the LTX-2.5 DiT on two 15 GiB cards: %v, want the ordinary set", n)
+	}
+	for _, want := range []string{"the card-only placement was asked for", "ltx25 does not fit the two leased cards (15.0 + 15.0 GiB)", "compute card would peak at 3.5 GiB (of 15.0 GiB)", "storage card at 20.6 GiB (of 14.0 GiB usable)", "resident share is 2.0 GiB", "wan_resident_gb", "the family's own is 9.0 GiB", "18.0 GiB of the 20.0 GiB DiT"} {
+		if !strings.Contains(n.Detail, want) {
+			t.Errorf("the detail must say why (%q missing): %q", want, n.Detail)
+		}
+	}
+	// a Wan call whose share missed the compute card names its share too
+	if n := wanNeed(t, wanMulticardCmd+" --wan-resident-gb 6", two); !strings.Contains(n.Detail, "resident share is 6.0 GiB") || !strings.Contains(n.Detail, "the family's own is 3.0 GiB") {
+		t.Errorf("a Wan call whose share missed the compute card says the share: %q", n.Detail)
+	}
 }
 
 // THE FILM-SIZE RUN IS THE ACCEPTANCE CRITERION. On 2026-10-11 the film (720x1280x81, 20 steps, plain decode) ran on two RTX 5060 Ti 16 GB with

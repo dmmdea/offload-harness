@@ -400,6 +400,7 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 	}
 	set := strings.Join(parts, " + ")
 	sageNote := "" // what a sage call that missed the card-only stages adds to the ordinary detail
+	missNote := "" // what a call that asked for the card-only placement and did not get it adds to the ordinary detail: why, with the figures
 	if co != nil && len(f.CardsGiB) == 2 {
 		var expert float64
 		for _, s := range slots {
@@ -422,6 +423,12 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		// ceiling, and with the film-size run's 12.2 GiB it would refuse the call that run measured (3.0 + 12.2 = 15.2 > 14.9). It stays the storage
 		// card's margin.
 		reserve := f.reserve()
+		dflt, part := wanResidentDefaultGiB, "expert"
+		if co.Animate {
+			dflt, part = animateResidentDefaultGiB, "DiT"
+		} else if co.LTX {
+			dflt, part = ltxResidentDefaultGiB, "DiT"
+		}
 		if co.Animate {
 			// The WAN-Animate-2 stages: the compute card holds its share of the DiT, the sampler's activations and the context; the storage card the rest of the DiT, clip_vision_h, the
 			// VAE and the context. The text encoder is off the cards before the DiT lands (OffloadFreeAfterEncode), so it is no stage of either card.
@@ -430,7 +437,7 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 			if expert > 0 && small > 0 && storage <= small-reserve && compute <= large {
 				return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB DiT + %.1f GiB of the default clip's sampler activations + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB of clip vision + %.1f GiB of VAE + %.1f GiB for the context = %.1f GiB (of %.1f usable), so each card fits its stage, the text encoder is taken off the cards before the DiT lands, and the weights are mapped read-only: no weights stream from RAM (sizes chosen, not measured: no animate run was made on two cards; the set is %s)", family, small, large, co.ResidentGiB, expert, animateActivationsGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, animateClipVisionGiB, animateVAEGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
 			}
-			return fitToCard(src, family, set, total, f, ""), true
+			return fitToCard(src, family, set, total, f, cardOnlyMiss(family, part, co.ResidentGiB, dflt, expert, small, large, compute, storage, reserve)), true
 		}
 		if co.LTX {
 			// The LTX-2.5 stages: the compute card holds its share of the DiT, the latent upscaler and the context; the storage card the rest of the DiT, both VAEs and the
@@ -440,7 +447,7 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 			if expert > 0 && small > 0 && storage <= small-reserve && compute <= large {
 				return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB DiT + %.1f GiB of latent upscaler + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card; the sampler's activations are unmeasured and not counted) and the storage card %.1f GiB of donor blocks + %.1f GiB of VAEs + %.1f GiB for the context = %.1f GiB (of %.1f usable), so each card fits its stage, the text encoder is taken off the cards before the DiT lands, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, ltxUpscalerGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, ltxStorageVAEsGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
 			}
-			return fitToCard(src, family, set, total, f, ""), true
+			return fitToCard(src, family, set, total, f, cardOnlyMiss(family, part, co.ResidentGiB, dflt, expert, small, large, compute, storage, reserve)), true
 		}
 		activations, activationsWord := wanActivationsGiB, "film-size activations"
 		if co.SageAttention {
@@ -452,6 +459,7 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		if fitsStorage && compute <= large {
 			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of %s + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, activations, activationsWord, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
 		}
+		missNote = cardOnlyMiss(family, part, co.ResidentGiB, dflt, expert, small, large, compute, storage, reserve)
 		if co.SageAttention && fitsStorage {
 			// Only the COMPUTE stage missed at the sage figure (the storage card fits its stage, so compute > large here). This sizing reads no geometry, so it holds the film's
 			// 15.2 GiB for any clip: a smaller clip's partial share (the measured 65 frames at 2 GiB) lands here as the ordinary set, where it declared 0 before sage was read.
@@ -459,8 +467,31 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 			// geometry for a miss it did not cause, so it is withheld.
 			sageNote = fmt.Sprintf("; --use-sage-attention in COMFY_EXTRA_ARGS sizes the activations at the film's %.1f GiB for any clip, so a smaller clip's partial share is declared the ordinary set here: --ram 0 states the real figure (it is not seen when COMFY_EXTRA_ARGS is set by an `env` prefix inside the wrapped command)", wanActivationsSageGiB)
 		}
+	} else if co != nil {
+		missNote = fmt.Sprintf("; the card-only placement was asked for (--wan-placement multicard, videogen_placement), but it runs on exactly two leased cards and this lease reports %d, so the call declares the set", len(f.CardsGiB))
 	}
-	return fitToCard(src, family, set, total, f, sageNote), true
+	return fitToCard(src, family, set, total, f, missNote+sageNote), true
+}
+
+// cardOnlyMiss is what a video (or animate) call that asked for the card-only placement and did not get it adds to the ordinary detail, so the line that
+// declares the whole set also says the placement was asked for and why it was refused: the recipe, the two cards, each card's peak against the room it has,
+// and, when the call's resident share (videogen_wan_resident_gb, the family's wan_resident_gb or --wan-resident-gb) is not the family's own, that share, because
+// it is the one figure an operator sets that moves both peaks (the compute card holds it, the storage card the rest of the DiT, so a small share can push the
+// remainder past what the smaller card holds while the family's default share fits). The compute card is judged against the whole larger card and the storage card
+// against what is left of the smaller one after the runner's reserve, as estimateWith judges them. part is what the share is a share of (an expert, a DiT).
+func cardOnlyMiss(family, part string, share, dflt, expert, small, large, compute, storage, reserve float64) string {
+	head := "; the card-only placement was asked for (--wan-placement multicard, videogen_placement)"
+	if expert <= 0 {
+		return head + fmt.Sprintf(", but no %s file of %s could be sized for it, so the call declares the set", part, family)
+	}
+	if small <= 0 {
+		return head + ", but a card of the lease reports no size, so the call declares the set"
+	}
+	why := fmt.Sprintf(" and %s does not fit the two leased cards (%.1f + %.1f GiB): the compute card would peak at %.1f GiB (of %.1f GiB) and the storage card at %.1f GiB (of %.1f GiB usable)", family, small, large, compute, large, storage, small-reserve)
+	if math.Abs(share-dflt) > 1e-9 {
+		why += fmt.Sprintf("; the call's resident share is %.1f GiB (videogen_wan_resident_gb, wan_resident_gb or --wan-resident-gb; the family's own is %.1f GiB), which leaves %.1f GiB of the %.1f GiB %s on the storage card", share, dflt, expert-share, expert, part)
+	}
+	return head + why + ", so the call declares the set"
 }
 
 // fitToCard is the one rule every weight-file estimate ends in (estimateWith, ForGraph): a set of files that together fit the
