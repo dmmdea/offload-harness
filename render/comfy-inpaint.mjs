@@ -31,7 +31,7 @@
 //   sdxl: [--ckpt name] [--vae name|builtin] [--steps N] [--cfg F] [--sampler s] [--scheduler s]
 //   qwen: [--unet name] [--patch name] [--preset full|lightning4] [--steps N] [--cfg F]
 //         [--strength F] [--lora name] [--lora-strength F] [--clip name] [--qvae name]
-//   [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy] [--reserve-vram F]
+//   [--api <url>] [--no-lock] [--keep-comfy] [--reserve-vram F]
 import { writeFileSync, unlinkSync, readFileSync, appendFileSync, mkdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { writeFileAtomic } from "./atomic-out.mjs";

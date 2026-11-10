@@ -4,7 +4,7 @@ A small, dependency-free Node tool that drives a local **ComfyUI** server to gen
 
 ## Requirements
 - **Node 18+** (built-in `fetch`)
-- A running **ComfyUI** (default `http://127.0.0.1:8188`) with the checkpoint/VAE you reference installed.
+- A running **ComfyUI**: the harness's own, which is the `comfy_instance` endpoint when that config key is set (a runner started under `local-offload gpu reserve` gets it as `COMFY_INSTANCE` and `COMFY_API`), else `COMFY_API` / `--api`, else `http://127.0.0.1:8188`, with the checkpoint/VAE you reference installed.
 
 ## Three modes
 
@@ -12,7 +12,7 @@ A small, dependency-free Node tool that drives a local **ComfyUI** server to gen
 ```bash
 node render/comfy-render.mjs out.png "a misty pine forest at dawn" --steps 30 --cfg 7
 ```
-Flags (all optional, neutral defaults): `--negative` (default *empty*), `--ckpt`, `--vae`, `--steps`, `--cfg`, `--sampler`, `--scheduler`, `--width`, `--height`, `--seed`, `--prompt` (the non-positional way to pass the prompt), `--wait-sec`, `--api`. Env: `COMFY_API`, `COMFY_CKPT`, `COMFY_VAE`, `COMFY_WAIT_SEC`, `COMFY_DEAD_SEC`. `--prompt`, `--wait-sec`, `--api` and the two poller env vars apply to **every** mode, not just this one.
+Flags (all optional, neutral defaults): `--negative` (default *empty*), `--ckpt`, `--vae`, `--steps`, `--cfg`, `--sampler`, `--scheduler`, `--width`, `--height`, `--seed`, `--prompt` (the non-positional way to pass the prompt), `--wait-sec`, `--api`. Env: `COMFY_API` (the ComfyUI endpoint; on a box with a named instance also `COMFY_INSTANCE`), `COMFY_CKPT`, `COMFY_VAE`, `COMFY_WAIT_SEC`, `COMFY_DEAD_SEC`. `--prompt`, `--wait-sec`, `--api` and the two poller env vars apply to **every** mode, not just this one.
 
 **2. Any ComfyUI workflow (full control)**
 ```bash

@@ -1,7 +1,7 @@
 // comfy-music.mjs — local TEXT-TO-MUSIC runner (ACE-Step v1.5 turbo, split stack).
 // The single entrypoint the local-offload `generate_audio` MCP tool shells out to for
 // kind=music. Mirrors comfy-video.mjs: single-slot GPU lock + free llama-swap first +
-// on-demand ComfyUI on :8188 + guarded zero-always-warm teardown, all via the shared
+// on-demand ComfyUI (the instance endpoint, default :8188) + guarded zero-always-warm teardown, all via the shared
 // withGpuSlot (gpu-lock.mjs) + ensureComfy (comfy-lifecycle.mjs) — NOT a duplicated
 // lifecycle. Builds the ACE-Step v1.5 split graph via wf-acestep.mjs (UNET DiT +
 // DualCLIP qwen encoders + music VAE). Seed-reproducible, so --seed is honored and
@@ -25,7 +25,7 @@
 // Usage:
 //   node render/comfy-music.mjs <out.flac> "<style tags>" \
 //        [--lyrics "..."] [--seconds N] [--seed N] [--steps N] [--cfg X] [--shift X] \
-//        [--unet name.safetensors] [--reserve-vram X] [--api http://127.0.0.1:8188] \
+//        [--unet name.safetensors] [--reserve-vram X] [--api <url>] \
 //        [--no-lock] [--keep-comfy]   |   <out.flac> --graph wf.json
 //        [--placement single|multicard [--cards <a>,<b>]]   # multicard: the DiT on one leased non-display card, the two text encoders and the VAE on the other
 //                                      # (render/multicard-recipes.json row acestep/xl-turbo-bf16; docs/systems/media-generation.md, "Card-only music"); flags spelled `--flag value`

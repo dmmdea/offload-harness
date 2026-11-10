@@ -2629,7 +2629,7 @@ verdict now covers what the script loads (`internal/mediacap/routeneeds.go`):
 - **Custom-node classes** the graph names: `VHS_VideoCombine` (ComfyUI-VideoHelperSuite) for Wan and
   Hunyuan, the DisTorch2 loaders (ComfyUI-MultiGPU, plus ComfyUI-GGUF for a `.gguf` expert), and
   `UnetLoaderGGUF` (ComfyUI-GGUF) for a `.gguf` image/edit UNET. `doctor` asks a ComfyUI that is
-  already running (`GET /object_info/<class>` on `COMFY_API`, default `127.0.0.1:8188`), which also
+  already running (`GET /object_info/<class>` on the harness's ComfyUI endpoint: the `comfy_instance` port when that key is set, else `COMFY_API`, default `127.0.0.1:8188`), which also
   sees a pack that failed to import; when nothing answers it decides from `<comfy_dir>/custom_nodes`
   on disk (an active pack directory with `__init__.py`, matched by name or by its marker class) and
   says which it used. `offload_status` and `acceptance` use the disk check only. Nothing starts
