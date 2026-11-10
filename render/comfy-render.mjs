@@ -27,7 +27,7 @@
 //   node comfy-render.mjs <out.png> "<prompt>" [seed] [width] [height] \
 //        [--negative "..."] [--ckpt name.safetensors] [--vae name.safetensors] \
 //        [--steps 30] [--cfg 7] [--sampler dpmpp_2m] [--scheduler karras] \
-//        [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy] [--reserve-vram F]
+//        [--api <url>] [--no-lock] [--keep-comfy] [--reserve-vram F]
 //   node comfy-render.mjs <out.png> --graph my-workflow.json [--api ...]
 //   node comfy-render.mjs <out.png> "<prompt>" --family qwen-image --ckpt qwen-image-2512-Q5_1.gguf \
 //        [--preset full|lightning4] [--clip te.safetensors] [--lora l.safetensors] [--shift 3.1]

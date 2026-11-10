@@ -18,7 +18,7 @@
 //        [--lora name] [--lora-strength F] [--steps N] [--cfg F] \
 //        [--megapixels F] \
 //        [--clip name] [--vae name] [--sampler s] [--scheduler s] [--shift F] \
-//        [--seed N] [--api http://127.0.0.1:8188] [--no-lock] [--reserve-vram F]
+//        [--seed N] [--api <url>] [--no-lock] [--reserve-vram F]
 //        [--placement single|multicard [--resident-gb N] [--cards <a>,<b>]]   # multicard: the 2511 edit and the qwen-image-2.1 edit on the TWO non-display cards of a lease
 //                                      # (docs/systems/media-generation.md, "Card-only image and edit"); flags spelled `--flag value`
 //   node render/comfy-edit.mjs <out.png> <target> "<instruction>" --family qwen-image-2.1 \

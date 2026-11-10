@@ -946,10 +946,13 @@ and correct** — it is not a defect and is not fixed by ROCm (which does not wo
 
 ## Step 3 — start the stack + register the MCP
 
-Start llama-swap as the user's long-running service (loopback-only):
+Start llama-swap as the user's long-running service (loopback-only). The listen port is 11436 unless
+`OFFLOAD_SWAP_PORT` moved it (see "A box where 11436 or 5800 and up are taken"), so run the command
+`install.ps1` printed under "Start the stack with:" or take the port from the config endpoint:
 
 ```powershell
-& "$env:OFFLOAD_HOME\llama-swap\llama-swap.exe" --config "$env:OFFLOAD_HOME\llama-swap.yaml" --listen 127.0.0.1:11436
+$p = ([uri](Get-Content "$HOME\.local-offload\config.json" -Raw -Encoding UTF8 | ConvertFrom-Json).endpoint).Port
+& "$env:OFFLOAD_HOME\llama-swap\llama-swap.exe" --config "$env:OFFLOAD_HOME\llama-swap.yaml" --listen 127.0.0.1:$p
 ```
 
 Register the offload harness as an MCP server for the agent:
@@ -1055,7 +1058,7 @@ difference between a good first impression and a confused user.
 | HF download 429 / timeout | rate-limited | Re-run (idempotent); persistent → STOP, ask human. |
 | `selftest` canary `fail`, device-lost | old AMD Adrenalin (deep-context crash #17432) | STOP → ask human to update the AMD driver; interim: lower `-ngl` or the window. |
 | `selftest` port `18801`/`18802` in use | a prior run leaked a process | Kill stray `llama-server.exe` / `local-agent.exe`, or reboot after asking; re-run. |
-| `doctor`: `health: DOWN` | llama-swap not running / wrong port | Start llama-swap (Step 3); confirm `--listen 127.0.0.1:11436`. |
+| `doctor`: `health: DOWN` | llama-swap not running / wrong port | Start llama-swap (Step 3); confirm `--listen` carries the port of the config `endpoint` (11436 by default). |
 | `doctor`: an alias `FAIL — not in the live roster` | model not served / wrong yaml | Check `llama-swap.yaml` lists that alias; some non-core aliases (vision/stt) are absent on a grunt-work-only install — expected. |
 | every offload call returns `deferred:true` | endpoint unreachable, or genuinely low-confidence/over-long input | `doctor` first; a defer on hard/over-long input is **by design**. |
 | `local-agent --serve` errors `refusing to bind` | you passed a non-loopback `--listen` | Use `127.0.0.1`; only add `--listen-trusted-network` if the human authorized LAN exposure. |

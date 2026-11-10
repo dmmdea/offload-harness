@@ -299,7 +299,7 @@ async function main() {
         const comfyVersion = stats?.system?.comfyui_version ?? stats?.comfyui_version ?? null;
         return convertForRun({ workflow: t.workflow, objectInfo, comfyVersion, minComfyUIVersion: t.min_comfyui_version, seed: sd, overrides: ov });
       },
-      preflight: preflightGraph,
+      preflight: (g) => preflightGraph(g, undefined, api),
       // Submission/polling via the shared comfy-submit.mjs layer: CLI-preferred submit
       // (idempotent lease, typed outcomes, provenance) with byte-identical raw fallback;
       // hardened poll loop (dead-server watchdog — run-graph gains the 2026-07-30 fix

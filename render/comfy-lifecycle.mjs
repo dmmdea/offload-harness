@@ -1310,7 +1310,7 @@ export async function ensureComfy(opts = {}) {
       log(line);
       return new Error(line);
     }
-    const line = `COMFY-ENDPOINT-DOWN: ComfyUI is not answering on ${api}, and an unkeyed runner can launch only the default endpoint (port ${DEFAULT_COMFY_PORT}): a launch with no --port would start 8188 while this run submits to ${api}. Start ComfyUI on that port yourself, or key the instance (COMFY_INSTANCE=<name>, or COMFY_CARD_UUID with this --api), which makes the runner launch it on its own port`;
+    const line = `COMFY-ENDPOINT-DOWN: ComfyUI is not answering on ${api}, and an unkeyed runner can launch only the default endpoint (port ${DEFAULT_COMFY_PORT}): a launch with no --port would start 8188 while this run submits to ${api}. Start ComfyUI on that port yourself, or key the instance (COMFY_INSTANCE=<name>, which is the comfy_instance config key when started under gpu reserve, or COMFY_CARD_UUID with this --api), which makes the runner launch it on its own port`;
     log(line);
     return new Error(line);
   };

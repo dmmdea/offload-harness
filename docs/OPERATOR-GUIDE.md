@@ -421,6 +421,8 @@ local-offload run-graph --graph wf.json --out-dir out/
 local-offload gpu reserve --class media -- <your command>
 ```
 
+On a box with a named ComfyUI instance (`comfy_instance`), a hand-run `gpu reserve -- node render/comfy-*.mjs` talks to that instance, not to 8188; see [Keep the harness off the owner's own ComfyUI](#keep-the-harness-off-the-owners-own-comfyui-comfy_instance).
+
 On a host with card-scoped leases enabled, hold only the cards the job uses so the others keep working:
 `gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free cards; the display card only up to `gpu_display_cap_pct`, default 60 percent of its VRAM with the desktop's use counted, and only when you state `--vram`; set the key to `0` when you need the screen's card to yourself; `gpu status` / `gpu cards` print a `display cap:` line under the display card with the VRAM in use against that share, whoever's memory it is),
 or no flag at all when `<cmd>` pins itself with `CUDA_VISIBLE_DEVICES`, `--cuda-device` or `COMFY_CUDA_DEVICE`. A command that carries a
@@ -451,11 +453,13 @@ keeps its instance from call to call, and changing it there restarts the kept in
 keeps its old meaning: the instance is kept whatever happens and has no process bound; its lease's holder (or you) stops it.
 A runner holds the instance for its whole job through `GET /offload/hold`, a response that sends one byte every 2 s and ends when
 the runner exits, so a long step that is not ComfyUI's (ffmpeg, a QA pass) does not let the bound fire. `curl
-http://127.0.0.1:8188/offload/idle` shows it: `exit_limit_sec` (the bound, 0 when there is none), `exit_idle_sec` (seconds
+http://127.0.0.1:<port>/offload/idle` shows it (`<port>` is the instance's port: 8189 when `comfy_instance` is set, see
+[Keep the harness off the owner's own ComfyUI](#keep-the-harness-off-the-owners-own-comfyui-comfy_instance); 8188 only for a ComfyUI started by hand): `exit_limit_sec` (the bound, 0 when there is none), `exit_idle_sec` (seconds
 idle now) and `holds` (runners holding it now), beside the model free's `limit_sec` and `idle_sec`.
 
 To stop a kept instance by hand, for example to hand the whole card to something else: find the process that listens on its port
-(`Get-NetTCPConnection -LocalPort 8188 -State Listen` gives `OwningProcess`; a keyed instance has its own port, printed in its
+(`Get-NetTCPConnection -LocalPort <port> -State Listen` gives `OwningProcess`. On a box with `comfy_instance` the port is
+`comfy_instance_port` (default 8189), never 8188: that one is the owner's own ComfyUI, so do not stop it. A keyed instance has its own port, printed in its
 launch marker `.offload-launch-<key>.json` in the ComfyUI folder) and stop it (`Stop-Process -Id <pid>`, or `kill <pid>` on
 Linux). For a keyed instance under a lease, `local-offload gpu release --epoch N` stops the instances of that lease; the media
 pipeline's own routine release leaves a self-bounded one running on purpose. Or just wait for the bound.
