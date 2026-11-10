@@ -1938,6 +1938,9 @@ function Install-Hyperframes {
         # SilentlyContinue: npm's own cleanup can leave an AV-locked file behind.
         Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
         if (-not $usable -or -not (Test-Path $entry)) { throw $refreshErr }
+        # A staged tree that fails the registry signature check is a supply-chain signal, not a fetch problem: it stays
+        # fatal (the staged tree is already removed, the live one untouched), and the call site lets it end the install.
+        if ($refreshErr -like 'npm audit signatures FAILED*') { throw $refreshErr }
         Write-Host "WARN  hyperframes: could not refresh to $latest ($refreshErr); keeping the installed $have (floor $floor)" -ForegroundColor Yellow
         $keep = $true
       }
