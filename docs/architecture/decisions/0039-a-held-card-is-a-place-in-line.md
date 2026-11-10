@@ -246,7 +246,8 @@ Consequences to know. A display card with no resident seat sorts first (nothing 
 loaded, `gpu reserve --cards 1 --vram 6` now prefers the screen's card to an eviction; that is the rule working, and
 `gpu_display_cap_pct: 0` restores the old order. The cap bounds admission only: nothing limits a job after it is
 placed, so the footprint has to be a measured peak, and one number per request cannot describe a donor slice beside
-a compute share. `--devices` still names any card on the operator's word. The llama-swap twin guards
+a compute share. `--devices` still names any card on the operator's word (superseded for the display card by the
+amendment of 2026-11-10). The llama-swap twin guards
 (`internal/placement/guards.go`, `display_floor` and `presence`) are unchanged.
 
 Related code: `internal/gpulease/allocator.go`, `internal/gpualloc/input.go`, `internal/config/gpucards.go`,
@@ -300,3 +301,23 @@ surfaces (`gpu status`, `gpu cards`, the `offload_status` brief) append the gate
 Related code: `internal/gpulease/allocator.go` (`displayOpen`, `less`, `DisplayAdmits`), `internal/gpualloc/input.go`
 (`DisplayBusy`, `BuildInput`), `internal/config/layers.go` (`AllocatorPresenceMode`), `internal/gpucards/gpucards.go`
 (`MarkIdleGate`), `gpu_cards.go` (`runGPUDisplayCheck`).
+
+## Amendment 2026-11-10 (naming the display card is not a way past its rule)
+
+A request that names its cards (`gpu reserve --devices`, the cards its command pins itself to, the cards a lost lease
+held when the reserve queues again, and the detached holder of any of these) used to enter the line as "the operator's
+word", display card included. Agents name cards as well as operators do, and an agent's `--devices` lease on the display
+card ran a render on the operator's screen while he was at the desk, taking the card to 83 % of its VRAM. The operator's
+rule is that the display card is usable up to 60 % only while the display is idle, and no way of naming it is an
+exception.
+
+A named set that includes the display card (or a card of a reading that cannot say which card the monitor is on) is now
+put to the allocator's own rule (`gpulease.DesktopRefusals`, `gpualloc.GrantCheck`, in `gpu_reserve_displaygate.go`). It
+waits outside the line while the card is not open, joins the line with the grant-time check once it is, and waits again
+if its turn comes after the operator is back. What no wait can change (a cap of 0, no `--vram` under a cap below 100, a
+footprint over the cap's budget) is refused at once. The operator keeps his override where it always was, in the config
+(`gpu_display_cap_pct`, `operator_presence`), not in a flag a session can type.
+
+What it does not do: a whole-node lease is unchanged (maintenance leases need it), and its unpinned command is not
+confined; a job admitted while the operator was away is not evicted when he returns; a Vulkan pin
+(`GGML_VK_VISIBLE_DEVICES`) is neither read as a card pin nor confined.
