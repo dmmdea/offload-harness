@@ -70,6 +70,9 @@ type servingProfile struct {
 	KVType    string `json:"kv_type"`
 	FlashAttn string `json:"flash_attn"`
 	Backend   string `json:"backend"`
+	// CacheRAMMiBByRAMTier is a tier's own --cache-ram figures by RAM band; a band it
+	// names wins over the document's top-level map (cacheRAMForProfile).
+	CacheRAMMiBByRAMTier map[string]int `json:"cache_ram_mib_by_ram_tier,omitempty"`
 	// AltBackends lists the extra serving backends a tier may render BESIDE its
 	// primary one on the same box (today: ["cpu"] — the CPU seat family, rendered
 	// when --llama-bin-cpu names a CPU build). Declared per tier so a box never
@@ -737,7 +740,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		LlamaBin: req.LlamaBin, ModelsDir: req.ModelsDir, Listen: req.Listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
-		CacheRAMMiB:  cacheRAMFor(doc.CacheRAMMiBByRAMTier, ramTier),
+		CacheRAMMiB:  cacheRAMForProfile(p.CacheRAMMiBByRAMTier, doc.CacheRAMMiBByRAMTier, ramTier),
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
 		IncludeQ3827B: p.IncludeQwen3827B, IncludeMimo9B: p.IncludeMimo9B,
 		IncludeQ3635B: spillSeatIncluded(p, ramTier),
@@ -1644,6 +1647,18 @@ func hasAltBackend(p servingProfile, b string) bool {
 		}
 	}
 	return false
+}
+
+// cacheRAMForProfile lets a tier replace the top-level figure for the RAM bands it
+// names. A unified-memory tier needs it: there the card's memory is the host's RAM, so
+// a seat's weights and the prompt cache draw on one pool, and the top-level figure
+// (sized for a box whose weights sit on a card) would let the two together reach the
+// owner's working memory. A band the tier does not name keeps the top-level figure.
+func cacheRAMForProfile(tier, top map[string]int, ramTier string) int {
+	if v := cacheRAMFor(tier, ramTier); v > 0 {
+		return v
+	}
+	return cacheRAMFor(top, ramTier)
 }
 
 // cacheRAMFor picks the --cache-ram MiB for a RAM tier from the profiles document.

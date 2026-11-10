@@ -45,3 +45,9 @@
 - **What it does.** The mid and high RAM bands bind `gemma-4-26b-agent` from `config_seed_ram_mid_high` and opt the node into remote agent work with one worker. Below that band the lane stays on the workhorse and the node stays out of remote agent work.
 - **Why.** The seat serves `--parallel 1`, and the same RAM gate renders it. The tier has no ComfyUI, so its script keys are blanked and `upscale_model` removed: the shipped defaults read as bound routes in `doctor`.
 - **Check.** A full installer rehearsal for this tier on Vulkan in a sandbox profile, then one real call per lane. It ran on a discrete card, so its numbers are not 780M measurements.
+
+### Changed - the unified-memory tiers cap the host prompt cache at 8192 MiB on 64 GB boxes
+
+- **What it does.** A tier may carry its own `cache_ram_mib_by_ram_tier`; a band it names wins over the top-level map. `amd-rdna3` and `amd-gcn` name `mid: 8192`, so their seats render `--cache-ram 8192` on a 56 to 119 GiB box. Every other tier and band renders what it did.
+- **Why.** On a unified-memory box the memory of the card is the RAM of the host. The 26B seat takes about 17 GiB of it, and the top-level 16384 MiB cache on top would reach about 33 GiB of a 56 GiB machine its owner also works on. 8192 is the server default, so the floor rule of ADR 0056 holds.
+- **Check.** `install render -profile amd-rdna3 -ram-tier mid` writes `--cache-ram 8192` (it wrote 16384), `-ram-tier high` still writes 24576, `amd-gcn` mid writes 8192 and `blackwell-16` mid still writes 16384. The figure is chosen, not measured against a contract stream.
