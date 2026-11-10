@@ -699,8 +699,8 @@ code change, only a new `pipelines.<task_type>` entry:
 }
 ```
 
-`script`/`workdir`/`timeout_sec`/`artifacts` are required (an invalid entry is rejected LOUDLY
-at config load, never silently at dispatch); `ingress_allow`/`max_ref_mb` are optional (default
+`script`/`workdir`/`timeout_sec`/`artifacts` are required, and `script` and `workdir` must be
+absolute paths (an invalid entry is rejected LOUDLY at config load, never silently at dispatch); `ingress_allow`/`max_ref_mb` are optional (default
 allowlist / 24 MiB per ref). The task_type key (`"scene-swap"` above) is dispatched exactly
 like any other fleet task — it is advertised in `/fleet/health`'s task list once the entry is
 valid, and refused with the usual `unsupported task_type` 400 otherwise.

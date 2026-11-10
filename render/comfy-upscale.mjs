@@ -12,7 +12,7 @@
 // Usage:
 //   node render/comfy-upscale.mjs <out.png> <image> --model 4x-UltraSharp.pth \
 //        [--scale F] [--width N --height N] [--method lanczos|bicubic|bilinear|area|nearest-exact] \
-//        [--api http://127.0.0.1:8188] [--no-lock] [--reserve-vram F]
+//        [--api <url>] [--no-lock] [--reserve-vram F]
 import { readFileSync, unlinkSync, mkdirSync } from "node:fs";
 import { writeFileAtomic } from "./atomic-out.mjs";
 import { join, dirname } from "node:path";

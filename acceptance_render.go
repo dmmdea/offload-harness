@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -15,6 +16,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/acceptance"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/judge"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
@@ -529,6 +531,38 @@ func newRenderOpts(only, outDir string) (renderOpts, error) {
 
 func (o renderOpts) wants(name string) bool { return o.only == nil || o.only[name] }
 
+// renderGroupRoutes are the media routes each route group's skip closure passes to routeSkip (keep the two in step).
+// With --only, a missing route is a failure only when a requested group uses it.
+var renderGroupRoutes = map[string][]string{
+	"image":     {"generate_image"},
+	"video":     {"generate_video"},
+	"animate":   {"animate_character"},
+	"voice":     {"generate_audio:voice", "generate_audio:voice:endpoint"},
+	"music":     {"generate_audio:music"},
+	"compose":   {"compose_video"},
+	"edit":      {"edit_image"},
+	"media":     {"media"},
+	"inpaint":   {"inpaint_image"},
+	"upscale":   {"upscale_image"},
+	"gen-edit":  {"edit_image_generative"},
+	"run-graph": {"run_graph"},
+}
+
+// wantsRoute reports whether a requested group uses the route (always true without --only).
+func (o renderOpts) wantsRoute(route string) bool {
+	if o.only == nil {
+		return true
+	}
+	for g := range o.only {
+		for _, r := range renderGroupRoutes[g] {
+			if r == route {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func newRenderEnv(cfg config.Config, src config.Source, routes []mediacap.Route, dir string, live bool) *renderEnv {
 	e := &renderEnv{cfg: cfg, routes: routes, aliases: map[string]string{}, dir: dir, live: live, as: acceptance.AssetPaths(dir)}
 	for _, a := range modelAliases(cfg) {
@@ -702,6 +736,13 @@ func writeNoCacheConfig(path string) (string, error) {
 	home := filepath.Dir(path)
 	if old, _ := filepath.Glob(filepath.Join(home, gateConfigPrefix+"*.json")); len(old) > 0 {
 		for _, f := range old {
+			// A leftover whose run is dead is removed at once, whatever its age: a killed gate never ran its defer, and the
+			// copy may hold the fleet token. A live pid (another gate, a recycled pid, another account) keeps it for the age rule.
+			s := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(f), gateConfigPrefix), ".json")
+			if pid, perr := strconv.Atoi(s); perr == nil && pid > 0 && !gpulease.PIDAlive(pid) {
+				_ = os.Remove(f)
+				continue
+			}
 			if fi, err := os.Stat(f); err == nil && time.Since(fi.ModTime()) > gateConfigStale {
 				_ = os.Remove(f)
 			}

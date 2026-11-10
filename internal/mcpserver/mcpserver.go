@@ -164,6 +164,9 @@ type Server struct {
 	// exe is the stale-binary guard: the executable this server started from, compared with the file on disk when
 	// a door whose behaviour a release changes answers (stalebinary.go).
 	exe *exeWatch
+	// cfg is the config file this server started from, compared with the file on disk when a door answers (stale_config.go).
+	// nil for a server built without a config source, which then says nothing.
+	cfg *cfgWatch
 }
 
 func New(p *pipeline.Pipeline) *Server {
@@ -173,9 +176,11 @@ func New(p *pipeline.Pipeline) *Server {
 
 // WithConfigSource records the config file this server runs on, so a node added to its delegate_remotes joins the running
 // session instead of waiting for a restart (internal/mediaremote: the ticket re-reads the file when its mtime changes). An
-// empty path (built-in defaults) leaves the roster the server started with.
+// empty path (built-in defaults) leaves the roster the server started with. It also takes the stamp and the hash of the file
+// now, which is what the stale-config notice compares the file on disk with (stale_config.go).
 func (s *Server) WithConfigSource(path string) *Server {
 	s.configPath = path
+	s.cfg = newCfgWatch(path)
 	return s
 }
 

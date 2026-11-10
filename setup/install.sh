@@ -48,6 +48,12 @@ HEAVY_CARD="${OFFLOAD_HEAVY_CARD:-}"
 UTILITY_CARD="${OFFLOAD_UTILITY_CARD:-}"
 MODELS=""
 LISTEN="127.0.0.1:11436"
+LISTEN_SET=0   # 1 when --listen named the address: then a kept config.json's endpoint follows it, and no stored one is read back
+# The first port llama-swap hands to a model's ${PORT} (OFFLOAD_SWAP_START_PORT / --start-port, 1024..64000). Empty =
+# llama-swap's own 5800. START_PORT_SET is 1 when the flag or the variable said something, `default` included (clears).
+START_PORT="${OFFLOAD_SWAP_START_PORT:-}"
+START_PORT_SET=0
+[ -n "$START_PORT" ] && START_PORT_SET=1
 NODE_ID="$(hostname)"
 SERVICE_USER="$(id -un)"
 BIN=""
@@ -161,7 +167,13 @@ Usage: install.sh [options]
   --utility-card ID   a two-card tier: the card that carries the memory stack, the cascade, STT and
                       the forecaster beside the heavy seat (default 1; env OFFLOAD_UTILITY_CARD)
   --models DIR        directory holding the GGUF files (default: <prefix>/models)
-  --listen ADDR       llama-swap listen address (default 127.0.0.1:11436)
+  --listen ADDR       llama-swap listen address HOST:PORT, port 1024..65535 (default 127.0.0.1:11436). The
+                      harness config's endpoint follows its port. Left unset, a re-run keeps the address
+                      the existing llama-swap.yaml was rendered with. The installer connects to the port
+                      first and stops when something that is not this install already answers there
+  --start-port N      the first port llama-swap hands to its models, 1024..64000 (default: llama-swap's
+                      own 5800; env OFFLOAD_SWAP_START_PORT; `default` clears a kept one). Left unset, a
+                      re-run keeps the one the existing llama-swap.yaml was rendered with
   --node-id NAME      fleet node id (default: hostname)
   --user NAME         the identity the services run as (default: you). Capability is
                       IDENTITY-DEPENDENT, so this must be the account that owns the
@@ -196,7 +208,8 @@ while [ $# -gt 0 ]; do
     --heavy-card) HEAVY_CARD="${2:?}"; shift 2 ;;
     --utility-card) UTILITY_CARD="${2:?}"; shift 2 ;;
     --models) MODELS="${2:?}"; shift 2 ;;
-    --listen) LISTEN="${2:?}"; shift 2 ;;
+    --listen) LISTEN="${2:?}"; LISTEN_SET=1; shift 2 ;;
+    --start-port) START_PORT="${2:?}"; START_PORT_SET=1; shift 2 ;;
     --node-id) NODE_ID="${2:?}"; shift 2 ;;
     --user) SERVICE_USER="${2:?}"; shift 2 ;;
     --no-service) NO_SERVICE=1; shift ;;
@@ -211,6 +224,34 @@ while [ $# -gt 0 ]; do
     *) die "unknown option $1 (try --help)" ;;
   esac
 done
+
+# --prefix is made absolute once, here: every consumer below (the config's home and serving_config_path, the render,
+# the systemd unit's WorkingDirectory / ExecStart, the MCP registration in client mode) gets the same absolute path.
+# A relative one broke as soon as the unit or `claude` started from another directory, while the acceptance gate, run
+# from this directory, still passed.
+if [ -n "$PREFIX" ]; then
+  case "$PREFIX" in
+    /*) ;;
+    *) if command -v realpath >/dev/null 2>&1; then PREFIX="$(realpath -m -- "$PREFIX")"; else PREFIX="$PWD/${PREFIX#./}"; fi ;;
+  esac
+  [ "$PREFIX" = "/" ] || PREFIX="${PREFIX%/}"
+  case "$PREFIX" in /*) ;; *) die "--prefix must resolve to an absolute path (got: $PREFIX)" ;; esac
+fi
+
+# The swap ports, validated like install.ps1 does (the same ranges). A stored value read back later is checked the same way.
+valid_port() { # valid_port VALUE LOW HIGH
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 6 ] && [ "$((10#$1))" -ge "$2" ] && [ "$((10#$1))" -le "$3" ]
+}
+valid_listen() { case "$1" in *:*) valid_port "${1##*:}" 1024 65535 ;; *) return 1 ;; esac; }
+if [ "$START_PORT_SET" -eq 1 ]; then
+  case "$START_PORT" in
+    default|DEFAULT|Default) START_PORT="" ;;
+    *) valid_port "$START_PORT" 1024 64000 || die "--start-port / OFFLOAD_SWAP_START_PORT='$START_PORT' is not a whole number in 1024..64000 (or 'default' to clear it)"
+       START_PORT="$((10#$START_PORT))" ;;
+  esac
+fi
+valid_listen "$LISTEN" || die "--listen '$LISTEN' is not HOST:PORT with a port in 1024..65535 (e.g. 127.0.0.1:11436)"
 
 # ---- the binary makes every decision, so find it first ----------------------
 if [ -z "$BIN" ]; then
@@ -294,6 +335,50 @@ if [ -z "$PREFIX" ]; then
   say "prefix:    $PREFIX  ($(printf '%s' "$VOL_JSON" | jq -r '.choice.because'))"
 else
   say "prefix:    $PREFIX  (given)"
+fi
+
+# ---- 2a. the swap ports: what an earlier install chose, and whether the listen port is free -------------------
+# A re-run with --listen / --start-port unset reads the two back from the `# basis:` line of the yaml the last run
+# rendered (params.listen, params.start_port), so it renders what that run chose instead of silently going back to
+# 11436 and llama-swap's 5800. No file, no stamp or unreadable json = nothing stored.
+STORED_LISTEN=""; STORED_START=""
+if [ -r "$PREFIX/etc/llama-swap.yaml" ]; then
+  STORED_BASIS="$(head -n 16 "$PREFIX/etc/llama-swap.yaml" | grep -m1 '^# basis: ' | sed 's/^# basis: //' || true)"
+  if [ -n "$STORED_BASIS" ]; then
+    STORED_LISTEN="$(printf '%s' "$STORED_BASIS" | jq -r '.params.listen // empty' 2>/dev/null || true)"
+    STORED_START="$(printf '%s' "$STORED_BASIS" | jq -r '.params.start_port // empty' 2>/dev/null || true)"
+    valid_listen "$STORED_LISTEN" || STORED_LISTEN=""
+    valid_port "$STORED_START" 1024 64000 || STORED_START=""
+  fi
+fi
+if [ "$LISTEN_SET" -eq 0 ] && [ -n "$STORED_LISTEN" ] && [ "$STORED_LISTEN" != "$LISTEN" ]; then
+  LISTEN="$STORED_LISTEN"
+  say "OVERRIDE swap listen=$LISTEN (default 127.0.0.1:11436; kept from the previous install)"
+fi
+if [ "$START_PORT_SET" -eq 0 ] && [ -n "$STORED_START" ]; then
+  START_PORT="$STORED_START"
+  say "OVERRIDE start_port=$START_PORT (llama-swap default 5800; kept from the previous install)"
+fi
+LISTEN_PORT="$((10#${LISTEN##*:}))"
+
+# A connect, not `ss`: a holder behind WSL mirrored networking shares the loopback port space and does not show in the
+# listener table of this side. Something that answers on the listen port is not ours to take unless the existing
+# yaml was rendered for this very port (an upgrade of this install, whose llama-swap is running there).
+loopback_answers() { # loopback_answers PORT
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 2 bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$0"' "$1" 2>/dev/null
+  else
+    bash -c 'exec 3<>"/dev/tcp/127.0.0.1/$0"' "$1" 2>/dev/null
+  fi
+}
+if [ "$DRY_RUN" -eq 1 ]; then
+  say "  would connect to 127.0.0.1:$LISTEN_PORT before rendering (stops when another service already answers there)"
+elif loopback_answers "$LISTEN_PORT"; then
+  if [ -n "$STORED_LISTEN" ] && [ "${STORED_LISTEN##*:}" = "$LISTEN_PORT" ]; then
+    say "listen:    127.0.0.1:$LISTEN_PORT answers; the existing llama-swap.yaml of this install names it, so it is taken to be this install's own llama-swap"
+  else
+    die "127.0.0.1:$LISTEN_PORT already answers and no earlier run of this install rendered for it, so it reads as another service's (a different product's llama-swap, or on WSL mirrored networking a server inside the other side). The harness would talk to it. If it is another service: pass --listen 127.0.0.1:<free port> (and --start-port N for the models' ports) and run again. If it is this install's own llama-swap from a version that did not stamp its yaml: stop it, run again (the port then reads free), and start it afterwards"
+  fi
 fi
 # ---- 2b. the fleet bearer ------------------------------------------------------
 # Every lane of a fleet node requires the fleet bearer, and fleet-serve refuses to start on the tailnet address
@@ -478,6 +563,21 @@ case "$SEED" in *"ships no media"*) SEED='{}'; say "media:     tier $TIER ships 
 SEED="$(printf '%s' "$SEED" | jq --argjson hf "$HF_SEED" '. + $hf')"
 if [ -f "$CONFIG" ] && [ "$DRY_RUN" -eq 0 ]; then
   say "config:    $CONFIG exists — left untouched (delete it to regenerate)"
+  # ... except its endpoint when --listen named a port on purpose (as install.ps1 does for OFFLOAD_SWAP_PORT): the yaml
+  # is rendered for that port below, and an endpoint left on the old one would talk to whatever holds it. Only a
+  # loopback endpoint is rewritten, in place (owner and mode stay), and it is said.
+  if [ "$LISTEN_SET" -eq 1 ]; then
+    OLD_EP="$(jq -r '.endpoint // empty | select(test("^http://127\\.0\\.0\\.1:[0-9]+/?$"))' "$CONFIG" 2>/dev/null || true)"
+    if [ -n "$OLD_EP" ] && [ "$(printf '%s' "$OLD_EP" | sed 's#^http://127\.0\.0\.1:##; s#/$##')" != "$LISTEN_PORT" ]; then
+      if jq --arg ep "http://127.0.0.1:$LISTEN_PORT" '.endpoint = $ep' "$CONFIG" > "$CONFIG.new" && cat "$CONFIG.new" > "$CONFIG"; then
+        rm -f "$CONFIG.new"
+        say "config:    $CONFIG endpoint $OLD_EP -> http://127.0.0.1:$LISTEN_PORT (--listen is set)"
+      else
+        rm -f "$CONFIG.new"
+        die "could not move the endpoint in $CONFIG to http://127.0.0.1:$LISTEN_PORT"
+      fi
+    fi
+  fi
   # A box that just gained the composition lane is told exactly which keys bind it.
   if [ -n "${HF_BROWSER:-}" ] && ! jq -e '(.hyperframes_dir // "") != ""' "$CONFIG" >/dev/null 2>&1; then
     say "NOTE  compose lane installed but $CONFIG predates it — add: $(printf '%s' "$HF_SEED" | jq -c .)"
@@ -485,7 +585,9 @@ if [ -f "$CONFIG" ] && [ "$DRY_RUN" -eq 0 ]; then
 else
   # serving_config_path: this script knows which yaml the node serves (step 5). Without the key the node publishes no
   # provenance for it, doctor's capacity row reads UNKNOWN, and a GPU lease cannot place a seat by its device pin.
-  BODY="$(printf '%s' "$SEED" | jq --arg home "$PREFIX" --arg yaml "$PREFIX/etc/llama-swap.yaml" '. + {home: $home, serving_config_path: $yaml}')"
+  # endpoint: the harness talks to the llama-swap this script renders, so it follows the listen port (config.Default()
+  # alone says 11436, which after --listen is some other service's).
+  BODY="$(printf '%s' "$SEED" | jq --arg home "$PREFIX" --arg yaml "$PREFIX/etc/llama-swap.yaml" --arg ep "http://127.0.0.1:$LISTEN_PORT" '. + {home: $home, serving_config_path: $yaml, endpoint: $ep}')"
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would write $CONFIG:"; printf '%s\n' "$BODY" | sed 's/^/    /'
   else
@@ -557,7 +659,7 @@ fi
 # ---- 5. the serving config --------------------------------------------------
 SWAP_YAML="$PREFIX/etc/llama-swap.yaml"
 if [ "$DRY_RUN" -eq 1 ]; then
-  say "  would render $SWAP_YAML for tier $TIER${LLAMA_BIN:+ --llama-bin $LLAMA_BIN}${LLAMA_BIN_CPU:+ --llama-bin-cpu $LLAMA_BIN_CPU}${LLAMA_BIN_EG2:+ --llama-bin-eg2 $LLAMA_BIN_EG2}${HEAVY_CARD:+ --heavy-card $HEAVY_CARD}${UTILITY_CARD:+ --utility-card $UTILITY_CARD}"
+  say "  would render $SWAP_YAML for tier $TIER${LLAMA_BIN:+ --llama-bin $LLAMA_BIN}${LLAMA_BIN_CPU:+ --llama-bin-cpu $LLAMA_BIN_CPU}${LLAMA_BIN_EG2:+ --llama-bin-eg2 $LLAMA_BIN_EG2}${HEAVY_CARD:+ --heavy-card $HEAVY_CARD}${UTILITY_CARD:+ --utility-card $UTILITY_CARD} --listen $LISTEN${START_PORT:+ --start-port $START_PORT}"
 else
   # --home is load-bearing: a tier's media seats name their binaries under the
   # install root, and without it the render REFUSES — after step 4 has already
@@ -566,7 +668,7 @@ else
     --rknpu-home "${RKNPU_HOME:-$PREFIX/rknpu}" --ram-tier "$RAM_TIER" \
     --vllm-user "$SERVICE_USER" --vllm-proxy-host "$TS_IP" \
     --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" \
-    ${LLAMA_BIN:+--llama-bin "$LLAMA_BIN"} ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} ${LLAMA_BIN_EG2:+--llama-bin-eg2 "$LLAMA_BIN_EG2"} ${HEAVY_CARD:+--heavy-card "$HEAVY_CARD"} ${UTILITY_CARD:+--utility-card "$UTILITY_CARD"} --models "$MODELS" --listen "$LISTEN" --out "$SWAP_YAML"
+    ${LLAMA_BIN:+--llama-bin "$LLAMA_BIN"} ${LLAMA_BIN_CPU:+--llama-bin-cpu "$LLAMA_BIN_CPU"} ${LLAMA_BIN_EG2:+--llama-bin-eg2 "$LLAMA_BIN_EG2"} ${HEAVY_CARD:+--heavy-card "$HEAVY_CARD"} ${UTILITY_CARD:+--utility-card "$UTILITY_CARD"} --models "$MODELS" --listen "$LISTEN" ${START_PORT:+--start-port "$START_PORT"} --out "$SWAP_YAML"
 fi
 
 # ---- 5b. the persistent vLLM agent seat (ADR 0035), when this box can run it ----

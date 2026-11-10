@@ -1467,7 +1467,12 @@ func runAuditYAML(args []string) error {
 		}
 		_ = yaml.Unmarshal(b, &doc)
 		if len(vs) == 0 {
-			fmt.Printf("%s: OK (%d models, every entry ttl %d, cards only)\n", path, len(doc.Models), servingtmpl.TTLRequired)
+			if strings.HasPrefix(pinsSkipped, "no card table: pin rules not applied") {
+				// The device pins were never compared with a card: say so on the verdict line (the exit status stays 0).
+				fmt.Printf("%s: OK (%d models, every entry ttl %d; cards NOT checked: no card table, see the note below)\n", path, len(doc.Models), servingtmpl.TTLRequired)
+			} else {
+				fmt.Printf("%s: OK (%d models, every entry ttl %d, cards only)\n", path, len(doc.Models), servingtmpl.TTLRequired)
+			}
 		} else {
 			bad++
 			fmt.Printf("%s: %d violation(s)\n%s\n", path, len(vs), servingtmpl.Violations(vs))

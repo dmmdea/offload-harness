@@ -357,7 +357,7 @@ Usage:
   local-offload report [--out FILE]      READ-ONLY capability report for this machine (tier, serving, media routes) — Markdown, safe to send
   local-offload acceptance [--json] [--render [--only a,b] [--out-dir DIR]] [--list]
                                          the gate: EXERCISE every bound capability as this identity (lease writable, interpreters runnable, aliases live). Non-zero when a node must not be handed work.
-                                         --render also makes one REAL call per bound route through its own verb (summarize,classify,embed,vision,stt,agent,image,video,animate,voice,music,compose,edit,media,inpaint,upscale) and checks the answer against a known one; --only names groups, --out-dir keeps the outputs (default: a new temp folder, never deleted); --list prints each group, whether it is bound and the exact command, and runs nothing
+                                         --render also makes one REAL call per bound route through its own verb (summarize,classify,embed,vision,stt,agent,image,video,animate,voice,music,compose,edit,media,inpaint,upscale) and checks the answer against a known one; --only names groups and scopes the whole run to them (other missing routes and the alias row are SKIP; a run where every requested group was skipped is NOT READY), --out-dir keeps the outputs (default: a new temp folder, never deleted); --list prints each group, whether it is bound and the exact command, and runs nothing
   local-offload install detect [--json]  classify this machine into a hardware tier (works on every OS)
   local-offload install plan [--json]    the tier + the media bindings an install would seed here
   local-offload install render [--profile ID] [--llama-bin DIR] [--llama-bin-cpu DIR] [--llama-bin-eg2 DIR] [--models DIR] [--out FILE]   render this tier's llama-swap serving config (templates embedded); --llama-bin-cpu adds the tier's CPU seat family (tier must declare alt_backends), --llama-bin-eg2 runs ONLY the embeddinggemma2 entry from a second llama.cpp build (b11452 or newer) for a node whose main build is older
@@ -1022,6 +1022,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// Whether the GPU power limit and clock lock a box applies at boot were applied this boot, from the state record the applier
 	// writes: one file, informational (a WARN or UNKNOWN never changes the exit code), and one line where nothing is recorded.
 	writePowerProfileRow(w)
+	// A card that drives a display under a bound ComfyUI lane with no --reserve-vram in the launch: informational (never an exit code), silent unless a
+	// lane is bound and none is set, and the GPU read it makes comes last. It needs no endpoint.
+	writeDisplayReserveRow(w, cfg, routes)
 	// Endpoints that name a box by a private-range IP literal instead of a tailnet name: pure config, a
 	// warning only (never an exit code), and silent on a config with none.
 	writeLANIPEndpointsSection(w, cfg)

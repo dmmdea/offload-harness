@@ -283,7 +283,7 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 	height := fs.Int("height", 0, "height px")
 	steps := fs.Int("steps", 0, "sampler steps (0 = builder default: wan 20 native / 8 fast)")
 	seed := fs.Int("seed", 0, "RNG seed for reproducibility")
-	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (default per-workflow; ~2.0 for Hunyuan/Wan)")
+	reserveVRAM := fs.Float64("reserve-vram", 0, "VRAM held back for the display (default 1.0; a --reserve-vram in comfy_extra_args overrides it box-wide)")
 	fast := fs.Bool("fast", false, "OPT-IN draft mode: 8-step lightx2v distill (wan; visibly weaker motion). The default is the native quality recipe")
 	hero := fs.Bool("hero", false, "deprecated: the native quality pass IS the default now; accepted as a no-op")
 	upscale := fs.Bool("upscale", false, "post-decode upscale using this machine's configured upscale model (e.g. 720p->1080p)")
@@ -335,7 +335,10 @@ func runGenerateVideo(args []string) error {
 		return err
 	}
 
-	cfg := loadCfg(c.fs)
+	cfg, src := loadCfgWithSource(c.fs)
+	if err := refuseBrokenConfig("generate-video", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
@@ -371,7 +374,10 @@ func runAnimateCharacter(args []string) error {
 		return err
 	}
 
-	cfg := loadCfg(c.fs)
+	cfg, src := loadCfgWithSource(c.fs)
+	if err := refuseBrokenConfig("animate-character", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err

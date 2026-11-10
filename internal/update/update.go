@@ -174,6 +174,24 @@ func cmpID(a, b string) int {
 	return floors.Compare(a, b)
 }
 
+// foreignRootMessage is the refusal for a root run against an install root another user owns: a root run would
+// leave a root-owned generation, link and installed.json there and would run the downloaded build as root.
+func foreignRootMessage(home, owner string, uid int, comps []string) string {
+	cmd := "local-offload update"
+	if len(comps) > 0 {
+		cmd += " --component " + strings.Join(comps, ",")
+	}
+	msg := fmt.Sprintf("refusing to run as root: the install root %s belongs to %s (uid %d); a root run would leave a root-owned generation, link and installed.json there and would run the downloaded build as root. Run it as that user: sudo -u %s %s (or without sudo)",
+		home, owner, uid, owner, cmd)
+	for _, c := range comps {
+		if c == LlamaSwap {
+			msg += ". If root is needed only to restart llama-swap, set update.restart.llama-swap.command to `sudo systemctl restart llama-swap.service` and run the update unprivileged"
+			break
+		}
+	}
+	return msg
+}
+
 // Run walks the components. It returns every report and the process exit code.
 func (e *Env) Run(ctx context.Context, opts Options) ([]Report, int) {
 	manPath := filepath.Join(e.Home, "installed.json")
@@ -189,6 +207,11 @@ func (e *Env) Run(ctx context.Context, opts Options) ([]Report, int) {
 		channel = "nightly"
 	}
 	mutating := !opts.DryRun && !opts.ResolveOnly
+	if mutating {
+		if uid, owner, bad := foreignRootOwner(e.Home); bad {
+			return []Report{{Component: "-", Action: "error", Detail: foreignRootMessage(e.Home, owner, uid, opts.Components)}}, ExitError
+		}
+	}
 	var lock *Lock
 	if mutating {
 		l, busy, holder, lerr := AcquireLock(e.Home)

@@ -421,6 +421,8 @@ local-offload run-graph --graph wf.json --out-dir out/
 local-offload gpu reserve --class media -- <your command>
 ```
 
+On a box with a named ComfyUI instance (`comfy_instance`), a hand-run `gpu reserve -- node render/comfy-*.mjs` talks to that instance, not to 8188; see [Keep the harness off the owner's own ComfyUI](#keep-the-harness-off-the-owners-own-comfyui-comfy_instance).
+
 On a host with card-scoped leases enabled, hold only the cards the job uses so the others keep working:
 `gpu reserve --class media --devices 2 -- <cmd>` (named cards), `--cards 2` (the allocator picks two free cards; the display card only up to `gpu_display_cap_pct`, default 60 percent of its VRAM with the desktop's use counted, and only when you state `--vram`; set the key to `0` when you need the screen's card to yourself; `gpu status` / `gpu cards` print a `display cap:` line under the display card with the VRAM in use against that share, whoever's memory it is),
 or no flag at all when `<cmd>` pins itself with `CUDA_VISIBLE_DEVICES`, `--cuda-device` or `COMFY_CUDA_DEVICE`. A command that carries a
@@ -451,11 +453,13 @@ keeps its instance from call to call, and changing it there restarts the kept in
 keeps its old meaning: the instance is kept whatever happens and has no process bound; its lease's holder (or you) stops it.
 A runner holds the instance for its whole job through `GET /offload/hold`, a response that sends one byte every 2 s and ends when
 the runner exits, so a long step that is not ComfyUI's (ffmpeg, a QA pass) does not let the bound fire. `curl
-http://127.0.0.1:8188/offload/idle` shows it: `exit_limit_sec` (the bound, 0 when there is none), `exit_idle_sec` (seconds
+http://127.0.0.1:<port>/offload/idle` shows it (`<port>` is the instance's port: 8189 when `comfy_instance` is set, see
+[Keep the harness off the owner's own ComfyUI](#keep-the-harness-off-the-owners-own-comfyui-comfy_instance); 8188 only for a ComfyUI started by hand): `exit_limit_sec` (the bound, 0 when there is none), `exit_idle_sec` (seconds
 idle now) and `holds` (runners holding it now), beside the model free's `limit_sec` and `idle_sec`.
 
 To stop a kept instance by hand, for example to hand the whole card to something else: find the process that listens on its port
-(`Get-NetTCPConnection -LocalPort 8188 -State Listen` gives `OwningProcess`; a keyed instance has its own port, printed in its
+(`Get-NetTCPConnection -LocalPort <port> -State Listen` gives `OwningProcess`. On a box with `comfy_instance` the port is
+`comfy_instance_port` (default 8189), never 8188: that one is the owner's own ComfyUI, so do not stop it. A keyed instance has its own port, printed in its
 launch marker `.offload-launch-<key>.json` in the ComfyUI folder) and stop it (`Stop-Process -Id <pid>`, or `kill <pid>` on
 Linux). For a keyed instance under a lease, `local-offload gpu release --epoch N` stops the instances of that lease; the media
 pipeline's own routine release leaves a self-bounded one running on purpose. Or just wait for the bound.
@@ -741,8 +745,11 @@ generative edit). Raise the reserve for every ComfyUI lane of the box:
 "comfy_extra_args": "--reserve-vram 3.0"
 ```
 
-The extra args are the tail of the launch argv, so this value wins over the runners' own. The `blackwell-16` tier seeds it on
-a fresh install; an existing config is never touched, so an installed box sets it by hand. A headless card does not need it.
+The extra args are the tail of the launch argv, so this value wins over the runners' own, and over a `reserve_vram` a call passes
+(the launch logs `COMFY-RESERVE-WARN: ...` naming the value that is live). `comfy_extra_args` also REPLACES a `COMFY_EXTRA_ARGS`
+from the environment, so copy any flags that env carries (`--use-sage-attention`, `--disable-dynamic-vram`) into it. The
+`blackwell-16` tier seeds it on a fresh install; an existing config is never touched, so an installed box sets it by hand
+(`doctor` prints a `reserve:` row when it should, described with the `power:` row below). A headless card does not need it.
 
 ### Keep the harness off the owner's own ComfyUI (`comfy_instance`)
 
@@ -867,7 +874,7 @@ measured. Any failure defers with a typed class (`BAD_INPUT`, `LINT_ERRORS`, `CH
 **Binding the lane.** The installer's hyperframes step does this on a box with Node >= 22. It
 installs the newest HyperFrames release from npm into `<home>/hyperframes` (`npm install --ignore-scripts`, each tarball verified against the registry's integrity field), runs `npm audit signatures` (fatal on failure) and
 `browser ensure`, and writes three keys into a FRESH config. An existing config is never rewritten,
-so the installer prints the three keys instead. To bind by hand:
+so the installer prints the three keys instead. On Windows, a refresh that fails (registry or disk trouble) while the installed HyperFrames already meets the floor in `setup/floors.json` warns and keeps that install, which `npm audit signatures` still checks; any other failure of this step warns and leaves the lane unbound without stopping the install. To bind by hand:
 
 ```json
 "compose_script": "render/compose-hyperframes.mjs",
@@ -2157,6 +2164,8 @@ state root; a marker that cannot be read or written means the warning prints eve
 once per process. The row is where the condition stays visible in between.
 
 **A power profile applied this boot (`power:` row).** A box can apply a GPU power limit and a clock lock at boot with a separate tool, and when that step is skipped the card runs at stock limits and nothing else says so. The tool writes a state record on every run, refusals included, and `doctor` prints one `power:` row from it. `OK` says a profile was applied since this boot began, how long ago, and how many steps returned success. `WARN` says no profile was applied this boot (the newest record is older than the boot, once the box has been up ten minutes: the boot apply runs a few minutes after boot, so a box just started gets a `SKIP` that says it is not yet a finding), or the last run was a dry run (which replaces the record of the real run), a refusal, a failure, an empty plan, or skipped by the tool's crash guard (`cookie_blocked`: a cookie from an earlier apply was still on disk, so that run applied nothing; the row does not say the card is at stock limits, because a resume from sleep a few minutes after the boot apply meets the cookie of an apply that is still in force, and a cookie from this boot clears itself within ten minutes, while one from an earlier boot stays until a person clears it), or the apply was partial: a step short of the plan, a lever skipped other than by the tool's own design (a card whose power limit is owned by firmware has none to apply, and that is counted, not warned), or a driver that differs from the profile's stamp, which leaves the tuned levers waiting for a re-evaluation. `UNKNOWN` (naming why) says the file cannot be read, is not JSON, is of a schema this doctor does not read, or carries no usable time; unknown is never reported as absent. With no state file the row is one `SKIP` line saying no power profile state is recorded, which is not an error: a box that applies no profile records nothing. The file is found only by `LOCAL_OFFLOAD_POWER_PROFILE_STATE`, which holds the path of the tool's state file: the harness knows no tool's install folder, so there is no platform default, and a box that applies a profile at boot sets the variable (until it is set, and on a box whose applier keeps no state file, the row reads `SKIP`). "This boot" counts from when the operating system session began, which a Windows Fast Startup power cycle does not reset; when the platform cannot say, the row says it cannot tell. The row prints no path, host name or card id, and not the applier's free-form detail. **It reads the record, not the card.** The record says what the tool did, and "applied" in it means the writes returned success, so the row does not compare the recorded limit and lock with the driver's live ones: the harness has no reader of a card's power limit or clock lock yet, and a limit changed after the apply reads green here until it does. It never changes doctor's exit code. **The same reading rides `/fleet/health` as `power_profile`** (`ok`, `skipped` or `unknown`, a reason token, the cards' recorded power limits and whether a clock-lock step succeeded; `OK` is `ok`, `WARN` is `skipped`, `SKIP` and `UNKNOWN` are `unknown`), and `offload_status` shows one token per node in its `fleet` block, the brief form included, so the roster says which nodes' profiles took. A node with no state file, or no setting (a Linux node with no boot-apply tool), publishes `unknown` with the reason `no_state`: an answer, not an error. See [FLEET-NODE.md](FLEET-NODE.md), "Boot-time GPU power profile".
+
+**A display card with no ComfyUI reserve (`reserve:` row).** On a card that also drives a desktop the runners' 1.0 GiB reserve is too little: a generative edit on a 16 GB card that also drives a desktop spilled into shared memory and sampled about 60 times slower. `doctor` prints one `reserve:` `WARN` row when a ComfyUI lane is bound, the effective extra args (`comfy_extra_args`, else the `COMFY_EXTRA_ARGS` env) carry no `--reserve-vram` (`imagegen_reserve_vram` does not count, it reaches the image lane only), the box is Windows (the spill is the Windows display-driver behaviour that was measured), and the card the lane runs on reports `display_active` or `display_attached`. The row names the key to set (`"comfy_extra_args": "--reserve-vram 3.0"`, the value the 16 GB tier seeds on a fresh install, which an installed box never gets) and says that the key replaces the env, so its flags are copied first. The lane's card is the one at `comfy_cuda_device` in ComfyUI's order (the fastest card when unpinned; several cards need `gpu_comfy_order` to know the positions). Where the display state cannot be read (`nvidia-smi` fails, the card cannot be named, or the driver did not report `display_attached`) the row reads `UNKNOWN` and says why; it never warns on a guess. It is silent otherwise, reads no endpoint, and never changes doctor's exit code.
 
 `doctor` also prints a `backends:` section after its checks, whatever they returned: one row per lane and per seat saying which
 serving engine answers (`active_backend`: `llama.cpp`, `vllm`, `rkllm`, `whisper.cpp`, `unknown` (the engine is not named, a probe timed out, or another node serves the seat), or `none`; on a lane, the engine of the seat the

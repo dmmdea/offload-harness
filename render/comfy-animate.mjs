@@ -10,7 +10,7 @@
 //        [--unet f.safetensors] [--text-encoder f] [--clip-vision f] [--vae f] \
 //        [--cache-device cpu|gpu] [--cache-dtype default|int8] \
 //        [--placement single|multicard] [--resident-gb N] [--cards <card>,<card>] [--print-graph] \
-//        [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy]
+//        [--api <url>] [--no-lock] [--keep-comfy]
 //   <prompt> describes the CHARACTER + BACKGROUND (what the output should show);
 //   --motion-prompt describes the driver video (what motion is being transferred).
 //   --placement single|multicard (single, today's, is the default): multicard is the CARD-ONLY placement on the two non-display cards of a lease, no host

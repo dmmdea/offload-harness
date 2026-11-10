@@ -103,6 +103,9 @@ func runGenerateImage(args []string) error {
 	}
 
 	cfg, src := loadCfgWithSource(fs)
+	if err := refuseBrokenConfig("generate-image", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
@@ -200,7 +203,10 @@ func runInpaintImage(args []string) error {
 		return fmt.Errorf("inpaint-image requires --mask (or --auto-text) and --prompt: local-offload inpaint-image <image> --mask m.png --prompt \"...\"")
 	}
 
-	cfg := loadCfg(fs)
+	cfg, src := loadCfgWithSource(fs)
+	if err := refuseBrokenConfig("inpaint-image", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
@@ -267,7 +273,10 @@ func runUpscaleImage(args []string) error {
 		return fmt.Errorf("upscale-image requires an image path (not stdin): local-offload upscale-image <image> [--scale 2]")
 	}
 
-	cfg := loadCfg(fs)
+	cfg, src := loadCfgWithSource(fs)
+	if err := refuseBrokenConfig("upscale-image", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
@@ -333,6 +342,9 @@ func runRunGraph(args []string) error {
 	defer cleanupInline()
 
 	cfg, src := loadCfgWithSource(fs)
+	if err := refuseBrokenConfig("run-graph", src); err != nil {
+		return err
+	}
 	p, cleanup, err := openPipeline(cfg)
 	if err != nil {
 		return err
