@@ -39,6 +39,56 @@ func TestLoadAcceptsAUTF8BOM(t *testing.T) {
 	if !bytes.Equal(StripBOM([]byte("\xEF\xBB\xBF{}")), []byte("{}")) || !bytes.Equal(StripBOM([]byte("{}")), []byte("{}")) {
 		t.Fatal("StripBOM must drop exactly one leading BOM and leave other input alone")
 	}
+
+	// A ./config.json that hides a DIFFERENT ~/.local-offload/config.json says so on the
+	// Source; the same file (cwd is the home config's directory, or a symlink to it) and an
+	// explicit flag do not.
+	home := t.TempDir()
+	homeDir := filepath.Join(home, ".local-offload")
+	if err := os.MkdirAll(homeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	homeCfg := filepath.Join(homeDir, "config.json")
+	if err := os.WriteFile(homeCfg, []byte(`{"model":"home-model"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("LOCAL_OFFLOAD_CONFIG", "")
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, "config.json"), []byte(`{"model":"cwd-model"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(cwd)
+	cfg, src = LoadWithSource("")
+	if cfg.Model != "cwd-model" || src.Path != "config.json" || src.ShadowedHome != homeCfg {
+		t.Fatalf("a cwd config over a different home config must keep precedence and record the shadow: model=%q src=%+v", cfg.Model, src)
+	}
+	var note bytes.Buffer
+	if !WarnOnShadowedHomeOnce(src, &note) || WarnOnShadowedHomeOnce(src, &note) {
+		t.Fatalf("the shadow note prints once per process, got %q", note.String())
+	}
+	for _, want := range []string{"NOTE: config read from ./config.json", filepath.Join(cwd, "config.json"), homeCfg, "NOT read", "--config", "LOCAL_OFFLOAD_CONFIG"} {
+		if !strings.Contains(note.String(), want) {
+			t.Errorf("shadow note must say %q: %q", want, note.String())
+		}
+	}
+	if _, flagSrc := LoadWithSource("config.json"); flagSrc.ShadowedHome != "" {
+		t.Errorf("an explicit --config shadows nothing: %+v", flagSrc)
+	}
+	t.Chdir(homeDir)
+	if _, same := LoadWithSource(""); same.ShadowedHome != "" {
+		t.Errorf("the home config read as ./config.json is the same file, not a shadow: %+v", same)
+	}
+	if err := os.Remove(filepath.Join(cwd, "config.json")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(homeCfg, filepath.Join(cwd, "config.json")); err == nil {
+		t.Chdir(cwd)
+		if _, sym := LoadWithSource(""); sym.ShadowedHome != "" {
+			t.Errorf("a symlink to the home config is the same file, not a shadow: %+v", sym)
+		}
+	}
 }
 
 // TestUnparseableConfigIsDefaultsAndSaysSo: a file that does not decode is a ParseError,

@@ -38,6 +38,16 @@ environment.
    command with the typed defer `NODE_PACK_NOT_ALLOWED` (`ref` = the pack). The table holds the packs the shipped graph builders
    need; a workflow that needs another adds a reviewed row to the file and to its Go copy.
 
+1b. **Refuse any node class that executes caller-supplied code.** A graph is data, but a node pack can ship a class that runs one of its string
+   inputs as code (`ModelTest` of `ComfyUI-Image-Filters` runs its `code` input through `exec()`); once that pack is installed, any submitted graph
+   holding the class would run the caller's Python on the node. `render/refused-node-classes.json` lists such classes by name, each with its pack
+   and why, and a graph that holds one (`class_type` of an API-format graph, `type` of a UI-format workflow node; exact and case-sensitive) is refused
+   with the typed defer `NODE_CLASS_REFUSED` (`ref` = the class) before ComfyUI is started or contacted and before anything is provisioned; a template's
+   converted graph is read the same way, right after conversion. A fleet node refuses it at the door (`400` naming the class, before a job, a temp file
+   or a lease exists: `mediacap.CheckGraphNodeClasses`), and the image, video and music runners refuse it for a `--graph` file they would post. The local
+   door answers the defer with `defer_class: contract`: the same graph is refused again on every node, so retrying never helps. A row is added only
+   for a class whose pack source was read and found to execute a caller-supplied input, to the file and to its Go copy (`internal/mediacap/refusednodes.go`).
+
 2. **Check tooling.** The satisfier's hard requirement is `uv` alongside the ComfyUI virtual
    environment's Python. Missing → `SATISFIER_UNAVAILABLE`. Skipped entirely for models-only or empty
    manifests.
@@ -204,7 +214,7 @@ and are therefore `0` for non-PNG outputs.
 
 A typed Defer: `{ "deferred": true, "code": …, "ref": …, "detail": … }`. Codes emitted by this path:
 `MODEL_DOWNLOAD_FAILED`, `MODEL_SHA_MISMATCH`, `SATISFIER_UNAVAILABLE`, `COMFY_VERSION_BELOW_MIN`,
-`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `EXTERNAL_COMFY_NEEDS_PACKS`, `COMFY_START_FAILED`, `NODE_CLASS_MISSING`,
+`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `EXTERNAL_COMFY_NEEDS_PACKS`, `COMFY_START_FAILED`, `NODE_CLASS_REFUSED`, `NODE_CLASS_MISSING`,
 `PREFLIGHT_MISSING_INPUTS`, `RUN_ERROR`, and, on a template run only, `TEMPLATE_CONVERT_REFUSED`, `TEMPLATE_MODEL_UNLISTED` and `MODEL_TOFU_RECORD`. A failure on the Go side of the call (rather than in the
 runner) defers with a free-form `run-graph failed: …` reason and a lowercase `err_class`, not a typed
 code — the `GPU_BUSY` and `TIMEOUT` tokens in the MCP tool description are advisory text, not codes

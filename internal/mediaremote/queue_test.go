@@ -1355,6 +1355,26 @@ func TestSweepRemovesDebrisAndTheRowMemoryForgetsAGoneNode(t *testing.T) {
 	if after != 2 {
 		t.Errorf("a node that left the roster is forgotten: %d", after)
 	}
+
+	// A waiting ticket whose owner is gone is debris the listing sweeps: it is not listed as a place in line, its file is gone
+	// and its place is dropped from the lease line, though no scan of any process ran.
+	e.lr.placeFor("tk-deadplace01", time.Now().Add(-21*24*time.Hour))
+	weeks := nowMs() - 21*24*60*60*1000
+	if err := st.write(ticketFile{ID: "mq-deadwait0001", ReqKey: "kd", Created: weeks, Owner: deadOwner, Beat: weeks, Updated: weeks,
+		Task: "generate_image", State: stWaiting, Scanned: true, Place: "tk-deadplace01"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range Queue(e.cfg, e.lr) {
+		if row.Ticket == "mq-deadwait0001" {
+			t.Errorf("a waiting ticket of a dead owner is listed: %+v", row)
+		}
+	}
+	if _, ok := st.read("mq-deadwait0001"); ok {
+		t.Error("the listing leaves a dead owner's waiting ticket on disk")
+	}
+	if e.lr.dropped("tk-deadplace01") != 1 {
+		t.Error("the listing drops the dead ticket's place from the line")
+	}
 }
 
 // forgetFirstReading drops the lane reading a ticket made when it was created, which its first scan would otherwise reuse for

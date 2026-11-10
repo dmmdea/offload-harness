@@ -78,8 +78,8 @@ var statusBlockTable = []statusBlock{
 	{"pair", func(_ *Server, _ context.Context, cfg config.Config) any { return statusPair(cfg) }},
 	// The media tickets of this machine (ADR 0083): reported only while there are any, so a box that never queued a call
 	// answers byte-identically to before. A nil slice must come back as an untyped nil, or it would read as a present block.
-	{"media_queue", func(_ *Server, _ context.Context, cfg config.Config) any {
-		if q := mediaremote.Queue(cfg); len(q) > 0 {
+	{"media_queue", func(s *Server, _ context.Context, cfg config.Config) any {
+		if q := mediaremote.Queue(cfg, runTaskAs{s}); len(q) > 0 {
 			return q
 		}
 		return nil

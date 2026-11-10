@@ -50,25 +50,26 @@ var ErrUnsupported = errors.New("no prebuilt for this node")
 var ErrBelowFloor = errors.New("below the floor")
 
 // slot is one required asset: any one of its alternative names satisfies it.
-// Patterns carry <TAG> (the whole tag), <N> (its number) and <SHA7> (a master-<N>-<sha7> tag's commit). No version
-// number appears in this table.
+// Patterns carry <TAG> (the whole tag), <N> (its number), <SHA7> (a master-<N>-<sha7> tag's commit) and <V> (one
+// dotted version, digits and dots, matched whatever it is). A CUDA row names the CUDA major and leaves the minor to
+// <V> ("cuda-13.<V>"), because upstream moves the minor between releases; no minor appears in this table.
 type slot []string
 
 // assetTable is the required-asset set per component and "<os>/<arch>/<variant>".
 var assetTable = map[string]map[string][]slot{
 	Llama: {
-		"windows/amd64/cuda13": {{"llama-<TAG>-bin-win-cuda-13.4-x64.zip"}, {"cudart-llama-bin-win-cuda-13.4-x64.zip"}},
-		"windows/amd64/cuda12": {{"llama-<TAG>-bin-win-cuda-12.4-x64.zip"}, {"cudart-llama-bin-win-cuda-12.4-x64.zip"}},
+		"windows/amd64/cuda13": {{"llama-<TAG>-bin-win-cuda-13.<V>-x64.zip"}, {"cudart-llama-bin-win-cuda-13.<V>-x64.zip"}},
+		"windows/amd64/cuda12": {{"llama-<TAG>-bin-win-cuda-12.<V>-x64.zip"}, {"cudart-llama-bin-win-cuda-12.<V>-x64.zip"}},
 		"windows/amd64/vulkan": {{"llama-<TAG>-bin-win-vulkan-x64.zip"}},
 		"windows/amd64/cpu":    {{"llama-<TAG>-bin-win-cpu-x64.zip"}},
-		"windows/arm64/cuda13": {{"llama-<TAG>-bin-win-cuda-13.4-arm64.zip"}, {"cudart-llama-bin-win-cuda-13.4-arm64.zip"}},
+		"windows/arm64/cuda13": {{"llama-<TAG>-bin-win-cuda-13.<V>-arm64.zip"}, {"cudart-llama-bin-win-cuda-13.<V>-arm64.zip"}},
 		"windows/arm64/vulkan": {{"llama-<TAG>-bin-win-vulkan-arm64.zip"}},
 		"windows/arm64/cpu":    {{"llama-<TAG>-bin-win-cpu-arm64.zip"}},
-		"linux/amd64/cuda13":   {{"llama-<TAG>-bin-ubuntu-cuda-13.4-x64.tar.gz"}, {"cudart-llama-<TAG>-bin-ubuntu-cuda-13.4-x64.tar.gz"}},
-		"linux/amd64/cuda12":   {{"llama-<TAG>-bin-ubuntu-cuda-12.8-x64.tar.gz"}, {"cudart-llama-<TAG>-bin-ubuntu-cuda-12.8-x64.tar.gz"}},
+		"linux/amd64/cuda13":   {{"llama-<TAG>-bin-ubuntu-cuda-13.<V>-x64.tar.gz"}, {"cudart-llama-<TAG>-bin-ubuntu-cuda-13.<V>-x64.tar.gz"}},
+		"linux/amd64/cuda12":   {{"llama-<TAG>-bin-ubuntu-cuda-12.<V>-x64.tar.gz"}, {"cudart-llama-<TAG>-bin-ubuntu-cuda-12.<V>-x64.tar.gz"}},
 		"linux/amd64/vulkan":   {{"llama-<TAG>-bin-ubuntu-vulkan-x64.tar.gz"}},
 		"linux/amd64/cpu":      {{"llama-<TAG>-bin-ubuntu-x64.tar.gz"}},
-		"linux/arm64/cuda13":   {{"llama-<TAG>-bin-ubuntu-cuda-13.4-arm64.tar.gz"}, {"cudart-llama-<TAG>-bin-ubuntu-cuda-13.4-arm64.tar.gz"}},
+		"linux/arm64/cuda13":   {{"llama-<TAG>-bin-ubuntu-cuda-13.<V>-arm64.tar.gz"}, {"cudart-llama-<TAG>-bin-ubuntu-cuda-13.<V>-arm64.tar.gz"}},
 		"linux/arm64/vulkan":   {{"llama-<TAG>-bin-ubuntu-vulkan-arm64.tar.gz"}},
 		"linux/arm64/cpu":      {{"llama-<TAG>-bin-ubuntu-arm64.tar.gz"}},
 	},
@@ -78,8 +79,8 @@ var assetTable = map[string]map[string][]slot{
 		"linux/arm64":   {{"llama-swap_<N>_linux_arm64.tar.gz"}},
 	},
 	Whisper: {
-		"windows/amd64/cuda13": {{"whisper-bin-win-cuda-12.4.0-x64.zip", "whisper-cublas-12.4.0-bin-x64.zip"}},
-		"windows/amd64/cuda12": {{"whisper-bin-win-cuda-12.4.0-x64.zip", "whisper-cublas-12.4.0-bin-x64.zip"}},
+		"windows/amd64/cuda13": {{"whisper-bin-win-cuda-12.<V>-x64.zip", "whisper-cublas-12.<V>-bin-x64.zip"}},
+		"windows/amd64/cuda12": {{"whisper-bin-win-cuda-12.<V>-x64.zip", "whisper-cublas-12.<V>-bin-x64.zip"}},
 		// No windows/amd64/vulkan row: whisper.cpp publishes no Windows Vulkan binary (v1.9.5 and b5454, checked 2026-11-06),
 		// and whisper-bin-x64.zip is a CPU build, so a row here swapped a node's GPU seat for CPU inference on the next update.
 		// A Vulkan node builds whisper-server from source; requiredSlots reports that.
@@ -223,7 +224,7 @@ func (r *Resolver) Resolve(ctx context.Context, def *compDef, etag string) (c *C
 				notes = append(notes, fmt.Sprintf("%s skipped: incomplete (%s)", rel.Tag, miss))
 				continue
 			}
-			cand.Notes = notes
+			cand.Notes = append(notes, cand.Notes...)
 			cand.Channel = "nightly"
 			return r.applyFloor(def, cand, newETag)
 		}
@@ -267,34 +268,209 @@ func expand(p, tag string) string {
 	return strings.ReplaceAll(p, "<SHA7>", sha)
 }
 
-// buildCandidate returns the candidate when every required slot is satisfied by an uploaded asset with a
-// non-empty digest, else nil and what is missing (the caller steps back one tag).
-func buildCandidate(def *compDef, variant string, rel ghRelease, slots []slot) (*Candidate, string) {
-	c := &Candidate{Component: def.Name, ID: rel.Tag, Source: def.Repo, Variant: variant}
-	for _, s := range slots {
+// versionToken stands for one dotted version inside a pattern: the CUDA minor (and patch) a release carries is
+// matched, never named, so a new upstream minor needs no edit here. The CUDA major stays literal in the pattern.
+const versionToken = "<V>"
+
+// versionExpr is what versionToken matches: digits and dots, starting and ending on a digit.
+const versionExpr = `[0-9]+(?:\.[0-9]+)*`
+
+// slotMatch is one usable asset that satisfies one alternative of a slot. ver is the matched <V>, nil for a
+// pattern without one.
+type slotMatch struct {
+	asset ghAsset
+	ver   []uint64
+}
+
+// assetUsable is an uploaded asset that carries a publisher sha256 digest.
+func assetUsable(a ghAsset) bool {
+	return (a.State == "" || a.State == "uploaded") && strings.HasPrefix(a.Digest, "sha256:") && len(a.Digest) > len("sha256:")
+}
+
+// parseVersion reads "5" or "4.0" as numeric components; false when a component does not fit.
+func parseVersion(s string) ([]uint64, bool) {
+	var v []uint64
+	for _, f := range strings.Split(s, ".") {
+		n, err := strconv.ParseUint(f, 10, 32)
+		if err != nil {
+			return nil, false
+		}
+		v = append(v, n)
+	}
+	return v, true
+}
+
+// compareVersion compares component by component (13.10 is above 13.5); a missing component counts as 0.
+func compareVersion(a, b []uint64) int {
+	for i := 0; i < len(a) || i < len(b); i++ {
+		var x, y uint64
+		if i < len(a) {
+			x = a[i]
+		}
+		if i < len(b) {
+			y = b[i]
+		}
+		if x != y {
+			if x > y {
+				return 1
+			}
+			return -1
+		}
+	}
+	return 0
+}
+
+func versionString(v []uint64) string {
+	parts := make([]string, len(v))
+	for i, n := range v {
+		parts[i] = strconv.FormatUint(n, 10)
+	}
+	return strings.Join(parts, ".")
+}
+
+// distinctVersions counts the different versions among a slot's matches.
+func distinctVersions(ms []slotMatch) int {
+	var seen []string
+	for _, m := range ms {
+		if m.ver == nil {
+			continue
+		}
+		k := versionString(m.ver)
+		dup := false
+		for _, s := range seen {
+			dup = dup || s == k
+		}
+		if !dup {
+			seen = append(seen, k)
+		}
+	}
+	return len(seen)
+}
+
+// matchSlot lists the usable assets of rel that satisfy one slot. A pattern without <V> is an exact name; a
+// pattern with it is an anchored regular expression over the asset names (every literal character escaped), and
+// every matching asset is listed. missing names what was looked for when nothing matched.
+func matchSlot(s slot, tag string, assets []ghAsset) (ms []slotMatch, missing []string) {
+	for _, alt := range s {
+		p := expand(alt, tag)
+		if !strings.Contains(p, versionToken) {
+			found := false
+			for _, a := range assets {
+				if a.Name == p && assetUsable(a) {
+					ms = append(ms, slotMatch{asset: a})
+					found = true
+					break
+				}
+			}
+			if !found {
+				missing = append(missing, p)
+			}
+			continue
+		}
+		parts := strings.Split(p, versionToken)
+		for i := range parts {
+			parts[i] = regexp.QuoteMeta(parts[i])
+		}
+		re := regexp.MustCompile("^" + strings.Join(parts, "("+versionExpr+")") + "$")
 		found := false
-		var missing []string
-		for _, alt := range s {
-			name := expand(alt, rel.Tag)
-			ok := false
-			for _, a := range rel.Assets {
-				if a.Name != name {
-					continue
-				}
-				if (a.State == "" || a.State == "uploaded") && strings.HasPrefix(a.Digest, "sha256:") && len(a.Digest) > len("sha256:") {
-					c.Assets = append(c.Assets, Asset{Name: a.Name, URL: a.URL, Digest: a.Digest, Size: a.Size})
-					ok = true
-				}
-				break
+		for _, a := range assets {
+			m := re.FindStringSubmatch(a.Name)
+			if m == nil || !assetUsable(a) {
+				continue
 			}
-			if ok {
+			if v, ok := parseVersion(m[1]); ok {
+				ms = append(ms, slotMatch{asset: a, ver: v})
 				found = true
-				break
 			}
-			missing = append(missing, name)
 		}
 		if !found {
+			missing = append(missing, p)
+		}
+	}
+	return ms, missing
+}
+
+// buildCandidate returns the candidate when every required slot is satisfied by an uploaded asset with a
+// non-empty digest, else nil and what is missing (the caller steps back one tag). Slots whose patterns carry <V>
+// must all carry the same version (a 13.5 build with a 13.4 runtime bundle is not a complete set); when several
+// versions agree the highest wins and the notes say so. The candidate's assets are the matched ones, by their own
+// names.
+func buildCandidate(def *compDef, variant string, rel ghRelease, slots []slot) (*Candidate, string) {
+	c := &Candidate{Component: def.Name, ID: rel.Tag, Source: def.Repo, Variant: variant}
+	all := make([][]slotMatch, len(slots))
+	var keys [][]uint64
+	for i, s := range slots {
+		ms, missing := matchSlot(s, rel.Tag, rel.Assets)
+		if len(ms) == 0 {
 			return nil, strings.Join(missing, " | ")
+		}
+		all[i] = ms
+		for _, m := range ms {
+			if m.ver == nil {
+				continue
+			}
+			dup := false
+			for _, k := range keys {
+				if compareVersion(k, m.ver) == 0 {
+					dup = true
+				}
+			}
+			if !dup {
+				keys = append(keys, m.ver)
+			}
+		}
+	}
+	pick := func(ms []slotMatch, k []uint64) *slotMatch {
+		for i := range ms {
+			if k == nil || ms[i].ver == nil || compareVersion(ms[i].ver, k) == 0 {
+				return &ms[i]
+			}
+		}
+		return nil
+	}
+	sort.Slice(keys, func(i, j int) bool { return compareVersion(keys[i], keys[j]) > 0 })
+	var chosen []*slotMatch
+	try := keys
+	if len(try) == 0 {
+		try = [][]uint64{nil} // no versioned slot in this row
+	}
+	for _, k := range try {
+		chosen = chosen[:0]
+		for _, ms := range all {
+			m := pick(ms, k)
+			if m == nil {
+				break
+			}
+			chosen = append(chosen, m)
+		}
+		if len(chosen) == len(all) {
+			break
+		}
+	}
+	if len(chosen) != len(all) {
+		var seen []string
+		for i, s := range slots {
+			var vs []string
+			for _, m := range all[i] {
+				if m.ver != nil {
+					vs = append(vs, m.asset.Name)
+				}
+			}
+			if len(vs) > 0 {
+				seen = append(seen, fmt.Sprintf("%s matches only %s", expand(strings.Join(s, " | "), rel.Tag), strings.Join(vs, ", ")))
+			}
+		}
+		return nil, "no one version is carried by every asset of the set: " + strings.Join(seen, "; ")
+	}
+	for i, m := range chosen {
+		c.Assets = append(c.Assets, Asset{Name: m.asset.Name, URL: m.asset.URL, Digest: m.asset.Digest, Size: m.asset.Size})
+		if n := len(all[i]); n > 1 && m.ver != nil && distinctVersions(all[i]) > 1 {
+			var names []string
+			for _, o := range all[i] {
+				names = append(names, o.asset.Name)
+			}
+			c.Notes = append(c.Notes, fmt.Sprintf("%s: %d assets match %s (%s); took the highest version that every asset of the set carries, %s",
+				rel.Tag, n, expand(strings.Join(slots[i], " | "), rel.Tag), strings.Join(names, ", "), m.asset.Name))
 		}
 	}
 	for _, a := range rel.Assets {
@@ -496,8 +672,9 @@ func liveVariant(live string) string {
 
 var cudaVerRe = regexp.MustCompile(`CUDA (?:UMD )?Version:\s*(\d+)\.(\d+)`)
 
-// cudaFamily reads the driver's CUDA major the way the installer does: a 13.x driver takes the cuda-13.4 assets,
-// anything else cuda-12; a card older than compute 7.5 (Maxwell, Pascal, Volta: CUDA 13 dropped them) is always 12.
+// cudaFamily reads the driver's CUDA major the way the installer does: a 13.x driver takes the cuda-13 family of
+// assets (whatever minor a release carries), anything else cuda-12; a card older than compute 7.5 (Maxwell, Pascal,
+// Volta: CUDA 13 dropped them) is always 12.
 func cudaFamily(smi string) string {
 	if smi == "" {
 		return "cuda12"

@@ -333,6 +333,7 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 	if ups != "" && !refineOff {
 		addUpsampleData(payload, ups, upsampled, renderPrompt, upsampleNote)
 	}
+	grant.name(payload) // the host RAM the call declared; the sd.cpp lane holds no card pair, so no cards are named
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
@@ -428,7 +429,9 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 		return defer1("inpaint failed: " + gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(map[string]any{"image_path": outPath, "seed": seed})
+	payload := map[string]any{"image_path": outPath, "seed": seed}
+	grant.name(payload) // the host RAM the call declared
+	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }

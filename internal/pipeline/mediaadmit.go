@@ -200,6 +200,9 @@ func (p *Pipeline) calibratedRAM(n hostneed.Need, k footKey) hostneed.Need {
 			k.family, k.task, hp.ResidentGiB, fleetnode.HostPeakPercentile, runs, hp.Runs, hp.MaxResidentGiB, n.GiB, clamp)}
 }
 
+// declaresHostRAM says the call declares host RAM for its lease (declaredLoad sizes it): the answer then states the figure, a 0 included.
+func (n mediaNeed) declaresHostRAM() bool { return n.RAM != nil || n.RAMPair != nil }
+
 // declaresRAM sets how the call's host RAM need is resolved.
 func (n mediaNeed) declaresRAM(f func(vramGiB float64) hostneed.Need) mediaNeed {
 	n.RAM = f
@@ -429,15 +432,29 @@ type mediaGrant struct {
 	// Devices are the lease ids of the two cards a card-only call (needMulticard) runs on, sorted. Set only when the grant holds that pair, so the answer
 	// of every other call names no cards; the image, edit and batch answers carry them as "devices", the key the queued answer already uses.
 	Devices []string
+	// HostRAMDeclared says the call's need declares host RAM for its lease (mediaNeed.RAM or RAMPair is set), HostRAMGiB is the touched figure it
+	// declared (0 is a real value: a card-only call on Linux) and HostRAMCommitGiB the commit figure its estimate stated (0 = none stated, the
+	// lease then takes the touched figure as its commit). The answer carries them (name); a call that declares none says nothing of host RAM.
+	HostRAMDeclared  bool
+	HostRAMGiB       float64
+	HostRAMCommitGiB float64
 	// Release gives everything back; call it exactly when the render is done (it is idempotent).
 	Release func()
 }
 
-// name adds the cards a card-only call ran on to its answer as "devices", the key the queued answer names them under. A grant that holds no such pair
-// leaves the answer exactly as it was.
+// name adds what the call ran on to its answer: the cards a card-only call ran on as "devices", the key the queued answer names them under, and
+// the host RAM the call declared for its lease as "host_ram_declared_gib" (always, once the call declared, a 0 included) and
+// "host_ram_commit_declared_gib" (when its estimate stated a commit). A grant that holds no such pair and declared nothing leaves the answer
+// exactly as it was.
 func (g mediaGrant) name(payload map[string]any) {
 	if len(g.Devices) > 0 {
 		payload["devices"] = g.Devices
+	}
+	if g.HostRAMDeclared {
+		payload["host_ram_declared_gib"] = round3(g.HostRAMGiB)
+		if g.HostRAMCommitGiB > 0 {
+			payload["host_ram_commit_declared_gib"] = round3(g.HostRAMCommitGiB)
+		}
 	}
 }
 
@@ -792,7 +809,7 @@ func (p *Pipeline) acquireMediaLease(ctx context.Context, reason string, ttl, wa
 	if need.OffDisplay {
 		env = append(env, p.offDisplayEnv(ctx, readTable)...)
 	}
-	return mediaGrant{Env: env, Release: release}, nil
+	return mediaGrant{Env: env, Release: release, HostRAMDeclared: need.declaresHostRAM(), HostRAMGiB: wholeGiB, HostRAMCommitGiB: wholeCommit}, nil
 }
 
 // offDisplayEnv keeps a whole-node call's own CUDA work off the operator's screen (operator rule 2026-11-07: the display
@@ -1255,7 +1272,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 					lease, err := m.Acquire(gpulease.ClassMedia, try)
 					if err == nil {
 						stopKeep()
-						return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID, deferralFor(ids), start, refuseFor(ids))
+						return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID, deferralFor(ids), need.declaresHostRAM(), start, refuseFor(ids))
 					}
 					mediaSlots.release(ids)
 					var held *gpulease.ErrHeld
@@ -1325,7 +1342,7 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 			}
 			return mediaGrant{}, err
 		}
-		return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID, deferralFor(ids), start, refuseFor(ids))
+		return p.grantCards(ctx, m, lease, ids, plan, cards, tokenID, deferralFor(ids), need.declaresHostRAM(), start, refuseFor(ids))
 	}
 }
 
@@ -1440,7 +1457,7 @@ func intersects(a, b []string) bool {
 // (d.defers) clears the models its own unload takes now, under the heartbeat, and asks the host afterwards; when the host never
 // has the room the lease is released and refuse gives the answer (grantCards then returns no grant).
 func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *gpulease.Lease, ids []string, plan mediaPlan, cards []gpuprobe.Card, tokenID string,
-	d hostRAMDeferral, start time.Time, refuse func(error) error) (mediaGrant, error) {
+	d hostRAMDeferral, declares bool, start time.Time, refuse func(error) error) (mediaGrant, error) {
 	if tokenID != "" {
 		m.DropToken(tokenID) // the call is served: its place is spent
 	}
@@ -1476,7 +1493,7 @@ func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *g
 	}
 	// The card is ours from here: the call's PAIR card turns running.
 	core.MarkWorking(ctx)
-	g := mediaGrant{Env: p.mediaGrantEnv(lease, ids, unload), Release: release}
+	g := mediaGrant{Env: p.mediaGrantEnv(lease, ids, unload), Release: release, HostRAMDeclared: declares, HostRAMGiB: d.declared, HostRAMCommitGiB: d.commit}
 	if plan.pair {
 		g.Devices = append([]string(nil), ids...)
 	}

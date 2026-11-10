@@ -24,9 +24,16 @@ import (
 	"time"
 )
 
-// waitAllRegistered blocks until n live waiters are registered, or fails the test.
+// waitAllRegistered blocks until n live waiters are registered, or fails the test. It returns the moment they are, so the
+// bound only decides when a hung test gives up: it is never under registerFloor, because a loaded shared runner took more than
+// 3 s to register a second waiter and failed a test whose subject was the order of grants, not the speed of registration.
+const registerFloor = 30 * time.Second
+
 func waitAllRegistered(t *testing.T, m *Manager, n int, within time.Duration) {
 	t.Helper()
+	if within < registerFloor {
+		within = registerFloor
+	}
 	deadline := time.Now().Add(within)
 	for time.Now().Before(deadline) {
 		if len(m.Waiters()) >= n {

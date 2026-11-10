@@ -471,7 +471,10 @@ func TestRunGenerateImage_RefinerOffByteCompat(t *testing.T) {
 		}
 	}
 	// image_path, width, height, seed — and family, which every image result carries
-	// since ADR 0058 (the binding that answered: here the unnamed default).
+	// since ADR 0058 (the binding that answered: here the unnamed default). The host RAM the
+	// call declared is the grant's statement, on every media answer, and no refiner key.
+	delete(data, "host_ram_declared_gib")
+	delete(data, "host_ram_commit_declared_gib")
 	if len(data) != 5 || data["family"] != "" {
 		t.Errorf("result data keys = %v, want exactly the pre-refiner four plus family", data)
 	}

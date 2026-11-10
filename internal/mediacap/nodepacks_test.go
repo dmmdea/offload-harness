@@ -103,6 +103,45 @@ func TestNodePackRowsMatchTheRunnersFile(t *testing.T) {
 			t.Errorf("row %d: node %+v, runner file %+v", i, got[i], fromFile[i])
 		}
 	}
+
+	// The same holds for the refused node classes: render/refused-node-classes.json is the runner's table, refusednodes.go
+	// the node's copy, and a graph holding a listed class is refused with the class named.
+	rawRefused, err := os.ReadFile(filepath.Join("..", "..", "render", "refused-node-classes.json"))
+	if err != nil {
+		t.Fatalf("the runner's refused-classes table: %v", err)
+	}
+	var refusedFile struct {
+		Classes []struct {
+			Class string `json:"class"`
+			Pack  string `json:"pack"`
+			Why   string `json:"why"`
+		} `json:"classes"`
+	}
+	if err := json.Unmarshal(rawRefused, &refusedFile); err != nil {
+		t.Fatal(err)
+	}
+	if len(refusedFile.Classes) == 0 {
+		t.Fatal("render/refused-node-classes.json lists no class")
+	}
+	gotRefused := RefusedNodeClasses()
+	if len(gotRefused) != len(refusedFile.Classes) {
+		t.Fatalf("the node's refused classes have %d rows, render/refused-node-classes.json has %d", len(gotRefused), len(refusedFile.Classes))
+	}
+	for i, c := range refusedFile.Classes {
+		if want := (RefusedNodeClass{Class: c.Class, Pack: c.Pack, Why: c.Why}); gotRefused[i] != want {
+			t.Errorf("refused class row %d: node %+v, runner file %+v", i, gotRefused[i], want)
+		}
+		var refused *NodeClassRefusedError
+		if err := CheckGraphNodeClasses([]byte(`{"1":{"class_type":"` + c.Class + `","inputs":{}}}`)); !errors.As(err, &refused) || refused.Row.Class != c.Class || !strings.Contains(err.Error(), "NODE_CLASS_REFUSED") {
+			t.Errorf("a graph holding %s: err = %v, want a *NodeClassRefusedError naming it", c.Class, err)
+		}
+		if err := CheckGraphNodeClasses([]byte(`{"nodes":[{"id":1,"type":"` + c.Class + `"}]}`)); err == nil {
+			t.Errorf("a UI-format workflow holding %s was not refused", c.Class)
+		}
+		if err := CheckGraphNodeClasses([]byte(`{"1":{"class_type":"` + strings.ToLower(c.Class) + `","inputs":{}}}`)); err != nil {
+			t.Errorf("the match is case-sensitive, but %q was refused: %v", strings.ToLower(c.Class), err)
+		}
+	}
 }
 
 // Every pack the doctor tells an operator to install is a pack the manifest door would take.

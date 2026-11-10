@@ -41,7 +41,7 @@ func TestABusyGraphIsATicketOnAMachineWithNoStateDirKey(t *testing.T) {
 			t.Errorf("the ticket's %s is a file under the state root the lease resolves: %v", name, err)
 		}
 	}
-	if rows := Queue(e.cfg); len(rows) != 1 || rows[0].Ticket != a.Ticket || rows[0].Task != string(core.TaskRunGraph) {
+	if rows := Queue(e.cfg, nil); len(rows) != 1 || rows[0].Ticket != a.Ticket || rows[0].Task != string(core.TaskRunGraph) {
 		t.Errorf("offload_status lists the graph ticket of a machine with no state_dir: %+v", rows)
 	}
 	// An identical request from a file of its own attaches to it, as on a machine that sets state_dir.

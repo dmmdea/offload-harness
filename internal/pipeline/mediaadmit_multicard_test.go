@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -479,8 +480,9 @@ func TestTheEditDoorLeasesTwoNonDisplayCardsForAMulticardBinding(t *testing.T) {
 	if !strings.Contains(argv, "--placement multicard") || !strings.Contains(argv, "--unet qwen_image_edit_2511_fp8mixed.safetensors") {
 		t.Errorf("argv = %q", argv)
 	}
-	// the measured fp8mixed row on two 16 GiB cards declares no host RAM
-	if got := leases[0].HostRAMGiB; got != 0 {
+	// the measured fp8mixed row on two 16 GiB cards declares no host RAM (the Linux figure: a Windows host declares the ordinary estimate for a row with
+	// no Windows figures, so the pin holds on the host systems it was measured on)
+	if got := leases[0].HostRAMGiB; got != 0 && runtime.GOOS != "windows" {
 		t.Errorf("the lease declares %.1f GiB of host RAM, want 0 (the measured row fits the pair)", got)
 	}
 	f.letRunnersGo()
@@ -528,7 +530,7 @@ func TestAMulticardNeedDeclaresRAMFromThePairNotTheLargestCard(t *testing.T) {
 	if edit.Kind != needMulticard {
 		t.Fatalf("an edit binding with the placement takes the multicard need kind, got %v", edit.Kind)
 	}
-	if got := f.p.declaredRAM(ctx, edit, cards, pairIDs()); got != 0 {
+	if got := f.p.declaredRAM(ctx, edit, cards, pairIDs()); got != 0 && runtime.GOOS != "windows" { // 0 is the Linux figure
 		t.Errorf("the pair: %.1f GiB, want 0 (the measured fp8mixed row fits two 16 GiB cards)", got)
 	}
 	// the same need sized on ONE card (a plan that does not name its pair) is the ordinary figure: the recipe runs on exactly two
@@ -561,8 +563,8 @@ func TestAMulticardNeedDeclaresRAMFromThePairNotTheLargestCard(t *testing.T) {
 	if got := f.p.declaredRAM(ctx, predicted, cards, pairIDs()); got != want {
 		t.Errorf("the predicted 2511 GGUF row: %.1f GiB, want the ordinary estimate %.1f GiB", got, want)
 	}
-	// the measured 2512 GGUF image row declares 0 on the pair
-	if got := f.p.declaredRAM(ctx, imageNeed(f.cfg, ""), cards, pairIDs()); got != 0 {
+	// the measured 2512 GGUF image row declares 0 on the pair (on Linux: a Windows host declares the ordinary estimate for a row with no Windows figures)
+	if got := f.p.declaredRAM(ctx, imageNeed(f.cfg, ""), cards, pairIDs()); got != 0 && runtime.GOOS != "windows" {
 		t.Errorf("the measured 2512 GGUF row: %.1f GiB, want 0", got)
 	}
 
@@ -714,8 +716,9 @@ func multicardLaneCases() []laneCase {
 				}
 				t.Cleanup(func() { mediaSlots.release([]string{A}) })
 			}},
-		// the measured row declares no host RAM, so a short host is no reason to wait: the weights live on the two cards
-		{name: "multicard, a short host and a measured row that declares no host RAM", spec: mc, grants: true,
+		// the measured row declares no host RAM, so a short host is no reason to wait: the weights live on the two cards (on Linux: a Windows host declares the
+		// ordinary estimate for a row with no Windows figures, so there the short host is a reason to wait)
+		{name: "multicard, a short host and a measured row that declares no host RAM", spec: mc, grants: runtime.GOOS != "windows",
 			setup: func(t *testing.T, f *admitFixture) { f.useHost(t, func() gpuprobe.HostMemory { return shortHost(95) }) }},
 		{name: "multicard on a box with one non-display card (the real admission refuses; the probe may not judge)", spec: mc, grants: false,
 			setup: func(t *testing.T, f *admitFixture) { f.cards[2].Display = true }},
@@ -744,6 +747,9 @@ func TestAnImageBatchWithoutThePlacementNamesNoCards(t *testing.T) {
 // The measured card-only zero is said in the log once per key, like every other declaration: a 0 the footprint store can never correct (calibratedRAM leaves
 // 0 alone) is the one a reader of the log must be able to see.
 func TestAMeasuredCardOnlyDeclarationOfZeroIsSaidInTheLogOncePerKey(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the measured zero is the Linux figure; a Windows host declares the ordinary estimate for a row with no Windows figures")
+	}
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: multicardEditBinding})
 	planNoteOnce.Range(func(k, _ any) bool { planNoteOnce.Delete(k); return true })
 	buf := captureLogLines(t)

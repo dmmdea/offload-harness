@@ -1001,8 +1001,8 @@ func TestAHostWithoutCardScopedLeasesStillAnswersBusy(t *testing.T) {
 	if res.OK || res.Meta.ErrClass != "gpu_busy" {
 		t.Fatalf("want the legacy busy answer, got ok=%v class=%q %s", res.OK, res.Meta.ErrClass, res.Reason)
 	}
-	if res.Data != nil {
-		t.Errorf("a busy answer carries no data: %s", res.Data)
+	if strings.Contains(string(res.Data), "waiter_token") { // the busy answer names its holder in data; it must carry no place in line
+		t.Errorf("a busy answer carries no place in line: %s", res.Data)
 	}
 	if n := len(f.m.Tokens()); n != 0 {
 		t.Errorf("%d token(s): a host that cannot lease cards keeps no places", n)

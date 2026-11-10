@@ -592,7 +592,9 @@ func (p *Pipeline) runGenerateAudio(ctx context.Context, req core.Request, meta 
 		return p.deferGen(req, meta, start, len(req.Input), "audio generation failed: "+gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(map[string]any{"audio_path": outPath, "kind": kind, "seed": seed})
+	payload := map[string]any{"audio_path": outPath, "kind": kind, "seed": seed}
+	grant.name(payload) // the cards a card-only call ran on and the host RAM it declared; any other answer is unchanged
+	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(text))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }
