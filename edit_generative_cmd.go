@@ -164,6 +164,7 @@ func runEditImageGenerative(args []string) error {
 	megapixels := fs.Float64("megapixels", 0, "the working canvas of this edit in megapixels, 0.01 to 16 (default: follows the source within 0.9-2.0 MP, or the binding's gen_edit_megapixels); not on qwen-image-2.1")
 	placement := fs.String("placement", "", "single | multicard (default: the binding's gen_edit_placement)")
 	family := fs.String("family", "", "named edit family (offload_status media.edit_families); default = this machine's default edit binding")
+	waiterToken := fs.String("waiter-token", "", "single mode only: "+waiterTokenFlagUsage)
 	route := fs.String("route", "auto", "local | auto (here when this machine has the edit lane, else a fleet node holding the SAME edit recipe) | remote (a fleet node; the images travel in a hash-checked bundle and the output is fetched back verified)")
 	var remotes repeatedFlag
 	fs.Var(&remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
@@ -189,6 +190,9 @@ func runEditImageGenerative(args []string) error {
 			if set[name] {
 				return fmt.Errorf("edit-image-generative: --%s belongs to single mode; with --batch name it on each row", name)
 			}
+		}
+		if set["waiter-token"] {
+			return fmt.Errorf("edit-image-generative: --waiter-token resumes the one place a single edit left; a batch has no one place to resume")
 		}
 		if *jobsFlag < 0 {
 			return fmt.Errorf("edit-image-generative: --jobs %d: the number of rows in flight cannot be negative (0 is the default)", *jobsFlag)
@@ -245,8 +249,10 @@ func runEditImageGenerative(args []string) error {
 			wait.RosterFile = src.Path
 		}
 		req := mediaremote.EditRequest(rows[0].batchJob(), *family, "")
+		withWaiterToken(req.Params, *waiterToken)
+		req.Resumable = true // this verb hands the place in line back (--waiter-token on the next call): see core.Request.Resumable
 		res := mediaremote.RunWith(ictx, cfg, p, req, *route, remotes, wait)
-		emitResult(res, *asJSON, "", *compactFlag)
+		emitMediaResult(res, *asJSON, *compactFlag)
 		return nil
 	}
 

@@ -77,7 +77,8 @@ type audioFlags struct {
 	reserveVRAM float64
 	// sampling holds the voice sampling knobs the caller named, by params key (core.VoiceSamplingKnobs); a knob not
 	// given is absent, so the engine keeps its own default (0 is a real value for cfg_weight and min_p).
-	sampling map[string]float64
+	sampling    map[string]float64
+	waiterToken string
 }
 
 // buildAudioParams maps the parsed CLI flags to the pipeline params map for a
@@ -118,6 +119,7 @@ func buildAudioParams(f audioFlags) map[string]any {
 	for k, v := range f.sampling {
 		params[k] = v
 	}
+	withWaiterToken(params, f.waiterToken)
 	return params
 }
 
@@ -171,8 +173,10 @@ func runGenerateAudio(args []string) error {
 		Door:   "cli:generate-audio",
 		Input:  c.text,
 		Params: params,
+		// This verb hands the place in line back (the answer's token, --waiter-token on the next call): see core.Request.Resumable.
+		Resumable: true,
 	}, c.route, c.remotes)
-	emitResult(res, c.asJSON, "", c.compact)
+	emitMediaResult(res, c.asJSON, c.compact)
 	return nil
 }
 
@@ -206,6 +210,7 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 	remotes := new(repeatedFlag)
 	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	node := fs.String("node", "", nodeFlagUsage)
+	waiterToken := fs.String("waiter-token", "", waiterTokenFlagUsage)
 	// voice sampling knobs (kind voice, the Chatterbox worker; refused by name for music and for a speech-server or audio.cpp voice).
 	// Strings so that "not given" differs from 0, which is a real value for cfg-weight and min-p.
 	sampling := map[string]*string{}
@@ -217,7 +222,7 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 	out, text, flagArgs := splitTwoArgs(args, map[string]bool{
 		"config": true, "kind": true, "voice": true, "clone": true, "lang": true,
 		"seconds": true, "seed": true, "reserve-vram": true, "tts-voice": true,
-		"route": true, "remote": true, "node": true, // generate-audio
+		"route": true, "remote": true, "node": true, "waiter-token": true, // generate-audio
 		"cfg-weight": true, "exaggeration": true, "temperature": true, "repetition-penalty": true, "min-p": true, "top-p": true,
 	})
 	if err := fs.Parse(flagArgs); err != nil {
@@ -235,7 +240,7 @@ func parseGenerateAudio(args []string, errorHandling flag.ErrorHandling) (genera
 		fs: fs,
 		audio: audioFlags{
 			node: *node, kind: *kind, voice: *voice, ttsVoice: *ttsVoice, clone: *clone, lang: *lang, out: out,
-			seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM, sampling: knobs,
+			seconds: *seconds, seed: *seed, reserveVRAM: *reserveVRAM, sampling: knobs, waiterToken: *waiterToken,
 		},
 		text: text, asJSON: *asJSON, compact: *compactFlag,
 		route: *route, remotes: *remotes,
