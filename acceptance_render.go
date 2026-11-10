@@ -43,6 +43,7 @@ var renderSentenceWords = []string{"quick", "brown", "fox", "jumps", "lazy", "do
 type renderStep struct {
 	label   string
 	pre     []string // ffmpeg arguments run before the call (the animate driver clip)
+	prep    func() error // writes the files the call reads (the run-graph graph); not run by --list
 	verb    string
 	args    []string // everything after the verb except --config and --json
 	own     bool     // the verb prints its own JSON and has no --json flag (delegate)
@@ -440,20 +441,58 @@ var renderGroups = []renderGroup{
 				})}}
 		}},
 	{"gen-edit",
-		func(e *renderEnv) string {
-			if why := e.routeSkip("edit_image_generative"); why != "" {
-				return why
-			}
-			return "bound, but generative edit has no CLI verb (it is an MCP tool only), so there is no real door to call from here"
-		}, nil},
+		func(e *renderEnv) string { return e.routeSkip("edit_image_generative") },
+		func(e *renderEnv) []renderStep {
+			out := e.p("gen-edit.png")
+			return []renderStep{{label: "edit-image-generative", verb: "edit-image-generative", out: out, timeout: renderTimeout(e.cfg.GenEditTimeoutSec),
+				args: []string{"--image", e.as.Sign, "--prompt", "make the circle green", "--seed", "7", "--out", out, "--route", "local"},
+				check: fileCheck(out, func(p string) (string, error) {
+					w, h, err := acceptance.PNGSize(p)
+					if err != nil {
+						return "", err
+					}
+					return fmt.Sprintf("PNG decodes, %dx%d", w, h), nil
+				})}}
+		}},
 	{"run-graph",
-		func(e *renderEnv) string {
-			if why := e.routeSkip("run_graph"); why != "" {
-				return why
-			}
-			return "bound, but run-graph runs a caller's own ComfyUI API graph and there is no sensible embedded default"
-		}, nil},
+		func(e *renderEnv) string { return e.routeSkip("run_graph") },
+		func(e *renderEnv) []renderStep {
+			graph, outDir := e.p("run-graph.json"), e.p("run-graph")
+			return []renderStep{{label: "run-graph", verb: "run-graph", timeout: renderDefaultTimeout,
+				// The graph uses ComfyUI core nodes only: a 64x64 blue image saved by SaveImage. It is a file, not --graph-json,
+				// because inline JSON through a subprocess command line is fragile on Windows.
+				prep: func() error {
+					if err := os.MkdirAll(outDir, 0o755); err != nil {
+						return err
+					}
+					return os.WriteFile(graph, []byte(runGraphProbe), 0o644)
+				},
+				args: []string{"--graph", graph, "--out-dir", outDir, "--route", "local"},
+				check: func(res core.Result, _ string) (string, error) {
+					var env struct {
+						ImagePath string `json:"image_path"`
+					}
+					if err := json.Unmarshal(res.Data, &env); err != nil {
+						return "", fmt.Errorf("the answer is not an object: %w", err)
+					}
+					if env.ImagePath == "" {
+						return "", fmt.Errorf("the answer names no image_path: %s", acceptance.Tail(string(res.Data), 160))
+					}
+					w, h, err := acceptance.PNGSize(env.ImagePath)
+					if err != nil {
+						return "", err
+					}
+					if w != 64 || h != 64 {
+						return "", fmt.Errorf("the graph makes a 64x64 image but %s is %dx%d", env.ImagePath, w, h)
+					}
+					return fmt.Sprintf("image_path is a PNG that decodes, %dx%d", w, h), nil
+				}}}
+		}},
 }
+
+// runGraphProbe is the graph the run-graph group sends: two ComfyUI core nodes, no model and no custom node.
+const runGraphProbe = `{"1":{"class_type":"EmptyImage","inputs":{"width":64,"height":64,"batch_size":1,"color":255}},` +
+	`"2":{"class_type":"SaveImage","inputs":{"images":["1",0],"filename_prefix":"acceptance_rg"}}}`
 
 // ---- running ---------------------------------------------------------------------------------
 
@@ -580,6 +619,11 @@ func (e *renderEnv) runStep(ctx context.Context, s renderStep) (string, error) {
 		}
 		if o := acceptance.Run(ctx, 5*time.Minute, e.ffmpeg, s.pre...); o.StartErr != nil || o.Exit != 0 {
 			return "", fmt.Errorf("%s: the driver clip could not be made: %s", s.label, acceptance.Tail(o.Stderr+fmt.Sprint(o.StartErr), 200))
+		}
+	}
+	if s.prep != nil {
+		if err := s.prep(); err != nil {
+			return "", fmt.Errorf("%s: cannot write the input files: %w", s.label, err)
 		}
 	}
 	callStart := time.Now()

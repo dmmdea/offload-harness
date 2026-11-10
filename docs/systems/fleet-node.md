@@ -1304,11 +1304,13 @@ for it.
 | `voice`, `music` | a fixed sentence; 5 s of music | `ffprobe` finds an audio stream with a duration; the voice is transcribed back when `stt` is bound |
 | `edit`, `media` | resize a PNG; convert it with ffmpeg | the output decodes; the output exists |
 | `inpaint`, `upscale` | the embedded sign and a generated mask; scale 2 | the output decodes (upscale: larger than the source) |
+| `gen-edit`, `run-graph` | a generative edit of the sign; a 64x64 core-node graph | the output decodes (run-graph: `image_path` is a 64x64 PNG) |
 
 A result with `deferred: true`, `ok: false`, a non-zero exit or a failed content check is a
 `FAIL` with the reason. A route the config does not bind is a `SKIP` with the reason.
-Generative edit has no CLI verb and `run-graph` needs a graph file with no sensible default,
-so both `SKIP` with that reason. Each call gets the route's own config timeout, else 30 minutes.
+`gen-edit` calls `edit-image-generative` on the embedded sign (`make the circle green`, seed 7)
+and `run-graph` calls `run-graph` with a two-node ComfyUI core graph (an empty 64x64 image, saved);
+each is a `SKIP` only when its route is not bound. Each call gets the route's own config timeout, else 30 minutes.
 
 Flags: `--only a,b` runs the named groups (implies `--render`). `--list` prints each group,
 whether this config binds it and the exact command, and runs nothing (it implies `--render`
