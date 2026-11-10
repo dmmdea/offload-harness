@@ -39,6 +39,8 @@ func loadCfg(fs *flag.FlagSet) config.Config {
 func loadCfgWithSource(fs *flag.FlagSet) (config.Config, config.Source) {
 	cfg, src := config.LoadWithSource(fs.Lookup("config").Value.String())
 	config.WarnOnDefaults(src, os.Stderr)
+	// A ./config.json that hides the home config says so, once per process, on stderr.
+	config.WarnOnShadowedHomeOnce(src, os.Stderr)
 	// C-95: every verb that builds a delegator loads its config here (the MCP
 	// server behind agent_delegate/agent_run, delegate, acceptance, report), so
 	// the note that a config's own layers shadow its agent_model lives on this
