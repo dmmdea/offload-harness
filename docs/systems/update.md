@@ -110,12 +110,16 @@ the real path of the generation's executable, which is what the OS reports for a
    installed: write `checked_at`, exit 0. That is the five-minute no-op. A candidate is **complete** only when every
    required asset for this node is present, uploaded, with a non-empty `sha256:` digest; otherwise the verb steps back
    one tag. The required-asset sets are a table in `internal/update/resolve.go` with patterns (`<TAG>`, `<N>`,
-   `<SHA7>`) and no version number. The **build family** (`cuda13`, `cuda12`, `vulkan`, `cpu`) is chosen per
+   `<SHA7>`, and `<V>`, one dotted version of digits and dots) and no version number: a CUDA row names the CUDA
+   major and `<V>` matches the minor the release carries (`cuda-13.<V>`), as an anchored regular expression over the
+   asset names. When a release carries two minors of one major the highest wins (numerically, 13.10 above 13.5) and
+   the candidate's notes say so; a build zip and its cudart bundle must carry the same one, else the release is not
+   complete. The **build family** (`cuda13`, `cuda12`, `vulkan`, `cpu`) is chosen per
    component: `update.variant.<component>` in `config.json`, else the family of the build at the live path (a
    `ggml-cuda` or `ggml-vulkan` library beside its program), else the node's backend. A node can run one component
    in another family than the rest: the maxwell-3 tier serves llama.cpp on CUDA and sd.cpp on Vulkan, the only family
    measured to render on that card, and resolving its sd.cpp from the node's CUDA backend would fetch a build with no
-   code for the card. The CUDA family is the driver's CUDA major (13.x takes the cuda-13.4 assets, anything else
+   code for the card. The CUDA family is the driver's CUDA major (13.x takes the cuda-13 assets, whatever minor, anything else
    cuda-12; a card below compute 7.5 is always 12), else the backend `installed.json` records.
 3. **Floor** (`setup/floors.json`, embedded in the binary): a candidate under a floor is never selected, and the
    verb never downgrades. A floor only ever rises; a ceiling or an exact pin is not representable (ADR 0099).
