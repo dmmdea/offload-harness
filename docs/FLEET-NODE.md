@@ -594,7 +594,8 @@ is missing what): a bound script or engine over a missing weight drops the task,
 run-graph payloads carry `graph` and `manifest` as **raw nested JSON** (no base64) and are
 strict-validated at ack time — a malformed fleet job dies at the 400 with a clear reason,
 never mid-render. Typed run-graph defers (`VENV_INCOHERENT`, `SATISFIER_SPAWN_FAILED`, `NODE_CLASS_MISSING`, …)
-surface in the job's `error` field as `code: detail`.
+surface in the job's `error` field as `code: detail`. A graph that holds a node class that executes caller-supplied code
+(`render/refused-node-classes.json`) is refused at the same ack with a `400` naming the class (`NODE_CLASS_REFUSED`), before a job or a lease exists.
 
 **A fleet media job's lease window is its route's own timeout, read from the node's config.** A media task takes the
 node's machine-wide media lease for the timeout key of the route it runs (`imagegen_timeout_sec`, `videogen_timeout_sec`,

@@ -33,6 +33,7 @@ import { readFileSync, unlinkSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { writeFileAtomic, commitPartial, discardPartial } from "./atomic-out.mjs";
 import { withGpuSlot } from "./gpu-lock.mjs";
+import { assertGraphClasses } from "./refused-node-classes.mjs";
 import { familySignature } from "./comfy-family.mjs";
 import { COMFY_DIR, comfyApi } from "./comfy-lifecycle.mjs";
 import { planImageMulticard, lifecycleOptions, verifyImagePlacement, beginPlacedWatch } from "./multicard-image.mjs";
@@ -93,7 +94,11 @@ export function computeRenderSeconds(seconds) {
 export function buildGraphFromArgs(pos, flags, { trim = false, multicard = false } = {}) {
   const seed = Number(flags.seed || Math.floor(Math.random() * 1e15));
   if (flags.graph) {
-    return { graph: JSON.parse(readFileSync(flags.graph, "utf8")), seed };
+    const graph = JSON.parse(readFileSync(flags.graph, "utf8"));
+    // The caller's own workflow is read against the node classes that execute caller-supplied code (render/refused-node-classes.json)
+    // before anything is started; a refusal throws NODE_CLASS_REFUSED naming the class.
+    assertGraphClasses(graph);
+    return { graph, seed };
   }
   const prompt = pos[1] || flags.prompt;
   if (!prompt) throw new Error('comfy-music: a "<style tags>" prompt is required (e.g. "calm lo-fi piano, soft rain")');

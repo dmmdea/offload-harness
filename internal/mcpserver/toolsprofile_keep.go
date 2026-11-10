@@ -382,7 +382,7 @@ var compactKeep = []compactKeepEntry{
 	},
 	{
 		Tools:    []string{"offload_run_graph"},
-		Sentence: "On ANY failure it returns deferred:true with a typed reason (SATISFIER_UNAVAILABLE, VENV_INCOHERENT, SATISFIER_SPAWN_FAILED [a provisioning subprocess failed to START, retried once — transient/retryable, NOT a venv problem], NODE_CLASS_MISSING, PREFLIGHT_MISSING_INPUTS, MODEL_SHA_MISMATCH, GPU_BUSY, TIMEOUT, ...) — it NEVER falls back to cloud; then run the graph another way.",
+		Sentence: "On ANY failure it returns deferred:true with a typed reason (SATISFIER_UNAVAILABLE, VENV_INCOHERENT, SATISFIER_SPAWN_FAILED [a provisioning subprocess failed to START, retried once — transient/retryable, NOT a venv problem], NODE_CLASS_MISSING, NODE_CLASS_REFUSED [a node class that executes caller-supplied code is in the graph: a contract refusal, remove the node, retrying never helps], PREFLIGHT_MISSING_INPUTS, MODEL_SHA_MISMATCH, GPU_BUSY, TIMEOUT, ...) — it NEVER falls back to cloud; then run the graph another way.",
 		Why:      "on any failure run_graph returns deferred:true and never falls back to cloud",
 	},
 	{
