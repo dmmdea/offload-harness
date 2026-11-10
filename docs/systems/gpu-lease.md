@@ -2292,7 +2292,7 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   the footprint store as `host_peak_gb` and `host_resident_peak_gb` with the number of runs (`host_runs`); both ride
   `/fleet/health` `model_footprints[]` additively. Two quantities on purpose: they differ exactly where the VRAM charge
   below bites. The media admission reads them back (`Pipeline.calibratedRAM`) and **raises** a declaration to the measured
-  resident figure once at least three runs exist (`hostPeakMinRuns`, chosen), for the image and video routes. It only
+  resident figure once at least three runs exist (`hostPeakMinRuns`, chosen), for the image, generative edit (task `image-edit`), music and video routes; a card-only render of the image, edit or music route is recorded under its own `multicard` quant, apart from the single-card key. It only
   raises: the sampled tree can miss memory (a ComfyUI instance kept from an earlier lease and reused is not under the
   runner that is sampled), and a render whose weights fit its card still declares 0. **The figure is not the all-time maximum**
   (F56: one inflated run raised a family's declaration for good, until footprints.json was edited by hand): the store keeps the

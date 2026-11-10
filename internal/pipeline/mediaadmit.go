@@ -107,7 +107,7 @@ type mediaNeed struct {
 	RAM func(vramGiB float64) hostneed.Need
 	// Foot is the footprint-store key this call's renders are recorded under (the key the same route's sampling
 	// hook uses), so a declaration can be raised to what those renders were measured to hold (calibratedRAM). The
-	// zero value is not calibrated; only the image and video routes set it.
+	// zero value is not calibrated; the image, edit, music and video routes set it.
 	Foot footKey
 	// RAMPair is RAM for a card-only call (needMulticard): it also reads the VRAM of EACH card of the lease, because the recipe's verdict is on the two
 	// cards together. Set instead of RAM, never beside it.
@@ -345,18 +345,24 @@ func imageNeed(cfg config.Config, token string) mediaNeed {
 
 // editNeed is the need of the generative-edit route for the resolved binding.
 func editNeed(cfg config.Config, token string) mediaNeed {
+	// The key runEditImageGenerative's sampling hook records under, so calibratedRAM reads the renders of this same binding.
+	fam, quant := editFootprintKey(cfg)
+	foot := footKey{fam, quant, editFootprintTask}
 	if cfg.EditMulticard() {
-		return multicardNeed(hostneed.RouteEdit, cfg, token)
+		return multicardNeed(hostneed.RouteEdit, cfg, token).withFootprint(foot)
 	}
-	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteEdit, cfg))
+	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteEdit, cfg)).withFootprint(foot)
 }
 
 // musicNeed is the need of the music route (ACE-Step on ComfyUI) for the resolved binding: two cards under the card-only placement, else one.
 func musicNeed(cfg config.Config, token string) mediaNeed {
+	// The key the music door's sampling hook records under (runAudioGenerate), so calibratedRAM reads the renders of this same placement.
+	fam, quant := musicFootprintKey(cfg)
+	foot := footKey{fam, quant, "audio-gen"}
 	if cfg.MusicMulticard() {
-		return multicardNeed(hostneed.RouteMusic, cfg, token)
+		return multicardNeed(hostneed.RouteMusic, cfg, token).withFootprint(foot)
 	}
-	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteMusic, cfg))
+	return singleCardNeed(cfg, token).declaresRAM(routeRAM(hostneed.RouteMusic, cfg)).withFootprint(foot)
 }
 
 // voiceNeed is the need of the Chatterbox voice worker (no ComfyUI instance). With card-scoped leases on and a green reader audit (onCard, p.cardScopedOn) it asks for ONE card, the allocator's pick with no pin (comfy_cuda_device pins ComfyUI, not
