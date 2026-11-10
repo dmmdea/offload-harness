@@ -705,6 +705,20 @@ allowlist / 24 MiB per ref). The task_type key (`"scene-swap"` above) is dispatc
 like any other fleet task — it is advertised in `/fleet/health`'s task list once the entry is
 valid, and refused with the usual `unsupported task_type` 400 otherwise.
 
+**What the CLI gets from the node.** The node runs `<node_path> <script> --job <job.json> --tier
+<tier> --out <out root>` in `workdir`, with the node's own environment plus two names the CLI
+needs in order to call back into the node:
+
+- `LOCAL_OFFLOAD_BIN`: this node's harness binary, so the CLI's nested `run-graph` and edit calls
+  reach this node's harness. The binary is on `PATH` on no service-installed node.
+- `COMFY_INPUT`: `<comfy_dir>/input`, the input folder of the ComfyUI install this node's
+  `run-graph` drives, where the CLI stages its images. Not set when `comfy_dir` is unset.
+
+A name the node's environment already sets is inherited unchanged, so an operator's own value
+wins. The config path is not passed: the nested calls find the node's config through
+`LOCAL_OFFLOAD_CONFIG`, which the node's service unit must therefore export (a node started with
+`--config` alone does not hand its config to the CLI).
+
 ### Payload
 
 ```json
