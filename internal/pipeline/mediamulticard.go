@@ -265,6 +265,9 @@ func multicardRAM(route hostneed.Route, cfg config.Config) func(vramGiB float64,
 func multicardLaunch(cfg config.Config) imagegen.ComfyLaunch {
 	l := comfyLaunch(cfg, false)
 	l.DynamicVRAM = ""
+	// The pair has an instance of its own, keyed and ported by the runner from the two cards: the
+	// configured instance (comfy_instance) does not apply, and the post-run /free still goes to it.
+	l.Instance, l.API = "", ""
 	return l
 }
 

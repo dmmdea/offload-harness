@@ -728,6 +728,24 @@ the difference — stop that instance (or start it with the binding's flags) and
 passes `--wan-resident-gb 0`; see "Sage attention" in `docs/systems/media-generation.md`), and a kept ComfyUI that runs sage is not reused by a call
 sized for the default attention.
 
+### Keep the harness off the owner's own ComfyUI (`comfy_instance`)
+
+If the box's owner runs their own ComfyUI on the default port 8188, point `comfy_dir` at the
+harness's ComfyUI and give it a name. Without a name every media call reaches whatever answers on
+8188 and frees its models afterwards.
+
+```json
+"comfy_dir": "D:/ComfyUI",
+"comfy_instance": "harness",
+"comfy_instance_port": 8189
+```
+
+The name is 1 to 48 letters, digits, `-` or `_`. The port is optional (0 = 8189, 1024 to 65535,
+never 8188) and needs the name. It cannot be combined with `comfy_cuda_device`. With the name set,
+every ComfyUI-backed route launches and talks to its own instance on that port, and
+`local-offload doctor` shows it on the `comfyui` row. Details:
+[systems/media-generation.md](systems/media-generation.md).
+
 ### Run character animation on two 16 GB cards (card-only placement)
 
 The WAN-Animate-2 DiT (`wan_animate_2_distill_int8_convrot.safetensors`) is 15.5 GiB, which a 16 GB card cannot hold beside the sampler, and a node that runs ComfyUI with

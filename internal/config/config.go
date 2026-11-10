@@ -20,6 +20,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/callscope"
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
@@ -709,6 +710,18 @@ type Config struct {
 	// ComfyDir is the local ComfyUI install dir (passed to the script as COMFY_DIR).
 	// Default: "C:/ComfyUI" on Windows, "" (unbound) elsewhere — see DefaultComfyDir.
 	ComfyDir string `json:"comfy_dir,omitempty"`
+	// ComfyInstance names the ComfyUI instance the harness owns, for a box whose owner runs
+	// their own ComfyUI on the default port 8188. Set, every ComfyUI-backed runner gets
+	// COMFY_INSTANCE=<name> and COMFY_API=http://127.0.0.1:<comfy_instance_port>, so the harness
+	// launches, reuses and frees its own instance there and never touches 8188. The config wins
+	// over a COMFY_INSTANCE / COMFY_API in the process environment. A call that holds a card
+	// grant keeps its per-card instance instead. "" = the default instance, as before.
+	// 1 to 48 letters, digits, '-' or '_' (the runner's own rule).
+	ComfyInstance string `json:"comfy_instance,omitempty"`
+	// ComfyInstancePort is the port of that instance. 0 = 8189 (the runner's COMFY_PORT_BASE
+	// default). 1024 to 65535, never 8188. Needs comfy_instance: the runner keys an instance
+	// by its name, so a port alone names nothing.
+	ComfyInstancePort int `json:"comfy_instance_port,omitempty"`
 	// --- ComfyUI launch profile (the harness launches ComfyUI on demand) ---
 	// ComfyCudaDevice pins the SINGLE-CARD ComfyUI routes to one card: the render
 	// runner launches ComfyUI with `--cuda-device <n>`, which hides every other card.
@@ -2625,6 +2638,10 @@ func loadArmed(path string) (Config, error) {
 	// The caller-scope policy filters every node list before any exit below returns the value (scope.go): a
 	// one-shot verb proceeds on a config that failed to load, and it must not proceed on an unfiltered one.
 	c = applyCallerScope(c)
+	// The harness's own ComfyUI endpoint is installed for gpugen's post-run /free, on every exit: a
+	// config with comfy_instance never has its runs free the owner's ComfyUI on 8188. Unset or
+	// invalid installs "", which keeps the order gpugen always had.
+	gpugen.SetOwnInstanceAPI(c.ComfyInstanceEndpoint())
 	// The policy for an overdue lease is installed before anything below can return early, on every exit
 	// and the error ones included: a one-shot verb proceeds on a config that failed to load, and a value
 	// that never got installed would leave it on the default for a key the operator did set. An
@@ -2761,6 +2778,9 @@ func load(path string) (Config, error) {
 	// key or a family with no license would otherwise surface only as a render that
 	// silently used the wrong binding, or a result with no license tag.
 	if err := validateFamilies(c); err != nil {
+		return c, err
+	}
+	if err := c.validateComfyInstance(); err != nil {
 		return c, err
 	}
 	// The iGPU media engines (CT-49): a cpu or unset backend is refused here, so
@@ -3673,6 +3693,76 @@ func DefaultComfyDir() string {
 		return "C:/ComfyUI"
 	}
 	return ""
+}
+
+// DefaultComfyInstancePort is the port of the harness's own ComfyUI instance when comfy_instance
+// is set and comfy_instance_port is not: the runner's COMFY_PORT_BASE default.
+const DefaultComfyInstancePort = 8189
+
+// defaultComfyPort is ComfyUI's own port. It belongs to the unkeyed instance, which on a shared
+// box is the owner's, so a named instance can never sit on it (the runner refuses that too).
+const defaultComfyPort = 8188
+
+// ComfyInstanceName is comfy_instance, trimmed. "" = the harness uses the default instance.
+func (c Config) ComfyInstanceName() string { return strings.TrimSpace(c.ComfyInstance) }
+
+// ComfyInstanceEndpoint is the endpoint of the harness's own ComfyUI instance, or "" when
+// comfy_instance is unset or the instance keys do not pass validateComfyInstance.
+func (c Config) ComfyInstanceEndpoint() string {
+	if c.ComfyInstanceName() == "" || c.validateComfyInstance() != nil {
+		return ""
+	}
+	port := c.ComfyInstancePort
+	if port == 0 {
+		port = DefaultComfyInstancePort
+	}
+	return "http://127.0.0.1:" + strconv.Itoa(port)
+}
+
+// ComfyInstanceEnv is the env that points a ComfyUI-backed child at the harness's own instance:
+// COMFY_INSTANCE and COMFY_API, appended last so they win over the inherited ones. nil when
+// comfy_instance is unset, so the child env stays what it always was. For the children that do not
+// take a launch profile (comfyLaunch); the runners that do get the same two entries through it.
+func (c Config) ComfyInstanceEnv() []string {
+	api := c.ComfyInstanceEndpoint()
+	if api == "" {
+		return nil
+	}
+	return []string{"COMFY_INSTANCE=" + c.ComfyInstanceName(), "COMFY_API=" + api}
+}
+
+// validateComfyInstance refuses a bad comfy_instance or comfy_instance_port by name at load,
+// the same rules the runner applies to COMFY_INSTANCE and to a keyed instance's port.
+func (c Config) validateComfyInstance() error {
+	name := c.ComfyInstanceName()
+	if name == "" {
+		if c.ComfyInstance != "" {
+			return fmt.Errorf("comfy_instance: %q is blank; unset it, or give the instance a name of 1 to 48 letters, digits, '-' or '_'", c.ComfyInstance)
+		}
+		if c.ComfyInstancePort != 0 {
+			return fmt.Errorf("comfy_instance_port: %d needs comfy_instance; the runner keys an instance by its name, so a port alone names nothing", c.ComfyInstancePort)
+		}
+		return nil
+	}
+	if len(name) > 48 {
+		return fmt.Errorf("comfy_instance: %q is %d characters; the most is 48", name, len(name))
+	}
+	for _, r := range name {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '-' || r == '_') {
+			return fmt.Errorf("comfy_instance: %q has a character other than letters, digits, '-' and '_' (1 to 48 of them)", name)
+		}
+	}
+	if strings.TrimSpace(c.ComfyCudaDevice) != "" {
+		return fmt.Errorf("comfy_instance cannot be combined with comfy_cuda_device (%q): a named instance is never pinned by a device index (an index counts cards in a different order than a uuid or a lease does), and the runner refuses the pair on every render; unset one of them", c.ComfyCudaDevice)
+	}
+	switch p := c.ComfyInstancePort; {
+	case p == 0:
+	case p == defaultComfyPort:
+		return fmt.Errorf("comfy_instance_port: %d is ComfyUI's default port, which belongs to the unkeyed instance (the owner's own ComfyUI); pick another, or leave it 0 for %d", p, DefaultComfyInstancePort)
+	case p < 1024 || p > 65535:
+		return fmt.Errorf("comfy_instance_port: %d is outside 1024 to 65535 (0 = %d)", p, DefaultComfyInstancePort)
+	}
+	return nil
 }
 
 // DefaultPlacementWait is the capacity wait of a call that has no whole-call deadline when

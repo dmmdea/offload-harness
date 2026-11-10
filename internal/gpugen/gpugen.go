@@ -523,11 +523,33 @@ func comfyAPIOf(spec Spec) string {
 	return comfyAPI(api)
 }
 
-// comfyAPI resolves the ComfyUI endpoint: explicit override, else COMFY_API, else the
-// 127.0.0.1:8188 default (matching the render/*.mjs scripts).
+var (
+	ownInstanceMu  sync.RWMutex
+	ownInstanceAPI string
+)
+
+// SetOwnInstanceAPI installs the endpoint of the harness's own ComfyUI instance (config
+// comfy_instance). While it is set, a post-run /free that no Spec or runner env names goes there
+// and never to COMFY_API or the 8188 default, which on a shared box is the owner's ComfyUI. ""
+// = unset, the order below as it always was. config.Load installs it.
+func SetOwnInstanceAPI(api string) {
+	ownInstanceMu.Lock()
+	ownInstanceAPI = api
+	ownInstanceMu.Unlock()
+}
+
+// comfyAPI resolves the ComfyUI endpoint: explicit override, else the harness's own instance
+// (SetOwnInstanceAPI), else COMFY_API, else the 127.0.0.1:8188 default (matching the
+// render/*.mjs scripts).
 func comfyAPI(override string) string {
 	if override != "" {
 		return override
+	}
+	ownInstanceMu.RLock()
+	own := ownInstanceAPI
+	ownInstanceMu.RUnlock()
+	if own != "" {
+		return own
 	}
 	if v := os.Getenv("COMFY_API"); v != "" {
 		return v
