@@ -36,7 +36,7 @@ for ($i = 1; $i -le 60; $i++) {
 }
 if (-not $ip) { W 'launcher: FATAL - no bindable Tailscale address after 10 min'; exit 1 }
 
-$p = Start-Process -FilePath '__OFFLOAD_HOME__/bin/local-offload.exe' `
+$p = Start-Process -FilePath '__OFFLOAD_HOME__/harness/local-offload.exe' `
   -ArgumentList 'fleet-serve', '-listen', ($ip + ':18811'), '-listen-trusted-network', '-node-id', '__NODE_ID__' `
   -WindowStyle Hidden -PassThru `
   -RedirectStandardOutput '__OFFLOAD_HOME__/fleet/fleet-node.out.log' `

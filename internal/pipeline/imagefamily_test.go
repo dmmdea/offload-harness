@@ -400,11 +400,13 @@ func TestLaunchProfileReachesEveryComfyRouteAndThePinOnlyTheSingleCardOnes(t *te
 		"generate_image (sdcpp)":  false, "run_graph": false, "generate_audio (voice)": false,
 		// The iGPU engines (CT-49) have no ComfyUI at all: no device pin, no launch keys.
 		"generate_video (sdcpp)": false, "animate_character (sdcpp)": false,
+		"upscale_image (sdcpp)": false, "inpaint_image (sdcpp)": false,
 		"generate_audio (voice, audiocpp)": false, "generate_audio (music, audiocpp)": false,
 	}
 	comfyRoute := map[string]bool{
 		"generate_image (sdcpp)": false, "generate_audio (voice)": false,
 		"generate_video (sdcpp)": false, "animate_character (sdcpp)": false,
+		"upscale_image (sdcpp)": false, "inpaint_image (sdcpp)": false,
 		"generate_audio (voice, audiocpp)": false, "generate_audio (music, audiocpp)": false,
 	}
 	for _, tc := range gpuLeaseCases() {

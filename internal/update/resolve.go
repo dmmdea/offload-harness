@@ -81,10 +81,12 @@ var assetTable = map[string]map[string][]slot{
 	Whisper: {
 		"windows/amd64/cuda13": {{"whisper-bin-win-cuda-12.<V>-x64.zip", "whisper-cublas-12.<V>-bin-x64.zip"}},
 		"windows/amd64/cuda12": {{"whisper-bin-win-cuda-12.<V>-x64.zip", "whisper-cublas-12.<V>-bin-x64.zip"}},
-		"windows/amd64/vulkan": {{"whisper-bin-x64.zip"}},
-		"windows/amd64/cpu":    {{"whisper-bin-x64.zip"}},
-		"linux/amd64/cpu":      {{"whisper-bin-ubuntu-x64.tar.gz"}},
-		"linux/arm64/cpu":      {{"whisper-bin-ubuntu-arm64.tar.gz"}},
+		// No windows/amd64/vulkan row: whisper.cpp publishes no Windows Vulkan binary (v1.9.5 and b5454, checked 2026-11-06),
+		// and whisper-bin-x64.zip is a CPU build, so a row here swapped a node's GPU seat for CPU inference on the next update.
+		// A Vulkan node builds whisper-server from source; requiredSlots reports that.
+		"windows/amd64/cpu": {{"whisper-bin-x64.zip"}},
+		"linux/amd64/cpu":   {{"whisper-bin-ubuntu-x64.tar.gz"}},
+		"linux/arm64/cpu":   {{"whisper-bin-ubuntu-arm64.tar.gz"}},
 	},
 	SDCpp: {
 		"windows/amd64/cuda13": {{"sd-master-<SHA7>-bin-win-cuda12-x64.zip"}, {"cudart-sd-bin-win-cu12-x64.zip"}},

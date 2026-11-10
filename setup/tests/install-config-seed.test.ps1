@@ -966,7 +966,7 @@ Assert ($null -eq $hadHome)                                                'the 
 # the rule, fail loud when there is none, and leave the record).
 Write-Host '== Step 8 wires the data home =='
 $installText = Get-Content -Raw (Join-Path $setupDir 'install.ps1')
-Assert ($installText -match [regex]::Escape('$dh = Get-DataHome -VolumesJson $volJson -Override $env:OFFLOAD_DATA_HOME')) 'Step 8 resolves the data home through Get-DataHome'
+Assert ($installText -match [regex]::Escape('$dh = Get-DataHome -VolumesJson $volJson -Override $dataHomeGiven')) 'Step 8 resolves the data home through Get-DataHome'
 Assert ($installText -match [regex]::Escape('if ($dh.Error) { throw "data home: $($dh.Error)" }'))                      'Step 8 fails loud when no data home is acceptable'
 Assert ($installText -match [regex]::Escape('-Seed ([pscustomobject]@{ home = $dh.Home })'))                           'Step 8 merges the chosen home into the fresh config'
 Assert ($installText -match [regex]::Escape('$volArgs = Get-DataVolumeArgs -AllowOS $allowOsData')) 'Step 8 builds the probe through Get-DataVolumeArgs, so --data cannot be dropped at the call site'

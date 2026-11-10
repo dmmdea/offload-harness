@@ -483,7 +483,9 @@ if [ -f "$CONFIG" ] && [ "$DRY_RUN" -eq 0 ]; then
     say "NOTE  compose lane installed but $CONFIG predates it — add: $(printf '%s' "$HF_SEED" | jq -c .)"
   fi
 else
-  BODY="$(printf '%s' "$SEED" | jq --arg home "$PREFIX" '. + {home: $home}')"
+  # serving_config_path: this script knows which yaml the node serves (step 5). Without the key the node publishes no
+  # provenance for it, doctor's capacity row reads UNKNOWN, and a GPU lease cannot place a seat by its device pin.
+  BODY="$(printf '%s' "$SEED" | jq --arg home "$PREFIX" --arg yaml "$PREFIX/etc/llama-swap.yaml" '. + {home: $home, serving_config_path: $yaml}')"
   if [ "$DRY_RUN" -eq 1 ]; then
     say "  would write $CONFIG:"; printf '%s\n' "$BODY" | sed 's/^/    /'
   else

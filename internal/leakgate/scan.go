@@ -377,6 +377,7 @@ func scanFile(sc *Scanner, tf TrackedFile, fsys FS, max int64, exempt map[exempt
 
 	body := data
 	isPNG := false
+	isWAV := false
 	var raw []byte     // set for a byte-order-marked file: its raw bytes are scanned too
 	var swapped []byte // and its payload read in the other byte order
 	invalid := false
@@ -417,17 +418,26 @@ func scanFile(sc *Scanner, tf TrackedFile, fsys FS, max int64, exempt map[exempt
 			fatal(0, perr.Error())
 		}
 		body = bytes.Join(info.Segments, []byte{'\n'})
+	case IsWAV(body):
+		isWAV = true
+		info, werr := ParseWAV(body)
+		if werr != nil {
+			fatal(0, werr.Error())
+		}
+		body = bytes.Join(info.Segments, []byte{'\n'})
 	case strings.HasSuffix(strings.ToLower(tf.Path), ".png"):
 		fatal(0, ErrPNGSignature.Error())
+	case strings.HasSuffix(strings.ToLower(tf.Path), ".wav"):
+		fatal(0, ErrWAVSignature.Error())
 	}
-	if !isPNG && !invalid && bytes.IndexByte(body[:min(len(body), sniffWindow)], 0) >= 0 {
+	if !isPNG && !isWAV && !invalid && bytes.IndexByte(body[:min(len(body), sniffWindow)], 0) >= 0 {
 		res.classes.Binaries++
-		if !strings.HasSuffix(strings.ToLower(tf.Path), ".png") {
+		if !strings.HasSuffix(strings.ToLower(tf.Path), ".png") && !strings.HasSuffix(strings.ToLower(tf.Path), ".wav") {
 			failClosed(WhyBinary, "unknown binary (a NUL in the first 8000 bytes; the name was scanned)")
 		}
 		return res
 	}
-	if !isPNG {
+	if !isPNG && !isWAV {
 		body = bytes.TrimPrefix(body, []byte{0xEF, 0xBB, 0xBF})
 	}
 

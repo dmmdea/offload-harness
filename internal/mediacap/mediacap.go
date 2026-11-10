@@ -132,10 +132,18 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 		out = append(out, withNeeds(r, cfg.ComfyDir, nil, imageNodeClasses(cfg), nil, nodes))
 	}
 
+	// The iGPU engines (CT-49) replace the ComfyUI/python route of the same name; an
+	// engine route never marks comfyUsed, only nodeUsed (its runner is a node script).
+	// Derived here, ahead of the inpaint and upscale slots, so those two can be replaced too.
+	igpu, igpuExtra := igpuRoutes(cfg, exeDir)
+
 	// --- inpaint_image: script AND checkpoint, matching the pipeline's gate.
 	// inpaint_ckpt is a ComfyUI model FILENAME, not a path, so it is reported but
 	// never stat'd — claiming a verdict on it would be a guess.
-	if cfg.InpaintScript == "" || cfg.InpaintCkpt == "" {
+	if r, ok := igpu["inpaint_image"]; ok {
+		out = append(out, r)
+		nodeUsed = true
+	} else if cfg.InpaintScript == "" || cfg.InpaintCkpt == "" {
 		out = append(out, Route{Name: "inpaint_image", Engine: "comfyui", State: NotConfigured,
 			Detail: "inpaint_script/inpaint_ckpt is unset"})
 	} else {
@@ -176,7 +184,10 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 	// --- upscale_image: script AND an ESRGAN filename, matching the pipeline's gate
 	// (config.EffectiveUpscaleModel: upscale_model, else videogen_upscale_model). The
 	// filename is a ComfyUI model NAME, reported but never stat'd — same rule as inpaint_ckpt.
-	if model := cfg.EffectiveUpscaleModel(); cfg.UpscaleScript == "" || model == "" {
+	if r, ok := igpu["upscale_image"]; ok {
+		out = append(out, r)
+		nodeUsed = true
+	} else if model := cfg.EffectiveUpscaleModel(); cfg.UpscaleScript == "" || model == "" {
 		out = append(out, Route{Name: "upscale_image", Engine: "comfyui", State: NotConfigured,
 			Detail: "upscale_script/upscale_model is unset (videogen_upscale_model is the fallback)"})
 	} else {
@@ -196,9 +207,6 @@ func routesWith(cfg config.Config, exeDir string, nodes NodeChecker) []Route {
 	// (routeneeds.go). run_graph runs the CALLER's graph, so its script is the whole
 	// binding; its manifest satisfaction is the runner's own preflight.
 	family, vFiles, vClasses, vOptional := videoNeeds(cfg)
-	// The iGPU engines (CT-49) replace the ComfyUI/python route of the same name; an
-	// engine route never marks comfyUsed, only nodeUsed (its runner is a node script).
-	igpu, igpuExtra := igpuRoutes(cfg, exeDir)
 	for _, s := range []struct {
 		name, engine, key, value string
 		comfy                    bool

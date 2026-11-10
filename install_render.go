@@ -70,6 +70,9 @@ type servingProfile struct {
 	KVType    string `json:"kv_type"`
 	FlashAttn string `json:"flash_attn"`
 	Backend   string `json:"backend"`
+	// CacheRAMMiBByRAMTier is a tier's own --cache-ram figures by RAM band; a band it
+	// names wins over the document's top-level map (cacheRAMForProfile).
+	CacheRAMMiBByRAMTier map[string]int `json:"cache_ram_mib_by_ram_tier,omitempty"`
 	// AltBackends lists the extra serving backends a tier may render BESIDE its
 	// primary one on the same box (today: ["cpu"] — the CPU seat family, rendered
 	// when --llama-bin-cpu names a CPU build). Declared per tier so a box never
@@ -737,7 +740,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		LlamaBin: req.LlamaBin, ModelsDir: req.ModelsDir, Listen: req.Listen,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
-		CacheRAMMiB:  cacheRAMFor(doc.CacheRAMMiBByRAMTier, ramTier),
+		CacheRAMMiB:  cacheRAMForProfile(p.CacheRAMMiBByRAMTier, doc.CacheRAMMiBByRAMTier, ramTier),
 		IncludeQ354B: p.IncludeQwen354B, IncludeQ359B: p.IncludeQwen359B,
 		IncludeQ3827B: p.IncludeQwen3827B, IncludeMimo9B: p.IncludeMimo9B,
 		IncludeQ3635B: spillSeatIncluded(p, ramTier),
@@ -789,6 +792,7 @@ func runInstallRender(args []string) error {
 	threads := fs.Int("threads", 0, "--threads per server (default: half the logical CPUs)")
 	goos := fs.String("os", "", "target OS: windows|linux (default: this machine)")
 	out := fs.String("out", "", "write the rendered config here instead of stdout")
+	stateOnly := fs.Bool("state", false, "print this render's verdict on the file at --out and write nothing: MATCH, STALE, UNSTAMPED, HAND-EDITED or MISSING, first word of one line (the installer's re-run check)")
 	root := fs.String("root", ".", "repo root holding setup/templates/profiles.json")
 	home := fs.String("home", "", "install root, for media seat paths (__OFFLOAD_HOME__)")
 	rknpuHome := fs.String("rknpu-home", "", "RKNPU home, for the rkllm seat's launcher (__RKNPU_HOME__; default: $RKNPU_HOME, else <home>/rknpu)")
@@ -826,6 +830,9 @@ func runInstallRender(args []string) error {
 	// a config that fails one is REFUSED here, before it can be written.
 	if err := renderGate(res); err != nil {
 		return err
+	}
+	if *stateOnly {
+		return printRenderState(os.Stdout, *out, res)
 	}
 	// The llama.cpp floor of the embeddinggemma2 entry. WRITE time only: a replay (audit-yaml) runs on
 	// another machine with another machine's paths, so deriveRender never asks.
@@ -875,6 +882,27 @@ func runInstallRender(args []string) error {
 	// stdout is free here because the config only goes there when --out is empty.
 	spec, _, _ := servingtmpl.SpecHash(res.Basis)
 	fmt.Printf("wrote %s (tier %s, %s/%s, spec_sha256 %s)\n", *out, res.TierID, osTag(target), res.Profile.Backend, spec)
+	return nil
+}
+
+// printRenderState answers the installer's re-run question: is the config at path what these exact inputs render?
+// It uses the render's own per-box inputs, which is what audit-yaml's replay cannot know, so MATCH here means the
+// file is what this install would write. The verdict order is AgainstRender's: a hand edit is reported as a hand
+// edit even when the file is also stale, because re-rendering it would destroy the edit.
+func printRenderState(w io.Writer, path string, res renderResult) error {
+	if path == "" {
+		return errors.New("install render --state needs --out: the verdict is about that file")
+	}
+	text, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		fmt.Fprintf(w, "MISSING %s\n", path)
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	rep := servingtmpl.AgainstRender(string(text), res.Basis, res.Config)
+	fmt.Fprintf(w, "%s %s\n", rep.State, rep.Line(path))
 	return nil
 }
 
@@ -1619,6 +1647,18 @@ func hasAltBackend(p servingProfile, b string) bool {
 		}
 	}
 	return false
+}
+
+// cacheRAMForProfile lets a tier replace the top-level figure for the RAM bands it
+// names. A unified-memory tier needs it: there the card's memory is the host's RAM, so
+// a seat's weights and the prompt cache draw on one pool, and the top-level figure
+// (sized for a box whose weights sit on a card) would let the two together reach the
+// owner's working memory. A band the tier does not name keeps the top-level figure.
+func cacheRAMForProfile(tier, top map[string]int, ramTier string) int {
+	if v := cacheRAMFor(tier, ramTier); v > 0 {
+		return v
+	}
+	return cacheRAMFor(top, ramTier)
 }
 
 // cacheRAMFor picks the --cache-ram MiB for a RAM tier from the profiles document.

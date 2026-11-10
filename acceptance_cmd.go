@@ -36,8 +36,24 @@ func runAcceptance(args []string) error {
 	fs := flag.NewFlagSet("acceptance", flag.ExitOnError)
 	fs.String("config", "", "config file path")
 	asJSON := fs.Bool("json", false, "emit the report as JSON")
+	render := fs.Bool("render", false, "after the checks, make one REAL call per bound route and check each against a known answer")
+	only := fs.String("only", "", "with --render: run only these route groups (comma-separated); implies --render")
+	list := fs.Bool("list", false, "print each route group, whether it is bound and the exact command it would run; runs nothing; implies --render")
+	outDir := fs.String("out-dir", "", "with --render: where the outputs stay (default: a new folder under the OS temp dir; never deleted)")
 	_ = fs.Parse(args)
 	cfg, src := loadCfgWithSource(fs)
+
+	doRender := *render || *only != "" || *list
+	var ropts renderOpts
+	if doRender {
+		var err error
+		if ropts, err = newRenderOpts(*only, *outDir); err != nil {
+			return err
+		}
+	}
+	if *list {
+		return listRender(cfg, src, mediacap.Routes(cfg), ropts, *asJSON)
+	}
 
 	ctx := context.Background()
 	rep := acceptance.New()
@@ -86,6 +102,12 @@ func runAcceptance(args []string) error {
 	// 4. The serving layer: every configured alias must be live, or the tasks that
 	//    route to it defer at call time.
 	rep.Add(aliasCheck2(ctx, cfg))
+
+	// 5. --render: one real call per bound route through the real verbs (acceptance_render.go).
+	//    A node is installed only when every route it binds has produced real output.
+	if doRender {
+		rep.Add(runRender(ctx, cfg, src, routes, ropts)...)
+	}
 
 	if *asJSON {
 		b, err := json.MarshalIndent(rep, "", "  ")

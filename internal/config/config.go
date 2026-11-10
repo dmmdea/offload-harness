@@ -900,6 +900,18 @@ type Config struct {
 	InpaintScheduler string  `json:"inpaint_scheduler,omitempty"`
 	// InpaintTimeoutSec bounds one inpaint render (default 900).
 	InpaintTimeoutSec int `json:"inpaint_timeout_sec,omitempty"`
+	// InpaintEngine: "" = the ComfyUI route above; "sdcpp" = render/sdcpp-inpaint.mjs, which
+	// runs sd-cli -i/--mask on the image lane's own binding (sdcpp_bin, sdcpp_model,
+	// sdcpp_model_kind, sdcpp_vae, sdcpp_llm and the other model keys, with imagegen_steps,
+	// imagegen_cfg and imagegen_sampler), so it needs no ComfyUI and no weight of its own.
+	InpaintEngine string `json:"inpaint_engine,omitempty"`
+	// InpaintSdcppScript is the runner (default render/sdcpp-inpaint.mjs).
+	InpaintSdcppScript string `json:"inpaint_sdcpp_script,omitempty"`
+	// InpaintSdcppBackend is sd-cli's --backend for this route (required, never cpu).
+	// InpaintSdcppExtraArgs go to sd-cli verbatim after the screen (the image lane's
+	// sdcpp_extra_args are NOT forwarded: on the AMD tier they hold --vae-on-cpu).
+	InpaintSdcppBackend   string   `json:"inpaint_sdcpp_backend,omitempty"`
+	InpaintSdcppExtraArgs []string `json:"inpaint_sdcpp_extra_args,omitempty"`
 	// --- generative, mask-free image edit (edit_image_generative) ---
 	// A THIRD edit-shaped route, deliberately distinct from its two siblings:
 	// edit_image is deterministic PIL ops, inpaint_image re-denoises inside a
@@ -986,6 +998,20 @@ type Config struct {
 	// UpscaleTimeoutSec bounds one upscale (default 600): the render itself is seconds,
 	// the budget is the cold ComfyUI start.
 	UpscaleTimeoutSec int `json:"upscale_timeout_sec,omitempty"`
+	// UpscaleEngine: "" = the ComfyUI route above; "sdcpp" = render/sdcpp-upscale.mjs, which
+	// runs `sd-cli -M upscale --upscale-model <upscale_sdcpp_model>` with no ComfyUI. The
+	// scale comes from the model; a --scale/--width/--height that differs from it is met by
+	// an ffmpeg lanczos resample of the model's output.
+	UpscaleEngine string `json:"upscale_engine,omitempty"`
+	// UpscaleSdcppScript is the runner (default render/sdcpp-upscale.mjs).
+	UpscaleSdcppScript string `json:"upscale_sdcpp_script,omitempty"`
+	// UpscaleSdcppBin is the absolute sd-cli; UpscaleSdcppModel the full path of the
+	// ESRGAN-family weight (.safetensors or .pth); UpscaleSdcppBackend sd-cli's --backend
+	// (required, never cpu); UpscaleSdcppExtraArgs go to sd-cli verbatim after the screen.
+	UpscaleSdcppBin       string   `json:"upscale_sdcpp_bin,omitempty"`
+	UpscaleSdcppModel     string   `json:"upscale_sdcpp_model,omitempty"`
+	UpscaleSdcppBackend   string   `json:"upscale_sdcpp_backend,omitempty"`
+	UpscaleSdcppExtraArgs []string `json:"upscale_sdcpp_extra_args,omitempty"`
 	// --- video / audio generation (generate_video / generate_audio) ---
 	// VideoGenScript is the path to render/comfy-video.mjs (the I2V lifecycle wrapper).
 	// Empty = no video route (the task defers cleanly), like an empty ImageGenScript.
@@ -2461,6 +2487,8 @@ func Default() Config {
 		UpscaleScript:               "render/comfy-upscale.mjs",
 		UpscaleModel:                "", // per-machine ESRGAN filename; falls back to videogen_upscale_model; both empty = defer
 		UpscaleTimeoutSec:           600,
+		UpscaleSdcppScript:          "render/sdcpp-upscale.mjs",
+		InpaintSdcppScript:          "render/sdcpp-inpaint.mjs",
 		VideoGenScript:              "render/comfy-video.mjs",
 		VideoGenSdcppScript:         "render/sdcpp-video.mjs",
 		AnimateGenSdcppScript:       "render/sdcpp-animate.mjs",
@@ -3570,6 +3598,7 @@ func pathFields(c *Config) []*string {
 		&c.ImageGenScript, &c.NodePath, &c.ComfyDir,
 		&c.SdcppScript, &c.SdcppBin, &c.SdcppModel, &c.SdcppVAE, &c.SdcppClipL, &c.SdcppClipG, &c.SdcppT5, &c.SdcppLLM,
 		&c.InpaintScript, &c.GenEditScript, &c.UpscaleScript,
+		&c.UpscaleSdcppScript, &c.UpscaleSdcppBin, &c.UpscaleSdcppModel, &c.InpaintSdcppScript,
 		&c.AnimateGenSdcppBin, &c.AnimateGenSdcppModel, &c.AnimateGenSdcppVAE, &c.AnimateGenSdcppT5xxl, &c.AnimateGenSdcppTAE,
 		&c.AnimateGenDepthBin, &c.AnimateGenDepthModel, &c.AnimateGenSdcppScript, &c.VideoGenSdcppScript,
 		&c.AudiocppScript, &c.AudiocppBin, &c.AudiocppVoiceModel, &c.AudiocppMusicModel,

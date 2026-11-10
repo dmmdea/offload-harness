@@ -57,6 +57,16 @@ param([switch]$RenderOnly, [string]$RenderOut, [switch]$Update)
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'   # Invoke-WebRequest is ~10x faster without the progress UI
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+# Started through Start-Process from PowerShell 7, Windows PowerShell inherits PowerShell 7's module paths and cannot
+# load the Utility module from them, so Get-FileHash does not exist and every download fails on its hash check.
+if ($PSVersionTable.PSEdition -eq 'Desktop') {
+  $modulePaths = @($env:PSModulePath -split ';')
+  $keptPaths = @($modulePaths | Where-Object { $_ -notlike '*\PowerShell\Modules*' -and $_ -notlike '*\PowerShell\7\Modules*' -and $_ -notlike '*\microsoft.powershell_7*' })
+  if ($keptPaths.Count -ne $modulePaths.Count) {
+    $env:PSModulePath = $keptPaths -join ';'
+    Import-Module (Join-Path $PSHOME 'Modules\Microsoft.PowerShell.Utility\Microsoft.PowerShell.Utility.psd1') -Force
+  }
+}
 $repoRoot  = Split-Path -Parent $scriptDir
 
 # ---------------------------------------------------------------------------
@@ -169,6 +179,14 @@ $SOURCES = @{
   'model-sd15'     = @{ kind = 'hf-file'; repo = 'stable-diffusion-v1-5/stable-diffusion-v1-5'; file = 'v1-5-pruned-emaonly.safetensors'; dest = 'v1-5-pruned-emaonly.safetensors' }
   'model-sdxl'     = @{ kind = 'hf-file'; repo = 'stabilityai/stable-diffusion-xl-base-1.0'; file = 'sd_xl_base_1.0.safetensors'; dest = 'sd_xl_base_1.0.safetensors' }
   'model-sdxl-vae' = @{ kind = 'hf-file'; repo = 'madebyollin/sdxl-vae-fp16-fix'; file = 'sdxl_vae.safetensors'; dest = 'sdxl_vae_fp16_fix.safetensors' }
+  # The seats' own weights, found by Get-SeatWeightKeys through dest (Step 5c). forModel: several tiers save a different
+  # projector under the same local name, so the row only answers for the seat whose model it belongs to.
+  'model-whisper-turbo' = @{ kind = 'hf-file'; repo = 'ggerganov/whisper.cpp'; file = 'ggml-large-v3-turbo.bin'; dest = 'ggml-large-v3-turbo.bin' }
+  'model-silero-v6'     = @{ kind = 'hf-file'; repo = 'ggml-org/whisper-vad'; file = 'ggml-silero-v6.2.0.bin'; dest = 'ggml-silero-v6.2.0.bin' }
+  'model-e4b-mmproj'    = @{ kind = 'hf-file'; repo = 'unsloth/gemma-4-E4B-it-qat-GGUF'; file = 'mmproj-F16.gguf'; dest = 'mmproj-F16.gguf'; forModel = 'gemma-4-E4B-it-qat-UD-Q4_K_XL.gguf' }
+  'model-iq3s-mmproj'   = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3.8-27B-GGUF'; file = 'mmproj-F16.gguf'; dest = 'mmproj-F16.gguf'; forModel = 'Qwen3.8-27B-UD-IQ3_S.gguf' }
+  'model-qwen3vl-8b'    = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3-VL-8B-Instruct-GGUF'; file = 'Qwen3-VL-8B-Instruct-Q8_0.gguf'; dest = 'Qwen3VL-8B-Instruct-Q8_0.gguf' }
+  'model-qwen3vl-8b-mmproj' = @{ kind = 'hf-file'; repo = 'unsloth/Qwen3-VL-8B-Instruct-GGUF'; file = 'mmproj-F16.gguf'; dest = 'mmproj-Qwen3VL-8B-Instruct-F16.gguf' }
   # --- maxwell-3 (the 3 GB band, 2026-10-28) media-seat weights, PLACED BY HAND like the CT-51 I5 rows below:
   # `install render` emits the tier's vision and stt seats from profiles.json and WARNS when these files are
   # not under the models dir; nothing here downloads them yet (no gate names these keys), so the operator places
@@ -179,20 +197,25 @@ $SOURCES = @{
   # q5_0 gives the same transcript 300 MiB lighter; q8_0 is the quality pick the 3 GB card still holds with room.
   'model-whisper-turbo-q8' = @{ kind = 'hf-file'; repo = 'ggerganov/whisper.cpp'; file = 'ggml-large-v3-turbo-q8_0.bin'; dest = 'ggml-large-v3-turbo-q8_0.bin' }
   'model-silero-v5'        = @{ kind = 'hf-file'; repo = 'ggml-org/whisper-vad'; file = 'ggml-silero-v5.1.2.bin'; dest = 'ggml-silero-v5.1.2.bin' }
-  # --- CT-51 I5: the amd-gcn (Vulkan iGPU) media models, PLACED BY HAND. Nothing in this installer downloads them
-  # (no gate names these keys; the Linux install has no media leg yet, so the weights are placed out of band).
+  # --- CT-51 I5: the iGPU media models. Step 5b fetches the ones a tier's seed binds, found by dest, so each dest is the
+  # path the seed names under models/ (the Linux install has no media leg yet, so there they are placed out of band).
   # Licences: FastWan2.2-TI2V-5B, the Wan 2.2 / 2.1 VAEs, umt5-xxl, taew2_2,
   # Wan2.1 VACE 1.3B and Depth-Anything V2 Small are Apache-2.0 (commercial use allowed); Chatterbox is MIT;
   # the ACE-Step 1.5 licence is MIT (the LICENSE file of its project and its Hugging Face card, read 2026-10-18; commercial use allowed); the audio lanes have no commercial_use key to set.
-  'model-fastwan'        = @{ kind = 'hf-file'; repo = 'Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF'; file = 'FastWan2.2-TI2V-5B-q8_0.gguf'; dest = 'FastWan2.2-TI2V-5B-q8_0.gguf' }
-  'model-wan22-vae'      = @{ kind = 'hf-file'; repo = 'QuantStack/Wan2.2-TI2V-5B-GGUF'; file = 'VAE/Wan2.2_VAE.safetensors'; dest = 'Wan2.2_VAE.safetensors' }
-  'model-umt5-xxl'       = @{ kind = 'hf-file'; repo = 'city96/umt5-xxl-encoder-gguf'; file = 'umt5-xxl-encoder-Q8_0.gguf'; dest = 'umt5-xxl-encoder-Q8_0.gguf' }
-  'model-wan22-tae'      = @{ kind = 'hf-file'; repo = 'lightx2v/Autoencoders'; file = 'taew2_2.safetensors'; dest = 'taew2_2.safetensors' }
-  'model-vace'           = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors'; dest = 'wan2.1_vace_1.3B_fp16.safetensors' }
-  'model-wan21-vae'      = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan_2.1_ComfyUI_repackaged'; file = 'split_files/vae/wan_2.1_vae.safetensors'; dest = 'wan_2.1_vae.safetensors' }
-  'model-depth-anything' = @{ kind = 'hf-file'; repo = 'mudler/depth-anything.cpp-gguf'; file = 'depth-anything2-small-q8_0.gguf'; dest = 'depth-anything2-small-q8_0.gguf' }
-  'model-chatterbox'     = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'Chatterbox-GGUF/chatterbox-q8_0.gguf'; dest = 'chatterbox-q8_0.gguf' }
-  'model-ace-step'       = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf'; dest = 'ace-step-1.5-turbo-bf16.gguf' }
+  'model-fastwan'        = @{ kind = 'hf-file'; repo = 'Green-Sky/FastWan2.2-TI2V-5B-FullAttn-GGUF'; file = 'FastWan2.2-TI2V-5B-q8_0.gguf'; dest = 'wan22-ti2v-5b/FastWan2.2-TI2V-5B-q8_0.gguf' }
+  'model-wan22-vae'      = @{ kind = 'hf-file'; repo = 'QuantStack/Wan2.2-TI2V-5B-GGUF'; file = 'VAE/Wan2.2_VAE.safetensors'; dest = 'wan22-ti2v-5b/Wan2.2_VAE.safetensors' }
+  'model-umt5-xxl'       = @{ kind = 'hf-file'; repo = 'city96/umt5-xxl-encoder-gguf'; file = 'umt5-xxl-encoder-Q8_0.gguf'; dest = 'wan22-ti2v-5b/umt5-xxl-encoder-Q8_0.gguf' }
+  'model-wan22-tae'      = @{ kind = 'hf-file'; repo = 'lightx2v/Autoencoders'; file = 'taew2_2.safetensors'; dest = 'wan22-ti2v-5b/taew2_2.safetensors' }
+  'model-vace'           = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan-2.1'; file = 'split_files/diffusion_models/wan2.1_vace_1.3B_fp16.safetensors'; dest = 'wan21-vace-1.3b/wan2.1_vace_1.3B_fp16.safetensors' }
+  'model-wan21-vae'      = @{ kind = 'hf-file'; repo = 'Comfy-Org/Wan-2.1'; file = 'split_files/vae/wan_2.1_vae.safetensors'; dest = 'wan21-vace-1.3b/wan_2.1_vae.safetensors' }
+  'model-depth-anything' = @{ kind = 'hf-file'; repo = 'mudler/depth-anything.cpp-gguf'; file = 'depth-anything2-small-q8_0.gguf'; dest = 'depth/depth-anything2-small-q8_0.gguf' }
+  'model-chatterbox'     = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'Chatterbox-GGUF/chatterbox-q8_0.gguf'; dest = 'chatterbox/chatterbox-q8_0.gguf' }
+  'model-ace-step'       = @{ kind = 'hf-file'; repo = 'audio-cpp/audio.cpp-gguf'; file = 'ACE-Step1.5-GGUF/turbo/ace-step-1.5-turbo-bf16.gguf'; dest = 'ace-step/ace-step-1.5-turbo-bf16.gguf' }
+  # The sd.cpp upscale weight (`sd-cli -M upscale`, no ComfyUI): 4xNomos2_hq_mosr, 8,593,400 bytes (the checksum is in
+  # docs/systems/media-generation.md; an installer carries no pinned hashes). Licence CC-BY-4.0 (the Hugging Face card metadata):
+  # commercial use is allowed with attribution to its author (Phips), which docs/systems/media-generation.md carries.
+  # NOT 4x-UltraSharp, the ComfyUI tiers' upscaler: that one is CC BY-NC-SA 4.0, non-commercial.
+  'model-esrgan-nomos2'  = @{ kind = 'hf-file'; repo = 'Phips/4xNomos2_hq_mosr'; file = '4xNomos2_hq_mosr.safetensors'; dest = 'upscale/4xNomos2_hq_mosr.safetensors' }
 }
 
 # ---------------------------------------------------------------------------
@@ -472,7 +495,10 @@ function Get-HfTree {
   while ($uri -and $guard -lt 50) {
     $guard++
     $r = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 60 -Headers @{ 'User-Agent' = 'offload-harness-installer' }
-    $all += @($r.Content | ConvertFrom-Json)
+    # Assigned first: Windows PowerShell's ConvertFrom-Json writes a JSON array as ONE object, so @(...) held a single
+    # element, the lookup in Get-HfFile never saw a file, and every download leaned on the redirect's headers.
+    $page = $r.Content | ConvertFrom-Json
+    foreach ($entry in $page) { $all += $entry }
     $uri = $null
     $link = $r.Headers['Link']
     if ($link) {
@@ -484,19 +510,28 @@ function Get-HfTree {
   return $all
 }
 
-# The 302 of a resolve URL carries the file's sha256 (X-Linked-ETag) and size (X-Linked-Size).
+# The 302 of a resolve URL carries the file's sha256 (X-Linked-ETag) and size (X-Linked-Size). A renamed repo first answers
+# 307 with a relative Location and neither header, so a redirect without them is followed.
 function Get-HfLinkedHeaders {
   param([string]$Url)
-  $req = [System.Net.HttpWebRequest]::Create($Url)
-  $req.Method = 'HEAD'
-  $req.AllowAutoRedirect = $false
-  $req.UserAgent = 'offload-harness-installer'
-  $req.Timeout = 30000
-  $resp = $req.GetResponse()
-  try {
-    $etag = [string]$resp.Headers['X-Linked-ETag']
-    $sz = [string]$resp.Headers['X-Linked-Size']
-  } finally { $resp.Close() }
+  $current = $Url
+  $etag = ''
+  $sz = ''
+  foreach ($hop in 1..4) {
+    $req = [System.Net.HttpWebRequest]::Create($current)
+    $req.Method = 'HEAD'
+    $req.AllowAutoRedirect = $false
+    $req.UserAgent = 'offload-harness-installer'
+    $req.Timeout = 30000
+    $resp = $req.GetResponse()
+    try {
+      $etag = [string]$resp.Headers['X-Linked-ETag']
+      $sz = [string]$resp.Headers['X-Linked-Size']
+      $next = [string]$resp.Headers['Location']
+    } finally { $resp.Close() }
+    if ($etag.Trim() -or -not $next) { break }
+    $current = (New-Object System.Uri -ArgumentList ([System.Uri]$current), $next).AbsoluteUri
+  }
   $etag = $etag.Trim()
   if ($etag.StartsWith('W/')) { $etag = $etag.Substring(2) }
   $szNum = [int64]0
@@ -2008,6 +2043,181 @@ function Ensure-RunGraphDeps {
   return ($log -join '; ')
 }
 
+# Where a fresh install goes when OFFLOAD_HOME is unset (first-class rule 2: never the OS drive by default). This
+# runs before Go exists on the box, so it cannot ask `local-offload install volumes`; the rule is that one's, plus USB.
+# An install already on a drive stays there. Otherwise: the fixed NTFS or ReFS volume with the most free space, never
+# the OS drive, never over USB (GetDriveType calls a USB SSD fixed; a stack on it vanishes with the cable), never a
+# cloud-synced virtual drive (they report FAT32). A box with no such volume fails LOUD before anything is downloaded;
+# OFFLOAD_ALLOW_OS_DATA=1 is the recorded decision to stay under the user profile on a one-disk box.
+# PURE: -Volumes is what Get-InstallVolumes reads. Returns @{ Home; Root; Because; Persist; Error }.
+function Get-InstallHomeChoice {
+  param($Volumes = @(), [string]$OsDrive = 'C:', [bool]$AllowOS = $false, [string]$ProfileHome = '', [bool]$ProfileHasInstall = $false, [long]$MinFree = 21474836480)
+  if ($ProfileHasInstall) {
+    return [pscustomobject]@{ Home = $ProfileHome; Root = ''; Because = 'an install already lives here'; Persist = $false; Error = '' }
+  }
+  if ($AllowOS) {
+    return [pscustomobject]@{ Home = $ProfileHome; Root = ''; Because = 'OFFLOAD_ALLOW_OS_DATA=1'; Persist = $false; Error = '' }
+  }
+  $os = $OsDrive.TrimEnd('\', '/').ToUpper()
+  $kept = @(); $why = @()
+  foreach ($v in @($Volumes)) {
+    $root = ([string]$v.Root).TrimEnd('\', '/').ToUpper()
+    if ($root -eq $os) { $why += "$root is the OS drive"; continue }
+    if ($v.Usb) { $why += "$root is on USB"; continue }
+    if ([string]$v.FileSystem -notin @('NTFS', 'ReFS')) { $why += "$root is $($v.FileSystem), not a disk a store can live on"; continue }
+    if ([long]$v.Free -lt $MinFree -and -not $v.HasInstall) { $why += "$root has under $([math]::Round($MinFree / 1GB)) GB free"; continue }
+    $kept += $v
+  }
+  $pick = @($kept | Where-Object { $_.HasInstall } | Select-Object -First 1)
+  $because = 'an install already lives here'
+  if ($pick.Count -eq 0) {
+    $pick = @($kept | Sort-Object { [long]$_.Free } -Descending | Select-Object -First 1)
+    if ($pick.Count -gt 0) { $because = "most free space of the data drives ($([math]::Round([long]$pick[0].Free / 1GB)) GB)" }
+  }
+  if ($pick.Count -eq 0) {
+    return [pscustomobject]@{ Home = ''; Root = ''; Because = ''; Persist = $false
+      Error = "no data drive for the stack ($($why -join '; ')). Set OFFLOAD_HOME=<a directory on a data drive>, or OFFLOAD_ALLOW_OS_DATA=1 to keep this one-disk box's stack under the user profile." }
+  }
+  $r = ([string]$pick[0].Root).TrimEnd('\', '/')
+  return [pscustomobject]@{ Home = "$r\offload-stack"; Root = $r; Because = $because; Persist = $true; Error = '' }
+}
+
+# The volumes Get-InstallHomeChoice decides over. A drive whose disk cannot be read is not called USB: the rule's other
+# tests still apply to it, and the cloud drives this probe cannot see through report a filesystem the rule refuses.
+function Get-InstallVolumes {
+  $out = @()
+  foreach ($d in @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' -ErrorAction SilentlyContinue)) {
+    $usb = $false
+    try {
+      $disk = Get-Partition -DriveLetter ($d.DeviceID.TrimEnd(':')) -ErrorAction Stop | Get-Disk -ErrorAction Stop
+      $usb = ("$($disk.BusType)" -eq 'USB')
+    } catch { $usb = $false }
+    $out += [pscustomobject]@{ Root = $d.DeviceID; Free = [long]$d.FreeSpace; FileSystem = "$($d.FileSystem)"; Usb = $usb
+      HasInstall = (Test-Path -LiteralPath (Join-Path "$($d.DeviceID)\" 'offload-stack\installed.json')) }
+  }
+  return ,$out
+}
+
+# The tool caches and temp of THIS run, under the install root when that root is off the OS drive (operator rule: C:
+# holds Windows and program installs, never tool caches). Go's toolchain download lands in GOMODCACHE, so it moves too.
+# A one-disk box keeps the tools' own defaults. Process scope only: it changes nothing for the owner's other builds.
+# PURE: returns an ordered map, empty when there is nothing to move.
+function Get-ToolCacheEnv {
+  param([string]$HomeDir, [string]$OsDrive = 'C:')
+  $map = [ordered]@{}
+  if (-not $HomeDir) { return $map }
+  $qual = { param($p) if ($p -match '^\s*([A-Za-z]):') { return ($Matches[1].ToUpper() + ':') } return '' }
+  $homeDrive = & $qual $HomeDir
+  if (-not $homeDrive -or $homeDrive -eq (& $qual $OsDrive)) { return $map }
+  $root = Join-Path $HomeDir 'cache'
+  $map['GOCACHE'] = Join-Path $root 'go-build'
+  $map['GOMODCACHE'] = Join-Path $root 'go-mod'
+  $map['GOTMPDIR'] = Join-Path $root 'go-tmp'
+  $map['npm_config_cache'] = Join-Path $root 'npm'
+  $map['UV_CACHE_DIR'] = Join-Path $root 'uv'
+  $map['UV_PYTHON_INSTALL_DIR'] = Join-Path $root 'uv-python'
+  $map['PIP_CACHE_DIR'] = Join-Path $root 'pip'
+  $map['TEMP'] = Join-Path $root 'tmp'
+  $map['TMP'] = Join-Path $root 'tmp'
+  return $map
+}
+
+# A LOCAL_OFFLOAD_CONFIG naming another file outranks the config this install writes, so every later run keeps reading
+# that file and the tier, data home and seats of this install never load (found on a box with a months-old trial's
+# variable still set). PURE: '' when there is no conflict, else the message with the exact fix.
+function Get-ConfigEnvShadow {
+  param([string]$EnvValue, [string]$ConfigPath)
+  if (-not $EnvValue -or -not $EnvValue.Trim()) { return '' }
+  $a = $EnvValue.Trim(); $b = $ConfigPath
+  try { $a = [System.IO.Path]::GetFullPath($a); $b = [System.IO.Path]::GetFullPath($b) } catch { }
+  if ($a -ieq $b) { return '' }
+  return ("LOCAL_OFFLOAD_CONFIG=$EnvValue outranks the config this install writes ($ConfigPath), so the harness would keep reading that file and this install would not take effect. " +
+    "If it is a leftover, clear it and run the installer in a new shell: [Environment]::SetEnvironmentVariable('LOCAL_OFFLOAD_CONFIG', `$null, 'User'). " +
+    "To keep it on purpose, set OFFLOAD_ALLOW_CONFIG_ENV=1 for this run.")
+}
+
+# The source rows behind a tier's declared seats (first-class rule 3: no hand-placed weights). A seat names its files
+# by the local names the rendered yaml expects, so the row is found by dest. Several tiers save a different projector
+# as mmproj-F16.gguf, so a row that is one seat's projector says so with forModel. A file with no row is returned, not
+# dropped: the install reports it by name. PURE.
+function Get-SeatWeightKeys {
+  param($ProfileRow, $Sources)
+  $keys = New-Object System.Collections.ArrayList
+  $unresolved = New-Object System.Collections.ArrayList
+  if (-not $ProfileRow -or -not $ProfileRow.PSObject.Properties['media_seats']) {
+    return [pscustomobject]@{ Keys = @(); Unresolved = @() }
+  }
+  foreach ($seat in @($ProfileRow.media_seats)) {
+    # A forecast seat's model is a harness-managed directory, not a file a row can name.
+    if ("$($seat.kind)" -eq 'forecast') { continue }
+    foreach ($field in 'model', 'mmproj', 'vad_model') {
+      if (-not $seat.PSObject.Properties[$field]) { continue }
+      $file = "$($seat.$field)"
+      if (-not $file) { continue }
+      $match = $null
+      foreach ($k in $Sources.Keys) {
+        $row = $Sources[$k]
+        if ($row.kind -ne 'hf-file' -or $row.dest -ne $file) { continue }
+        if ($row.ContainsKey('forModel') -and $row.forModel -ne "$($seat.model)") { continue }
+        $match = $k
+        break
+      }
+      if ($match) { if (-not $keys.Contains($match)) { [void]$keys.Add($match) } }
+      elseif (-not $unresolved.Contains($file)) { [void]$unresolved.Add($file) }
+    }
+  }
+  return [pscustomobject]@{ Keys = @($keys); Unresolved = @($unresolved) }
+}
+
+# The source rows behind a tier's seed (first-class rule 3: no hand-placed weights). A seed names each file it binds as
+# __OFFLOAD_HOME__/models/<dest>, at any depth (a video family nests its files), so the row is found by dest. A layer
+# counts only when this box's RAM band applies it. A file with no row is returned, not dropped. PURE.
+# A wav of this box's own Windows voice reading a neutral passage, for an engine that clones every voice from a reference.
+function New-VoiceReference {
+  param([Parameter(Mandatory = $true)][string]$Path)
+  New-Item -ItemType Directory -Force -Path (Split-Path -Parent $Path) | Out-Null
+  Add-Type -AssemblyName System.Speech
+  $speech = New-Object System.Speech.Synthesis.SpeechSynthesizer
+  try {
+    $format = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo -ArgumentList 24000, ([System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen), ([System.Speech.AudioFormat.AudioChannel]::Mono)
+    $speech.SetOutputToWaveFile($Path, $format)
+    $speech.Speak('The harbour was quiet that morning, and the first boats were only just leaving. A light wind came in from the west, carrying the smell of salt and fresh bread from the town. By noon the market had filled, and the whole street was talking about the weather.')
+  } finally { $speech.Dispose() }
+}
+
+function Get-SeedWeightKeys {
+  param($ProfileRow, $Sources, [string]$RamTier = '')
+  $keys = New-Object System.Collections.ArrayList
+  $unresolved = New-Object System.Collections.ArrayList
+  if (-not $ProfileRow) { return [pscustomobject]@{ Keys = @(); Unresolved = @() } }
+  $layers = New-Object System.Collections.ArrayList
+  if ($ProfileRow.PSObject.Properties['config_seed']) { [void]$layers.Add($ProfileRow.config_seed) }
+  if ($RamTier -in @('low', 'mid', 'high') -and $ProfileRow.PSObject.Properties['config_seed_ram_low_up']) { [void]$layers.Add($ProfileRow.config_seed_ram_low_up) }
+  if ($RamTier -in @('mid', 'high') -and $ProfileRow.PSObject.Properties['config_seed_ram_mid_high']) { [void]$layers.Add($ProfileRow.config_seed_ram_mid_high) }
+  $prefix = '__OFFLOAD_HOME__/models/'
+  $walk = {
+    param($node)
+    if ($null -eq $node) { return }
+    if ($node -is [string]) {
+      if ($node.StartsWith($prefix)) {
+        $file = $node.Substring($prefix.Length)
+        $match = $null
+        foreach ($k in $Sources.Keys) {
+          $row = $Sources[$k]
+          if ($row.kind -eq 'hf-file' -and $row.dest -eq $file) { $match = $k; break }
+        }
+        if ($match) { if (-not $keys.Contains($match)) { [void]$keys.Add($match) } }
+        elseif (-not $unresolved.Contains($file)) { [void]$unresolved.Add($file) }
+      }
+      return
+    }
+    if ($node -is [System.Collections.IEnumerable]) { foreach ($v in $node) { & $walk $v }; return }
+    if ($node -is [System.Management.Automation.PSCustomObject]) { foreach ($p in $node.PSObject.Properties) { & $walk $p.Value } }
+  }
+  foreach ($layer in $layers) { & $walk $layer }
+  return [pscustomobject]@{ Keys = @($keys); Unresolved = @($unresolved) }
+}
+
 # Test seam: OFFLOAD_INSTALL_DOT_SOURCE=1 -> define the pure helpers above and
 # return before ANY main-flow work (no dirs, no transcript, no detection). Used
 # by setup/tests/install-cuda-build.test.ps1 + install-config-seed.test.ps1 +
@@ -2018,7 +2228,41 @@ if ($env:OFFLOAD_INSTALL_DOT_SOURCE -eq '1') { return }
 # ---------------------------------------------------------------------------
 # Resolve config
 # ---------------------------------------------------------------------------
-if ($env:OFFLOAD_HOME) { $HOME_DIR = $env:OFFLOAD_HOME } else { $HOME_DIR = Join-Path $HOME 'offload-stack' }
+# Fail before anything is written or downloaded: see Get-ConfigEnvShadow.
+if (-not $RenderOnly) {
+  $cfgShadow = Get-ConfigEnvShadow -EnvValue $env:LOCAL_OFFLOAD_CONFIG -ConfigPath (Join-Path (Join-Path $HOME '.local-offload') 'config.json')
+  if ($cfgShadow) {
+    if ($env:OFFLOAD_ALLOW_CONFIG_ENV -eq '1') { Write-Host "NOTE  $cfgShadow" -ForegroundColor Yellow } else { throw $cfgShadow }
+  }
+}
+$script:homePickedRoot = ''
+if ($env:OFFLOAD_HOME) { $HOME_DIR = $env:OFFLOAD_HOME }
+elseif ($RenderOnly) { $HOME_DIR = Join-Path $HOME 'offload-stack' }
+else {
+  $profileHome = Join-Path $HOME 'offload-stack'
+  $hc = Get-InstallHomeChoice -Volumes (Get-InstallVolumes) -OsDrive $env:SystemDrive -AllowOS ($env:OFFLOAD_ALLOW_OS_DATA -eq '1') -ProfileHome $profileHome `
+    -ProfileHasInstall ((Test-Path (Join-Path $profileHome 'installed.json')) -or (Test-Path (Join-Path $profileHome 'llama-swap.yaml')))
+  if ($hc.Error) { throw "install home: $($hc.Error)" }
+  $HOME_DIR = $hc.Home
+  $script:homePickedRoot = $hc.Root
+  Write-Host "install home: $HOME_DIR ($($hc.Because))" -ForegroundColor White
+  if ($hc.Persist) {
+    # selftest, doctor, update and report find the install through this; set here so a crash mid-install still finds it.
+    [Environment]::SetEnvironmentVariable('OFFLOAD_HOME', $HOME_DIR, 'User')
+    $env:OFFLOAD_HOME = $HOME_DIR
+    Write-Host "      OFFLOAD_HOME=$HOME_DIR saved for this user; a shell opened before now does not have it" -ForegroundColor DarkGray
+  }
+}
+if (-not $RenderOnly) {
+  $toolCaches = Get-ToolCacheEnv -HomeDir $HOME_DIR -OsDrive $env:SystemDrive
+  foreach ($k in @($toolCaches.Keys)) {
+    # An operator's own cache setting stands. TEMP and TMP are always set by Windows, so those two always move.
+    if ($k -notin @('TEMP', 'TMP') -and (Test-Path "Env:$k")) { continue }
+    New-Item -ItemType Directory -Force -Path $toolCaches[$k] | Out-Null
+    Set-Item -Path "Env:$k" -Value $toolCaches[$k]
+  }
+  if (@($toolCaches.Keys).Count -gt 0) { Write-Host "      tool caches and temp: $(Join-Path $HOME_DIR 'cache')" -ForegroundColor DarkGray }
+}
 # HAILO_HOME must ALWAYS be non-empty (Task 5 review finding: an empty value expands
 # __HAILO_HOME__ to "" and silently produces the plausible-wrong "/hailo-http.cmd").
 # Set here, beside HOME_DIR, so EVERY path that can reach the seed merge has it.
@@ -2133,6 +2377,81 @@ function Test-Go126 {
   if ($parts.Count -lt 2) { return $false }
   return ([int]$parts[0] -gt 1) -or ([int]$parts[0] -eq 1 -and [int]$parts[1] -ge 26)
 }
+# The repo VERSION file is the renderer's REQUIRED version. A harness exe whose
+# embedded templates/structs predate the on-disk profiles.json renders it wrong
+# silently (an unknown include_qwen38 is dropped by the old struct, so the yaml
+# loses entries Step 5 just downloaded 18.8GB for) — every consumer below
+# (Resolve-HarnessExe, the Step 6 refusal, Step 7's rebuild gate) compares
+# against this one value.
+$versionFile = Join-Path $repoRoot 'VERSION'
+if (-not (Test-Path $versionFile)) { throw "no VERSION file at $versionFile - cannot version-gate the renderer" }
+$repoVersion = (Get-Content -Raw $versionFile).Trim()
+
+# Get-HarnessExeVersion reads what a built exe says it is (`local-offload <ver>`).
+# $null on any failure (missing exe, an exe too old to answer) - callers treat
+# $null as a mismatch, so a broken/ancient binary takes the rebuild path.
+# NB: the output is drained into an array, NOT piped through Select-Object -First 1
+# - an early pipeline stop kills the native process and leaves $LASTEXITCODE unset,
+# which read as a failure and sent every render down the version-mismatch throw.
+function Get-HarnessExeVersion {
+  param([string]$Exe)
+  if (-not ($Exe -and (Test-Path $Exe))) { return $null }
+  try {
+    $out = @(& $Exe --version 2>$null)
+    if ($LASTEXITCODE -ne 0 -or $out.Count -lt 1 -or -not $out[0]) { return $null }
+    return ("$($out[0])" -split '\s+')[-1].Trim()   # last token: the format may grow a prefix
+  } catch { return $null }
+}
+
+# Resolve-HarnessExe returns a local-offload.exe able to render a serving config.
+# Step 6 delegates rendering to it, but Step 7 is what BUILDS the installed copy, so
+# at Step 6 time there may not be one yet. Resolution order, cheapest first:
+#   1. $env:OFFLOAD_HARNESS_EXE  - an explicit override; render.tests.ps1 builds once
+#                                  and points every case at it instead of paying a
+#                                  build per render.
+#   2. the already-installed exe - ONLY when its --version matches the repo VERSION
+#                                  file. A stale installed exe on a re-install is the
+#                                  version-skew trap above; it falls through to 3.
+#   3. `go build` into a temp dir - Go is a verified prereq well before Step 6, and
+#                                  this touches NO install artifact, which keeps
+#                                  -RenderOnly side-effect-free with respect to the
+#                                  install tree (it is no longer build-free, and the
+#                                  header says so).
+function Resolve-HarnessExe {
+  if ($env:OFFLOAD_HARNESS_EXE -and (Test-Path $env:OFFLOAD_HARNESS_EXE)) { return $env:OFFLOAD_HARNESS_EXE }
+  $installed = Join-Path (Join-Path $HOME_DIR 'harness') 'local-offload.exe'
+  if ((Test-Path $installed) -and ((Get-HarnessExeVersion $installed) -eq $repoVersion)) { return $installed }
+  if ($script:tmpRenderExe -and (Test-Path $script:tmpRenderExe)) { return $script:tmpRenderExe }
+  $repoRoot = Split-Path -Parent $scriptDir
+  Get-ChildItem -LiteralPath ([System.IO.Path]::GetTempPath()) -Filter 'offload-render-*.exe' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue   # an earlier run that died
+  $tmpExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".exe")
+  Push-Location $repoRoot
+  # `go build` writes "go: downloading <module>" to STDERR on a box whose module cache is
+  # cold (every fresh install), and under this file's $ErrorActionPreference='Stop' a
+  # stderr line merged by 2>&1 is a TERMINATING NativeCommandError: the first fresh Windows
+  # box (an RTX 5080 desktop, 2026-11-04) died here with the build still running. Only the
+  # exit code decides a build; stderr is its log.
+  $prevEapGo = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $buildOut = @(& go build -o $tmpExe . 2>&1 | ForEach-Object { "$_" })
+    $goRc = $LASTEXITCODE
+  } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
+  if ($goRc -ne 0) { throw "cannot build the renderer from $repoRoot ($goRc): $($buildOut -join ' ')" }
+  if (-not (Test-Path $tmpExe)) { throw "go build reported success but produced no $tmpExe" }
+  $script:tmpRenderExe = $tmpExe
+  return $tmpExe
+}
+
+# The temp renderer has no job once the installed exe exists, or once a dry run has rendered.
+function Remove-TempRenderer {
+  if ($script:tmpRenderExe) {
+    Remove-Item -LiteralPath $script:tmpRenderExe -Force -ErrorAction SilentlyContinue
+    $script:tmpRenderExe = $null
+  }
+}
+
+
 if (-not $RenderOnly) {
 $wingetFlags = @('--accept-package-agreements', '--accept-source-agreements', '--silent')
 Step 'prereq: Git' `
@@ -2153,6 +2472,28 @@ Step 'prereq: Go >=1.26' `
     Update-SessionPath
     if (-not (Test-Go126)) { throw "Go still <1.26 after winget install + PATH refresh" }
   }
+# The media and compose lanes spawn ffmpeg and ffprobe, and nothing else on this path installs them, so on a clean box
+# every one of those routes read BOUND-BUT-MISSING. Not fatal: the text and vision seats serve without it, and a metered
+# run (OFFLOAD_WITH_MEDIA=0) asked for no media.
+if ($env:OFFLOAD_WITH_MEDIA -ne '0') {
+  Step 'prereq: ffmpeg' `
+    { [bool](Get-Command ffmpeg -ErrorAction SilentlyContinue) -and [bool](Get-Command ffprobe -ErrorAction SilentlyContinue) } `
+    {
+      $ffmpegWhy = ''
+      if (-not (Get-Command winget -ErrorAction SilentlyContinue)) { $ffmpegWhy = 'winget is unavailable' }
+      else {
+        & winget install --id Gyan.FFmpeg -e --source winget @wingetFlags
+        if ($LASTEXITCODE -ne 0) { $ffmpegWhy = "winget install Gyan.FFmpeg failed (exit $LASTEXITCODE)" }
+        Update-SessionPath
+        if (-not $ffmpegWhy -and -not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) { $ffmpegWhy = 'ffmpeg is still not on PATH after winget install + PATH refresh' }
+      }
+      if ($ffmpegWhy) { Write-Host "WARN  ffmpeg: $ffmpegWhy. Install it and put it on PATH; until then the media, compose, video, animate and audio routes defer." -ForegroundColor Yellow }
+    }
+}
+# Build the renderer now. A module whose Go toolchain cannot be fetched (go.mod's floor is a patch level above what
+# Test-Go126 reads; GOTOOLCHAIN=local, a blocked proxy) or a tree that does not compile fails here, in the first
+# minutes, instead of after tens of GB of weights.
+Step 'preflight: build the renderer' { $false } { $null = Resolve-HarnessExe }
 
 # ---------------------------------------------------------------------------
 # Step 3: llama.cpp binaries for the backend (+ cudart for CUDA)
@@ -2291,7 +2632,8 @@ foreach ($key in $modelKeys) { Invoke-ModelInstall -Key $key -StepPrefix 'model'
 # Step 5b (J2): media tier - stable-diffusion.cpp (Vulkan) + the image roster.
 # Default gate: ON for the AMD/Vulkan profiles (amd-*: the tier this leg was built
 # for), OFF elsewhere. OFFLOAD_WITH_MEDIA=1 forces on any box (sd.cpp runs on any
-# Vulkan GPU incl. NVIDIA); =0 forces off (metered links - the lead set is ~10GB).
+# Vulkan GPU incl. NVIDIA); =0 forces off (metered links - the image set is ~10GB, and a
+# tier that also binds video, animate, voice and music brings ~28GB more).
 # OFFLOAD_MEDIA_EXTRAS=1 additionally pulls SD1.5 + SDXL base + fp16-fix VAE.
 # ---------------------------------------------------------------------------
 $withMedia = ($profileId -match '^amd-rdna3')
@@ -2302,74 +2644,78 @@ if ($withMedia) {
   Invoke-EngineInstall -Keys @('sdcpp-vulkan') -Dest $sdcppDir -ExeName 'sd-cli.exe' -Label "sd.cpp (vulkan) -> $sdcppDir"
   $mediaKeys = @('model-zimage', 'model-zimage-llm', 'model-zimage-vae')
   if ($env:OFFLOAD_MEDIA_EXTRAS -eq '1') { $mediaKeys += @('model-sd15', 'model-sdxl', 'model-sdxl-vae') }
+  # Everything else the tier's seed binds: the seed is the one list, so a route cannot be seeded with no way to its files.
+  if ($profileId -and (Test-Path $profilesJson)) {
+    $mediaProfiles = (Get-Content -Raw $profilesJson | ConvertFrom-Json).profiles
+    if ($mediaProfiles.PSObject.Properties[$profileId]) {
+      $seedWeights = Get-SeedWeightKeys -ProfileRow $mediaProfiles.$profileId -Sources $SOURCES -RamTier $ramTier
+      $mediaKeys = @($mediaKeys + @($seedWeights.Keys) | Select-Object -Unique)
+      foreach ($file in @($seedWeights.Unresolved)) {
+        Write-Host "NOTE  seed file $file has no source in this installer; the route that binds it reads BOUND-BUT-MISSING until it is placed in $modelDir" -ForegroundColor Yellow
+      }
+    }
+  }
   foreach ($key in $mediaKeys) { Invoke-ModelInstall -Key $key -StepPrefix 'media model' }
 } else {
   Write-Host "SKIP  media tier (profile=$(if ($profileId) { $profileId } else { '(none)' }) is not amd-*; set OFFLOAD_WITH_MEDIA=1 to install sd.cpp + the image roster on any Vulkan-capable box)" -ForegroundColor DarkGray
 }
+# ---------------------------------------------------------------------------
+# Step 5c: what the tier's declared seats need. `install render` emits the vision and stt seats from media_seats and
+# only warned about their files, so every Windows box reached those routes by hand. Their weights now come from the
+# seats themselves, and on a Vulkan box the speech seat's engine is built here, since whisper.cpp ships no Windows
+# Vulkan binary. OFFLOAD_WITH_MEDIA=0 skips this too (metered links).
+# ---------------------------------------------------------------------------
+if ($profileId -and (Test-Path $profilesJson) -and $env:OFFLOAD_WITH_MEDIA -ne '0') {
+  $seatProfiles = (Get-Content -Raw $profilesJson | ConvertFrom-Json).profiles
+  if ($seatProfiles.PSObject.Properties[$profileId]) {
+    $seatRow = $seatProfiles.$profileId
+    $seatWeights = Get-SeatWeightKeys -ProfileRow $seatRow -Sources $SOURCES
+    foreach ($key in @($seatWeights.Keys)) { Invoke-ModelInstall -Key $key -StepPrefix 'seat weight' }
+    foreach ($file in @($seatWeights.Unresolved)) {
+      Write-Host "NOTE  seat file $file has no source in this installer; the seat that names it stays unserved until it is placed in $modelDir" -ForegroundColor Yellow
+    }
+    $sttSeat = @(@($seatRow.media_seats) | Where-Object { "$($_.kind)" -eq 'stt' }) | Select-Object -First 1
+    if ($backend -eq 'vulkan') {
+      # The engines with no Windows Vulkan binary this tier uses, read from what it binds. The seed layers count only when
+      # this box's RAM band applies them.
+      $engineBuilds = New-Object System.Collections.ArrayList
+      if ($sttSeat) { [void]$engineBuilds.Add('whisper') }
+      $engineLayers = @($seatRow.config_seed)
+      if ($ramTier -in @('low', 'mid', 'high') -and $seatRow.PSObject.Properties['config_seed_ram_low_up']) { $engineLayers += $seatRow.config_seed_ram_low_up }
+      if ($ramTier -in @('mid', 'high') -and $seatRow.PSObject.Properties['config_seed_ram_mid_high']) { $engineLayers += $seatRow.config_seed_ram_mid_high }
+      foreach ($layer in $engineLayers) {
+        if ($layer -and "$($layer.animategen_depth_bin)" -like '__OFFLOAD_HOME__/build/*' -and -not $engineBuilds.Contains('da3')) { [void]$engineBuilds.Add('da3') }
+        if ($layer -and "$($layer.audiocpp_bin)" -like '__OFFLOAD_HOME__/build/*' -and -not $engineBuilds.Contains('audiocpp')) { [void]$engineBuilds.Add('audiocpp') }
+      }
+      # audio.cpp's Chatterbox has no voice of its own. The seed names a reference under <home>\voices, and this box's own
+      # Windows voice speaks it: nothing is downloaded, and no real person's voice becomes the default. If it cannot be made
+      # the voice route reads BOUND-BUT-MISSING, by name.
+      foreach ($layer in $engineLayers) {
+        if ($layer -and "$($layer.voicegen_ref)" -like '__OFFLOAD_HOME__/voices/*') {
+          $voiceRef = Join-Path $HOME_DIR ("$($layer.voicegen_ref)".Replace('__OFFLOAD_HOME__/', '') -replace '/', '\')
+          Step 'default voice reference (spoken by this box''s Windows voice)' { Test-Path -LiteralPath $voiceRef } {
+            try { New-VoiceReference -Path $voiceRef }
+            catch { Write-Host "WARN  could not make $voiceRef ($($_.Exception.Message)). The voice route reads BOUND-BUT-MISSING until a wav is placed there or voicegen_ref is rebound." -ForegroundColor Yellow }
+          }
+        }
+      }
+      $engineScript = Join-Path $scriptDir 'build-engine-vulkan.ps1'
+      foreach ($engine in @($engineBuilds)) {
+        Step "engine: $engine (Vulkan, built on this box)" { $false } {
+          # Its own process: the build puts a compiler first on its PATH and lowers its own priority. A failed build does
+          # not end the install: the text seats still serve, and the route it feeds reads BOUND-BUT-MISSING and fails the
+          # acceptance gate, by name.
+          $prevEapBuild = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          try { & (Join-Path $PSHOME 'powershell.exe') -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $engineScript -Engine $engine -HomeDir $HOME_DIR }
+          finally { $ErrorActionPreference = $prevEapBuild }
+          if ($LASTEXITCODE -ne 0) { Write-Host "WARN  the $engine build failed (exit $LASTEXITCODE); the log is above. The routes it feeds read BOUND-BUT-MISSING until it builds." -ForegroundColor Yellow }
+        }
+      }
+    }
+  }
+}
 }  # end if (-not $RenderOnly) — Steps 2-5 (artifact acquisition)
-
-# The repo VERSION file is the renderer's REQUIRED version. A harness exe whose
-# embedded templates/structs predate the on-disk profiles.json renders it wrong
-# silently (an unknown include_qwen38 is dropped by the old struct, so the yaml
-# loses entries Step 5 just downloaded 18.8GB for) — every consumer below
-# (Resolve-HarnessExe, the Step 6 refusal, Step 7's rebuild gate) compares
-# against this one value.
-$versionFile = Join-Path $repoRoot 'VERSION'
-if (-not (Test-Path $versionFile)) { throw "no VERSION file at $versionFile - cannot version-gate the renderer" }
-$repoVersion = (Get-Content -Raw $versionFile).Trim()
-
-# Get-HarnessExeVersion reads what a built exe says it is (`local-offload <ver>`).
-# $null on any failure (missing exe, an exe too old to answer) - callers treat
-# $null as a mismatch, so a broken/ancient binary takes the rebuild path.
-# NB: the output is drained into an array, NOT piped through Select-Object -First 1
-# - an early pipeline stop kills the native process and leaves $LASTEXITCODE unset,
-# which read as a failure and sent every render down the version-mismatch throw.
-function Get-HarnessExeVersion {
-  param([string]$Exe)
-  if (-not ($Exe -and (Test-Path $Exe))) { return $null }
-  try {
-    $out = @(& $Exe --version 2>$null)
-    if ($LASTEXITCODE -ne 0 -or $out.Count -lt 1 -or -not $out[0]) { return $null }
-    return ("$($out[0])" -split '\s+')[-1].Trim()   # last token: the format may grow a prefix
-  } catch { return $null }
-}
-
-# Resolve-HarnessExe returns a local-offload.exe able to render a serving config.
-# Step 6 delegates rendering to it, but Step 7 is what BUILDS the installed copy, so
-# at Step 6 time there may not be one yet. Resolution order, cheapest first:
-#   1. $env:OFFLOAD_HARNESS_EXE  - an explicit override; render.tests.ps1 builds once
-#                                  and points every case at it instead of paying a
-#                                  build per render.
-#   2. the already-installed exe - ONLY when its --version matches the repo VERSION
-#                                  file. A stale installed exe on a re-install is the
-#                                  version-skew trap above; it falls through to 3.
-#   3. `go build` into a temp dir - Go is a verified prereq well before Step 6, and
-#                                  this touches NO install artifact, which keeps
-#                                  -RenderOnly side-effect-free with respect to the
-#                                  install tree (it is no longer build-free, and the
-#                                  header says so).
-function Resolve-HarnessExe {
-  if ($env:OFFLOAD_HARNESS_EXE -and (Test-Path $env:OFFLOAD_HARNESS_EXE)) { return $env:OFFLOAD_HARNESS_EXE }
-  $installed = Join-Path (Join-Path $HOME_DIR 'harness') 'local-offload.exe'
-  if ((Test-Path $installed) -and ((Get-HarnessExeVersion $installed) -eq $repoVersion)) { return $installed }
-  $repoRoot = Split-Path -Parent $scriptDir
-  $tmpExe = Join-Path ([System.IO.Path]::GetTempPath()) ("offload-render-" + [guid]::NewGuid().ToString('N').Substring(0,8) + ".exe")
-  Push-Location $repoRoot
-  # `go build` writes "go: downloading <module>" to STDERR on a box whose module cache is
-  # cold (every fresh install), and under this file's $ErrorActionPreference='Stop' a
-  # stderr line merged by 2>&1 is a TERMINATING NativeCommandError: the first fresh Windows
-  # box (an RTX 5080 desktop, 2026-11-04) died here with the build still running. Only the
-  # exit code decides a build; stderr is its log.
-  $prevEapGo = $ErrorActionPreference
-  $ErrorActionPreference = 'Continue'
-  try {
-    $buildOut = @(& go build -o $tmpExe . 2>&1 | ForEach-Object { "$_" })
-    $goRc = $LASTEXITCODE
-  } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
-  if ($goRc -ne 0) { throw "cannot build the renderer from $repoRoot ($goRc): $($buildOut -join ' ')" }
-  if (-not (Test-Path $tmpExe)) { throw "go build reported success but produced no $tmpExe" }
-  return $tmpExe
-}
 
 # ---------------------------------------------------------------------------
 # Step 6: render llama-swap.yaml PROFILE-DRIVEN (H2). The template is chosen by
@@ -2423,6 +2769,61 @@ if ($env:OFFLOAD_EG2_LLAMA_BIN) {
   }
   $eg2Bin = $eg2Dir.Replace('\', '/').TrimEnd('/')
 }
+# The render's inputs, one list for the render itself and for the verdict on an existing file.
+function Get-RenderArgs {
+  $renderArgs = @(
+    'install', 'render',
+    '--os', 'windows',
+    '--llama-bin', $llamaDir.Replace('\', '/'),
+    '--models', $modelDir.Replace('\', '/'),
+    '--home', $HOME_DIR.Replace('\', '/'),
+    '--listen', '127.0.0.1:11436',
+    '--out', $yamlDest,
+    '--root', (Split-Path -Parent $scriptDir)
+  )
+  # The embeddinggemma2 entry's own build (OFFLOAD_EG2_LLAMA_BIN), only when the operator set one.
+  if ($eg2Bin) { $renderArgs += @('--llama-bin-eg2', $eg2Bin) }
+  # An unknown/absent profile still renders: the binary carries the same off-matrix
+  # backend defaults this script used to hold, keyed by the TEMPLATE's backend.
+  if ($pp.known -and $profileId) { $renderArgs += @('--profile', $profileId) }
+  else { $renderArgs += @('--fallback-backend', $tplBackend) }
+  # --threads matters only where the template carries the __NTHREADS__ token: the cpu
+  # backend's entries and, since ADR 0080, the RAM-spill agent seat of the cuda template
+  # (the spilled experts run on those threads). The value is PHYSICAL cores - the value
+  # this script has always used. The bake's own thread count is not recorded in the repo,
+  # so the spill seat's --threads is the renderer's input, not a measured literal.
+  $cores = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum
+  if (-not $cores -or $cores -lt 1) { $cores = [Environment]::ProcessorCount }
+  $renderArgs += @('--threads', "$cores")
+  # The RAM gate on the 26B lives in the binary now, but the VALUE is this script's:
+  # it resolves ram_tier from the detect verdict (or OFFLOAD_RAM_TIER), defaulting to
+  # 'min'. Passing it keeps the gate byte-identical to what this script used to do
+  # itself - cpu_moe needs a real RAM path and is dropped on low/min.
+  if ($ramTier) { $renderArgs += @('--ram-tier', $ramTier) }
+  return ,$renderArgs
+}
+
+# The re-run half of Step 6's SKIP: the file against what THIS install's inputs render. MATCH keeps it. STALE re-renders
+# (a promoted profile, a new seat); the action keeps the old file beside the new one. HAND-EDITED keeps it and says so,
+# because re-rendering destroys somebody's edit; OFFLOAD_RERENDER=1 is the explicit way past that. UNSTAMPED predates
+# the stamp, so the content probes above it decide. A render that refuses goes to the action, which reports it by name.
+function Test-YamlRenderCurrent {
+  $stateArgs = (Get-RenderArgs) + '--state'
+  $exe = Resolve-HarnessExe
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { $lines = @(& $exe @stateArgs 2>$null | ForEach-Object { "$_" }); $rc = $LASTEXITCODE } finally { $ErrorActionPreference = $prevEap }
+  if ($rc -ne 0) { return $false }
+  $verdict = [string](@($lines | Where-Object { $_ -match '^(MATCH|STALE|UNSTAMPED|HAND-EDITED|MISSING)\b' }) | Select-Object -First 1)
+  if ($verdict -match '^STALE') { Write-Host "      $verdict" -ForegroundColor Yellow; return $false }
+  if ($verdict -match '^HAND-EDITED') {
+    if ($env:OFFLOAD_RERENDER -eq '1') { Write-Host "      $verdict" -ForegroundColor Yellow; return $false }
+    Write-Host "WARN  $verdict" -ForegroundColor Yellow
+    Write-Host "      keeping it, so this box does not serve what the profile says. To replace it with the render (the old file is kept beside it): set OFFLOAD_RERENDER=1 and run the installer again." -ForegroundColor Yellow
+  }
+  return $true
+}
+
 Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $profileId } else { '(defaults)' }) ctx=$(if ($pp.known) { $pp.ctx } else { 'template' }) kv=$(if ($pp.known) { $pp.kv_k } else { 'template' }) 26b=$(if ($pp.known) { $pp.moe_mode } else { 'template' }))" `
   {
     (Test-Path $yamlDest) -and
@@ -2438,7 +2839,8 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     # Adding the seat's __TOKEN__ pair to the regex above does NOT catch this: Render
     # refuses to emit a leftover token, so a rendered file can never contain one - that
     # list only detects hand-edited files. This has to be a CONTENT probe.
-    (@($gatedSeats.GetEnumerator() | Where-Object { $_.Value -and -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $_.Key -Quiet) }).Count -eq 0)
+    (@($gatedSeats.GetEnumerator() | Where-Object { $_.Value -and -not (Select-String -Path $yamlDest -SimpleMatch -Pattern $_.Key -Quiet) }).Count -eq 0) -and
+    (Test-YamlRenderCurrent)
   } `
   {
     # DELEGATED to `local-offload install render` (ADR 0021). This script used to
@@ -2448,6 +2850,11 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     # `-match '^blackwell-'` branch that a Linux install of the same tier never got.
     # ONE renderer, in the binary, consumed by both wrappers - which is what section 3
     # of the first-class-install plan always described.
+    if ((Test-Path $yamlDest) -and -not $RenderOnly) {
+      $yamlPrev = "$yamlDest.prev-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+      Copy-Item -LiteralPath $yamlDest -Destination $yamlPrev -Force
+      Write-Host "      old config kept as $yamlPrev; a running llama-swap serves the old one until it restarts" -ForegroundColor DarkGray
+    }
     $offloadRender = Resolve-HarnessExe
     # Belt for the version gate: Resolve-HarnessExe already refuses a stale
     # INSTALLED exe, so a mismatch here means the fallback build itself handed
@@ -2458,35 +2865,7 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
     if ($renderVersion -ne $repoVersion) {
       throw "renderer $offloadRender reports version '$renderVersion' but the repo VERSION is '$repoVersion' - a stale renderer silently drops newer profile fields; rebuild it (or point OFFLOAD_HARNESS_EXE at a current build) and re-run"
     }
-    $renderArgs = @(
-      'install', 'render',
-      '--os', 'windows',
-      '--llama-bin', $llamaDir.Replace('\', '/'),
-      '--models', $modelDir.Replace('\', '/'),
-      '--home', $HOME_DIR.Replace('\', '/'),
-      '--listen', '127.0.0.1:11436',
-      '--out', $yamlDest,
-      '--root', (Split-Path -Parent $scriptDir)
-    )
-    # The embeddinggemma2 entry's own build (OFFLOAD_EG2_LLAMA_BIN), only when the operator set one.
-    if ($eg2Bin) { $renderArgs += @('--llama-bin-eg2', $eg2Bin) }
-    # An unknown/absent profile still renders: the binary carries the same off-matrix
-    # backend defaults this script used to hold, keyed by the TEMPLATE's backend.
-    if ($pp.known -and $profileId) { $renderArgs += @('--profile', $profileId) }
-    else { $renderArgs += @('--fallback-backend', $tplBackend) }
-    # --threads matters only where the template carries the __NTHREADS__ token: the cpu
-    # backend's entries and, since ADR 0080, the RAM-spill agent seat of the cuda template
-    # (the spilled experts run on those threads). The value is PHYSICAL cores - the value
-    # this script has always used. The bake's own thread count is not recorded in the repo,
-    # so the spill seat's --threads is the renderer's input, not a measured literal.
-    $cores = (Get-CimInstance Win32_Processor | Measure-Object -Property NumberOfCores -Sum).Sum
-    if (-not $cores -or $cores -lt 1) { $cores = [Environment]::ProcessorCount }
-    $renderArgs += @('--threads', "$cores")
-    # The RAM gate on the 26B lives in the binary now, but the VALUE is this script's:
-    # it resolves ram_tier from the detect verdict (or OFFLOAD_RAM_TIER), defaulting to
-    # 'min'. Passing it keeps the gate byte-identical to what this script used to do
-    # itself - cpu_moe needs a real RAM path and is dropped on low/min.
-    if ($ramTier) { $renderArgs += @('--ram-tier', $ramTier) }
+    $renderArgs = Get-RenderArgs
 
     # A native command writing to stderr becomes a TERMINATING error under
     # $ErrorActionPreference='Stop', so warnings from the renderer would abort the
@@ -2511,6 +2890,7 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
 # -RenderOnly stops here: config rendered, no artifacts/build/manifest. Emit a
 # compact JSON verdict describing the resolved profile so a test can assert on it.
 if ($RenderOnly) {
+  Remove-TempRenderer
   $rv = @{ render_only = $true; backend = $backend; render_backend = $tplBackend;
     profile = $profileId; ram_tier = $ramTier; big_ram = $bigRam;
     agent_ctx_tokens = $agentCtxTokens; include_26b = [bool]$pp.include_26b;
@@ -2544,6 +2924,7 @@ Step 'build local-offload.exe' `
     if ($goRc -ne 0) { throw "go build (harness) failed (exit $goRc)" }
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
   }
+Remove-TempRenderer
 $manifestComponents['local-offload'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
 # Step 7a: the render runners beside the harness exe. The shipped defaults are
 # "render/*.mjs", resolved against the EXECUTABLE's directory (gpugen.ResolveScript),
@@ -2657,6 +3038,15 @@ Step 'harness config -> ~/.local-offload/config.json' `
       $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed $seedCond -OffloadHome $HOME_DIR
       Write-Host "      config_seed_ram_mid_high ($profileId, ram_tier=$ramTier): $(@($seedCond.PSObject.Properties.Name) -join ', ')" -ForegroundColor DarkGray
     }
+    # tierseed.Resolve's rule, which this raw merge bypasses: the tier's agent window unless a seed layer set one. Without
+    # it a Windows node advertises no context ceiling and the delegator's placement gate never selects it (config.go).
+    $ctxSeeded = @(@($seed, $seedCondLow, $seedCond) | Where-Object { $_ -and $_.PSObject.Properties['agent_ctx_tokens'] }).Count -gt 0
+    if (-not $ctxSeeded -and $pp.known -and [int]$agentCtxTokens -gt 0) {
+      $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ agent_ctx_tokens = [int]$agentCtxTokens })
+    }
+    # This step is the one place that knows which yaml the node serves. Without the key the node publishes no provenance
+    # for it, doctor's capacity row reads UNKNOWN, and a GPU lease cannot place a seat by its device pin (config.go).
+    $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ serving_config_path = $yamlDest.Replace([string][char]92, '/') })
     # A box off the tier matrix has no profile row, so no seed reseeds its escalation and reasoning rungs; the
     # template binds both to the 26B, which the CUDA fallback render no longer serves (0186 w4).
     $rungSeed = Get-OffMatrixRungSeed -ProfileRow $profRow -Include26B ([bool]$pp.include_26b)
@@ -2717,6 +3107,23 @@ Step 'harness config -> ~/.local-offload/config.json' `
       }
       $comfyProbeDir = if ($env:COMFY_DIR) { $env:COMFY_DIR } else { 'C:/ComfyUI' }
       $comfyVenv = Test-Path (Join-Path $comfyProbeDir '.venv/Scripts/python.exe')
+      # edit_image needs only Pillow, so a box without it gets a venv of its own under the install root. Never a pip into
+      # a python this install does not own.
+      if (-not $comfyVenv -and -not ($pyExe -and $pyHasPil)) {
+        $editVenv = Join-Path $HOME_DIR 'venvs\edit'
+        $editPy = Join-Path $editVenv 'Scripts\python.exe'
+        if (Get-Command uv -ErrorAction SilentlyContinue) {
+          if (-not (Test-Path $editPy)) { & uv venv $editVenv --quiet 2>$null | Out-Null }
+          if (Test-Path $editPy) { & uv pip install --quiet --python $editPy pillow 2>$null | Out-Null }
+        } elseif ($pyExe) {
+          if (-not (Test-Path $editPy)) { & $pyExe -m venv $editVenv 2>$null | Out-Null }
+          if (Test-Path $editPy) { & $editPy -m pip install --quiet pillow 2>$null | Out-Null }
+        }
+        if (Test-Path $editPy) {
+          & $editPy -c "import PIL" 2>$null | Out-Null
+          if ($LASTEXITCODE -eq 0) { $pyExe = $editPy; $pyHasPil = $true }
+        }
+      }
     } catch {
       # Engine-level throws (a vanished interpreter, AV blocking process creation,
       # a stale `py` registration) ignore $ErrorActionPreference — an optional
@@ -2763,8 +3170,12 @@ Step 'harness config -> ~/.local-offload/config.json' `
     $prevEapVol = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'   # a non-zero exit (no eligible volume) still prints the JSON the rule reads
     try { $volJson = (@(& $dataHomeExe @volArgs 2>$null) -join "`n") } catch { $volJson = '' } finally { $ErrorActionPreference = $prevEapVol }
-    $dh = Get-DataHome -VolumesJson $volJson -Override $env:OFFLOAD_DATA_HOME -OsDrive $env:SystemDrive -AllowOS $allowOsData
+    # When this run chose the stack's drive, the data goes with it: that choice already refused USB, which the volume probe cannot see.
+    $dataHomeGiven = $env:OFFLOAD_DATA_HOME
+    if (-not $dataHomeGiven -and $script:homePickedRoot) { $dataHomeGiven = "$script:homePickedRoot/local-offload" }
+    $dh = Get-DataHome -VolumesJson $volJson -Override $dataHomeGiven -OsDrive $env:SystemDrive -AllowOS $allowOsData
     if ($dh.Error) { throw "data home: $($dh.Error)" }
+    if (-not $env:OFFLOAD_DATA_HOME -and $script:homePickedRoot) { $dh.Because = 'the drive this install chose for the stack' }
     New-Item -ItemType Directory -Force -Path $dh.Home | Out-Null
     $cfgText = Merge-ConfigSeed -ConfigText $cfgText -Seed ([pscustomobject]@{ home = $dh.Home })
     $script:dataHomeChoice = $dh
@@ -2807,9 +3218,24 @@ if ($env:COMFY_PY)  { $comfyPy  = $env:COMFY_PY }  else { $comfyPy  = Join-Path 
 # bare or half-made C:/ComfyUI folder and no venv (the first fresh Windows install, an RTX 5080
 # desktop, 2026-11-04) reached Ensure-RunGraphDeps, which called the missing python.exe and
 # killed the install one step before the manifest and the verdict. Best-effort means SKIP.
-if ((Test-Path $comfyDir) -and (Test-Path $comfyPy)) {
+# A tier that blanks run_graph_script serves no run-graph route, so a ComfyUI on this box is the owner's own and this
+# installer has no reason to pip into it.
+$runGraphBlank = $false
+if (Test-Path $cfgDest) {
+  try {
+    $rgCfg = Get-Content -Raw $cfgDest | ConvertFrom-Json
+    $runGraphBlank = ($rgCfg.PSObject.Properties['run_graph_script'] -and -not $rgCfg.run_graph_script)
+  } catch { $runGraphBlank = $false }
+}
+if ($runGraphBlank) {
+  Write-Host "SKIP  run-graph deps (this tier serves no run-graph route; any ComfyUI on this box is left alone)" -ForegroundColor DarkGray
+} elseif ((Test-Path $comfyDir) -and (Test-Path $comfyPy)) {
   Write-Host "DO    run-graph deps (ComfyUI at $comfyDir)" -ForegroundColor Cyan
-  $rgLog = Ensure-RunGraphDeps -ComfyPy $comfyPy -ComfyDir $comfyDir
+  # pip writes its 'not found' answer to stderr, which is a terminating error under this file's 'Stop': a box whose
+  # ComfyUI lacks comfy-cli died here, one step before the manifest. Only exit codes and throws decide in this helper.
+  $prevEapRg = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try { $rgLog = Ensure-RunGraphDeps -ComfyPy $comfyPy -ComfyDir $comfyDir } finally { $ErrorActionPreference = $prevEapRg }
   Write-Host "OK    run-graph deps: $rgLog" -ForegroundColor Green
 } elseif (Test-Path $comfyDir) {
   Write-Host "SKIP  run-graph deps (a directory at $comfyDir but no venv python at $comfyPy; offload_run_graph will DEFER SATISFIER_UNAVAILABLE, not crash; set COMFY_PY to the ComfyUI python to enable)" -ForegroundColor DarkGray

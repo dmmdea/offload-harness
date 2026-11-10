@@ -2,6 +2,7 @@ package hwdetect
 
 import (
 	"bufio"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -152,14 +153,16 @@ func probeFallbackGPU() (name string, vramGb float64, vendorHint string) {
 	return "", 0, ""
 }
 
-// ramGb is total physical memory, rounded down — the dual-gpu band keys on it.
+// ramGb is total physical memory in whole GiB, rounded to nearest as setup/detect.ps1 does. Rounding down read a
+// 64 GB APU with an 8 GB carve-out (55.8 GiB visible) as 55, the low band, while the installer on the same box
+// said 56, mid: the two disagreed on the RAM gate of the 26B.
 func ramGb() int {
 	if runtime.GOOS == "windows" {
 		out, err := run(15*time.Second, "powershell", winexec.SafeScriptArgs(
 			"(Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory")...)
 		if err == nil {
 			if b, err := strconv.ParseFloat(strings.TrimSpace(out), 64); err == nil {
-				return int(b / (1 << 30))
+				return int(math.Round(b / (1 << 30)))
 			}
 		}
 		return 0
@@ -177,7 +180,7 @@ func ramGb() int {
 		fields := strings.Fields(sc.Text())
 		if len(fields) >= 2 {
 			kb, _ := strconv.ParseFloat(fields[1], 64)
-			return int(kb / (1 << 20))
+			return int(math.Round(kb / (1 << 20)))
 		}
 	}
 	return 0

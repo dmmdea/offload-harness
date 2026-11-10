@@ -282,6 +282,45 @@ func gpuLeaseCases() []gpuLeaseCase {
 			},
 		},
 		{
+			name:   "upscale_image (sdcpp)",
+			runner: "sdcpp-upscale.mjs",
+			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {
+				t.Helper()
+				cfg.UpscaleEngine = config.EngineSdcpp
+				cfg.UpscaleSdcppScript = stub
+				cfg.UpscaleSdcppBin, cfg.UpscaleSdcppModel, cfg.UpscaleSdcppBackend = igpuBin(t, dir, "sd-cli"), "u.safetensors", "vulkan0"
+				if err := os.WriteFile(filepath.Join(dir, "a.png"), []byte("x"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+			invoke: func(t *testing.T, p *Pipeline, dir string) string {
+				t.Helper()
+				return p.Run(context.Background(), core.Request{Task: core.TaskUpscaleImage,
+					Params: map[string]any{"image": filepath.Join(dir, "a.png")}}).Reason
+			},
+		},
+		{
+			name:   "inpaint_image (sdcpp)",
+			runner: "sdcpp-inpaint.mjs",
+			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {
+				t.Helper()
+				cfg.InpaintEngine = config.EngineSdcpp
+				cfg.InpaintSdcppScript = stub
+				cfg.InpaintSdcppBackend = "vulkan0"
+				cfg.SdcppBin, cfg.SdcppModel = igpuBin(t, dir, "sd-cli"), "m.gguf"
+				for _, n := range []string{"a.png", "m.png"} {
+					if err := os.WriteFile(filepath.Join(dir, n), []byte("x"), 0o644); err != nil {
+						t.Fatal(err)
+					}
+				}
+			},
+			invoke: func(t *testing.T, p *Pipeline, dir string) string {
+				t.Helper()
+				return p.Run(context.Background(), core.Request{Task: core.TaskInpaintImage, Input: "clean it",
+					Params: map[string]any{"image": filepath.Join(dir, "a.png"), "mask": filepath.Join(dir, "m.png")}}).Reason
+			},
+		},
+		{
 			name:   "generate_audio (voice, audiocpp)",
 			runner: "audiocpp-generate.mjs",
 			setup: func(t *testing.T, cfg *config.Config, stub, dir string) {

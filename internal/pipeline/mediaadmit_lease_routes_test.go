@@ -53,6 +53,8 @@ var leaseRoutes = []leaseRoute{
 	{"generate_audio (music)", "audiogen_timeout_sec", setAudioTimeout},
 	{"generate_video (sdcpp)", "videogen_timeout_sec", setVideoTimeout},
 	{"animate_character (sdcpp)", "animategen_timeout_sec", setAnimateTimeout},
+	{"upscale_image (sdcpp)", "upscale_timeout_sec", setUpscaleTimeout},
+	{"inpaint_image (sdcpp)", "inpaint_timeout_sec", setInpaintTimeout},
 	{"generate_audio (voice, audiocpp)", "audiogen_timeout_sec", setAudioTimeout},
 	{"generate_audio (music, audiocpp)", "audiogen_timeout_sec", setAudioTimeout},
 }

@@ -204,3 +204,11 @@ there could never match the prefix the node sends.
   `SweepKVSlotDir`).
 - `<node-f>`'s own re-run, on Vulkan, is still owed. Until a node's build reaches the floor, its
   render emits nothing and it behaves exactly as before.
+
+## Amendment 2026-11-10: a tier may carry its own figures
+
+`cache_ram_mib_by_ram_tier` may also sit inside a tier. A band the tier names wins over the top-level map;
+a band it does not name keeps the top-level figure (`cacheRAMForProfile` in `install_render.go`).
+The two unified-memory tiers, `amd-rdna3` and `amd-gcn`, name `mid: 8192`. On those boxes the memory of the card is the RAM of the host,
+so the 26B seat (about 17 GiB) and a 16384 MiB cache would together take about 33 GiB of a 56 GiB box that its owner also works on.
+8192 is the server default, so the floor rule holds. The figure is chosen, not measured against a contract stream.

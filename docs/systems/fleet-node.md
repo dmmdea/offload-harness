@@ -1276,6 +1276,50 @@ the identity the service runs as — `sudo -u <svc>` / the scheduled task's prin
 answers a question nobody asked. Relative script bindings resolve against the EXECUTABLE's
 directory, so run the INSTALLED binary, not a copy in /tmp.
 
+### `--render`: one real call per bound route
+
+Those checks prove the node CAN run its parts. They do not prove a route produces anything.
+A route can be derived as configured and still defer when it is called: the model is not
+in the roster, a script wants a binding the config lacks, a render comes out blank. So
+`--render` adds one real call per bound route, each checked against a known answer. A node
+is installed only when every route it binds has produced real output.
+
+Each call is this binary run again as a subprocess: the real CLI verb, `--json`, the same
+`--config`. It is not a mock and it does not call internals, so the call takes the GPU lease
+and passes admission exactly as a caller's would. The one exception is the embedding call,
+which has no verb: it posts to `/v1/embeddings` in this process, through the same lease
+fence. Every call is pinned to this node (`--route local`), so a fleet node can never answer
+for it.
+
+| group | the call | the check |
+|---|---|---|
+| `summarize` | a short embedded paragraph | non-empty, names a word of the paragraph |
+| `classify` | the same text, three labels | label is `documentation` |
+| `embed` | `/v1/embeddings`, the bound alias | one vector, length > 0 (only when the alias is in the live roster) |
+| `vision` | `vqa` and `ocr` on an embedded sign | OCR reads `OFFLOAD` and `HARNESS`; the red shape is a `circle` |
+| `stt` | `transcribe` an embedded speech sample | transcript has `country` and `ask` |
+| `agent` | one `delegate` run: 17 times 23 | the answer contains `391` |
+| `image` | `generate-image` at 512x512, fixed prompt and seed | a PNG, over 20 KB, more than 8 colours on a sample grid; `vqa` names a bicycle |
+| `video`, `animate`, `compose` | the smallest clip (17 frames, 256x256; a 2 s title card) | `ffprobe` finds a video stream with a duration; the runner's own black and frozen gate counts |
+| `voice`, `music` | a fixed sentence; 5 s of music | `ffprobe` finds an audio stream with a duration; the voice is transcribed back when `stt` is bound |
+| `edit`, `media` | resize a PNG; convert it with ffmpeg | the output decodes; the output exists |
+| `inpaint`, `upscale` | the embedded sign and a generated mask; scale 2 | the output decodes (upscale: larger than the source) |
+
+A result with `deferred: true`, `ok: false`, a non-zero exit or a failed content check is a
+`FAIL` with the reason. A route the config does not bind is a `SKIP` with the reason.
+Generative edit has no CLI verb and `run-graph` needs a graph file with no sensible default,
+so both `SKIP` with that reason. Each call gets the route's own config timeout, else 30 minutes.
+
+Flags: `--only a,b` runs the named groups (implies `--render`). `--list` prints each group,
+whether this config binds it and the exact command, and runs nothing (it implies `--render`
+and, with `--json`, prints the rows as JSON). `--out-dir DIR` keeps the outputs where a human
+can open them; the default is a new folder under the OS temp dir. The path is the
+`render outputs` row of the report, and nothing in it is ever deleted. A stale file from an
+earlier run cannot pass: an output older than its call fails.
+
+The calls load models, so run this on a node that is meant to take the GPU. It is slow by
+design: a cold video or animation render takes minutes.
+
 ## What a node advertises about its VRAM
 
 `/fleet/health` publishes four VRAM numbers, and only one of them is a safe divisor

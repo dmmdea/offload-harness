@@ -20,9 +20,10 @@ import (
 // shipped serving templates and not from a list of tiers, so a tier added later cannot drift from it.
 //
 // THE RULE. A tier seeds fleet_max_concurrent_jobs 1 when
-//   - it seeds an agent seat (agent_model): the rule is about the agent lane. amd-rdna3 and cpu seed none, so their
+//   - it seeds an agent seat (agent_model): the rule is about the agent lane. amd-rdna3 (base seed) and cpu seed none, so their
 //     agent lane would fall back to the workhorse (offload-e4b, also --parallel 1); whether they should seed a
-//     one-worker cap too is a separate decision, and this rule leaves them as they are;
+//     one-worker cap too is a separate decision, and this rule leaves them as they are. amd-rdna3's 64 GB band binds
+//     the 26B agent seat and its one-worker cap in config_seed_ram_mid_high;
 //   - it declares no vllm_seat: a tier that does is served by a vLLM seat when the box runs it (many slots),
 //     and its llama-swap agent entry is only the fallback, so a one-worker cap there is the opposite defect;
 //   - the agent seat, resolved through its aliases, is a llama.cpp entry of the tier's rendered template that

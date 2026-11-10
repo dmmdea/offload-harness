@@ -569,7 +569,7 @@ var compactKeep = []compactKeepEntry{
 	},
 	{
 		Tools:    []string{"offload_inpaint_image"},
-		Sentence: "On any failure (no SDXL-class inpaint binding on this machine, missing files, render error) it returns deferred:true.",
+		Sentence: "On any failure (no inpaint binding on this machine: an SDXL-class inpaint_* checkpoint, or inpaint_engine sdcpp; missing files, render error) it returns deferred:true.",
 		Why:      "the deferral protocol: the lane hands the work back as deferred:true and the caller does it another way",
 	},
 	{

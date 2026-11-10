@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/core"
+	"github.com/dmmdea/offload-harness/internal/gpugen"
 	"github.com/dmmdea/offload-harness/internal/mediaops"
 )
 
@@ -25,6 +26,9 @@ func (p *Pipeline) editConfig() mediaops.EditConfig {
 		// render/edit_image.py lives beside the render scripts this machine already
 		// resolved (imagegen_script is an absolute path on configured boxes).
 		worker = filepath.Join(filepath.Dir(p.cfg.ImageGenScript), "edit_image.py")
+	} else if script, err := gpugen.ResolveScript(filepath.Join("render", "edit_image.py")); err == nil {
+		// An sd.cpp tier binds no imagegen_script, and the route read CONFIGURED while every call deferred.
+		worker = script
 	}
 	return mediaops.EditConfig{
 		Python:      mediaops.ResolveEditPython(p.cfg.EditPython, p.cfg.ComfyDir),
