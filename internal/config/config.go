@@ -3276,6 +3276,34 @@ func (c Config) DynamicVRAMDisabled() bool {
 	return strings.Contains(extra, "--disable-dynamic-vram")
 }
 
+// ComfyReserveVRAM is the --reserve-vram a ComfyUI launched for this binding runs with when the extra args carry one
+// (comfy_extra_args, else the inherited COMFY_EXTRA_ARGS env, the same source DynamicVRAMDisabled reads): the LAST
+// `--reserve-vram v` or `--reserve-vram=v` token, because the extras are the tail of the launch argv and the runner's
+// own token before them loses. ok is false when the extras carry none; a token with no readable number reports ok with 0.
+func (c Config) ComfyReserveVRAM() (v float64, ok bool) {
+	extra := c.ComfyExtraArgs
+	if extra == "" {
+		extra = os.Getenv("COMFY_EXTRA_ARGS")
+	}
+	toks := strings.Fields(extra)
+	for i, t := range toks {
+		var val string
+		switch {
+		case t == "--reserve-vram":
+			if i+1 < len(toks) {
+				val = toks[i+1]
+			}
+		case strings.HasPrefix(t, "--reserve-vram="):
+			val = strings.TrimPrefix(t, "--reserve-vram=")
+		default:
+			continue
+		}
+		ok = true
+		v, _ = strconv.ParseFloat(val, 64)
+	}
+	return v, ok
+}
+
 // warnImageBindingTo carries the image seat's traps for one (effective) binding.
 // where is "" for the default binding (the message text is unchanged from before the
 // families existed) or `imagegen_families["x"]: ` for a named family.

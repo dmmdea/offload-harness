@@ -1417,6 +1417,13 @@ export async function ensureComfy(opts = {}) {
     const { outputDir, tempDir } = instancePaths(comfyDir, key);
     for (const d of [outputDir, tempDir]) { try { mkdirs(d); } catch {} }
   }
+  // A call that passed its own reserve while the extra args carry one: the extras are the argv tail, so theirs is live. Said once per launch;
+  // a call that passed nothing is not told (every default call on a box whose extras carry the reserve would be), and neither is one that
+  // passed the default 1.0 (the music runner passes that value on every call).
+  const launchExtraReserve = argvFlagValue(String(env.COMFY_EXTRA_ARGS || "").split(/\s+/).filter(Boolean), "--reserve-vram");
+  if (launchExtraReserve !== null && opts.reserveVram != null && Number(opts.reserveVram) !== 1 && Number(opts.reserveVram) !== Number(launchExtraReserve)) {
+    log(`COMFY-RESERVE-WARN: the extra args carry --reserve-vram ${launchExtraReserve}, which overrides this call's ${opts.reserveVram}; ${launchExtraReserve} is live`);
+  }
   const flags = launchFlags({ reserveVram, warm, extraArgs: env.COMFY_EXTRA_ARGS, profile, instance: key ? instance : null, comfyDir, warn: log, launch, idle: wantPack ? idleExt : null });
   // Applied only if launchFlags found the files: the child's env and the probe below follow what it really launched.
   const idleApplied = wantPack && flags.some(idleYamlToken);
