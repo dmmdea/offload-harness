@@ -7,6 +7,38 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.217.0] - 2026-11-10 - a reserve in the ComfyUI extra args keeps the kept instance; gpu reserve carries the instance; blackwell-16 seeds a 3 GB reserve
+
+### Fixed - a `--reserve-vram` in `comfy_extra_args` no longer restarts the kept ComfyUI on every call
+
+- **What was wrong.** A ComfyUI the harness launched stays up for 300 s after a job so the next call skips the cold start, and a call that needs another launch shape (another `--reserve-vram`, warm against single) restarts it. The comparison read the reserve the instance was launched with against the reserve the call itself asked for. The extra args are the tail of the launch argv, so with `comfy_extra_args: "--reserve-vram 3.0"` the instance runs with 3.0 whatever the call asks, and every later call found "launched with 3.0, this call needs 1.0" and restarted it. The other direction failed too: an instance launched before the reserve was added to the extra args kept the old reserve until it idled out.
+- **What it does.** The kept instance is compared against the reserve it would be launched with now: the one in `COMFY_EXTRA_ARGS` when there is one, else the call's own. A box that sets the reserve there keeps its instance from call to call, and changing it there restarts the kept instance once, on the next call.
+- **Checks.** On `<node-h>` (16 GB display card, `comfy_instance` set, `comfy_extra_args: "--reserve-vram 3.0"`), two `acceptance --only upscale` calls back to back as separate invocations. Installed 0.215.0 runners: 14 s and 16 s, and the process listening on the instance port changed between the calls. The same two calls through a copy of the runners with this change: 12 s and 3 s, one process, two prompts in its log.
+
+### Fixed - a command run under `gpu reserve` reaches the harness's own ComfyUI instance, not the one on 8188
+
+- **What was wrong.** `comfy_instance` (0.215.0) points every ComfyUI-backed route at the harness's own instance, so a box whose owner runs a ComfyUI on port 8188 is left alone. `local-offload gpu reserve -- <command>` built the command's environment from the caller's plus the lease variables and never added the instance. A runner started by hand that way (`gpu reserve -- node render/comfy-run-graph.mjs ...`, the form the runners themselves print and the guide gives for by-hand runs) resolved the unkeyed instance, found the owner's ComfyUI answering on 8188 and posted its graph there.
+- **What it does.** The wrapped command gets `COMFY_INSTANCE` and `COMFY_API` from the config when the config names an instance and the caller's environment sets neither. A caller that already sets one of the two keeps its own. A config with no `comfy_instance` changes nothing.
+- **Checks.** `gpu reserve --config <scratch> -- cmd /c "set COMFY_"` against a scratch lease folder: with `comfy_instance: "harness"` the command sees `COMFY_INSTANCE=harness` and `COMFY_API=http://127.0.0.1:8189`; without the key it sees neither; with `COMFY_API=http://127.0.0.1:8190` set by the caller it sees that endpoint and no instance name.
+
+### Fixed - a queued answer's `retry_after_sec` is inside the 30 s its place holds
+
+- **What was wrong.** 0.216.0 added `retry_after_sec` to the `gpu_queued` answer and worked it out as a busy answer does: 30 s under another door call, the holder's remaining declared term under a reserved lease. A place in line holds back later callers for 30 s after its last ask. A caller that slept on the figure came back exactly as its place stopped holding, or, behind a reserved lease, long after the token itself had run out (ten minutes).
+- **What it does.** The figure of a queued answer is 10 s at most, a third of the hold. A place is kept by asking again, and the ask itself waits `gpu_wait_ms` in line, so a short figure costs no extra calls. A busy answer's figure is unchanged.
+- **Checks.** The existing queued-answer test holds a card for an hour and now also fails when the figure reaches the hold (`TestTheQueuedAnswerStillNamesTheHolderAndWhenToComeBack`).
+
+### Fixed - the selftest's `ctx_sweep` no longer counts a context size that loaded but did not generate
+
+- **What was wrong.** `ctx_sweep` loads the resident model at 8K, 16K and 32K and generates at each; the largest size that works authorises the 32K promotion. Its probe returns `ok` once the server answers `/health`, also when the decode after it failed, and the sweep read only `ok`. A size whose first decode failed (where the large-context compute buffers are allocated) was recorded as working, with `tps n/a`. This is the sibling of the `fa_q8kv` defect fixed in 0.215.0: a probe with no generated tokens read as evidence.
+- **What it does.** A size counts only when the load came up and the warm decode produced tokens. A size that loaded and did not generate stops the sweep with `loaded but did not generate` and the probe's own detail, and is recorded `ok: false`.
+- **Checks.** On `<node-h>` the selftest with this change, canaries on: `ctx_sweep` 8K / 16K / 32K ok at 51.0 / 50.8 / 50.9 tok/s, verdict pass. The failing branch needs a decode that fails after a load that works and was not produced.
+
+### Changed - `blackwell-16` seeds a 3 GB ComfyUI VRAM reserve; the `<node-h>` report is from 0.215.0 with every media route bound
+
+- **What was wrong.** The tier is sized for a card that also drives the desktop, and its seed left ComfyUI at the runners' `--reserve-vram 1.0`. On `<node-h>` the desktop held 2.5 to 5.4 GB of the 16 GB card, the seeded generative edit loaded partially (12.7 GB on the card, 2.1 GB offloaded), the driver spilled into shared memory and sampling ran at 195 to 240 s/it.
+- **What it does.** `blackwell-16` seeds `comfy_extra_args: "--reserve-vram 3.0"`, which holds for every ComfyUI lane of the box. A fresh install gets it; an existing config is never touched, so an installed box sets the key by hand (the operator guide has a section for it). A headless 16 GB card gives up about 2 GB of placement room it does not need to and may clear the key. The 16 GB siblings were not measured and seed nothing.
+- **Checks.** Same box, same call, fresh instance at 3.0: 3.5 s/it, 71 s end to end, 14.5 GB dedicated at the peak, shared GPU memory flat. Gated at 3.0 on that box, each output opened or measured: generative edit, run-graph, video, animate, image, inpaint, upscale and music. Two reserve values were tried, not a sweep. `docs/tiers/reports/blackwell-16-node-h.md` now carries the `report` output of the box at 0.215.0 (every media route CONFIGURED, nothing BOUND-BUT-MISSING) and the day's measurements.
+
 ## [0.216.0] - 2026-11-10 - the CLI media verbs keep their place in line with --waiter-token
 
 ### Fixed - the CLI media verbs can keep their place in line, so a caller that waited is no longer passed by one that asks at once

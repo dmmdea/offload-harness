@@ -1,5 +1,0 @@
-### Fixed - the selftest's `ctx_sweep` no longer counts a context size that loaded but did not generate
-
-- **What was wrong.** `ctx_sweep` loads the resident model at 8K, 16K and 32K and generates at each; the largest size that works authorises the 32K promotion. Its probe returns `ok` once the server answers `/health`, also when the decode after it failed, and the sweep read only `ok`. A size whose first decode failed (where the large-context compute buffers are allocated) was recorded as working, with `tps n/a`. This is the sibling of the `fa_q8kv` defect fixed in 0.215.0: a probe with no generated tokens read as evidence.
-- **What it does.** A size counts only when the load came up and the warm decode produced tokens. A size that loaded and did not generate stops the sweep with `loaded but did not generate` and the probe's own detail, and is recorded `ok: false`.
-- **Checks.** On `<node-h>` the selftest with this change, canaries on: `ctx_sweep` 8K / 16K / 32K ok at 51.0 / 50.8 / 50.9 tok/s, verdict pass. The failing branch needs a decode that fails after a load that works and was not produced.
