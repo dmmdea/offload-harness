@@ -2399,8 +2399,15 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   numbers say: the lane's own growth is in no counter yet (`TestAWarmBackNeverRunsWhileALaneThatDeclaredHostRAMIsLive`).
 * **A refused warm stays owed.** The marker is left for the last holder, exactly as for the other refusals, and the seat
   loads on its next request. That request is a llama-swap load the lease system does not gate (see the reach note below):
-  refusing the warm keeps the harness from *adding* a load to a tight host, it does not stop a delegator that asks for the
-  seat.
+  refusing the warm keeps the harness from *adding* a load to a tight host. **A contract's own cold load is now gated by the
+  same rule** (`internal/pipeline/seathostram.go`, both contract doors: `runAgentTask` and the MCP `agent_run` door): a run
+  that finds the agent seat not ready, with no load in flight, asks the host before its warm-up starts the load, and when the
+  seat does not fit it defers as `capacity`, re-placeable, with a reason that starts `host RAM:`, so the delegator places it on
+  another node. A load already in flight, a seat already loaded and a model that is not the agent seat are not gated; a node
+  that states no `agent_seat_host_ram_gib` keeps the old behaviour (the warm-back's fail-closed default is a chosen figure).
+  Why: on the 3-card reference box, with about 80 GiB already committed by the desktop and its sessions, one contract's cold
+  load took the commit charge to 152.0 of 153.8 GiB (the page file had grown 7 GiB to make room). A request sent straight to
+  llama-swap, outside both doors, is still not gated.
 * **Not done, on purpose.** The owed warm is not counted as *pending* when another lease is admitted. The seat was unloaded to
   make room for that very lease, and its reload happens after the lease ends, so reserving room for it at the lease's grant
   would count the memory twice; the reload is admitted when it is attempted.
