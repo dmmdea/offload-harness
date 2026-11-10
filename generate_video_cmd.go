@@ -236,11 +236,11 @@ var generateVideoValueFlags = map[string]bool{
 func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (generateVideoCLI, error) {
 	fs := flag.NewFlagSet("generate-video", errorHandling)
 	fs.String("config", "", "config file path")
-	asJSON := fs.Bool("json", false, "print full result JSON")
+	asJSON := fs.Bool("json", false, "print full result JSON. A call that could not get the cards within gpu_wait_ms is a deferral, not an error: it exits 0 with \"ok\": false and \"deferred\": true and writes no file, so a script checks \"ok\" (or that the file exists) and asks again")
 	model := fs.String("model", "", "family override: wan | ltx25 | h3 | hunyuan (h3: still optional — t2v without). Empty = the machine's videogen_family seat (falls back to wan when no family is configured)")
 	negative := fs.String("negative", "", "hard exclusions, e.g. 'blurry, distorted'")
 	transformer := fs.String("transformer", "", "OPTIONAL per-request LTX-2.5 transformer file override (e.g. the bf16 transformer for one hero render — int8 stays this box's default; gap 5, bigger-models-2026-09-24.md). Wins over this box's (or the resolved family's) bound file; a no-op on any other family's graph")
-	frames := fs.Int("frames", 0, "frame count (16fps; 81 ≈ 5s is the native ceiling)")
+	frames := fs.Int("frames", 0, "frame count, played at the family's own frame rate (wan: 16 fps, and 81 frames, about 5 s, is its native ceiling; ltx25: this machine's videogen_fps)")
 	width := fs.Int("width", 0, "width px")
 	height := fs.Int("height", 0, "height px")
 	steps := fs.Int("steps", 0, "sampler steps (0 = builder default: wan 20 native / 8 fast)")
