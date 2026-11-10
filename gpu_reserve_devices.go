@@ -18,11 +18,13 @@ package main
 //   - Evidence from the wrapped command that cannot be turned into a card degrades to a
 //     whole-node lease WITH a note (the wider fence is the safe direction); it never
 //     fails a reserve that worked before.
-//   - Cards named with --devices are the operator's word: queued FIFO behind whoever
-//     holds them, display card included. `--cards` takes the non-display cards first and
-//     auto-assigns the display card only while it is idle (rule 2026-11-07), up to its cap
-//     (gpu_display_cap_pct, default 60), and only to a request that declares its footprint
-//     (--vram); a cap of 0 closes it (A-RAM-15).
+//   - Cards named with --devices are queued FIFO behind whoever holds them. `--cards` takes
+//     the non-display cards first and auto-assigns the display card only while it is idle
+//     (rule 2026-11-07), up to its cap (gpu_display_cap_pct, default 60), and only to a
+//     request that declares its footprint (--vram); a cap of 0 closes it (A-RAM-15). A NAMED
+//     set (--devices, or the cards the command pins itself to) that includes the display card
+//     is held to the same rule: it waits outside the line until the card is open to it, and
+//     the grant asks again (gpu_reserve_displaygate.go). Naming the card is not a way past it.
 //   - A busy card is a place in line: `--cards N` that cannot be met right now queues FIFO
 //     on a fixed set (the cards free right now first, topped up from the claimed ones that
 //     would fit) or polls until enough cards qualify for a reason a lease does not
@@ -57,6 +59,9 @@ type reserveDeviceFlags struct {
 	ramGiB    float64
 	// ramCommitGiB is the commit the job declares beside the working set ramGiB (0 = the same figure).
 	ramCommitGiB float64
+	// displayNamed: a named set the parent's plan saw include the display card, for the detached holder
+	// (gpu_reserve_displaygate.go), which then takes nothing on a card table it cannot read.
+	displayNamed bool
 }
 
 // devicePlan is the decision: a concrete set (IDs, nil = whole node), or an allocation

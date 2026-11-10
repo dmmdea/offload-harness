@@ -860,7 +860,7 @@ retry would hold the mutex against every other poller of the gate. What a media 
 
 | form | meaning |
 |---|---|
-| `gpu reserve --devices 0,GPU-aaaa ...` | exactly these cards (an nvidia-smi index or a UUID prefix of at least four characters; ambiguous or unknown is an error). The operator's word: the display card is allowed, and a busy card is a place in line, FIFO behind its holder. |
+| `gpu reserve --devices 0,GPU-aaaa ...` | exactly these cards (an nvidia-smi index or a UUID prefix of at least four characters; ambiguous or unknown is an error). A busy card is a place in line, FIFO behind its holder. A set that includes the display card is held to the display card's rule, as `--cards` is (below, "Named cards and the display card"). |
 | `gpu reserve --cards 2` or `--cards 1..3` | the allocator picks (below). The non-display cards are taken first. The display card is allocatable only while it is idle, up to `gpu_display_cap_pct` (default 60 percent of its VRAM, the desktop's own use included), only with a declared `--vram`, and never when the cap is 0 ("The display card is allocatable up to a cap", below). |
 | `gpu reserve --whole-node ...` | everything, as before. |
 | `gpu reserve ... -- <cmd>` | the cards `<cmd>` names itself: `CUDA_VISIBLE_DEVICES` (a UUID, or an index in PCI order when `CUDA_DEVICE_ORDER=PCI_BUS_ID`, else in ComfyUI order), else `--cuda-device N`, else `COMFY_CUDA_DEVICE`. Nothing named means the whole node. |
@@ -987,8 +987,8 @@ the footprint, as it always was.
   key, whatever the desk is doing.
 - **A footprint is needed to be held to a share.** A job that gives no `--vram` is not given the display card under a cap below 100
   (the layer's guard refuses a seat with no display footprint the same way); a media call declares no VRAM footprint, so the typed
-  media tools do not take the display card until a measured footprint is fed to the allocator. `--devices` names the card on the
-  operator's word and is never second-guessed.
+  media tools do not take the display card until a measured footprint is fed to the allocator. A request that NAMES the display
+  card (`--devices`, or the card its command pins itself to) is held to the same rule; see the next paragraph.
 - **An unknown display stays closed.** A reading that could not say which card the monitor is on marks every card `display-unknown`
   and none of them is handed out, whatever the cap.
 - **The cap bounds admission only.** Nothing limits a job after it is placed, so the footprint has to be a measured peak, and one
@@ -1038,8 +1038,25 @@ that may be the display card on a reading that could not say. The check runs wit
 be skipped by a lease that is mid-release; a refused grant is released at once and the request chooses again from the same
 fresh readings, so it takes another card it still fits, queues on what qualifies now, or keeps polling for the display card
 to qualify until its `--wait` ends. The second choice keeps the arrival time of the first (`Options.QueuedSince`), so the
-place in line is not lost to it. `--devices` is the operator's word and carries no check
-(`TestDesktopRefusalsAppliesTheCapAtGrantTime`).
+place in line is not lost to it (`TestDesktopRefusalsAppliesTheCapAtGrantTime`).
+
+**Named cards and the display card (2026-11-10).** A set the request names (`--devices`, the cards its command pins itself to,
+the cards a lost lease held when the reserve queues again, and the detached holder of any of them) that includes the display
+card, or a card of a reading that could not say which card the monitor is on, is held to the rule above
+(`gpu_reserve_displaygate.go`). Until then it was "the operator's word" and went straight into the line, and an agent's
+`--devices` lease rendered on the operator's screen while he was at the desk, to 83 % of its VRAM. Now:
+
+- While the card is not open (the operator at the desk, the card busy, a stale or unsure reading, the desktop past the cap) the
+  request waits, polling every 5 s for as long as `--wait` lasts, OUTSIDE the line, so it holds no place that keeps another
+  request off the other cards it named. It says so once per kind of refusal. With no wait left it is refused with the reason.
+- Once the card is open it joins the line with the grant-time check (`gpualloc.GrantCheck`); a turn that comes after the operator
+  is back is refused and the request waits again, keeping its arrival time.
+- Refused at once, because no wait changes it: `gpu_display_cap_pct: 0`, no `--vram` declared under a cap below 100, or a
+  `--vram` larger than the cap leaves on the card with nothing else on it.
+- A named set without the display card, and a whole-node lease, are unchanged. A whole-node lease whose command names no card
+  is not confined (see the confinement section), so an unpinned command under it can still land on CUDA's fastest card.
+
+`TestGPUReserveDevicesOnTheDisplayCardIsHeldToItsRule`.
 
 **A lease already running on the display card is not revoked when the operator returns or closes the card.** The post-admission
 watcher ([composite-tier.md](composite-tier.md), ADR 0075) unloads the display layer's llama-swap twins and nothing else: it never

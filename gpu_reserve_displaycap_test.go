@@ -81,3 +81,31 @@ func TestGPUReserveCardsTakesTheDisplayCardWithinTheCapAndNotPastIt(t *testing.T
 		t.Fatalf("gpu_display_cap_pct 0 is the operator's switch: %v %v", ids, err)
 	}
 }
+
+// Naming the display card is not a way past its rule (incident: an agent's `gpu reserve --devices <display card>`
+// rendered on the operator's screen while he was at the desk, to 83 % of its VRAM). The verb with --devices on the
+// screen's card: refused (nothing held) while the desk is not idle and with no --vram declared; taken once the desk is
+// idle and the declared footprint fits under the cap.
+func TestGPUReserveDevicesOnTheDisplayCardIsHeldToItsRule(t *testing.T) {
+	cfg, m := scopedLeaseFixture(t)
+	useCannedDisplayTable(t)
+	t.Setenv("LO_HELPER_SLEEP_MS", "0")
+	reserve := func(extra ...string) error {
+		args := append([]string{"--config", cfg, "--class", "media", "--devices", "1", "--wait", "0", "--ram", "0", "--reason", "display rule"}, extra...)
+		return runGPUReserve(append(args, helperCmd()...))
+	}
+	displayBusyFn = func(config.Config, []gpuprobe.Card) string { return "the operator is at the desk" }
+	if err := reserve("--vram", "4"); err == nil || !strings.Contains(err.Error(), "the operator is at the desk") {
+		t.Fatalf("the operator at the desk closes the display card to a named request too: %v", err)
+	}
+	displayBusyFn = func(config.Config, []gpuprobe.Card) string { return "" }
+	if err := reserve(); err == nil || !strings.Contains(err.Error(), "--vram") {
+		t.Fatalf("a named request that declares no footprint cannot be shown to stay under the cap: %v", err)
+	}
+	if n := len(m.Leases()); n != 0 {
+		t.Fatalf("a refused request holds nothing, found %d lease(s)", n)
+	}
+	if err := reserve("--vram", "4"); err != nil {
+		t.Fatalf("the desk idle and 4 GiB on 2.6 in use of 15.9 is under the 60 percent cap: the named card is taken: %v", err)
+	}
+}
