@@ -399,13 +399,7 @@ func runAuditConfig(args []string) error {
 		if t, ok := live["tier_profile"].(string); ok && t != "" {
 			tier, tierSource = t, "the config's tier_profile"
 		} else {
-			// A failed GPU probe (nvidia-smi missing for this account, driver unloaded) reads the same as a GPU-less box and
-			// classifies as tier cpu: a guess about the audited node, so refuse it and ask for the tier by name.
-			f := auditDetectFacts()
-			if f.Vendor == "none" && f.GPUCount == 0 {
-				return errors.New("audit-config: no GPU was read on this machine (a failed nvidia-smi reads the same), so there is no tier to detect; pass --tier <id> (cpu for a GPU-less box)")
-			}
-			tier, tierSource = hwdetect.Classify(f).Profile, "this machine's detected tier"
+			tier, tierSource = hwdetect.Classify(hwdetect.Detect()).Profile, "this machine's detected tier"
 		}
 	}
 	p, ok := doc.Profiles[tier]
