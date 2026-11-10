@@ -1417,6 +1417,18 @@ read-only unless deliberately widened. See
   it finds still on an older image at the end of each Windows leg and in its deploy record, under "Sessions still on an old
   image" (process id and start time, and the session when the owners registry names it). It is information only: it never changes a
   node's verdict and never stops anyone's server.
+  **The same for the config file (`stale_config`).** A server also loads its config once, at start, so an edit of the config
+  file (the ComfyUI instance, extra launch arguments, an upscale model, a lane binding) changes nothing in a session that is
+  already open; only the `delegate_remotes` roster is re-read. When the server is given its config file
+  (`WithConfigSource`, which takes the file's stamp and sha256 at that moment) it compares the file on disk with that start
+  state (`internal/mcpserver/stale_config.go`). An unchanged stamp is the cheap answer; a moved stamp whose bytes are equal (a
+  touch, a save of the same content) is not reported; a file that holds other bytes, or is gone, is. The sentence names the file
+  and says to reconnect with `/mcp` or restart the client. It rides as a **second text block** `stale_config: <note>` on every
+  `tools/call` result, every door and the three doors that carry `stale_binary` in their own answer included (none of them carries
+  a `stale_config` key, so the middleware does not skip them), and as a top-level `stale_config` string on `offload_status`; it
+  is logged once. A server with no config source (built-in defaults) or a config file that did not exist at start says nothing.
+  The stamp is taken when the config source is given, a little after the config was loaded, so an edit in that short window is
+  not seen. Nothing is interrupted and the call still runs.
 - `offload_status` reports harness state to the calling agent: the configured model roster (the one
   table in `config.ModelRoutes`, shared with `doctor`/`acceptance`/`report`), a live `/v1/models`
   probe through [`internal/swapclient`](../../internal/swapclient/swapclient.go), and
