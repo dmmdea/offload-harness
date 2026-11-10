@@ -2,7 +2,8 @@
 #
 # This is THE product of the installer: a receipt that both an autonomous agent and a skeptical
 # human can trust. It stands up a TRANSIENT llama-swap on a test port (18801) against the stack
-# already installed in $OFFLOAD_HOME, exercises EACH installed chat tier through the actual
+# already installed in $OFFLOAD_HOME (on a per-run copy of its yaml whose startPort is 18820, so the children never
+# take the live stack's child ports), exercises EACH installed chat tier through the actual
 # llama-swap exclusive+swap group (so a second tier forces eviction+cold-load of the first),
 # runs a deep-context canary at depth ~7000, smoke-tests the harness + agent, and prints ONE
 # receipt JSON as the LAST stdout line. Human-readable progress precedes it.
@@ -76,9 +77,78 @@ function LogOk      { param([string]$m) Write-Host "  PASS $m" -ForegroundColor 
 function LogWarn    { param([string]$m) Write-Host "  WARN $m" -ForegroundColor Yellow }
 function LogFail    { param([string]$m) Write-Host "  FAIL $m" -ForegroundColor Red }
 
+# Free = nothing answers a loopback connect AND a listener can bind the port. The State column of
+# Get-NetTCPConnection is not trusted: on Windows 11 build 26300 a `-State Listen` query missed a live listener in
+# 19 of 20 reads, and a server inside WSL (mirrored networking) is not in that table at all. Any error reads busy.
 function Test-PortFree {
   param([int]$Port)
-  return -not [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+  $c = New-Object System.Net.Sockets.TcpClient
+  try {
+    $iar = $c.BeginConnect('127.0.0.1', $Port, $null, $null)
+    if ($iar.AsyncWaitHandle.WaitOne(250)) {
+      $answered = $false
+      try { $c.EndConnect($iar); $answered = [bool]$c.Connected } catch { $answered = $false }
+      if ($answered) { return $false }
+    }
+  } catch { } finally { $c.Close() }
+  $l = $null
+  try {
+    $l = New-Object System.Net.Sockets.TcpListener([System.Net.IPAddress]::Loopback, $Port)
+    $l.Start()
+    return $true
+  } catch { return $false } finally { if ($l) { try { $l.Stop() } catch { } } }
+}
+
+# Who holds a port, for an error message only (best effort; the table can miss a live listener, so it never decides).
+function Get-PortOwnerNote {
+  param([int]$Port)
+  try {
+    $row = @(Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue | Where-Object { $_.OwningProcess } | Select-Object -First 1)
+    if ($row.Count -gt 0) {
+      $pn = (Get-Process -Id $row[0].OwningProcess -ErrorAction SilentlyContinue | Select-Object -First 1).ProcessName
+      return " (held by pid $($row[0].OwningProcess) $pn)"
+    }
+  } catch { }
+  return ''
+}
+
+# The transient swap's own child-port band. llama-swap numbers every ${PORT} model from startPort (default 5800) in
+# yaml order, so a swap run on the installed yaml hands its children the SAME ports as the live stack beside it.
+# The selftest runs on a copy of the yaml with this start port instead (Set-YamlStartPort).
+$SWAP_START_PORT = 18820
+
+# How many models of the yaml take a ${PORT} (directly or through a macro): the size of llama-swap's child-port span.
+function Get-YamlPortModelCount {
+  param([string]$YamlText)
+  $section = ''; $macros = @{}; $models = @{}; $cur = $null
+  foreach ($l in ($YamlText -split "\r?\n")) {
+    if ($l -match '^\s*#') { continue }
+    if ($l -match '^(\S[^:#]*):') { $section = $Matches[1]; $cur = $null; continue }
+    if ($section -eq 'macros' -or $section -eq 'models') {
+      if ($l -match '^  ("?[^\s:"]+"?):') { $cur = $Matches[1]; if ($section -eq 'macros') { $macros[$cur] = '' } else { $models[$cur] = '' }; continue }
+      if ($cur) { if ($section -eq 'macros') { $macros[$cur] += "`n$l" } else { $models[$cur] += "`n$l" } }
+    }
+  }
+  $portMacros = @($macros.Keys | Where-Object { $macros[$_] -match '\$\{PORT\}' })
+  $n = 0
+  foreach ($k in $models.Keys) {
+    $body = $models[$k]
+    $hit = $body -match '\$\{PORT\}'
+    foreach ($m in $portMacros) { if (-not $hit -and $body.Contains('${' + $m + '}')) { $hit = $true } }
+    if ($hit) { $n++ }
+  }
+  return $n
+}
+
+# The yaml text with its top-level startPort set to $Port: the existing line replaced, else one inserted above models:.
+function Set-YamlStartPort {
+  param([string]$YamlText, [int]$Port)
+  $line = "startPort: $Port"
+  $existing = New-Object System.Text.RegularExpressions.Regex('(?m)^startPort:[^\r\n]*')
+  if ($existing.IsMatch($YamlText)) { return $existing.Replace($YamlText, $line, 1) }
+  $modelsKey = New-Object System.Text.RegularExpressions.Regex('(?m)^models:')
+  if (-not $modelsKey.IsMatch($YamlText)) { throw 'the yaml has no top-level models: line to put a startPort above' }
+  return $modelsKey.Replace($YamlText, ($line + "`n" + 'models:'), 1)
 }
 
 # A killed server's port stays listed long after its process is gone: measured 15 s and 74 s with a model on the card,
@@ -178,7 +248,8 @@ function Test-AllocFailure {
   return ($ErrText -match '(?i)(VK_ERROR_OUT_OF_DEVICE_MEMORY|out of device memory|CUDA (error:? )?out of memory|cudaErrorMemoryAllocation|device[- ]lost|VK_ERROR_DEVICE_LOST|failed to allocate|ggml_backend.*alloc|unable to allocate|connection.*(closed|refused|reset|aborted)|actively refused|forcibly closed|unexpectedly)')
 }
 
-# Start the transient llama-swap against $yamlPath on $SWAP_PORT. Returns the Process object.
+# Start the transient llama-swap against $ConfigPath (the per-run yaml copy, not the installed yaml) on $SWAP_PORT.
+# Returns the Process object.
 function Start-Swap {
   param([string]$ConfigPath)
   $logFile = Join-Path $env:TEMP ("offload-selftest-swap-{0}.log" -f $PID)
@@ -186,6 +257,14 @@ function Start-Swap {
         -ArgumentList @('--config', $ConfigPath, '--listen', "127.0.0.1:$SWAP_PORT") `
         -PassThru -NoNewWindow -RedirectStandardError $logFile -RedirectStandardOutput "$logFile.out"
   return $p
+}
+
+# Free what the transient swap holds on the cards (its /unload endpoint stops every model it loaded) before a standalone
+# probe server loads on top of it: the swap keeps its last tier for its 5-minute ttl, and the probe then competes with it
+# for VRAM, so an allocation failure there would read as "this ctx does not fit" for a card whose ctx does.
+function Clear-SwapModels {
+  try { [void](Invoke-RestMethod -Uri "$swapBase/unload" -Method Get -TimeoutSec 30) } catch { }
+  Start-Sleep -Seconds 3
 }
 
 # Poll /v1/models until the swap answers or timeout. llama-swap's own HTTP is up long before any
@@ -196,7 +275,13 @@ function Wait-SwapReady {
   while ((Get-Date) -lt $deadline) {
     if ($script:swapProc -and $script:swapProc.HasExited) { return $false }
     $m = Invoke-JsonGet "$swapBase/v1/models" 5
-    if ($m) { return $true }
+    if ($m) {
+      # An answer is ours only if the process we started is still alive a moment later (a swap that lost its listen
+      # port to another server exits at once while that server answers).
+      Start-Sleep -Milliseconds 500
+      if ($script:swapProc -and $script:swapProc.HasExited) { return $false }
+      return $true
+    }
     Start-Sleep -Milliseconds 750
   }
   return $false
@@ -621,6 +706,7 @@ function Invoke-ProbeLoad {
     } catch { $faState = $null }
     $tps = $null
     $genText = ''
+    $decodeOk = $true   # false only when the warm generation was asked for and its request failed
     $detail = "loaded+healthy at ctx=$Ctx kv=$KvType on a standalone probe server"
     if ($backend -ne 'cpu' -and $spillN -gt 0 -and $ModelFile -eq $moe26bFile) { $detail = "$detail (26B at --n-cpu-moe $spillN, the shipped placement)" }
     if ($WarmDecode) {
@@ -646,10 +732,11 @@ function Invoke-ProbeLoad {
         $detail = "$detail; warm decode $ct tok in $([math]::Round($dsw.Elapsed.TotalSeconds,2))s"
       } catch {
         $dsw.Stop()
+        $decodeOk = $false
         $detail = "$detail; warm decode FAILED: $($_.Exception.Message)"
       }
     }
-    return @{ ok = $true; detail = $detail; cold_load_s = $coldS; tps = $tps; text = $genText; fa_state = $faState }
+    return @{ ok = $true; detail = $detail; cold_load_s = $coldS; tps = $tps; text = $genText; fa_state = $faState; decode_ok = $decodeOk }
   } catch {
     return @{ ok = $false; detail = "probe threw: $($_.Exception.Message)"; cold_load_s = $null; tps = $null; text = ''; fa_state = $null }
   } finally {
@@ -661,12 +748,80 @@ function Invoke-ProbeLoad {
 # ---------------------------------------------------------------------------
 # Receipt accumulator (R4.4 schema)
 # ---------------------------------------------------------------------------
+
+# Memory in use on each card right now, and the processes holding some (nvidia-smi). $null when there is no nvidia-smi
+# or it will not answer: the receipt then says the memory was not measured. A pass on a card that a desktop or another
+# job already fills reads slower than the same pass on an idle card; this is what lets a reader tell them apart.
+function Get-CardMemSnapshot {
+  $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $smi) { return $null }
+  try {
+    $cards = @(); $holders = @()
+    $q = Invoke-WithEapContinue { & $smi.Source '--query-gpu=index,name,memory.used,memory.total' '--format=csv,noheader,nounits' 2>$null }
+    foreach ($ln in @($q)) {
+      $p = ([string]$ln).Split(',')
+      if ($p.Count -ge 4) { $cards += ,([ordered]@{ index = [int]$p[0].Trim(); name = $p[1].Trim(); used_mib = [int]$p[2].Trim(); total_mib = [int]$p[3].Trim() }) }
+    }
+    $a = Invoke-WithEapContinue { & $smi.Source '--query-compute-apps=pid,process_name,used_memory' '--format=csv,noheader,nounits' 2>$null }
+    foreach ($ln in @($a)) {
+      $p = ([string]$ln).Split(',')
+      # A WDDM driver reports "[N/A]" for every process: such a row names nobody, so only a numeric figure is kept.
+      if ($p.Count -ge 3 -and $p[2].Trim() -match '^\d+$') { $holders += ,([ordered]@{ pid = $p[0].Trim(); process = (Split-Path -Leaf $p[1].Trim()); used_mib = [int]$p[2].Trim() }) }
+    }
+    if ($cards.Count -eq 0) { return $null }
+    $hnote = $null
+    if ($holders.Count -eq 0) { $hnote = 'no per-process memory figure reported by the driver, so holders are not named' }
+    return [ordered]@{ measured = $true; started_utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); cards = [object[]]$cards; holders = [object[]]$holders; note = $hnote }
+  } catch { return $null }
+}
+
+function Format-CardMemNote {
+  param($Snap)
+  if (-not $Snap -or -not $Snap.measured) { return 'card memory at tier start not measured' }
+  $parts = @($Snap.cards | ForEach-Object { "card $($_.index) $($_.used_mib) of $($_.total_mib) MiB" })
+  $h = @($Snap.holders | ForEach-Object { "$($_.process) $($_.used_mib) MiB" })
+  $hold = if ($h.Count -gt 0) { " (holders: {0})" -f ($h -join ', ') } else { '' }
+  return ("card memory in use at tier start: {0}{1}" -f ($parts -join '; '), $hold)
+}
+
+# The earlier receipts this script wrote on this box (same gpu, driver and backend): of the newest five, the best
+# tok/s per tier among its pass rows. $null when there is none, and then no tier is compared. A tier that is slow in
+# every earlier receipt has no pass row to compare with either.
+function Get-TierBaseline {
+  param([string]$ReceiptDir, [string]$Gpu, [string]$Driver, [string]$Backend)
+  $best = @{}; $used = @()
+  try {
+    $files = @(Get-ChildItem -LiteralPath $ReceiptDir -Filter 'selftest-*.json' -File -ErrorAction SilentlyContinue | Sort-Object Name -Descending | Select-Object -First 5)
+    foreach ($f in $files) {
+      $r = $null
+      try { $r = Get-Content -Raw -LiteralPath $f.FullName -Encoding UTF8 | ConvertFrom-Json } catch { $r = $null }
+      if (-not $r) { continue }
+      if ([string]$r.gpu -ne $Gpu -or [string]$r.driver_version -ne $Driver -or [string]$r.backend -ne $Backend) { continue }
+      $hit = $false
+      foreach ($t in @($r.tiers)) {
+        if (-not $t -or $t.status -ne 'pass' -or $null -eq $t.tok_s) { continue }
+        $v = [double]$t.tok_s
+        if ($v -le 0) { continue }
+        if (-not $best.ContainsKey([string]$t.id) -or $v -gt $best[[string]$t.id].tok_s) {
+          $best[[string]$t.id] = @{ tok_s = $v; cold_load_s = $t.cold_load_s; receipt = $f.Name }
+        }
+        $hit = $true
+      }
+      if ($hit) { $used += $f.Name }
+    }
+  } catch { return $null }
+  if ($best.Count -eq 0) { return $null }
+  return @{ tiers = $best; receipts = $used }
+}
+
 $receipt = [ordered]@{
   schema          = 1
   backend         = $null
   gpu             = $null
   driver_version  = $null
   tiers           = @()
+  card_mem_at_tier_start = $null   # per-card memory in use when the tier rows start (nvidia-smi), or measured=$false
+  baseline        = $null          # the earlier receipts the tier rows were compared with, or $null (none on this box)
   canary          = [ordered]@{ depth = 7000; status = 'fail'; detail = 'not run' }
   remediations    = @()
   harness_smoke   = 'fail'
@@ -770,11 +925,7 @@ $receipt = [ordered]@{
     gpu_vae = [ordered]@{ status = 'skipped'; seconds = $null; promote = $null; detail = $null }
   }
   verdict         = 'fail'
-  proves          = @(
-    'installation integrity',
-    'each installed tier cold-loads and generates through the swap-exclusive group',
-    'this GPU+driver did not crash generating to depth 7000'
-  )
+  proves          = @()   # built from the final row statuses once the verdict is known (end of script)
   does_not_prove  = @(
     'long-running :11436 service behavior under sustained multi-hour load',
     'behavior on a different driver version than the one recorded above',
@@ -885,12 +1036,40 @@ try {
   Log ""
 
   # --- Start the transient swap (Behavior 1 continued) --------------------------------------
+  # The swap runs on a per-run COPY of the yaml with its own startPort, so its children never take the child ports of the
+  # live stack's llama-swap (which numbers the same models from the same start port on the installed yaml). Every port of
+  # the span is probed first; a busy one stops the run here, named, instead of failing a model load later.
+  $yamlText = [System.IO.File]::ReadAllText($yamlPath)
+  $spanCount = Get-YamlPortModelCount -YamlText $yamlText
+  $spanLast = $SWAP_START_PORT + [math]::Max($spanCount, 1) - 1
+  for ($sp = $SWAP_START_PORT; $sp -le $spanLast; $sp++) {
+    if (-not (Test-PortFree $sp)) {
+      throw "selftest child port $sp is already in use$(Get-PortOwnerNote $sp) - the transient swap numbers its $spanCount model port(s) from $SWAP_START_PORT; free it before selftest"
+    }
+  }
+  $swapYaml = Join-Path $env:TEMP ("offload-selftest-swap-{0}.yaml" -f $PID)
+  Write-Utf8NoBom -Path $swapYaml -Content (Set-YamlStartPort -YamlText $yamlText -Port $SWAP_START_PORT)
+  LogOk "selftest swap child ports $SWAP_START_PORT..$spanLast free (a copy of the yaml carries startPort $SWAP_START_PORT; the installed yaml is not touched)"
+
+  # The earlier receipts of this box, for the tier-speed comparison below (none = nothing is compared).
+  $tierBaseline = Get-TierBaseline -ReceiptDir (Join-Path $HOME_DIR 'receipts') -Gpu ([string]$receipt.gpu) -Driver ([string]$receipt.driver_version) -Backend ([string]$receipt.backend)
+  if ($tierBaseline) {
+    $receipt.baseline = [ordered]@{ receipts = [object[]]@($tierBaseline.receipts); n = @($tierBaseline.receipts).Count }
+    Log ("  tier speed is compared with {0} earlier receipt(s) of this box: {1}" -f @($tierBaseline.receipts).Count, (@($tierBaseline.receipts) -join ', '))
+  } else {
+    Log "  no earlier receipt of this box (same gpu, driver, backend) with a passing tier row: tier speed is not compared"
+  }
+
   LogStep "start transient llama-swap on $SWAP_PORT"
-  $script:swapProc = Start-Swap -ConfigPath $yamlPath
+  $script:swapProc = Start-Swap -ConfigPath $swapYaml
   if (-not (Wait-SwapReady -TimeoutSec 120)) {
     throw "llama-swap did not answer /v1/models within 120s on port $SWAP_PORT (proxy failed to start)"
   }
   LogOk "llama-swap proxy up (pid $($script:swapProc.Id))"
+  $snap = Get-CardMemSnapshot
+  if ($snap) { $receipt.card_mem_at_tier_start = $snap }
+  else { $receipt.card_mem_at_tier_start = [ordered]@{ measured = $false; started_utc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ'); cards = [object[]]@(); holders = [object[]]@(); note = 'not measured: nvidia-smi is not available or did not answer' } }
+  Log ("  " + (Format-CardMemNote $receipt.card_mem_at_tier_start))
 
   # --- R4.1: exercise EACH installed tier THROUGH the exclusive+swap group -------------------
   # Hitting each alias in sequence on the SAME running swap: the exclusive group means request N+1
@@ -922,10 +1101,30 @@ try {
       $tokS = $null
       if ($warm.ok -and $null -ne $warm.tok_s) { $tokS = $warm.tok_s }
       $status = 'pass'
+      $rowDetail = $null
       $tokLabel = if ($null -ne $tokS) { "$tokS" } else { 'n/a' }
-      if ($null -ne $tokS -and $tokS -lt 8) { $status = 'warn' }  # CPU-class throughput
-      $receipt.tiers += ,([ordered]@{ id = $tier.id; cold_load_s = $coldS; tok_s = $tokS; status = $status; detail = $null })
-      if ($status -eq 'warn') { LogWarn "$($tier.id): cold_load=${coldS}s warm-tok/s=$tokLabel (CPU-class, WARN)" }
+      if (-not $warm.ok) {
+        # The cold request answered but the warm one did not: no rate was measured, so the row is not a pass.
+        $status = if (Test-AllocFailure $warm.error) { 'fail' } else { 'warn' }
+        $rowDetail = "warm request failed: $($warm.error)"
+      } elseif ($null -eq $tokS) {
+        $status = 'warn'
+        $rowDetail = 'warm request answered with no token count, so tok/s is not measured'
+      } elseif ($tokS -lt 8) { $status = 'warn' }  # CPU-class throughput
+      # Far below this box's own earlier receipt for the same tier (an earlier pass on the same gpu, driver, backend).
+      if ($null -ne $tokS -and $tierBaseline -and $tierBaseline.tiers.ContainsKey([string]$tier.id)) {
+        $bl = $tierBaseline.tiers[[string]$tier.id]
+        if ($tokS -lt (0.6 * $bl.tok_s)) {
+          $status = 'warn'
+          $rowDetail = ("tok/s {0} vs {1} best on this box ({2}); cold {3} s vs {4} s; {5}" -f $tokS, $bl.tok_s, $bl.receipt, $coldS, $bl.cold_load_s, (Format-CardMemNote $receipt.card_mem_at_tier_start))
+        }
+      }
+      $receipt.tiers += ,([ordered]@{ id = $tier.id; cold_load_s = $coldS; tok_s = $tokS; status = $status; detail = $rowDetail })
+      if ($status -eq 'fail') { LogFail "$($tier.id): cold_load=${coldS}s $rowDetail" }
+      elseif ($status -eq 'warn') {
+        if ($rowDetail) { LogWarn "$($tier.id): cold_load=${coldS}s warm-tok/s=$tokLabel ($rowDetail)" }
+        else { LogWarn "$($tier.id): cold_load=${coldS}s warm-tok/s=$tokLabel (CPU-class, WARN)" }
+      }
       else { LogOk "$($tier.id): cold_load=${coldS}s warm-tok/s=$tokLabel" }
     } else {
       # The 26B failing is a tier-local FAIL, not a whole-selftest FAIL. It carries the operator advice in
@@ -1063,7 +1262,11 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
     while ((Get-Date) -lt $deadline) {
       if ($script:agentProc.HasExited) { break }
       $am = Invoke-JsonGet "http://127.0.0.1:$AGENT_PORT/v1/models" 5
-      if ($am) { $agentUp = $true; break }
+      if ($am) {
+        Start-Sleep -Milliseconds 500
+        if (-not $script:agentProc.HasExited) { $agentUp = $true }
+        break
+      }
       Start-Sleep -Milliseconds 500
     }
     if ($agentUp) {
@@ -1118,6 +1321,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       $why = if (-not $agentTierPresent) { "$AGENT_TIER gguf absent" } elseif ($backend -eq 'cpu') { 'cpu backend' } else { 'skip flag set' }
       LogWarn ("larger-ctx load NOT attempted ({0}); kv_mb~{1}MB@{2} is COMPUTED only" -f $why, $kvApprox, $AGENT_LARGER_CTX)
     } else {
+      Clear-SwapModels
       $probe = Test-LargerCtxLoad -Ctx $AGENT_LARGER_CTX -TimeoutSec 120
       $receipt.agent.larger_ctx_ok = [bool]$probe.ok
       $receipt.agent.larger_ctx_src = 'measured'
@@ -1234,6 +1438,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       # the 26B at --n-cpu-moe N -ngl 999 where the profile says n_cpu_moe (blackwell-16: 14), at -ngl 999 with no
       # expert flag where it says gpu, and every other model at -ngl 999. An OOM here therefore means the shipped
       # placement does not fit, and the downshift below is advice about the ctx the yaml actually serves.
+      Clear-SwapModels   # the micro-bench above left the agent tier loaded in the swap
       LogStep ("  ctx probe: loading {0} at projected ctx={1} kv={2}" -f $residentId, $tryCtx, $kv)
       $r1 = Invoke-ProbeLoad -ModelFile $residentSpec.file -Ctx $tryCtx -KvType $kv -FlashAttn $fa -TimeoutSec 180
       if ($r1.ok) {
@@ -1267,7 +1472,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         # the load NEVER started, so NOTHING was measured. Marking this 'measured' would be dishonest:
         # it would (a) skip the does_not_prove gate and (b) let tuned.source read 'measured' while
         # tuned.ctx_size falls back to the PROJECTED value. Record 'not-attempted' - no OOM, no downshift.
-        $pm.ctx.measured_ctx_ok = $false
+        $pm.ctx.measured_ctx_ok = $null   # nothing was measured: not a negative result (schema: $null = not attempted)
         $pm.ctx.src = 'not-attempted'
         $pm.ctx.detail = ("ctx probe at {0} failed (non-alloc): {1}" -f $tryCtx, $r1.detail)
         LogWarn $pm.ctx.detail
@@ -1316,6 +1521,7 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         $pm.q8_kv.measured_ok = $pm.ctx.measured_ctx_ok   # $true iff the q8 load in step 2 succeeded
         $pm.q8_kv.note = if ($pm.ctx.measured_ctx_ok -eq $true) { 'q8_0 KV load confirmed via the ctx probe (step 2)' }
                          elseif ($pm.ctx.measured_ctx_ok -eq $false) { 'q8_0 KV load did NOT confirm - see ctx.detail' }
+                         elseif ($pm.ctx.src -eq 'not-attempted' -and $pm.ctx.detail -match 'failed \(non-alloc\)') { "q8_0 KV probe did not run: $($pm.ctx.detail)" }
                          else { 'q8_0 KV load not attempted this run' }
       } elseif ($proj.kv_type -eq 'f16' -and $active.profile -match '^amd-') {
         $pm.q8_kv.measured_ok = $null
@@ -1449,6 +1655,11 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
           $cn.fa_q8kv.status = 'warn'
           $cn.fa_q8kv.detail = "q8_0-KV loaded+generated but the f16 baseline failed ($($rf.detail)) - overlap not comparable this run"
           LogWarn "fa_q8kv: $($cn.fa_q8kv.detail)"
+        } elseif ($rf.decode_ok -and -not $rq.decode_ok) {
+          # The q8_0 server loaded but its warm generation failed while f16 decoded: evidence against q8_0, not "no text".
+          $cn.fa_q8kv.status = 'fail'
+          $cn.fa_q8kv.detail = "q8_0 warm decode FAILED while f16 decoded: $($rq.detail) - stay on the f16 floor"
+          LogFail "fa_q8kv: $($cn.fa_q8kv.detail)"
         } elseif ([string]::IsNullOrWhiteSpace($rf.text) -or [string]::IsNullOrWhiteSpace($rq.text)) {
           # No text is not a divergence: there is nothing to compare, so the gate neither passes nor fails.
           $cn.fa_q8kv.status = 'warn'
@@ -1570,10 +1781,12 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       # (5) swap_leak - cycle tiers through the transient swap, then verify llama-swap did
       # not leak llama-server processes (>=2 tiers exercises a real eviction cycle).
       try {
+        $cycleErrs = @()
         if ($installedTiers.Count -ge 2) {
           LogStep "  swap_leak: eviction cycle $($installedTiers[0].id) -> $($installedTiers[1].id) -> $($installedTiers[0].id)"
           foreach ($t in @($installedTiers[0], $installedTiers[1], $installedTiers[0])) {
-            [void](Invoke-Chat -Model $t.id -UserContent 'Reply with exactly the single word: ok' -MaxTokens 8 -TimeoutSec 300)
+            $cyc = Invoke-Chat -Model $t.id -UserContent 'Reply with exactly the single word: ok' -MaxTokens 8 -TimeoutSec 300
+            if (-not $cyc.ok) { $cycleErrs += "$($t.id): $($cyc.error)" }
           }
         } else {
           LogStep "  swap_leak: single tier installed - process-count check only (no eviction cycle)"
@@ -1584,7 +1797,14 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         $cn.swap_leak.servers_after = $mineProcs.Count
         $stillUp = [bool](Invoke-JsonGet "$swapBase/v1/models" 5)
         $cycleLabel = if ($installedTiers.Count -ge 2) { 'after the eviction cycle' } else { '(single tier - process-count check only, no eviction cycle ran)' }
-        if ($mineProcs.Count -le 1 -and $stillUp) {
+        # A cycle that did not complete (a chat failed, or no child was seen after a real cycle) counts nothing: 0 children
+        # is not "no leak" when nothing loaded.
+        $cycleIncomplete = ($cycleErrs.Count -gt 0) -or ($installedTiers.Count -ge 2 -and $mineProcs.Count -eq 0)
+        if ($mineProcs.Count -le 1 -and $stillUp -and $cycleIncomplete) {
+          $cn.swap_leak.status = 'warn'
+          $cn.swap_leak.detail = "cycle did not complete: $(if ($cycleErrs.Count -gt 0) { $cycleErrs -join '; ' } else { 'no llama-server child was seen after the cycle' })"
+          LogWarn "swap_leak: $($cn.swap_leak.detail)"
+        } elseif ($mineProcs.Count -le 1 -and $stillUp) {
           $cn.swap_leak.status = 'pass'
           $cn.swap_leak.detail = "$($mineProcs.Count) llama-server process(es) $cycleLabel; swap proxy still healthy"
           LogOk "swap_leak: $($cn.swap_leak.detail)"
@@ -1644,6 +1864,9 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       # tier does not bind comes back SKIP. Outputs stay beside the receipts.
       LogStep "  whisper + vision: real lanes against known answers"
       try {
+        # No temp config (the config.json above did not parse): `--config <missing>` would fall back to the default
+        # endpoint, the live stack, and report ITS answer here.
+        if (-not (Test-Path $tmpCfg)) { throw 'temp config not written; gate not run' }
         $gateDir = Join-Path (Join-Path $HOME_DIR 'receipts') ("selftest-gate-{0}" -f (Get-Date).ToString('yyyyMMdd-HHmmss'))
         $gateOut = Invoke-WithEapContinue { & $harnessExe --config $tmpCfg acceptance --only 'vision,stt' --out-dir $gateDir --json 2>$null }
         $gateDoc = (($gateOut | ForEach-Object { "$_" }) -join "`n") | ConvertFrom-Json
@@ -1656,7 +1879,9 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
           if ($entry.status -eq 'pass') { LogOk "$($pair[0]): $($entry.detail)" } else { LogWarn "$($pair[0]) $($entry.status): $($entry.detail)" }
         }
       } catch {
-        foreach ($k in @('whisper', 'vision')) { $cn[$k].status = 'fail'; $cn[$k].detail = "the gate could not run: $($_.Exception.Message)" }
+        # The gate did not run: nothing was seen failing, so the rows are 'skipped' (no config) or 'warn', not 'fail'.
+        $gateNoRun = if (Test-Path $tmpCfg) { 'warn' } else { 'skipped' }
+        foreach ($k in @('whisper', 'vision')) { $cn[$k].status = $gateNoRun; $cn[$k].detail = "the gate could not run: $($_.Exception.Message)" }
         LogWarn "whisper + vision: $($cn.whisper.detail)"
       }
 
@@ -1954,6 +2179,43 @@ if (-not $receipt.media.ran) {
   $d = "the sd.cpp media tier (reference render + gpu-vae trial): not exercised this pass ($mg) - image generation on this box is unproven"
   if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
 }
+# F8 honesty: proves[] is built here, from the FINAL row statuses, so a pass that carries warn or fail rows does not list
+# a claim those rows did not prove. Each such row lands a does_not_prove line instead.
+$prv = @()
+if ($receipt.verdict -ne 'fail') { $prv += 'installation integrity' }
+$tierRows = @($receipt.tiers)
+$allTiersPass = ($tierRows.Count -gt 0) -and (-not ($tierRows | Where-Object { $_.status -ne 'pass' })) -and ((-not $installedTiers) -or $tierRows.Count -ge @($installedTiers).Count)
+if ($allTiersPass) { $prv += 'each installed tier cold-loads and generates through the swap-exclusive group' }
+foreach ($tr in $tierRows) {
+  if ($tr.status -ne 'pass') {
+    $d = "tier $($tr.id): $($tr.status) - cold-load and generate through the swap group is not proven for it$(if ($tr.detail) { ' (' + $tr.detail + ')' })"
+    if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+  }
+}
+if ($receipt.canary.status -eq 'pass') { $prv += 'this GPU+driver did not crash generating to depth 7000' }
+else {
+  $d = "this GPU+driver did not crash generating to depth 7000: canary $($receipt.canary.status) ($($receipt.canary.detail))"
+  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+}
+foreach ($cnName in @('fa_q8kv','moe_full_offload','ctx_sweep','bench','swap_leak','embedder','whisper','vision')) {
+  $cnEntry = $receipt.canaries[$cnName]
+  if ($cnEntry -and ($cnEntry.status -eq 'fail' -or $cnEntry.status -eq 'warn')) {
+    $d = "canary ${cnName}: $($cnEntry.status) ($($cnEntry.detail)) - its promotion/verification is not authorized this pass"
+    if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+  }
+}
+foreach ($mdName in @('render','gpu_vae')) {
+  $mdEntry = $receipt.media[$mdName]
+  if ($mdEntry -and ($mdEntry.status -eq 'fail' -or $mdEntry.status -eq 'warn')) {
+    $d = "media $mdName : $($mdEntry.status) ($($mdEntry.detail)) - not proven this pass"
+    if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+  }
+}
+if ($tierRows.Count -gt 0 -and -not $tierBaseline) {
+  $d = 'tier speed compared with this box''s earlier runs: not compared, there is no earlier receipt of this box (same gpu, driver, backend) with a passing tier row'
+  if (-not ($receipt.does_not_prove -contains $d)) { $receipt.does_not_prove += $d }
+}
+$receipt.proves = $prv
 
 Log ""
 LogStep "verdict: $($receipt.verdict)"

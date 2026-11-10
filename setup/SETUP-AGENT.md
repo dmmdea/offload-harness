@@ -873,7 +873,11 @@ pwsh -NoProfile -File setup\selftest.ps1
 
 This stands up a **transient** llama-swap on test port `18801` (and the agent on `18802`), exercises
 each installed tier through the real swap group, runs a **deep-context canary** at depth ~7000, and
-prints ONE **receipt JSON** as the last line. Both transient ports are freed on every exit path.
+prints ONE **receipt JSON** as the last line. Both transient ports are freed on every exit path. The transient swap
+runs on a temp copy of `llama-swap.yaml` whose child ports start at `18820`, so it does not share child ports with a
+running `:11436` stack; a busy port of that span stops the run with the port named. `proves` lists only what the final
+row statuses back (a tier row that is `warn` or `fail`, or a canary that did not pass, drops its claim and lands a
+`does_not_prove` line instead).
 
 Receipt schema (real fields):
 
@@ -925,6 +929,7 @@ Read them against the tables in the [AMD RDNA3 chapter](#amd-rdna3--the-780m-cla
 |---|---|
 | `tiers[].status:"pass"` | Tier cold-loads and generates. Good. |
 | `tiers[].status:"warn"` (`tok_s < 8`) | Throughput is CPU-class. Expected on `backend:"cpu"`; on a GPU backend it hints the model fell back to CPU — check the canary/remediations. |
+| `tiers[].status:"warn"` with a `detail` | Not a CPU-class reading. Either the cold request answered but the warm one failed or returned no token count (`detail` says `warm request failed: ...`; an allocation or device-lost error there is `fail` instead), or the tier ran below 60 % of the best `tok_s` an earlier receipt of this box (same `gpu`, `driver_version`, `backend`; newest five in `receipts\`) recorded for it. The `detail` then names that receipt and the card memory in use when the tier rows started. Read `card_mem_at_tier_start` (per-card MiB used, from `nvidia-smi`; `measured:false` when there is none): a card another program already fills reads slow on a healthy install. With no earlier receipt nothing is compared, and `does_not_prove` says so. |
 | `tiers[].status:"fail"` on `gemma4-26b-a4b` | The 26B did not load or answer on this card. selftest does **not** remediate it: RAM is overflow only, so it never moves experts to the CPU and never edits `llama-swap.yaml`. The row's `detail` says what to change: set the tier's `moe_26b` to `drop` in `profiles.json` (on a tier whose `resident_tier` or agent seat is the 26B, change those too, or pick a tier whose resident model is not the 26B), or declare a *measured* partial spill (`n_cpu_moe` with `n_cpu_moe_max`), then re-run the install. A device-lost or driver-crash message → update the driver first → **STOP and ask the human** re the driver. |
 | `remediations[]` non-empty | An entry named `downshift ctx a->b` is the standalone ctx probe halving the window after an OOM (the yaml is not edited; `profile_measure.tuned.ctx_size` is the value to apply). selftest writes no other remediation, and never one that changes `llama-swap.yaml`. |
 | `canary.status:"fail"` (device-lost / connection drop) | The deep-context Vulkan crash class (llama.cpp #17432). The detail says: update the AMD Adrenalin driver; if it persists lower `-ngl` or the window. **STOP and ask the human to update the driver.** |
@@ -1054,7 +1059,7 @@ difference between a good first impression and a confused user.
 | `install.ps1`: integrity mismatch against the publisher's digest | corrupt/wrong asset | Do not substitute. Delete the `.part` and re-run once; recurs → STOP and surface. |
 | HF download 429 / timeout | rate-limited | Re-run (idempotent); persistent → STOP, ask human. |
 | `selftest` canary `fail`, device-lost | old AMD Adrenalin (deep-context crash #17432) | STOP → ask human to update the AMD driver; interim: lower `-ngl` or the window. |
-| `selftest` port `18801`/`18802` in use | a prior run leaked a process | Kill stray `llama-server.exe` / `local-agent.exe`, or reboot after asking; re-run. |
+| `selftest` port `18801`/`18802` (or a child port `18820` up) in use | a prior run leaked a process, or another server holds it (the message names the holder when Windows lists one) | Kill stray `llama-server.exe` / `local-agent.exe`, or reboot after asking; re-run. |
 | `doctor`: `health: DOWN` | llama-swap not running / wrong port | Start llama-swap (Step 3); confirm `--listen 127.0.0.1:11436`. |
 | `doctor`: an alias `FAIL — not in the live roster` | model not served / wrong yaml | Check `llama-swap.yaml` lists that alias; some non-core aliases (vision/stt) are absent on a grunt-work-only install — expected. |
 | every offload call returns `deferred:true` | endpoint unreachable, or genuinely low-confidence/over-long input | `doctor` first; a defer on hard/over-long input is **by design**. |
