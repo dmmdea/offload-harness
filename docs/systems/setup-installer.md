@@ -715,6 +715,20 @@ tier's template has no llama.cpp entry (the NPU serves), so a board there has no
 the `embeddinggemma2` entry, for a node whose main build is older than b11452 (see "A second llama.cpp build for the
 embeddinggemma2 entry" above). The dry run names it in its `would render` line and the render call passes it only when set.
 
+`--prefix DIR` is made absolute once, right after the options are read (a relative one, `--prefix stack` or
+`--prefix .`, is resolved against the current directory), so the config's `home` and `serving_config_path`, the render, the
+systemd unit and the client-mode MCP registration all get the same absolute path.
+
+`--listen HOST:PORT` (port 1024..65535, default `127.0.0.1:11436`) and `--start-port N` (1024..64000, also
+`OFFLOAD_SWAP_START_PORT`; default unset = llama-swap's 5800; the word `default` clears a kept one) take the same two
+settings as `install.ps1` (see "Per-box ports and promotions" below). A new `config.json` gets
+`endpoint = http://127.0.0.1:<listen port>`; an existing one keeps its endpoint unless `--listen` is given and the
+endpoint is a different loopback port (one line says so). With both flags unset, a re-run reads the listen address and
+the start port back from the `# basis:` line of the existing `<prefix>/etc/llama-swap.yaml` and prints an `OVERRIDE`
+line for each. Before anything is written, a live run connects to `127.0.0.1:<listen port>` (a connect, because a holder
+behind WSL mirrored networking does not show in the listener table) and stops when it answers, unless that yaml already
+names the port: then it is this install's own llama-swap, an upgrade. `--dry-run` only says it would connect.
+
 It is **deliberately thin**. Every decision that can be wrong lives in the binary, which
 is cross-compiled and unit-tested; the script only fetches, places and registers:
 
@@ -921,7 +935,11 @@ A re-run with the variables unset reads the four values back from the `# basis:`
 `<home>\llama-swap.yaml`, so it renders what the last run chose and the stale check does not drop it. The value `default`
 clears one. The installer prints one `OVERRIDE ...` line per setting in force. A new `config.json` gets
 `endpoint = http://127.0.0.1:<port>`; an existing one is changed only when `OFFLOAD_SWAP_PORT` is set (one line says so).
-`selftest.ps1` starts its transient swap on the installed yaml, so it inherits the start port.
+`selftest.ps1` does not inherit the start port. It starts its transient swap (port 18801) on a per-run copy of the
+installed yaml in the temp folder whose `startPort:` is 18820, so its children never take the child ports of the live
+stack's llama-swap, which numbers the same models from the installed start port. Before it starts, it probes every port
+of the span (18820 up, one per model that takes a `${PORT}`) with a TCP connect plus a bind check, and stops with the
+busy port named. The installed yaml is not touched, and the copy is removed at teardown.
 
 **Two probes (Windows).** On a box whose WSL runs in mirrored networking, WSL and Windows share the loopback port space,
 and a server inside WSL holds a port without showing in the Windows listener table. So the installer asks with a TCP
@@ -932,8 +950,11 @@ connect (about 250 ms), not with `Get-NetTCPConnection`:
 2. after the render: it counts the models that take a `${PORT}` and probes `start .. start+count-1`. A port that answers
    with no listener of this install means that seat can never load: `FAIL` and exit 1.
 
-A port that answers because this stack's own llama-swap or its children run (an upgrade) is fine. `install.sh` has no
-such settings: it already takes `--listen`, and it has no start port, no probe and no persistence yet.
+A port that answers because this stack's own llama-swap or its children run (an upgrade) is fine. `install.sh` takes
+`--listen` and `--start-port` (also `OFFLOAD_SWAP_START_PORT`), keeps them from the previous install the same way, and
+probes the listen port before it writes anything (see "The Linux install path"). It does not take
+`OFFLOAD_SWAP_PORT`, and it does not probe the children's port range after the render, so a children port held by
+another service is still found only when a seat fails to load.
 
 ## Observability and debugging
 

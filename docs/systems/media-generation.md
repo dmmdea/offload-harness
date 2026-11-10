@@ -1732,7 +1732,18 @@ Set a name for the harness's own instance:
 unset is 8189 (the runner's `COMFY_PORT_BASE` default); it must be 1024 to 65535 and never 8188.
 A port with no `comfy_instance` is a config error, because the runner keys an instance by its
 name. So is `comfy_cuda_device` beside `comfy_instance` (a named instance is never pinned by an
-index; the runner refuses the pair).
+index; the runner refuses the pair). A family overlay (`imagegen_families`, `gen_edit_families`)
+that sets `comfy_cuda_device` or a bad instance key under a valid `comfy_instance` is refused by
+name at load and when the family is picked.
+
+A named instance whose keys fail validation keeps its name and gets an endpoint that is never port
+8188, so the runner refuses the render itself (and the post-run `/free` never reaches the owner's
+ComfyUI on 8188) instead of quietly driving the default instance. The ComfyUI media CLI verbs
+(`generate-image`, `inpaint-image`, `upscale-image`, `run-graph`, `edit-image-generative`,
+`generate-video`, `animate-character`, `generate-audio`) also refuse to run when a config file was
+named or found but could not be read, parsed or validated, or when `--config` or
+`$LOCAL_OFFLOAD_CONFIG` names a file that does not exist. With no config file at all (a fresh
+install) they run as before and defer on the empty bindings.
 
 With the key set, every ComfyUI-backed runner the harness starts gets `COMFY_INSTANCE=<name>` and
 `COMFY_API=http://127.0.0.1:<port>`: image generation and the image batch, inpaint, upscale,
@@ -2629,7 +2640,7 @@ verdict now covers what the script loads (`internal/mediacap/routeneeds.go`):
 - **Custom-node classes** the graph names: `VHS_VideoCombine` (ComfyUI-VideoHelperSuite) for Wan and
   Hunyuan, the DisTorch2 loaders (ComfyUI-MultiGPU, plus ComfyUI-GGUF for a `.gguf` expert), and
   `UnetLoaderGGUF` (ComfyUI-GGUF) for a `.gguf` image/edit UNET. `doctor` asks a ComfyUI that is
-  already running (`GET /object_info/<class>` on `COMFY_API`, default `127.0.0.1:8188`), which also
+  already running (`GET /object_info/<class>` on the harness's ComfyUI endpoint: the `comfy_instance` port when that key is set, else `COMFY_API`, default `127.0.0.1:8188`), which also
   sees a pack that failed to import; when nothing answers it decides from `<comfy_dir>/custom_nodes`
   on disk (an active pack directory with `__init__.py`, matched by name or by its marker class) and
   says which it used. `offload_status` and `acceptance` use the disk check only. Nothing starts

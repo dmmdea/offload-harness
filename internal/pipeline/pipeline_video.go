@@ -134,8 +134,8 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 			args = append(args, "--"+k, strconv.Itoa(v))
 		}
 	}
-	// invariant 5: --reserve-vram stays per-workflow-overridable (default lives in the
-	// runner; Wan 14B=2.0, ACE-Step differs). Pass it through ONLY when the caller set it.
+	// invariant 5: --reserve-vram stays per-workflow-overridable (the default, 1.0, lives in
+	// the lifecycle; a --reserve-vram in comfy_extra_args wins over it). Pass it through ONLY when the caller set it.
 	if rv := paramStr(req.Params, "reserve_vram"); rv != "" {
 		args = append(args, "--reserve-vram", rv)
 	}

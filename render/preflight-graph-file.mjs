@@ -4,9 +4,11 @@
 // GPU cycle. (The existing preflight-graph.mjs only checks the 3 built-in builders.)
 const API = () => process.env.COMFY_API || "http://127.0.0.1:8188";
 
-async function defaultFetchInfo(cls) {
+// `api` is the ComfyUI endpoint the run itself uses (a named instance is not on the default
+// port); when omitted, COMFY_API then 8188 as before.
+async function defaultFetchInfo(cls, api) {
   try {
-    const r = await fetch(`${API()}/object_info/${encodeURIComponent(cls)}`);
+    const r = await fetch(`${api || API()}/object_info/${encodeURIComponent(cls)}`);
     if (!r.ok) return null;
     const j = await r.json();
     return j[cls] || null;
@@ -34,7 +36,8 @@ function satisfies(spec, key, def) {
   return children >= (Number.isFinite(min) ? min : 1);
 }
 
-export async function preflightGraph(graph, fetchInfo = defaultFetchInfo) {
+export async function preflightGraph(graph, fetchInfo, api) {
+  if (!fetchInfo) fetchInfo = (cls) => defaultFetchInfo(cls, api);
   const missing = [], unknownClasses = [];
   for (const [node, spec] of Object.entries(graph || {})) {
     const cls = spec?.class_type;

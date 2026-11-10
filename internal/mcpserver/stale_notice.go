@@ -63,7 +63,10 @@ func carriesStaleSignal(first mcp.Content) bool {
 // block does not already carry the signal (carriesStaleSignal). It is registered after the config gate, so it wraps outside it:
 // the deferral a server with an invalid config answers with is a result of a stale server too, on every door.
 //
-// A result that carries the key is passed through before any check: its door already stat the installed file (and may have
+// The stale-config notice (stale_config.go) rides the same way as a block "stale_config: <note>" on every result, the three doors
+// included, because none of them carries that key in its own answer; it is one stat while the config file has not moved.
+//
+// A result that carries the key is passed through before any binary check: its door already stat the installed file (and may have
 // hashed it, up to installedReadWait) for its own answer, and a check here would do the work twice. For every other result the
 // check runs after the handler finished, so a long call is never delayed by it before it runs; on a server that was not swapped
 // it is one stat, and on one that was the hash of the installed file is cached per stat (stale_image.go).
@@ -84,17 +87,24 @@ func (s *Server) staleNotice(next mcp.MethodHandler) mcp.MethodHandler {
 			return res, err
 		}
 		out, ok := res.(*mcp.CallToolResult)
-		if !ok || out == nil || len(out.Content) == 0 || carriesStaleSignal(out.Content[0]) {
+		if !ok || out == nil || len(out.Content) == 0 {
 			return res, err
 		}
-		// The note first: its read of the stamp is what finds a stamp that cannot be read right now, which the state reads after.
-		note, guard := s.staleBinaryFields(buildinfo.Version)
 		var blocks []mcp.Content
-		if note != "" {
-			blocks = append(blocks, &mcp.TextContent{Text: "stale_binary: " + note})
+		// The binary check is skipped for a result that carries the signal itself; the config note below is not: no door
+		// carries a stale_config key in its own answer, so every result is looked at for it.
+		if !carriesStaleSignal(out.Content[0]) {
+			// The note first: its read of the stamp is what finds a stamp that cannot be read right now, which the state reads after.
+			note, guard := s.staleBinaryFields(buildinfo.Version)
+			if note != "" {
+				blocks = append(blocks, &mcp.TextContent{Text: "stale_binary: " + note})
+			}
+			if guard != "" && (blind.Add(1)-1)%staleGuardEvery == 0 {
+				blocks = append(blocks, &mcp.TextContent{Text: "stale_binary_guard: " + guard})
+			}
 		}
-		if guard != "" && (blind.Add(1)-1)%staleGuardEvery == 0 {
-			blocks = append(blocks, &mcp.TextContent{Text: "stale_binary_guard: " + guard})
+		if note := s.cfg.staleConfigNote(); note != "" {
+			blocks = append(blocks, &mcp.TextContent{Text: "stale_config: " + note})
 		}
 		if len(blocks) == 0 {
 			return res, nil

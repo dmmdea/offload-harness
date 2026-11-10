@@ -11,7 +11,7 @@
 //        [--steps N] [--cfg X] [--fast] [--hero] [--seed N] [--negative "..."] \
 //        [--wan-vvram-gb 7] [--wan-loader auto|native|gguf-distorch] [--wan-decode auto|plain|tiled] \
 //        [--upscale-model name.pth] [--upscale-width 1920] [--upscale-height 1080] \
-//        [--api http://127.0.0.1:8188] [--no-lock] [--keep-comfy]   |   <out.mp4> --graph wf.json
+//        [--api <url>] [--no-lock] [--keep-comfy]   |   <out.mp4> --graph wf.json
 //   --fast: OPT-IN distilled speed path (wan; 8-step lightx2v, weaker motion). --hero:
 //   accepted for compatibility; the native no-LoRA pass IS the default. --wan-vvram-gb:
 //   GiB of each Wan expert DisTorch2 parks in system RAM (the harness passes this box's

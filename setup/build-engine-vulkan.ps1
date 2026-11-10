@@ -70,6 +70,21 @@ function Invoke-Native {
   } finally { $ErrorActionPreference = $prev }
 }
 
+# Stdout lines of a native tool whose stderr is discarded. Under 'Stop' Windows PowerShell 5.1 turns a native stderr line
+# into a throw (order-dependent with Select-Object -First 1), so the call runs on Continue and the exit code is returned
+# beside the lines. Returns @{ rc = <exit code>; lines = <stdout lines> }.
+function Get-NativeLines {
+  param([string]$Exe, [string[]]$ToolArgs)
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $lines = @(& $Exe @ToolArgs 2>$null | ForEach-Object { "$_" })
+    return @{ rc = $LASTEXITCODE; lines = $lines }
+  } catch {
+    return @{ rc = 1; lines = @() }
+  } finally { $ErrorActionPreference = $prev }
+}
+
 function Get-GitHubJson {
   param([string]$Uri)
   return Invoke-RestMethod -Uri $Uri -Headers @{ 'User-Agent' = 'offload-harness-installer'; 'Accept' = 'application/vnd.github+json' } -TimeoutSec 60
@@ -101,7 +116,8 @@ if ($spec.Releases) {
   if (-not $tag) { throw "no $($spec.Repo) release at or above the floor $floor" }
   $sourceId = $tag
 } else {
-  $head = (& $git ls-remote $repoUrl HEAD 2>$null | Select-Object -First 1)
+  $lsr = Get-NativeLines $git @('ls-remote', $repoUrl, 'HEAD')
+  $head = $(if ($lsr.rc -eq 0 -and $lsr.lines.Count) { $lsr.lines[0] } else { '' })
   if ("$head" -notmatch '^([0-9a-f]{40})') { throw "could not read the head of $repoUrl" }
   $sourceId = $Matches[1].Substring(0, 12)
 }
