@@ -495,15 +495,26 @@ func cardOnlyMiss(family, part string, share, dflt, expert, small, large, comput
 }
 
 // WindowsFigures is what a Windows host holds for one card-only render: HostGiB is the working set the call is admitted against and CommitGiB the system commit.
-type WindowsFigures struct{ HostGiB, CommitGiB float64 }
+// SetGiB is the size of the weight set the run was made with (the figure fitToCard counts): the figures stand for a call whose set is no larger than that (within 5 percent),
+// because the working set follows the files that are mapped. A larger set (a bf16 transformer in place of the int8 one) is unmeasured and keeps the ordinary estimate.
+type WindowsFigures struct{ HostGiB, CommitGiB, SetGiB float64 }
 
-// videoWindowsFigures maps a video or animate family (wan22, ltx25, wan-animate2) to what one card-only render of it measured on a Windows host. It is EMPTY today: the
-// 0 the card-only video and animate branches of estimateWith declare was measured on Linux nodes only (the read-only map's pages are clean file pages MemAvailable counts
-// there), and no Windows run of a card-only video call has been measured by the footprint sampler. A figure gets in by one render of that family through the door on a Windows
-// host (--wan-placement multicard, or --placement multicard for the animate graph), read back from the footprint store's entry for the run (fleetnode.FootprintEntry): HostPeakGiB
-// (private bytes peak) is the commit, HostResidentPeakGiB (resident peak) is the touched figure, both from the process-tree sampler. Until a family has its entry, a Windows host
-// declares the ordinary estimate for it (cardOnlyDeclares). The same split image rows carry as WindowsHostGiB / WindowsCommitGiB (render/multicard-recipes.json).
-var videoWindowsFigures = map[string]WindowsFigures{}
+// covers says whether the figures stand for a call whose weight set is total GiB.
+func (w WindowsFigures) covers(total float64) bool { return w.SetGiB <= 0 || total <= w.SetGiB*1.05 }
+
+// videoWindowsFigures maps a video or animate family (wan22, ltx25, wan-animate2) to what one card-only render of it measured on a Windows host. A family without an entry is
+// unmeasured there: the 0 the card-only video and animate branches of estimateWith declare was measured on Linux nodes only (the read-only map's pages are clean file pages
+// MemAvailable counts there). A figure gets in by one render of that family through the door on a Windows host (--wan-placement multicard, or --placement multicard for the animate
+// graph), from a cold ComfyUI instance, read back from the footprint store's entry for the run (fleetnode.FootprintEntry): HostPeakGiB (private bytes peak) is the commit,
+// HostResidentPeakGiB (resident peak) is the touched figure, both from the process-tree sampler. Until a family has its entry, a Windows host declares the ordinary estimate for it
+// (cardOnlyDeclares). The same split image rows carry as WindowsHostGiB / WindowsCommitGiB (render/multicard-recipes.json).
+//
+// ltx25: 2026-11-10, a Windows host with two 16 GiB cards leased, the int8 22B distilled transformer (20.03 GiB) and the int8 text encoder (14.32 GiB), one 448x832 clip of 49
+// frames from a cold instance: the process tree peaked at 23.0 GiB resident and 29.4 GiB of private bytes while the door declared 0. Rounded up to the next GiB. The calibration
+// of a declaration against the recorded peaks (the pipeline's calibratedRAM) raises it from there when larger canvases record more.
+var videoWindowsFigures = map[string]WindowsFigures{
+	"ltx25": {HostGiB: 24, CommitGiB: 30, SetGiB: 34.35},
+}
 
 // cardOnlyDeclares is the declaration of a card-only video or animate call whose two cards each fit their stage (zero: the Need estimateWith has built, 0 host RAM). That 0 is a Linux
 // figure. On Windows the map's pages sit in the working set while the DiT is copied to the card and WDDM commits the card allocations (a krea2 card-only image render held 27 GiB
@@ -514,7 +525,7 @@ func cardOnlyDeclares(zero Need, family, set string, total float64, f Facts, sma
 		return zero
 	}
 	peaks := fmt.Sprintf("the compute card peaks at %.1f GiB (of %.1f GiB) and the storage card at %.1f GiB (of %.1f GiB usable)", compute, large, storage, small-reserve)
-	if w, ok := videoWindowsFigures[family]; ok {
+	if w, ok := videoWindowsFigures[family]; ok && w.covers(total) {
 		return Need{GiB: w.HostGiB, CommitGiB: w.CommitGiB, CommitStated: true, Source: SourceMeasured,
 			Detail: fmt.Sprintf("%s: the card-only placement on 2 leased cards (%.1f + %.1f GiB): %s; on a Windows host the read-only map's pages sit in the working set while the DiT is copied to the card and WDDM commits the card allocations, measured at %.1f GiB touched and %.1f GiB of commit (a Linux host declares 0 for the same call)", family, small, large, peaks, w.HostGiB, w.CommitGiB)}
 	}

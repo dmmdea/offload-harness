@@ -696,11 +696,11 @@ func TestTheResidentShareIsReadFromTheCall(t *testing.T) {
 	if n := wanNeed(t, ltxCmd, ltx); n.GiB != 0 {
 		t.Fatalf("premise: the default 9 GiB share of the LTX-2.5 DiT fits two 15 GiB cards, got %v", n)
 	}
-	// The same fitting call on a Windows host: its 0 is a Linux measurement, so it declares the ordinary set (no Windows figure is measured yet) and says why.
+	// The same fitting call on a Windows host: its 0 is a Linux measurement, so it declares what a Windows run of this set measured (24 GiB touched, 30 GiB of commit), stated.
 	win := ltx
 	win.GOOS = "windows"
-	if w := wanNeed(t, ltxCmd, win); !near(w.GiB, 20.03+14.32) || w.CommitStated || !strings.Contains(w.Detail, "fits the two leased cards (15.0 + 15.0 GiB)") || !strings.Contains(w.Detail, "measured on a Linux host") || !strings.Contains(w.Detail, "no run has measured what a Windows host holds") {
-		t.Fatalf("the fitting LTX-2.5 call on a Windows host: %v, want the ordinary set with the reason", w)
+	if w := wanNeed(t, ltxCmd, win); !near(w.GiB, 24) || !near(w.CommitGiB, 30) || !w.CommitStated || w.Source != SourceMeasured || !strings.Contains(w.Detail, "2 leased cards (15.0 + 15.0 GiB)") || !strings.Contains(w.Detail, "a Linux host declares 0") {
+		t.Fatalf("the fitting LTX-2.5 call on a Windows host: %v, want the measured Windows figures, stated", w)
 	}
 	n := wanNeed(t, ltxCmd+" --wan-resident-gb 2", ltx)
 	if !near(n.GiB, 20.03+14.32) {
