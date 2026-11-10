@@ -103,7 +103,7 @@ func TestABusyGraphIsATicketAndTheSameGraphAttachesToIt(t *testing.T) {
 	if _, runs := e.lr.counts(); runs != 0 {
 		t.Errorf("a ticket does not run the graph in this machine's line while it waits: %d runs", runs)
 	}
-	if rows := Queue(e.cfg); len(rows) != 1 || rows[0].Task != string(core.TaskRunGraph) || rows[0].State != stWaiting || !rows[0].Place {
+	if rows := Queue(e.cfg, nil); len(rows) != 1 || rows[0].Task != string(core.TaskRunGraph) || rows[0].State != stWaiting || !rows[0].Place {
 		t.Errorf("offload_status lists the graph ticket, holding a place in the local line: %+v", rows)
 	}
 
@@ -688,7 +688,7 @@ func TestAGraphThatReadsAnInputFileIsALocalOnlyTicketThatKeepsItsPlace(t *testin
 	if again := graphAnswer(t, runDoor(e.cfg, e.lr, resend(e, req, refGraph, nil), AtOnce)); again.Ticket != a.Ticket {
 		t.Errorf("a resend is the same ticket: %s vs %s", again.Ticket, a.Ticket)
 	}
-	if rows := Queue(e.cfg); len(rows) != 1 || rows[0].Task != string(core.TaskRunGraph) || rows[0].Why == "" || !rows[0].Place {
+	if rows := Queue(e.cfg, nil); len(rows) != 1 || rows[0].Task != string(core.TaskRunGraph) || rows[0].Why == "" || !rows[0].Place {
 		t.Errorf("offload_status lists it with its reason and its place: %+v", rows)
 	}
 
@@ -763,7 +763,7 @@ func TestAGraphsNeedIsReadOnceWhenTheTicketIsMade(t *testing.T) {
 	e.free(0)
 	time.Sleep(300 * time.Millisecond) // several scans
 	noPosts(t, "the 8 GB node (the floor was read when the ticket was made)", small)
-	if rows := Queue(e.cfg); len(rows) != 1 || !strings.Contains(rows[0].Why, "chosen") {
+	if rows := Queue(e.cfg, nil); len(rows) != 1 || !strings.Contains(rows[0].Why, "chosen") {
 		t.Errorf("the ticket still names the default floor: %+v", rows)
 	}
 }
