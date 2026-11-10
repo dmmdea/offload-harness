@@ -611,7 +611,7 @@ async function resolveInPrivateTemp(t, { uvExit }) {
   const priv = scratchDir(t, "satisfy-tmp-");
   const uvLog = join(bin, "uv-calls.jsonl");
   const py = makeStub(bin, "python", { stdout: ["torch==2.11.0+cu128", "requests==2.32.0"] });
-  makeStub(bin, process.platform === "win32" ? "uv" : "uv.exe", { // resolveDeps looks for uv.exe beside the python
+  makeStub(bin, "uv", { // resolveDeps looks for uv beside the python (uv.exe on Windows, where makeStub adds the suffix)
     exit: uvExit, record: uvLog, writes: { kind: "file_o", base64: Buffer.from("requests==2.32.0\n").toString("base64") },
   });
   mkdirSync(join(comfy, "custom_nodes", "PackA"), { recursive: true });

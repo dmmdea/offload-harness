@@ -337,6 +337,8 @@ Packs are cloned (the head of the repository's default branch; the commit it got
 resolved in **one `uv pip compile`** (under the host-torch constraints) and installed as one
 lock — so **`uv` in the ComfyUI venv is the REQUIRED satisfier tool** (uv is driven directly;
 ComfyUI-Manager and GitPython are not used and are not installed for it).
+On Linux uv is found beside the venv's python or on `PATH`, and a venv without pip is served through `uv pip`
+(docs/OPERATOR-GUIDE.md, the run-graph section).
 `install.ps1` provisions **`pip install uv`** as part of the run-graph deps step, guarded to
 skip when present. It runs only when a ComfyUI install is discoverable — override with
 `$env:COMFY_DIR` (else the `comfy_dir` of the existing config, else `C:/ComfyUI`) / `$env:COMFY_PY`.

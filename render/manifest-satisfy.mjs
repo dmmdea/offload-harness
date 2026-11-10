@@ -415,7 +415,7 @@ export async function satisfyManifest(manifest, deps) {
 
   // The satisfier tooling (uv) is ONLY needed to install PACKS. A models-only or
   // empty manifest (a graph using only built-in nodes) must NOT require it.
-  if (hasPacks && !satisfierAvailable()) return defer("SATISFIER_UNAVAILABLE", "uv", "uv not found in the ComfyUI venv (pip install uv)");
+  if (hasPacks && !satisfierAvailable()) return defer("SATISFIER_UNAVAILABLE", "uv", "uv not found beside the ComfyUI venv's python or on PATH (install uv)");
 
   // comfyui_min_version is only enforceable once ComfyUI is reachable; versionBelow is
   // null-safe (returns false when the version can't be read), so this never wrongly defers.
@@ -565,11 +565,71 @@ import { pipeline } from "node:stream/promises";
 // Unified resolve: ONE `uv pip compile` across ALL packs' requirements files at once
 // (cross-pack conflict detection — the ecosystem's documented failure mode is
 // last-writer-wins sequential pip), then ONE constrained install of the lock.
-export function buildCompileCmd(reqPaths, { uvExe, comfyPy, lockPath }) {
-  return [uvExe, "pip", "compile", "--python", comfyPy, ...reqPaths, "-o", lockPath];
+export function buildCompileCmd(reqPaths, { uvExe, comfyPy, lockPath, indexArgs = [] }) {
+  return [uvExe, "pip", "compile", "--python", comfyPy, ...indexArgs, ...reqPaths, "-o", lockPath];
 }
 export function buildInstallCmd(lockPath, { comfyPy }) {
   return [comfyPy, "-m", "pip", "install", "-r", lockPath];
+}
+
+// resolveUv: uv beside the venv's python (where `pip install uv` puts it: Scripts/uv.exe on Windows, bin/uv elsewhere), else
+// the first uv on PATH, else null. A venv that uv itself created holds no uv, and off Windows the file was never named
+// uv.exe, so a Linux node with uv installed deferred SATISFIER_UNAVAILABLE on every graph that names a node pack.
+export function resolveUv(comfyPy, { platform = process.platform, env = process.env, exists = existsSync } = {}) {
+  const name = platform === "win32" ? "uv.exe" : "uv";
+  const beside = join(dirname(comfyPy), name);
+  if (exists(beside)) return beside;
+  for (const dir of String(env.PATH || env.Path || "").split(platform === "win32" ? ";" : ":")) {
+    if (dir && exists(join(dir, name))) return join(dir, name);
+  }
+  return null;
+}
+
+// `python -m pip` in a venv that has no pip module (uv creates them that way).
+const NO_PIP_RE = /No module named pip\b/;
+
+// torchIndexUrl: the PyTorch index the venv's torch build came from, read off its local version label
+// (`torch==2.15.0+cu134` gives .../whl/cu134), or null when torch is absent or carries no such label.
+//
+// Off Windows a CUDA torch wheel depends on the CUDA runtime wheels (cuda-toolkit, nvidia-*), and the build of the same
+// number on PyPI can pin a different CUDA release than the one installed. Resolving the packs' lock against PyPI alone then
+// pins the wrong runtime, and the install replaces torch itself to match (a Linux node, 2026-11-10: 2.15.0+cu134 was
+// replaced by PyPI's 2.15.0, a cu132 build, and ten CUDA libraries went down with it). With this index in the resolve, the
+// lock carries the installed build and its own runtime, and nothing of torch moves.
+export function torchIndexUrl(held, { platform = process.platform } = {}) {
+  if (platform === "win32") return null;   // the Windows wheels carry their CUDA runtime inside: the public pin moves nothing there
+  const line = (held || []).find((l) => /^torch==/i.test(l));
+  const m = line && /\+(cu\d+|cpu|rocm[\d.]+|xpu)$/.exec(line.trim());
+  return m ? `https://download.pytorch.org/whl/${m[1]}` : null;
+}
+
+// lockMovesHeld: the held lines a lock would replace (it names the package at another version). Empty when the lock leaves
+// every held package alone. A lock that does not name a held package at all does not move it.
+export function lockMovesHeld(lockText, held) {
+  const pins = new Map();
+  for (const raw of String(lockText || "").split(/\r?\n/)) {
+    const l = raw.trim();
+    const eq = l.indexOf("==");
+    if (eq <= 0 || l.startsWith("#")) continue;
+    pins.set(l.slice(0, eq).trim().toLowerCase().replace(/[-_.]+/g, "-"), l.split(/\s/)[0]);
+  }
+  const moved = [];
+  for (const h of held || []) {
+    const name = h.slice(0, h.indexOf("==")).trim().toLowerCase().replace(/[-_.]+/g, "-");
+    const got = pins.get(name);
+    if (got && got.toLowerCase() !== h.trim().toLowerCase()) moved.push(`${h} -> ${got}`);
+  }
+  return moved;
+}
+
+// uvCheckLines: what `uv pip check` printed, without its status lines (they carry a run time and a count) and without
+// "was built for a different platform". That last line is about the wheel's own tag, not about a dependency: decord 0.6.0
+// ships a wheel that names itself cp36 inside a py3 file, installs and runs on a current python, and uv reports it on
+// every check. An installer never picks a wheel for another platform, so the line says nothing a pack install can fix.
+export function uvCheckLines(out) {
+  return String(out || "").split(/\r?\n/).map((l) => l.trim()).filter((l) => l
+    && !/^(Using Python |Checked \d+ packages? in |Found \d+ incompatibilit|All installed packages are compatible)/.test(l)
+    && !/ was built for a different platform$/.test(l));
 }
 
 // buildClonePackCmd: `git clone -- <repo> <dir>`. The literal `--` terminates option parsing,
@@ -776,13 +836,49 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
   // (adversarial-review finding, 2026-07-22). Clear the memo on rejection so a retry
   // actually re-spawns.
   const hostConstraints = () => (hostConstraintsP ??= ((async () => ({
-    held: buildHostConstraints(await runOut([comfyPy, "-m", "pip", "freeze"])),
+    held: buildHostConstraints(await pipFreeze(false)),
   }))()).catch((e) => { hostConstraintsP = null; throw e; }));
+  // A venv with pip is asked exactly as before, with no extra spawn. One without it (the first `python -m pip` answers
+  // "No module named pip") gets the same question through `uv pip <verb> --python <venv python>` from then on.
+  let noPip = false;
+  const uvPip = (verb, ...rest) => {
+    const uvExe = resolveUv(comfyPy);
+    if (!uvExe) throw new Error("the ComfyUI venv has no pip module and no uv was found beside its python or on PATH");
+    return [uvExe, "pip", verb, "--python", comfyPy, ...rest];
+  };
+  const pipElseUv = async (runner, pipCmd, uvCmd, opts) => {
+    if (!noPip) {
+      try { return await runner(pipCmd, opts); }
+      catch (e) { if (!NO_PIP_RE.test(String((e && e.message) || ""))) throw e; noPip = true; }
+    }
+    return runner(uvCmd(), opts);
+  };
+  // `uv pip freeze` lists every package and has no --all.
+  const pipFreeze = (all) => pipElseUv(runOut, [comfyPy, "-m", "pip", "freeze", ...(all ? ["--all"] : [])], () => uvPip("freeze"));
+  const checkText = (cmd) => new Promise((resolve, reject) => {
+    const c = track(nodeSpawn(cmd[0], cmd.slice(1), { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
+    let out = "";
+    c.stdout.on("data", (d) => (out += d));
+    c.stderr.on("data", (d) => (out += d));
+    c.on("error", reject);
+    c.on("close", (code) => resolve({ code: code === null ? -1 : code, out }));
+  });
+  // The check as {code, out}: pip's own answer where the venv has pip, else uv's with only its conflict lines (uvCheckLines);
+  // a uv check whose every line was dropped reads as clean.
+  const venvCheck = async () => {
+    if (!noPip) {
+      const r = await checkText([comfyPy, "-m", "pip", "check"]);
+      if (r.code === 0 || !NO_PIP_RE.test(r.out)) return r;
+      noPip = true;
+    }
+    const r = await checkText(uvPip("check"));
+    const lines = uvCheckLines(r.out);
+    return { code: lines.length ? (r.code || 1) : 0, out: lines.join("\n") };
+  };
   return {
     comfyDir,
-    // The pack satisfier's hard tool is uv (unified resolve); derived from the venv
-    // python's Scripts dir.
-    satisfierAvailable: () => existsSync(comfyPy) && existsSync(join(dirname(comfyPy), "uv.exe")),
+    // The pack satisfier's hard tool is uv (unified resolve): beside the venv's python, else on PATH (resolveUv).
+    satisfierAvailable: () => existsSync(comfyPy) && !!resolveUv(comfyPy),
     comfyVersion: async () => {
       try { const r = await fetch(`${api}/system_stats`); const j = await r.json(); return j?.system?.comfyui_version || j?.comfyui_version || null; }
       catch { return null; }
@@ -798,16 +894,9 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
     })(),
     exists: (p) => existsSync(p),
     // pip check as text: {code, out}, whatever the exit code (the baseline and the delta of satisfyManifest). Rejects only when pip could not start.
-    pipCheckText: () => new Promise((resolve, reject) => {
-      const c = track(nodeSpawn(comfyPy, ["-m", "pip", "check"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true }));
-      let out = "";
-      c.stdout.on("data", (d) => (out += d));
-      c.stderr.on("data", (d) => (out += d));
-      c.on("error", reject);
-      c.on("close", (code) => resolve({ code: code === null ? -1 : code, out }));
-    }),
+    pipCheckText: () => venvCheck(),
     // The digest of this venv's `pip freeze --all`; "" when it cannot be read (an unreadable venv never invalidates a rejection).
-    freezeHash: async () => { try { return freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { return ""; } },
+    freezeHash: async () => { try { return freezeDigest(await pipFreeze(true)); } catch { return ""; } },
     // Durable "this exact pack set was resolved+checked successfully" marker. Written only
     // after a fully successful resolve+check; read fail-safe. It attests VENV state, so it
     // lives INSIDE the venv (beside the interpreter's home): a wiped/recreated venv takes
@@ -863,7 +952,12 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
         .filter((p) => existsSync(p));
       if (!reqPaths.length) return;
       const { held } = await hostConstraints();
-      const uvExe = join(dirname(comfyPy), "uv.exe");
+      const uvExe = resolveUv(comfyPy);
+      if (!uvExe) throw new Error("uv not found beside the ComfyUI venv's python or on PATH");
+      // Off Windows, a torch build with a CUDA label is resolved against its own index and held at its FULL version
+      // (torchIndexUrl says why). Without that index a +cuXXX line does not exist anywhere, so it is held by its public pin.
+      const torchIndex = torchIndexUrl(held);
+      const indexArgs = torchIndex ? ["--extra-index-url", torchIndex, "--index-strategy", "unsafe-best-match"] : [];
       // The constraints file and the unified lock are scratch for THIS step: they live in a folder of
       // their own that is removed when the step ends, however it ends. (They were pid-named files in
       // the OS temp dir that nothing removed, so every provisioning run left two behind.)
@@ -874,12 +968,17 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
           const p = join(scratch, "host-constraints.txt");
           // Constraints file carries the PUBLIC lines (local +cuXXX builds don't exist
           // on PyPI → unresolvable); the tripwire compares the FULL lines.
-          writeFileSync(p, held.map(publicPin).join("\n") + "\n");
-          env = { PIP_CONSTRAINT: p, UV_CONSTRAINT: p };
+          writeFileSync(p, (torchIndex ? held : held.map(publicPin)).join("\n") + "\n");
+          env = { PIP_CONSTRAINT: p, UV_CONSTRAINT: p, ...(torchIndex ? { PIP_EXTRA_INDEX_URL: torchIndex } : {}) };
         }
         const lockPath = join(scratch, "pack-lock.txt");
-        await run(buildCompileCmd(reqPaths, { uvExe, comfyPy, lockPath }), { env: { ...process.env, ...env } });
-        await run(buildInstallCmd(lockPath, { comfyPy }), { env: { ...process.env, ...env } });
+        await run(buildCompileCmd(reqPaths, { uvExe, comfyPy, lockPath, indexArgs }), { env: { ...process.env, ...env } });
+        if (torchIndex) {
+          // Nothing is installed from a lock that would replace a held package: the venv stays as it was.
+          const moved = lockMovesHeld(readFileSync(lockPath, "utf8"), held);
+          if (moved.length) throw new Error("the resolved lock would replace a protected package (" + moved.join(", ") + "); nothing was installed");
+        }
+        await pipElseUv(run, buildInstallCmd(lockPath, { comfyPy }), () => uvPip("install", ...indexArgs, "-r", lockPath), { env: { ...process.env, ...env } });
       } finally {
         try { rmSync(scratch, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } catch { /* best effort: the install's own result matters more */ }
       }
@@ -891,7 +990,7 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
       // No credential prompt: a repository this node cannot read (the private MultiGPU mirror) fails at once, so the next candidate is tried.
       gitRun: (cmd) => run(cmd, { env: { ...process.env, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" } }),
       gitOrigin: (dir) => runOut(["git", "-C", dir, "remote", "get-url", "origin"]),
-      freezeHash: async () => { try { return freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { return ""; } },
+      freezeHash: async () => { try { return freezeDigest(await pipFreeze(true)); } catch { return ""; } },
       lsRemoteHead: async (repo) => {
         const out = await runOut(["git", "ls-remote", "--", repo, "HEAD"]);
         const sha = out.split(/\s+/)[0] || "";
@@ -904,7 +1003,7 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
     // there), and, when the failure is the pack's own (`reject`), record the commit so it is not cloned and failed again.
     discardFreshPacks: async (fresh, { reject, reason }) => {
       let freeze = "";
-      if (reject) { try { freeze = freezeDigest(await runOut([comfyPy, "-m", "pip", "freeze", "--all"])); } catch { freeze = ""; } }
+      if (reject) { try { freeze = freezeDigest(await pipFreeze(true)); } catch { freeze = ""; } }
       for (const { pack, commit } of fresh) {
         const dir = join(comfyDir, "custom_nodes", pack.name);
         if (checkNodePack(pack)) continue;   // a name the table does not give is never a path to remove
@@ -921,7 +1020,8 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
     pipCheck: async () => {
       try {
         try {
-          await run([comfyPy, "-m", "pip", "check"]);
+          const r = await venvCheck();
+          if (r.code !== 0) throw new Error(`${noPip ? "uv pip check" : comfyPy} exit ${r.code}: ${String(r.out).slice(-300)}`);
         } catch (e) {
           // A spawn failure means pip never RAN — rethrow so the caller classifies it as
           // SATISFIER_SPAWN_FAILED instead of blaming the venv. Only a real non-zero exit
@@ -934,7 +1034,7 @@ export function defaultSatisfyDeps({ comfyDir, comfyPy, api }) {
         // report incoherent (→ typed VENV_INCOHERENT defer), never a silent torch swap.
         const { held } = await hostConstraints();
         if (held.length) {
-          const now = buildHostConstraints(await runOut([comfyPy, "-m", "pip", "freeze"]));
+          const now = buildHostConstraints(await pipFreeze(false));
           if ([...held].sort().join("|") !== [...now].sort().join("|")) {
             const detail = "host constraint drift — a protected package moved during provisioning: expected [" + held.join(", ") + "] got [" + now.join(", ") + "]";
             console.error(detail);

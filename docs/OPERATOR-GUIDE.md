@@ -533,6 +533,17 @@ Prerequisite (provisioned by `install.ps1`): **uv** in the ComfyUI venv (the pac
 unified-resolve tool, the hard requirement) and git on PATH. ComfyUI-Manager and GitPython are not
 used by run-graph and `install.ps1` no longer installs them.
 
+On a Linux node nothing provisions this, and three things differ:
+
+- **uv** is taken from beside the venv's python (`<venv>/bin/uv`) or, when it is not there, from `PATH`. A venv that
+  `uv venv` created holds no pip; there the freeze, the check and the install go through `uv pip --python <venv python>`.
+- **A CUDA torch build keeps its own index.** When the venv's torch carries a label (`2.15.0+cu134`), the packs' lock is
+  resolved with `https://download.pytorch.org/whl/<label>` beside PyPI and torch is held at its full version, so the lock
+  names the installed build and its own CUDA runtime wheels. A lock that would still replace torch, torchvision,
+  torchaudio or numpy is refused before anything is installed.
+- **System libraries are the node's.** A pack that imports OpenCV (`opencv-python`) needs `libgl1` on a headless host
+  (`apt-get install --no-install-recommends libgl1`); without it the graph defers `RUN_ERROR` naming `libGL.so.1`.
+
 ### Generative inpainting (inpaint-image) ✅
 
 ```powershell
