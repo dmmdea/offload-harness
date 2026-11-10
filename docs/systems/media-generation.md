@@ -2267,9 +2267,10 @@ that holds the whole node, is served by the old path exactly as before.
 does not fail with `gpu busy`. It leaves a place-keeping token and answers with a deferred result,
 `err_class: gpu_queued`, `defer_class: capacity`, whose data carries `waiter_token`, `queue_position`
 (1 = next), `eta_s` (the declared window left on the lease in the way: a ceiling, not a promise),
-`devices` (the cards it waits for; empty = the whole node), `held_by` (the leases in the way), `holders` and
-`retry_after_sec` (the same blocks a busy answer carries, below, whenever a lease is in the way, so a caller that
-paces its re-ask by them keeps doing so) and a `resume` sentence. The caller re-sends the same request with `waiter_token`, and the call resumes the place
+`devices` (the cards it waits for; empty = the whole node), `held_by` (the leases in the way), `holders` (the
+block a busy answer carries, below, whenever a lease is in the way), `retry_after_sec` (how long to sleep before
+asking again: 10 s at most, a third of the 30 s the place holds, because a place is kept by asking again and the
+ask itself waits in line) and a `resume` sentence. The caller re-sends the same request with `waiter_token`, and the call resumes the place
 it left, with the arrival time it had. A token lives ten minutes after the last time its caller polled it;
 for the first 30 seconds of that it holds its place against later callers for the same cards, and after
 that it is skipped by everyone (a whole-node barrier included), so a client that wandered off never blocks
