@@ -2273,8 +2273,11 @@ hold a place on, and every call gets the plain `gpu_busy` defer carrying the rea
 and the whole-node one; not the in-process or host-RAM forms, which have none) says it in the reason, `gpu busy: held by a media-class lease (epoch 1906,
 group nightly, cards <id>, <id>; 696s, reason "..."), its term ends in 512s`, and in its data: `{"holders":[{"epoch","class","reason","group","held_sec",
 "remaining_sec","expires_at","devices"}], "retry_after_sec":N}`. `devices` empty means the lease holds the whole node; `expires_at` (RFC 3339) and
-`retry_after_sec` (the lease's remaining term, a ceiling for a media lease, not a promise) are left out when the lease declared no term or it has passed:
-no figure is made up. When several leases are live the block describes the lowest epoch. The vision gate (`vqa`, `ocr`, `assess_image`, `video_watch`) answers
+`retry_after_sec` are left out when the lease declared no term or it has passed: no figure is made up. The two figures answer different questions.
+`remaining_sec` is the lease's remaining declared term. `retry_after_sec` is how long to sleep before asking again: the remaining term when the holder
+reserved a window, and 30 s (the line's own cadence, never more than the term) when the holder is another door call, whose lease ends when that call
+returns and whose term is only the call's ceiling. The sentence then reads `it is one door call and ends when that call returns, 5309s at most`. A
+batch that renders call by call opens a gap after each call, and a caller that slept the ceiling would miss every one. When several leases are live the block describes the lowest epoch. The vision gate (`vqa`, `ocr`, `assess_image`, `video_watch`) answers
 the same way, with the seat's cards in the sentence: `gpu busy: the vision seat <model> sits on cards <id>, <id>; a media-class lease (epoch 1906, cards <id>,
 reason "...") has held them for 696s and its term ends in 512s`. A seat sits on one or more cards and is held when a lease touches ANY of them; the sentence
 says which. `video_watch` carries the block once, from the window that found the cards held.
