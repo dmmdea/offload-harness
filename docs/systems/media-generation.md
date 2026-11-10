@@ -1105,8 +1105,11 @@ with the read-only loader promotes a row: flip `basis` in `render/multicard-reci
 - *The finished answer names the pair.* A generate-image, edit-image or batch that ran on the pair adds `devices` to its success answer: the two lease ids,
   sorted, the key and spelling the queued answer already uses (`TestAMulticardImageBindingLeasesTwoNonDisplayCardsAndPassesThePlacement`). Under a parent
   lease they are the parent's two cards. A batch carries them on every item it rendered here, so the item `generate-image --batch` prints has them too. A call
-  that did not hold the pair (the one-card lease, a pool that holds two cards, a named family without the key, `single`) adds nothing: its answer is byte for
-  byte what it was.
+  that did not hold the pair (the one-card lease, a pool that holds two cards, a named family without the key, `single`) adds no `devices`. The video, animate
+  and music (audio-gen) answers carry `devices` the same way when their grant holds the pair.
+- *The finished answer states the host RAM it declared.* Every media door whose lease declares host RAM (generate-image on ComfyUI or sd.cpp, edit, inpaint, video on ComfyUI, animate, music) adds `host_ram_declared_gib` to its success answer: the touched figure the call declared for its lease, a `0` included (a card-only call on
+  Linux declares 0, and the key is there to say so), and `host_ram_commit_declared_gib` when the estimate stated a commit. A door that declares nothing (upscale,
+  voice on a card) adds neither key.
 - *Under a parent lease* (`local-offload gpu reserve --devices <a>,<b> -- <command>`) the call runs inside it on both cards, if the lease holds exactly two
   non-display cards of this box; one card, the whole node and a lease that includes the display card are refused with the reason.
 - *The lane probe and the place-in-line keeper read the same named plan*, so a router sees a held card of the pair as a busy lane, and the differential
@@ -2260,6 +2263,16 @@ place on the cards that would qualify but for what is short (the allocator's `Wa
 node, so it does not become a barrier) with the reason, and resumes it when the host recovers; when no card
 could qualify however long it waited (all of them the screen, quarantined, foreign-busy) there is nothing to
 hold a place on, and every call gets the plain `gpu_busy` defer carrying the reason.
+
+**A busy answer names who holds the cards and when to come back.** A `gpu_busy` defer that has a lease behind it (the card-scoped admission's busy answer
+and the whole-node one; not the in-process or host-RAM forms, which have none) says it in the reason, `gpu busy: held by a media-class lease (epoch 1906,
+group nightly, cards <id>, <id>; 696s, reason "..."), its term ends in 512s`, and in its data: `{"holders":[{"epoch","class","reason","group","held_sec",
+"remaining_sec","expires_at","devices"}], "retry_after_sec":N}`. `devices` empty means the lease holds the whole node; `expires_at` (RFC 3339) and
+`retry_after_sec` (the lease's remaining term, a ceiling for a media lease, not a promise) are left out when the lease declared no term or it has passed:
+no figure is made up. When several leases are live the block describes the lowest epoch. The vision gate (`vqa`, `ocr`, `assess_image`, `video_watch`) answers
+the same way, with the seat's cards in the sentence: `gpu busy: the vision seat <model> sits on cards <id>, <id>; a media-class lease (epoch 1906, cards <id>,
+reason "...") has held them for 696s and its term ends in 512s`. A seat sits on one or more cards and is held when a lease touches ANY of them; the sentence
+says which. `video_watch` carries the block once, from the window that found the cards held.
 
 **Open acceptance of P13 (P13 is not complete until these are closed).** What the review pass could not close
 from a worktree, with no GPU and no live lease root:
