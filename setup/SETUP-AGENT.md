@@ -755,10 +755,10 @@ installer's default steps and uses no card while installing (it never loads the 
 wheels, the venv and the 837 MB checkpoint).
 
 ```powershell
-local-offload install forecast            # --home / --models to relocate; --json prints one final result line
+local-offload install forecast            # builds in the install root and prints it; --home / --models to relocate; --json prints one final result line
 ```
 
-It builds `<OFFLOAD_HOME>/forecast/venv` (python 3.13), installs torch with `--torch-backend=auto`, installs `timestral` from the
+It builds `<home>/forecast/venv` (python 3.13), where `<home>` is `--home` when given, else `$OFFLOAD_HOME`, else the nearest folder holding the installer's `installed.json` (found the way `local-offload update` finds it; the seat looks for the venv there), else `~/.local-offload` only when neither exists. The first progress line names the home it chose. It installs torch with `--torch-backend=auto`, installs `timestral` from the
 head of its default branch, fetches the weights at the revision `main` names on Hugging Face at install time into `<models>/timestral-209m` (checked against the digest and size the Hub publishes) and writes the
 server file. A second run changes nothing. The weights are Modified MIT: keep the attribution "2026 - Mistral AI" and note that
 there are no rights for a company whose global consolidated monthly revenue exceeds USD 20M (the install prints this line

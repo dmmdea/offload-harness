@@ -358,7 +358,7 @@ payload is the identity and can be megabytes of numbers, a hash would cost about
 the seat's `ttl` frees the card, so there is no unload after a burst.
 
 **Installing it.** `local-offload install forecast [--home H] [--models M] [--ref <sha|branch>] [--torch-backend auto] [--json]`
-needs `uv` on PATH and builds `<home>/forecast/venv` (python 3.13), installs torch with `uv pip install torch
+needs `uv` on PATH and builds `<home>/forecast/venv` (python 3.13; `<home>` is `--home`, else `$OFFLOAD_HOME`, else the nearest `installed.json` the way `update` finds it, else `~/.local-offload`, and the first progress line names it), installs torch with `uv pip install torch
 --torch-backend=auto`, installs the `timestral` package from the head of its default branch (resolved at install time), fetches the weights by
 `snapshot_download` at the newest Hugging Face revision (the one `main` names at that moment) into `<models>/timestral-209m` and verifies them against the digest and size the Hub publishes (`lfs.oid`), and writes the
 embedded server file. Every step verifies what is there and skips when it is right, so a second run changes nothing. It never
