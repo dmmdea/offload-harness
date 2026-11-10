@@ -195,7 +195,13 @@ var reasonPrefixCodes = []struct{ prefix, code string }{
 	// "<kind> refused: <why>" is a binding the node cannot run as configured (an engine binary that does not
 	// resolve is the usual case); a request the bindings refuse by size or flags sets its own err_class.
 	{"audio generation refused:", ReasonConfig}, {"video generation refused:", ReasonConfig}, {"character animation refused:", ReasonConfig},
-	{"animategen_engine is sdcpp but ", ReasonConfig}, {"compose_video: no composition route configured", ReasonConfig},
+	{"animategen_engine is sdcpp but ", ReasonConfig},
+	// The same two shapes on the iGPU image doors (upscale_image, inpaint_image); an out-of-range inpaint
+	// argument is the request's, like an unknown audio kind.
+	{"image upscale refused:", ReasonConfig}, {"inpaint refused:", ReasonConfig},
+	{"upscale_engine is sdcpp but ", ReasonConfig}, {"inpaint_engine is sdcpp but ", ReasonConfig},
+	{"inpaint denoise must be ", ReasonContract}, {"inpaint grow_mask must be ", ReasonContract},
+	{"compose_video: no composition route configured", ReasonConfig},
 	{"voice=endpoint requested but tts_endpoint is unset", ReasonConfig},
 	// A named family the node does not serve is the request's; a family whose overlay is incomplete is the config's.
 	{"unknown image family", ReasonContract}, {"unknown edit family", ReasonContract}, {"imagegen_families[", ReasonConfig},

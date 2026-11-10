@@ -76,6 +76,7 @@ matched text, unless an exempt row bound to the exact path and git blob id says 
 | a text file | scanned; a UTF-8 mark is stripped; UTF-16 with a mark is decoded first, and its raw bytes are scanned too (a plain ASCII file with a stray mark decodes to other scripts and would hide its names) |
 | a file with a UTF-16 mark that is not valid UTF-16 (an odd payload, an unpaired surrogate) | fails like an unknown binary |
 | a PNG | every chunk except pixel data is scanned, compressed text chunks are inflated, bytes after the end marker are scanned; a bad signature or a missing end marker fails |
+| a WAV | the RIFF/WAVE container is checked and every chunk length must fit the file; every chunk but `fmt ` and `data` (LIST/INFO, `bext`, `iXML`, `id3 `, `cue `, `labl`, `note`, and any id not known) is scanned as text, and so are bytes after the declared RIFF end; the PCM samples are opaque; a `.wav` that is not RIFF/WAVE, a chunk that overflows, or a file with no `fmt ` or no `data` chunk fails |
 | an unknown binary | fails (a NUL in the first 8000 bytes) |
 | a file over 16 MiB | fails |
 | a run of more than 96 alphanumeric characters | fails, naming the line |
@@ -197,7 +198,7 @@ sources like every other file.
 | `testdata/leak-gate-digests.json` | the committed digests, the MAC and the exempt rows |
 | `internal/leakgate/leakgate.go` | entries, the list format, validation, findings |
 | `internal/leakgate/match.go`, `fold.go`, `foldtable.go` | the tokenizer, the matcher and the fold |
-| `internal/leakgate/scan.go`, `png.go` | the tree scan and its fail-closed rules; the PNG chunk walk |
+| `internal/leakgate/scan.go`, `png.go`, `wav.go` | the tree scan and its fail-closed rules; the PNG and WAV chunk walks |
 | `internal/leakgate/shape.go` | the keyless shape rules |
 | `internal/leakgate/digest.go`, `key.go` | the digest file and its MAC; key resolution and the required/skip decision |
 | `internal/leakgate/filelist.go`, `patterns.go` | the `-files` grammar of the local scanner; the hook patterns |
