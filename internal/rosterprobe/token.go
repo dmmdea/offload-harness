@@ -2,6 +2,7 @@ package rosterprobe
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -20,9 +21,11 @@ import (
 //
 //	401  the node has a token and this one is not it
 //	403  the node has none and listens beyond loopback, so it refuses the agent lane for every caller
+//	403  typed `"refusal":"scope_not_admitted"`: the bearer passed and the node's caller-scope backstop
+//	     (fleet_admit_scopes) refused the probe, which declares no scope; the node checks the bearer first
 //	400  `job_id required`: the bearer passed and the node refused the incomplete envelope
 //
-// No job is created and nothing is queued on any of the three, which is what makes it safe to send to a
+// No job is created and nothing is queued on any of them, which is what makes it safe to send to a
 // live node. The ordering is the node's documented, test-pinned contract (docs/FLEET-NODE.md; the
 // "auth precedes envelope validation" tests in internal/fleetnode/auth_test.go), and it is re-proved here
 // against the real node handler.
@@ -58,14 +61,28 @@ const (
 	TokenNodeHasNone
 )
 
+// scopeRefusal is the typed refusal a node writes when its caller-scope backstop (fleet_admit_scopes,
+// internal/fleetnode/scope.go) refuses an asker. The node runs it only after the bearer check passed.
+const scopeRefusal = "scope_not_admitted"
+
 // ClassifyToken reads a node's answer to the probe. A 400 counts as acceptance only when it is the
 // `job_id required` refusal: any other 400 (a node that predates the agent lane says `unsupported
-// task_type`) proves nothing about the bearer.
+// task_type`) proves nothing about the bearer. A 403 is a node with no token unless it carries the
+// typed scope refusal: a node that admits only some caller scopes (a personal-only node) answers the
+// probe, which declares none, with that refusal after the bearer passed. It was read
+// as NO-TOKEN, and doctor told the operator to set a token the node already held. The field is read, never the
+// prose: a node's message is not a protocol.
 func ClassifyToken(status int, body string) TokenState {
 	switch status {
 	case http.StatusUnauthorized:
 		return TokenMismatch
 	case http.StatusForbidden:
+		var v struct {
+			Refusal string `json:"refusal"`
+		}
+		if json.Unmarshal([]byte(body), &v) == nil && v.Refusal == scopeRefusal {
+			return TokenAccepted
+		}
 		return TokenNodeHasNone
 	case http.StatusBadRequest:
 		if strings.Contains(body, "job_id required") {
