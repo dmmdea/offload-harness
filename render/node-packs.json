@@ -25,6 +25,14 @@
     {
       "name": "ComfyUI-GGUF",
       "repo": "https://github.com/city96/ComfyUI-GGUF"
+    },
+    {
+      "name": "ComfyUI-RMBG",
+      "repo": "https://github.com/1038lab/ComfyUI-RMBG"
+    },
+    {
+      "name": "ComfyUI-Image-Filters",
+      "repo": "https://github.com/spacepxl/ComfyUI-Image-Filters"
     }
   ]
 }
