@@ -143,6 +143,43 @@ type videoFlags struct {
 	fast        bool
 	hero        bool
 	upscale     bool
+	waiterToken string
+}
+
+// waiterTokenFlagUsage is the help of --waiter-token on every media verb that can answer "gpu_queued".
+const waiterTokenFlagUsage = "the place in line a deferred call left: when a call could not get the GPU within gpu_wait_ms it answers gpu_queued with data.waiter_token (the \"result\" object under --json); run the SAME command again with --waiter-token <token> inside 10 minutes and the call keeps its arrival time, so a caller that asks later does not pass it. Empty = not sent"
+
+// withWaiterToken puts the --waiter-token of a media verb into the request's params when one was given.
+func withWaiterToken(params map[string]any, token string) {
+	if t := strings.TrimSpace(token); t != "" {
+		params["waiter_token"] = t
+	}
+}
+
+// waiterTokenHint is the sentence a media verb prints under a deferred call that left a place in line, naming the flag that
+// resumes it ("" when the result left none). The reason already says "waiter_token=<token>", which is the MCP spelling.
+func waiterTokenHint(res core.Result) string {
+	if !res.Deferred || res.Meta.ErrClass != core.ErrClassGPUQueued || len(res.Data) == 0 {
+		return ""
+	}
+	var d struct {
+		Token string `json:"waiter_token"`
+	}
+	if json.Unmarshal(res.Data, &d) != nil || d.Token == "" {
+		return ""
+	}
+	return "To keep your place in line, run the same command again with --waiter-token " + d.Token
+}
+
+// emitMediaResult is emitResult for a media verb whose deferral can be a place in line: the plain-text form adds the flag line
+// (--json already carries the token in the result object).
+func emitMediaResult(res core.Result, asJSON, compact bool) {
+	emitResult(res, asJSON, "", compact)
+	if !asJSON {
+		if hint := waiterTokenHint(res); hint != "" {
+			fmt.Println(hint)
+		}
+	}
 }
 
 // buildVideoParams maps the parsed CLI flags to the pipeline params map for a
@@ -200,6 +237,7 @@ func buildVideoParams(f videoFlags) map[string]any {
 	if f.upscale {
 		params["upscale"] = true
 	}
+	withWaiterToken(params, f.waiterToken)
 	return params
 }
 
@@ -225,7 +263,7 @@ const (
 var generateVideoValueFlags = map[string]bool{
 	"config": true, "model": true, "negative": true, "frames": true,
 	"width": true, "height": true, "steps": true, "seed": true, "reserve-vram": true,
-	"transformer": true, "route": true, "remote": true, "node": true, "min-vram-gb": true,
+	"transformer": true, "route": true, "remote": true, "node": true, "min-vram-gb": true, "waiter-token": true,
 }
 
 // parseGenerateVideo parses the generate-video command line. The CLI carries every
@@ -255,6 +293,7 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	node := fs.String("node", "", nodeFlagUsage)
 	minVRAM := fs.String("min-vram-gb", "", minVRAMFlagUsage)
+	waiterToken := fs.String("waiter-token", "", waiterTokenFlagUsage)
 
 	// generate-video takes THREE positionals (out path, still image, prompt); the
 	// rest are flags.
@@ -274,7 +313,7 @@ func parseGenerateVideo(args []string, errorHandling flag.ErrorHandling) (genera
 		video: videoFlags{
 			model: *model, node: *node, minVRAM: floor, still: still, negative: *negative, out: out, transformer: *transformer,
 			frames: *frames, width: *width, height: *height, steps: *steps,
-			seed: *seed, reserveVRAM: *reserveVRAM, fast: *fast, hero: *hero, upscale: *upscale,
+			seed: *seed, reserveVRAM: *reserveVRAM, fast: *fast, hero: *hero, upscale: *upscale, waiterToken: *waiterToken,
 		},
 		prompt: prompt, asJSON: *asJSON, compact: *compactFlag,
 		route: *route, remotes: *remotes,
@@ -309,8 +348,10 @@ func runGenerateVideo(args []string) error {
 		Input:  c.prompt,
 		Image:  c.video.still,
 		Params: buildVideoParams(c.video),
+		// This verb hands the place in line back (the answer's token, --waiter-token on the next call): see core.Request.Resumable.
+		Resumable: true,
 	}, c.route, c.remotes)
-	emitResult(res, c.asJSON, "", c.compact)
+	emitMediaResult(res, c.asJSON, c.compact)
 	return nil
 }
 
@@ -344,8 +385,10 @@ func runAnimateCharacter(args []string) error {
 		Image:  c.animate.ref,
 		Video:  c.animate.driver,
 		Params: buildAnimateParams(c.animate),
+		// This verb hands the place in line back (the answer's token, --waiter-token on the next call): see core.Request.Resumable.
+		Resumable: true,
 	}, c.route, c.remotes)
-	emitResult(res, c.asJSON, "", c.compact)
+	emitMediaResult(res, c.asJSON, c.compact)
 	return nil
 }
 
@@ -361,6 +404,7 @@ type animateFlags struct {
 	poseStrength             float64
 	refStrength              float64
 	reserveVRAM              float64
+	waiterToken              string
 }
 
 // animateCharacterCLI is one parsed `animate-character` command line.
@@ -395,12 +439,13 @@ func parseAnimateCharacter(args []string, errorHandling flag.ErrorHandling) (ani
 	fs.Var(remotes, "remote", "fleet node base URL for this call (repeatable); must be one of delegate_remotes")
 	node := fs.String("node", "", nodeFlagUsage)
 	minVRAM := fs.String("min-vram-gb", "", minVRAMFlagUsage)
+	waiterToken := fs.String("waiter-token", "", waiterTokenFlagUsage)
 
 	out, ref, driver, prompt, flagArgs := splitFourArgs(args, map[string]bool{
 		"config": true, "motion-prompt": true, "negative": true, "width": true,
 		"height": true, "frames": true, "steps": true, "seed": true,
 		"pose-strength": true, "ref-strength": true, "reserve-vram": true,
-		"route": true, "remote": true, "node": true, "min-vram-gb": true, // animate-character
+		"route": true, "remote": true, "node": true, "min-vram-gb": true, "waiter-token": true, // animate-character
 	})
 	if err := fs.Parse(flagArgs); err != nil {
 		return animateCharacterCLI{}, err
@@ -418,7 +463,7 @@ func parseAnimateCharacter(args []string, errorHandling flag.ErrorHandling) (ani
 		animate: animateFlags{
 			out: out, node: *node, minVRAM: floor, ref: ref, driver: driver, prompt: prompt, motionPrompt: *motionPrompt, negative: *negative,
 			width: *width, height: *height, frames: *frames, steps: *steps, seed: *seed,
-			poseStrength: *poseStrength, refStrength: *refStrength, reserveVRAM: *reserveVRAM,
+			poseStrength: *poseStrength, refStrength: *refStrength, reserveVRAM: *reserveVRAM, waiterToken: *waiterToken,
 		},
 		asJSON: *asJSON, compact: *compactFlag, route: *route, remotes: *remotes,
 	}, nil
@@ -448,5 +493,6 @@ func buildAnimateParams(f animateFlags) map[string]any {
 	if f.reserveVRAM > 0 {
 		params["reserve_vram"] = strconv.FormatFloat(f.reserveVRAM, 'f', -1, 64)
 	}
+	withWaiterToken(params, f.waiterToken)
 	return params
 }

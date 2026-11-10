@@ -213,11 +213,13 @@ type Request struct {
 	ParentJobID string `json:"-"`
 	// Resumable says the door that admitted this call can hand a place in line back to its
 	// caller AND take it again: it returns the answer's data (the waiter_token) and accepts
-	// waiter_token on the next call. Only the MCP server sets it. A media call that waited its
-	// window with no card leaves a place-keeping token only for such a door; for the CLI verbs,
-	// the fleet dispatch (the delegator re-places, it never resumes) and the image batch a
-	// token could never be claimed, and would hold a card back from the next caller for the
-	// 30 s grace, so they get the plain "gpu busy" defer. It is never decoded from, or encoded
+	// waiter_token on the next call. The MCP server sets it, and so do the CLI verbs that take
+	// --waiter-token (generate-video, animate-character, generate-audio, a single
+	// edit-image-generative). A media call that waited its window with no card leaves a
+	// place-keeping token only for such a door; for the other CLI verbs, the fleet dispatch (the
+	// delegator re-places, it never resumes) and the image batch a token could never be
+	// claimed, and would hold a card back from the next caller for the 30 s grace, so they
+	// get the plain "gpu busy" defer. It is never decoded from, or encoded
 	// to, the wire: a remote delegator cannot ask a node to keep a place for it. Like Door it
 	// never routes, gates or selects a tier.
 	Resumable bool `json:"-"`

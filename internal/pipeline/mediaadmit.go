@@ -515,6 +515,11 @@ type errGPUQueued struct {
 	Devices  []string
 	HeldBy   []uint64
 	Why      string
+	// Holders are the leases in the way, in the shape a busy answer names its holder (core.LaneHolder), and RetryAfterSec is the
+	// figure a caller sleeps on before it asks again, worked out as a busy answer works it (retryAfterSec) from the lowest epoch
+	// among them. Both are left out when no lease is in the way (the places ahead are callers) or the lease declared no term.
+	Holders       []core.LaneHolder
+	RetryAfterSec int
 }
 
 func (e *errGPUQueued) Error() string {
@@ -531,7 +536,7 @@ func (e *errGPUQueued) Error() string {
 
 // queuedPayload is the machine-readable half of the answer.
 func (e *errGPUQueued) payload() json.RawMessage {
-	b, _ := json.Marshal(map[string]any{
+	data := map[string]any{
 		"queued":         true,
 		"waiter_token":   e.Token,
 		"queue_position": e.Position,
@@ -541,7 +546,15 @@ func (e *errGPUQueued) payload() json.RawMessage {
 		"devices": e.Devices,
 		"held_by": e.HeldBy,
 		"resume":  "call again with the same request and waiter_token=" + e.Token + " within 10 minutes to resume this place; a place not re-polled for 30 seconds stops holding back later callers",
-	})
+	}
+	// What a busy answer carries when a lease is in the way, so a caller that paces its re-ask by it keeps doing so.
+	if len(e.Holders) > 0 {
+		data["holders"] = e.Holders
+	}
+	if e.RetryAfterSec > 0 {
+		data["retry_after_sec"] = e.RetryAfterSec
+	}
+	b, _ := json.Marshal(data)
 	return b
 }
 
@@ -1442,6 +1455,11 @@ func (p *Pipeline) queuedAnswerWhy(m *gpulease.Manager, ids []string, since time
 			continue
 		}
 		e.HeldBy = append(e.HeldBy, l.Epoch)
+		h := laneHolderOf(l, now)
+		if len(e.Holders) == 0 {
+			e.RetryAfterSec = retryAfterSec(l, h.RemainingSec)
+		}
+		e.Holders = append(e.Holders, h)
 		if !l.ExpiresAt.IsZero() {
 			if s := int(l.ExpiresAt.Sub(now).Round(time.Second) / time.Second); s > e.ETASec {
 				e.ETASec = s

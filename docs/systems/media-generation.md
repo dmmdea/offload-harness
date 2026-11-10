@@ -2267,8 +2267,9 @@ that holds the whole node, is served by the old path exactly as before.
 does not fail with `gpu busy`. It leaves a place-keeping token and answers with a deferred result,
 `err_class: gpu_queued`, `defer_class: capacity`, whose data carries `waiter_token`, `queue_position`
 (1 = next), `eta_s` (the declared window left on the lease in the way: a ceiling, not a promise),
-`devices` (the cards it waits for; empty = the whole node), `held_by` (the leases in the way) and a
-`resume` sentence. The caller re-sends the same request with `waiter_token`, and the call resumes the place
+`devices` (the cards it waits for; empty = the whole node), `held_by` (the leases in the way), `holders` and
+`retry_after_sec` (the same blocks a busy answer carries, below, whenever a lease is in the way, so a caller that
+paces its re-ask by them keeps doing so) and a `resume` sentence. The caller re-sends the same request with `waiter_token`, and the call resumes the place
 it left, with the arrival time it had. A token lives ten minutes after the last time its caller polled it;
 for the first 30 seconds of that it holds its place against later callers for the same cards, and after
 that it is skipped by everyone (a whole-node barrier included), so a client that wandered off never blocks
@@ -2288,9 +2289,19 @@ the phrase `gpu status` leads with, never as the bare class word (`held by media
 cards): `gpu queued: card(s) <ids> held by a media-class lease ("<reason>"); your place in line is #1 ...`, and
 `gpu busy: held by a text-class lease (30s, reason "<reason>")`.
 
-**Only a door that can resume leaves a place.** A token is claimed by sending it back, which only an MCP tool
-can do (`core.Request.Resumable`, set by the MCP server and by nothing that arrives over the wire). The
-`generate-image` CLI verbs, the fleet-node dispatch (the delegator re-places a refused subtask, it never resumes
+**Only a door that can resume leaves a place.** A token is claimed by sending it back, which an MCP tool can do
+and so can the CLI verbs that take `--waiter-token` (`core.Request.Resumable`, set by the MCP server and by those
+verbs, and by nothing that arrives over the wire). `generate-video`, `animate-character`, `generate-audio` and a
+single `edit-image-generative` take `--waiter-token <token>`: a call of theirs that waited out `gpu_wait_ms` answers
+`gpu_queued` like an MCP call does (with `--json` the token is `result.waiter_token`; the plain-text form ends with
+`To keep your place in line, run the same command again with --waiter-token <token>`), and running the same
+command again with the flag resumes the place with its original arrival time. Without it, a caller that asks again
+is a new arrival, and whoever asks first after a release wins. The same holds for a two-card (card-only placement)
+or whole-node call: it takes the same path (`acquireCardScoped`, `acquireMediaLease`), and what used to give it the
+`gpu_busy` answer with `holders[]` was only that the CLI never marked its request resumable. `generate-image` and `run-graph`
+block on the ticket queue on a box with a fleet and take no token; on a box without one they and the other CLI
+verbs (`upscale-image`, `inpaint`, `edit-image`, a batch) still get the plain `gpu busy` defer. The
+fleet-node dispatch (the delegator re-places a refused subtask, it never resumes
 one) and the image batch get the plain `gpu busy` defer and leave nothing behind: a token nobody can claim would
 hold its cards back from every later caller for the 30-second grace, and a node a delegator retries every few
 seconds would keep newcomers behind a rolling set of them.
