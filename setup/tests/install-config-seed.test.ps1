@@ -405,9 +405,27 @@ foreach ($k in @('llama-vulkan', 'llama-cuda', 'llama-cudart', 'llama-cuda13', '
   Assert ($p.tagRule -eq 'b-number')                                           "$k orders releases by their b-number"
   Assert ($p.dest -eq 'llama')                                                 "$k lands in the llama live directory"
 }
-Assert ($SOURCES['llama-cuda13'].asset -eq 'llama-<TAG>-bin-win-cuda-13.4-x64.zip')       'llama-cuda13 names the cuda-13.4 asset family'
-Assert ($SOURCES['llama-cudart13'].asset -eq 'cudart-llama-bin-win-cuda-13.4-x64.zip')    'llama-cudart13 names the cuda-13.4 cudart asset'
-Assert ($SOURCES['llama-cuda'].asset -eq 'llama-<TAG>-bin-win-cuda-12.4-x64.zip')         'llama-cuda keeps the 12.4 asset name'
+Assert ($SOURCES['llama-cuda13'].asset -eq 'llama-<TAG>-bin-win-cuda-13.<V>-x64.zip')     'llama-cuda13 names the CUDA 13 major and matches the minor'
+Assert ($SOURCES['llama-cudart13'].asset -eq 'cudart-llama-bin-win-cuda-13.<V>-x64.zip')  'llama-cudart13 names the CUDA 13 major and matches the minor'
+Assert ($SOURCES['llama-cuda'].asset -eq 'llama-<TAG>-bin-win-cuda-12.<V>-x64.zip')       'llama-cuda names the CUDA 12 major and matches the minor'
+Assert ($SOURCES['llama-cudart'].asset -eq 'cudart-llama-bin-win-cuda-12.<V>-x64.zip')    'llama-cudart names the CUDA 12 major and matches the minor'
+# Resolved against the real asset names of release b12244 (upstream moved cuda-13.3 -> 13.4 -> 13.5): the cuda-13
+# pair lands on 13.5 and the cuda-12 pair on 12.4, the major is never blurred, and the two of a pair are one version.
+$b12244 = @(
+  'llama-b12244-bin-win-cuda-12.4-x64.zip', 'cudart-llama-bin-win-cuda-12.4-x64.zip',
+  'llama-b12244-bin-win-cuda-13.5-x64.zip', 'cudart-llama-bin-win-cuda-13.5-x64.zip',
+  'llama-b12244-bin-win-cuda-13.5-arm64.zip', 'cudart-llama-bin-win-cuda-13.5-arm64.zip',
+  'llama-b12244-bin-win-vulkan-x64.zip', 'llama-b12244-bin-win-cpu-x64.zip'
+) | ForEach-Object {
+  [pscustomobject]@{ name = $_; state = 'uploaded'; digest = ('sha256:' + ('ab' * 32)); size = 1000; browser_download_url = "https://example.invalid/b12244/$_" }
+}
+$script:GhReleaseCache['ggml-org/llama.cpp'] = @([pscustomobject]@{ tag_name = 'b12244'; draft = $false; assets = $b12244 })
+$r13 = Resolve-GitHubSet -Keys @('llama-cuda13', 'llama-cudart13')
+Assert ($r13['llama-cuda13'].url -like '*/llama-b12244-bin-win-cuda-13.5-x64.zip')        'cuda13 build resolves to the 13.5 zip of b12244'
+Assert ($r13['llama-cudart13'].url -like '*/cudart-llama-bin-win-cuda-13.5-x64.zip')      'cuda13 runtime resolves to the 13.5 bundle of b12244'
+$r12 = Resolve-GitHubSet -Keys @('llama-cuda', 'llama-cudart')
+Assert ($r12['llama-cuda'].url -like '*/llama-b12244-bin-win-cuda-12.4-x64.zip')          'cuda12 build resolves to the 12.4 zip of b12244'
+Assert ($r12['llama-cudart'].url -like '*/cudart-llama-bin-win-cuda-12.4-x64.zip')        'cuda12 runtime resolves to the 12.4 bundle of b12244'
 Assert ($SOURCES['llama-vulkan'].asset -eq 'llama-<TAG>-bin-win-vulkan-x64.zip')          'llama-vulkan names the vulkan asset'
 Assert ($SOURCES['llama-cpu'].asset -eq 'llama-<TAG>-bin-win-cpu-x64.zip')                'llama-cpu names the cpu asset'
 Assert ($SOURCES['llama-swap'].tagRule -eq 'v-number')                         'llama-swap releases order by their v-number'
