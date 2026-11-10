@@ -41,7 +41,7 @@ type MulticardRow struct {
 	// decode's buffers land while the DiT is still committed): the working-set peak (the read-only map's file pages are resident while a plain loader copies the whole DiT to the card, and Windows counts
 	// them against Available until it trims them) and the private-commit peak (WDDM backs the card allocations with system commit). On Linux the
 	// same pages are clean file pages MemAvailable already counts, so a measured row declares 0 there; on Windows it declares these two figures,
-	// stated, when they are set; a row that carries none (0, 0) declares 0 on every host, as it did before these fields existed. The figures cover
+	// stated, when they are set; a row that carries none (0, 0) declares 0 on a Linux host and, on Windows, keeps the ordinary estimate until a run there has measured it. The figures cover
 	// the load the run made: for flux3-klein the prompt upsampled outside ComfyUI (hostneed keeps the ordinary estimate for an in-graph upsampler
 	// file). The JSON's "hostWindowsGiB" {touched, commit}.
 	WindowsHostGiB, WindowsCommitGiB float64
