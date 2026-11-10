@@ -1,5 +1,0 @@
-### Added - a running MCP server now says when its config file has changed since it started
-
-- **What was wrong.** An MCP server loads its config once and keeps it for as long as the client keeps it. An edit of the config file (the ComfyUI instance, extra launch arguments, an upscale model) while sessions were open changed nothing in them, and nothing told them: the stale-binary notice compared only the executable.
-- **What it does now.** A server given a config file remembers its stamp and sha256 at start. When the file on disk holds other bytes, or is gone, every tool result carries a second text block `stale_config: ...` naming the file and saying to reconnect with `/mcp` or restart the client, and `offload_status` carries a `stale_config` key. A touch or a save of the same bytes says nothing, and a server with no config file says nothing. Nothing is interrupted.
-- **Checks.** `go build`, `go vet ./internal/mcpserver/`, the existing stale-notice tests of that package, and one real call of the notice on a server started from a temporary config file that was then edited.
