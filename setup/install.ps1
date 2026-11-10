@@ -2650,8 +2650,17 @@ $gatedSeats = [ordered]@{
   'qwen3.6-35b-a3b-agent' = $includeQwen3635B
   'embeddinggemma2' = $includeEmbeddingGemma2
 }
-# -RenderOnly always renders fresh: drop any stale output so the Step SKIP test can't short-circuit it.
-if ($RenderOnly -and (Test-Path $yamlDest)) { Remove-Item $yamlDest -Force }
+# -RenderOnly always renders fresh so the Step SKIP test can't short-circuit it. With -RenderOut the stale output is
+# dropped (the operator named a scratch file). Without it the target is the LIVE <home>\llama-swap.yaml: that file is
+# never deleted up front. The render goes to a file beside it ($yamlLive keeps the real path) and replaces it, keeping the
+# old one as .prev-<stamp>, only after the render succeeded; a refused render leaves the live yaml as it was.
+$yamlLive = $null
+if ($RenderOnly -and $RenderOut) { if (Test-Path $yamlDest) { Remove-Item $yamlDest -Force } }
+elseif ($RenderOnly) {
+  $yamlLive = $yamlDest
+  $yamlDest = Join-Path $HOME_DIR 'llama-swap.render-tmp.yaml'
+  if (Test-Path $yamlDest) { Remove-Item $yamlDest -Force }
+}
 # OFFLOAD_EG2_LLAMA_BIN: the embeddinggemma2 entry's OWN llama.cpp build, for a node whose main build is older
 # than the embeddinggemma2 floor in setup/floors.json and cannot load it (the entry's architecture is gemma-embedding2). Opt-in and operator-managed:
 # the build this installer resolves is held at or above the floor (setup/floors.json), so an installer-managed node needs no second build.
@@ -2787,6 +2796,15 @@ Step "render llama-swap.yaml (backend=$tplBackend profile=$(if ($profileId) { $p
 # compact JSON verdict describing the resolved profile so a test can assert on it.
 if ($RenderOnly) {
   Remove-TempRenderer
+  if ($yamlLive) {
+    if (Test-Path -LiteralPath $yamlLive) {
+      $yamlLivePrev = "$yamlLive.prev-$(Get-Date -Format 'yyyyMMdd-HHmmss')"
+      Copy-Item -LiteralPath $yamlLive -Destination $yamlLivePrev -Force
+      Write-Host "      old config kept as $yamlLivePrev" -ForegroundColor DarkGray
+    }
+    Move-Item -Force -LiteralPath $yamlDest -Destination $yamlLive
+    $yamlDest = $yamlLive
+  }
   $rv = @{ render_only = $true; backend = $backend; render_backend = $tplBackend;
     profile = $profileId; ram_tier = $ramTier; big_ram = $bigRam;
     agent_ctx_tokens = $agentCtxTokens; include_26b = [bool]$pp.include_26b;
