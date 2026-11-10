@@ -435,7 +435,7 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 			compute := co.ResidentGiB + animateActivationsGiB + wanComputeContextGiB
 			storage := expert - co.ResidentGiB + animateClipVisionGiB + animateVAEGiB + wanStorageOverheadGiB
 			if expert > 0 && small > 0 && storage <= small-reserve && compute <= large {
-				return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB DiT + %.1f GiB of the default clip's sampler activations + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB of clip vision + %.1f GiB of VAE + %.1f GiB for the context = %.1f GiB (of %.1f usable), so each card fits its stage, the text encoder is taken off the cards before the DiT lands, and the weights are mapped read-only: no weights stream from RAM (sizes chosen, not measured: no animate run was made on two cards; the set is %s)", family, small, large, co.ResidentGiB, expert, animateActivationsGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, animateClipVisionGiB, animateVAEGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+				return cardOnlyDeclares(Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB DiT + %.1f GiB of the default clip's sampler activations + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB of clip vision + %.1f GiB of VAE + %.1f GiB for the context = %.1f GiB (of %.1f usable), so each card fits its stage, the text encoder is taken off the cards before the DiT lands, and the weights are mapped read-only: no weights stream from RAM (sizes chosen, not measured: no animate run was made on two cards; the set is %s)", family, small, large, co.ResidentGiB, expert, animateActivationsGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, animateClipVisionGiB, animateVAEGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, family, set, total, f, small, large, compute, storage, reserve), true
 			}
 			return fitToCard(src, family, set, total, f, cardOnlyMiss(family, part, co.ResidentGiB, dflt, expert, small, large, compute, storage, reserve)), true
 		}
@@ -445,7 +445,7 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 			compute := co.ResidentGiB + ltxUpscalerGiB + wanComputeContextGiB
 			storage := expert - co.ResidentGiB + ltxStorageVAEsGiB + wanStorageOverheadGiB
 			if expert > 0 && small > 0 && storage <= small-reserve && compute <= large {
-				return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB DiT + %.1f GiB of latent upscaler + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card; the sampler's activations are unmeasured and not counted) and the storage card %.1f GiB of donor blocks + %.1f GiB of VAEs + %.1f GiB for the context = %.1f GiB (of %.1f usable), so each card fits its stage, the text encoder is taken off the cards before the DiT lands, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, ltxUpscalerGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, ltxStorageVAEsGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+				return cardOnlyDeclares(Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB DiT + %.1f GiB of latent upscaler + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card; the sampler's activations are unmeasured and not counted) and the storage card %.1f GiB of donor blocks + %.1f GiB of VAEs + %.1f GiB for the context = %.1f GiB (of %.1f usable), so each card fits its stage, the text encoder is taken off the cards before the DiT lands, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, ltxUpscalerGiB, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, ltxStorageVAEsGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, family, set, total, f, small, large, compute, storage, reserve), true
 			}
 			return fitToCard(src, family, set, total, f, cardOnlyMiss(family, part, co.ResidentGiB, dflt, expert, small, large, compute, storage, reserve)), true
 		}
@@ -457,7 +457,7 @@ func estimateWith(family string, files []mediacap.ModelFile, f Facts, co *CardOn
 		storage := expert - co.ResidentGiB + wanStorageOverheadGiB
 		fitsStorage := expert > 0 && small > 0 && storage <= small-reserve
 		if fitsStorage && compute <= large {
-			return Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of %s + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, activations, activationsWord, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, true
+			return cardOnlyDeclares(Need{GiB: 0, Source: src, Detail: fmt.Sprintf("%s: the card-only placement (--wan-placement multicard) on 2 leased cards (%.1f + %.1f GiB): the compute card holds %.1f GiB of the %.1f GiB expert + %.1f GiB of %s + %.1f GiB of CUDA context = %.1f GiB (of the %.1f GiB card) and the storage card %.1f GiB of donor blocks + %.1f GiB for the VAE and the context = %.1f GiB (of %.1f usable), so each card fits its stage, and the weights are mapped read-only: no weights stream from RAM (the set is %s)", family, small, large, co.ResidentGiB, expert, activations, activationsWord, wanComputeContextGiB, compute, large, expert-co.ResidentGiB, wanStorageOverheadGiB, storage, small-reserve, set)}, family, set, total, f, small, large, compute, storage, reserve), true
 		}
 		missNote = cardOnlyMiss(family, part, co.ResidentGiB, dflt, expert, small, large, compute, storage, reserve)
 		if co.SageAttention && fitsStorage {
@@ -492,6 +492,33 @@ func cardOnlyMiss(family, part string, share, dflt, expert, small, large, comput
 		why += fmt.Sprintf("; the call's resident share is %.1f GiB (videogen_wan_resident_gb, wan_resident_gb or --wan-resident-gb; the family's own is %.1f GiB), which leaves %.1f GiB of the %.1f GiB %s on the storage card", share, dflt, expert-share, expert, part)
 	}
 	return head + why + ", so the call declares the set"
+}
+
+// WindowsFigures is what a Windows host holds for one card-only render: HostGiB is the working set the call is admitted against and CommitGiB the system commit.
+type WindowsFigures struct{ HostGiB, CommitGiB float64 }
+
+// videoWindowsFigures maps a video or animate family (wan22, ltx25, wan-animate2) to what one card-only render of it measured on a Windows host. It is EMPTY today: the
+// 0 the card-only video and animate branches of estimateWith declare was measured on Linux nodes only (the read-only map's pages are clean file pages MemAvailable counts
+// there), and no Windows run of a card-only video call has been measured by the footprint sampler. A figure gets in by one render of that family through the door on a Windows
+// host (--wan-placement multicard, or --placement multicard for the animate graph), read back from the footprint store's entry for the run (fleetnode.FootprintEntry): HostPeakGiB
+// (private bytes peak) is the commit, HostResidentPeakGiB (resident peak) is the touched figure, both from the process-tree sampler. Until a family has its entry, a Windows host
+// declares the ordinary estimate for it (cardOnlyDeclares). The same split image rows carry as WindowsHostGiB / WindowsCommitGiB (render/multicard-recipes.json).
+var videoWindowsFigures = map[string]WindowsFigures{}
+
+// cardOnlyDeclares is the declaration of a card-only video or animate call whose two cards each fit their stage (zero: the Need estimateWith has built, 0 host RAM). That 0 is a Linux
+// figure. On Windows the map's pages sit in the working set while the DiT is copied to the card and WDDM commits the card allocations (a krea2 card-only image render held 27 GiB
+// resident and 31 GiB of commit there), so a family with measured Windows figures declares them, stated, and any other keeps the ordinary estimate (fitToCard, the figure the call
+// declares when the placement is not asked for) with the reason, until a run on Windows has measured it. A Linux host keeps zero as it was.
+func cardOnlyDeclares(zero Need, family, set string, total float64, f Facts, small, large, compute, storage, reserve float64) Need {
+	if f.goos() != "windows" {
+		return zero
+	}
+	peaks := fmt.Sprintf("the compute card peaks at %.1f GiB (of %.1f GiB) and the storage card at %.1f GiB (of %.1f GiB usable)", compute, large, storage, small-reserve)
+	if w, ok := videoWindowsFigures[family]; ok {
+		return Need{GiB: w.HostGiB, CommitGiB: w.CommitGiB, CommitStated: true, Source: SourceMeasured,
+			Detail: fmt.Sprintf("%s: the card-only placement on 2 leased cards (%.1f + %.1f GiB): %s; on a Windows host the read-only map's pages sit in the working set while the DiT is copied to the card and WDDM commits the card allocations, measured at %.1f GiB touched and %.1f GiB of commit (a Linux host declares 0 for the same call)", family, small, large, peaks, w.HostGiB, w.CommitGiB)}
+	}
+	return fitToCard(zero.Source, family, set, total, f, fmt.Sprintf("; the card-only placement was asked for (--wan-placement multicard, videogen_placement) and the recipe fits the two leased cards (%.1f + %.1f GiB): %s; but its 0 was measured on a Linux host and no run has measured what a Windows host holds for it (the read-only map's pages in the working set, the card allocations in commit), so the call declares the set until a run has (videoWindowsFigures)", small, large, peaks))
 }
 
 // fitToCard is the one rule every weight-file estimate ends in (estimateWith, ForGraph): a set of files that together fit the

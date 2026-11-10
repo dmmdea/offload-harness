@@ -310,8 +310,9 @@ const (
 )
 
 func ltxFacts(t *testing.T, vram float64) Facts {
+	// The card-only 0 these tests pin is the Linux figure (a Windows host declares the ordinary estimate for it), and an empty GOOS means the host the test runs on, so the helper says Linux.
 	dir, stat := comfyTree(t, map[string]float64{ltxInt8Transformer: 20.03, ltxBf16Transformer: 39.13, ltxGemma: 14.32})
-	return Facts{Cfg: config.Config{ComfyDir: dir}, VRAMGiB: vram, Stat: stat}
+	return Facts{Cfg: config.Config{ComfyDir: dir}, VRAMGiB: vram, Stat: stat, GOOS: "linux"}
 }
 
 // --graph POSTS THE CALLER'S OWN WORKFLOW: the helper's family flags are not read, so the call is as
@@ -553,7 +554,8 @@ const wanMulticardCmd = "node render/comfy-video.mjs o.mp4 s.png p --model wan -
 
 func wanFacts(t *testing.T, cards ...float64) Facts {
 	dir, stat := comfyTree(t, map[string]float64{"hi.safetensors": 13.3, "lo.safetensors": 13.4, "te.safetensors": 6.3})
-	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, CardsGiB: cards}
+	// The card-only 0 these tests pin is the Linux figure (a Windows host declares the ordinary estimate for it), and an empty GOOS means the host the test runs on, so the helper says Linux.
+	f := Facts{Cfg: config.Config{ComfyDir: dir}, Stat: stat, CardsGiB: cards, GOOS: "linux"}
 	for _, c := range cards {
 		if c > f.VRAMGiB {
 			f.VRAMGiB = c
@@ -693,6 +695,12 @@ func TestTheResidentShareIsReadFromTheCall(t *testing.T) {
 	const ltxCmd = "node render/comfy-video.mjs o.mp4 s.png p --model ltx25 --wan-placement multicard"
 	if n := wanNeed(t, ltxCmd, ltx); n.GiB != 0 {
 		t.Fatalf("premise: the default 9 GiB share of the LTX-2.5 DiT fits two 15 GiB cards, got %v", n)
+	}
+	// The same fitting call on a Windows host: its 0 is a Linux measurement, so it declares the ordinary set (no Windows figure is measured yet) and says why.
+	win := ltx
+	win.GOOS = "windows"
+	if w := wanNeed(t, ltxCmd, win); !near(w.GiB, 20.03+14.32) || w.CommitStated || !strings.Contains(w.Detail, "fits the two leased cards (15.0 + 15.0 GiB)") || !strings.Contains(w.Detail, "measured on a Linux host") || !strings.Contains(w.Detail, "no run has measured what a Windows host holds") {
+		t.Fatalf("the fitting LTX-2.5 call on a Windows host: %v, want the ordinary set with the reason", w)
 	}
 	n := wanNeed(t, ltxCmd+" --wan-resident-gb 2", ltx)
 	if !near(n.GiB, 20.03+14.32) {
