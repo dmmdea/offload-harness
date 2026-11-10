@@ -47,7 +47,7 @@ type agentSeatLabel struct {
 var projectedAgentSeats = map[string]agentSeatLabel{
 	"amd-rdna3": {
 		Seat:            "",
-		Why:             "derives its seat from resident_tier offload-e4b below the 64 GB band (the workhorse equals the resident, so the derive rule exempts it); that band binds gemma-4-26b-agent in config_seed_ram_mid_high; no agent contract has run on this class",
+		Why:             "derives its seat from resident_tier offload-e4b below the 64 GB band (the workhorse equals the resident, so the derive rule exempts it); that band binds gemma-4-26b-agent in config_seed_ram_mid_high; on 2026-11-10 a 780M box with 64 GB ran the acceptance gate's known-answer step on the 26B seat (pass, 33 s) and one grounded two-file task on each seat (both correct: the 26B in 5 steps, offload-e4b in 3; docs/tiers/reports/amd-rdna3-node-j.md), which is one task and not a contract; no agent contract has run on this class",
 		FailedElsewhere: "offload-e4b",
 	},
 	"amd-rdna3-dgpu": {

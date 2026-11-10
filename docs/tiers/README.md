@@ -13,7 +13,7 @@ a Windows class.
 | tier | backend | ctx | KV | resident tier | 26B | media seat | report |
 |---|---|---|---|---|---|---|---|
 | [amd-gcn](amd-gcn.md) | vulkan | 32768 | f16 | offload-e4b | dropped | `sdcpp` (z-image-turbo) + stt/vision seat | — |
-| [amd-rdna3](amd-rdna3.md) | vulkan | 16384 | f16 | offload-e4b | `gpu` | `sdcpp` (z-image-turbo) + stt/vision seat | — |
+| [amd-rdna3](amd-rdna3.md) | vulkan | 16384 | f16 | offload-e4b | `gpu` | `sdcpp` (z-image-turbo) + stt/vision seat | [1](reports/amd-rdna3-node-j.md) |
 | [amd-rdna3-dgpu](amd-rdna3-dgpu.md) | vulkan | 32768 | q8_0 | gemma4-26b-a4b | `gpu` | `sdcpp` (z-image-turbo) + stt/vision seat | — |
 | [ampere-16](ampere-16.md) | cuda | 131072 | q8_0 | offload-e4b | dropped | comfyui (hidream-o1) + forecast/stt/vision seat | — |
 | [ampere-2x16](ampere-2x16.md) | cuda-pair | 131072 | q8_0 | offload-e4b | dropped | forecast/stt/upsampler/vision seat | [1](reports/ampere-2x16-node-i.md) |
