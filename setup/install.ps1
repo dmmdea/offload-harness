@@ -2924,12 +2924,38 @@ if ($RenderOnly) {
 # ---------------------------------------------------------------------------
 $harnessExe = Join-Path $harnessDir 'local-offload.exe'
 $agentExe   = Join-Path $harnessDir 'local-agent.exe'
+# The commit a binary was built from is kept in <exe>.built-from. A newer checkout with the SAME
+# VERSION file kept the old binaries, so the skip also needs the recorded commit to equal this
+# checkout's HEAD. No record, no git, or not a git checkout: the commit is unknown, so rebuild.
+function Get-RepoCommit {
+  $prevEapGit = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $sha = "$(& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1)".Trim()
+    if ($LASTEXITCODE -eq 0 -and $sha -match '^[0-9a-f]{40,64}$') { return $sha }
+  } catch { } finally { $ErrorActionPreference = $prevEapGit }
+  return ''
+}
+function Test-BuiltFromHead {
+  param([string]$Exe)
+  $head = Get-RepoCommit
+  $rec = "$Exe.built-from"
+  if (-not $head -or -not (Test-Path -LiteralPath $rec)) { return $false }
+  return ("$(Get-Content -LiteralPath $rec -TotalCount 1)".Trim() -eq $head)
+}
+function Save-BuiltFrom {
+  param([string]$Exe)
+  $head = Get-RepoCommit
+  if ($head) { Set-Content -LiteralPath "$Exe.built-from" -Value $head -Encoding ascii }
+  else { Remove-Item -LiteralPath "$Exe.built-from" -Force -ErrorAction SilentlyContinue }
+}
 # SKIP requires the exe AND its version: a bare Test-Path let a re-install keep a
 # STALE local-offload.exe whose embedded templates/structs render the NEW on-disk
 # profiles.json wrong (silently - see the version-gate note above Resolve-HarnessExe).
-# The exe's own --version is the ground truth.
+# The exe's own --version is the ground truth. It also requires the checkout's commit to be
+# the one the exe was built from (a newer commit with an unchanged VERSION rebuilds).
 Step 'build local-offload.exe' `
-  { (Test-Path $harnessExe) -and ((Get-HarnessExeVersion $harnessExe) -eq $repoVersion) } `
+  { (Test-Path $harnessExe) -and ((Get-HarnessExeVersion $harnessExe) -eq $repoVersion) -and (Test-BuiltFromHead $harnessExe) } `
   {
     if (-not (Test-Go126)) { throw "Go >=1.26 not on PATH - cannot build" }
     Push-Location $repoRoot
@@ -2943,6 +2969,7 @@ Step 'build local-offload.exe' `
     } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
     if ($goRc -ne 0) { throw "go build (harness) failed (exit $goRc)" }
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
+    Save-BuiltFrom $harnessExe
   }
 Remove-TempRenderer
 $manifestComponents['local-offload'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
@@ -2966,7 +2993,7 @@ Step 'render runners -> harness\render' { $false } {
 # local-agent has no --version verb, so its rebuild gate uses the manifest version
 # idiom instead (same staleness class, same fix shape as a downloaded component).
 Step 'build local-agent.exe' `
-  { (Test-Path $agentExe) -and ((Get-OldVersion 'local-agent') -eq $repoVersion) } `
+  { (Test-Path $agentExe) -and ((Get-OldVersion 'local-agent') -eq $repoVersion) -and (Test-BuiltFromHead $agentExe) } `
   {
     if (-not (Test-Go126)) { throw "Go >=1.26 not on PATH - cannot build" }
     Push-Location $repoRoot
@@ -2975,6 +3002,7 @@ Step 'build local-agent.exe' `
       if ($LASTEXITCODE -ne 0) { throw "go build (agent) failed (exit $LASTEXITCODE)" }
     } finally { Pop-Location }
     if (-not (Test-Path $agentExe)) { throw "local-agent.exe not produced" }
+    Save-BuiltFrom $agentExe
   }
 $manifestComponents['local-agent'] = New-ComponentRecord -Version $repoVersion -Source 'repo'
 
@@ -3262,12 +3290,21 @@ if ($hfResult -and (Test-Path $cfgDest)) {
 # Step 8b: run-graph satisfier tooling (best-effort). offload_run_graph provisions a
 # workflow's node manifest with git and uv; ensure uv (REQUIRED) and
 # comfy-cli (OPTIONAL convenience) are present in the ComfyUI venv. Only runs when a
-# ComfyUI install is discoverable (COMFY_DIR override, else config default C:/ComfyUI)
-# — a box without ComfyUI is unaffected (run-graph then simply DEFERs
+# ComfyUI install is discoverable (COMFY_DIR override, else the comfy_dir of the existing
+# config file, else C:/ComfyUI) — a box without ComfyUI is unaffected (run-graph then simply DEFERs
 # SATISFIER_UNAVAILABLE at call time, never crashes). A comfy-cli wheel-build failure
 # is a WARN and continues; a uv install failure fails LOUD.
 # ---------------------------------------------------------------------------
-if ($env:COMFY_DIR) { $comfyDir = $env:COMFY_DIR } else { $comfyDir = 'C:/ComfyUI' }
+# The existing config is read once: its comfy_dir picks the folder when COMFY_DIR is not set (a box whose
+# config says D:/ComfyUI was told there was no ComfyUI at C:/ComfyUI and its run-graph tooling was never ensured),
+# and its run_graph_script says whether this tier serves a run-graph route at all.
+$rgCfg = $null
+if (Test-Path $cfgDest) {
+  try { $rgCfg = Get-Content -Raw $cfgDest | ConvertFrom-Json } catch { $rgCfg = $null }
+}
+if ($env:COMFY_DIR) { $comfyDir = $env:COMFY_DIR }
+elseif ($rgCfg -and $rgCfg.PSObject.Properties['comfy_dir'] -and $rgCfg.comfy_dir) { $comfyDir = [string]$rgCfg.comfy_dir }
+else { $comfyDir = 'C:/ComfyUI' }
 if ($env:COMFY_PY)  { $comfyPy  = $env:COMFY_PY }  else { $comfyPy  = Join-Path $comfyDir '.venv/Scripts/python.exe' }
 # Discoverable means the venv's python answers, not that the directory exists: a box with a
 # bare or half-made C:/ComfyUI folder and no venv (the first fresh Windows install, an RTX 5080
@@ -3276,11 +3313,8 @@ if ($env:COMFY_PY)  { $comfyPy  = $env:COMFY_PY }  else { $comfyPy  = Join-Path 
 # A tier that blanks run_graph_script serves no run-graph route, so a ComfyUI on this box is the owner's own and this
 # installer has no reason to pip into it.
 $runGraphBlank = $false
-if (Test-Path $cfgDest) {
-  try {
-    $rgCfg = Get-Content -Raw $cfgDest | ConvertFrom-Json
-    $runGraphBlank = ($rgCfg.PSObject.Properties['run_graph_script'] -and -not $rgCfg.run_graph_script)
-  } catch { $runGraphBlank = $false }
+if ($rgCfg) {
+  try { $runGraphBlank = ($rgCfg.PSObject.Properties['run_graph_script'] -and -not $rgCfg.run_graph_script) } catch { $runGraphBlank = $false }
 }
 if ($runGraphBlank) {
   Write-Host "SKIP  run-graph deps (this tier serves no run-graph route; any ComfyUI on this box is left alone)" -ForegroundColor DarkGray

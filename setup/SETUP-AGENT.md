@@ -339,7 +339,7 @@ lock — so **`uv` in the ComfyUI venv is the REQUIRED satisfier tool** (uv is d
 ComfyUI-Manager and GitPython are not used and are not installed for it).
 `install.ps1` provisions **`pip install uv`** as part of the run-graph deps step, guarded to
 skip when present. It runs only when a ComfyUI install is discoverable — override with
-`$env:COMFY_DIR` (default `C:/ComfyUI`) / `$env:COMFY_PY`.
+`$env:COMFY_DIR` (else the `comfy_dir` of the existing config, else `C:/ComfyUI`) / `$env:COMFY_PY`.
 
 `comfy-cli` is an **optional convenience only** — run-graph does **not** depend on it.
 `install.ps1` installs it best-effort: on boxes where its wheel deps (`pydantic-core`) have
