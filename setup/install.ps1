@@ -3170,8 +3170,14 @@ function Get-RepoCommit {
   $prevEapGit = $ErrorActionPreference
   $ErrorActionPreference = 'Continue'
   try {
-    $sha = "$(& git -C $repoRoot rev-parse HEAD 2>$null | Select-Object -First 1)".Trim()
-    if ($LASTEXITCODE -eq 0 -and $sha -match '^[0-9a-f]{40,64}$') { return $sha }
+    # Drain the output, read the exit code, THEN take the first line. Piping into Select-Object -First 1 stops the
+    # pipeline early, which under Windows PowerShell 5.1 can kill git and leave $LASTEXITCODE at -1 with the sha
+    # already printed (a race: the same lines gave 0 on another box), so no .built-from was written and every
+    # re-run rebuilt.
+    $out = @(& git -C $repoRoot rev-parse HEAD 2>$null)
+    $rc = $LASTEXITCODE
+    $sha = if ($out.Count) { "$($out[0])".Trim() } else { '' }
+    if ($rc -eq 0 -and $sha -match '^[0-9a-f]{40,64}$') { return $sha }
   } catch { } finally { $ErrorActionPreference = $prevEapGit }
   return ''
 }
