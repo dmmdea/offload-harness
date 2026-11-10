@@ -135,6 +135,11 @@ type RenderBasis struct {
 	// FallbackBackend is --fallback-backend: non-empty means the box is
 	// off-matrix and the render came from fallbackProfile, not from the table.
 	FallbackBackend string `json:"fallback_backend"`
+	// CtxOverride is --ctx-size and KVOverride is --kv-type: a per-box replacement of the tier's ctx_size / kv_type.
+	// Omitted when unset, so a render that names neither hashes as it did. They are recorded because the tier's own
+	// values are in the profiles entry hash, and a re-derive that dropped the override would read the box STALE.
+	CtxOverride int    `json:"ctx_override,omitempty"`
+	KVOverride  string `json:"kv_override,omitempty"`
 }
 
 // ParamsBasis mirrors servingtmpl.Params ONE FIELD FOR ONE FIELD, by Go field
@@ -146,6 +151,7 @@ type ParamsBasis struct {
 	LlamaBin      string           `json:"llama_bin"`
 	ModelsDir     string           `json:"models_dir"`
 	Listen        string           `json:"listen"`
+	StartPort     int              `json:"start_port,omitempty"` // omitted when 0 (llama-swap's own default 5800), so a render that names none hashes as it did
 	Ctx           int              `json:"ctx_size"`
 	KVType        string           `json:"kv_type"`
 	FlashAttn     string           `json:"flash_attn"`
@@ -207,7 +213,7 @@ func BasisOf(p Params) ParamsBasis {
 		Backend: p.Backend, AltCPULlamaBin: p.AltCPULlamaBin, DisableCUDAGraphs: p.DisableCUDAGraphs,
 		VLLMSeat: p.VLLMSeat, ExtraVLLMSeats: p.ExtraVLLMSeats, VLLMRuntime: p.VLLMRuntime,
 		OmitE4B: p.OmitE4B, OmitEmbed300M: p.OmitEmbed300M,
-		HeavyCard: p.HeavyCard, UtilityCard: p.UtilityCard,
+		HeavyCard: p.HeavyCard, UtilityCard: p.UtilityCard, StartPort: p.StartPort,
 	}
 }
 
@@ -226,7 +232,7 @@ func (b ParamsBasis) Params() Params {
 		Backend: b.Backend, AltCPULlamaBin: b.AltCPULlamaBin, DisableCUDAGraphs: b.DisableCUDAGraphs,
 		VLLMSeat: b.VLLMSeat, ExtraVLLMSeats: b.ExtraVLLMSeats, VLLMRuntime: b.VLLMRuntime,
 		OmitE4B: b.OmitE4B, OmitEmbed300M: b.OmitEmbed300M,
-		HeavyCard: b.HeavyCard, UtilityCard: b.UtilityCard,
+		HeavyCard: b.HeavyCard, UtilityCard: b.UtilityCard, StartPort: b.StartPort,
 	}
 }
 

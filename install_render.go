@@ -545,7 +545,14 @@ type renderRequest struct {
 	LlamaBin  string
 	ModelsDir string
 	Listen    string
-	Home      string
+	// StartPort (--start-port) is the first port llama-swap hands to a model; 0 leaves llama-swap's own default.
+	StartPort int
+	// CtxOverride (--ctx-size) and KVOverride (--kv-type) replace the tier's ctx_size and kv_type for this one box
+	// (a promotion the selftest authorised). Zero and empty leave the tier's own. The stamp records them, so a replay
+	// reproduces the render and a seed change to the tier's own values still reads STALE.
+	CtxOverride int
+	KVOverride  string
+	Home        string
 	// RknpuHome (--rknpu-home) is where __RKNPU_HOME__ expands in seat paths: the rkllm
 	// seat's default launcher lives there, like the sidecar's own command.
 	RknpuHome string
@@ -676,6 +683,18 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 	if err != nil {
 		return renderResult{}, notRenderable(err)
 	}
+	if req.CtxOverride != 0 {
+		if !validCtxOverride(req.CtxOverride) {
+			return renderResult{}, fmt.Errorf("tier %s: --ctx-size %d is not one of 8192, 16384, 32768, 65536, 131072", id, req.CtxOverride)
+		}
+		p.CtxSize = req.CtxOverride
+	}
+	if req.KVOverride != "" {
+		if req.KVOverride != "f16" && req.KVOverride != "q8_0" {
+			return renderResult{}, fmt.Errorf("tier %s: --kv-type %q is not f16 or q8_0 (K and V stay symmetric)", id, req.KVOverride)
+		}
+		p.KVType = req.KVOverride
+	}
 	// A second route is a per-tier declaration, not a per-box flag: the flag renders
 	// it, the table permits it. Either half alone is an error the operator sees.
 	if req.AltLlamaBinCPU != "" && !hasAltBackend(p, "cpu") {
@@ -737,7 +756,7 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 		Primary: p.VLLMSeat, PrimaryActive: seat != nil, Extras: p.ExtraVLLMSeats, ExtraActive: seatIDs(extras),
 	})
 	params := servingtmpl.Params{
-		LlamaBin: req.LlamaBin, ModelsDir: req.ModelsDir, Listen: req.Listen,
+		LlamaBin: req.LlamaBin, ModelsDir: req.ModelsDir, Listen: req.Listen, StartPort: req.StartPort,
 		Ctx: p.CtxSize, KVType: p.KVType, FlashAttn: p.FlashAttn,
 		MoE26B: moe, Threads: n, Include26B: include26B, IncludeQ38: p.IncludeQwen38,
 		CacheRAMMiB:  cacheRAMForProfile(p.CacheRAMMiBByRAMTier, doc.CacheRAMMiBByRAMTier, ramTier),
@@ -773,10 +792,19 @@ func deriveRender(profilesRaw []byte, req renderRequest) (renderResult, error) {
 			TierID:              id,
 			TemplateSHA256:      servingtmpl.SHA256Hex([]byte(tmpl)),
 			ProfilesEntrySHA256: entrySHA,
-			Render:              servingtmpl.RenderBasis{RAMTier: ramTier, FallbackBackend: req.Fallback},
+			Render:              servingtmpl.RenderBasis{RAMTier: ramTier, FallbackBackend: req.Fallback, CtxOverride: req.CtxOverride, KVOverride: req.KVOverride},
 			Params:              servingtmpl.BasisOf(params),
 		},
 	}, nil
+}
+
+// validCtxOverride is the window sizes an operator may promote a box to.
+func validCtxOverride(n int) bool {
+	switch n {
+	case 8192, 16384, 32768, 65536, 131072:
+		return true
+	}
+	return false
 }
 
 func runInstallRender(args []string) error {
@@ -789,6 +817,9 @@ func runInstallRender(args []string) error {
 	utilityCard := fs.String("utility-card", "", "two-card tiers: the card that carries the memory stack, the cascade, STT and the forecaster beside the heavy seat (default 1)")
 	modelsDir := fs.String("models", "", "directory holding the GGUF model files")
 	listen := fs.String("listen", "127.0.0.1:11436", "llama-swap listen address")
+	startPort := fs.Int("start-port", 0, "first port llama-swap hands to a model (0 = say nothing, llama-swap's own default 5800; else 1024..64000, rendered as a top-level startPort line)")
+	ctxSize := fs.Int("ctx-size", 0, "replace the tier's ctx_size on this box (0 = the tier's own; 8192|16384|32768|65536|131072); recorded in the stamp")
+	kvType := fs.String("kv-type", "", "replace the tier's kv_type on this box (f16|q8_0, K and V together; empty = the tier's own); recorded in the stamp")
 	threads := fs.Int("threads", 0, "--threads per server (default: half the logical CPUs)")
 	goos := fs.String("os", "", "target OS: windows|linux (default: this machine)")
 	out := fs.String("out", "", "write the rendered config here instead of stdout")
@@ -814,7 +845,7 @@ func runInstallRender(args []string) error {
 	}
 	res, err := deriveRender(raw, renderRequest{
 		TierID: *profileID, Fallback: *fallback, RAMTier: *ramTier, GOOS: *goos,
-		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen, Home: *home, Threads: *threads,
+		LlamaBin: *llamaBin, ModelsDir: *modelsDir, Listen: *listen, StartPort: *startPort, CtxOverride: *ctxSize, KVOverride: *kvType, Home: *home, Threads: *threads,
 		RknpuHome:      homeOr(*rknpuHome, "RKNPU_HOME", *home, "rknpu"),
 		AltLlamaBinCPU: *altLlamaBinCPU,
 		EG2LlamaBin:    *eg2LlamaBin,
@@ -1563,7 +1594,7 @@ func replayRequest(b servingtmpl.SpecBasis) (renderRequest, bool) {
 	req := renderRequest{
 		TierID: b.TierID, Fallback: b.Render.FallbackBackend, RAMTier: b.Render.RAMTier,
 		GOOS: b.Params.GOOS, LlamaBin: b.Params.LlamaBin, ModelsDir: b.Params.ModelsDir,
-		Listen: b.Params.Listen, Home: b.Params.Home, RknpuHome: b.Params.RknpuHome, Threads: b.Params.Threads,
+		Listen: b.Params.Listen, StartPort: b.Params.StartPort, CtxOverride: b.Render.CtxOverride, KVOverride: b.Render.KVOverride, Home: b.Params.Home, RknpuHome: b.Params.RknpuHome, Threads: b.Params.Threads,
 		// The second builds are per-BOX paths too (the CPU family's and the embeddinggemma2 entry's): a
 		// replay that dropped one re-rendered the entry or the family on the main build and read STALE for
 		// a path the node chose itself, which no re-render by this binary could ever fix.

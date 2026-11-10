@@ -900,6 +900,41 @@ The migration, in order: stop fleet-serve and the MCP doors, `data migrate --app
 new home has run clean. The ComfyUI side (its `input` and `output` folders under the ComfyUI install) is a
 separate surface and is not covered here.
 
+## Per-box ports and promotions (`OFFLOAD_SWAP_PORT`, `OFFLOAD_SWAP_START_PORT`, `OFFLOAD_CTX_SIZE`, `OFFLOAD_KV_TYPE`)
+
+`install.ps1` takes four optional settings, all validated before anything is downloaded:
+
+| Variable | Meaning | Default |
+|---|---|---|
+| `OFFLOAD_SWAP_PORT` | the loopback port the stack's llama-swap listens on (the host is always `127.0.0.1`), 1024..65535 | 11436 |
+| `OFFLOAD_SWAP_START_PORT` | the first port llama-swap gives its models, 1024..64000 | unset (llama-swap's 5800) |
+| `OFFLOAD_CTX_SIZE` | replaces the profile's `ctx_size`: 8192, 16384, 32768, 65536 or 131072 | the profile's |
+| `OFFLOAD_KV_TYPE` | replaces the profile's `kv_type` (`f16` or `q8_0`, K and V together) | the profile's |
+
+They reach `install render` as `--listen`, `--start-port`, `--ctx-size` and `--kv-type`. `--start-port` adds one
+top-level `startPort:` line to the yaml after the template is expanded, so no template text changes. The stamp records
+the start port in `params.start_port` and the two overrides in `render.ctx_override` / `render.kv_override`, each only
+when set, so every existing stamp is byte-identical and `audit-yaml --against-render` replays the same render.
+`agent_ctx_tokens` follows `OFFLOAD_CTX_SIZE` only when the profile's own `agent_ctx_tokens` equals its `ctx_size`.
+
+A re-run with the variables unset reads the four values back from the `# basis:` line of the existing
+`<home>\llama-swap.yaml`, so it renders what the last run chose and the stale check does not drop it. The value `default`
+clears one. The installer prints one `OVERRIDE ...` line per setting in force. A new `config.json` gets
+`endpoint = http://127.0.0.1:<port>`; an existing one is changed only when `OFFLOAD_SWAP_PORT` is set (one line says so).
+`selftest.ps1` starts its transient swap on the installed yaml, so it inherits the start port.
+
+**Two probes (Windows).** On a box whose WSL runs in mirrored networking, WSL and Windows share the loopback port space,
+and a server inside WSL holds a port without showing in the Windows listener table. So the installer asks with a TCP
+connect (about 250 ms), not with `Get-NetTCPConnection`:
+
+1. before any download: if `OFFLOAD_SWAP_PORT` answers and no process whose image is under the install home owns a
+   Windows listener on it, it stops, names the WSL case and the two variables;
+2. after the render: it counts the models that take a `${PORT}` and probes `start .. start+count-1`. A port that answers
+   with no listener of this install means that seat can never load: `FAIL` and exit 1.
+
+A port that answers because this stack's own llama-swap or its children run (an upgrade) is fine. `install.sh` has no
+such settings: it already takes `--listen`, and it has no start port, no probe and no persistence yet.
+
 ## Observability and debugging
 
 `local-offload doctor` verifies the serving layer end to end and reports per-alias reachability, and on

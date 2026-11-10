@@ -33,6 +33,12 @@ type Params struct {
 	LlamaBin  string // dir holding llama-server AND its shared objects (LD_LIBRARY_PATH)
 	ModelsDir string
 	Listen    string // "127.0.0.1:11436"
+	// StartPort is the first port llama-swap hands to a model's ${PORT}. 0 says nothing,
+	// so llama-swap keeps its own default (5800) and the rendered text is the template's
+	// own. Non-zero adds one top-level `startPort:` line after the template is expanded.
+	// For a box where 5800 and up are already taken (WSL in mirrored networking shares the
+	// Windows loopback ports and hides them from the Windows listener table).
+	StartPort int
 	Ctx       int
 	KVType    string // applied to both K and V; kept symmetric on purpose
 	FlashAttn string // "on"/"off"
@@ -678,6 +684,9 @@ func Render(tmpl string, p Params) (string, error) {
 	// it normally follows a template var. llama-swap rejects an expression that opens on
 	// an operator, so drop it.
 	out = leadingSetOperator.ReplaceAllString(out, `$1`)
+	if out, err = withStartPort(out, p.StartPort); err != nil {
+		return "", err
+	}
 	// A leftover token would start a server with a literal "__CTX__" argument, which
 	// fails looking like a model problem. Refuse instead, naming what is unresolved.
 	if left := uniqueTokens(out); len(left) > 0 {
@@ -689,6 +698,28 @@ func Render(tmpl string, p Params) (string, error) {
 		return "", fmt.Errorf("the rendered config serves no model: this template has none of its own and the tier declared no seat")
 	}
 	return out, nil
+}
+
+// The start port range an operator may ask for: above the privileged ports, below the
+// ephemeral range a client picks from.
+const (
+	minStartPort = 1024
+	maxStartPort = 64000
+)
+
+var modelsKeyLine = regexp.MustCompile(`(?m)^models:`)
+
+// withStartPort adds the top-level `startPort:` line just above `models:`. It runs on the
+// expanded text, so no template file changes and a render that asks for none is untouched.
+func withStartPort(out string, port int) (string, error) {
+	if port == 0 {
+		return out, nil
+	}
+	loc := modelsKeyLine.FindStringIndex(out)
+	if loc == nil {
+		return "", fmt.Errorf("start port %d asked for, but the rendered config has no top-level `models:` line to put it above", port)
+	}
+	return out[:loc[0]] + fmt.Sprintf("startPort: %d\n", port) + out[loc[0]:], nil
 }
 
 // servesWithoutLlama is true for a render that starts no llama-server: the rk3588 backend,
@@ -790,6 +821,9 @@ func (p Params) validate() error {
 	}
 	if p.Listen == "" {
 		missing = append(missing, "listen address")
+	}
+	if p.StartPort != 0 && (p.StartPort < minStartPort || p.StartPort > maxStartPort) {
+		return fmt.Errorf("start port %d is out of range: use 0 (llama-swap's own default, 5800) or %d..%d", p.StartPort, minStartPort, maxStartPort)
 	}
 	if p.Ctx <= 0 {
 		missing = append(missing, "ctx size")
