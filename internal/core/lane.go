@@ -39,13 +39,21 @@ type LaneVerdict struct {
 	Unjudged bool `json:"unjudged,omitempty"`
 }
 
-// LaneHolder is one live lease in the way, as `gpu status` would list it.
+// LaneHolder is one live lease in the way, as `gpu status` would list it. It is also the holder a busy deferral names in its
+// result ({"holders":[...], "retry_after_sec":N}), where the caller reads who holds the cards and when to come back.
 type LaneHolder struct {
-	Epoch        uint64   `json:"epoch"`
-	Class        string   `json:"class"`
-	Reason       string   `json:"reason,omitempty"`
-	RemainingSec int      `json:"remaining_sec,omitempty"`
-	Devices      []string `json:"devices,omitempty"`
+	Epoch  uint64 `json:"epoch"`
+	Class  string `json:"class"`
+	Reason string `json:"reason,omitempty"`
+	// Group is the lease's group label (gpulease.Info.Group), empty when it names none.
+	Group        string `json:"group,omitempty"`
+	RemainingSec int    `json:"remaining_sec,omitempty"`
+	// HeldSec is how long the lease had been held when it was read.
+	HeldSec int `json:"held_sec,omitempty"`
+	// ExpiresAt is the end of the lease's declared term, RFC 3339 in UTC; empty when the lease declared none.
+	ExpiresAt string `json:"expires_at,omitempty"`
+	// Devices are the cards the lease claims (lease ids); empty = the whole node.
+	Devices []string `json:"devices,omitempty"`
 }
 
 // LaneProber is implemented by a Runner that can answer the question above. It reads and never writes: no lease, no

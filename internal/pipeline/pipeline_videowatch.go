@@ -159,6 +159,8 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 	// busyReason, once set, is the gpu_busy reason that stopped the sweep.
 	var classes []string
 	var lastReason, busyReason string
+	// busyData is the holders block of the window that found the cards held (runVisionGen), carried once on the all-deferred answer.
+	var busyData json.RawMessage
 	// ranIn / cachedIn split the windows' prompt tokens: work the cards did vs a
 	// cache hit's stored figure. tokIn (their sum) is what the caller is shown.
 	var tokIn, tokOut, framesTotal, deferred, ranIn, cachedIn, skipped int
@@ -247,7 +249,7 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 			note.Deferred, note.Reason = true, res.Reason
 			wclass = res.Meta.ErrClass
 			if wclass == errClassGPUBusy {
-				busyReason = res.Reason
+				busyReason, busyData = res.Reason, res.Data
 			}
 			break
 		}
@@ -275,7 +277,11 @@ func (p *Pipeline) runVideoWatch(ctx context.Context, req core.Request, built ta
 		// grouped on err_class see the call as what it was.
 		meta.ErrClass = commonErrClass(classes)
 		p.recordVideoWatchCall(req.Task, meta, len(req.Input), true, reason, ranIn, cachedIn, 0)
-		return core.Deferf(reason, "", meta)
+		res := core.Deferf(reason, "", meta)
+		if meta.ErrClass == errClassGPUBusy {
+			res.Data = busyData // who holds the cards and when to come back, once, not per window
+		}
+		return res
 	}
 
 	out := map[string]any{

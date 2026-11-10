@@ -281,6 +281,7 @@ func (p *Pipeline) runGenerateVideo(ctx context.Context, req core.Request, meta 
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := map[string]any{"video_path": outPath, "seed": seed}
 	addLicenseData(payload, config.FamilyInfo{License: fb.License, CommercialUse: fb.CommercialUse})
+	grant.name(payload) // the cards a card-only call ran on and the host RAM it declared; any other answer is unchanged
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
@@ -426,7 +427,9 @@ func (p *Pipeline) runAnimateCharacter(ctx context.Context, req core.Request, me
 		return p.deferGen(req, meta, start, len(req.Input), "character animation failed: "+gerr.Error())
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
-	data, _ := json.Marshal(map[string]any{"video_path": outPath, "seed": seed})
+	payload := map[string]any{"video_path": outPath, "seed": seed}
+	grant.name(payload) // the cards a card-only call ran on and the host RAM it declared; any other answer is unchanged
+	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
 }

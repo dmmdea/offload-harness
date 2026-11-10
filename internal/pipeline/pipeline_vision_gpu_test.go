@@ -95,8 +95,17 @@ func TestVisionGPULockHeldDefersWithDistinctReason(t *testing.T) {
 	if res.OK || !res.Deferred {
 		t.Fatalf("expected defer while the gen lock is held, got OK=%v", res.OK)
 	}
-	if !strings.HasPrefix(res.Reason, "gpu busy: generation job holds the lock (") || !strings.HasSuffix(res.Reason, "s)") {
-		t.Errorf("reason = %q, want the distinct gpu-busy reason with the holder age", res.Reason)
+	// The reason names the seat and the lease in the way (epoch, cards, age, term), and the answer carries the holder as data.
+	if !strings.HasPrefix(res.Reason, "gpu busy: the vision seat fake-vlm; a media-class lease (epoch 1, the whole node, reason \"test generation job\") has held the cards for ") ||
+		!strings.Contains(res.Reason, "s and its term ends in ") {
+		t.Errorf("reason = %q, want the distinct gpu-busy reason naming the seat, the lease and its term", res.Reason)
+	}
+	var held struct {
+		Holders []core.LaneHolder `json:"holders"`
+		Retry   int               `json:"retry_after_sec"`
+	}
+	if err := json.Unmarshal(res.Data, &held); err != nil || len(held.Holders) != 1 || held.Holders[0].Epoch != 1 || held.Holders[0].Class != "media" || held.Holders[0].ExpiresAt == "" || held.Retry <= 0 {
+		t.Errorf("data = %s (%v), want one media holder at epoch 1 with its term end and a retry figure", res.Data, err)
 	}
 	if res.Meta.ErrClass != "gpu_busy" {
 		t.Errorf("err class = %q, want gpu_busy", res.Meta.ErrClass)

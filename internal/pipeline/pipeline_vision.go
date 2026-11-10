@@ -205,17 +205,31 @@ func (p *Pipeline) runVisionGen(ctx context.Context, req core.Request, built tas
 	// measured vision run had to stop the fleet node instead of queueing like every other GPU
 	// job. Per lease: a child of lease A still waits for any other lease on the seat's cards.
 	visionModel := meta.Model
+	// seen is the lease the last poll read (the lowest epoch when several sit on the seat's cards): the wait hands back only
+	// its held flag, age and class, and the deferral below names the lease in full.
+	var seen gpulease.Info
 	readLease := func(dir string) gpulease.Info {
-		return modelaffinity.ScopeToModel(modelaffinity.InspectLease(dir), visionModel).Where(func(l gpulease.Info) bool {
+		seen = modelaffinity.ScopeToModel(modelaffinity.InspectLease(dir), visionModel).Where(func(l gpulease.Info) bool {
 			return !gpulease.Inherited(l)
 		})
+		return seen
 	}
 	if info := gpulock.WaitFreeScoped(ctx, p.gpuLockPath, p.visionGPUWait, p.visionGPUPoll, readLease); info.Held {
 		meta.LatencyMs = time.Since(start).Milliseconds()
 		meta.ErrClass = errClassGPUBusy
-		reason := fmt.Sprintf("gpu busy: generation job holds the lock (%ds)", int(info.Age/time.Second))
+		// Say which cards the seat sits on and which lease is in the way: the seat can sit on several cards and be held on
+		// one of them, which read as a gate blind to card scope. A whole-node lease needs no card table to be named, so the seat's
+		// cards are asked (an nvidia-smi read, memoised) only when the lease names cards; nil reads as the whole node.
+		var seat []string
+		if len(seen.Devices) > 0 {
+			seat = modelaffinity.SeatCards(visionModel)
+		}
+		now := time.Now()
+		reason := visionBusyReason(visionModel, seat, seen, now)
 		p.recordDefer(req.Task, meta, len(req.Input), reason)
-		return core.Deferf(reason, "", meta)
+		res := core.Deferf(reason, "", meta)
+		res.Data = busyHolderData(seen, now)
+		return res
 	}
 
 	// The call is on its seat from here to its return: registered (gpuactivity.KindVision), so
