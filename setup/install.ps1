@@ -1889,47 +1889,63 @@ function Install-Hyperframes {
     $latest = ''
     $lv = & npm view hyperframes dist-tags.latest 2>$null
     if ($LASTEXITCODE -eq 0 -and $lv) { $latest = ("$lv").Trim() }
-    $keep = ($have -and (Test-Path $entry) -and (& $atLeast $have $floor) -and ((-not $latest) -or (& $atLeast $have $latest)))
+    # $usable: an install already on disk that meets the floor. $keep: it is also as new as npm's newest.
+    $usable = [bool]($have -and (Test-Path $entry) -and (& $atLeast $have $floor))
+    $keep = $usable -and ((-not $latest) -or (& $atLeast $have $latest))
+    $refreshErr = ''
+    if (-not $keep) {
+      $stage = Join-Path $Dest '.install-staging'
+      # A refresh that fails (registry, filesystem, AV) must not end the install when the installed version already
+      # meets the floor: every throw in here leaves the live tree intact (the swap rolls back), so the install keeps it.
+      try {
+        if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+        New-Item -ItemType Directory -Force -Path $stage | Out-Null
+        Copy-Item -Force (Join-Path $src 'package.json') (Join-Path $stage 'package.json')
+        Push-Location $stage
+        try {
+          & npm install --ignore-scripts --no-audit --no-fund
+          if ($LASTEXITCODE -ne 0) { throw "npm install (newest hyperframes) failed (exit $LASTEXITCODE); the live install is unchanged" }
+          $stagedPkg = Join-Path $stage 'node_modules/hyperframes/package.json'
+          if (-not (Test-Path $stagedPkg)) { throw "npm install produced no node_modules/hyperframes/package.json; the live install is unchanged" }
+          $newVer = (Get-Content -Raw $stagedPkg | ConvertFrom-Json).version
+          if (-not (& $atLeast $newVer $floor)) { throw "npm resolved hyperframes $newVer, below the floor $floor in setup/floors.json; the live install is unchanged" }
+          & npm audit signatures
+          if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
+        } finally { Pop-Location }
+        # Each move is one whole rename (Move-DirAtomic; Move-Item would split a tree a render holds a file in) and the
+        # swap stops on the first one refused: a render holding a file leaves the live install as it was, and a
+        # failure after the old tree moved aside puts it back.
+        $live = Join-Path $Dest 'node_modules'; $prev = Join-Path $Dest 'node_modules.prev'
+        if (Test-Path $prev) { Remove-Item -Recurse -Force $prev -ErrorAction Stop }
+        $movedAside = $false
+        if (Test-Path $live) {
+          try { Move-DirAtomic $live $prev; $movedAside = $true }
+          catch { Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue; throw "cannot move the live hyperframes install aside (is a composition rendering?); nothing changed: $($_.Exception.Message)" }
+        }
+        try { Move-DirAtomic (Join-Path $stage 'node_modules') $live }
+        catch {
+          if ($movedAside -and -not (Test-Path $live)) { try { Move-DirAtomic $prev $live } catch { } }
+          Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+          throw "moving the new hyperframes tree into place failed; the previous install is back: $($_.Exception.Message)"
+        }
+        # A lockfile an older installer left is a pin set for the tree just replaced: kept as .prev, out of the live dir.
+        $oldLock = Join-Path $Dest 'package-lock.json'
+        if (Test-Path $oldLock) { Move-Item -Force $oldLock "$oldLock.prev" -ErrorAction SilentlyContinue }
+        Copy-Item -Force (Join-Path $src 'package.json') (Join-Path $Dest 'package.json')
+        Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+      } catch { $refreshErr = $_.Exception.Message }
+      if ($refreshErr) {
+        # SilentlyContinue: npm's own cleanup can leave an AV-locked file behind.
+        Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
+        if (-not $usable -or -not (Test-Path $entry)) { throw $refreshErr }
+        Write-Host "WARN  hyperframes: could not refresh to $latest ($refreshErr); keeping the installed $have (floor $floor)" -ForegroundColor Yellow
+        $keep = $true
+      }
+    }
     if ($keep) {
+      # The tree kept (up to date, or kept after a failed refresh) is verified the same way: an integrity failure stays fatal.
       & npm audit signatures
       if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
-    } else {
-      $stage = Join-Path $Dest '.install-staging'
-      if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
-      New-Item -ItemType Directory -Force -Path $stage | Out-Null
-      Copy-Item -Force (Join-Path $src 'package.json') (Join-Path $stage 'package.json')
-      Push-Location $stage
-      try {
-        & npm install --ignore-scripts --no-audit --no-fund
-        if ($LASTEXITCODE -ne 0) { throw "npm install (newest hyperframes) failed (exit $LASTEXITCODE); the live install is unchanged" }
-        $stagedPkg = Join-Path $stage 'node_modules/hyperframes/package.json'
-        if (-not (Test-Path $stagedPkg)) { throw "npm install produced no node_modules/hyperframes/package.json; the live install is unchanged" }
-        $newVer = (Get-Content -Raw $stagedPkg | ConvertFrom-Json).version
-        if (-not (& $atLeast $newVer $floor)) { throw "npm resolved hyperframes $newVer, below the floor $floor in setup/floors.json; the live install is unchanged" }
-        & npm audit signatures
-        if ($LASTEXITCODE -ne 0) { throw "npm audit signatures FAILED for the hyperframes install - registry signature or provenance check did not pass; refusing to bind the compose lane" }
-      } finally { Pop-Location }
-      # Each move is one whole rename (Move-DirAtomic; Move-Item would split a tree a render holds a file in) and the
-      # swap stops on the first one refused: a render holding a file leaves the live install as it was, and a
-      # failure after the old tree moved aside puts it back.
-      $live = Join-Path $Dest 'node_modules'; $prev = Join-Path $Dest 'node_modules.prev'
-      if (Test-Path $prev) { Remove-Item -Recurse -Force $prev -ErrorAction Stop }
-      $movedAside = $false
-      if (Test-Path $live) {
-        try { Move-DirAtomic $live $prev; $movedAside = $true }
-        catch { Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue; throw "cannot move the live hyperframes install aside (is a composition rendering?); nothing changed: $($_.Exception.Message)" }
-      }
-      try { Move-DirAtomic (Join-Path $stage 'node_modules') $live }
-      catch {
-        if ($movedAside -and -not (Test-Path $live)) { try { Move-DirAtomic $prev $live } catch { } }
-        Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
-        throw "moving the new hyperframes tree into place failed; the previous install is back: $($_.Exception.Message)"
-      }
-      # A lockfile an older installer left is a pin set for the tree just replaced: kept as .prev, out of the live dir.
-      $oldLock = Join-Path $Dest 'package-lock.json'
-      if (Test-Path $oldLock) { Move-Item -Force $oldLock "$oldLock.prev" -ErrorAction SilentlyContinue }
-      Copy-Item -Force (Join-Path $src 'package.json') (Join-Path $Dest 'package.json')
-      Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
     }
     & npm rebuild esbuild
     if ($LASTEXITCODE -ne 0) { throw "npm rebuild esbuild failed (exit $LASTEXITCODE)" }
@@ -3212,7 +3228,17 @@ Step 'build local-offload.exe' `
       & go build -o $harnessExe . 2>&1 | ForEach-Object { Write-Host "      go: $_" }
       $goRc = $LASTEXITCODE
     } finally { $ErrorActionPreference = $prevEapGo; Pop-Location }
-    if ($goRc -ne 0) { throw "go build (harness) failed (exit $goRc)" }
+    if ($goRc -ne 0) {
+      # On Windows the Go toolchain renames a running exe aside to <exe>~ and writes the new one, so open MCP
+      # sessions normally do not block this build; an AV lock on the old image still can. Name the holders.
+      $holdNote = ''
+      try {
+        $exeFull = [System.IO.Path]::GetFullPath($harnessExe)
+        $holders = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and ($_.Path -ieq $exeFull) } | ForEach-Object { "$($_.ProcessName) (pid $($_.Id))" })
+        if ($holders.Count) { $holdNote = "; running processes hold this exe open: $($holders -join ', ') - close them (MCP clients, shells) and re-run" }
+      } catch { }
+      throw "go build (harness) failed (exit $goRc)$holdNote"
+    }
     if (-not (Test-Path $harnessExe)) { throw "local-offload.exe not produced" }
     Save-BuiltFrom $harnessExe
   }
@@ -3254,13 +3280,25 @@ $manifestComponents['local-agent'] = New-ComponentRecord -Version $repoVersion -
 # ---------------------------------------------------------------------------
 # Step 7b: the composition lane (HyperFrames; ADR 0059). Skipped with a reason on a
 # box without node >= 22 (the lane then stays unbound); FATAL on an integrity
-# failure (npm audit signatures) - an unverifiable install is never bound.
+# failure (npm audit signatures) - an unverifiable install is never bound. Any other
+# failure of this optional lane warns, leaves the lane unbound and carries the previous
+# manifest record; a failed refresh of an install that already meets the floor keeps it.
 # ---------------------------------------------------------------------------
 $hfResult = $null
 $hfSkipWhy = ''
 $nodeCmd = Get-Command node -ErrorAction SilentlyContinue
 $nodeVer = ''
-if ($nodeCmd) { $nodeVer = "$(& $nodeCmd.Source --version 2>$null | Select-Object -First 1)".Trim() }
+if ($nodeCmd) {
+  # A node shim that errors on --version (no default Node set, a bad NODE_OPTIONS) writes to stderr; under 'Stop' PS 5.1
+  # turns that into a throw that would end the install. The exit code is the verdict: no version -> the SKIP path below.
+  $prevEapNode = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $nodeOut = @(& $nodeCmd.Source --version 2>$null | ForEach-Object { "$_" })
+    $nodeRc = $LASTEXITCODE
+  } catch { $nodeOut = @(); $nodeRc = 1 } finally { $ErrorActionPreference = $prevEapNode }
+  $nodeVer = if ($nodeRc -eq 0 -and $nodeOut.Count) { "$($nodeOut[0])".Trim() } else { '' }
+}
 $nodeMajor = Get-NodeMajor -VersionText $nodeVer
 if (-not $nodeCmd) {
   $hfSkipWhy = 'no node on PATH'
@@ -3273,9 +3311,21 @@ if ($hfSkipWhy) {
   Write-Host "SKIP  hyperframes (compose lane): $hfSkipWhy - compose_video stays unbound (NOT CONFIGURED)" -ForegroundColor Yellow
 } else {
   Write-Host "DO    hyperframes (compose lane, node $nodeVer)" -ForegroundColor Cyan
-  $hfResult = Install-Hyperframes -RepoRoot $repoRoot -Dest (Join-Path $HOME_DIR 'hyperframes') -NodeExe $nodeCmd.Source
-  $manifestComponents['hyperframes'] = $hfResult.version
-  Write-Host "OK    hyperframes $($hfResult.version) (chrome-headless-shell $($hfResult.chrome) at $($hfResult.browser))" -ForegroundColor Green
+  # An optional lane: a failure here must not end the install before the manifest is written (the exe is already
+  # rebuilt). The lane stays unbound ($hfResult null) and the previous manifest record is carried. Only an
+  # integrity failure on the installed tree stays fatal.
+  try {
+    $hfResult = Install-Hyperframes -RepoRoot $repoRoot -Dest (Join-Path $HOME_DIR 'hyperframes') -NodeExe $nodeCmd.Source
+    $manifestComponents['hyperframes'] = $hfResult.version
+    Write-Host "OK    hyperframes $($hfResult.version) (chrome-headless-shell $($hfResult.chrome) at $($hfResult.browser))" -ForegroundColor Green
+  } catch {
+    $hfErr = $_.Exception.Message
+    if ($hfErr -like 'npm audit signatures FAILED*') { throw }
+    $hfResult = $null
+    Write-Host "WARN  hyperframes (compose lane) failed: $hfErr - compose_video stays unbound (NOT CONFIGURED); the previous install record is kept" -ForegroundColor Yellow
+    $hfOld = Get-OldRecord 'hyperframes'
+    if ($hfOld) { $manifestComponents['hyperframes'] = $hfOld }
+  }
 }
 
 # ---------------------------------------------------------------------------
@@ -3537,7 +3587,7 @@ if ($cfgExisted -and (Test-Path $cfgDest)) {
 # how to move its data off the OS drive (the copy is `local-offload data migrate`).
 if (-not $script:dataHomeChoice -and (Test-Path $cfgDest)) {
   $cfgHomeProbe = $null
-  try { $cfgHomeProbe = Get-Content -Raw $cfgDest | ConvertFrom-Json } catch { $cfgHomeProbe = $null }
+  try { $cfgHomeProbe = Get-Content -Raw -Encoding UTF8 $cfgDest |ConvertFrom-Json } catch { $cfgHomeProbe = $null }
   if ($cfgHomeProbe -and -not ($cfgHomeProbe.PSObject.Properties['home'] -and $cfgHomeProbe.home)) {
     Write-Host "NOTE  $cfgDest sets no home, so this node keeps its data under the user profile on the OS drive. Run 'local-offload data status' to see it and 'local-offload data migrate' to copy it to a data drive (never a move, never a junction)." -ForegroundColor Yellow
   }
@@ -3546,7 +3596,7 @@ if (-not $script:dataHomeChoice -and (Test-Path $cfgDest)) {
 # An EXISTING config is never rewritten, so a box that just gained the lane is told
 # exactly which three keys bind it.
 if ($hfResult -and (Test-Path $cfgDest)) {
-  $cfgNow = Get-Content -Raw $cfgDest | ConvertFrom-Json
+  $cfgNow = Get-Content -Raw -Encoding UTF8 $cfgDest |ConvertFrom-Json
   if (-not $cfgNow.PSObject.Properties['hyperframes_dir'] -or -not $cfgNow.hyperframes_dir) {
     Write-Host "NOTE  compose lane installed but $cfgDest predates it - add: compose_script=render/compose-hyperframes.mjs, hyperframes_dir=$($hfResult.dir.Replace('\','/')), hyperframes_browser_path=auto" -ForegroundColor Yellow
   }
@@ -3566,7 +3616,7 @@ if ($hfResult -and (Test-Path $cfgDest)) {
 # and its run_graph_script says whether this tier serves a run-graph route at all.
 $rgCfg = $null
 if (Test-Path $cfgDest) {
-  try { $rgCfg = Get-Content -Raw $cfgDest | ConvertFrom-Json } catch { $rgCfg = $null }
+  try { $rgCfg = Get-Content -Raw -Encoding UTF8 $cfgDest |ConvertFrom-Json } catch { $rgCfg = $null }
 }
 if ($env:COMFY_DIR) { $comfyDir = $env:COMFY_DIR }
 elseif ($rgCfg -and $rgCfg.PSObject.Properties['comfy_dir'] -and $rgCfg.comfy_dir) { $comfyDir = [string]$rgCfg.comfy_dir }
