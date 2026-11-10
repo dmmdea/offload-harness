@@ -514,7 +514,7 @@ else any file drop the human prefers):
 
 Maintainer side: those numbers replace this chapter's "expect" ranges and `profiles.json`'s
 PROJECTED notes with MEASURED values (same-PR docs), and this box joins the harness's
-real-hardware validation set — seven tiers as of 2026-09-07 (`blackwell-2x16`, `blackwell-16`, `blackwell-8`, `ampere-8`, `ampere-6`, `ampere-16`, `amd-gcn`).
+real-hardware validation set — seven tiers as of 2026-09-07 (`blackwell-2x16`, `blackwell-16`, `blackwell-8`, `ampere-8`, `ampere-6`, `ampere-16`, `amd-gcn`), and `amd-rdna3` since 2026-11-10: its first receipt, from a 780M box with 64 GB, is `docs/tiers/reports/amd-rdna3-node-j.md`, and the tier notes in `profiles.json` carry its numbers.
 
 ### Media tier (J2) — image generation via stable-diffusion.cpp
 
