@@ -293,7 +293,7 @@ func TestRunIGPUTakesTheLeaseWithTheLanesOwnDeclaration(t *testing.T) {
 		}
 		defer func() { generateIGPU = old }()
 		meta := core.Meta{}
-		_, dres := f.p.runIGPU(context.Background(), core.Request{Task: core.TaskGenerateVideo, Input: "x"}, &meta, time.Now(), igpuRun{
+		_, _, dres := f.p.runIGPU(context.Background(), core.Request{Task: core.TaskGenerateVideo, Input: "x"}, &meta, time.Now(), igpuRun{
 			leaseReason: "video-gen (sdcpp)", failVerb: "video generation failed", fpFamily: "wan22", fpQuant: "q8_0", fpTask: "video-gen",
 			script: "render/sdcpp-video.mjs", out: filepath.Join(t.TempDir(), "o.mp4"), timeout: time.Minute, ram: ram,
 		})
