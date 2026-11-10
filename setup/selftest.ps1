@@ -545,7 +545,10 @@ function Invoke-ProbeLoad {
     [string]$FlashAttn = 'on',
     [switch]$WarmDecode,
     [string]$GenPrompt = 'Count from one to forty in words, comma-separated, then stop.',
-    [int]$TimeoutSec = 180
+    [int]$TimeoutSec = 180,
+    # Tokens of the warm generation. 160 times a decode; a caller that READS the text (fa_q8kv) asks for more, because
+    # a thinking model spends its first tokens on reasoning and returns an empty content at 160.
+    [int]$MaxTokens = 160
   )
   $llamaServer = Join-Path $llamaDir 'llama-server.exe'
   if (-not $ModelFile) { return @{ ok = $false; detail = 'no model file specified'; cold_load_s = $null; tps = $null } }
@@ -623,7 +626,7 @@ function Invoke-ProbeLoad {
     if ($WarmDecode) {
       # One warm generation directly against the probe server's OpenAI endpoint; time the decode.
       $body = @{ model = 'probe'; messages = @(@{ role = 'user'; content = $GenPrompt });
-                 max_tokens = 160; temperature = 0; stream = $false } | ConvertTo-Json -Depth 6 -Compress
+                 max_tokens = $MaxTokens; temperature = 0; stream = $false } | ConvertTo-Json -Depth 6 -Compress
       $dsw = [System.Diagnostics.Stopwatch]::StartNew()
       try {
         $rr = Invoke-RestMethod -Uri "http://127.0.0.1:$probePort/v1/chat/completions" -Method Post `
@@ -632,7 +635,14 @@ function Invoke-ProbeLoad {
         $ct = 0
         if ($rr.usage -and $rr.usage.completion_tokens) { $ct = [int]$rr.usage.completion_tokens }
         if ($ct -gt 0 -and $dsw.Elapsed.TotalSeconds -gt 0) { $tps = [math]::Round($ct / $dsw.Elapsed.TotalSeconds, 1) }
-        if ($rr.choices -and $rr.choices[0].message) { $genText = [string]$rr.choices[0].message.content }
+        if ($rr.choices -and $rr.choices[0].message) {
+          $msg = $rr.choices[0].message
+          $genText = [string]$msg.content
+          # A thinking model can spend every token on reasoning and leave content empty. The reasoning text is decoded
+          # under the same KV type at temp 0, so it is what a text comparison reads then, rather than nothing.
+          $rcProp = $msg.PSObject.Properties['reasoning_content']
+          if ([string]::IsNullOrWhiteSpace($genText) -and $rcProp -and $rcProp.Value) { $genText = [string]$rcProp.Value }
+        }
         $detail = "$detail; warm decode $ct tok in $([math]::Round($dsw.Elapsed.TotalSeconds,2))s"
       } catch {
         $dsw.Stop()
@@ -1420,9 +1430,12 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
       } else {
         $faPrompt = 'List the first twelve prime numbers in ascending order, comma-separated, then stop.'
         LogStep "  fa_q8kv: f16-KV baseline (fixed prompt, temp 0, ctx=$faCtx)"
-        $rf = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $faCtx -KvType 'f16' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240
+        # 512 tokens, not the probe's 160: the resident of a card tier is a thinking model (the 26B), which used all 160
+        # on reasoning and returned an empty content, and an empty text read as "diverged" (overlap 0) on a tier that
+        # ships q8_0 KV and passes every real lane with it.
+        $rf = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $faCtx -KvType 'f16' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240 -MaxTokens 512
         LogStep "  fa_q8kv: q8_0-KV run (same prompt)"
-        $rq = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $faCtx -KvType 'q8_0' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240
+        $rq = Invoke-ProbeLoad -ModelFile $cnResidentSpec.file -Ctx $faCtx -KvType 'q8_0' -FlashAttn 'on' -WarmDecode -GenPrompt $faPrompt -TimeoutSec 240 -MaxTokens 512
         $cn.fa_q8kv.fa_confirmed = $rq.fa_state
         if (-not $rq.ok) {
           $cn.fa_q8kv.status = 'fail'
@@ -1435,6 +1448,11 @@ Asia-Pacific market for the first time. Leadership asked the team to prioritize 
         } elseif (-not $rf.ok) {
           $cn.fa_q8kv.status = 'warn'
           $cn.fa_q8kv.detail = "q8_0-KV loaded+generated but the f16 baseline failed ($($rf.detail)) - overlap not comparable this run"
+          LogWarn "fa_q8kv: $($cn.fa_q8kv.detail)"
+        } elseif ([string]::IsNullOrWhiteSpace($rf.text) -or [string]::IsNullOrWhiteSpace($rq.text)) {
+          # No text is not a divergence: there is nothing to compare, so the gate neither passes nor fails.
+          $cn.fa_q8kv.status = 'warn'
+          $cn.fa_q8kv.detail = "a run returned no text to compare (f16: $(([string]$rf.text).Length) chars [$($rf.detail)]; q8_0: $(([string]$rq.text).Length) chars [$($rq.detail)]) - overlap not comparable this run; not a divergence, and not a promotion"
           LogWarn "fa_q8kv: $($cn.fa_q8kv.detail)"
         } else {
           $ov = Get-WordOverlap -A $rf.text -B $rq.text
