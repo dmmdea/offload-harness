@@ -114,7 +114,11 @@ the real path of the generation's executable, which is what the OS reports for a
    major and `<V>` matches the minor the release carries (`cuda-13.<V>`), as an anchored regular expression over the
    asset names. When a release carries two minors of one major the highest wins (numerically, 13.10 above 13.5) and
    the candidate's notes say so; a build zip and its cudart bundle must carry the same one, else the release is not
-   complete. The **build family** (`cuda13`, `cuda12`, `vulkan`, `cpu`) is chosen per
+   complete. sd.cpp's Linux rows leave the Ubuntu release the zip was built on to `<V>` in the same way
+   (`...-bin-Linux-Ubuntu-<V>-x86_64-vulkan.zip`): upstream built on 24.04 up to `master-1043` and on 26.04 from
+   `master-1044`, and a row that named 24.04 resolved `master-1043` as the newest build for good. Whether a build
+   made on a newer Ubuntu starts on this node is the offline self-check's question (it runs the staged program
+   before the swap), not the table's. The **build family** (`cuda13`, `cuda12`, `vulkan`, `cpu`) is chosen per
    component: `update.variant.<component>` in `config.json`, else the family of the build at the live path (a
    `ggml-cuda` or `ggml-vulkan` library beside its program), else the node's backend. A node can run one component
    in another family than the rest: the maxwell-3 tier serves llama.cpp on CUDA and sd.cpp on Vulkan, the only family

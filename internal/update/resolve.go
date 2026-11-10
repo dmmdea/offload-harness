@@ -53,6 +53,8 @@ var ErrBelowFloor = errors.New("below the floor")
 // Patterns carry <TAG> (the whole tag), <N> (its number), <SHA7> (a master-<N>-<sha7> tag's commit) and <V> (one
 // dotted version, digits and dots, matched whatever it is). A CUDA row names the CUDA major and leaves the minor to
 // <V> ("cuda-13.<V>"), because upstream moves the minor between releases; no minor appears in this table.
+// An sd.cpp Linux row leaves the Ubuntu release its zip was built on to <V> for the same reason ("Ubuntu-<V>":
+// upstream built on 24.04, then on 26.04, and a row that named one stopped at the last tag that carried it).
 type slot []string
 
 // assetTable is the required-asset set per component and "<os>/<arch>/<variant>".
@@ -93,8 +95,8 @@ var assetTable = map[string]map[string][]slot{
 		"windows/amd64/cuda12": {{"sd-master-<SHA7>-bin-win-cuda12-x64.zip"}, {"cudart-sd-bin-win-cu12-x64.zip"}},
 		"windows/amd64/vulkan": {{"sd-master-<SHA7>-bin-win-vulkan-x64.zip"}},
 		"windows/amd64/cpu":    {{"sd-master-<SHA7>-bin-win-cpu-x64.zip"}},
-		"linux/amd64/vulkan":   {{"sd-master-<SHA7>-bin-Linux-Ubuntu-24.04-x86_64-vulkan.zip"}},
-		"linux/amd64/cpu":      {{"sd-master-<SHA7>-bin-Linux-Ubuntu-24.04-x86_64.zip"}},
+		"linux/amd64/vulkan":   {{"sd-master-<SHA7>-bin-Linux-Ubuntu-<V>-x86_64-vulkan.zip"}},
+		"linux/amd64/cpu":      {{"sd-master-<SHA7>-bin-Linux-Ubuntu-<V>-x86_64.zip"}},
 	},
 }
 
@@ -270,6 +272,7 @@ func expand(p, tag string) string {
 
 // versionToken stands for one dotted version inside a pattern: the CUDA minor (and patch) a release carries is
 // matched, never named, so a new upstream minor needs no edit here. The CUDA major stays literal in the pattern.
+// The Ubuntu release in an sd.cpp zip name is matched the same way.
 const versionToken = "<V>"
 
 // versionExpr is what versionToken matches: digits and dots, starting and ending on a digit.
