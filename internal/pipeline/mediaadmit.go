@@ -517,7 +517,8 @@ type errGPUQueued struct {
 	Why      string
 	// Holders are the leases in the way, in the shape a busy answer names its holder (core.LaneHolder), and RetryAfterSec is the
 	// figure a caller sleeps on before it asks again, worked out as a busy answer works it (retryAfterSec) from the lowest epoch
-	// among them. Both are left out when no lease is in the way (the places ahead are callers) or the lease declared no term.
+	// among them and then kept inside the time the place holds (queuedRetryAfterSec). Both are left out when no lease is in the
+	// way (the places ahead are callers) or the lease declared no term.
 	Holders       []core.LaneHolder
 	RetryAfterSec int
 }
@@ -1427,6 +1428,18 @@ func (p *Pipeline) hostRAMAnswer(m *gpulease.Manager, ids []string, since time.T
 	return p.queuedAnswerWhy(m, ids, since, tokenID, opts, reason, nil, true, short.Error())
 }
 
+// queuedRetryAfterSec is the figure a QUEUED answer tells its caller to sleep on. A busy answer's figure is the holder's
+// remaining term under a reserved lease and 30 s under another door call; the second IS the time a place holds the line
+// (gpulease.TokenGrace) and the first is far past it, so a caller that slept on either came back to a place every later
+// caller had been allowed to pass. A place is kept by asking again, and the ask itself waits gpu_wait_ms in line, so the
+// figure is a third of the hold at most. 0 (no figure) stays 0.
+func queuedRetryAfterSec(busy int) int {
+	if hold := int(gpulease.TokenGrace/time.Second) / 3; busy > hold {
+		return hold
+	}
+	return busy
+}
+
 // queuedAnswer leaves the place-keeping token for a call that waited its window and still has no
 // card, and builds the answer that carries it. A call whose door cannot resume a place (resumable
 // false) leaves nothing and gets the plain busy answer.
@@ -1457,7 +1470,7 @@ func (p *Pipeline) queuedAnswerWhy(m *gpulease.Manager, ids []string, since time
 		e.HeldBy = append(e.HeldBy, l.Epoch)
 		h := laneHolderOf(l, now)
 		if len(e.Holders) == 0 {
-			e.RetryAfterSec = retryAfterSec(l, h.RemainingSec)
+			e.RetryAfterSec = queuedRetryAfterSec(retryAfterSec(l, h.RemainingSec))
 		}
 		e.Holders = append(e.Holders, h)
 		if !l.ExpiresAt.IsZero() {

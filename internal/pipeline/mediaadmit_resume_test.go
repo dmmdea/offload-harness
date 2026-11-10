@@ -120,7 +120,9 @@ func TestACallFromADoorThatCanResumeStillGetsAPlace(t *testing.T) {
 	}
 }
 
-// A caller that paced its re-ask by a busy answer's holders[] and retry_after_sec keeps both when the answer is a place in line.
+// A caller that paced its re-ask by a busy answer's holders[] and retry_after_sec keeps both when the answer is a place in line,
+// and the figure it sleeps on is inside the time that place holds: the holder here has an hour left, and a caller that slept an
+// hour (or the 30 s of the hold itself) would come back to a place every later caller had passed.
 func TestTheQueuedAnswerStillNamesTheHolderAndWhenToComeBack(t *testing.T) {
 	f := newAdmitFixtureWith(t, admitSpec{order: admitOrder, mutate: func(c *config.Config) { c.ComfyCudaDevice = "2" }})
 	holder, err := f.m.TryAcquire(gpulease.ClassMedia, gpulease.Options{Reason: "its card", TTL: time.Hour, Devices: []string{leaseIDOf(admitUUIDC)}})
@@ -141,6 +143,9 @@ func TestTheQueuedAnswerStillNamesTheHolderAndWhenToComeBack(t *testing.T) {
 	}
 	if data.Token == "" || len(data.Holders) != 1 || data.Holders[0].Reason != "its card" || data.RetryAfterSec <= 0 {
 		t.Errorf("the place in line must also carry holders[] and retry_after_sec, got %s", res.Data)
+	}
+	if hold := int(gpulease.TokenGrace / time.Second); data.RetryAfterSec >= hold {
+		t.Errorf("retry_after_sec = %d: a caller that sleeps that long finds its place no longer holding the line (it holds %d s)", data.RetryAfterSec, hold)
 	}
 }
 
