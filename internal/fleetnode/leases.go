@@ -28,6 +28,7 @@ package fleetnode
 //   - saturation and dispatch follow the same cards: the node says it is closed only when the
 //     leases that refuse new work cover every card it has, and a text reservation refuses a
 //     contract only when it holds every seat that contract could run on (textLeaseAgainst).
+//     An accel job runs on no card a lease can name and is never refused by one (ADR 0102).
 
 import (
 	"encoding/json"
@@ -213,8 +214,13 @@ func (r leaseReading) closesNode(devices []gpuprobe.Device) bool {
 // agent payload this node cannot read, keeps the whole-node reading: the cards it will use
 // are chosen later, and unknown is every card. Every live text lease counts, not only the
 // lowest epoch.
+//
+// An accel job is never refused (ADR 0102). It runs on an accelerator that is not one of the
+// cards a lease can name (an NPU or TPU with its own runtime, and on the Axera card its own
+// memory), so a reservation of the GPUs says nothing about it: refused, the device sat idle
+// for the whole measurement window and every forwarded tool deferred.
 func (s *Server) textLeaseAgainst(taskType string, payload json.RawMessage) (gpulease.Info, bool) {
-	if s.opts.Lease == nil {
+	if s.opts.Lease == nil || taskType == string(core.TaskAccel) {
 		return gpulease.Info{}, false
 	}
 	info := s.opts.Lease()

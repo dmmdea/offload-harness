@@ -57,7 +57,8 @@ without an entry is decided exactly as before.
   so moving it changes the space a caller receives, and the tool description says which device serves it.
 - Nothing is chosen per call and nothing falls back at call time. If the named device's node is down, the
   call defers (ADR 0038) instead of running on the other device, which matches every other accelerator
-  lane.
+  lane. **Superseded by [ADR 0102](0102-an-accelerator-answers-through-a-gpu-lease-and-a-shared-tool-falls-back.md):**
+  the named device is tried first, and the next device that serves the name answers when it cannot.
 
 ## Related
 

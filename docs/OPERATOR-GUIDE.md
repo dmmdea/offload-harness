@@ -2330,7 +2330,8 @@ HAND-EDITED, while UNSTAMPED (every config rendered before 0.123.0) prints as a 
 re-rendering with `install render`, never by hand-editing the file.
 
 **Lease in health (0.113.16).** `/fleet/health` carries `lease` while the node's GPU lease is held; a text lease makes the
-node ineligible for new delegated work (and its dispatch answers 503, re-placeable). `gpu reserve --drain --unload-seat` and
+node ineligible for new delegated work (and its dispatch answers 503, re-placeable). An `accel` job is the exception: it runs
+on an NPU or TPU, never on a leased card, so a lease never refuses it (ADR 0102). `gpu reserve --drain --unload-seat` and
 `gpu release --warm-seat` are the maintenance verbs — see docs/systems/gpu-lease.md.
 
 **A held card is a place in line (0.115.2).** `gpu reserve` QUEUES behind a current holder for `--wait` (default 8h;

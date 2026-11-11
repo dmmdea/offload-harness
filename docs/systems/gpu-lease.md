@@ -3357,7 +3357,8 @@ local-offload gpu release --warm-seat
 
 **Alias-bound seats (0.113.20).** llama-swap's `/running` lists CANONICAL ids, while `agent_model` is normally an alias (`agent-pool` → `qwen3.8-27b-vllm`). The drain's reader matched `/running` by the configured name, so on an alias-bound seat it read "not loaded" and returned at once — a silent no-op from 0.113.16 to 0.113.19 on the reference workstation (<node-c>, whose seat is bound by its id, drained correctly, which is why the live proofs passed). The reader now lives in `internal/seatload` and resolves the name through the roster before consulting `/running`; an unreadable roster falls back to the bare name.
 
-Taking a text lease already makes the node a non-target (health `lease`, dispatch 503, the delegator's gate), but work placed
+Taking a text lease already makes the node a non-target (health `lease`, dispatch 503, the delegator's gate; an `accel` job
+is never refused, since it runs on an NPU or TPU and not on a leased card, ADR 0102), but work placed
 before the lease can still be in flight. `--drain` waits, after the lease is taken, until the agent seat reports nothing
 running or waiting: llama-swap's `/running` is read first — an unloaded seat is idle by definition, and its `/upstream/<model>/…`
 path is NEVER probed on an unloaded seat because that path loads the model on demand — then the loaded seat's own gauges

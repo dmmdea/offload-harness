@@ -3,6 +3,7 @@ package fleetnode
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +131,24 @@ func TestBuildAccelRefusals(t *testing.T) {
 	entries, _ := os.ReadDir(filepath.Join(cfg.BaseDir(), "pipeline-jobs"))
 	if len(entries) != 0 {
 		t.Fatalf("refused jobs left dirs behind: %v", entries)
+	}
+}
+
+// A text reservation of the node's GPUs never refuses an accel job (ADR 0102): the accelerator is not a
+// card a lease names. Seen for real on 2026-11-11, when a measurement lease on a node's GPUs refused
+// every forwarded NPU call for hours. The image job on the same server is the control: the refusal
+// still stands for work that lands on a card.
+func TestATextLeaseOfTheGPUsNeverRefusesAnAccelJob(t *testing.T) {
+	cfg := accelCfg(t)
+	cfg.ImageGenScript = imageCfg().ImageGenScript
+	s, _ := newTestServer(t, cfg, &fakeRunner{}, leasedOpts(textLease()))
+	rec := do(t, s, http.MethodPost, "/fleet/dispatch",
+		`{"job_id":"j-accel-leased","task_type":"accel","payload":{"accelerator":"coral-edgetpu","tool":"classify","args":{"top_k":1}}}`, nil)
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("an accel job under a text lease of the GPUs = %d, want 202: %s", rec.Code, rec.Body.String())
+	}
+	if rec := dispatchImage(t, s, "j-image-leased"); rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("control: an image job under the same lease = %d, want 503: %s", rec.Code, rec.Body.String())
 	}
 }
 
