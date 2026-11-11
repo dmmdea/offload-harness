@@ -1885,6 +1885,11 @@ func (m *Manager) Acquire(class Class, opts Options) (*Lease, error) {
 			// says what it is waiting for), and tries again next tick. A request behind it for the
 			// same cards stays behind it, as it would behind any other waiter.
 			err = aerr
+			if wait > 0 {
+				// Ask the host to give back memory it holds for something that can return it (relief.go: the WSL VM's
+				// page cache, when the operator turned that on). It returns at once; the next tick reads the host again.
+				m.relieveHostRAM(short.HostRAMCheck)
+			}
 			if self.WaitingFor != WaitHostRAM {
 				self.WaitingFor = WaitHostRAM
 				m.refreshWaiter(self)

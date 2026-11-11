@@ -25,6 +25,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/seatinflight"
+	"github.com/dmmdea/offload-harness/internal/wslcache"
 )
 
 // PipelineSpec describes one externally-provided pipeline CLI this node can run
@@ -1508,6 +1509,12 @@ type Config struct {
 	// a pointer because unset (600, a chosen figure) and 0 (no bound: the wait runs the whole --wait, as before the bound)
 	// must differ. `gpu reserve --ram-hold-max` overrides it for one reserve.
 	GPUHostRAMHoldMaxSec *int `json:"gpu_hostram_hold_max_sec,omitempty"`
+	// GPUHostRAMWSLCacheDrop (Windows hosts with WSL 2; off by default) lets a GPU lease that is WAITING for host RAM ask the
+	// WSL VM to drop its page cache: through a distro that is already running, only when the cache a drop can free (Cached less
+	// Shmem) covers the lease's shortfall, at most once a minute for the whole box, one stderr line per drop
+	// (internal/wslcache, internal/gpulease/relief.go). The VM's page cache is committed memory to the host, and WSL's own
+	// reclaim once left 25 GiB of it in place for 40 minutes while a render waited (gpu-lease.md, "The WSL VM's page cache").
+	GPUHostRAMWSLCacheDrop bool `json:"gpu_hostram_wsl_cache_drop,omitempty"`
 	// GPUDisplayCapPct (A-RAM-15, default 60) is how much of the display card's total VRAM jobs may use, the
 	// desktop's own memory included: the card allocator (`gpu reserve --cards`, the media admission path) takes the
 	// screen's card only while the VRAM in use now plus the job's declared footprint stays at or under this share of
@@ -2700,6 +2707,13 @@ func loadArmed(path string) (Config, error) {
 	// the pipeline's media admission, the detached holder), so it is installed here too: wired per
 	// constructor it was wired nowhere, and the grant ignored the key `gpu status` reported.
 	gpulease.SetDefaultHostRAMHeadroom(c.GPUHostRAMHeadroom())
+	// The WSL page-cache relief is read by the same waiters (relief.go), so it is installed here as well; off, it is
+	// uninstalled, so a process that loads a second config gets that config's answer.
+	if c.GPUHostRAMWSLCacheDrop {
+		gpulease.SetHostRAMRelief(wslcache.Relieve, os.Stderr)
+	} else {
+		gpulease.SetHostRAMRelief(nil, nil)
+	}
 	if lerr := modelaffinity.SetGPULease(c.GPULockPath, c.StateDir); lerr != nil {
 		fmt.Fprintf(os.Stderr, "warning: GPU load gate disabled: %v\n"+
 			"  Text calls will not wait for a media render to finish with the card.\n", lerr)

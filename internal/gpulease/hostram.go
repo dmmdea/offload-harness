@@ -781,6 +781,7 @@ func (m *Manager) AwaitHostRAM(epoch uint64, o AwaitHostRAMOptions) error {
 			told = true
 			o.OnWait(refused)
 		}
+		m.relieveHostRAM(refused.HostRAMCheck) // returns at once, outside the epoch lock (relief.go)
 		m.pauseOrCancel(min(m.pollInterval(), remaining), o.Cancel)
 		if cancelled(o.Cancel) {
 			return ErrCancelled

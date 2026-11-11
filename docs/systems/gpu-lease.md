@@ -31,6 +31,7 @@ other on a single shared card.
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmitsLoad` (the ONE admission rule, over the working set a job touches and the commit it is charged, apart), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
 | `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB` and `Options.HostRAMCommitGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases, per quantity (the working set less what the processes below the holder, and the keyed ComfyUI instances whose launch marker names the lease's epoch, hold RESIDENT; the commit less what they hold PRIVATELY), `Manager.HostRAMPendingLoad` (a running lease is credited with the commit peak its tree has plateaued at: `hostram_observed.go`); and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
 | `internal/pipeline/mediahostram.go` | **F82 for the media path**: whether a render defers its host RAM until its own unload has run (`hostRAMDeferral`, shared by the grant and the lane probe), the Go-side clear under the lease (`clearForHostRAM`), the bound of the wait after it (`hostRAMWaitEnd`, `mediaHostRAMFloor`) and the step that runs both (`clearThenAdmitHostRAM`); [the media order](#a-render-lease-follows-the-same-order-the-media-path-the-incident-of-2026-10-24) |
+| `internal/gpulease/relief.go`, `internal/wslcache` | **the WSL VM's page cache (`gpu_hostram_wsl_cache_drop`, off by default)**: a lease waiting for host RAM asks the WSL 2 VM to drop the page cache a drop can free, when that covers its shortfall ([below](#the-wsl-vms-page-cache-gpu_hostram_wsl_cache_drop)) |
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card (for its own `--graph`, the files that graph's loaders name), else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
@@ -2873,6 +2874,44 @@ Once admitted the row shows `host_ram_gib` alone.
 **Not covered.** The media admission in `internal/pipeline` takes its lease with the declared figure compared in the grant, and the
 render lane unloads the seat from inside that lease (`claimLeaseUnload`, `freeLlamaSwap`); it asks for no `--unload-seat`, so this
 reorder does not apply to it.
+
+### The WSL VM's page cache (`gpu_hostram_wsl_cache_drop`)
+
+**The incident (2026-11-10, reference box).** A film lane's render waited on host RAM with no seat loaded. About 25 GiB of the
+host's commit was the WSL 2 VM's page cache: files a distro had read, clean and droppable inside the VM, but committed memory
+to the host (the `vmmemWSL` process), which no Windows reclaim touches. WSL's own reclaim (`.wslconfig`
+`autoMemoryReclaim=dropCache`) ran at 12:31 and next at 13:14. A manual `sync; echo 1 > /proc/sys/vm/drop_caches` moved the
+host's commit from 127.0 to 103.2 GiB and the render started. What filled the cache is not known; this treats the symptom.
+
+**What a waiting lease does now, when the key is on.** Each time a request that will keep waiting is refused on host RAM (the
+grant's queue wait in `Acquire`, and `AwaitHostRAM` after a seat unload), `relieveHostRAM` (`internal/gpulease/relief.go`):
+
+1. computes the shortfall from the refusal's own numbers (`hostRAMShortGiB`): the larger of headroom less what would be left
+   available, and the projected commit less its bound;
+2. returns at once if another attempt by any process on the box started within the last minute (the stamp file
+   `hostram-relief.stamp` beside the lease directory), or one of this process is still running;
+3. otherwise starts one attempt in the background and returns: the loop keeps polling, and in `Acquire` keeps its waiter
+   record fresh (a call blocked past `waiterStaleWindow` would lose its place in line). The epoch lock is never held;
+4. the attempt (`internal/wslcache`) lists the running distros with `wsl.exe --list --running` (it never starts one: a distro
+   start adds its own cache; Docker Desktop's distros are skipped), reads `/proc/meminfo` in the first, and counts what a drop
+   can free as `Cached` less `Shmem` (tmpfs and shared memory sit in `Cached` and no drop frees them);
+5. only when that is at least the shortfall (and at least 1 GiB) it runs `sync` and writes `1` to `/proc/sys/vm/drop_caches`
+   as root, reads the cache again, and writes one line to stderr: `gpu lease: asked the WSL VM to drop its page cache for a
+   lease N GiB short of host RAM: droppable cache X GiB before, Y GiB after`. A failed read or drop writes
+   `gpu lease: host RAM relief failed: ...`.
+
+The next tick's reading of the host is what admits the request; the relief admits nothing itself. `drop_caches=1` frees clean
+page cache only (sync writes dirty pages first) and touches no memory a process holds; the cost is cold reads for the
+distros afterwards. All distros share one kernel, so one drop covers the VM. The command lines are fixed: nothing from a lease
+or a request reaches them, and the distro name is one `wsl.exe` listed.
+
+**Where it does nothing.** Off Windows (a Linux host's own page cache already counts as available); with no running distro;
+in a process whose account sees no distros (a service under another account); when the droppable cache does not cover the
+shortfall (the desktop or a process holds the memory, and a drop would only cost cold reads); for a request with no `--wait`;
+for a single check that does not wait (the agent seat's cold-load gate, `agent_seat_host_ram_gib`).
+
+**Off by default.** It changes the state of something the harness does not own (the VM's cache), so an operator turns it on
+per host with `"gpu_hostram_wsl_cache_drop": true`.
 
 ### What `gpu status` and `offload_status` show
 
