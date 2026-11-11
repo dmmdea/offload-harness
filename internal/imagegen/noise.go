@@ -11,14 +11,19 @@ import (
 // The decoded-noise detector. A diffusion render that went wrong (a broken VAE decode, a sampler fed NaNs) can come back as a
 // perfectly valid PNG of pure per-pixel noise: the file exists, is not empty and decodes, and nothing in the file says it is
 // not a picture. A picture is spatially coherent at the scale of a few pixels, so the average luma of neighbouring 16 px and
-// 8 px cells is strongly correlated; noise is not.
+// 8 px cells is strongly correlated; noise is not. Noise is also DENSE: nearly every 16 px cell is busy inside. A sparse
+// picture (a star field, thin line art, text or one line on a plain ground) has uncorrelated cells too, but most of its cells
+// are flat, so the third test keeps it a picture.
 //
-// Measured on real files, not chosen: 17 frames of decoded noise scored at most 0.149 at 16 px and 0.452 at 8 px, and 400 real
-// renders (contact sheets and strips included) scored at least 0.578 at 16 px and 0.721 at 8 px. The two limits sit in the gap
-// between those, and the picture has to fail BOTH to be called noise.
+// Measured on real files, not chosen: 17 frames of decoded noise scored at most 0.149 at 16 px and 0.452 at 8 px, with at
+// least 96.7 % busy cells; 400 real renders (contact sheets and strips included) scored at least 0.578 at 16 px and 0.721 at
+// 8 px, and those under 0.7 at 16 px had at most 75 % busy cells; a star field, line art, a diagonal line on black and rows of
+// text-like glyphs had 1 % to 66 %. The limits sit in those gaps, and the picture has to fail ALL THREE to be called noise.
 const (
 	noiseCorrLimit16 = 0.3 // decoded noise: the lag-1 correlation of 16 px cells is below this ...
-	noiseCorrLimit8  = 0.6 // ... and that of 8 px cells is below this
+	noiseCorrLimit8  = 0.6 // ... and that of 8 px cells is below this ...
+	noiseBusyShare   = 0.9 // ... and at least this share of 16 px cells is busy inside
+	noiseBusySD      = 24  // a cell is busy when the standard deviation of its luma (0..255) is above this
 	// noiseMinSide is the smallest canvas side the detector will judge: under it there are too few cells for the correlation
 	// to mean anything (icons, thumbnails, test fixtures), and the answer is "not noise".
 	noiseMinSide = 256
@@ -41,7 +46,36 @@ func DecodedNoise(img image.Image) (noise bool, corr16, corr8 float64) {
 	luma := lumaPlane(img)
 	corr16 = cellCorrelation(luma, b.Dx(), b.Dy(), 16)
 	corr8 = cellCorrelation(luma, b.Dx(), b.Dy(), 8)
-	return corr16 < noiseCorrLimit16 && corr8 < noiseCorrLimit8, corr16, corr8
+	if corr16 >= noiseCorrLimit16 || corr8 >= noiseCorrLimit8 {
+		return false, corr16, corr8
+	}
+	return busyCellShare(luma, b.Dx(), b.Dy(), 16, noiseBusySD) >= noiseBusyShare, corr16, corr8
+}
+
+// busyCellShare is the share of whole c x c cells whose luma standard deviation is above sd.
+func busyCellShare(luma []float64, w, h, c int, sd float64) float64 {
+	cw, ch := w/c, h/c
+	if cw < 1 || ch < 1 {
+		return 0
+	}
+	area := float64(c * c)
+	busy := 0
+	for cy := 0; cy < ch; cy++ {
+		for cx := 0; cx < cw; cx++ {
+			var sum, sq float64
+			for y := cy * c; y < (cy+1)*c; y++ {
+				for _, v := range luma[y*w+cx*c : y*w+cx*c+c] {
+					sum += v
+					sq += v * v
+				}
+			}
+			m := sum / area
+			if sq/area-m*m > sd*sd {
+				busy++
+			}
+		}
+	}
+	return float64(busy) / float64(cw*ch)
 }
 
 // NoiseReason decodes the picture at path and returns why it is decoded noise, "" when it is not or cannot be judged (it is
@@ -67,7 +101,7 @@ func NoiseReason(path string) string {
 	if !noise {
 		return ""
 	}
-	return fmt.Sprintf("decoded noise: neighbour-cell correlation %.2f at 16 px, %.2f at 8 px; a picture scores above 0.5", c16, c8)
+	return fmt.Sprintf("decoded noise: neighbour-cell correlation %.2f at 16 px, %.2f at 8 px, and busy across the frame; a picture scores above 0.5", c16, c8)
 }
 
 // SetAsideNoise moves the file a noise verdict rejected next to its path as <path>.noise, and returns the words that end the

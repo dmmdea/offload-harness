@@ -16,11 +16,12 @@ func TestDecodedNoiseIsNotARenderedPictureNorAFinishedOne(t *testing.T) {
 	const n = 512
 	rng := rand.New(rand.NewSource(7))
 	noise := image.NewNRGBA(image.Rect(0, 0, n, n))
-	for by := 0; by < n/8; by++ {
-		for bx := 0; bx < n/8; bx++ {
+	// Independent random colours in 2 px blocks: decoded noise changes every few pixels, so every 16 px cell is busy inside.
+	for by := 0; by < n/2; by++ {
+		for bx := 0; bx < n/2; bx++ {
 			c := color.NRGBA{uint8(rng.Intn(256)), uint8(rng.Intn(256)), uint8(rng.Intn(256)), 255}
-			for y := by * 8; y < by*8+8; y++ {
-				for x := bx * 8; x < bx*8+8; x++ {
+			for y := by * 2; y < by*2+2; y++ {
+				for x := bx * 2; x < bx*2+2; x++ {
 					noise.SetNRGBA(x, y, c)
 				}
 			}
