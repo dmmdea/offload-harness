@@ -762,6 +762,41 @@ func TestANodeWithoutArtifactsYieldsAnUnverifiedResult(t *testing.T) {
 	}
 }
 
+// An image call that names a family goes to the node that serves it, not to the first node that can take an image job; with
+// no such node it says so by name and sends nothing.
+func TestImageCallWithAFamilyGoesToTheNodeThatServesIt(t *testing.T) {
+	media := t.TempDir()
+	_ = os.WriteFile(filepath.Join(media, "x.png"), []byte("PNGDATA"), 0o644)
+	data := fmt.Sprintf(`{"image_path":%q}`, filepath.Join(media, "x.png"))
+	logA, logB := &fakeLog{}, &fakeLog{}
+	nodeA := fakeNode(t, fakeOpts{tasks: []string{"image-gen"}, log: logA,
+		routes:        `[{"route":"generate_image","state":"CONFIGURED"},{"route":"generate_image:flux3-klein","state":"CONFIGURED"}]`,
+		imageFamilies: `[{"name":"sdxl-turbo","default":true},{"name":"flux3-klein"}]`})
+	nodeB := fakeNode(t, fakeOpts{tasks: []string{"image-gen"}, jobData: data, media: media, log: logB,
+		routes:        `[{"route":"generate_image:z-image-turbo","state":"CONFIGURED"}]`,
+		imageFamilies: `[{"name":"z-image-turbo"}]`})
+	cfg := config.Config{MediaDir: t.TempDir(), DelegateRemotes: []string{nodeA.URL, nodeB.URL}}
+	ask := func(fam string) core.Result {
+		return Run(context.Background(), cfg, &recordingRunner{}, core.Request{Task: core.TaskGenerateImage, Input: "p", Params: map[string]any{"family": fam}}, "remote", nil)
+	}
+	if res := ask("z-image-turbo"); !res.OK {
+		t.Fatalf("the family a later node serves was not placed there: %+v", res)
+	}
+	if got := logA.seen("/fleet/dispatch"); len(got) != 0 {
+		t.Errorf("the node that does not serve the family was sent the job: %v", got)
+	}
+	if got := logB.seen("/fleet/dispatch"); len(got) != 1 {
+		t.Errorf("the node that serves the family was sent %d jobs, want 1", len(got))
+	}
+	res := ask("no-such-family")
+	if res.OK || !strings.Contains(res.Reason, `no fleet node serves image family "no-such-family"`) {
+		t.Fatalf("a family no node serves must be refused by name: %+v", res)
+	}
+	if got := logA.seen("/fleet/dispatch"); len(got) != 0 {
+		t.Errorf("the job of a family no node serves was sent to a node: %v", got)
+	}
+}
+
 func TestNodeNameRefusesAnythingButAPlainName(t *testing.T) {
 	for _, bad := range []string{"..", ".", "/", "C:", `C:\x`, "a:b", "a\x00b"} {
 		if _, err := nodeName(bad); err == nil && bad != `C:\x` {
@@ -786,6 +821,8 @@ type fakeOpts struct {
 	status  int    // dispatch status, 0 = 202
 	jobData string // done job data
 	media   string
+	// imageFamilies is raw JSON for health image_families, "" = absent.
+	imageFamilies string
 	// jobState, when set, is the state the job reports forever (it never finishes).
 	jobState string
 	// doneAfter holds the job in "running" until this long after the dispatch.
@@ -875,6 +912,9 @@ func fakeNode(t *testing.T, o fakeOpts) *httptest.Server {
 			extra := `,"harness_version":"` + buildinfo.Version + `","gpu_devices":[{"index":0,"uuid":"GPU-fake-0","name":"test card","vram_total_gb":15.92,"vram_free_gb":12}]`
 			if o.routes != "" {
 				extra += `,"media_routes":` + o.routes
+			}
+			if o.imageFamilies != "" {
+				extra += `,"image_families":` + o.imageFamilies
 			}
 			if o.lease != "" {
 				extra += `,"lease":` + o.lease

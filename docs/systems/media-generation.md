@@ -3153,6 +3153,18 @@ predates `media_routes` is unknown, not refused), and do not hold a TEXT lease (
 with no held lease ranks first, then the shorter queue (queued plus running), then config order. Every miss is named in the
 defer, with `defer_class` `capacity`.
 
+An image call that names a `family` (`generate-image --family F`, single or `--batch`, `route remote`, or an `auto` call on a
+machine with no image lane) is sent only to a node that serves `F`, read from the same `/fleet/health`: the route
+`generate_image:F` CONFIGURED, or `F` as the name of the node's default binding (`image_families` or the default row of
+`image_recipes`) with `generate_image` CONFIGURED. A node that lists its bindings and does not list `F` is a named miss
+(`does not serve image family "F" (it serves a, b)`) and the call goes on to the next node that does; a node that says nothing
+about family names (a default-only node whose binding has no recipe, or one older than `image_families`) is unknown, not
+refused, and judges it at its door as before. With no node left the call defers by name (`no fleet node serves image family
+"F"; nodes that do: none reachable`, or the nodes that serve it and cannot take the call now), and when every node was left out
+for what it serves or how it is configured the defer is the `no_node_configured` one. A call that names no family keeps going to
+any node with the lane. The ticket, `--spill` and generative-edit placements already match a node on the recipe it publishes for
+the family, so they never offered a job to a node without it.
+
 **What travels.** A job with no input file goes through `POST /fleet/dispatch`. A job with a still (`offload_generate_video`),
 a reference and driver (`offload_animate_character`) or a clone sample (`offload_generate_audio`) packs the files into a
 bundle (each under its field name plus its extension, copied into a temp directory and packed with `composebundle`) and goes

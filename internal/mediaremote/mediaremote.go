@@ -175,7 +175,8 @@ func audioRoutes(p map[string]any) []string {
 }
 
 // nodeRoutes are the media_routes names that satisfy req on a node: the task is servable there when ANY of
-// them is CONFIGURED. nil = the task has no route name to check (image: the node judges family and engine).
+// them is CONFIGURED. nil = the task has no route name to check (image: a call that names a family is matched on it by
+// need.imageFamily, imageFamilyMiss; one that names none is left to the node).
 func nodeRoutes(req core.Request) []string {
 	switch req.Task {
 	case core.TaskGenerateVideo:
@@ -670,7 +671,8 @@ func pickNode(ctx context.Context, cfg config.Config, bases []string, task, door
 
 // pickNodeFor is pickNode for a call that asks something more of the node (need): an image job sent with refine=false
 // needs a node that carries it, and a graph needs a node on this release (releaseRefuses) with one card and the card size it
-// asked for (refuses); a node that does not is a named miss.
+// asked for (refuses), and an image call that names a family needs a node that serves it (imageFamilyMiss); a node that does not
+// is a named miss.
 func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, doorTask string, routes []string, n need) (base, node string, err error) {
 	type cand struct {
 		base, node string
@@ -683,6 +685,8 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 		// later counts the nodes left out for a reason that passes (not reachable, a text lease on the card); fixed counts
 		// the ones left out for a configuration fact.
 		later, fixed int
+		// famServers are the nodes that serve the image family the call names but were left out for something else.
+		famServers []string
 	)
 	// The candidates are read through internal/rosterprobe like every other single-shot lane (ADR 0074):
 	// each entry is judged by the tailnet shape check before it is dialled (a refused entry is a named miss,
@@ -716,6 +720,16 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 			fixed++
 			continue
 		}
+		// An image call that names a family goes only to a node that serves it: the one that does not would refuse the job
+		// ("unknown image family") and the call would end there with a node that does serve it never asked.
+		if n.imageFamily != "" && task == taskImage {
+			if why := imageFamilyMiss(v, n.imageFamily); why != "" {
+				misses = append(misses, fmt.Sprintf("%s: %s", who, why))
+				fixed++
+				continue
+			}
+			famServers = append(famServers, who)
+		}
 		if v.LeasedText {
 			misses = append(misses, fmt.Sprintf("%s: a text lease holds its card", who))
 			later++
@@ -742,8 +756,19 @@ func pickNodeFor(ctx context.Context, cfg config.Config, bases []string, task, d
 	}
 	if len(cands) == 0 {
 		why := "no fleet node serves " + task
+		if n.imageFamily != "" && task == taskImage {
+			why = fmt.Sprintf("no fleet node serves image family %q", n.imageFamily)
+		}
 		if doorTask == taskMediaJob {
 			why += " with input files"
+		}
+		if n.imageFamily != "" && task == taskImage {
+			why += "; nodes that do: "
+			if len(famServers) == 0 {
+				why += "none reachable"
+			} else {
+				why += strings.Join(famServers, ", ") + " (none can take the call now)"
+			}
 		}
 		pe := &placementError{core.DeferClassCapacity, why + ": probed " + strings.Join(misses, "; ")}
 		if later == 0 && fixed > 0 {
