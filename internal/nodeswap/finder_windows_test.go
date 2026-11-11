@@ -5,10 +5,11 @@ package nodeswap
 import (
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/winexec"
 )
 
 // TestFinderSeesAProcessStartedThroughAJunction is the 2026-11-11 swap failure on a Windows node:
@@ -32,10 +33,10 @@ func TestFinderSeesAProcessStartedThroughAJunction(t *testing.T) {
 	genExe := filepath.Join(gen, "nodeswap-junction-probe.exe")
 	copyExe(t, self, genExe)
 	live := filepath.Join(root, "probe")
-	if out, err := exec.Command("cmd", "/c", "mklink", "/J", live, gen).CombinedOutput(); err != nil {
+	if out, err := winexec.Command("cmd", "/c", "mklink", "/J", live, gen).CombinedOutput(); err != nil {
 		t.Fatalf("mklink /J: %v: %s", err, out)
 	}
-	cmd := exec.Command(filepath.Join(live, "nodeswap-junction-probe.exe"), "-test.run=^TestFinderSeesAProcessStartedThroughAJunction$")
+	cmd := winexec.Command(filepath.Join(live, "nodeswap-junction-probe.exe"), "-test.run=^TestFinderSeesAProcessStartedThroughAJunction$")
 	cmd.Env = append(os.Environ(), "NODESWAP_JUNCTION_HELPER=1")
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
