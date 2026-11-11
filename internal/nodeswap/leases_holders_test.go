@@ -17,6 +17,7 @@ package nodeswap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
@@ -202,6 +203,31 @@ func TestInspectGPULeaseCarriesTheHoldersPID(t *testing.T) {
 	}
 	if len(info.Leases) != 1 || info.Leases[0].PID != os.Getpid() {
 		t.Fatalf("leases = %+v, want the one lease held by this process (pid %d)", info.Leases, os.Getpid())
+	}
+}
+
+// A swap run under `gpu reserve` does not wait for the wrapper's own lease (GPU_LEASE_EPOCH), and still
+// waits for any other. 2026-11-11: the sweep's llama-swap rows waited on their own wrapper, timed out,
+// and exited 0 with nothing swapped, on every node whose row carries a lease.
+func TestInspectGPULeaseSkipsTheLeaseThisProcessRunsUnder(t *testing.T) {
+	dir := t.TempDir()
+	release := acquireScratchLease(t, dir, "fleet sweep wrapper", deployCardA)
+	defer release()
+	info, err := inspectGPULease(dir, "")
+	if err != nil || len(info.Leases) != 1 {
+		t.Fatalf("setup: leases=%+v err=%v", info.Leases, err)
+	}
+	own := info.Leases[0].Epoch
+	t.Setenv("GPU_LEASE_EPOCH", fmt.Sprint(own+1))
+	if info, _ = inspectGPULease(dir, ""); !info.Held || len(info.Leases) != 1 {
+		t.Fatalf("a lease this process does not run under must still hold: %+v", info)
+	}
+	t.Setenv("GPU_LEASE_EPOCH", fmt.Sprint(own))
+	if info, _ = inspectGPULease(dir, ""); info.Held || len(info.Leases) != 0 {
+		t.Fatalf("the wrapper's own lease must not hold the swap: %+v", info)
+	}
+	if holding, _ := splitLeases(info, nil, nil); len(holding) != 0 {
+		t.Fatalf("splitLeases still holds: %v", holding)
 	}
 }
 

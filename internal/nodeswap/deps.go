@@ -200,8 +200,22 @@ func inspectGPULease(lockPath, stateDir string) (GPULeaseInfo, error) {
 	// a legacy lease an older binary wrote names none and so reads as the whole node, which is
 	// the direction of every doubt for a deploy. The holder's pid rides along: a lease held by a
 	// process the deploy is about to stop is ended by the stop, on any card.
+	// The lease this process runs UNDER is not one to wait for: `gpu reserve -- local-offload update ...`
+	// (the fleet sweep wraps every engine row that way) hands its epoch to the command as GPU_LEASE_EPOCH,
+	// and waiting on it can only time out. That was every llama-swap row on 2026-11-11: the wait-idle step
+	// saw the wrapper's own lease, gave up after its 3 minutes as "inconclusive", exit 0, nothing swapped.
+	// gpulease.Inherited compares the epoch, so a stale variable exempts nothing and every other lease
+	// still holds the swap.
 	for _, l := range info.Each() {
+		if gpulease.Inherited(l) {
+			continue
+		}
 		out.Leases = append(out.Leases, GPULeaseOnCards{Epoch: l.Epoch, Class: string(l.Class), Reason: l.Reason, PID: l.PID, Devices: l.Devices})
+	}
+	if len(out.Leases) == 0 {
+		// Only this process's own lease is live: nothing holds the swap. (Held with no Leases would read
+		// as one whole-node lease in splitLeases.)
+		return GPULeaseInfo{}, nil
 	}
 	return out, nil
 }
