@@ -126,11 +126,80 @@ type need struct {
 	voiceSampling bool
 	// edit: the call is a generative edit, matched on the edit recipe a node publishes (edit.go).
 	edit bool
+	// imageFamily is the named image family of a generate_image call ("" for a call that names none, which any node with the
+	// lane may take). A node that does not serve it refuses the job by name, so pickNodeFor leaves such a node out (imageFamilyMiss).
+	imageFamily string
 }
 
 func needOf(req core.Request) need {
 	_, steps := posInt(req.Params, "steps")
-	return need{refineOff: refineOff(req.Params), steps: steps, graph: graphNeedOf(req), vram: vramNeedOf(req), voiceSampling: req.Task == core.TaskGenerateAudio && core.VoiceSamplingGiven(req.Params), edit: req.Task == core.TaskEditImageGenerative}
+	n := need{refineOff: refineOff(req.Params), steps: steps, graph: graphNeedOf(req), vram: vramNeedOf(req), voiceSampling: req.Task == core.TaskGenerateAudio && core.VoiceSamplingGiven(req.Params), edit: req.Task == core.TaskEditImageGenerative}
+	if req.Task == core.TaskGenerateImage {
+		n.imageFamily = strings.TrimSpace(str(req.Params, "family"))
+	}
+	return n
+}
+
+// imageFamilyMiss says why node v cannot take a generate_image call that names image family fam, "" when it may. The rule
+// is the one a node's own advertisement states (mediacap): a named family is the route "generate_image:<name>", and the
+// node's DEFAULT binding is the route "generate_image" under the name health publishes for it (image_families, or the
+// default row of image_recipes), so a node whose default family is fam is never left out, whichever of the two says so.
+//   - the route "generate_image:<fam>" is reported: the node serves fam exactly when it is CONFIGURED;
+//   - else fam is the default binding's name: it serves it when "generate_image" is CONFIGURED (or not reported);
+//   - else, when the node lists the bindings it has, fam is not among them: it does not serve it;
+//   - else the node says nothing about family names (an older node, or a default-only node whose binding has no recipe):
+//     unknown, never refused, and the node judges it at its door as before.
+func imageFamilyMiss(v delegate.NodeView, fam string) string {
+	route := mediacap.ImageFamilyRoute(fam)
+	if st, known := v.RouteState(route); known {
+		if st == delegate.MediaRouteConfigured {
+			return ""
+		}
+		return fmt.Sprintf("route %s is %s on that node", route, st)
+	}
+	var (
+		names       []string // the bindings the node lists, a default binding with no family name among them as ""
+		defaultName string
+		haveDefault bool
+	)
+	for _, f := range v.ImageFamilies {
+		names = append(names, f.Name)
+		if f.Default {
+			defaultName, haveDefault = f.Name, true
+		}
+	}
+	if len(names) == 0 {
+		// No named families on the node: its default binding is its only one, and a ComfyUI one publishes a recipe row.
+		for _, r := range v.ImageRecipes {
+			names = append(names, r.Name)
+			if r.Default {
+				defaultName, haveDefault = r.Name, true
+			}
+		}
+	}
+	if haveDefault && defaultName == fam {
+		if st, known := v.RouteState("generate_image"); known && st != delegate.MediaRouteConfigured {
+			return fmt.Sprintf("its default family %q matches, but its route generate_image is %s on that node", fam, st)
+		}
+		return ""
+	}
+	if len(names) == 0 {
+		return ""
+	}
+	var shown []string
+	for _, n := range names {
+		if n == fam {
+			return "" // a named binding the route list omits: unknown, not refused
+		}
+		if n != "" {
+			shown = append(shown, n)
+		}
+	}
+	serves := "its default binding only, which names no family"
+	if len(shown) > 0 {
+		serves = strings.Join(shown, ", ")
+	}
+	return fmt.Sprintf("does not serve image family %q (it serves %s)", fam, serves)
 }
 
 // nodeMatch is the verdict of one node's published recipes against this machine's.

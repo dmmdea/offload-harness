@@ -182,7 +182,10 @@ func TestBatchSerialFailsAtOnceWhereNoNodeCanEverTakeTheJob(t *testing.T) {
 	no := false
 	jobs := manyJobs(t, 1)
 	jobs[0].Refine = &no
-	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, neverWarm(t), serialOpts())
+	// The family is one the node serves by name (a single call sends the family name as given, so a node that does not serve it
+	// is left out for that, before refine=false is looked at).
+	nodeFamily := func(o *BatchOpts) { o.Family = "qwen-image-2.1" }
+	b, err := RunBatch(bctx(t), e.cfg, e.lr, jobs, neverWarm(t), serialOpts(nodeFamily))
 	if err != nil {
 		t.Fatal(err)
 	}
