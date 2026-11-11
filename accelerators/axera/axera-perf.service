@@ -1,0 +1,21 @@
+# Boot-time tuning for the Axera AX650-class card (accelerators/axera/axera-perf.sh). Install once per host:
+#   sed -e "s#__AXERA_HOME__#$AXERA_HOME#g" -e "s#__AXERA_USER__#$(id -un)#g" axera-perf.service \
+#     | sudo tee /etc/systemd/system/axera-perf.service >/dev/null
+#   sudo systemctl daemon-reload && sudo systemctl enable --now axera-perf.service
+# __AXERA_HOME__ is the directory holding venv/ and this file's axera-perf.sh (a flat copy or a checkout of
+# accelerators/axera/ beneath it: adjust the ExecStart path to match). The card's device nodes are
+# world-accessible (crw-rw-rw-, as the vendor package creates them), so the unit runs as the user that owns the home.
+[Unit]
+Description=Axera AX650 card: CPU to its top clock
+After=systemd-modules-load.service local-fs.target
+ConditionPathExists=/dev/axcl_host
+
+[Service]
+Type=oneshot
+User=__AXERA_USER__
+ExecStart=/bin/bash __AXERA_HOME__/axera-perf.sh
+RemainAfterExit=yes
+TimeoutStartSec=240
+
+[Install]
+WantedBy=multi-user.target
