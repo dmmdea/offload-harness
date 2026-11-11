@@ -1,0 +1,6 @@
+### Fixed - an engine swap run under `gpu reserve` no longer waits for its own lease
+
+- **Why.** A single-file swap (`update --component llama-swap`) waits for every live GPU lease before it stops the daemon. Run under `gpu reserve -- local-offload update ...`, the way a fleet sweep wraps every engine row, that wait included the wrapper's own lease. The wait could only time out: after three minutes the verb answered "inconclusive: the node did not go idle in time, nothing changed", exit 0, with nothing swapped. Measured on a Windows node: the llama-swap row exited 0 on every pass and the binary stayed on the old release. Every llama-swap row that carries a lease had the same problem.
+- **What it does.** The lease reader used by the swap's idle wait skips the one lease this process runs under (`GPU_LEASE_EPOCH`, which `gpu reserve` hands to its command). The epoch is compared, so a stale variable exempts nothing, and every other lease still holds the swap. If only its own lease is live, nothing holds it.
+- **Where.** `internal/nodeswap/deps.go` (`inspectGPULease`).
+- **Check.** One test with a real lease in a scratch state dir: under another lease's epoch the lease still holds; under its own epoch nothing holds and `splitLeases` holds nothing.
