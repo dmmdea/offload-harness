@@ -369,6 +369,30 @@ the one decision the MCP registration and the status block read; the loop's lane
 claims (`AccelLane.Claims`). Each device's status entry lists `serves` (what it registered) beside
 `owns` (what it could).
 
+**The owner is the first choice, not the only one ([ADR 0102](../architecture/decisions/0102-an-accelerator-answers-through-a-gpu-lease-and-a-shared-tool-falls-back.md)).**
+When the owner cannot take a call, the call runs on the next device that serves the same name, in the
+listed order (local devices, then `fleet_accelerators`), on both surfaces (`agent.AccelFallback`, called
+from `mcpserver.handleAccelChain` and `agent.accelLaneTools`).
+
+- **Cannot take the call** means a defer (the node is off, no node advertises the device, the dispatch was
+  refused, the sidecar did not start) or a sidecar refusal about the device (`model_missing`,
+  `model_load_failed`, a digest mismatch, `npu_disabled`, `npu_unavailable`, `runtime_missing`, `internal`).
+  A refusal of the caller's input (`bad_request`, `image_missing`, `image_unreadable`, `out_path_exists`,
+  `out_path_unwritable`, `forbidden`, `not_found`, `unknown_model`) is the answer and is not retried.
+- **The fallback device runs its own tool row**: its sidecar tool, its required argument, and only the
+  arguments its schema declares. The model is that device's, so `score_threshold` defaults and the label
+  space of `offload_classify_image` are that device's too.
+- **The result says so**: `fallback: {from, reason, served_by}` on an answer from another device,
+  `fallback_tried: [{device, reason}]` on the owner's defer when none could answer.
+- **An embedding moves only when asked.** `offload_image_embed` and `offload_text_embed` fall back only with
+  `any_space: true`, because another device's vector is in another space; without it the defer carries
+  `fallback_withheld`. The argument is in the schema only where a fallback device exists.
+- **Nothing is remembered**: every call tries the owner first, and a node that is off costs the roster
+  probe (about 2 s) before the next device runs.
+- `offload_status.accelerators.<id>.fallback_for` lists the names a device answers when their owner cannot,
+  and each such tool's description carries a `FALLBACK:` sentence (it names no device, so the compact
+  tools profile keeps it by its exact text; a forwarded tool's `[FLEET: ...]` note stays last).
+
 **Both surfaces, generalised (0.114.0):** the MCP server keeps one per-device table
 (`internal/mcpserver/acceltools.go`) and one on-demand sidecar per device; the agent loop
 receives every device as an `agent.AccelLane` (`pipeline.NewLoopAccel`, config order) and
@@ -562,6 +586,8 @@ entry; a Hailo owns those five too and keeps them unless an entry moves them.
 **Moving `offload_image_embed` changes the embedding space** (768-d `siglip2-base-p16-224` instead of the Coral's
 1280-d EfficientNet or the Hailo's 512-d TinyCLIP): re-embed every stored vector, because vectors are comparable
 only within one space. `offload_status`'s `serves` per device shows what registered where.
+When the card's node is off or cannot take a call, detection, classification and semantic segmentation run on
+the next device that serves them, and the embedding moves only with `any_space: true` (ADR 0102, above).
 
 **Deliberately not owned**, each a ruling of [ADR 0101](../architecture/decisions/0101-axera-ax650-npu-card-as-an-accelerator.md):
 `face_detect` and `face_embed` (the InsightFace weights are non-commercial), `person_embed` (no AX650-compiled
@@ -644,7 +670,14 @@ Ownership across the fleet is ADR 0037 extended: `accelerators` is walked before
 `accelerator_tool_owners` entry names the fleet device for it (ADR 0068, below), and a box
 that lists a device in both registers the local lane only. A box that lists nothing in
 `fleet_accelerators` is byte-identical to 0.114.x (pinned by
-`TestFleetAcceleratorRegistersForwardedToolsOnly`).
+`TestFleetAcceleratorRegistersForwardedToolsOnly`). The owner is tried first and the other devices that
+serve the name answer when it cannot (ADR 0102, "The owner is the first choice" above).
+
+**A GPU lease never refuses an `accel` job (ADR 0102).** A text lease reserves a node's GPUs for a
+measurement and its `/fleet/dispatch` answers `503 node leased` to work that would land on them. An
+accelerator is not one of those cards, so an `accel` job is admitted while the lease is held and the two
+run side by side (`fleetnode.textLeaseAgainst`). Before this a forwarded call was refused for the whole
+measurement window with the device idle.
 
 **The Hailo-8L never travels** (register E-08, [ADR 0038](../architecture/decisions/0038-accelerator-work-travels-to-the-box-that-has-the-device.md)
 amendment): the standalone box that carries it keeps it local. `/fleet/health` omits it from

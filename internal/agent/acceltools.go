@@ -157,7 +157,9 @@ func laneToolsFor(id string, call NPUFunc) []Tool {
 // which is also the order hwdetect.DetectAllAccelerators emits and the order
 // the MCP surface walks — so the two surfaces resolve a shared name identically.
 // A lane's Claims (accelerator_tool_owners, ADR 0068) take their names first,
-// the same override mcpserver.accelOwnerPlan applies.
+// the same override mcpserver.accelOwnerPlan applies. The owner is the first
+// choice, not the only one: every other lane that serves the name answers when
+// the owner cannot (AccelFallback, ADR 0102).
 func accelLaneTools(lanes []AccelLane, have []Tool) []Tool {
 	taken := map[string]bool{}
 	for _, t := range have {
@@ -179,6 +181,7 @@ func accelLaneTools(lanes []AccelLane, have []Tool) []Tool {
 		}
 	}
 	var out []Tool
+	ownerOf := map[string]string{} // tool name -> the lane that registered it here
 	for _, lane := range lanes {
 		if lane.Call == nil {
 			continue
@@ -188,6 +191,7 @@ func accelLaneTools(lanes []AccelLane, have []Tool) []Tool {
 				continue
 			}
 			taken[t.Name] = true
+			ownerOf[t.Name] = lane.ID
 			if lane.Remote {
 				// The seat must know the image is read on THIS box and shipped: a
 				// path on the far node would fail here, the reverse of the local lane.
@@ -196,5 +200,76 @@ func accelLaneTools(lanes []AccelLane, have []Tool) []Tool {
 			out = append(out, t)
 		}
 	}
+	// Every other lane that serves a registered name answers when the owner cannot (ADR 0102),
+	// in lane order: the owner is the first choice, never the only one.
+	steps := map[string][]AccelStep{}
+	for _, lane := range lanes {
+		if lane.Call == nil {
+			continue
+		}
+		for _, t := range laneToolsFor(lane.ID, lane.Call) {
+			owner, registered := ownerOf[t.Name]
+			if !registered || owner == lane.ID || slices.ContainsFunc(steps[t.Name], func(s AccelStep) bool { return s.Device == lane.ID }) {
+				continue
+			}
+			exec := t.Exec
+			steps[t.Name] = append(steps[t.Name], AccelStep{Device: lane.ID, Props: AccelSchemaProps(t.Schema),
+				Run: func(ctx context.Context, args map[string]any) map[string]any {
+					b, _ := json.Marshal(args)
+					return accelResult(exec(ctx, string(b)))
+				}})
+		}
+	}
+	for i := range out {
+		chain := steps[out[i].Name]
+		if len(chain) == 0 {
+			continue
+		}
+		desc, schema := AccelFallbackSurface(out[i].Name, out[i].Description, string(out[i].Schema), true)
+		out[i].Description, out[i].Schema = desc, json.RawMessage(schema)
+		name, owner, exec := out[i].Name, ownerOf[out[i].Name], out[i].Exec
+		out[i].Exec = func(ctx context.Context, args string) (string, error) {
+			var in map[string]any
+			_ = json.Unmarshal([]byte(args), &in)
+			mine := args
+			if _, said := in[AnySpaceArg]; said {
+				// The caller's word to this loop, never a sidecar argument.
+				sub := map[string]any{}
+				for k, v := range in {
+					if k != AnySpaceArg {
+						sub[k] = v
+					}
+				}
+				b, _ := json.Marshal(sub)
+				mine = string(b)
+			}
+			res, err := exec(ctx, mine)
+			if err != nil {
+				return res, err
+			}
+			got := accelResult(res, nil)
+			if _, cannot := AccelCannotServe(got); !cannot {
+				return res, nil // the owner answered: its bytes, untouched
+			}
+			b, merr := json.Marshal(AccelFallback(ctx, name, owner, got, in, chain))
+			if merr != nil {
+				return res, nil
+			}
+			return string(b), nil
+		}
+	}
 	return out
+}
+
+// accelResult reads one lane tool's answer as a dict. An error or an answer that is not a JSON
+// object is a defer, which is how every lane already reports a call it could not make.
+func accelResult(res string, err error) map[string]any {
+	if err != nil {
+		return map[string]any{"deferred": true, "reason": err.Error()}
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(res), &m) != nil || m == nil {
+		return map[string]any{"deferred": true, "reason": "the device returned a non-object result"}
+	}
+	return m
 }

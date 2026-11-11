@@ -19,7 +19,7 @@ import (
 func fullSurfaceCfg(profile string) config.Config {
 	c := browseCfg()
 	c.AgentDelegationEnabled = true
-	c.Accelerators = []string{"hailo-8l", "coral-edgetpu", "rknpu"}
+	c.Accelerators = []string{"hailo-8l", "coral-edgetpu", "rknpu", "axera-ax650"}
 	c.ToolsSchemaProfile = profile
 	return c
 }

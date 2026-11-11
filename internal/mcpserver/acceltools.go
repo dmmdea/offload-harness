@@ -13,6 +13,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/accelclient"
 	"github.com/dmmdea/offload-harness/internal/accelremote"
+	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
 )
 
@@ -188,19 +189,25 @@ func (s *Server) accelSidecar(id string) *accelclient.Sidecar {
 // way); the sidecar's own structured refusals pass through untouched — they
 // are results.
 func (s *Server) accelCall(ctx context.Context, id, tool string, args map[string]any) (*mcp.CallToolResult, error) {
+	return jsonResult(s.accelCallMap(ctx, id, tool, args))
+}
+
+// accelCallMap is accelCall's answer as the dict, for a caller that reads it before returning it
+// (the fallback chain, ADR 0102).
+func (s *Server) accelCallMap(ctx context.Context, id, tool string, args map[string]any) map[string]any {
 	start := time.Now()
 	sc := s.accelSidecar(id)
 	if err := sc.Ensure(ctx); err != nil {
 		s.p.RecordAccel(tool, id, sinceMs(start), true, id+": "+err.Error())
-		return jsonResult(map[string]any{"deferred": true, "reason": id + ": " + err.Error()})
+		return map[string]any{"deferred": true, "reason": id + ": " + err.Error()}
 	}
 	out, err := sc.Client().Call(ctx, tool, args)
 	if err != nil {
 		s.p.RecordAccel(tool, id, sinceMs(start), true, id+": "+err.Error())
-		return jsonResult(map[string]any{"deferred": true, "reason": id + ": " + err.Error()})
+		return map[string]any{"deferred": true, "reason": id + ": " + err.Error()}
 	}
 	s.p.RecordAccel(tool, id, sinceMs(start), false, "")
-	return jsonResult(out)
+	return out
 }
 
 // sinceMs is the wall since start in whole milliseconds, for a ledger row.
@@ -286,17 +293,8 @@ func (s *Server) handleAccelTool(id, tool, requiredArg string) mcp.ToolHandler {
 // is returned in ignored, and the walk decides its name as if it were absent. A
 // fleet owner carries FleetOwnerSuffix.
 func accelOwnerPlan(cfg config.Config) (owner map[string]string, ignored []string) {
-	type dev struct{ id, owner string }
-	var devs []dev
-	for _, id := range cfg.Accelerators {
-		devs = append(devs, dev{id, id})
-	}
-	for _, id := range cfg.FleetAccelerators {
-		if slices.Contains(cfg.Accelerators, id) {
-			continue // the device is here; its local lane owns its names
-		}
-		devs = append(devs, dev{id, id + FleetOwnerSuffix})
-	}
+	type dev = accelDev
+	devs := accelDevices(cfg)
 	serves := func(id, name string) bool {
 		return slices.ContainsFunc(accelMCPTools(id), func(t accelMCPTool) bool { return t.name == name })
 	}
@@ -335,6 +333,43 @@ func accelOwnerPlan(cfg config.Config) (owner map[string]string, ignored []strin
 	return owner, ignored
 }
 
+// accelDev is one device this box can reach: its id, and its owner tag (the id for a device on
+// this box, the id + FleetOwnerSuffix for one reached over the fleet).
+type accelDev struct{ id, owner string }
+
+// accelDevices lists the devices in the order every walk uses: the local ones in
+// config.Accelerators order, then the fleet ones in config.FleetAccelerators order.
+func accelDevices(cfg config.Config) []accelDev {
+	var devs []accelDev
+	for _, id := range cfg.Accelerators {
+		devs = append(devs, accelDev{id, id})
+	}
+	for _, id := range cfg.FleetAccelerators {
+		if slices.Contains(cfg.Accelerators, id) {
+			continue // the device is here; its local lane owns its names
+		}
+		devs = append(devs, accelDev{id, id + FleetOwnerSuffix})
+	}
+	return devs
+}
+
+// accelFallbackPlan says, for every tool name in the owner plan, which other devices serve it, in
+// the listed order (ADR 0102). The owner is the first choice; these answer when it cannot. A
+// name only one device serves has no entry, and a device listed twice is counted once.
+func accelFallbackPlan(cfg config.Config, owner map[string]string) map[string][]accelDev {
+	plan := map[string][]accelDev{}
+	for _, d := range accelDevices(cfg) {
+		for _, t := range accelMCPTools(d.id) {
+			o, ok := owner[t.name]
+			if !ok || o == d.owner || slices.Contains(plan[t.name], d) {
+				continue
+			}
+			plan[t.name] = append(plan[t.name], d)
+		}
+	}
+	return plan
+}
+
 // registerAccelTools registers every device's table under accelOwnerPlan: a
 // device registers the names the plan gives it and skips the rest, each skip
 // logged once at startup. Local devices call their loopback sidecar; a device
@@ -346,6 +381,7 @@ func (s *Server) registerAccelTools(srv *mcp.Server, cfg config.Config) map[stri
 	for _, why := range ignored {
 		log.Printf("accelerator_tool_owners: %s; ignored, the first-listed rule decides that name (ADR 0068)", why)
 	}
+	fallbacks := accelFallbackPlan(cfg, owner)
 	// registered guards a device id listed twice: its second walk must not add the
 	// same tools again.
 	registered := map[string]bool{}
@@ -359,7 +395,9 @@ func (s *Server) registerAccelTools(srv *mcp.Server, cfg config.Config) map[stri
 				continue
 			}
 			registered[t.name] = true
-			srv.AddTool(&mcp.Tool{Name: t.name, Description: t.desc, InputSchema: json.RawMessage(t.schema)}, s.handleAccelTool(id, t.sidecar, t.arg))
+			desc, schema := agent.AccelFallbackSurface(t.name, t.desc, t.schema, len(fallbacks[t.name]) > 0)
+			srv.AddTool(&mcp.Tool{Name: t.name, Description: desc, InputSchema: json.RawMessage(schema)},
+				s.handleAccelChain(accelDev{id, id}, t, fallbacks[t.name]))
 		}
 	}
 	for _, id := range cfg.FleetAccelerators {
@@ -374,12 +412,67 @@ func (s *Server) registerAccelTools(srv *mcp.Server, cfg config.Config) map[stri
 				log.Printf("fleet accelerator %s: %s is served by %s on this box; skipped (shared-name rule)", id, t.name, owner[t.name])
 				continue
 			}
-			desc := t.desc + fleetAccelNote(id, t.arg)
 			registered[t.name] = true
-			srv.AddTool(&mcp.Tool{Name: t.name, Description: desc, InputSchema: json.RawMessage(t.schema)}, s.handleFleetAccelTool(id, t.sidecar, t.arg))
+			desc, schema := agent.AccelFallbackSurface(t.name, t.desc+fleetAccelNote(id, t.arg), t.schema, len(fallbacks[t.name]) > 0)
+			srv.AddTool(&mcp.Tool{Name: t.name, Description: desc, InputSchema: json.RawMessage(schema)},
+				s.handleAccelChain(accelDev{id, id + FleetOwnerSuffix}, t, fallbacks[t.name]))
 		}
 	}
 	return owner
+}
+
+// accelDevCall runs one sidecar tool on one device: its loopback sidecar here, or the fleet node
+// that carries it.
+func (s *Server) accelDevCall(ctx context.Context, d accelDev, tool string, args map[string]any) map[string]any {
+	if d.owner == d.id {
+		return s.accelCallMap(ctx, d.id, tool, args)
+	}
+	return s.fleetAccelCallMap(ctx, d.id, tool, args)
+}
+
+// handleAccelChain adapts one registered accelerator tool: the owner's handler (handleAccelTool
+// or handleFleetAccelTool), and when the owner cannot take the call, the same tool on each
+// fallback device through that device's own table row (agent.AccelFallback, ADR 0102). With no
+// fallback device it is the owner's handler and nothing else.
+func (s *Server) handleAccelChain(owner accelDev, row accelMCPTool, fallbacks []accelDev) mcp.ToolHandler {
+	if len(fallbacks) == 0 {
+		if owner.owner == owner.id {
+			return s.handleAccelTool(owner.id, row.sidecar, row.arg)
+		}
+		return s.handleFleetAccelTool(owner.id, row.sidecar, row.arg)
+	}
+	var steps []agent.AccelStep
+	for _, d := range fallbacks {
+		for _, t := range accelMCPTools(d.id) {
+			if t.name != row.name {
+				continue
+			}
+			steps = append(steps, agent.AccelStep{Device: d.id, Props: agent.AccelSchemaProps([]byte(t.schema)),
+				Run: func(ctx context.Context, args map[string]any) map[string]any {
+					if args[t.arg] == nil || args[t.arg] == "" {
+						return map[string]any{"deferred": true, "reason": d.id + ": empty " + t.arg}
+					}
+					return s.accelDevCall(ctx, d, t.sidecar, args)
+				}})
+		}
+	}
+	return func(ctx context.Context, req *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		var in map[string]any
+		if bad := parseArgs(req.Params.Arguments, &in); bad != nil {
+			return bad, nil
+		}
+		if in[row.arg] == nil || in[row.arg] == "" {
+			return jsonResult(map[string]any{"deferred": true, "reason": "empty " + row.arg})
+		}
+		mine := map[string]any{}
+		for k, v := range in {
+			if k != agent.AnySpaceArg { // the caller's word to this server, never a sidecar argument
+				mine[k] = v
+			}
+		}
+		out := s.accelDevCall(ctx, owner, row.sidecar, mine)
+		return jsonResult(agent.AccelFallback(ctx, row.name, owner.id, out, in, steps))
+	}
 }
 
 // fleetAccelNote is the note appended to a forwarded accelerator tool's description: the call goes to another node, and the
@@ -417,18 +510,23 @@ func (s *Server) handleFleetAccelTool(id, tool, requiredArg string) mcp.ToolHand
 // forwarding failure is a device-prefixed defer, the node's own result passes through untouched.
 // offload_ocr engine:"npu" reaches a fleet node's Axera card through it too.
 func (s *Server) fleetAccelCall(ctx context.Context, id, tool string, in map[string]any) (*mcp.CallToolResult, error) {
+	return jsonResult(s.fleetAccelCallMap(ctx, id, tool, in))
+}
+
+// fleetAccelCallMap is fleetAccelCall's answer as the dict (see accelCallMap).
+func (s *Server) fleetAccelCallMap(ctx context.Context, id, tool string, in map[string]any) map[string]any {
 	start := time.Now()
 	out, err := accelremote.Call(ctx, s.p.Cfg(), id, tool, in)
 	if err != nil {
 		s.p.RecordAccel(tool, id+FleetOwnerSuffix, sinceMs(start), true, id+" (fleet): "+err.Error())
-		return jsonResult(map[string]any{"deferred": true, "reason": id + " (fleet): " + err.Error()})
+		return map[string]any{"deferred": true, "reason": id + " (fleet): " + err.Error()}
 	}
 	tier := id + FleetOwnerSuffix
 	if n := accelPlacementNode(out); n != "" {
 		tier = n + ":" + id
 	}
 	s.p.RecordAccel(tool, tier, sinceMs(start), false, "")
-	return jsonResult(out)
+	return out
 }
 
 // accelStatus is the status block's `accelerators` entry: one row per listed
@@ -452,16 +550,32 @@ func accelStatus(ctx context.Context, cfg config.Config) map[string]any {
 		slices.Sort(names)
 		return names
 	}
+	// fallback_for is what the device answers when the tool's owner cannot (ADR 0102): the names
+	// another device registered that this one serves too. A row gets the key only when it has any.
+	fallbacks := accelFallbackPlan(cfg, plan)
+	withFallbacks := func(owner string, entry map[string]any) map[string]any {
+		names := []string{}
+		for name, devs := range fallbacks {
+			if slices.ContainsFunc(devs, func(d accelDev) bool { return d.owner == owner }) {
+				names = append(names, name)
+			}
+		}
+		if len(names) > 0 {
+			slices.Sort(names)
+			entry["fallback_for"] = names
+		}
+		return entry
+	}
 	for _, id := range cfg.FleetAccelerators {
 		if slices.Contains(cfg.Accelerators, id) {
 			continue
 		}
-		out[id] = map[string]any{"owns": accelOwns(id), "serves": serves(id + FleetOwnerSuffix), "fleet": true,
-			"note": "not on this box: its tools forward to the first delegate_remotes node whose /fleet/health lists it (accelremote, cap 8 MiB per image)"}
+		out[id] = withFallbacks(id+FleetOwnerSuffix, map[string]any{"owns": accelOwns(id), "serves": serves(id + FleetOwnerSuffix), "fleet": true,
+			"note": "not on this box: its tools forward to the first delegate_remotes node whose /fleet/health lists it (accelremote, cap 8 MiB per image)"})
 	}
 	for _, id := range cfg.Accelerators {
 		lc, ok := accelLaneConfigFor(cfg, id)
-		entry := map[string]any{"owns": accelOwns(id), "serves": serves(id)}
+		entry := withFallbacks(id, map[string]any{"owns": accelOwns(id), "serves": serves(id)})
 		if !ok {
 			entry["note"] = "listed in accelerators but this build has no adapter for it — nothing is registered"
 			out[id] = entry

@@ -91,12 +91,12 @@ func isClassText(reason string) bool {
 	return false
 }
 
-// fleetSurfaceCfg is the same optional surfaces as fullSurfaceCfg with the three accelerators listed as FLEET accelerators, whose
+// fleetSurfaceCfg is the same optional surfaces as fullSurfaceCfg with the four accelerators listed as FLEET accelerators, whose
 // descriptions carry the "[FLEET: ...]" suffix.
 func fleetSurfaceCfg(profile string) config.Config {
 	c := browseCfg()
 	c.AgentDelegationEnabled = true
-	c.FleetAccelerators = []string{"hailo-8l", "coral-edgetpu", "rknpu"}
+	c.FleetAccelerators = []string{"hailo-8l", "coral-edgetpu", "rknpu", "axera-ax650"}
 	c.ToolsSchemaProfile = profile
 	return c
 }

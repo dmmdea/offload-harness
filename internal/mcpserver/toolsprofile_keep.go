@@ -1,5 +1,7 @@
 package mcpserver
 
+import "github.com/dmmdea/offload-harness/internal/agent"
+
 // toolsprofile_keep.go: the reviewed keep-list of the compact tools/list profile.
 //
 // Compact keeps the opening sentence of every description and, beyond it, only the sentences named here, in the tools named
@@ -737,6 +739,19 @@ var compactKeep = []compactKeepEntry{
 		Tools:    []string{"offload_text_embed"},
 		Sentence: "[FLEET: this box has no axera-ax650 — the call is forwarded to the fleet node that does; text travels with the job; the result carries placement{node,wall_ms}]",
 		Why:      "the forwarding note of a fleet accelerator, for the one tool that takes text and no image: the call is forwarded to another node and the text travels with it, which the opening sentence (on-box, free) does not say",
+	},
+	// The fallback sentence of a shared accelerator tool (agent.AccelFallbackSurface, ADR 0102): on a box where another device serves
+	// the same name, the tool's answer can come from that device's model. One sentence for every box (it names no device), and one
+	// for the two embedding tools, whose answer moves only when the caller asks.
+	{
+		Tools:    []string{"offload_classify_image", "offload_object_detect", "offload_semantic_segment", "offload_segment", "offload_zero_shot", "offload_depth", "offload_pose"},
+		Sentence: agent.AccelFallbackNote,
+		Why:      "a shared accelerator tool falls back: when its device cannot take the call the next device answers with its own model and fewer arguments, which the opening sentence (one named device and model) does not say",
+	},
+	{
+		Tools:    []string{"offload_image_embed", "offload_text_embed"},
+		Sentence: agent.AccelFallbackSpaceNote,
+		Why:      "an embedding tool falls back only with any_space:true and then answers in a different embedding space: the one rule that keeps a caller from comparing vectors of two devices",
 	},
 	// The Axera card's own descriptions (acceltools.go): what its depth and embedding tools write and return, and the pairing rule of its
 	// embedding space with its own text tower. Kept verbatim: they are what the caller reads the result shape and the space from.
