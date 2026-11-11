@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -49,6 +50,13 @@ type cimProcRow struct {
 // elevated in session 0, and an unelevated swap saw no node to stop and no new node to verify,
 // then rolled back against the running node. Such a row is returned when its Name is the target's
 // file name, marked Unreadable, so the swap can refuse instead of guessing.
+//
+// A path is matched by the file it names, not by its spelling. CIM reports the path a process was
+// started through, and a node whose live directory is a junction into a generation directory
+// (<home>/llama-swap -> <home>/llama-swap-versions/<id>) runs from the junction's path while the
+// swap names the generation's. Measured 2026-11-11 on a Windows node: the restarted llama-swap ran,
+// and the post-restart check and the rollback's check both reported no process, because the two
+// spellings never compared equal. deps_other.go resolves links for the same reason.
 func findProcessesByExeWindows(exePath string) ([]ProcessInfo, error) {
 	abs, err := filepath.Abs(exePath)
 	if err != nil {
@@ -56,7 +64,7 @@ func findProcessesByExeWindows(exePath string) ([]ProcessInfo, error) {
 	}
 	script := fmt.Sprintf(
 		`Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | `+
-			`Where-Object { ($_.ExecutablePath -and ($_.ExecutablePath -ieq %s)) -or (-not $_.ExecutablePath -and ($_.Name -ieq %s)) } | `+
+			`Where-Object { ($_.ExecutablePath -ieq %s) -or ($_.Name -ieq %s) } | `+
 			`Select-Object ProcessId,CommandLine,ExecutablePath,Name | ConvertTo-Json -Compress`,
 		psQuote(abs), psQuote(filepath.Base(abs)))
 	raw, err := runPowerShell(context.Background(), 20*time.Second, script)
@@ -71,11 +79,33 @@ func findProcessesByExeWindows(exePath string) ([]ProcessInfo, error) {
 	if perr != nil {
 		return nil, fmt.Errorf("parsing CIM process query output: %w (raw: %s)", perr, truncate(string(out), 300))
 	}
+	var want os.FileInfo
+	if fi, serr := os.Stat(abs); serr == nil {
+		want = fi
+	}
 	procs := make([]ProcessInfo, 0, len(rows))
 	for _, r := range rows {
+		if r.ExecutablePath != "" && !sameExecutable(abs, want, r.ExecutablePath) {
+			continue
+		}
 		procs = append(procs, ProcessInfo{PID: r.ProcessId, CommandLine: r.CommandLine, ExecutablePath: r.ExecutablePath, Unreadable: r.ExecutablePath == ""})
 	}
 	return procs, nil
+}
+
+// sameExecutable reports whether the process path got names the file at want: the same spelling, or
+// the same file reached another way (a junction or symlink on either side, a short 8.3 name). wantInfo
+// is want's os.Stat, nil when want does not exist; a path that cannot be read then only matches by
+// spelling.
+func sameExecutable(want string, wantInfo os.FileInfo, got string) bool {
+	if strings.EqualFold(filepath.Clean(got), filepath.Clean(want)) {
+		return true
+	}
+	if wantInfo == nil {
+		return false
+	}
+	gi, err := os.Stat(got)
+	return err == nil && os.SameFile(wantInfo, gi)
 }
 
 // parseCimRows handles ConvertTo-Json's shape quirk: a single match returns
