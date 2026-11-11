@@ -728,6 +728,38 @@ var compactKeep = []compactKeepEntry{
 		Sentence: "[FLEET: this box has no rknpu — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]",
 		Why:      "the forwarding note of a fleet accelerator: the call is forwarded to another node and the image bytes travel with it, which the opening sentence (on-box, free) does not say",
 	},
+	{
+		Tools:    []string{"offload_classify_image", "offload_object_detect", "offload_semantic_segment", "offload_segment", "offload_image_embed", "offload_zero_shot", "offload_depth", "offload_pose"},
+		Sentence: "[FLEET: this box has no axera-ax650 — the call is forwarded to the fleet node that does; image_path is read HERE and its bytes travel with the job (cap 8 MiB); the result carries placement{node,wall_ms}]",
+		Why:      "the forwarding note of a fleet accelerator: the call is forwarded to another node and the image bytes travel with it, which the opening sentence (on-box, free) does not say",
+	},
+	{
+		Tools:    []string{"offload_text_embed"},
+		Sentence: "[FLEET: this box has no axera-ax650 — the call is forwarded to the fleet node that does; text travels with the job; the result carries placement{node,wall_ms}]",
+		Why:      "the forwarding note of a fleet accelerator, for the one tool that takes text and no image: the call is forwarded to another node and the text travels with it, which the opening sentence (on-box, free) does not say",
+	},
+	// The Axera card's own descriptions (acceltools.go): what its depth and embedding tools write and return, and the pairing rule of its
+	// embedding space with its own text tower. Kept verbatim: they are what the caller reads the result shape and the space from.
+	{
+		Tools:    []string{"offload_depth"},
+		Sentence: "Writes an 8-bit PNG (bright = near) at the input's resolution.",
+		Why:      "what the tool writes: an 8-bit depth PNG, bright = near, at the input's resolution (the only place the output's polarity and size are stated)",
+	},
+	{
+		Tools:    []string{"offload_depth"},
+		Sentence: "Returns {depth_path,min,max,mean,model}.",
+		Why:      "the result shape of the depth tool: where the PNG is and the depth statistics, which the call returns instead of the pixels",
+	},
+	{
+		Tools:    []string{"offload_image_embed"},
+		Sentence: "Returns {embedding,dim,space,model}; space=siglip2-base-p16-224 pairs with this device's offload_text_embed and offload_zero_shot, and vectors from other devices are never comparable.",
+		Why:      "the result shape and the pairing rule of the Axera embedding space: it pairs only with this device's text tower and zero-shot tool, never with another device's vectors",
+	},
+	{
+		Tools:    []string{"offload_text_embed"},
+		Sentence: "Returns {embedding,dim,space,model}.",
+		Why:      "the result shape of the text tower: the vector, its dimension, the space it is in and the model that made it",
+	},
 	// offload_image_embed is a name all three devices share; a box that lists only the Coral or only the RKNPU advertises that
 	// device's own description, and the combined surfaces never show it (the shared-name rule gives the name to the first device).
 	{

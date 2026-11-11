@@ -34,6 +34,18 @@ table{width:100%;border-collapse:collapse;font-size:12px}th,td{text-align:left;p
 const $=s=>document.querySelector(s);
 const ago=t=>{const s=Math.max(0,Math.floor(Date.now()/1000-t));return s<60?s+'s':s<3600?Math.floor(s/60)+'m':Math.floor(s/3600)+'h'};
 const esc=x=>String(x??'').replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+// One line per accelerator card the node publishes telemetry for (health accelerator_telemetry); the same
+// format as topmodel.go's AccelTelemetryLine. An absent key is unknown and left out.
+function accelLine(id,t){
+  if(t.error)return `${id} telemetry unavailable: ${t.error}`;
+  const has=k=>t[k]!==undefined&&t[k]!==null,p=[];
+  if(has('temp_c'))p.push(`${Math.round(t.temp_c)}°C`);
+  if(has('npu_load_pct'))p.push(`NPU ${Math.round(t.npu_load_pct)}%`);
+  if(has('cmm_used_mib')&&has('cmm_total_mib'))p.push(`CMM ${Math.round(t.cmm_used_mib)}/${Math.round(t.cmm_total_mib)} MiB`);
+  if(t.clocks_at_max)p.push('clocks max');else if(has('npu_mhz')&&has('npu_max_mhz'))p.push(`clocks NPU ${Math.round(t.npu_mhz)}/${Math.round(t.npu_max_mhz)} MHz`);
+  if(t.link_degraded)p.push('LINK DEGRADED');
+  return p.length?`${id} ${p.join(' · ')}`:id;
+}
 function spark(hist,n){
   const W=400,H=110,pad=4;if(!hist||!hist.length)return `<svg class="spark" viewBox="0 0 ${W} ${H}"></svg>`;
   const x=i=>pad+(W-2*pad)*i/Math.max(1,hist.length-1);
@@ -65,6 +77,7 @@ function card(n){
   ${n.reachable?'':`<div class="sev-error">${esc(n.probe_error)}</div>`}
   ${spark(n.history,n)}<div class="legend"><span><i style="background:var(--gpu)"></i>GPU ${n.gpu_util_known?n.gpu_util_pct+'%':'n/a'}</span><span><i style="background:var(--cpu)"></i>CPU ${n.host_cpu_pct}%</span><span><i style="background:var(--vram)"></i>VRAM free ${(n.vram_free_gb||0).toFixed(1)} GB</span><span><i style="background:var(--ram)"></i>RAM ${(n.host_ram_used_gb||0).toFixed(0)} / ${(n.host_ram_total_gb||0).toFixed(0)} GB</span></div>
   ${devs}
+  ${Object.keys(n.accelerator_telemetry||{}).sort().map(id=>`<div class="holder">${esc(accelLine(id,n.accelerator_telemetry[id]))}</div>`).join('')}
   <div class="kv"><span>queue</span><b>${n.jobs_running} running · ${n.jobs_queued} queued · max ${n.max_concurrent_jobs||'?'} / ${n.max_queue_depth||'?'}</b><span>ctx</span><b>${n.agent_ctx_tokens||'?'} tok</b><span>base</span><b>${esc(n.base)}</b></div>
   <div class="models">${(n.served_models||[]).map(esc).join(' · ')||'served models unknown'}</div></div>`;
 }

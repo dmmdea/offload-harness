@@ -433,6 +433,28 @@ counts, no path, host name or text, so a caller without the bearer reads it too.
 that ended to `<state root>/gpu/faults.jsonl` and rewrites `<state root>/gpu/faults-summary.json`
 ([gpu-lease.md](systems/gpu-lease.md#retention-and-the-fleet-nodes-summary)).
 
+## Accelerator card telemetry: `accelerator_telemetry`
+
+A node whose accelerator card reports its own state publishes it in health as `accelerator_telemetry`, an object keyed by device id (today only `axera-ax650`, the Axera AX650-class NPU on an M.2 card). Each value is a compact flat object:
+
+| Field | Meaning |
+|---|---|
+| `temp_c` | Card temperature, degrees C. |
+| `npu_load_pct`, `cpu_load_pct` | NPU and the card's CPU load, percent. |
+| `cmm_used_mib`, `cmm_total_mib` | The card's CMM pool (the memory models load into): used and total, MiB. |
+| `mem_used_mib`, `mem_total_mib` | The card's total memory: used and total, MiB. |
+| `cpu_mhz`, `cpu_max_mhz`, `npu_mhz`, `npu_max_mhz` | Current and maximum clocks, MHz. |
+| `clocks_at_max` | True when the clocks sit at their maximum. |
+| `link_speed`, `link_width`, `link_degraded` | The PCIe link as negotiated, and whether it is below what the card supports. |
+| `processes` | Count of processes holding the card. |
+| `sidecar_up` | Whether the device's sidecar answered when the reading was taken. |
+| `sampled_at` | When the card was read (RFC 3339). |
+| `error` | Present instead of the numbers when the reading failed. |
+
+A key the card did not report is absent: a reader takes absent as unknown, never as zero. The whole field is additive and omitted on a node with no such device, on a node one release behind, and until the first reading lands; the delegator decodes it into `NodeView.AcceleratorTelemetry`, `offload_status` shows it on the fleet node row, and the fleet overview page and `top` render one line per device (for example `axera-ax650 34°C · NPU 0% · CMM 18/2944 MiB · clocks max`).
+
+**Served from a cache.** Health never waits on the card. The reading comes from the running sidecar's own health when it answers (2 s), else from one run of its launcher as `<launcher> --telemetry` (6 s, one JSON document, never starting the sidecar). The value is cached 15 s; a stale cache is returned as it is while at most one background refresh per device runs. The device must be listed in `accelerators` (fleet-visible) and in the node's own config, which is where its endpoint and launcher come from.
+
 ## Config keys
 
 | Key | Default | Purpose |

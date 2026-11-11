@@ -210,7 +210,7 @@ func TestEveryShippedAcceleratorSeedIsValid(t *testing.T) {
 	for id := range d.Accelerators {
 		for _, goos := range []string{"windows", "linux"} {
 			out, err := ResolveAccelerators(d.Accelerators, []string{id}, Options{
-				Home: "/tmp/x", HailoHome: "/tmp/hailo", CoralHome: "/tmp/coral", RknpuHome: "/tmp/rknpu", GOOS: goos})
+				Home: "/tmp/x", HailoHome: "/tmp/hailo", CoralHome: "/tmp/coral", RknpuHome: "/tmp/rknpu", AxeraHome: "/tmp/axera", GOOS: goos})
 			if err != nil {
 				t.Errorf("accelerator %s does not resolve for %s: %v", id, goos, err)
 				continue
@@ -238,7 +238,7 @@ func TestEveryDeclaredAcceleratorHasAFleetVisibilityDecision(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	localOnly := map[string]bool{"hailo-8l": true, "coral-edgetpu": false, "rknpu": false}
+	localOnly := map[string]bool{"hailo-8l": true, "coral-edgetpu": false, "rknpu": false, "axera-ax650": false}
 	for id := range d.Accelerators {
 		want, decided := localOnly[id]
 		if !decided {

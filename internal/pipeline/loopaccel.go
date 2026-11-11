@@ -47,6 +47,12 @@ func laneConfigFor(cfg config.Config, id string) (laneConfig, bool) {
 			t = 60 * time.Second
 		}
 		return laneConfig{cfg.RknpuEndpoint, cfg.RknpuSidecarCmd, t, cfg.RknpuIdleSec}, true
+	case "axera-ax650":
+		t := time.Duration(cfg.AxeraTimeoutSec) * time.Second
+		if t <= 0 {
+			t = 60 * time.Second
+		}
+		return laneConfig{cfg.AxeraEndpoint, cfg.AxeraSidecarCmd, t, cfg.AxeraIdleSec}, true
 	}
 	return laneConfig{}, false
 }

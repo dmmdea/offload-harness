@@ -61,6 +61,9 @@ type Options struct {
 	// RknpuHome is the RKNPU sidecar home __RKNPU_HOME__ expands to (its venv, models/
 	// and the accelerators/rknpu/ scripts live under it).
 	RknpuHome string
+	// AxeraHome is the Axera sidecar home __AXERA_HOME__ expands to (its venv, models/ and
+	// the accelerators/axera/ scripts live under it).
+	AxeraHome string
 	// VLLMSeatActive says whether THIS box renders the tier's vLLM agent seat. The
 	// caller decides it with vllmseat.Spec.Detect — the engine is a hand-built venv
 	// the installer does not create, so a box without it binds the fallback seat. The
@@ -826,11 +829,13 @@ type Accelerator struct {
 
 // ResolveAccelerators merges the seeds of the listed accelerator ids, validates
 // every key against config.Config, and expands __HAILO_HOME__ / __CORAL_HOME__ /
-// __RKNPU_HOME__ (plus the usual __OFFLOAD_HOME__/__EXE__). An id with no entry is an authoring error — an
+// __RKNPU_HOME__ / __AXERA_HOME__ (plus the usual __OFFLOAD_HOME__/__EXE__). An id with no entry is an authoring error — an
 // installer that detected a device the table does not describe must say so.
 //
 // This function is the single authority on the rule; install.ps1 carries a
-// PowerShell parity copy for the no-Go-binary path — change it here first.
+// PowerShell parity copy for the no-Go-binary path — change it here first. Coral, RKNPU and
+// Axera are Linux-only devices (the Axera probe reads /proc/bus/pci/devices) with no PowerShell
+// home handling, so __AXERA_HOME__ has no parity copy.
 func ResolveAccelerators(accs map[string]Accelerator, ids []string, opt Options) (map[string]any, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -878,6 +883,7 @@ func ResolveAccelerators(accs map[string]Accelerator, ids []string, opt Options)
 		{"__HAILO_HOME__", "HailoHome", homeOf(opt.HailoHome)},
 		{"__CORAL_HOME__", "CoralHome", homeOf(opt.CoralHome)},
 		{"__RKNPU_HOME__", "RknpuHome", homeOf(opt.RknpuHome)},
+		{"__AXERA_HOME__", "AxeraHome", homeOf(opt.AxeraHome)},
 	}
 	out := map[string]any{}
 	for k, v := range merged {

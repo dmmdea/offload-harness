@@ -177,6 +177,7 @@ func TestAcceleratorDefaultTimeoutsFitTheBudget(t *testing.T) {
 		"hailo-8l":      def.HailoTimeoutSec,
 		"coral-edgetpu": def.CoralTimeoutSec,
 		"rknpu":         def.RknpuTimeoutSec,
+		"axera-ax650":   def.AxeraTimeoutSec,
 	} {
 		if need := coldSpawn + time.Duration(sec)*time.Second + dispatchTimeout; need >= Budget {
 			t.Errorf("%s: cold spawn + %d s call + dispatch = %s, does not fit accelremote.Budget %s", id, sec, need, Budget)

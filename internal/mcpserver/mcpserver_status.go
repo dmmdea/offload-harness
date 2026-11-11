@@ -729,6 +729,11 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 		n["jobs_queued"] = r.view.JobsQueued
 		n["max_concurrent_jobs"] = r.view.MaxConcurrentJobs
 		n["served_models"] = r.view.ServedModels
+		// Card telemetry of an accelerator the node carries (health accelerator_telemetry), exactly as
+		// the node published it; absent on a node with none.
+		if len(r.view.AcceleratorTelemetry) > 0 {
+			n["accelerator_telemetry"] = r.view.AcceleratorTelemetry
+		}
 		// served_models lists llama-swap chat seats only. What the node renders (image, video, audio, stt, compose)
 		// rides the media block, so a node with no chat seat for an image model is not read as having no engine.
 		if m := nodeMediaSummary(r.view); m != nil {

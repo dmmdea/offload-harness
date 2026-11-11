@@ -70,6 +70,12 @@ type NodeView struct {
 	// `accelerators`, ADR 0024). Absent = none. Read by accelremote to pick the
 	// node that carries a device this box lacks (Coral Phase B).
 	Accelerators []string
+	// AcceleratorTelemetry is the compact card telemetry of each advertised device that publishes
+	// any (health `accelerator_telemetry`, today the Axera card): temp_c, npu_load_pct, cmm_used_mib,
+	// cmm_total_mib, clocks_at_max, link_degraded, sidecar_up and the rest of the compact object,
+	// keyed by device id. Absent keys inside a device are unknown, never zero. nil = the node
+	// publishes none (older node, no such device, or no reading yet).
+	AcceleratorTelemetry map[string]map[string]any
 	// SeatRate is the node's published seat rate (health `seat_rate`,
 	// 0.117.2): the retry floor a RETRY on that node is sized by (D-46).
 	// nil = the node published none (older node, or no sample yet) — the
@@ -604,8 +610,10 @@ type healthWire struct {
 	// zero value — nil/false, both read as UNKNOWN by the gate.
 	ServedModels []string `json:"served_models"`
 	Accelerators []string `json:"accelerators"`
-	GpuUtilPct   int      `json:"gpu_util_pct"`
-	GpuUtilKnown bool     `json:"gpu_util_known"`
+	// Additive: per-device card telemetry (see NodeView.AcceleratorTelemetry).
+	AcceleratorTelemetry map[string]map[string]any `json:"accelerator_telemetry"`
+	GpuUtilPct           int                       `json:"gpu_util_pct"`
+	GpuUtilKnown         bool                      `json:"gpu_util_known"`
 	// Additive (0.132.2): the placement figure that skips a card reporting
 	// display_active.
 	WorkUtilPct   int  `json:"work_util_pct"`
@@ -749,19 +757,20 @@ func FetchNodeView(ctx context.Context, base, token string) (NodeView, error) {
 		AgentCtxTokens: w.AgentCtxTokens,
 		QueueDepth:     w.QueueDepth,
 
-		JobsRunning:       w.JobsRunning,
-		JobsQueued:        w.JobsQueued,
-		MaxConcurrentJobs: w.MaxConcurrentJobs,
-		MaxQueueDepth:     w.MaxQueueDepth,
-		ServedModels:      w.ServedModels,
-		Accelerators:      w.Accelerators,
-		SeatRate:          w.SeatRate,
-		SeatBudget:        w.SeatBudget,
-		GpuUtilPct:        w.GpuUtilPct,
-		GpuUtilKnown:      w.GpuUtilKnown,
-		WorkUtilPct:       w.WorkUtilPct,
-		WorkUtilKnown:     w.WorkUtilKnown,
-		LeasedText:        w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),
+		JobsRunning:          w.JobsRunning,
+		JobsQueued:           w.JobsQueued,
+		MaxConcurrentJobs:    w.MaxConcurrentJobs,
+		MaxQueueDepth:        w.MaxQueueDepth,
+		ServedModels:         w.ServedModels,
+		Accelerators:         w.Accelerators,
+		AcceleratorTelemetry: w.AcceleratorTelemetry,
+		SeatRate:             w.SeatRate,
+		SeatBudget:           w.SeatBudget,
+		GpuUtilPct:           w.GpuUtilPct,
+		GpuUtilKnown:         w.GpuUtilKnown,
+		WorkUtilPct:          w.WorkUtilPct,
+		WorkUtilKnown:        w.WorkUtilKnown,
+		LeasedText:           w.Lease != nil && w.Lease.Held && strings.EqualFold(w.Lease.Class, "text"),
 		// An overdue lease also publishes busy=true (the clamp to zero used to make
 		// it read free), but for the delegator that busy is the OVERDUE flag's
 		// to carry: LeaseBusy means a genuinely long lease and is a hard

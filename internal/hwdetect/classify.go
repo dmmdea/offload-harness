@@ -353,12 +353,48 @@ func DetectRknpu(read func(path string) (string, error)) []string {
 	return nil
 }
 
+// axeraPciDevicesPath is the kernel's PCI device table. Each line is: bus/devfn (hex), vendor and
+// device id as one 8-digit hex field (field 1), IRQ, BARs, then the bound driver name as the LAST
+// field. Linux only; Windows has no such file and the read fails, which is "no device".
+const axeraPciDevicesPath = "/proc/bus/pci/devices"
+
+// axeraPciID is the AX650-class card's vendor+device id as /proc/bus/pci/devices prints it
+// (vendor 1f4b, device 0650) and axeraPciDriver the host driver bound to it.
+const (
+	axeraPciID     = "1f4b0650"
+	axeraPciDriver = "ax_pcie_dev_host"
+)
+
+// DetectAxera reports ["axera-ax650"] iff some line of /proc/bus/pci/devices carries the card's
+// vendor+device id as its second field AND the AXCL host driver as its last field. Both are
+// required: the id alone is a card with no driver bound (no runtime can reach it), the driver
+// name alone proves nothing about which card. A stub reader that returns one word for any path
+// (the other probes' tests) cannot match, and an unreadable table is "no accelerator". read is
+// injected so the rule is testable without a device.
+func DetectAxera(read func(path string) (string, error)) []string {
+	s, err := read(axeraPciDevicesPath)
+	if err != nil {
+		return nil
+	}
+	for _, line := range strings.Split(s, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 {
+			continue
+		}
+		if strings.EqualFold(f[1], axeraPciID) && f[len(f)-1] == axeraPciDriver {
+			return []string{"axera-ax650"}
+		}
+	}
+	return nil
+}
+
 // DetectAllAccelerators is the union of every device probe, in the order the
 // ids will be listed in config.Accelerators — Hailo first, then Coral, then the
-// RKNPU. Order is load-bearing: the tool surface's shared-name rule (Coral D5)
+// RKNPU, then the Axera. Order is load-bearing: the tool surface's shared-name rule (Coral D5)
 // gives a name to the FIRST listed accelerator that owns it.
 func DetectAllAccelerators(run func(args ...string) (string, error), read func(path string) (string, error)) []string {
 	out := DetectAccelerators(run)
 	out = append(out, DetectCoral(read)...)
-	return append(out, DetectRknpu(read)...)
+	out = append(out, DetectRknpu(read)...)
+	return append(out, DetectAxera(read)...)
 }
