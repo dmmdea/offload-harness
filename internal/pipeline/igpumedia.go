@@ -811,6 +811,9 @@ func (p *Pipeline) runInpaintImageSdcpp(ctx context.Context, req core.Request, m
 	if dres != nil {
 		return *dres
 	}
+	if res, noise := p.deferIfNoise(req, meta, start, outPath, "inpaint failed"); noise {
+		return res
+	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := map[string]any{"image_path": outPath, "seed": seed}
 	grant.name(payload) // the host RAM the lane declared; an iGPU lane holds no card pair, so no cards are named

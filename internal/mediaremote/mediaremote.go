@@ -48,6 +48,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
+	"github.com/dmmdea/offload-harness/internal/imagegen"
 	"github.com/dmmdea/offload-harness/internal/mediacap"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/rosterprobe"
@@ -477,7 +478,7 @@ func collect(ctx context.Context, cfg config.Config, req core.Request, pl planne
 	if fn, ok := h.(fetchNotifier); ok {
 		fn.Fetching()
 	}
-	local, err := fetchOutputs(ctx, cfg, base, data, outputDest{out: str(req.Params, "out"), outDir: pl.outDir}, jobID, node)
+	local, err := fetchOutputs(ctx, cfg, base, data, outputDest{out: str(req.Params, "out"), outDir: pl.outDir, judgeNoise: judgesNoise(req.Task)}, jobID, node)
 	if err != nil {
 		if be := budgetEnded(ctx, phaseFetching, node, jobID, err); be != nil {
 			return core.Result{}, be
@@ -493,6 +494,12 @@ func collect(ctx context.Context, cfg config.Config, req core.Request, pl planne
 		return core.Result{}, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("node %s rendered the job but fetching it failed: %v", node, err)}
 	}
 	return core.Result{OK: true, Data: local, Meta: core.Meta{Node: node, LatencyMs: time.Since(start).Milliseconds()}}, nil
+}
+
+// judgesNoise says a task's primary image is a diffusion render, the only kind the decoded-noise check judges: a generated,
+// generatively edited or inpainted picture. An upscale, a deterministic edit and a graph's outputs are not looked at.
+func judgesNoise(t core.TaskType) bool {
+	return t == core.TaskGenerateImage || t == core.TaskEditImageGenerative || t == core.TaskInpaintImage
 }
 
 // phase is the step of a call a deadline can end.
@@ -940,6 +947,9 @@ var outputKeys = []string{"video_path", "image_path", "audio_path"}
 // directory for the rest (run-graph's out_dir, which then replaces media_dir for every output).
 type outputDest struct {
 	out, outDir string
+	// judgeNoise has the primary image judged for decoded noise before anything lands (a generated or edited picture; not an
+	// upscale, a deterministic edit or a graph's outputs).
+	judgeNoise bool
 }
 
 // renameFile moves a verified download into place. A var so a test can make a placement fail.
@@ -1131,6 +1141,23 @@ func fetchOutputs(ctx context.Context, cfg config.Config, base string, data json
 			}
 		} else {
 			unverified = true
+		}
+	}
+
+	// A render that came back as decoded noise is a content failure, not a transfer fault: the staged copy of the image is
+	// judged here, and a noise picture is discarded exactly as a sha256 mismatch is, so it never lands and a good file already
+	// at out stays. The class is abstention ("the stack is healthy; the work is what failed"): not infrastructure, so it is
+	// not read as a broken box, and a final answer, so nothing asks the node for the same job again.
+	if to.judgeNoise {
+		imagePath, _ := m["image_path"].(string)
+		for i, it := range items {
+			if imagePath == "" || named[i] != imagePath {
+				continue
+			}
+			if why := imagegen.NoiseReason(it.tmp); why != "" {
+				cleanup()
+				return nil, &placementError{core.DeferClassAbstention, fmt.Sprintf("the file %s came back as %s (job %s): it was discarded", it.name, why, jobID)}
+			}
 		}
 	}
 
