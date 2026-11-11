@@ -12,7 +12,7 @@ import (
 )
 
 // A forwarded mask came back as 40-110 KB of base64 inside the tool's answer and no file was written, so the
-// caller's out_path was silently dropped (seen 2026-11-11 driving the Axera card from the Qube). The file must
+// caller's out_path was silently dropped (seen 2026-11-11 driving the Axera card from the delegator). The file must
 // land on the caller's box, and a node's answer must never put bytes over the caller's image, a non-PNG file
 // or anything outside the image's directory (security pass on that fix).
 func TestForwardedMaskLandsOnTheCallersBoxAndNowhereElse(t *testing.T) {
