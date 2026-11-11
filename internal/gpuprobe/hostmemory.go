@@ -64,7 +64,8 @@ import (
 // their processes already hold: resident bytes for the touched set, private bytes for the commit).
 //
 // Paging is never an acceptable state on this harness (the house rule: the cards do the inference, RAM is overflow only,
-// bounded, and never makes the box unstable). Nothing here tunes the OS; it reads, and it decides whether a lease may be granted.
+// bounded, and never makes the box unstable). Nothing here tunes the OS; it reads, and it decides whether a lease may be granted. (The one thing that does act on a
+// host is opt-in and lives in the lease wait: the WSL VM's page-cache drop, gpu_hostram_wsl_cache_drop, internal/gpulease/relief.go.)
 
 // DefaultHostRAMHeadroomGiB is the host RAM the admission rule keeps uncommitted beyond what a
 // lease declares (config gpu_host_ram_headroom_gib, 0 = this). It is the room the desktop, the
