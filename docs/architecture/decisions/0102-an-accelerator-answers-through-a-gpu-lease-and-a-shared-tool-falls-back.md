@@ -53,6 +53,13 @@ model, the same owner on both surfaces.
   `any_space: true`; without it the owner's defer comes back with `fallback_withheld`, naming the devices
   that could have answered. The argument is added to the tool's schema only on a box where a fallback device
   exists, and it never reaches a sidecar.
+- **`out_path` is checked before it travels.** The owner applied its own rule to `out_path` (the NPU card's
+  sidecar, or the caller-side landing of a fleet device). A fallback device's sidecar may apply none, and an
+  agent seat can pass any path, so the fallback applies the lane's rule itself before any device runs:
+  `out_path` is never the input image, its directory must exist, and an existing target is replaced only
+  when it is a regular file that is already a PNG. Otherwise the owner's answer comes back with
+  `fallback_withheld`. The Coral sidecar's `semantic_segment` gains the same rule at the sink, where it had
+  none (found by the security pass on this change).
 - **Nothing is remembered between calls.** There is no "owner is down" state and no health pre-check: every
   call tries the owner first. A node that is off costs the roster probe (about 2 s) before the fallback runs.
 - **Where it lives.** At tool registration on both surfaces, through one function

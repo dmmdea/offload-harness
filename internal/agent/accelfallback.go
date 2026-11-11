@@ -3,6 +3,9 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 )
@@ -82,6 +85,10 @@ func AccelFallback(ctx context.Context, tool, owner string, out, args map[string
 		out["fallback_withheld"] = "not run on " + strings.Join(names, " or ") + ": an embedding from another device is in a different space and cannot be compared with " + owner + "'s; pass " + AnySpaceArg + ":true to take one anyway (the result's space names it)"
 		return out
 	}
+	if why := outPathRefusal(args); why != "" {
+		out["fallback_withheld"] = why
+		return out
+	}
 	var tried []map[string]string
 	for _, s := range steps {
 		if ctx.Err() != nil {
@@ -94,6 +101,9 @@ func AccelFallback(ctx context.Context, tool, owner string, out, args map[string
 			}
 		}
 		got := s.Run(ctx, sub)
+		if got == nil {
+			got = map[string]any{"deferred": true, "reason": s.Device + ": empty answer"}
+		}
 		if why, failed := AccelCannotServe(got); failed {
 			tried = append(tried, map[string]string{"device": s.Device, "reason": why})
 			continue
@@ -103,6 +113,48 @@ func AccelFallback(ctx context.Context, tool, owner string, out, args map[string
 	}
 	out["fallback_tried"] = tried
 	return out
+}
+
+// outPathRefusal says why a call's out_path must not travel to a fallback device, or "" when it
+// may. The owner applied its own rule to out_path before it answered (the Axera sidecar's, or
+// accelremote's landing for a fleet device); a fallback device's sidecar may apply none, and a
+// model seat can pass any path. So the rule every guarded writer of this lane uses is applied
+// here, before any device runs: out_path is never the input image, its directory must exist,
+// and an existing target is replaced only when it is a regular file that is already a PNG.
+func outPathRefusal(args map[string]any) string {
+	out, _ := args["out_path"].(string)
+	if out = strings.TrimSpace(out); out == "" {
+		return ""
+	}
+	if img, _ := args["image_path"].(string); strings.TrimSpace(img) != "" {
+		same := filepath.Clean(out) == filepath.Clean(img)
+		if a, ea := os.Stat(out); !same && ea == nil {
+			if b, eb := os.Stat(img); eb == nil {
+				same = os.SameFile(a, b)
+			}
+		}
+		if same {
+			return "not run on another device: out_path " + out + " is the input image and is never replaced"
+		}
+	}
+	if fi, err := os.Stat(filepath.Dir(out)); err != nil || !fi.IsDir() {
+		return "not run on another device: the directory of out_path " + out + " does not exist"
+	}
+	fi, err := os.Lstat(out)
+	if err != nil {
+		return "" // a new file
+	}
+	if fi.Mode().IsRegular() {
+		if f, oerr := os.Open(out); oerr == nil {
+			head := make([]byte, 8)
+			n, _ := io.ReadFull(f, head)
+			f.Close()
+			if n == 8 && string(head) == "\x89PNG\r\n\x1a\n" {
+				return "" // an earlier output
+			}
+		}
+	}
+	return "not run on another device: out_path " + out + " exists and is not a PNG file; it is never replaced"
 }
 
 // AccelSchemaProps returns the argument names a tool's JSON schema declares.

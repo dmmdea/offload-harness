@@ -387,6 +387,10 @@ from `mcpserver.handleAccelChain` and `agent.accelLaneTools`).
 - **An embedding moves only when asked.** `offload_image_embed` and `offload_text_embed` fall back only with
   `any_space: true`, because another device's vector is in another space; without it the defer carries
   `fallback_withheld`. The argument is in the schema only where a fallback device exists.
+- **`out_path` is checked before it travels**: never the input image, its directory must exist, and an
+  existing target is replaced only when it is a regular PNG file; otherwise the defer carries
+  `fallback_withheld` and no other device runs. The Coral sidecar's `semantic_segment` applies the same rule
+  itself since this release (it used to overwrite any path it was given), writing through a temporary file.
 - **Nothing is remembered**: every call tries the owner first, and a node that is off costs the roster
   probe (about 2 s) before the next device runs.
 - `offload_status.accelerators.<id>.fallback_for` lists the names a device answers when their owner cannot,

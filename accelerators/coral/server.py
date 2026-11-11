@@ -291,10 +291,38 @@ def tool_object_detect(args: dict) -> dict:
     return {"objects": objects, "count": len(objects), "model": MODELS[key]["file"], "image_width": w, "image_height": h}
 
 
+def _out_path(args: dict, image: str, suffix: str) -> str:
+    """Where a tool may write its PNG: the caller's out_path, or <image stem><suffix> beside the image.
+
+    Writing anywhere new is the caller's choice; replacing a file that is not already a PNG never is (a source
+    image, a config or a record clobbered with mask bytes is data loss). An earlier output is replaced. The
+    same rule the Axera sidecar and the fleet caller's landing apply.
+    """
+    out = args.get("out_path")
+    if out is not None and (not isinstance(out, str) or not out):
+        raise ValueError({"error": "bad_request", "detail": "out_path must be a non-empty string"})
+    if not out:
+        out = os.path.splitext(image)[0] + suffix
+    d = os.path.dirname(os.path.abspath(out))
+    if not os.path.isdir(d) or not os.access(d, os.W_OK):
+        raise ValueError({"error": "out_path_unwritable", "out_path": out})
+    if os.path.lexists(out):
+        try:
+            with open(out, "rb") as fh:
+                is_png = fh.read(8) == b"\x89PNG\r\n\x1a\n"
+        except OSError:
+            is_png = False
+        if os.path.islink(out) or not os.path.isfile(out) or not is_png:
+            raise ValueError({"error": "out_path_exists", "out_path": out,
+                              "detail": "an existing file that is not a PNG is never overwritten; choose a new path"})
+    return out
+
+
 def tool_semantic_segment(args: dict) -> dict:
     image = args.get("image_path")
     if not isinstance(image, str) or not image:
         raise ValueError({"error": "bad_request", "detail": "image_path required"})
+    out_path = _out_path(args, image, ".segmask.png")  # refused before the TPU runs, never after
     key = "deeplab-pascal"
     it = _interpreter(key)
     d = it.get_input_details()[0]
@@ -308,8 +336,9 @@ def tool_semantic_segment(args: dict) -> dict:
     t = t[0]
     mask = t.argmax(-1).astype(np.uint8) if t.ndim == 3 else t.astype(np.uint8)
     labels = _load_labels(key)
-    out_path = args.get("out_path") or (os.path.splitext(image)[0] + ".segmask.png")
-    Image.fromarray(mask, mode="L").resize((w, h), Image.NEAREST).save(out_path)
+    tmp = out_path + ".part.png"
+    Image.fromarray(mask, mode="L").resize((w, h), Image.NEAREST).save(tmp, format="PNG")
+    os.replace(tmp, out_path)
     ids, counts = np.unique(mask, return_counts=True)
     classes = [{"class_id": int(i), "label": labels[int(i)] if int(i) < len(labels) else str(int(i)), "pixels": int(c)}
                for i, c in zip(ids, counts)]

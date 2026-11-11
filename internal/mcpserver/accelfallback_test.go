@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -20,13 +22,17 @@ import (
 // An embedding is the exception that must hold: another device's vector is in another space, so it
 // moves only when the caller says any_space, and the caller's word never reaches a sidecar.
 func TestASharedToolRunsOnTheNextDeviceWhenItsOwnerCannot(t *testing.T) {
-	var embedCalls int
+	var embedCalls, segmentCalls int
 	var detectArgs, embedArgs map[string]any
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte(`{"enabled":true,"models_missing":[]}`)) })
 	mux.HandleFunc("/v1/object_detect", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&detectArgs)
 		w.Write([]byte(`{"objects":[{"label":"cat","class_id":15,"x":1,"y":2,"w":3,"h":4,"score":0.9}],"count":1}`))
+	})
+	mux.HandleFunc("/v1/semantic_segment", func(w http.ResponseWriter, r *http.Request) {
+		segmentCalls++
+		w.Write([]byte(`{"mask_path":"/tmp/x.segmask.png","classes":[],"width":1,"height":1}`))
 	})
 	mux.HandleFunc("/v1/embed", func(w http.ResponseWriter, r *http.Request) {
 		embedCalls++
@@ -41,7 +47,7 @@ func TestASharedToolRunsOnTheNextDeviceWhenItsOwnerCannot(t *testing.T) {
 	cfg.Accelerators = []string{"coral-edgetpu"}
 	cfg.CoralEndpoint = fake.URL
 	cfg.FleetAccelerators = []string{"axera-ax650"}
-	cfg.AcceleratorToolOwners = map[string]string{"offload_object_detect": "axera-ax650", "offload_image_embed": "axera-ax650"}
+	cfg.AcceleratorToolOwners = map[string]string{"offload_object_detect": "axera-ax650", "offload_image_embed": "axera-ax650", "offload_semantic_segment": "axera-ax650"}
 	cs := doorSession(t, New(pipeline.New(cfg, nil, nil, nil)))
 
 	call := func(name, args string) map[string]any {
@@ -76,5 +82,21 @@ func TestASharedToolRunsOnTheNextDeviceWhenItsOwnerCannot(t *testing.T) {
 	}
 	if _, sent := embedArgs["any_space"]; sent {
 		t.Fatalf("any_space reached the sidecar: %v", embedArgs)
+	}
+
+	// The owner guards out_path; the next device's sidecar may not, and a model seat can pass any path
+	// (the security pass on this change). An out_path that is the input image, or an existing file that is
+	// not a PNG, never travels to another device.
+	src := filepath.Join(t.TempDir(), "street.jpg")
+	if err := os.WriteFile(src, []byte("jpeg bytes"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	args, _ := json.Marshal(map[string]any{"image_path": src, "out_path": src})
+	got = call("offload_semantic_segment", string(args))
+	if got["fallback_withheld"] == nil || segmentCalls != 0 {
+		t.Fatalf("an out_path that is the input image travelled to the next device (%d calls): %v", segmentCalls, got)
+	}
+	if b, _ := os.ReadFile(src); string(b) != "jpeg bytes" {
+		t.Fatalf("the input image was replaced: %q", b)
 	}
 }
