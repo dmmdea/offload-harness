@@ -7,6 +7,16 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.227.0] - 2026-11-11 - a remote image call that names a family goes to a node that serves it
+
+### Fixed - a remote image call that names a family goes to a node that serves it
+
+- **Why.** `generate-image` (single and `--batch`, `--route remote`, or `auto` on a machine with no image lane) with a named family that only some fleet nodes define was sent to the first node that could take an image job, without asking whether it serves the family. That node answered `unknown image family "F" - this node serves ...`, the row failed, and a later node that does serve it was never tried. Measured on a fleet of five: with `--family` naming a family only the last node advertised, both rows of a batch failed on the first node, and the same batch with `--remote <that node>` rendered both.
+- **What it does.** The node pick (`pickNodeFor`) now leaves a node out when it does not serve the named family, by its own advertisement: the route `generate_image:F` CONFIGURED, or `F` as the name of its default binding (`image_families`, or the default row of `image_recipes`) with `generate_image` CONFIGURED. A node that lists its bindings without `F` is a named miss and the next node is tried; a node that publishes no family names stays unknown, not refused. A call with no family is unchanged. With no node left the defer says `no fleet node serves image family "F"; nodes that do: ...` and, when every node is left out for configuration, files `no_node_configured` so a batch stops waiting.
+- **Where.** `internal/mediaremote/identity.go` (`imageFamilyMiss`, `need.imageFamily`), `internal/mediaremote/mediaremote.go` (`pickNodeFor`). The ticket, `--spill` placement and generative edit already matched a node on its published recipe and are unchanged.
+- **Check.** Two fake nodes through `Run` with route remote: the family only the second advertises was sent to the second and never to the first; a family neither serves was refused by name with nothing sent.
+- **Docs.** `docs/systems/media-generation.md` ("Which node").
+
 ## [0.226.0] - 2026-11-11 - a render that decodes to pure noise is a failed job, not a rendered one
 
 ### Fixed - a render that decodes to pure noise is a failed job, not a `rendered` one (and `--resume` no longer skips it)
