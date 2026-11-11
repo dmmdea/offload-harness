@@ -38,6 +38,13 @@ func batchPNG(t testing.TB, w, h int) []byte {
 
 func encodePNG(w, h int) ([]byte, error) {
 	img := image.NewNRGBA(image.Rect(0, 0, w, h))
+	// A smooth gradient behind the marks: a fixture of one thin line on black reads as decoded noise to the noise check, and a
+	// picture does not.
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: 40, G: uint8(60 + 100*x/w), B: uint8(60 + 100*y/h), A: 255})
+		}
+	}
 	for x := 0; x < w; x++ {
 		img.Set(x, x%h, color.NRGBA{R: uint8(x), G: 200, B: 30, A: 255})
 	}

@@ -958,6 +958,7 @@ func setAside(out string) string {
 
 // proveFile completes a row whose lane reported success: the file must be at out and not empty, and its hash is read from
 // it. A lane that said it rendered a file that is not there is a failure, not a result, and an empty file it left is removed.
+// A file that decodes to noise (imagegen.DecodedNoise) is a failure too, and is set aside so --resume renders it again.
 func proveFile(r *BatchRow) {
 	sum, n, err := fileSHA256(r.Out)
 	switch {
@@ -970,6 +971,10 @@ func proveFile(r *BatchRow) {
 		_ = os.Remove(r.Out)
 		r.Verdict, r.Error = VerdictFailed, "the lane reported success but "+r.Out+" is empty"
 	default:
+		if why := imagegen.NoiseReason(r.Out); why != "" {
+			r.Verdict, r.Error = VerdictFailed, why+imagegen.SetAsideNoise(r.Out)
+			return
+		}
 		r.SHA256 = sum
 	}
 }
@@ -1008,7 +1013,15 @@ func pngVerifies(path string, w, h int) bool {
 		return false
 	}
 	b := img.Bounds()
-	return b.Dx() == hdr.Width && b.Dy() == hdr.Height
+	if b.Dx() != hdr.Width || b.Dy() != hdr.Height {
+		return false
+	}
+	// A picture of decoded noise decodes whole and has the right size, and is not a result: it is rendered again, which also
+	// repairs a noise file an earlier run left at out and --resume had taken for finished.
+	if noise, _, _ := imagegen.DecodedNoise(img); noise {
+		return false
+	}
+	return true
 }
 
 // resumeMaxPixels bounds the canvas --resume will decode to prove a file: 64 Mpx, 8192x8192, at most about 256 MB for the

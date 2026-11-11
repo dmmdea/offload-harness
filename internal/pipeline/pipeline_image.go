@@ -157,6 +157,9 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 		p.recordDefer(req.Task, meta, len(req.Input), "image generation failed: "+gerr.Error())
 		return core.Deferf("image generation failed: "+gerr.Error(), "", meta)
 	}
+	if res, noise := p.deferIfNoise(req, meta, start, outPath, "image generation failed"); noise {
+		return res
+	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := imageResultPayload(outPath, req.Params, seed, fam)
 	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
@@ -172,6 +175,19 @@ func (p *Pipeline) runGenerateImage(ctx context.Context, req core.Request, meta 
 	data, _ := json.Marshal(payload)
 	p.record(req.Task, meta, len(prompt))
 	return core.Result{OK: true, Data: data, Meta: meta}
+}
+
+// deferIfNoise judges a diffusion render that has just been committed at outPath (imagegen.NoiseReason). A picture that decodes
+// to noise is a failed render, not a result: it is set aside next to its path (so nothing is left there for a later --resume to
+// take as finished) and answered like any generation failure, a defer that records no success. The caller's lease is released
+// by its own defer. The second value is false when the picture is fine or cannot be judged. Only generated, generatively edited
+// and inpainted pictures come here: not an upscale, a deterministic edit or a graph's output.
+func (p *Pipeline) deferIfNoise(req core.Request, meta core.Meta, start time.Time, outPath, verb string) (core.Result, bool) {
+	why := imagegen.NoiseReason(outPath)
+	if why == "" {
+		return core.Result{}, false
+	}
+	return p.deferGen(req, meta, start, len(req.Input), verb+": "+why+imagegen.SetAsideNoise(outPath)), true
 }
 
 // imageResultPayload is the generate_image result both engines return. width/height
@@ -327,6 +343,9 @@ func (p *Pipeline) runGenerateImageSdcpp(ctx context.Context, req core.Request, 
 		meta.ErrClass = classifyErr(gerr)
 		return deferf("image generation failed: " + gerr.Error())
 	}
+	if res, noise := p.deferIfNoise(req, meta, start, outPath, "image generation failed"); noise {
+		return res
+	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := imageResultPayload(outPath, req.Params, seed, fam)
 	addRefineData(payload, p.cfg.ImageGenRefinerModel, refined, renderPrompt, refineNote)
@@ -427,6 +446,9 @@ func (p *Pipeline) runInpaintImage(ctx context.Context, req core.Request, meta c
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("inpaint failed: " + gerr.Error())
+	}
+	if res, noise := p.deferIfNoise(req, meta, start, outPath, "inpaint failed"); noise {
+		return res
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := map[string]any{"image_path": outPath, "seed": seed}
@@ -763,6 +785,9 @@ func (p *Pipeline) runEditImageGenerative(ctx context.Context, req core.Request,
 	if gerr != nil {
 		meta.ErrClass = classifyErr(gerr)
 		return defer1("generative edit failed: " + gerr.Error())
+	}
+	if res, noise := p.deferIfNoise(req, meta, start, outPath, "generative edit failed"); noise {
+		return res
 	}
 	meta.LatencyMs = time.Since(start).Milliseconds()
 	payload := map[string]any{"image_path": outPath, "seed": seed, "family": fam.Name}
