@@ -78,12 +78,12 @@ mkdir -p "$TMP/llama"
 run_install cuda --llama-bin "$TMP/llama"
 [ "$RC" -eq 0 ] && pass "a real --llama-bin passes" || fail "a real --llama-bin passes" "rc=$RC: $OUT"
 
-# 6. seed gets the RKNPU home (default <prefix>/rknpu, or $RKNPU_HOME).
+# 6. seed gets the RKNPU home (default <prefix>/rknpu, or $RKNPU_HOME); other device homes may follow it.
 rm -f "$SEED_LOG"; run_install rk3588
-grep -q -- "--rknpu-home $TMP/prefix/rknpu\$" "$SEED_LOG" 2>/dev/null \
+grep -qE -- "--rknpu-home $TMP/prefix/rknpu( |\$)" "$SEED_LOG" 2>/dev/null \
   && pass "seed defaults --rknpu-home to <prefix>/rknpu" || fail "seed defaults --rknpu-home to <prefix>/rknpu" "$(cat "$SEED_LOG" 2>/dev/null)"
 rm -f "$SEED_LOG"; RKNPU_HOME=/srv/npu run_install rk3588
-grep -q -- "--rknpu-home /srv/npu\$" "$SEED_LOG" 2>/dev/null \
+grep -qE -- "--rknpu-home /srv/npu( |\$)" "$SEED_LOG" 2>/dev/null \
   && pass "seed follows \$RKNPU_HOME" || fail "seed follows \$RKNPU_HOME" "$(cat "$SEED_LOG" 2>/dev/null)"
 
 # 7. the render call resolves the RKNPU home the same way as the seed call (a dry run never renders,
