@@ -1,6 +1,0 @@
-### Fixed - a Windows swap sees a node started through a junction
-
-- **Why.** On Windows, llama-swap's live directory is a junction into its generation directory (`<home>/llama-swap` -> `<home>/llama-swap-versions/<id>`). The process finder compared the path CIM reports, which is the path the process was started through (the junction), with the generation path the swap names, by spelling. The two never matched. Measured on a Windows node: the swap restarted llama-swap, and both the post-restart check and the rollback's check reported "no process appeared" against a running node.
-- **What it does.** The finder fetches processes by file name and then matches a path by the file it names (`os.SameFile`). It still accepts an exact spelling. A junction or symlink on either side, or a short 8.3 name, now matches. A process whose path the OS will not give is still returned as unreadable, as before. The Linux finder already resolved links.
-- **Where.** `internal/nodeswap/deps_windows.go` (`findProcessesByExeWindows`, `sameExecutable`).
-- **Check.** One Windows test starts a real process through a junction and asks the finder for both the junction path and the generation path. On the old code it fails ("not found in []"); with the fix it passes.
