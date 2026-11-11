@@ -612,7 +612,8 @@ registers locally — MCP surface and agent loop alike, so the parity test still
 [`internal/accelremote`](../../internal/accelremote/accelremote.go):
 
 1. **`image_path` is read on THIS box** and its bytes travel inside the job (cap 8 MiB); a
-   caller-side `out_path` is dropped. There is no shared filesystem and no mount.
+   caller-side `out_path` is not sent (the node writes inside its job dir) but is honoured when the file
+   comes back (step 4). There is no shared filesystem and no mount.
 2. **Placement is a live probe**: `delegate_remotes` in order, first node whose
    `/fleet/health` lists the id (2 s per probe; every miss is named in the defer, and an entry the tailnet guard
    refuses is named as not dialled, ADR 0074).
@@ -627,6 +628,16 @@ registers locally — MCP surface and agent loop alike, so the parity test still
 4. **The result is the tool's dict plus `placement{node, base, accelerator, job_id, wall_ms,
    remote:true}`.** Transport, placement and dispatch failures are device-prefixed defers
    (`coral-edgetpu (fleet): …`); the node's own defers and the sidecar's refusals pass through.
+   **A shipped file lands on the caller's box** before the dict is returned: each `<stem>_b64` +
+   `<stem>_name` pair becomes a file and `<stem>_path` names it, so a forwarded `offload_segment`,
+   `offload_semantic_segment` or `offload_depth` answers like the local lane and no image bytes ride into the
+   caller's context. With one shipped file the caller's `out_path` names it (never the caller's own image, and
+   its directory must exist, as for the sidecars); otherwise it lands beside the caller's image as
+   `<image>.<kind>.png`, the local default (e.g. `street.mask.png`). The caller builds that name: the node only
+   contributes `<kind>`, a plain word, so a node's answer can never name the caller's image, a sibling file or
+   another directory. Only PNG bytes land, and an existing file is replaced only when it is a regular PNG file:
+   never a symlink or any other kind of file (the sidecars' own `out_path` rule). A file that cannot land
+   leaves `<stem>_error` instead of its bytes.
 
 Ownership across the fleet is ADR 0037 extended: `accelerators` is walked before
 `fleet_accelerators` on both surfaces, so a local device wins a shared name unless an
@@ -851,7 +862,7 @@ To verify an Axera card (an AX650-class M.2 card, AXCL driver bound):
 - [`internal/tierseed/tierseed.go`](../../internal/tierseed/tierseed.go) —
   `ResolveAccelerators`
 - [`internal/accelremote/accelremote.go`](../../internal/accelremote/accelremote.go) — the
-  forwarder (image bytes, node pick, dispatch + poll, placement)
+  forwarder (image bytes, node pick, dispatch + poll, placement, shipped files landed on the caller's box)
 - [`internal/fleetnode/accel_task.go`](../../internal/fleetnode/accel_task.go),
   [`internal/pipeline/acceltask.go`](../../internal/pipeline/acceltask.go) — the `accel`
   fleet task (payload → job dir → local lane → `mask_b64`)
