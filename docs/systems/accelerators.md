@@ -5,9 +5,9 @@
 Devices that ride **beside** the GPU tier: a box's `profile` stays one string, and
 `accelerators: []` lists the additive compute devices found next to it
 ([ADR 0024](../architecture/decisions/0024-accelerators-are-additive-to-the-gpu-tier.md)).
-Today the harness declares three — the Hailo-8L NPU, the Coral Edge TPU and the Rockchip RK3588
-NPU (`rknpu`) — each served through an on-demand loopback HTTP sidecar the harness spawns and that
-exits itself when idle.
+Today the harness declares four — the Hailo-8L NPU, the Coral Edge TPU, the Rockchip RK3588
+NPU (`rknpu`) and the Axera AX650-class NPU on an M.2 card (`axera-ax650`) — each served through an
+on-demand loopback HTTP sidecar the harness spawns and that exits itself when idle.
 
 ## Questions this doc answers
 
@@ -17,17 +17,22 @@ exits itself when idle.
 - How does the sidecar start, answer, and stop?
 - Which tools does the NPU own, and which stay on the GPU?
 - How is the Rockchip RK3588 NPU detected on a vendor and on a mainline kernel?
+- How is the Axera AX650 card detected, which ten tools does it serve, on which models, and what do they cost in
+  card memory and time?
+- Which tools should an operator hand the Axera card on a box that also has a Coral or an RKNPU?
+- How do I read the Axera card's temperature, load, memory and link, and how is the card tuned at boot?
 
 ## Scope
 
 Detection, config seeding, the sidecar runtime and wire contract, the NPU tool surface and its
-ownership boundary, and status reporting.
+ownership boundary, status reporting, and the Axera card's telemetry and tuning.
 
 ## Non-scope
 
 - The Hailo sidecar's own implementation (models, HEFs, pipelines) — that lives in the Hailo repo
-  (Hailo-8L-Analysis-Pipelines), not here. The Coral's sidecar is `accelerators/coral/` and the
-  RKNPU's `accelerators/rknpu/`; this doc holds their contract, not their code.
+  (Hailo-8L-Analysis-Pipelines), not here. The Coral's sidecar is `accelerators/coral/`, the
+  RKNPU's `accelerators/rknpu/` and the Axera card's `accelerators/axera/`; this doc holds their contract,
+  not their code.
 - GPU tier selection and serving → [setup-installer.md](setup-installer.md)
 - The GPU vision seats (VQA, GPU OCR) → [offload-pipeline.md](offload-pipeline.md)
 
@@ -210,6 +215,43 @@ untouched, so add `unconstrained_seats` (the seat's model id, 0.154.0), `vision_
 `max_input_chars` 8000 and `ocr_max_tokens` 512 by hand, or delete the file to regenerate it; `local-offload audit-config`
 lists them as SEED-ONLY.
 
+### Axera AX650 detection and seed (`axera-ax650`)
+
+The device is an AX650-class NPU on an M.2 card (the AX8850 card): 4 GB of memory **on the card**, of which
+945 MiB is the card's own OS and 2944 MiB the CMM, the contiguous pool every model loads into. A model never
+lands in host RAM or in VRAM, so the card works while the GPUs serve LLMs and takes nothing from them. The host
+side is the vendor's AXCL package (kernel driver `ax_pcie_dev_host` plus the runtime under `/usr/lib/axcl`,
+3.16.0 measured); the sidecar reaches it through pyaxengine, the publisher's Python binding, on its
+`AXCLRTExecutionProvider`.
+
+`hwdetect.DetectAxera` reports `["axera-ax650"]` iff some line of `/proc/bus/pci/devices`, split on whitespace,
+has `1f4b0650` (vendor 1f4b, device 0650, case-insensitive) as its **second** field and the driver name
+`ax_pcie_dev_host` as its **last** field. Both are required: the id alone is a card no runtime can reach, and a
+driver name alone says nothing about which card. An unreadable table is "no accelerator", and Windows has no
+such file, so the probe never matches there (Linux only; `setup/detect.ps1` has no mirror, as for the RKNPU).
+`DetectAllAccelerators` lists it **last** (Hailo, Coral, RKNPU, Axera), so under the shared-name rule an earlier
+device keeps a name it also owns unless `accelerator_tool_owners` says otherwise (see Axera tools below).
+`OFFLOAD_ACCELERATORS` overrides the probe as for the others.
+
+The seeded keys (axera-ax650):
+
+| Key | Meaning |
+|---|---|
+| `accelerators` | `["axera-ax650"]` — the gate |
+| `axera_endpoint` | sidecar base, `http://127.0.0.1:18816` — loopback only (a non-loopback bind is refused), after the RKNPU's 18815 |
+| `axera_sidecar_cmd` | launcher (`__AXERA_HOME__/axera-http.sh`); the harness runs it as `<cmd> --idle-sec <axera_idle_sec>`; the same launcher answers `--telemetry` and `--apply-perf`; empty = never spawn, defer when down |
+| `axera_timeout_sec` | one NPU call's bound, default 60 (a cold call pays the runtime init plus a model load, 0.02 to 1.34 s, the text tower 6.5 s, the first-ever `classify` 13.7 s); a forwarded call is cut off at `accelremote.Budget` whatever this says |
+| `axera_idle_sec` | the sidecar's self-exit idle window, default 300, clamped by the sidecar to 1..300; also how long models stay loaded in the card's CMM (never host RAM) |
+
+`AXERA_HOME` (`install seed --axera-home`, env `AXERA_HOME`, default `<OFFLOAD_HOME>/axera`; `install.sh` passes
+it) holds the sidecar's `venv/` (pyaxengine wheel, numpy, pillow, opencv-python-headless, onnxruntime, tokenizers,
+shapely, pyclipper, on Python 3.14), `models/`, `wheels/`, `cache/` (derived embeddings) and `accelerators/axera/`
+copied flat or checked out beneath it; the launcher walks up to the first ancestor holding `venv/`. An empty home
+is refused at seed time like the other devices'; `accelOptions` fills it from flag, environment and
+`<home>/axera`, so `install seed`, `install plan` and `audit-config` agree. The install recipe and the boot-tuning
+unit are in [SETUP-AGENT.md](../../setup/SETUP-AGENT.md) (the "Accelerators (axera-ax650)" entry) and the
+operator walkthrough in [OPERATOR-GUIDE.md](../OPERATOR-GUIDE.md#the-axera-card-axera-ax650).
+
 ## Runtime — the sidecar
 
 The sidecar is the Hailo repo's `server/http_server.py`, bound to loopback
@@ -258,9 +300,9 @@ use the NPU while the same contract on any other node advertises no such tool.
 | `offload_text_embed` | `text_embed` | text vectors ON the NPU, same 512-d space as `offload_image_embed` (siglip2 optional) |
 | `offload_zero_shot` | `zero_shot` | free-text labels → ranked similarities, both towers on-NPU |
 
-Plus `offload_ocr` gains `engine:"npu"` (the Hailo PaddleOCR path) and `offload_transcribe`
-gains `engine:"npu"` (whisper-base fast preview) — both **explicitly caller-selected**,
-never an automatic fallback. Whisper-on-NPU is PLATFORM-BLOCKED on Windows HailoRT 4.24
+Plus `offload_ocr` gains `engine:"npu"` (the Hailo PaddleOCR path; on a box with no Hailo, the Axera card's
+PP-OCRv5, see Axera tools below) and `offload_transcribe` gains `engine:"npu"` (whisper-base fast preview,
+Hailo only) — both **explicitly caller-selected**, never an automatic fallback. Whisper-on-NPU is PLATFORM-BLOCKED on Windows HailoRT 4.24
 (the sidecar returns a typed diagnosis; Linux-validated upstream), so `engine:"npu"`
 transcription on such a box defers honestly with the reason.
 
@@ -270,7 +312,7 @@ Ownership when both devices are present:
 |---|---|---|
 | Structured vision outputs (face detect/identity, object detect, re-id, depth, low-light, image embeddings) | **NPU, exclusively** | boxes/vectors/maps are what the device natively produces, fast and free |
 | Language about images (VQA, description) | **GPU** (the tier's VLM) | untouched by this feature |
-| OCR | **GPU primary**; `engine:"npu"` explicit | the engines read stylised text differently — a silent switch would change results |
+| OCR | **GPU primary**; `engine:"npu"` explicit (Hailo, else the Axera card) | the engines read stylised text differently — a silent switch would change results |
 
 ### Coral tools and the shared-name rule (0.114.0)
 
@@ -297,8 +339,7 @@ Deliberately **not** owned by the Coral: `text_embed` and `zero_shot` (no text t
 the Edge TPU — the EfficientNet space is not CLIP, and the tool description says so), the
 `face_*`, `pose`, `person_embed`, `depth`, `enhance_low_light` tools, and `segment` (instance
 segmentation; the Coral's DeepLab is semantic, hence the distinct name — the two outputs are
-not interchangeable). The `engine:"npu"` switches on `offload_ocr` / `offload_transcribe` stay
-Hailo-only.
+not interchangeable). The Coral serves no OCR or transcription, so the `engine:"npu"` switches never reach it.
 
 **Shared-name rule ([ADR 0037](../architecture/decisions/0037-a-capability-name-has-one-owner-per-box.md)).**
 `offload_object_detect` and `offload_image_embed` are capability names, and a capability has
@@ -427,7 +468,8 @@ tensors sit at cosine 0.963-0.991 to FP32 for PP-YOLOE's nine outputs and 0.988 
 
 Deliberately **not** owned: `text_embed` and `zero_shot` (only the image side is served), the tools
 the Hailo covers (`face_*`, `person_embed`, `pose`, `segment`, `depth`, `enhance_low_light`) and the
-Coral's `semantic_segment`. `offload_ocr` and `offload_transcribe` `engine:"npu"` stay Hailo-only.
+Coral's `semantic_segment`. The RKNPU serves no OCR or transcription: `offload_transcribe` `engine:"npu"` is
+Hailo-only, and `offload_ocr` `engine:"npu"` goes Hailo first, then the Axera card.
 
 **The shared-name rule over three devices.** With a third device sharing names, the first listed
 owner is not always the first device listed: `classify_image` is owned by the Coral and the RKNPU
@@ -441,10 +483,94 @@ table (`laneConfigFor`), with no registry — a missed site registers nothing, a
 block says so. A test holds every device `profiles.json` declares to all three: its owned capabilities are the MCP
 tools, the loop's tools and a pipeline lane.
 
+### Axera tools
+
+The Axera card owns nine capabilities and a tenth, OCR, that is reached only through `offload_ocr`
+`engine:"npu"`. The sidecar speaks the Coral's contract (`POST /v1/<tool>`), and every model is compiled for the
+AX650 NPU by its publisher; the manifest is [`accelerators/axera/models.json`](../../accelerators/axera/models.json)
+(files and sources, no digest). "Warm" is end to end over HTTP on a resident model; "cold" is the first call that
+loads it (cache present). All numbers measured on the card; raw NPU plus PCIe time per run is smaller (RF-DETR
+40.4 ms, SigLIP2 image tower 12.7 ms, DeepLabV3+ 46.3, Depth Anything 3 27.0, RTMPose 3.9, MobileSAM encoder 63.6
+plus decoder 20.6, PP-OCRv5 detection 43.7, recognition 6.9, classifier 1.0).
+
+| MCP / loop tool | Sidecar tool | Model (licence) | CMM MiB | Cold ms | Warm ms |
+|---|---|---|---|---|---|
+| `offload_object_detect` | `object_detect` | RF-DETR small, 80 COCO classes (Apache-2.0); 512x512, box head = the publisher's 0.5 MB ONNX MLP on the host through onnxruntime | 32 | 915 | 46-52 |
+| `offload_classify_image` | `classify` | SigLIP2 B/16-224 zero-shot over the 1000 ImageNet class names (Apache-2.0) | 98 | 1502; 13727 the first time ever | 16-20 |
+| `offload_image_embed` | `embed` | SigLIP2 image tower, 768-d, `space:"siglip2-base-p16-224"` | 98 | 18 | 16-17 |
+| `offload_text_embed` | `text_embed` | SigLIP2 text tower, 64 tokens, the same space | 466 | 6495-7616 (tower load) | 0.2-0.7 cached, about 5 new text |
+| `offload_zero_shot` | `zero_shot` | both towers; `prob` is SigLIP's sigmoid with the checkpoint's logit scale and bias | 98 + 466 | 36-44 | 16-19 |
+| `offload_semantic_segment` | `semantic_segment` | DeepLabV3+ MobileNetV2, 21 Pascal VOC classes (MIT); 513x513 | 51 | 222-232 | 61-64 |
+| `offload_depth` | `depth` | Depth Anything 3 small (Apache-2.0); 504x280, 8-bit PNG at the input's size | 41 | 618-636 | 39-52 |
+| `offload_pose` | `pose` | RF-DETR person boxes, then RTMPose-M, COCO-17 keypoints (Apache-2.0); a 192x256 crop per person | 32 + 17 | 306-324 | 52-60 for one person |
+| `offload_segment` | `segment` | RF-DETR boxes refined by MobileSAM (Apache-2.0); `everything:true` = a 16x16 point grid; 1024 letterbox | 32 + 33 + 12 | 602-646 | 220-250 for 5 instances; `everything` 5497 (22 masks) |
+| `offload_ocr` `engine:"npu"` | `ocr` | PP-OCRv5 mobile detection + classifier + recognition (Apache-2.0) | 33 + 1 + 9 | 257-311 | 76-110 for 2 lines, 213-292 for a 5-line page |
+
+Both surfaces (MCP and the agent loop's `AccelLane`) carry the same nine, registered from the one table in
+`internal/mcpserver/acceltools.go` and gated on `HasAccelerator("axera-ax650")`; a fleet-listed card registers
+them as forwarders. Three details that shape results:
+
+- **`classify` keeps only the image tower at call time.** The 1000 ImageNet text embeddings are computed once with
+  the text tower (about 11 s), cached under `<AXERA_HOME>/cache` keyed by the text model's digest, the template and
+  the names, and the tower is then unloaded. That is the 13.7 s first call; every later one is the image pass.
+- **One embedding space.** `embed`, `text_embed`, `zero_shot` and `classify` are one SigLIP2 checkpoint, so an image
+  vector and a text vector are comparable (cosine) and every result names `space`. Vectors from another device are
+  never comparable with them.
+- **Measured on real images:** two cats, two remotes and a couch on a sofa image gave `object_detect` cat 0.867
+  twice, remote, couch; `classify` top-1 "tiger cat" 0.344, then "Egyptian Mau" and "tabby cat"; `zero_shot` ranked
+  "two cats" first; `semantic_segment` cat 121896 px and sofa 12865 px; `pose` 17 keypoints on one person (nose
+  0.91, eyes 0.95 and 0.91).
+
+**OCR through `offload_ocr` `engine:"npu"`.** The branch order is Hailo (if listed), then this box's own Axera
+card, then a fleet node's card named in `fleet_accelerators` (the image travels with the job, the `accel` task
+below), else a defer that names the three options; a `route` other than `local` is refused (the route places the
+GPU vision model). Both surfaces do the same: the MCP handler and the loop's `ocr` tool. The GPU vision OCR stays
+primary: a page reads in 0.2-0.3 s here and a 5-line page came back exact ("Order #A-77821 shipped on 2026-11-09
+via ground freight."), but 15 px screen text reads with occasional glyph errors ("count=l" for "count=1"), so
+stylised and small screen text stay on the GPU. The sidecar departs from the publisher's demo in three measured
+ways, each fixing a real failure:
+
+- **Detection is letterboxed** (aspect kept) onto the 960 canvas instead of stretched to 960x960; the stretch split
+  a wide line into "Theo" and "e quick...".
+- **Recognition reads a long line in 320 px windows overlapping by half**, stitched at a CTC step where both windows
+  predict blank, then one greedy decode. The demo squashes a whole line into one window, and a 19:1 line read nothing.
+- **Padding is mid-grey 127.5**, PaddleOCR's normalised zero, not raw 0; black padding read as a stray "-".
+
+**Ownership and the embedding-space caveat.** Axera is listed last, so on a box that also lists a Hailo, a Coral or
+an RKNPU the earlier device keeps every shared name it owns. The recommended four to hand the card are the ones
+where its model is the stronger one (RF-DETR against SSD- or PP-YOLOE-class detection, SigLIP2 zero-shot
+classification, one embedding space with a text tower, DeepLabV3+ against DeepLabV3), and the operator says so per
+tool (ADR 0068):
+
+```json
+"accelerators": ["coral-edgetpu", "axera-ax650"],
+"accelerator_tool_owners": {
+  "offload_object_detect": "axera-ax650",
+  "offload_classify_image": "axera-ax650",
+  "offload_image_embed": "axera-ax650",
+  "offload_semantic_segment": "axera-ax650"
+}
+```
+
+Beside a Coral alone, the names the Coral does not own (`offload_text_embed`, `offload_zero_shot`,
+`offload_depth`, `offload_pose`, `offload_segment`) register to the Axera card by the first-listed rule with no
+entry; a Hailo owns those five too and keeps them unless an entry moves them.
+**Moving `offload_image_embed` changes the embedding space** (768-d `siglip2-base-p16-224` instead of the Coral's
+1280-d EfficientNet or the Hailo's 512-d TinyCLIP): re-embed every stored vector, because vectors are comparable
+only within one space. `offload_status`'s `serves` per device shows what registered where.
+
+**Deliberately not owned**, each a ruling of [ADR 0101](../architecture/decisions/0101-axera-ax650-npu-card-as-an-accelerator.md):
+`face_detect` and `face_embed` (the InsightFace weights are non-commercial), `person_embed` (no AX650-compiled
+model exists), `enhance_low_light` (no licence-clean fast model), and `offload_transcribe` `engine:"npu"`
+(Whisper through the Python binding measured 270 ms per decoded token, because the KV cache re-crosses PCIe every
+step; a C++ path that keeps it on the card is a later slice). An NPU LLM or VLM seat (the vendor's
+OpenAI-compatible server; Qwen3.5 0.8B Int4 measured 17.7 tok/s decode in 1185 MiB of CMM, 2B Int4 11.0 tok/s in
+2260 MiB) is a later slice that shares the CMM, which is why the sidecar's budget leaves half the pool free.
+
 ### How the artifacts are fetched and verified (ADR 0099)
 
-Nothing in `accelerators/coral/` or `accelerators/rknpu/` names a version, a commit or a sha256 as policy. Each
-`models.json` lists files and sources only; the two `fetch-models.sh` scripts resolve at the moment they run and
+Nothing in `accelerators/coral/`, `accelerators/rknpu/` or `accelerators/axera/` names a version, a commit or a sha256 as policy. Each
+`models.json` lists files and sources only; the three `fetch-models.sh` scripts resolve at the moment they run and
 take the integrity check from the publisher:
 
 - **Coral.** The tip of the default branch of `google-coral/test_data`; each file's publisher digest is its git
@@ -454,6 +580,15 @@ take the integrity check from the publisher:
   carries every file asked of it (a half-published release steps back to the one before), with the digest read from
   the GitHub API (asset digest or git blob id); the timm weights are checked against the Hugging Face tree API's
   `lfs.oid` at `main`.
+- **Axera.** `accelerators/axera/fetch-models.sh` (a thin wrapper over the standard-library `fetch_models.py`, so it
+  runs before the venv exists). `--runtime` takes the newest non-draft, non-prerelease release of
+  `AXERA-TECH/pyaxengine` that carries the py3-none-any wheel into `<home>/wheels`, checked against the GitHub asset
+  digest; `--models` resolves seven Hugging Face repositories at their current default-branch commit (about 760 MB,
+  625 MB of it SigLIP2) and checks each file against the tree API's per-file id (LFS sha256 for a weight, git blob
+  id for a small file) and its size; `--only KEY[,KEY]` narrows it, `--verify` re-hashes what is on disk. The
+  record is `models.installed.json` beside the weights (and `runtime.installed.json`); the sidecar re-hashes each
+  model file once per process against it and answers a mismatch with a structured error, never a load. Every model
+  is the publisher's own AX650 compile, so no conversion step exists.
 - **The record.** A file that passes is written to `models.installed.json` beside the weights as
   `{file, digest, publisher_digest, size, source, fetched_at}`. `digest` is the sha256 of the bytes. The record is data
   about what was installed, not a rule: the next run resolves again.
@@ -479,8 +614,12 @@ registers locally — MCP surface and agent loop alike, so the parity test still
    refuses is named as not dialled, ADR 0074).
 3. **The node runs a fleet task `accel`** — `{accelerator, tool, args, image_b64, image_name}`
    — on its **local** lane only (a forwarded call never forwards again), in a job-scoped dir
-   that lives as long as the job; a mask the tool writes there returns as `mask_b64`. `accel`
-   is exempt from `fleet_max_concurrent_jobs` (it never touches the text endpoint).
+   that lives as long as the job; every file the tool writes there comes back with it: each `<stem>_path` result
+   key that names a file inside the job dir gains `<stem>_b64` and `<stem>_name` (cap 8 MiB each), so
+   `mask_path` returns as `mask_b64` (Coral and Axera masks) and the Axera `depth_path` as `depth_b64`; the
+   shipped input never goes back. `accel` is exempt from `fleet_max_concurrent_jobs` (it never touches the text
+   endpoint). The Axera card is fleet-visible (it is not on the local-only list), so it is advertised in
+   `/fleet/health`, and `offload_ocr` `engine:"npu"` forwards to it too.
 4. **The result is the tool's dict plus `placement{node, base, accelerator, job_id, wall_ms,
    remote:true}`.** Transport, placement and dispatch failures are device-prefixed defers
    (`coral-edgetpu (fleet): …`); the node's own defers and the sidecar's refusals pass through.
@@ -496,7 +635,7 @@ that lists a device in both registers the local lane only. A box that lists noth
 amendment): the standalone box that carries it keeps it local. `/fleet/health` omits it from
 `accelerators`, `accel` is advertised only for a device the fleet may use, an `accel` job naming it is
 refused, listing it in `fleet_accelerators` is a `doctor` finding, and `fleet-ui` refuses a `--listen` port
-equal to `hailo_endpoint`'s on a box that lists it. The Coral and the RKNPU are unaffected; the one list is
+equal to `hailo_endpoint`'s on a box that lists it. The Coral, the RKNPU and the Axera card are unaffected; the one list is
 `config.LocalOnlyAccelerator`.
 
 `offload_status.accelerators` lists a fleet device with `fleet: true` and no health probe (the
@@ -521,6 +660,82 @@ temp_c, loaded:[...], models_missing:[...], runtime:{litert, libedgetpu}}` — r
 For rknpu the block carries the endpoint, whether a launcher is configured, the three owned tools
 and the sidecar's `/health` dict, embedded verbatim.
 
+For axera-ax650 the block carries the same (endpoint, launcher, owned tools, `serves`, the sidecar's `/health`
+with its `loaded`, `cmm_resident_mib`, `cmm_budget_mib`, `models_missing`, `models_unverified`, `tools_ready`,
+`perf` and `telemetry`) and one more thing no other device has: card telemetry that survives the sidecar being
+down. While `/health` is unreachable the entry carries `telemetry` from one run of `<axera_sidecar_cmd> --telemetry`
+and `telemetry_source: "one-shot probe (sidecar not running)"` (cached 10 s, and never starting the sidecar, so
+status stays side-effect free); if that run fails the entry carries `telemetry_error` instead. A fleet node's rows
+in `offload_status` carry `accelerator_telemetry` as the node published it in `/fleet/health`
+([FLEET-NODE.md](../FLEET-NODE.md#accelerator-card-telemetry-accelerator_telemetry) holds the key table).
+
+## Telemetry and tuning (Axera card)
+
+**What is read.** `accelerators/axera/axcl_telemetry.py` reads every card through the AXCL runtime library with
+`ctypes` (`axclrtGetDeviceProperties`; one shell request to the card through `axclrtControlExecuteShellCmd`, the
+call the vendor CLI itself uses, batched into one round trip; `axclrtGetDevicePidInfo`) plus the host's sysfs. One
+read takes about 0.57 s. Per card:
+
+| Group | Fields |
+|---|---|
+| Identity | `firmware`, `uid`, `pcie.bdf`, `pcie.driver` |
+| Heat and load | `temp_c`, `cpu_load_pct`, `npu_load_pct`, `npu_cores[{core, util_pct, time, period}]`, `npu_busy` |
+| Memory | `mem_total_mib`, `mem_used_mib`, `cmm_total_mib`, `cmm_used_mib`, `cmm_free_mib`, `cmm_blocks{owner: MiB}`, `processes[{pid, exe, cmm_mib}]` |
+| Link | `pcie{link_speed, link_width, max_link_speed, max_link_width, aer{correctable, nonfatal, fatal}, link_degraded}` |
+| Clocks | `clocks{cpu_mhz, cpu_max_mhz, cpu_governor, cpu_steps_mhz, npu_mhz, npu_max_mhz, nnbus_mhz, nnbus_max_mhz, at_max}` |
+| Thermal | `thermal{zone, policy, trips_c, hw_reset_c}` |
+
+The document's top level adds `source`, `sampled_at`, `read_ms`, and `host{fans[{label, rpm}], temps[{label, c}]}`:
+the card has no fan tachometer and no power sensor (the vendor CLI prints `--` for both by construction), and its
+cooling is a passive heatsink with a separate host fan, so the host's own hwmon is where that fan and the chassis
+temperature are read. Measured: 34 C idle on the heatsink with the fan, 35.5 C with eleven models resident; per
+process, with eleven resident the sidecar held 693 MiB of CMM by its own blocks and the card showed 814 MiB used
+(the 18 MiB baseline is the firmware's codec buffers).
+
+**Where each shows.**
+
+| Surface | What it carries | Freshness |
+|---|---|---|
+| `axera-http.sh --telemetry` | the whole document, one JSON object on stdout, then exit; never starts the sidecar | one read, 0.57 s |
+| Sidecar `GET /health` `telemetry` | the whole document plus `age_sec` | cached 5 s and refreshed off the request path; a sample older than 15 s waits up to 1 s for a fresh read |
+| `offload_status` accelerators entry | `telemetry` (+ `telemetry_source` while the sidecar is down) or `telemetry_error` | live from `/health`, else the one-shot probe cached 10 s |
+| Fleet node `/fleet/health` `accelerator_telemetry` | the compact object: `temp_c`, `npu_load_pct`, `cpu_load_pct`, `cmm_used_mib`, `cmm_total_mib`, `mem_*_mib`, the four clock fields, `clocks_at_max`, `link_speed`, `link_width`, `link_degraded`, `processes` (a count), `sampled_at`, `sidecar_up`; a failed read is `{error, sidecar_up, sampled_at}` | cached 15 s, refreshed in the background, never blocking a health request; a device with no reading yet is absent, never zeroed |
+| `NodeView`, `offload_status` fleet rows, the fleet UI and `top` | the compact object, one line per device: `axera-ax650 34°C · NPU 0% · CMM 18/2944 MiB · clocks max`, with `LINK DEGRADED` appended when the link runs below the slot's capability | one poll |
+
+**Why a library read in a child process, and not the vendor CLI.** The vendor CLI is single-instance (a SysV
+shared-memory guard private to it), and other pollers on the same host use it, so a second poller is refused with
+"already running". The runtime's own calls are sequence-numbered requests over the card's control channel and take
+no such lock, so the harness reads beside the CLI, beside other pollers and beside inference. The sidecar runs the
+reader as a **child process** and never imports it: the sidecar holds live inference sessions, and a telemetry read
+must not initialise, reset or finalise the runtime inside that process.
+
+**Tuning: full performance, nothing risky.** The levers and their state:
+
+- **Card CPU: pinned to its top step.** The card ships with the CPU at 1.2 GHz of a 1.2/1.4/1.5 GHz table under the
+  `userspace` governor. `axera-http.sh --apply-perf` (`axcl_telemetry.py --apply-perf`) writes `scaling_setspeed =
+  cpuinfo_max_freq` under `userspace` and sets `performance` under any other governor, then reports what it set. It
+  is volatile (the card resets with the host) and idempotent. The sidecar applies it at **every spawn** (reported in
+  `/health` `perf`), and `axera-perf.service` (a systemd oneshot, `accelerators/axera/axera-perf.service` calling
+  `axera-perf.sh`) applies it at boot, waiting up to 180 s for the card's firmware, so the first call after a boot is
+  not slower. Install it with the two `sed` tokens in its header, then `systemctl enable --now axera-perf.service`.
+  **What the pin is worth, measured plainly:** an interleaved A-B-A-B run of 400 inferences per model per clock,
+  1.2 GHz (factory) against 1.5 GHz (pinned), p50 latency: RTMPose-M 4.18 to 4.02 ms (+3.8 %), MobileSAM decoder
+  22.47 to 21.88 ms (+2.6 %), SigLIP2 image 13.68 to 13.42 ms (+1.9 %), RF-DETR 41.54 to 42.02 ms (-1.2 %, noise).
+  Latency is bound by the NPU (already at its 800 MHz maximum) and the Gen2 x2 link, not by the card's CPU. The pin
+  is free and idempotent, so it stays, but it is worth at most about 4 % and only on the small models; do not
+  expect more.
+- **NPU and NN-bus clocks: already at their maximum** (800 MHz and 1.6 GHz). They are reported, never written.
+- **PCIe: no lever.** The link is Gen2 x2 (5 GT/s x2, about 1 GB/s), the chip's own maximum; the card does not
+  support ASPM (its LnkCap says so), so there is no link power state to disable; MaxPayload is the card's 128 B
+  cap. `link_degraded` flags a link running below the slot's capability.
+- **Thermal trips: left alone.** Passive trips at 80, 105 and 120 C under `step_wise`, hardware reset at 120 C; the
+  card idles at 34 C, far below the first. **Sustained load, measured:** RF-DETR back to back for 120 s ran at 23.5
+  inferences per second with the NPU at 88-89 % load in telemetry and the clocks held at their maxima (NPU 800 MHz,
+  CPU 1.5 GHz); the card went from 35.2 C to a 36.4 C peak, +1.2 C and 44 C below the first passive trip. No
+  throttling: the heatsink and the host fan leave large headroom.
+- **Host side:** thread pools capped at 2, no CPU pinning and no `nice` (the card is the bottleneck), `oom_score_adj`
+  500 so the host sheds the sidecar before anything of its own.
+
 ## Limits
 
 - **Single in-flight inference** — one sidecar process serialises NPU access by construction.
@@ -535,6 +750,18 @@ and the sidecar's `/health` dict, embedded verbatim.
   reference board `/dev/dri/renderD129` is `root:render` and `card2` `root:video`). One in-flight
   inference per sidecar, as for every device; a forwarded call is cut off at the 150 s Budget,
   45 s of which a cold start can spend.
+- **Axera: one in-flight call, one card, a PCIe Gen2 x2 link.** One lock serialises every NPU call, and the link
+  (about 1 GB/s, the chip's maximum) is why Whisper through the Python binding was rejected: its KV cache re-crosses
+  the link every step. The card's memory is its own: 2944 MiB of CMM, never host RAM or VRAM. Sessions stay resident
+  under an LRU budget, `AXERA_CMM_BUDGET_MIB` (default 1536, half the pool, so an NPU LLM seat on the same card keeps
+  its share); a load the card refuses evicts every other session and retries once. The full vision set resident is
+  793 MiB estimated, 796 MiB measured. The text tower costs 466 MiB and a 6.5 s load, so the first
+  `text_embed` or `zero_shot` after an idle exit is slow; `axera_idle_sec` (default 300, max 300) is the trade
+  between that and holding card memory. After the idle exit the card is back to its 18 MiB baseline. Small screen
+  text OCRs with glyph errors (use the GPU OCR for it). The AXCL runtime keeps every session in a module-level list
+  and its unload does not bind the per-thread AXCL context, so dropping a reference never freed card memory; the
+  sidecar unloads explicitly with the session's own context bound (measured: with a 120 MiB budget, detect, then
+  embed evicts detect, then depth evicts embed).
 
 ## Verifying on a box
 
@@ -545,8 +772,8 @@ On a box with the device (config seeded, sidecar repo checked out):
 2. `offload_face_embed` on a real photo → `{faces:[{…, embedding:[512 floats]}], count}`;
    right after, `curl http://127.0.0.1:18813/health` shows non-empty loaded networks (the NPU
    ran, not a cache).
-3. `offload_ocr` with `engine:"npu"` → PaddleOCR text; without `engine` → the GPU path,
-   unchanged.
+3. `offload_ocr` with `engine:"npu"` → PaddleOCR text (on a box with no Hailo, the Axera card's instead); without
+   `engine` → the GPU path, unchanged.
 4. Wait `hailo_idle_sec` + 10 s → the sidecar process is gone; the next NPU call spawns it
    again (cold ~2 s + HEF load).
 5. On a box **without** the device: `tools/list` is unchanged.
@@ -566,6 +793,22 @@ To verify an RKNPU (a Rockchip RK3588 board, driver bound):
 5. Wait `rknpu_idle_sec` + 10 s → the sidecar process is gone and its RAM back; the next call spawns
    it again.
 
+To verify an Axera card (an AX650-class M.2 card, AXCL driver bound):
+
+1. `grep ax_pcie_dev_host /proc/bus/pci/devices` prints a line whose second field is `1f4b0650`; then
+   `local-offload install detect -json` → `"accelerators"` contains `"axera-ax650"`.
+2. `<AXERA_HOME>/axera-http.sh --telemetry` prints one JSON document with a card (temperature, `cmm_total_mib`
+   2944, `clocks.at_max` true once tuned) without starting the sidecar. `fetch-models.sh --verify` re-hashes the
+   models against the publisher digests.
+3. `offload_status` → `accelerators.axera-ax650` with the endpoint, `serves`, and `telemetry` (with
+   `telemetry_source` while the sidecar is down).
+4. `offload_object_detect` (or `offload_classify_image`) on a real photo → a result naming its `model`; right after,
+   `curl http://127.0.0.1:18816/health` lists it under `loaded`, `cmm_resident_mib` rises, and `perf` reports the CPU
+   clock applied. Then `offload_ocr` with `engine:"npu"` on a page of text on a box with no Hailo.
+5. Wait `axera_idle_sec` + 10 s → the sidecar process is gone and the card's CMM is back to its baseline; the
+   next call spawns it again. On a delegator that lists the card in `fleet_accelerators`, the node's
+   `/fleet/health` carries `accelerator_telemetry` and the fleet UI shows the `axera-ax650 34°C · NPU 0% · ...` line.
+
 ## Source map
 
 - [`internal/accelclient/hailoclient.go`](../../internal/accelclient/accelclient.go) — the
@@ -583,6 +826,22 @@ To verify an RKNPU (a Rockchip RK3588 board, driver bound):
   [`internal/agent/acceltools.go`](../../internal/agent/acceltools.go),
   [`internal/pipeline/loopaccel.go`](../../internal/pipeline/loopaccel.go) — the per-device tables
   (tools, owned capabilities, lane config) that must stay in lockstep
+- [`accelerators/axera/server.py`](../../accelerators/axera/server.py) — the Axera sidecar: the ten tools, the
+  CMM-budgeted LRU with its explicit unload, the digest check, `/health`
+- [`accelerators/axera/axcl_telemetry.py`](../../accelerators/axera/axcl_telemetry.py) — card telemetry through the
+  AXCL runtime, and `--apply-perf`
+- [`accelerators/axera/axera-http.sh`](../../accelerators/axera/axera-http.sh) — the launcher (`--idle-sec`,
+  `--telemetry`, `--apply-perf`); [`axera-perf.sh`](../../accelerators/axera/axera-perf.sh) and
+  [`axera-perf.service`](../../accelerators/axera/axera-perf.service) — the boot tuning oneshot
+- [`accelerators/axera/fetch_models.py`](../../accelerators/axera/fetch_models.py),
+  [`fetch-models.sh`](../../accelerators/axera/fetch-models.sh),
+  [`models.json`](../../accelerators/axera/models.json) — the publisher-verified fetch and its manifest;
+  [`imagenet_classes.txt`](../../accelerators/axera/imagenet_classes.txt) — the 1000 class names `classify` scores
+- [`internal/accelclient/telemetry.go`](../../internal/accelclient/telemetry.go) — the one-shot probe, the compact
+  reduction and the background collector;
+  [`internal/fleetnode/accel_telemetry.go`](../../internal/fleetnode/accel_telemetry.go) — `accelerator_telemetry`
+  in `/fleet/health`; [`internal/fleetview/acceltelemetry.go`](../../internal/fleetview/acceltelemetry.go) — the
+  one-line render
 - [`internal/pairworkloads/pairworkloads.go`](../../internal/pairworkloads/pairworkloads.go) —
   `EngineFor`: the device is the PAIR card's engine
 - [`internal/tierseed/tierseed.go`](../../internal/tierseed/tierseed.go) —
@@ -608,6 +867,8 @@ To verify an RKNPU (a Rockchip RK3588 board, driver bound):
   the decision record
 - [ADR 0038](../architecture/decisions/0038-accelerator-work-travels-to-the-box-that-has-the-device.md) —
   fleet routing: the work travels to the device, bytes included
+- [ADR 0101](../architecture/decisions/0101-axera-ax650-npu-card-as-an-accelerator.md) — the Axera card: roster,
+  rulings, alternatives
 - [mcp-server.md](mcp-server.md) — the tool surface this extends
 - [setup-installer.md](setup-installer.md) — detection and seeding in the install flow
 - [fleet-node.md](fleet-node.md) — the health payload that advertises the list

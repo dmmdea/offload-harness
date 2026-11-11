@@ -1019,6 +1019,82 @@ Never `npm install -g hyperframes`: a global HyperFrames self-upgrades in a deta
 whose install is below the floor reads `compose_video` BOUND-BUT-MISSING and defers `CLI_MISSING`
 until the same command runs.
 
+### The Axera card (`axera-ax650`)
+
+An AX650-class NPU on an M.2 card, with its own 4 GB (2944 MiB CMM): it runs ten tools beside the GPUs and takes no
+VRAM and no host RAM. Reference: [systems/accelerators.md](systems/accelerators.md), [ADR 0101](architecture/decisions/0101-axera-ax650-npu-card-as-an-accelerator.md).
+
+**Install** (Linux host, the vendor's AXCL package already installed; full steps in `setup/SETUP-AGENT.md`):
+
+```sh
+grep ax_pcie_dev_host /proc/bus/pci/devices          # the card, second field 1f4b0650
+export AXERA_HOME=<offload-home>/axera               # default; holds venv/, models/, wheels/, cache/, accelerators/axera/
+$AXERA_HOME/fetch-models.sh --runtime                # pyaxengine wheel, publisher-digest checked
+uv venv --python 3.14 $AXERA_HOME/venv
+uv pip install --python $AXERA_HOME/venv/bin/python $AXERA_HOME/wheels/axengine-*.whl numpy pillow opencv-python-headless onnxruntime tokenizers shapely pyclipper
+$AXERA_HOME/fetch-models.sh --models                 # 7 repositories, about 760 MB, every file digest-checked
+local-offload install seed ...                       # fills accelerators + axera_* keys (or add them by hand)
+```
+
+**Check the card.** `$AXERA_HOME/axera-http.sh --telemetry` prints one JSON document (temperature, `cmm_*`, loads,
+clocks, PCIe link, thermal trips) and never starts the sidecar. `offload_status` lists `axera-ax650` with the same
+under `telemetry` (`telemetry_source` says it came from a one-shot probe while the sidecar is down, `telemetry_error`
+says the read failed). A first `offload_object_detect` answers in about 0.9 s (model load) and then in about 50 ms.
+
+**Read it on the fleet UI.** A node with the card publishes `accelerator_telemetry` in `/fleet/health`; the fleet UI
+and `top` show one line per card, `axera-ax650 34°C · NPU 0% · CMM 18/2944 MiB · clocks max`. `LINK DEGRADED` means the
+PCIe link runs below the slot's capability (check `pcie` in `--telemetry`); `clocks NPU a/b MHz` instead of
+`clocks max` means a clock is below its maximum; `axera-ax650 telemetry unavailable: ...` carries the read's error.
+The card idles near 34 C and rose 1.2 C under two minutes of back-to-back detection, 44 C below the first throttle
+trip, so a rising number here is a cooling fault, not normal load.
+
+**Tune at boot.** The card's CPU ships at 1.2 GHz; `axera-http.sh --apply-perf` pins it to 1.5 GHz and the sidecar does
+it at every spawn. To do it at boot instead, install the oneshot unit:
+
+```sh
+sed -e "s#__AXERA_HOME__#$AXERA_HOME#g" -e "s#__AXERA_USER__#$(id -un)#g" accelerators/axera/axera-perf.service \
+  | sudo tee /etc/systemd/system/axera-perf.service >/dev/null
+sudo systemctl daemon-reload && sudo systemctl enable --now axera-perf.service
+```
+
+Be realistic about the gain: latency is bound by the NPU (already at its 800 MHz maximum) and the PCIe Gen2 x2 link, so
+the pin is worth at most about 4 % and only on small models. There is nothing else to tune: the NPU and bus clocks
+are at maximum and the card has no ASPM. Memory is the lever that matters: `AXERA_CMM_BUDGET_MIB` (default 1536) and
+`axera_idle_sec` (default 300) trade resident models against card memory and cold starts (the text tower costs
+466 MiB and a 6.5 s load; the first-ever `offload_classify_image` takes 13.7 s once, to cache the class embeddings).
+
+**Choose owners.** Names the card shares with a Coral or an RKNPU go to the first listed device unless you say
+otherwise. Where the card's model is the stronger one, hand it over per tool and restart the MCP server:
+
+```json
+"accelerator_tool_owners": {
+  "offload_object_detect": "axera-ax650",
+  "offload_classify_image": "axera-ax650",
+  "offload_image_embed": "axera-ax650",
+  "offload_semantic_segment": "axera-ax650"
+}
+```
+
+`offload_status` shows each device's `serves`. Moving `offload_image_embed` changes the embedding space (768-d
+`siglip2-base-p16-224`): re-embed anything you stored. A box without the card lists it in `fleet_accelerators` and its
+calls travel to the node that has it, image bytes included.
+
+**Use cases** (every call takes a local file path; a result names its `model`):
+
+| Goal | Calls |
+|---|---|
+| Search a photo or frame library by text, no cloud | once per image, store the vector: `offload_image_embed {"image_path":"a.jpg"}` (16 ms); per query: `offload_text_embed {"text":"two cats on a sofa"}` (about 5 ms new, under 1 ms repeated); rank by cosine. Both are in the one 768-d space |
+| Sort or tag product photos and screenshots with free-text labels | `offload_zero_shot {"image_path":"a.jpg","labels":["a laptop","a phone","a receipt"]}` returns `{results:[{label,similarity,prob}],best}` best-first; `template` defaults to `"a photo of {}."` |
+| Count and locate people, cars, laptops in stills or video frames | `offload_object_detect {"image_path":"frame.jpg","score_threshold":0.5}` returns boxes in image pixels (the 80 COCO classes) |
+| Cut-outs and compositing | `offload_segment {"image_path":"a.jpg","out_path":"a.mask.png"}` writes an instance-id mask (0 background, i = `instances[i-1]`); `"everything":true` gives class-agnostic masks (about 5.5 s); `offload_semantic_segment {"image_path":"a.jpg"}` writes a class-id map (21 Pascal classes) |
+| Depth-of-field and parallax | `offload_depth {"image_path":"a.jpg","out_path":"a.depth.png"}` writes an 8-bit PNG, bright = near |
+| Movement and form analysis on video frames | `offload_pose {"image_path":"frame.jpg"}` returns `{people:[{x,y,w,h,score,keypoints:{nose:{x,y,score},...}}]}`, 17 COCO keypoints per person (52-60 ms for one person) |
+| Batch document OCR off the GPU | `offload_ocr {"image":"page.png","engine":"npu"}` (a page in 0.2-0.3 s). The GPU OCR stays primary for stylised text and small screen text, where the card makes glyph errors |
+| All of it while the GPUs serve LLMs | nothing to do: the card has its own memory and takes nothing from VRAM |
+
+On a forwarded call a mask or depth map is returned in the result as `mask_b64` or `depth_b64` (with `mask_name` or
+`depth_name`), because the file lives on the node that ran it.
+
 ## 4. Drive the coding agent
 
 The agent plans with a local model and acts through tools confined to a workspace. Build it once:
