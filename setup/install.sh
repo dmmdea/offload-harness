@@ -555,7 +555,7 @@ fi
 if ! SEED="$("$BIN" install seed --profile "$TIER" --home "$PREFIX" --os linux --ram-tier "$RAM_TIER" \
         --vllm-venv "$VLLM_VENV" --hf-home "$HF_HOME_DIR" --accelerators "$ACCELERATORS" \
         --hailo-home "${HAILO_HOME:-$PREFIX/hailo}" --coral-home "${CORAL_HOME:-$PREFIX/coral}" \
-        --rknpu-home "${RKNPU_HOME:-$PREFIX/rknpu}")"; then
+        --rknpu-home "${RKNPU_HOME:-$PREFIX/rknpu}" --axera-home "${AXERA_HOME:-$PREFIX/axera}")"; then
   die "could not resolve the media seed for tier $TIER"
 fi
 case "$SEED" in *"ships no media"*) SEED='{}'; say "media:     tier $TIER ships none — text only until bound by hand" ;; esac

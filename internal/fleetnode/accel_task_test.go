@@ -39,6 +39,32 @@ func TestAccelTaskIsServedExactlyWhenADeviceIsListed(t *testing.T) {
 	}
 }
 
+// A raw fleet job with no shipped image must not point a tool at this node's files or write its output over
+// one: before, image_path and out_path survived when image_b64 was absent, so a fleet caller could overwrite
+// any file the service user can write with PNG bytes (security pass on the axera-ax650 change).
+func TestBuildAccelDropsCallerPathsWithoutAShippedImage(t *testing.T) {
+	cfg := accelCfg(t)
+	payload, _ := json.Marshal(map[string]any{
+		"accelerator": "coral-edgetpu", "tool": "semantic_segment",
+		"args": map[string]any{"image_path": "/etc/hostname", "out_path": "/srv/node/etc/config.json", "top_k": 3},
+	})
+	req, cleanup, err := BuildRequest(t.Context(), cfg, true, "accel", payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer cleanup()
+	args := req.Params["args"].(map[string]any)
+	if _, ok := args["image_path"]; ok {
+		t.Fatalf("a caller's image_path reached the node's tool: %v", args)
+	}
+	if _, ok := args["out_path"]; ok {
+		t.Fatalf("a caller's out_path reached the node's tool: %v", args)
+	}
+	if args["top_k"] != float64(3) {
+		t.Fatalf("other args must pass through: %v", args)
+	}
+}
+
 func TestBuildAccelWritesTheShippedImageIntoTheJobDir(t *testing.T) {
 	cfg := accelCfg(t)
 	payload, _ := json.Marshal(map[string]any{

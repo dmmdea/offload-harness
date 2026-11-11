@@ -544,7 +544,7 @@ func MethodFor(state string) string {
 // EngineFor names the real engine behind a harness task and seat with the
 // identifiers PAIR's upstream engine PRs use (llamacpp, vllm) plus the two
 // non-text engines the harness drives (whispercpp, comfyui) and the
-// accelerators (coral-edgetpu, hailo-8l, rknpu): an NPU call is not a llama.cpp
+// accelerators (coral-edgetpu, hailo-8l, rknpu, axera-ax650): an NPU call is not a llama.cpp
 // job, and the card's engine badge is how PAIR tells them apart. An rkllm seat
 // (chat and vision on the RK3588 NPU, named "<model>-npu") is the same device.
 func EngineFor(task, seat string) string {
@@ -558,6 +558,9 @@ func EngineFor(task, seat string) string {
 		return "coral-edgetpu"
 	case strings.Contains(s, "hailo"):
 		return "hailo-8l"
+	case strings.Contains(s, "axera"):
+		// Before the "-npu" suffix rule below: an Axera seat named "<model>-npu" is this device.
+		return "axera-ax650"
 	case strings.Contains(s, "rknpu"), strings.HasSuffix(name, "-npu"):
 		return "rknpu"
 	case strings.Contains(s, "vllm"):
@@ -645,7 +648,7 @@ func declaresVLLM(seats []string, id string) bool {
 // than a text / media engine.
 func isAcceleratorEngine(engine string) bool {
 	switch engine {
-	case "coral-edgetpu", "hailo-8l", "rknpu":
+	case "coral-edgetpu", "hailo-8l", "rknpu", "axera-ax650":
 		return true
 	}
 	return false

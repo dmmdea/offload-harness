@@ -67,6 +67,22 @@ func accelMCPTools(id string) []accelMCPTool {
 			{"offload_object_detect", "object_detect", "image_path", "Detect the 80 COCO object classes (person, car, dog, laptop, ...) on the LOCAL Rockchip RK3588 NPU (free, on-box). Returns {objects:[{label,class_id,x,y,w,h,score}],count} in image pixels, sorted by score.", `{"type":"object","properties":{` + img + `,"score_threshold":{"type":"number","description":"minimum score (the sidecar's default when omitted)"}},"required":["image_path"]}`},
 			{"offload_image_embed", "embed", "image_path", "IMAGE embedding on the LOCAL Rockchip RK3588 NPU (a CLIP-class image tower) for image-to-image similarity search and clustering. Returns {embedding,dim,space,model}. space names the embedding space — NOT the Hailo's tinyclip and NOT the Coral's efficientnet-edgetpu-s, so vectors from different devices are never comparable, even at the same dimension. No text tower is served (no offload_text_embed / offload_zero_shot on this device).", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
 		}
+	case "axera-ax650":
+		// Nine capabilities on the Axera AX650-class NPU (an M.2 card, AXCL host runtime), served by
+		// the loopback sidecar. Most names are ones the other devices also own - the shared-name rule
+		// decides on a box with several; offload_text_embed and offload_zero_shot pair with THIS
+		// device's offload_image_embed (siglip2-base-p16-224), never with another device's vectors.
+		return []accelMCPTool{
+			{"offload_classify_image", "classify", "image_path", "Classify an image on the LOCAL Axera AX650 NPU (free, on-box; 1000 ImageNet classes by SigLIP2 zero-shot over the class names). Returns {results:[{label,score}],best,model,domain} top-k (default 5).", `{"type":"object","properties":{` + img + `,"top_k":{"type":"integer","description":"results to return (default 5)"}},"required":["image_path"]}`},
+			{"offload_object_detect", "object_detect", "image_path", "Detect the 80 COCO object classes (person, car, dog, laptop, ...) on the LOCAL Axera AX650 NPU (RF-DETR small, free, on-box). Returns {objects:[{label,class_id,x,y,w,h,score}],count} in image pixels, sorted by score.", `{"type":"object","properties":{` + img + `,"score_threshold":{"type":"number","description":"minimum score (default 0.5)"}},"required":["image_path"]}`},
+			{"offload_semantic_segment", "semantic_segment", "image_path", "SEMANTIC segmentation on the LOCAL Axera AX650 NPU (DeepLabV3+ MobileNet, 21 Pascal VOC classes): a per-pixel class-id PNG, NOT instances (that is offload_segment). Returns {mask_path,classes:[{class_id,label,pixels}],width,height}.", `{"type":"object","properties":{` + img + `,"out_path":{"type":"string","description":"output mask PNG (default: <name>.segmask.png)"}},"required":["image_path"]}`},
+			{"offload_segment", "segment", "image_path", "Instance SEGMENTATION on the LOCAL Axera AX650 NPU: RF-DETR boxes for the 80 COCO classes, each refined to a mask by MobileSAM; everything=true gives class-agnostic masks from a point grid. Writes an instance-id mask PNG (uint8: 0=background, i=instances[i-1]) next to the input or to out_path. Returns {instances:[{label,class_id,x,y,w,h,score}],mask_path,count}.", `{"type":"object","properties":{` + img + `,"everything":{"type":"boolean","description":"true = class-agnostic masks from a point grid (default false = 80 COCO classes)"},"score_threshold":{"type":"number","description":"minimum instance score (default 0.5)"},"out_path":{"type":"string","description":"output mask PNG (default: <name>.mask.png)"}},"required":["image_path"]}`},
+			{"offload_image_embed", "embed", "image_path", "768-d IMAGE embedding on the LOCAL Axera AX650 NPU (SigLIP2 base) for similarity search and clustering. Returns {embedding,dim,space,model}; space=siglip2-base-p16-224 pairs with this device's offload_text_embed and offload_zero_shot, and vectors from other devices are never comparable.", `{"type":"object","properties":{` + img + `},"required":["image_path"]}`},
+			{"offload_text_embed", "text_embed", "text", "TEXT embedding on the LOCAL Axera AX650 NPU in the SAME 768-d space as this device's offload_image_embed (SigLIP2 base): text-to-image search over frames with zero cloud. Returns {embedding,dim,space,model}.", `{"type":"object","properties":{"text":{"type":"string","description":"the text to embed"}},"required":["text"]}`},
+			{"offload_zero_shot", "zero_shot", "image_path", "ZERO-SHOT image classification on the LOCAL Axera AX650 NPU: score an image against free-text labels, both SigLIP2 towers on the NPU. Returns {results:[{label,similarity,prob}],best} ranked best-first.", `{"type":"object","properties":{` + img + `,"labels":{"type":"array","items":{"type":"string"},"description":"candidate labels, free text"},"template":{"type":"string","description":"prompt template (default \"a photo of {}.\")"}},"required":["image_path","labels"]}`},
+			{"offload_depth", "depth", "image_path", "Relative DEPTH map on the LOCAL Axera AX650 NPU (Depth Anything 3 small). Writes an 8-bit PNG (bright = near) at the input's resolution. Returns {depth_path,min,max,mean,model}.", `{"type":"object","properties":{` + img + `,"out_path":{"type":"string","description":"output PNG (default: <name>.depth.png)"}},"required":["image_path"]}`},
+			{"offload_pose", "pose", "image_path", "Human POSE estimation on the LOCAL Axera AX650 NPU (RF-DETR person boxes, then RTMPose-M): people with 17 named COCO keypoints each, in the image's own pixel space. Returns {people:[{x,y,w,h,score,keypoints:{nose:{x,y,score},...}}],count}.", `{"type":"object","properties":{` + img + `,"score_threshold":{"type":"number","description":"minimum person score (default 0.5)"}},"required":["image_path"]}`},
+		}
 	}
 	return nil
 }
@@ -81,6 +97,8 @@ func accelOwns(id string) []string {
 		return []string{"classify_image", "object_detect", "semantic_segment", "image_embed"}
 	case "rknpu":
 		return []string{"classify_image", "object_detect", "image_embed"}
+	case "axera-ax650":
+		return []string{"classify_image", "object_detect", "semantic_segment", "segment", "image_embed", "text_embed", "zero_shot", "depth", "pose"}
 	}
 	return nil
 }
@@ -94,6 +112,10 @@ type accelLaneConfig struct {
 	timeout  time.Duration
 	idleSec  int
 	note     string
+	// telemetry marks a device whose launcher answers `<cmd> --telemetry` with one JSON document
+	// (card temperature, loads, clocks, link, CMM use): accelStatus runs it once while the sidecar
+	// is down, and /fleet/health publishes it. Only the Axera card has one.
+	telemetry bool
 }
 
 func accelLaneConfigFor(cfg config.Config, id string) (accelLaneConfig, bool) {
@@ -104,21 +126,28 @@ func accelLaneConfigFor(cfg config.Config, id string) (accelLaneConfig, bool) {
 			t = 60 * time.Second
 		}
 		return accelLaneConfig{cfg.HailoEndpoint, cfg.HailoSidecarCmd, t, cfg.HailoIdleSec,
-			"on-demand loopback sidecar; the first NPU call starts it (cold ~2 s + HEF load), it exits itself after hailo_idle_sec idle"}, true
+			"on-demand loopback sidecar; the first NPU call starts it (cold ~2 s + HEF load), it exits itself after hailo_idle_sec idle", false}, true
 	case "coral-edgetpu":
 		t := time.Duration(cfg.CoralTimeoutSec) * time.Second
 		if t <= 0 {
 			t = 30 * time.Second
 		}
 		return accelLaneConfig{cfg.CoralEndpoint, cfg.CoralSidecarCmd, t, cfg.CoralIdleSec,
-			"on-demand loopback sidecar (accelerators/coral/server.py); the first call starts it (cold ~0.5-2 s model load on the TPU), it exits itself after coral_idle_sec idle; reads sysfs temp/status, never writes it"}, true
+			"on-demand loopback sidecar (accelerators/coral/server.py); the first call starts it (cold ~0.5-2 s model load on the TPU), it exits itself after coral_idle_sec idle; reads sysfs temp/status, never writes it", false}, true
 	case "rknpu":
 		t := time.Duration(cfg.RknpuTimeoutSec) * time.Second
 		if t <= 0 {
 			t = 60 * time.Second
 		}
 		return accelLaneConfig{cfg.RknpuEndpoint, cfg.RknpuSidecarCmd, t, cfg.RknpuIdleSec,
-			"on-demand loopback sidecar (accelerators/rknpu/server.py); the first call starts it (cold: interpreter start, RKNN runtime init and the model load), it exits itself after rknpu_idle_sec idle; the NPU shares system memory with the host, so a loaded model holds its RAM until then"}, true
+			"on-demand loopback sidecar (accelerators/rknpu/server.py); the first call starts it (cold: interpreter start, RKNN runtime init and the model load), it exits itself after rknpu_idle_sec idle; the NPU shares system memory with the host, so a loaded model holds its RAM until then", false}, true
+	case "axera-ax650":
+		t := time.Duration(cfg.AxeraTimeoutSec) * time.Second
+		if t <= 0 {
+			t = 60 * time.Second
+		}
+		return accelLaneConfig{cfg.AxeraEndpoint, cfg.AxeraSidecarCmd, t, cfg.AxeraIdleSec,
+			"on-demand loopback sidecar (accelerators/axera/server.py on the AXCL runtime); the first call starts it (cold: interpreter start, runtime init, then each model loads on first use in 0.1-6.5 s), it exits itself after axera_idle_sec idle; models live in the card's own memory (CMM), never in host RAM or VRAM", true}, true
 	}
 	return accelLaneConfig{}, false
 }
@@ -380,19 +409,26 @@ func (s *Server) handleFleetAccelTool(id, tool, requiredArg string) mcp.ToolHand
 		if in[requiredArg] == nil || in[requiredArg] == "" {
 			return jsonResult(map[string]any{"deferred": true, "reason": "empty " + requiredArg})
 		}
-		start := time.Now()
-		out, err := accelremote.Call(ctx, s.p.Cfg(), id, tool, in)
-		if err != nil {
-			s.p.RecordAccel(tool, id+FleetOwnerSuffix, sinceMs(start), true, id+" (fleet): "+err.Error())
-			return jsonResult(map[string]any{"deferred": true, "reason": id + " (fleet): " + err.Error()})
-		}
-		tier := id + FleetOwnerSuffix
-		if n := accelPlacementNode(out); n != "" {
-			tier = n + ":" + id
-		}
-		s.p.RecordAccel(tool, tier, sinceMs(start), false, "")
-		return jsonResult(out)
+		return s.fleetAccelCall(ctx, id, tool, in)
 	}
+}
+
+// fleetAccelCall forwards one accelerator tool call through accelremote and records it: a
+// forwarding failure is a device-prefixed defer, the node's own result passes through untouched.
+// offload_ocr engine:"npu" reaches a fleet node's Axera card through it too.
+func (s *Server) fleetAccelCall(ctx context.Context, id, tool string, in map[string]any) (*mcp.CallToolResult, error) {
+	start := time.Now()
+	out, err := accelremote.Call(ctx, s.p.Cfg(), id, tool, in)
+	if err != nil {
+		s.p.RecordAccel(tool, id+FleetOwnerSuffix, sinceMs(start), true, id+" (fleet): "+err.Error())
+		return jsonResult(map[string]any{"deferred": true, "reason": id + " (fleet): " + err.Error()})
+	}
+	tier := id + FleetOwnerSuffix
+	if n := accelPlacementNode(out); n != "" {
+		tier = n + ":" + id
+	}
+	s.p.RecordAccel(tool, tier, sinceMs(start), false, "")
+	return jsonResult(out)
 }
 
 // accelStatus is the status block's `accelerators` entry: one row per listed
@@ -437,6 +473,17 @@ func accelStatus(ctx context.Context, cfg config.Config) map[string]any {
 		pctx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		if h, err := accelclient.NewDevice(id, lc.endpoint, 2*time.Second).Health(pctx); err != nil {
 			entry["health_error"] = err.Error() + " (not running — normal between uses)"
+			// A device with card telemetry still reports it while its sidecar is down: the launcher
+			// answers --telemetry with one JSON document and exits (never spawning the sidecar). The
+			// probe is cached 10 s per device, so a poll loop cannot hammer the card's driver.
+			if lc.telemetry && lc.cmd != "" {
+				if doc, terr := accelclient.OneShotTelemetry(ctx, id, lc.cmd); terr != nil {
+					entry["telemetry_error"] = terr.Error()
+				} else {
+					entry["telemetry"] = doc
+					entry["telemetry_source"] = "one-shot probe (sidecar not running)"
+				}
+			}
 		} else {
 			entry["health"] = h
 		}

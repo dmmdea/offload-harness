@@ -1857,7 +1857,7 @@ type Config struct {
 	// config file or the public repo. A self-hosted NIM needs no key.
 	// --- accelerators (ADR 0024): devices that ride BESIDE the GPU tier ---
 	// Accelerators lists the additive accelerator ids present on this box
-	// ("hailo-8l", "coral-edgetpu", "rknpu"). `profile` stays the one GPU tier; an empty list is
+	// ("hailo-8l", "coral-edgetpu", "rknpu", "axera-ax650"). `profile` stays the one GPU tier; an empty list is
 	// byte-identical to a box with no accelerator — tools/list does not change.
 	Accelerators []string `json:"accelerators,omitempty"`
 	// FleetAccelerators lists accelerator ids this box does NOT carry but may
@@ -1917,6 +1917,24 @@ type Config struct {
 	// RknpuIdleSec is passed to the sidecar as its self-exit idle window, which is also how
 	// long its resident models keep their RAM (the NPU shares system memory). Default 300.
 	RknpuIdleSec int `json:"rknpu_idle_sec,omitempty"`
+	// AxeraEndpoint is the Axera AX650-class NPU sidecar base (accelerators/axera/server.py),
+	// loopback only, port 18816 so a box carrying several devices never collides with the
+	// Hailo's 18813, the Coral's 18814 or the RKNPU's 18815. Inert while Accelerators lacks
+	// "axera-ax650".
+	AxeraEndpoint string `json:"axera_endpoint,omitempty"`
+	// AxeraSidecarCmd launches the Axera sidecar on demand (axera-http.sh). Empty = never
+	// spawn; the harness defers when /health is unreachable. The same launcher answers
+	// `--telemetry` with one JSON document (status and /fleet/health use it while the
+	// sidecar is down).
+	AxeraSidecarCmd string `json:"axera_sidecar_cmd,omitempty"`
+	// AxeraTimeoutSec bounds one Axera call. The NPU answers in milliseconds to seconds, but
+	// a cold call also pays the AXCL runtime init and the model load into the card's own
+	// memory (0.1-6.5 s per model), so 60 is ample. It must stay under accelremote.Budget
+	// less the 45 s cold-spawn window. Default 60.
+	AxeraTimeoutSec int `json:"axera_timeout_sec,omitempty"`
+	// AxeraIdleSec is passed to the sidecar as its self-exit idle window, which is also how
+	// long its models stay loaded in the card's memory (never host RAM). Default 300.
+	AxeraIdleSec int `json:"axera_idle_sec,omitempty"`
 	// --- fleet-node server (`fleet-serve` / `fleet-measure`; docs/FLEET-NODE.md) ---
 	// FleetListen is the fleet-serve bind address. Loopback by default; the
 	// production binding is the machine's TAILSCALE address behind
@@ -2594,6 +2612,9 @@ func Default() Config {
 		RknpuEndpoint:                 "http://127.0.0.1:18815", // loopback sidecar base; inert while Accelerators lacks rknpu
 		RknpuTimeoutSec:               60,
 		RknpuIdleSec:                  300,
+		AxeraEndpoint:                 "http://127.0.0.1:18816", // loopback sidecar base; inert while Accelerators lacks axera-ax650
+		AxeraTimeoutSec:               60,
+		AxeraIdleSec:                  300,
 		FleetListen:                   "127.0.0.1:18811", // fleet-serve bind (18810 = the dispatcher's)
 		FleetNodeID:                   "",                // "" = hostname at serve time
 		FleetMaxQueueDepth:            0,                 // 0 = built-in default (2x fleet_max_concurrent_jobs accepted+running); negative = unlimited

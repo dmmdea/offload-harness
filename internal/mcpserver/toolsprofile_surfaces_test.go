@@ -19,7 +19,7 @@ import (
 
 // gateDevices is every accelerator id the server has a tool table for. TestGateDevicesCoverEveryAcceleratorTable reads the table
 // switch in acceltools.go and fails when this list lacks an id the switch has.
-var gateDevices = []string{"hailo-8l", "coral-edgetpu", "rknpu"}
+var gateDevices = []string{"hailo-8l", "coral-edgetpu", "rknpu", "axera-ax650"}
 
 // gateSurface is one tools/list the server can emit, for the review gate to read.
 type gateSurface struct {

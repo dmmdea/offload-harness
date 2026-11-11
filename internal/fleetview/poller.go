@@ -226,6 +226,7 @@ func (p *Poller) fold(base string, h map[string]any, herr error, j map[string]an
 	n.AgentSeat = str(h, "agent_seat")
 	n.AgentCtx = int(num(h, "agent_ctx_tokens"))
 	n.ServedModels = strs(h, "served_models")
+	n.AccelTelemetry = nestedMaps(h, "accelerator_telemetry")
 	n.QueueDepth = int(num(h, "queue_depth"))
 	n.JobsRunning = int(num(h, "jobs_running"))
 	n.JobsQueued = int(num(h, "jobs_queued"))
@@ -355,6 +356,12 @@ func copyNode(n *Node) Node {
 	}
 	if n.ServedModels != nil {
 		cp.ServedModels = append([]string(nil), n.ServedModels...)
+	}
+	if n.AccelTelemetry != nil {
+		cp.AccelTelemetry = make(map[string]map[string]any, len(n.AccelTelemetry))
+		for id, t := range n.AccelTelemetry {
+			cp.AccelTelemetry[id] = cloneAnyMap(t)
+		}
 	}
 	if n.History != nil {
 		cp.History = append([]Point(nil), n.History...)

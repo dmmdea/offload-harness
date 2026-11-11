@@ -56,6 +56,7 @@ var notMediaLeaseTimeouts = map[string]string{
 	"hailo_timeout_sec":            "an accelerator call",
 	"coral_timeout_sec":            "an accelerator call",
 	"rknpu_timeout_sec":            "an accelerator call",
+	"axera_timeout_sec":            "an accelerator call",
 }
 
 // configTimeoutTags returns every top-level *_timeout_sec JSON key config.Config declares.

@@ -128,6 +128,7 @@ func validateConfiguredBases(c Config) error {
 		{"hailo_endpoint", c.HailoEndpoint},
 		{"coral_endpoint", c.CoralEndpoint},
 		{"rknpu_endpoint", c.RknpuEndpoint},
+		{"axera_endpoint", c.AxeraEndpoint},
 		{"pair_workloads_endpoint", c.PairWorkloadsEndpoint},
 		{"pair_node_info_url", c.PairNodeInfoURL},
 	} {

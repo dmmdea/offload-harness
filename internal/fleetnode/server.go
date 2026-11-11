@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/accelclient"
 	"github.com/dmmdea/offload-harness/internal/backendchain"
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
@@ -226,6 +227,9 @@ type Server struct {
 	// the list health publishes. The standalone Hailo-8L is never in it, whoever
 	// built Options and whatever the manifest says. nil on a node with none.
 	accelerators []string
+	// accelTelemetry caches the per-device card telemetry health publishes (accelerator_telemetry),
+	// refreshed in the background so a health request never waits on a card or a launcher.
+	accelTelemetry *accelclient.TelemetryCollector
 	// imageFamilies is the named-family advertisement (ADR 0058), computed once
 	// like families; nil on a node without named families (key omitted).
 	imageFamilies []ImageFamily
@@ -537,6 +541,7 @@ func New(runner Runner, jobs *Jobs, opts Options) *Server {
 		jobs:               jobs,
 		opts:               opts,
 		accelerators:       config.FleetVisibleAccelerators(opts.Accelerators),
+		accelTelemetry:     accelclient.NewTelemetryCollector(),
 		imageFamilies:      ImageFamilies(opts.Cfg),
 		agentSeat:          opts.Cfg.AgentPlannerModel(""),
 		agentLane:          AgentLaneAdmissible(opts.Cfg, opts.LoopbackListener),
@@ -1320,8 +1325,14 @@ type healthPayload struct {
 	// without the local-only devices (register E-08). Additive + omitempty: a
 	// node with none emits a byte-identical payload.
 	Accelerators []string `json:"accelerators,omitempty"`
-	VramTotalGb  float64  `json:"vram_total_gb"`
-	VramFreeGb   float64  `json:"vram_free_gb"`
+	// AcceleratorTelemetry is the compact card telemetry of each advertised device that has any
+	// (today the Axera card): temperature, loads, clocks, PCIe link, card memory, process count and
+	// whether its sidecar is up, sourced from the sidecar's /health or a one-shot launcher probe and
+	// cached 15 s off the request path. Absent for a node with none; a device with no reading yet is
+	// absent, never zeroed.
+	AcceleratorTelemetry map[string]map[string]any `json:"accelerator_telemetry,omitempty"`
+	VramTotalGb          float64                   `json:"vram_total_gb"`
+	VramFreeGb           float64                   `json:"vram_free_gb"`
 	// GpuDevices is the full per-device breakdown behind VramTotalGb/
 	// VramFreeGb's headline pick (nvidia-smi multi-device source only — see
 	// HeadlineDevice for the largest-total-wins rule those two fields apply).
@@ -1859,6 +1870,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}
 	// Which engine answers for each lane and seat: a cached read, one background refresh per TTL.
 	payload.LaneBackends, payload.SeatBackends = s.activeBackends()
+	payload.AcceleratorTelemetry = s.acceleratorTelemetry()
 	// The image recipe (ADR 0082) is published by a node that serves image-gen, from a memo; the node carries
 	// `refine` on that task exactly when it serves it.
 	for _, t := range tasks {

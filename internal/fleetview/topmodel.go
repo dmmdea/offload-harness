@@ -86,6 +86,26 @@ func RenderTop(o Overview, width int) string {
 		}
 	}
 
+	// ACCELERATORS: one line per device a node publishes card telemetry for (health
+	// accelerator_telemetry). A node that published none has no lines.
+	accelHeader := false
+	for _, n := range o.Nodes {
+		if !n.Reachable || len(n.AccelTelemetry) == 0 {
+			continue
+		}
+		if !accelHeader {
+			b.WriteString("\nACCELERATORS\n")
+			accelHeader = true
+		}
+		name := n.NodeID
+		if name == "" {
+			name = n.Base
+		}
+		for _, id := range accelTelemetryIDs(n.AccelTelemetry) {
+			fmt.Fprintf(&b, "%-20s %s\n", name, truncate(AccelTelemetryLine(id, n.AccelTelemetry[id]), width-21))
+		}
+	}
+
 	b.WriteString("\nJOBS\n")
 	for _, j := range recentJobs(o, 15) {
 		wall := ""

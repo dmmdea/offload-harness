@@ -1247,6 +1247,15 @@ A box can apply a GPU power limit and a clock lock at boot with a separate tool,
 - **What leaves the node.** A state, a token, the cards' power limits, whether a clock-lock step succeeded and the record's time. Never the record's host, path, detail or step text: the clock lock is matched in the step's description and only the fact is published, and the limits are the record's `boards[].power_limit_w`, published only when the state is `ok`. A shape of `boards` or `steps` this reader does not know costs those two fields, never the verdict.
 - **Not read by placement.** The fleet block shows it; no gate, ranking or deal consults it.
 
+## Accelerator card telemetry (`accelerator_telemetry`)
+
+Health publishes the card state of an accelerator that has any, keyed by device id; today that is the Axera card (`axera-ax650`). The field list is in [FLEET-NODE.md](../FLEET-NODE.md#accelerator-card-telemetry-accelerator_telemetry); this section is how it is produced and read.
+
+- **Source.** The sidecar's `GET /health` carries a `telemetry` document while it runs; while it is down the launcher answers `<axera_sidecar_cmd> --telemetry` with the same document and exits (`accelclient.ProbeCmd`, 6 s, never starting the sidecar). Both shapes are one document of `cards[]`; the compact object is `cards[0]` (`accelclient.CompactTelemetry`). `offload_status.accelerators.<id>` carries the full document as `telemetry` with `telemetry_source` (`one-shot probe (sidecar not running)`) when the sidecar is down, or `telemetry_error`; the one-shot is cached 10 s per device.
+- **Off the request path.** `fleetnode` holds an `accelclient.TelemetryCollector`: `Get` returns the cached compact object and, when it is older than 15 s, starts one background refresh per device (never two in flight). A device with nothing read yet is absent from the first health answers, not zeroed. A failed reading is published as `{error, sidecar_up, sampled_at}`.
+- **Fleet-visible devices only, and only those listed locally.** The loop walks the advertised `accelerators` (so never the local-only Hailo-8L) and keeps the devices in the node's own `accelerators` config, where the endpoint and launcher live.
+- **Readers.** `delegate.NodeView.AcceleratorTelemetry` (wire `accelerator_telemetry`), the `offload_status` fleet node row, `fleetview.Node.AccelTelemetry` and its line formatter `AccelTelemetryLine` (the page's `ui.html` carries the same format in JS, `top` calls the Go one). Placement does not read it.
+
 ## The acceptance gate (`local-offload acceptance`)
 
 A node must pass this before it is handed work. It is deliberately NOT `doctor`: doctor

@@ -202,7 +202,7 @@ func seedOwnedKeys(doc tierseed.Doc, home string) map[string]bool {
 			owned[k] = true
 		}
 	}
-	// Accelerator rows (hailo-8l, coral-edgetpu, rknpu) seed their own keys, so the audit owns
+	// Accelerator rows (hailo-8l, coral-edgetpu, rknpu, axera-ax650) seed their own keys, so the audit owns
 	// them too; withLiveAccelerators puts the seed of the devices a node lists into what the node
 	// is compared with. Resolving needs every device's home (accelOptions) — with any one empty
 	// the whole resolution failed and this skipped it, so no accelerator key was ever owned.

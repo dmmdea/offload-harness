@@ -1,6 +1,7 @@
 package accelclient
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -16,7 +17,7 @@ import (
 // ErrNoSidecarCmd: the sidecar is down and this box has no way to start it
 // (no <device>_sidecar_cmd configured). One sentinel for every device — callers
 // compare identity, and the device is on the wrapping error's prefix.
-var ErrNoSidecarCmd = errors.New("sidecar not running and no launcher configured (hailo_sidecar_cmd / coral_sidecar_cmd / rknpu_sidecar_cmd)")
+var ErrNoSidecarCmd = errors.New("sidecar not running and no launcher configured (hailo_sidecar_cmd / coral_sidecar_cmd / rknpu_sidecar_cmd / axera_sidecar_cmd)")
 
 // Sidecar starts the HTTP sidecar ON DEMAND (operator decision 2026-08-22: no
 // scheduler, no always-on service — the sidecar self-exits idle, the harness
@@ -82,4 +83,39 @@ func SpawnCmd(cmdPath string, idleSec int) func() error {
 		go cmd.Wait() // reap; never block the caller
 		return nil
 	}
+}
+
+// ProbeCmd runs the configured launcher ONCE with the given extra arguments (the Axera
+// launcher's `--telemetry`), waits for it, and returns its stdout. It is the run-and-capture
+// sibling of SpawnCmd: the same shell wrapping, but attached, bounded by ctx (the process is
+// killed when ctx ends) and never leaving anything running. A non-zero exit is an error that
+// carries the first line of stderr. It starts no sidecar: the launcher is trusted to answer these
+// arguments and exit without serving.
+func ProbeCmd(ctx context.Context, cmdPath string, args ...string) ([]byte, error) {
+	line := cmdPath
+	for _, a := range args {
+		line += " " + a
+	}
+	var cmd *exec.Cmd
+	if runtime.GOOS == "windows" {
+		cmd = winexec.CommandContext(ctx, "cmd.exe", "/c", line)
+	} else {
+		cmd = winexec.CommandContext(ctx, "sh", "-c", line)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		msg := bytes.TrimSpace(stderr.Bytes())
+		if i := bytes.IndexByte(msg, '\n'); i >= 0 {
+			msg = msg[:i]
+		}
+		if len(msg) > 0 {
+			return nil, fmt.Errorf("%w: %s", err, msg)
+		}
+		return nil, err
+	}
+	return stdout.Bytes(), nil
 }

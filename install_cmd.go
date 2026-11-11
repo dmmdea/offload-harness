@@ -187,6 +187,7 @@ func runInstallSeed(args []string) error {
 	hailoHome := fs.String("hailo-home", "", "Hailo repo checkout __HAILO_HOME__ expands to (default: $HAILO_HOME, else <home>/hailo)")
 	coralHome := fs.String("coral-home", "", "Coral sidecar home __CORAL_HOME__ expands to (default: $CORAL_HOME, else <home>/coral)")
 	rknpuHome := fs.String("rknpu-home", "", "RKNPU sidecar home __RKNPU_HOME__ expands to (default: $RKNPU_HOME, else <home>/rknpu)")
+	axeraHome := fs.String("axera-home", "", "Axera sidecar home __AXERA_HOME__ expands to (default: $AXERA_HOME, else <home>/axera)")
 	_ = fs.Parse(args)
 	if *profile == "" {
 		return fmt.Errorf("install seed needs --profile <tier id>")
@@ -234,7 +235,7 @@ func runInstallSeed(args []string) error {
 			return err
 		}
 		accSeed, err := tierseed.ResolveAccelerators(doc.Accelerators, ids,
-			accelOptions(tierseed.Options{Home: *home, GOOS: *goos}, *hailoHome, *coralHome, *rknpuHome))
+			accelOptions(tierseed.Options{Home: *home, GOOS: *goos, AxeraHome: *axeraHome}, *hailoHome, *coralHome, *rknpuHome))
 		if err != nil {
 			return err
 		}
@@ -274,11 +275,13 @@ func splitIDs(v string) []string {
 // all resolve accelerator seeds, and the resolver refuses a token whose home is
 // empty, so each must supply EVERY device's home — a verb that passed only the
 // Hailo's failed on any box that also lists another device. A new device is one
-// line here.
+// line here. The Axera home rides in on opt.AxeraHome (the --axera-home flag, "" when the
+// verb has none) so the positional signature every caller uses stays as it is.
 func accelOptions(opt tierseed.Options, hailoFlag, coralFlag, rknpuFlag string) tierseed.Options {
 	opt.HailoHome = homeOr(hailoFlag, "HAILO_HOME", opt.Home, "hailo")
 	opt.CoralHome = homeOr(coralFlag, "CORAL_HOME", opt.Home, "coral")
 	opt.RknpuHome = homeOr(rknpuFlag, "RKNPU_HOME", opt.Home, "rknpu")
+	opt.AxeraHome = homeOr(opt.AxeraHome, "AXERA_HOME", opt.Home, "axera")
 	return opt
 }
 

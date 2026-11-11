@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -208,12 +209,24 @@ func (s *Server) handleOCR(ctx context.Context, req *mcp.CallToolRequest) (*mcp.
 			// The route places the GPU vision model; the NPU path is this box's
 			// own sidecar and never travels. Refuse rather than silently run
 			// local under a route the caller asked for.
-			return jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("route %q applies to engine gpu only; engine npu always runs this box's Hailo sidecar", in.Route)})
+			return jsonResult(map[string]any{"deferred": true, "reason": fmt.Sprintf("route %q applies to engine gpu only; engine npu always runs this box's own NPU sidecar", in.Route)})
 		}
-		if !s.p.Cfg().HasAccelerator("hailo-8l") {
-			return jsonResult(map[string]any{"deferred": true, "reason": "engine:npu requested but this box lists no hailo-8l accelerator"})
+		// Hailo listed: its OCR, unchanged. Else the Axera card's PP-OCRv5 through the same
+		// accelerator lane as its other tools: this box's own card, or the fleet node's that
+		// carries one (fleet_accelerators; the image travels with the job like every forwarded
+		// accelerator call). Neither: an honest defer.
+		switch cfg := s.p.Cfg(); {
+		case cfg.HasAccelerator("hailo-8l"):
+			return s.hailoCall(ctx, "ocr", map[string]any{"image_path": in.Image})
+		case cfg.HasAccelerator("axera-ax650"):
+			return s.accelCall(ctx, "axera-ax650", "ocr", map[string]any{"image_path": in.Image})
+		case slices.Contains(cfg.FleetAccelerators, "axera-ax650"):
+			if strings.TrimSpace(in.Image) == "" {
+				return jsonResult(map[string]any{"deferred": true, "reason": "empty image"})
+			}
+			return s.fleetAccelCall(ctx, "axera-ax650", "ocr", map[string]any{"image_path": in.Image})
 		}
-		return s.hailoCall(ctx, "ocr", map[string]any{"image_path": in.Image})
+		return jsonResult(map[string]any{"deferred": true, "reason": "engine:npu requested but this box lists no NPU with OCR (hailo-8l, or axera-ax650 here or in fleet_accelerators)"})
 	default:
 		// An unrecognized engine must not silently become a GPU call — the
 		// result would be indistinguishable from an intentional one (loop-side

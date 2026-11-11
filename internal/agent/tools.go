@@ -81,7 +81,7 @@ func readOnlyTools(root string, offload OffloadFunc, npu NPUFunc, lanes []AccelL
 	tools = append(tools, searchTool)
 
 	if offload != nil {
-		tools = append(tools, offloadTools(offload, npu)...)
+		tools = append(tools, offloadTools(offload, npu, axeraOCRLane(lanes))...)
 		tools = append(tools, summarizeFileTool(s, offload))
 	}
 	// Accelerator tools (ADR 0024): registered ONLY when the box wires an
@@ -93,6 +93,24 @@ func readOnlyTools(root string, offload OffloadFunc, npu NPUFunc, lanes []AccelL
 		tools = append(tools, npuTools(npu)...)
 	}
 	return tools, nil
+}
+
+// axeraOCRLane is the Axera card's lane Call for offload_ocr engine:npu when the box has no Hailo:
+// this box's own card when it lists one, else the fleet lane that forwards to the node carrying it
+// (the image travels with the call, as on every forwarded accelerator tool), else nil. The MCP
+// surface's offload_ocr makes the same choice.
+func axeraOCRLane(lanes []AccelLane) NPUFunc {
+	var remote NPUFunc
+	for _, l := range lanes {
+		if l.ID != "axera-ax650" || l.Call == nil {
+			continue
+		}
+		if !l.Remote {
+			return l.Call
+		}
+		remote = l.Call
+	}
+	return remote
 }
 
 // summarizeFileTool digests a workspace file on the free offload cascade WITHOUT
@@ -336,7 +354,7 @@ func (s *scope) readFile(_ context.Context, args string) (string, error) {
 // offloadTools wraps the in-process offloader as four local tools. Each returns
 // the offload Result JSON as the tool result; an offloader error propagates and
 // the loop feeds it back as an is_error tool result (defer-not-crash).
-func offloadTools(offload OffloadFunc, npu NPUFunc) []Tool {
+func offloadTools(offload OffloadFunc, npu NPUFunc, axeraOCR NPUFunc) []Tool {
 	mk := func(name, task, desc, schema string, build func(json.RawMessage) (string, map[string]any, error)) Tool {
 		return Tool{
 			ToolSpec: ToolSpec{Name: name, Description: desc, Schema: json.RawMessage(schema)},
@@ -443,8 +461,8 @@ func offloadTools(offload OffloadFunc, npu NPUFunc) []Tool {
 		{
 			ToolSpec: ToolSpec{
 				Name:        "offload_ocr",
-				Description: "Transcribe the text in an IMAGE on a free local vision model, without the image entering the agent's context. path must be a real image file. Optional engine: gpu (default) = the local vision model; npu = the Hailo-8L fast-batch OCR when this box has the accelerator. Returns {text} or a defer.",
-				Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"path to the image file to transcribe"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local vision model; npu: the Hailo-8L fast-batch OCR when this box has the accelerator"}},"required":["path"]}`),
+				Description: "Transcribe the text in an IMAGE on a free local vision model, without the image entering the agent's context. path must be a real image file. Optional engine: gpu (default) = the local vision model; npu = the NPU OCR (Hailo-8L, or Axera AX650 PP-OCRv5) when this box has one. Returns {text} or a defer.",
+				Schema:      json.RawMessage(`{"type":"object","properties":{"path":{"type":"string","description":"path to the image file to transcribe"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local vision model; npu: the NPU OCR (Hailo-8L, or Axera AX650 PP-OCRv5) when this box has one"}},"required":["path"]}`),
 			},
 			Exec: func(ctx context.Context, args string) (string, error) {
 				var in struct {
@@ -458,10 +476,15 @@ func offloadTools(offload OffloadFunc, npu NPUFunc) []Tool {
 				case "", "gpu":
 					return offload(ctx, "ocr", "", map[string]any{"image": in.Path})
 				case "npu":
-					if npu == nil {
-						return `{"deferred":true,"reason":"engine:npu requested but this box lists no hailo-8l accelerator; omit engine to use the vision model"}`, nil
+					// Hailo listed: its OCR, unchanged. Else the Axera card's PP-OCRv5 through its
+					// lane (this box's card, or the fleet node's). Neither: an honest defer.
+					if npu != nil {
+						return npu(ctx, "ocr", map[string]any{"image_path": in.Path})
 					}
-					return npu(ctx, "ocr", map[string]any{"image_path": in.Path})
+					if axeraOCR != nil {
+						return axeraOCR(ctx, "ocr", map[string]any{"image_path": in.Path})
+					}
+					return `{"deferred":true,"reason":"engine:npu requested but this box lists no NPU with OCR (hailo-8l, or axera-ax650 here or in fleet_accelerators); omit engine to use the vision model"}`, nil
 				default:
 					// An unrecognized engine must not silently become a GPU call —
 					// the result would be indistinguishable from an intentional one.

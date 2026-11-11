@@ -95,6 +95,44 @@ func rknpuTools(call NPUFunc) []Tool {
 	}
 }
 
+// axeraTools is the Axera AX650-class NPU's tool table: nine capabilities on an M.2 card reached
+// through the loopback sidecar, names and schemas equal to the MCP rows. Most names are ones the
+// other devices also own, so the shared-name rule in accelLaneTools decides who registers them on
+// a box carrying more than one device; text_embed and zero_shot pair with THIS device's
+// image_embed (siglip2-base-p16-224).
+func axeraTools(call NPUFunc) []Tool {
+	img := `"image_path":{"type":"string","description":"local image file path (JPEG/PNG)"}`
+	return []Tool{
+		laneTool(call, "offload_classify_image", "classify", "image_path",
+			"Classify an image on the LOCAL Axera AX650 NPU (free, on-box; 1000 ImageNet classes by SigLIP2 zero-shot over the class names). Returns {results:[{label,score}],best,model,domain} top-k (default 5) or a defer.",
+			`{"type":"object","properties":{`+img+`,"top_k":{"type":"integer","description":"results to return (default 5)"}},"required":["image_path"]}`),
+		laneTool(call, "offload_object_detect", "object_detect", "image_path",
+			"Detect the 80 COCO object classes (person, car, dog, laptop, ...) on the LOCAL Axera AX650 NPU (RF-DETR small, free, on-box). Returns {objects:[{label,class_id,x,y,w,h,score}],count} in image pixels, sorted by score or a defer.",
+			`{"type":"object","properties":{`+img+`,"score_threshold":{"type":"number","description":"minimum score (default 0.5)"}},"required":["image_path"]}`),
+		laneTool(call, "offload_semantic_segment", "semantic_segment", "image_path",
+			"SEMANTIC segmentation on the LOCAL Axera AX650 NPU (DeepLabV3+ MobileNet, 21 Pascal VOC classes): a per-pixel class-id PNG, NOT instances (that is offload_segment). Returns {mask_path,classes:[{class_id,label,pixels}],width,height} or a defer.",
+			`{"type":"object","properties":{`+img+`,"out_path":{"type":"string","description":"output mask PNG (default: <name>.segmask.png)"}},"required":["image_path"]}`),
+		laneTool(call, "offload_segment", "segment", "image_path",
+			"Instance SEGMENTATION on the LOCAL Axera AX650 NPU: RF-DETR boxes for the 80 COCO classes, each refined to a mask by MobileSAM; everything=true gives class-agnostic masks from a point grid. Writes an instance-id mask PNG (uint8: 0=background, i=instances[i-1]) next to the input or to out_path. Returns {instances:[{label,class_id,x,y,w,h,score}],mask_path,count} or a defer.",
+			`{"type":"object","properties":{`+img+`,"everything":{"type":"boolean","description":"true = class-agnostic masks from a point grid (default false = 80 COCO classes)"},"score_threshold":{"type":"number","description":"minimum instance score (default 0.5)"},"out_path":{"type":"string","description":"output mask PNG (default: <name>.mask.png)"}},"required":["image_path"]}`),
+		laneTool(call, "offload_image_embed", "embed", "image_path",
+			"768-d IMAGE embedding on the LOCAL Axera AX650 NPU (SigLIP2 base) for similarity search and clustering. Returns {embedding,dim,space,model}; space=siglip2-base-p16-224 pairs with this device's offload_text_embed and offload_zero_shot, and vectors from other devices are never comparable.",
+			`{"type":"object","properties":{`+img+`},"required":["image_path"]}`),
+		laneTool(call, "offload_text_embed", "text_embed", "text",
+			"TEXT embedding on the LOCAL Axera AX650 NPU in the SAME 768-d space as this device's offload_image_embed (SigLIP2 base): text-to-image search over frames with zero cloud. Returns {embedding,dim,space,model} or a defer.",
+			`{"type":"object","properties":{"text":{"type":"string","description":"the text to embed"}},"required":["text"]}`),
+		laneTool(call, "offload_zero_shot", "zero_shot", "image_path",
+			"ZERO-SHOT image classification on the LOCAL Axera AX650 NPU: score an image against free-text labels, both SigLIP2 towers on the NPU. Returns {results:[{label,similarity,prob}],best} ranked best-first or a defer.",
+			`{"type":"object","properties":{`+img+`,"labels":{"type":"array","items":{"type":"string"},"description":"candidate labels, free text"},"template":{"type":"string","description":"prompt template (default \"a photo of {}.\")"}},"required":["image_path","labels"]}`),
+		laneTool(call, "offload_depth", "depth", "image_path",
+			"Relative DEPTH map on the LOCAL Axera AX650 NPU (Depth Anything 3 small). Writes an 8-bit PNG (bright = near) at the input's resolution. Returns {depth_path,min,max,mean,model} or a defer.",
+			`{"type":"object","properties":{`+img+`,"out_path":{"type":"string","description":"output PNG (default: <name>.depth.png)"}},"required":["image_path"]}`),
+		laneTool(call, "offload_pose", "pose", "image_path",
+			"Human POSE estimation on the LOCAL Axera AX650 NPU (RF-DETR person boxes, then RTMPose-M): people with 17 named COCO keypoints each, in the image's own pixel space. Returns {people:[{x,y,w,h,score,keypoints:{nose:{x,y,score},...}}],count} or a defer.",
+			`{"type":"object","properties":{`+img+`,"score_threshold":{"type":"number","description":"minimum person score (default 0.5)"}},"required":["image_path"]}`),
+	}
+}
+
 // laneToolsFor maps an accelerator id to its tool table. An unknown id has no
 // table and registers nothing — the loop must never invent tools for a device
 // it has no adapter for.
@@ -106,6 +144,8 @@ func laneToolsFor(id string, call NPUFunc) []Tool {
 		return coralTools(call)
 	case "rknpu":
 		return rknpuTools(call)
+	case "axera-ax650":
+		return axeraTools(call)
 	}
 	return nil
 }

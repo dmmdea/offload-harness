@@ -54,9 +54,9 @@
     "notes": "operator-facing caveats."
   },
   "_accelerator_fields": {
-    "kind": "npu | tpu — the device class (hailo-8l and rknpu are npus, coral-edgetpu a tpu). An accelerator is ADDITIVE to a box's GPU tier (ADR 0024): `profile` stays one string and `accelerators` lists what rides beside it.",
+    "kind": "npu | tpu — the device class (hailo-8l, rknpu and axera-ax650 are npus, coral-edgetpu a tpu). An accelerator is ADDITIVE to a box's GPU tier (ADR 0024): `profile` stays one string and `accelerators` lists what rides beside it.",
     "owns": "the offload_* capabilities this accelerator serves EXCLUSIVELY when present; the GPU tier keeps everything else (VQA/description stay on the VLM; OCR stays GPU-primary with engine:npu as the caller's explicit fast path).",
-    "config_seed": "config.json keys merged AFTER the GPU tier's seed (internal/tierseed.ResolveAccelerators). Each device has its own home token: __HAILO_HOME__ expands to the Hailo repo checkout (installer env HAILO_HOME, default <OFFLOAD_HOME>/hailo), __CORAL_HOME__ to the Coral sidecar home (CORAL_HOME, default <OFFLOAD_HOME>/coral), __RKNPU_HOME__ to the RKNPU sidecar home (RKNPU_HOME, default <OFFLOAD_HOME>/rknpu).",
+    "config_seed": "config.json keys merged AFTER the GPU tier's seed (internal/tierseed.ResolveAccelerators). Each device has its own home token: __HAILO_HOME__ expands to the Hailo repo checkout (installer env HAILO_HOME, default <OFFLOAD_HOME>/hailo), __CORAL_HOME__ to the Coral sidecar home (CORAL_HOME, default <OFFLOAD_HOME>/coral), __RKNPU_HOME__ to the RKNPU sidecar home (RKNPU_HOME, default <OFFLOAD_HOME>/rknpu), __AXERA_HOME__ to the Axera sidecar home (AXERA_HOME, default <OFFLOAD_HOME>/axera).",
     "detect": "how detect.ps1 / hwdetect recognise the device — documentation of the rule implemented in code."
   },
   "accelerators": {
@@ -125,6 +125,31 @@
         "rknpu_idle_sec": 300
       },
       "notes": "Rockchip RK3588 / RK3588S NPU (6 TOPS, 3 cores). Driver: the vendor rknpu, built into the 6.1 BSP kernel or, on a mainline kernel, the out-of-tree DKMS build (0.9.8) with the in-tree `rocket` driver blacklisted — rocket is a different driver that the RKNN runtime does not use. Measured on <node-d> (RK3588S: 4x A55 + 4x A76, 7.7 GiB shared LPDDR4X): librknnrt 2.3.2 ran resnet18_for_rk3588.rknn (the Rockchip prebuilt the sidecar served until 2026-09-30; core mask 0_1_2) at 2.94 ms/inference (340 FPS) on the vendor kernel's driver 0.9.7 and at 3.58 ms (279.5 FPS) on the mainline 7.0 kernel with the DKMS driver 0.9.8. The models the sidecar serves now — PP-YOLOE+ s int8 (object_detect), ResNet-50 with torchvision IMAGENET1K_V2 weights (classify_image) and CLIP ViT-B/32 (image_embed), none under an AGPL or GPL licence — were converted and checked on the toolkit's simulator on 2026-09-30 and have not run on the NPU yet, so their latency is unmeasured. An .rknn is compiled for one target SoC (rk3588). The sidecar (accelerators/rknpu/server.py) speaks the Coral's contract — harness-spawned on demand over loopback, self-exits idle, models verified by sha256 — and serves three capabilities in v1: classify_image (ImageNet), object_detect (COCO), image_embed (a CLIP-class image tower; the result names its `space`, which is not the Hailo's TinyCLIP or the Coral's EfficientNet at any dimension). All three names are shared with the Hailo and/or the Coral, so the shared-name rule (ADR 0037) gives each to the FIRST listed owner. No text tower is served: no text_embed / zero_shot, and OCR / STT engine:npu stay Hailo-only. The NPU shares system memory with the host, so a resident model holds RAM until rknpu_idle_sec passes. The service user must be able to open the NPU's DRM node under /dev/dri (root, or a member of the node's group: render on the reference board). Linux only."
+    },
+    "axera-ax650": {
+      "kind": "npu",
+      "owns": [
+        "classify_image",
+        "object_detect",
+        "semantic_segment",
+        "segment",
+        "image_embed",
+        "text_embed",
+        "zero_shot",
+        "depth",
+        "pose"
+      ],
+      "detect": "some line of /proc/bus/pci/devices, split on whitespace, has the card's vendor+device id 1f4b0650 (case-insensitive hex) as its second field AND the host driver name ax_pcie_dev_host as its last field (the Axera AX650-class card with its AXCL host driver bound). Both are required: the id alone is a card with no driver, and a read that succeeds proves nothing. Linux only — Windows has no /proc and never matches",
+      "config_seed": {
+        "accelerators": [
+          "axera-ax650"
+        ],
+        "axera_endpoint": "http://127.0.0.1:18816",
+        "axera_sidecar_cmd": "__AXERA_HOME__/axera-http.sh",
+        "axera_timeout_sec": 60,
+        "axera_idle_sec": 300
+      },
+      "notes": "An AX650-class NPU on an M.2 card, 4 GB of card memory of which 2944 MiB is the CMM pool models load into; AXCL host runtime. Models measured on the card: see docs/systems/accelerators.md. The sidecar (accelerators/axera/server.py) speaks the Coral's contract (harness-spawned on demand over loopback, self-exits idle) and serves nine capabilities: classify_image, object_detect, semantic_segment, segment, image_embed, text_embed, zero_shot, depth and pose, plus an ocr tool reached only through offload_ocr engine:npu when the box lists no Hailo. Models live in the card's own memory, never in host RAM or VRAM. The names it shares with the Hailo, the Coral or the RKNPU follow the shared-name rule (ADR 0037): the first listed owner takes each. Its image and text embeddings share one 768-d space named in every result; vectors from another device are never comparable. `<axera_sidecar_cmd> --telemetry` prints one JSON document of card telemetry (temperature, loads, clocks, link, CMM use) without starting the sidecar; offload_status and /fleet/health use it while the sidecar is down. Linux only."
     }
   },
   "cache_ram_mib_by_ram_tier": { "min": 1024, "low": 8192, "mid": 16384, "high": 24576 },

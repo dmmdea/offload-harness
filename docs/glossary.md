@@ -13,6 +13,14 @@ A fleet node's `202` response accepting a dispatched job. It means "this job is 
 job is finished". Duplicate dispatches of a non-failed job re-ack rather than starting a second run —
 see [flows/fleet-job-lifecycle.md](flows/fleet-job-lifecycle.md).
 
+## AXCL
+
+The vendor's host runtime for the Axera AX650-class NPU card: a kernel driver (`ax_pcie_dev_host`) and a library under
+`/usr/lib/axcl` through which a host process loads models onto the card and reads its state. The Axera sidecar reaches
+the card through pyaxengine, the publisher's Python binding of this runtime, and reads telemetry from the runtime
+library directly rather than through the single-instance vendor CLI. See
+[systems/accelerators.md](systems/accelerators.md) and [ADR 0101](architecture/decisions/0101-axera-ax650-npu-card-as-an-accelerator.md).
+
 ## Backlog gate
 
 The delegator's rule that holds a fleet node out of a placement when a new job would wait longer to START
@@ -47,6 +55,13 @@ backlog gate is skipped. See [ADR 0063](architecture/decisions/0063-placement-ho
 The ordered set of model Tiers an offload task walks, entering at the smallest capable tier and
 escalating only when a result fails validation or lands below a confidence threshold. Exhausting the
 Cascade produces a Defer rather than an error. The Cascade never calls a remote model.
+
+## CMM
+
+The contiguous memory pool on an Axera card (2944 MiB of its 4 GB) that every model loads into. It is the card's own
+memory, never host RAM or VRAM, and the sidecar's LRU budget (`AXERA_CMM_BUDGET_MIB`, default 1536 MiB) keeps loaded
+sessions inside it so a later NPU LLM seat keeps its share. Telemetry reports `cmm_total_mib`, `cmm_used_mib` and
+`cmm_free_mib`. See [systems/accelerators.md](systems/accelerators.md).
 
 ## Composition
 

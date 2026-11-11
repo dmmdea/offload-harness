@@ -50,6 +50,10 @@ type Node struct {
 	AgentSeat     string   `json:"agent_seat,omitempty"`
 	AgentCtx      int      `json:"agent_ctx_tokens"`
 	ServedModels  []string `json:"served_models,omitempty"`
+	// AccelTelemetry is each accelerator's compact card telemetry as the node published it (health
+	// accelerator_telemetry, today the Axera card), keyed by device id; the page and `top` render one
+	// line per device (AccelTelemetryLine). Absent on a node with none.
+	AccelTelemetry map[string]map[string]any `json:"accelerator_telemetry,omitempty"`
 
 	QueueDepth    int `json:"queue_depth"`
 	JobsRunning   int `json:"jobs_running"`

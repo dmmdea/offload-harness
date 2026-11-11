@@ -150,7 +150,7 @@ func TestOCREngineNPURoutesToSidecar(t *testing.T) {
 func TestOCREngineNPUWithoutAcceleratorDefers(t *testing.T) {
 	s := New(pipeline.New(config.Default(), nil, nil, nil))
 	res, _ := s.handleOCR(context.Background(), &mcp.CallToolRequest{Params: &mcp.CallToolParamsRaw{Arguments: json.RawMessage(`{"image":"a.jpg","engine":"npu"}`)}})
-	if out := callText(t, res); !strings.Contains(out, `"deferred":true`) || !strings.Contains(out, "no hailo-8l") {
+	if out := callText(t, res); !strings.Contains(out, `"deferred":true`) || !strings.Contains(out, "no NPU with OCR") {
 		t.Fatalf("engine:npu on a box without the accelerator must defer plainly, got %s", out)
 	}
 }

@@ -500,7 +500,7 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	srv.AddTool(&mcp.Tool{
 		Name:        "offload_ocr",
 		Description: "Transcribe ALL text in an IMAGE on a free local vision model (OCR). image is a local file path or a data:image/... URI. Returns {text} with the transcribed text in reading order; if it can't transcribe confidently it returns deferred:true and you should read the image yourself. route (default local; engine gpu only) can place the call on a fleet node's vision seat over the tailnet when this box's GPU is busy (auto) or unconditionally (remote); meta.node / meta.placement report where it ran.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local vision model; npu: the Hailo-8L PaddleOCR path when this box has the accelerator (fast batch transcription)"},` + visionRouteSchema + `},"required":["image"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"image":{"type":"string","description":"local image file path or a data:image/...;base64 URI"},"engine":{"type":"string","enum":["gpu","npu"],"description":"gpu (default): the local vision model; npu: the NPU OCR (Hailo-8L, or Axera AX650 PP-OCRv5) when this box has one (fast batch transcription)"},` + visionRouteSchema + `},"required":["image"]}`),
 	}, s.handleOCR)
 
 	srv.AddTool(&mcp.Tool{

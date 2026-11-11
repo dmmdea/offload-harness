@@ -1030,6 +1030,50 @@ the fleet node runs as must be able to open the NPU's DRM node (group `render` o
 board), and the NPU shares system memory with the host, so a loaded model holds its RAM until the
 idle exit.
 
+### Accelerators (axera-ax650)
+
+The Axera AX650-class NPU on an M.2 card is the fourth accelerator (ADR 0024 + ADR 0037 + ADR 0101;
+`docs/systems/accelerators.md`). Detection reads `/proc/bus/pci/devices` for a line whose second field is
+`1f4b0650` and whose last field is the driver `ax_pcie_dev_host`, so it is **Linux only** and needs the vendor's AXCL
+host package installed first (driver plus `/usr/lib/axcl`; the card's nodes under `/dev` are world-accessible).
+`install.sh` merges the seed and writes `installed.json`. The card has its own 4 GB (2944 MiB CMM): models never use
+host RAM or VRAM. Two knobs:
+
+- `AXERA_HOME` (`install seed --axera-home`; `install.sh` passes it) — the sidecar home `__AXERA_HOME__` expands to
+  in the seeded `axera_sidecar_cmd`. Default `<OFFLOAD_HOME>/axera`. It holds `venv/`, `models/`, `wheels/`,
+  `cache/` and `accelerators/axera/` copied flat or checked out beneath the home; the launcher walks up to
+  `venv/`. The harness runs it as `axera-http.sh --idle-sec <axera_idle_sec>`. An EMPTY home is refused at seed time.
+- `OFFLOAD_ACCELERATORS` — the same override as for the other devices (`coral-edgetpu,axera-ax650` exercises the
+  shared-name rule; the first listed owner of each name registers it).
+
+The seed writes `accelerators`, `axera_endpoint` (`http://127.0.0.1:18816`), `axera_sidecar_cmd`, `axera_timeout_sec`
+(60) and `axera_idle_sec` (300, clamped by the sidecar to 1..300), with `audit-config` owning them as for the other
+devices. Install recipe on the host, in order (Python 3.14 and `uv` assumed):
+
+1. The vendor AXCL host package; confirm `grep ax_pcie_dev_host /proc/bus/pci/devices` prints the card.
+2. Put `accelerators/axera/` under `$AXERA_HOME`, then `fetch-models.sh --runtime` (the pyaxengine wheel into
+   `wheels/`, publisher-digest checked), then
+   `uv venv --python 3.14 $AXERA_HOME/venv` and
+   `uv pip install --python $AXERA_HOME/venv/bin/python $AXERA_HOME/wheels/axengine-*.whl numpy pillow opencv-python-headless onnxruntime tokenizers shapely pyclipper`.
+3. `fetch-models.sh --models` (seven repositories, about 760 MB, resolved at run time; every file checked against the
+   publisher's sha256 or git blob id; `--dry-run` shows the plan, `--verify` re-hashes).
+4. Config (or `local-offload install seed`): `accelerators` gains `"axera-ax650"`, plus the four `axera_*` keys above.
+5. Boot tuning: `sed -e "s#__AXERA_HOME__#$AXERA_HOME#g" -e "s#__AXERA_USER__#$(id -un)#g"
+   accelerators/axera/axera-perf.service | sudo tee /etc/systemd/system/axera-perf.service`, then
+   `sudo systemctl daemon-reload && sudo systemctl enable --now axera-perf.service`. It pins the card's CPU to its top
+   clock (the sidecar also does at every spawn; worth at most about 4 % on small models) and waits up to 180 s for the
+   card. Adjust `ExecStart` if the scripts sit under `accelerators/axera/` beneath the home.
+6. Check: `$AXERA_HOME/axera-http.sh --telemetry` prints the card's JSON (temperature, `cmm_total_mib`,
+   `clocks.at_max`) without starting the sidecar; `offload_status` lists `axera-ax650` with telemetry; one
+   `offload_object_detect` call on a real photo answers with a `model`.
+
+The sidecar spawns on demand over loopback :18816 and exits itself after `axera_idle_sec`. For a box that also has a
+Coral or an RKNPU, hand the card the tools where its models are stronger with `"accelerator_tool_owners":
+{"offload_object_detect": "axera-ax650", "offload_classify_image": "axera-ax650", "offload_image_embed":
+"axera-ax650", "offload_semantic_segment": "axera-ax650"}` (ADR 0068); moving `offload_image_embed` changes the
+embedding space (768-d `siglip2-base-p16-224`), so re-embed stored vectors. A box without the card reaches it with
+`"fleet_accelerators": ["axera-ax650"]` beside `delegate_remotes`, and `offload_ocr` `engine:"npu"` forwards too.
+
 ### Optional: the coding agent + chat GUI (OFF by default)
 
 The `local-agent --serve` endpoint is **unauthenticated** and drives write/GitHub tools, so it is
