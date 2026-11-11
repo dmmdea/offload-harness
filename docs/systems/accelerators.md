@@ -508,7 +508,11 @@ plus decoder 20.6, PP-OCRv5 detection 43.7, recognition 6.9, classifier 1.0).
 
 Both surfaces (MCP and the agent loop's `AccelLane`) carry the same nine, registered from the one table in
 `internal/mcpserver/acceltools.go` and gated on `HasAccelerator("axera-ax650")`; a fleet-listed card registers
-them as forwarders. Three details that shape results:
+them as forwarders. The sidecar answers only loopback JSON clients (a POST with another `Host` or a non-JSON
+`Content-Type` is a 403, which shuts out a browser page and DNS rebinding), and an `out_path` may name any new file
+but never replaces an existing file that is not a PNG (`out_path_exists`). A fleet `accel` job never carries the
+caller's `image_path` or `out_path` onto the node: the node drops both for every job, shipped image or not.
+Three details that shape results:
 
 - **`classify` keeps only the image tower at call time.** The 1000 ImageNet text embeddings are computed once with
   the text tower (about 11 s), cached under `<AXERA_HOME>/cache` keyed by the text model's digest, the template and

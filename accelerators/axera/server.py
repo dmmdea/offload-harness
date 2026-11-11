@@ -405,6 +405,17 @@ def _out_path(args: dict, image: str, suffix: str) -> str:
     d = os.path.dirname(os.path.abspath(out))
     if not os.path.isdir(d) or not os.access(d, os.W_OK):
         raise Refusal({"error": "out_path_unwritable", "out_path": out})
+    # Writing anywhere new is the caller's choice; replacing a file that is not already a PNG never is (a
+    # config, a record or a script clobbered with mask bytes is data loss). An earlier output is replaced.
+    if os.path.lexists(out):
+        try:
+            with open(out, "rb") as fh:
+                is_png = fh.read(8) == b"\x89PNG\r\n\x1a\n"
+        except OSError:
+            is_png = False
+        if os.path.islink(out) or not os.path.isfile(out) or not is_png:
+            raise Refusal({"error": "out_path_exists", "out_path": out,
+                           "detail": "an existing file that is not a PNG is never overwritten; choose a new path"})
     return out
 
 
@@ -1042,6 +1053,12 @@ class Handler(BaseHTTPRequestHandler):
         fn = TOOLS.get(tool)
         if fn is None:
             return self._send(404, {"error": "unknown_tool", "tool": tool, "known": sorted(TOOLS)})
+        # Only the harness's own client: JSON (a browser cannot send it cross-origin without a preflight this
+        # server never answers) to a loopback Host (a DNS-rebinding page carries its own name).
+        host = (self.headers.get("Host") or "").rsplit(":", 1)[0].strip("[]").lower()
+        ctype = (self.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if host not in LOOPBACK or ctype != "application/json":
+            return self._send(403, {"error": "forbidden", "detail": "loopback JSON clients only"})
         _touch()
         try:
             n = int(self.headers.get("Content-Length") or 0)

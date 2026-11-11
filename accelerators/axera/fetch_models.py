@@ -54,14 +54,17 @@ def _home(arg: str | None) -> str:
 
 
 def _get(url: str, accept: str = "application/json", timeout: int = 60):
-    headers = {"User-Agent": UA, "Accept": accept}
+    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": accept})
+    host = urllib.parse.urlparse(url).hostname
     tok = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
-    if tok and urllib.parse.urlparse(url).hostname == "api.github.com":
-        headers["Authorization"] = "Bearer " + tok
     hf = os.environ.get("HF_TOKEN")
-    if hf and urllib.parse.urlparse(url).hostname == "huggingface.co":
-        headers["Authorization"] = "Bearer " + hf
-    return urllib.request.urlopen(urllib.request.Request(url, headers=headers), timeout=timeout)
+    # An unredirected header goes to this host only: urllib never copies it onto a redirect, so a token never
+    # follows a Hugging Face resolve URL to its file CDN (a signed URL needs none).
+    if tok and host == "api.github.com":
+        req.add_unredirected_header("Authorization", "Bearer " + tok)
+    elif hf and host == "huggingface.co":
+        req.add_unredirected_header("Authorization", "Bearer " + hf)
+    return urllib.request.urlopen(req, timeout=timeout)
 
 
 def _json(url: str):

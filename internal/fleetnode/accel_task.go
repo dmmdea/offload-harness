@@ -61,6 +61,13 @@ func buildAccel(cfg config.Config, payload json.RawMessage) (core.Request, func(
 	if p.Args == nil {
 		p.Args = map[string]any{}
 	}
+	// A path in a fleet job's args names a file on the CALLER's disk, never one on this node: the image
+	// travels as image_b64 and the tool's output lands in the job dir. Both are dropped for every job,
+	// shipped image or not, so no fleet caller can point a tool at this node's files or have its output
+	// written over one of them (a raw job with image_path + out_path and no image_b64 could otherwise
+	// overwrite any file the service user can write with PNG bytes).
+	delete(p.Args, "image_path")
+	delete(p.Args, "out_path")
 	jobsRoot := filepath.Join(cfg.BaseDir(), "pipeline-jobs")
 	if err := os.MkdirAll(jobsRoot, 0o755); err != nil {
 		return core.Request{}, noop, fmt.Errorf("accel: creating pipeline-jobs dir: %w", err)
@@ -93,10 +100,8 @@ func buildAccel(cfg config.Config, payload json.RawMessage) (core.Request, func(
 			cleanup()
 			return core.Request{}, noop, fmt.Errorf("accel: writing image: %w", werr)
 		}
+		// The tool's default output (beside the image, inside the job dir) is the one the result ships back.
 		p.Args["image_path"] = path
-		// A caller-side out_path is on the caller's disk; the tool's default
-		// (beside the image, inside the job dir) is the one the result ships back.
-		delete(p.Args, "out_path")
 	}
 	return core.Request{
 		Task:  core.TaskAccel,
