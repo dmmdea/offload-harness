@@ -1009,7 +1009,7 @@ def _health() -> dict:
     return {"enabled": ENABLED, "device": DEVICE, "runtime": _RUNTIME, "loaded": list(_sessions),
             "cmm_resident_mib": _resident_mib(), "cmm_budget_mib": CMM_BUDGET_MIB,
             "models_missing": sorted(missing), "models_unverified": sorted(unverified), "tools": sorted(TOOLS),
-            "tools_ready": tools_ready, "perf": _perf, "telemetry": _telemetry(wait=1.5) if ENABLED else None,
+            "tools_ready": tools_ready, "perf": _perf, "telemetry": _telemetry(wait=1.0) if ENABLED else None,
             "uptime_sec": int(time.time() - _started), "idle_sec": IDLE_SEC}
 
 

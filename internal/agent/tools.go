@@ -95,16 +95,22 @@ func readOnlyTools(root string, offload OffloadFunc, npu NPUFunc, lanes []AccelL
 	return tools, nil
 }
 
-// axeraOCRLane is the Axera card's lane Call when this box lists the device LOCALLY (a fleet lane
-// is Remote and never serves engine:npu: the explicit NPU OCR path is this box's own device), else
-// nil. offload_ocr engine:npu uses it when the box has no Hailo.
+// axeraOCRLane is the Axera card's lane Call for offload_ocr engine:npu when the box has no Hailo:
+// this box's own card when it lists one, else the fleet lane that forwards to the node carrying it
+// (the image travels with the call, as on every forwarded accelerator tool), else nil. The MCP
+// surface's offload_ocr makes the same choice.
 func axeraOCRLane(lanes []AccelLane) NPUFunc {
+	var remote NPUFunc
 	for _, l := range lanes {
-		if l.ID == "axera-ax650" && !l.Remote && l.Call != nil {
+		if l.ID != "axera-ax650" || l.Call == nil {
+			continue
+		}
+		if !l.Remote {
 			return l.Call
 		}
+		remote = l.Call
 	}
-	return nil
+	return remote
 }
 
 // summarizeFileTool digests a workspace file on the free offload cascade WITHOUT
@@ -471,14 +477,14 @@ func offloadTools(offload OffloadFunc, npu NPUFunc, axeraOCR NPUFunc) []Tool {
 					return offload(ctx, "ocr", "", map[string]any{"image": in.Path})
 				case "npu":
 					// Hailo listed: its OCR, unchanged. Else the Axera card's PP-OCRv5 through its
-					// own lane when this box lists it locally. Neither: an honest defer.
+					// lane (this box's card, or the fleet node's). Neither: an honest defer.
 					if npu != nil {
 						return npu(ctx, "ocr", map[string]any{"image_path": in.Path})
 					}
 					if axeraOCR != nil {
 						return axeraOCR(ctx, "ocr", map[string]any{"image_path": in.Path})
 					}
-					return `{"deferred":true,"reason":"engine:npu requested but this box lists no NPU with OCR (hailo-8l or axera-ax650); omit engine to use the vision model"}`, nil
+					return `{"deferred":true,"reason":"engine:npu requested but this box lists no NPU with OCR (hailo-8l, or axera-ax650 here or in fleet_accelerators); omit engine to use the vision model"}`, nil
 				default:
 					// An unrecognized engine must not silently become a GPU call —
 					// the result would be indistinguishable from an intentional one.

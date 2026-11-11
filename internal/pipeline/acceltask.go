@@ -20,9 +20,12 @@ import (
 // lane the node does not list is a defer, not an error: the caller's placement
 // probe was wrong or stale, and the caller does the work another way.
 //
-// A file the tool writes inside the job dir (the Coral's semantic mask) is
-// unreadable by the caller once the job is cleaned up, so its bytes ride back
-// in the result as mask_b64 (cap core.AccelImageCap).
+// A file the tool writes inside the job dir (a semantic or instance mask, the
+// Axera card's depth map) is unreadable by the caller once the job is cleaned
+// up, so its bytes ride back in the result: every <stem>_path key naming a file
+// inside the job dir gains <stem>_b64 and <stem>_name (mask_path -> mask_b64,
+// depth_path -> depth_b64; cap core.AccelImageCap each). The shipped input
+// (image_path) never goes back.
 func (p *Pipeline) runAccelTask(ctx context.Context, req core.Request, meta core.Meta, start time.Time) core.Result {
 	id, _ := req.Params["accelerator"].(string)
 	tool, _ := req.Params["tool"].(string)
@@ -59,11 +62,18 @@ func (p *Pipeline) runAccelTask(ctx context.Context, req core.Request, meta core
 		reason, _ := m["reason"].(string)
 		return finish(core.Deferf(reason, "", meta))
 	}
-	if mp, ok := m["mask_path"].(string); ok && jobDir != "" {
-		if abs, aerr := filepath.Abs(mp); aerr == nil && strings.HasPrefix(abs, filepath.Clean(jobDir)+string(filepath.Separator)) {
-			if b, rerr := os.ReadFile(abs); rerr == nil && len(b) <= core.AccelImageCap {
-				m["mask_b64"] = base64.StdEncoding.EncodeToString(b)
-				m["mask_name"] = filepath.Base(abs)
+	if jobDir != "" {
+		for k, v := range m {
+			stem, isPath := strings.CutSuffix(k, "_path")
+			fp, isStr := v.(string)
+			if !isPath || !isStr || stem == "" || k == "image_path" {
+				continue
+			}
+			if abs, aerr := filepath.Abs(fp); aerr == nil && strings.HasPrefix(abs, filepath.Clean(jobDir)+string(filepath.Separator)) {
+				if b, rerr := os.ReadFile(abs); rerr == nil && len(b) <= core.AccelImageCap {
+					m[stem+"_b64"] = base64.StdEncoding.EncodeToString(b)
+					m[stem+"_name"] = filepath.Base(abs)
+				}
 			}
 		}
 	}

@@ -409,19 +409,26 @@ func (s *Server) handleFleetAccelTool(id, tool, requiredArg string) mcp.ToolHand
 		if in[requiredArg] == nil || in[requiredArg] == "" {
 			return jsonResult(map[string]any{"deferred": true, "reason": "empty " + requiredArg})
 		}
-		start := time.Now()
-		out, err := accelremote.Call(ctx, s.p.Cfg(), id, tool, in)
-		if err != nil {
-			s.p.RecordAccel(tool, id+FleetOwnerSuffix, sinceMs(start), true, id+" (fleet): "+err.Error())
-			return jsonResult(map[string]any{"deferred": true, "reason": id + " (fleet): " + err.Error()})
-		}
-		tier := id + FleetOwnerSuffix
-		if n := accelPlacementNode(out); n != "" {
-			tier = n + ":" + id
-		}
-		s.p.RecordAccel(tool, tier, sinceMs(start), false, "")
-		return jsonResult(out)
+		return s.fleetAccelCall(ctx, id, tool, in)
 	}
+}
+
+// fleetAccelCall forwards one accelerator tool call through accelremote and records it: a
+// forwarding failure is a device-prefixed defer, the node's own result passes through untouched.
+// offload_ocr engine:"npu" reaches a fleet node's Axera card through it too.
+func (s *Server) fleetAccelCall(ctx context.Context, id, tool string, in map[string]any) (*mcp.CallToolResult, error) {
+	start := time.Now()
+	out, err := accelremote.Call(ctx, s.p.Cfg(), id, tool, in)
+	if err != nil {
+		s.p.RecordAccel(tool, id+FleetOwnerSuffix, sinceMs(start), true, id+" (fleet): "+err.Error())
+		return jsonResult(map[string]any{"deferred": true, "reason": id + " (fleet): " + err.Error()})
+	}
+	tier := id + FleetOwnerSuffix
+	if n := accelPlacementNode(out); n != "" {
+		tier = n + ":" + id
+	}
+	s.p.RecordAccel(tool, tier, sinceMs(start), false, "")
+	return jsonResult(out)
 }
 
 // accelStatus is the status block's `accelerators` entry: one row per listed
