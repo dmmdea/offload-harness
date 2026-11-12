@@ -227,11 +227,14 @@ var reasonPrefixCodes = []struct{ prefix, code string }{
 	{"unknown image family", ReasonContract}, {"unknown edit family", ReasonContract}, {"imagegen_families[", ReasonConfig},
 	{"probe:", ReasonInfrastructure}, {"generate_svg: write:", ReasonInfrastructure}, {"generate_svg:", ReasonInfrastructure},
 	// The browse door's own typed errors (pipeline/browse.go: "browse: <CLASS>: <detail>"; docs/systems/browse-lane.md),
-	// the four that name one member: no browser or no decision endpoint to drive it is the stack (as lane_unavailable),
-	// a page outside allow_hosts is the request's, and max_actions spent is a limit the call carried. The rest of the
-	// door's classes ("blocked", where the model reported it cannot proceed, and the others) are not named here.
+	// the five that name one member: no browser or no decision endpoint to drive it is the stack (as lane_unavailable),
+	// a page outside allow_hosts is the request's, max_actions spent is a limit the call carried, and "blocked" (the model
+	// or the loop reported no progress) is a loop that ended with no usable answer, abstention; why the page could not be
+	// driven is not on the row. "blocked" is matched on the door's own sentence and is not an errClassCodes entry: the
+	// word means other things elsewhere. The door's other classes are not named here.
 	{"browse: BROWSER_UNAVAILABLE:", ReasonInfrastructure}, {"browse: DECISION_UNAVAILABLE:", ReasonInfrastructure},
 	{"browse: HOST_NOT_ALLOWED:", ReasonContract}, {"browse: budget:", ReasonBudget},
+	{"browse: blocked:", ReasonAbstention},
 }
 
 // legacyReasonPrefixCodes classify a deferred row by the sentence the harness ITSELF wrote, for the rows
