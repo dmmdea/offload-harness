@@ -76,7 +76,7 @@ an unfinished attempt, not a duration the gate reads.
 | part | runs as | answers | owner page |
 |---|---|---|---|
 | failure register | `local-offload ledger --failures` | which failures the stack has, how many, whose they are, what is known about why | [failure-register.md](failure-register.md) |
-| trace-corpus readout | `local-offload trace-corpus harvest\|readout\|freeze\|check` | how the agent loop behaves in recorded runs: pager re-fetch, compaction passes, prefill | [coding-agent.md](coding-agent.md), [ADR 0091](../architecture/decisions/0091-agent-trace-corpus-readout-pager-refetch-compaction-fire-and-prefill.md) |
+| trace-corpus readout | `local-offload trace-corpus harvest\|readout\|trigger\|freeze\|check` | how the agent loop behaves in recorded runs: pager re-fetch, compaction passes, prefill | [coding-agent.md](coding-agent.md), [ADR 0091](../architecture/decisions/0091-agent-trace-corpus-readout-pager-refetch-compaction-fire-and-prefill.md) |
 | measurement gate | `local-offload gate freeze\|check\|verdict\|schema\|selftest` | whether a candidate is better, or not worse and cheaper | [measurement-gate.md](measurement-gate.md), [ADR 0088](../architecture/decisions/0088-one-measurement-gate.md) |
 | SHA-bound review evidence | `offload_review_diff` (MCP tool) | which bytes a review judged, and whether a clean seat judged them | [mcp-server.md](mcp-server.md) |
 
@@ -112,11 +112,19 @@ class with no row reads `undocumented`, and a class whose row holds neither a ro
 in `uninvestigated_classes`. At this head no row of the table has been investigated, so the register's first product is
 its gap list. A test fails for a non-empty cell until the class is named in it with what the finding rests on.
 
+Every class also carries a **cause** found by reading its emitting code and the real rows, from a catalogue in code
+(`internal/ledger/rootcause.go`): a cause kind, a root cause, the evidence and an action, printed with the class
+(`classes[].cause`, and as text on stderr). It says `not investigated` and what would settle it where the evidence does not
+settle the cause: 15 of the 31 classes on 2026-11-12, and `causes_not_investigated` lists those in the window.
+
 ### The trace-corpus readout
 
-`local-offload trace-corpus` has four modes. `harvest` reads recorded agent runs, from the standalone agent traces and
+`local-offload trace-corpus` has five modes. `harvest` reads recorded agent runs, from the standalone agent traces and
 the delegation log and never the ledger, reduces each to numbers and enums, redacts the few strings left and writes the
-corpus to `--out`, printing its sha256, which every report then carries as `corpus_hash`. `readout` prints the report.
+corpus to `--out`, printing its sha256, which every report then carries as `corpus_hash`. `readout` prints the report and, on stderr, the recipe proposer's trigger (ADR 0036) as
+`needed N / have M / met | NOT MET`. `trigger` prints that trigger as JSON: `needed` (100), `have` (runs with a measured
+pager report, `pager.measured_runs`, not trace-bearing runs), `met`, the trace-bearing and total run counts beside it and the
+largest single named seat's count. It does not judge the other half of the trigger, a frozen pre-registration for the seat.
 `freeze` writes the report as a baseline, created exclusively: a path that exists is refused (exit 2, as `gate freeze`
 refuses one), so a baseline is never replaced and a new one goes to a new `--out`. `check` demands the report back byte
 for byte and refuses a baseline taken from a different corpus. `readout`, `freeze` and `check` are deterministic and
@@ -150,7 +158,7 @@ node's real seat, so those runs are reported apart (`pool_alias`) and `attributi
 per-seat reading cannot reach.
 
 The first readout, in [ADR 0091](../architecture/decisions/0091-agent-trace-corpus-readout-pager-refetch-compaction-fire-and-prefill.md)
-(status Proposed at this head, a snapshot of one machine's log on 2026-10-14; later logs carry recorded runs, so re-run the
+(status Accepted since 2026-11-12, a snapshot of one machine's log on 2026-10-14; later logs carry recorded runs, so re-run the
 readout before quoting it), found no run that
 had recorded a pager report or a pass count. The pager verdict read `NO_DATA` and the fire rate `null`, so the questions
 were recorded as unanswered rather than answered "rarely".
@@ -256,7 +264,7 @@ flags is kept raw without being shown to the seat. The key stays off until a sea
 - `local-offload ledger --failures [--since DAYS] [--include-test-traffic] [--table FILE]`
 - `local-offload trace-corpus harvest [--traces DIR] [--delegation-log DIR] --out FILE [--seat LIST]
   [--exclude-seat LIST] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--config PATH]`, then
-  `readout|freeze|check --corpus FILE` (`check` also takes `--baseline FILE`; `readout` and `freeze` take `--out FILE`)
+  `readout|trigger|freeze|check --corpus FILE` (`check` also takes `--baseline FILE`; `readout` and `freeze` take `--out FILE`)
 - `local-offload gate freeze|check|verdict|schema|selftest`
 - `local-offload recipe-audit --recipe ID --seat ALIAS --seat-tag TAG --contracts TASKS.json --baseline BASELINE.json
   --engine-build STR [--store DIR] [--attempts N] [--input-out FILE] [--config PATH]`
@@ -328,7 +336,7 @@ flags is kept raw without being shown to the seat. The key stays off until a sea
   named head. It does not block or allow a merge, and the lane cannot show the head belongs to the diff.
 - **Bind a verdict to the hash `freeze` printed**, not to a later `gate check` of the file: an edit that leaves a valid
   canonical document is another pre-registration, and only the hash tells it from the frozen one.
-- **ADR 0088, ADR 0090 and ADR 0091 are Proposed at this head.** Only `Accepted` ADRs are current guidance, so the code
+- **ADR 0088 and ADR 0090 are Proposed at this head** (ADR 0091 is Accepted). Only `Accepted` ADRs are current guidance, so the code
   and the system pages above are what this page rests on.
 
 ## Source map

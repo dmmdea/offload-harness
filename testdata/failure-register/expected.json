@@ -52,6 +52,12 @@
     "other",
     "stall_prefill"
   ],
+  "causes_not_investigated": [
+    "failed_verification",
+    "other",
+    "poll_deadline",
+    "stall_prefill"
+  ],
   "classes": [
     {
       "class": "node_busy",
@@ -111,7 +117,14 @@
       "investigated": true,
       "meaning": "A seat answered a capacity defer after admission.",
       "root_cause": "Another job held what the call needed.",
-      "structural_fix": "open"
+      "structural_fix": "open",
+      "cause": {
+        "kind": "capacity signal",
+        "root_cause": "The seat or card the call needed was held by other work when it arrived: the seat was at its local run cap (`seat busy:`), a GPU lease of another class held the card (`gpu busy: held by ...`), or a media job waited for host RAM. The harness defers rather than overload the card.",
+        "evidence": "pipeline/agenttask.go (seat busy, defer class capacity) and pipeline/pipeline_gpu.go (gpu busy); 628 rows in 30 days: video 247, research 205, audio 109 (the agent pool at its cap, a media lease on the cards, host RAM)",
+        "action": "none: working as designed. Fewer deferrals need more free card time (keep a card free for media while text leases run) or a higher run cap on a box with room.",
+        "investigated": true
+      }
     },
     {
       "class": "abstention",
@@ -178,7 +191,14 @@
       "investigated": true,
       "meaning": "The model ran and gave no usable answer.",
       "root_cause": "The work, not the stack.",
-      "structural_fix": "open"
+      "structural_fix": "open",
+      "cause": {
+        "kind": "node configuration",
+        "root_cause": "The answer was cut at its completion token cap, so there was nothing usable to return: the vision lane's `vision output truncated` (117 rows) and an agent answer cut at the completion budget so the re-pack was skipped (about 94 rows, `output_truncated`). The cap is a setting of the seat or the call.",
+        "evidence": "pipeline/pipeline_vision.go:315 and pipeline/agentlistcap.go:75; 221 rows in 30 days, 107 on one vision seat's questions",
+        "action": "raise the vision lane's output cap for that seat, or ask for shorter answers; not investigated: why those answers run past the cap.",
+        "investigated": true
+      }
     },
     {
       "class": "failed_verification",
@@ -230,7 +250,14 @@
       "investigated": true,
       "meaning": "A result failed the contract's own checks.",
       "root_cause": "not recorded",
-      "structural_fix": "Tighten the contract (synthetic row)."
+      "structural_fix": "Tighten the contract (synthetic row).",
+      "cause": {
+        "kind": "unknown",
+        "root_cause": "not investigated: the rows say which check failed (`min_items` on plans, quotes or numbers; a regex) but not whether the seat's answer was wrong or the check too strict; the acceptance list is shape-only (delegate/lint.go warns of it)",
+        "evidence": "delegate/run.go (failed verification); 357 rows in 30 days, 345 of them from research subtasks",
+        "action": "not investigated: read the saved output of a sample of failed research subtasks against their acceptance lists",
+        "investigated": false
+      }
     },
     {
       "class": "capacity_wait",
@@ -271,7 +298,14 @@
       "investigated": false,
       "meaning": "undocumented",
       "root_cause": "undocumented",
-      "structural_fix": "undocumented"
+      "structural_fix": "undocumented",
+      "cause": {
+        "kind": "capacity signal",
+        "root_cause": "No node had room for the subtask before the call's deadline: 248 of 267 waited until the call's own deadline (not agent_placement_wait_sec), 259 for one node's agent pool alias.",
+        "evidence": "delegate/run_wait.go:436 and :442; 267 rows in 30 days, 259 on one pool alias",
+        "action": "none: working as designed. Reducing it needs more worker slots on the pool's node, or fewer research subtasks per call.",
+        "investigated": true
+      }
     },
     {
       "class": "budget",
@@ -312,7 +346,14 @@
       "investigated": true,
       "meaning": "A ceiling stopped the run.",
       "root_cause": "A step budget.",
-      "structural_fix": "open"
+      "structural_fix": "open",
+      "cause": {
+        "kind": "caller contract",
+        "root_cause": "A limit the call carried ended the run before the agent finished: the call's own deadline (`call deadline reached`, `wall timeout after ... the caller's deadline`), a cancellation filed under this class (`agent loop: canceled`), or the step budget (`step budget exhausted`). Most are the caller's deadline, not a node ceiling.",
+        "evidence": "core/calldeadline.go, pipeline/liveness.go:411, pipeline/agenttask.go:1295; 250 rows in 30 days, 241 from research subtasks",
+        "action": "give long research subtasks a longer call deadline or fewer subtasks per call; a run that ends on the step budget needs a larger max_steps.",
+        "investigated": true
+      }
     },
     {
       "class": "config",
@@ -353,7 +394,14 @@
       "investigated": false,
       "meaning": "undocumented",
       "root_cause": "undocumented",
-      "structural_fix": "undocumented"
+      "structural_fix": "undocumented",
+      "cause": {
+        "kind": "node configuration",
+        "root_cause": "A seat was set up so that it cannot serve the call: its tool-call parser does not match its chat template, so a tool call came back as text.",
+        "evidence": "pipeline/agenttask.go:1303; 2 rows in 30 days, both on one seat",
+        "action": "set that seat's --tool-call-parser to the one its chat template needs.",
+        "investigated": true
+      }
     },
     {
       "class": "node_unreachable",
@@ -394,7 +442,14 @@
       "investigated": true,
       "meaning": "No node answered.",
       "root_cause": "The network path.",
-      "structural_fix": "open"
+      "structural_fix": "open",
+      "cause": {
+        "kind": "upstream service",
+        "root_cause": "A node host did not answer on the network: a dial that timed out (`the connected party did not properly respond`) or a poll that never got an answer. Why the host did not answer (asleep, off, network) is not recorded on the row.",
+        "evidence": "delegate/run_remote.go; 3 rows in 30 days, 2 on one node",
+        "action": "none from the harness: the node host or path is the fault; `local-offload doctor` shows which nodes answer now.",
+        "investigated": true
+      }
     },
     {
       "class": "other",
@@ -435,7 +490,14 @@
       "investigated": false,
       "meaning": "undocumented",
       "root_cause": "undocumented",
-      "structural_fix": "undocumented"
+      "structural_fix": "undocumented",
+      "cause": {
+        "kind": "unknown",
+        "root_cause": "not investigated: the class is the residue no rule names, a mix of causes; the largest sampled sentence is a node's `a text lease holds its card; it may take the call later` (a capacity signal no rule names), and 15 rows are the browse door's own errors",
+        "evidence": "reasoncode.go DeferCode (the residue); 55 rows in 30 days: audio 18, browse 15, video 7, compose 6",
+        "action": "not investigated: list the distinct reasons of the 55 rows and add a rule per sentence that ties to one class",
+        "investigated": false
+      }
     },
     {
       "class": "poll_deadline",
@@ -476,7 +538,14 @@
       "investigated": true,
       "meaning": "A node owned the job and it did not finish inside the poll budget.",
       "root_cause": "A job larger than the budget.",
-      "structural_fix": "open"
+      "structural_fix": "open",
+      "cause": {
+        "kind": "unknown",
+        "root_cause": "not investigated: the class does not separate a job longer than the poll budget from a node that stopped making progress (failurekinds.go says so), and the 3 rows differ (a poll error, a stale last-progress, the node's own wall)",
+        "evidence": "delegate/run_remote.go (poll deadline after); 3 rows in 30 days",
+        "action": "not investigated: for each row, compare the node's own record of the job with the delegator's poll budget",
+        "investigated": false
+      }
     },
     {
       "class": "stall_prefill",
@@ -517,7 +586,14 @@
       "investigated": false,
       "meaning": "The run went silent while the prompt was being processed.",
       "root_cause": "Not recorded.",
-      "structural_fix": "open"
+      "structural_fix": "open",
+      "cause": {
+        "kind": "unknown",
+        "root_cause": "not investigated: the rows say no progress in prefill past an allowance computed from the prompt size and the seat's rate; a prompt larger than the allowance or a wedged engine both read so",
+        "evidence": "agent/liveness.go; 0 rows in 30 days, 246 in the whole ledger (written before the stamp)",
+        "action": "not investigated: compare the prompt size of those rows with the seat's measured prefill rate",
+        "investigated": false
+      }
     }
   ]
 }

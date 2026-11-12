@@ -13,7 +13,8 @@ The split is the point. The counts come from the ledger. The **root cause** and 
 a person's: they are written in the table below, and no code derives, guesses or fills them in. A class with no row
 here reads `undocumented`, and a class whose row holds no root cause and no fix a person wrote reads as not
 investigated (`uninvestigated_classes`), so a failure the harness keeps hitting without anyone having looked into it
-is visible as a gap, not hidden. The table ships with those cells empty: nothing on this page has been investigated yet.
+is visible as a gap, not hidden. The table ships with those cells empty: nothing in it has been written by a person yet. The root causes found by reading
+the code and the real rows are a separate catalogue, in code, printed with each class (see Root causes).
 
 It is read-only. It never writes the ledger, starts nothing and calls no model.
 
@@ -87,6 +88,69 @@ policy, or a write set past a door cap; neither a broken stack nor an unplaceabl
 a share of `failure_rows` and counts only the classes filed as stack faults: an `unclassified` failure is in
 `failure_rows` but never in `stack_fault_rows`, so while unclassified rows exist the share is a lower bound.
 
+### Root causes
+
+Every class of the closed set has an entry in `internal/ledger/rootcause.go`, beside the class definitions: a **cause kind**,
+a **root cause** (one or two sentences), the **evidence** (the function that emits the class and the count read) and an
+**action**. `ledger --failures` prints it with each class: in the JSON as `classes[].cause` (`kind`, `root_cause`,
+`evidence`, `action`, `investigated`) and as text on stderr, one block per class, with `causes_not_investigated` naming
+the classes in the window that are still open. The person-written table below it is a different thing and is unchanged:
+its `root_cause` and `structural_fix` fields still come only from the page, and `cause.root_cause` comes only from
+the catalogue.
+
+The cause kinds are `capacity signal` (the stack was healthy and full), `node configuration`, `harness defect`,
+`caller contract` (the request, its limits or its deadline), `upstream service` (an engine, a node host or a network
+path failed) and `unknown`. They say whose fix the cause is, which `kind` (above) does not.
+
+How the table was made (2026-11-12): the code that emits each class was read, then the rows of the 30 days to
+2026-11-12 in the real ledger, and the whole ledger for a class with no row in the window. An entry is `investigated` only
+when the emitter and those rows together settle the cause it states. Where they do not, the cause reads
+`not investigated:` and says what would settle it. The counts are that snapshot; the live count of a class is its `count`.
+A class with no entry reads as not investigated. **15 of the 31 classes are not investigated**: 8 have rows that do not
+settle the cause (`failed_verification`, `poll_deadline`, `stall_admission`, `stall_cold_load`, `stall_prefill`,
+`stall_decode`, `stall_repack`, `other`) and 7 have no row in the whole ledger (`job_lost`, `remote_error`, `shed`,
+`stall_tool`, `stall_engine`, `stall_other`, `write`). In the 30 days to 2026-11-12, 4 of the 19 classes present were
+not investigated.
+
+| failure class | cause kind | root cause | evidence | action |
+|---|---|---|---|---|
+| `failed_verification` | unknown | not investigated: the rows say which check failed (`min_items` on plans, quotes or numbers; a regex) but not whether the seat's answer was wrong or the check too strict; the acceptance list is shape-only (delegate/lint.go warns of it) | delegate/run.go (failed verification); 357 rows in 30 days, 345 of them from research subtasks | not investigated: read the saved output of a sample of failed research subtasks against their acceptance lists |
+| `queue_full` | capacity signal | Every node asked refused the dispatch for room: its queue was at fleet_max_queue_depth (the sampled bodies read `queue full (N jobs accepted+running, limit N)`) or its card was leased. The delegator files every 503 or 429 so. | delegate/run_capacity.go capacityRefusal; 49 rows in 30 days (of the three commonest reason groups, 22 rows read queue full and 1 node leased) | none: working as designed. A node with spare capacity can raise fleet_max_queue_depth. |
+| `queue_deadline` | capacity signal | A node accepted the job and its backlog never reached it inside the queue patience, and the node did not confirm taking it back. Jobs queue behind other work on a full node. | delegate/run_remote.go (queue deadline after); 0 rows in 30 days, 318 in the whole ledger, all written before the withdrawal stamp existed | none: working as designed (the delegator withdraws and re-places since ADR 0064; queue_withdrawn is the same event confirmed). |
+| `queue_withdrawn` | capacity signal | The same event as queue_deadline, and the node confirmed taking the job back: it sat in the node's backlog (`accepted`, never `running`) past the queue patience and was withdrawn. | delegate/run_remote.go; 186 rows in 30 days, 182 from research subtasks, 111 on one node | none: working as designed. If one node keeps most of them (111 of 186), check its concurrency against the headroom it advertises. |
+| `poll_deadline` | unknown | not investigated: the class does not separate a job longer than the poll budget from a node that stopped making progress (failurekinds.go says so), and the 3 rows differ (a poll error, a stale last-progress, the node's own wall) | delegate/run_remote.go (poll deadline after); 3 rows in 30 days | not investigated: for each row, compare the node's own record of the job with the delegator's poll budget |
+| `canceled` | caller contract | The caller's context ended (the caller went away, or the call's own deadline passed) before or while a subtask ran. | delegate/calldeadline.go; 29 rows in 30 days: `canceled: context canceled` and `the call's context ended before this subtask started` | none: working as designed. |
+| `node_unreachable` | upstream service | A node host did not answer on the network: a dial that timed out (`the connected party did not properly respond`) or a poll that never got an answer. Why the host did not answer (asleep, off, network) is not recorded on the row. | delegate/run_remote.go; 3 rows in 30 days, 2 on one node | none from the harness: the node host or path is the fault; `local-offload doctor` shows which nodes answer now. |
+| `job_lost` | unknown | not investigated: the ledger holds no row of this class, so no failure of it has been observed; it settles when a row appears and its reason and node are read | delegate/run_remote.go (a poll 404 after an acknowledged dispatch); 0 rows in the 30 days to 2026-11-12 and 0 in the whole ledger | not investigated |
+| `dispatch_refused` | node configuration | A node refused the dispatch itself, and the sampled rows give two node-side causes: the node rejected the delegator's bearer token (status 401 `unauthorized`, 112 rows, one node: a fleet_auth_token mismatch) and a node whose configured data folder could not be created (`creating pipeline-jobs dir`, 33 rows, one node: the path is not on that machine now). | delegate/calldeadline.go (401 unauthorized) and fleetnode/tasks.go:1031 (creating pipeline-jobs dir); 145 rows in 30 days, 145 on one node's seat | re-pair that node's token (`local-offload doctor` checks fleet tokens) and fix or remove the node's missing data folder; both are edits on the node. |
+| `remote_error` | unknown | not investigated: the ledger holds no row of this class, so no failure of it has been observed; it settles when a row appears and its reason and node are read | delegate/run_remote.go (a node's job reported errored, or its answer was unusable); 0 rows in the 30 days to 2026-11-12 and 0 in the whole ledger | not investigated |
+| `capacity_wait` | capacity signal | No node had room for the subtask before the call's deadline: 248 of 267 waited until the call's own deadline (not agent_placement_wait_sec), 259 for one node's agent pool alias. | delegate/run_wait.go:436 and :442; 267 rows in 30 days, 259 on one pool alias | none: working as designed. Reducing it needs more worker slots on the pool's node, or fewer research subtasks per call. |
+| `node_busy` | capacity signal | The seat or card the call needed was held by other work when it arrived: the seat was at its local run cap (`seat busy:`), a GPU lease of another class held the card (`gpu busy: held by ...`), or a media job waited for host RAM. The harness defers rather than overload the card. | pipeline/agenttask.go (seat busy, defer class capacity) and pipeline/pipeline_gpu.go (gpu busy); 628 rows in 30 days: video 247, research 205, audio 109 (the agent pool at its cap, a media lease on the cards, host RAM) | none: working as designed. Fewer deferrals need more free card time (keep a card free for media while text leases run) or a higher run cap on a box with room. |
+| `shed` | unknown | not investigated: the ledger holds no row of this class, so no failure of it has been observed; it settles when a row appears and its reason and node are read | delegate (sheddable work, priority -1, found no idle node); 0 rows in the 30 days to 2026-11-12 and 0 in the whole ledger | not investigated |
+| `no_eligible_node` | upstream service | A lane found no fleet node able to take the call. In the sampled rows each node probed failed its health check with a timeout (`context deadline exceeded`), so the nodes were not answering, not refusing for room. Why they did not answer is not recorded. | the remote lanes' placement sentences (forecastremote and the others) and delegate route=remote; 76 rows in 30 days, 48 of them the vision lane | none from the harness: bring the nodes back (`local-offload doctor`); not investigated: why the probes timed out at the failure times. |
+| `seat_down` | upstream service | The inference engine behind the seat was gone from llama-swap's /running, or refused connections, when the run needed it, and did not return inside the node's recovery wait. What stopped the engine is not recorded. | agent/seatdown.go:185; 89 rows in 30 days, 87 on one node's pool alias | not investigated: why that node's engine goes away; read its llama-swap log at the failure times. The harness already waits and re-issues (ADR 0066). |
+| `stall_admission` | unknown | not investigated: the monitor reports a run silent in the admission phase; why is not on the row | agent/liveness.go; 0 rows in 30 days, 1 in the whole ledger | not investigated: read the node's engine log at the time of the row |
+| `stall_cold_load` | unknown | not investigated: the rows say no byte came for 120 s after the seat read ready, on its first completion since the load; whether the bound is too tight for a cold seat or the engine was wedged is not settled | agent/liveness.go:268; 4 rows in 30 days, all on one node's pool alias | not investigated: time that seat's first completion after a load against the bound |
+| `stall_prefill` | unknown | not investigated: the rows say no progress in prefill past an allowance computed from the prompt size and the seat's rate; a prompt larger than the allowance or a wedged engine both read so | agent/liveness.go; 0 rows in 30 days, 246 in the whole ledger (written before the stamp) | not investigated: compare the prompt size of those rows with the seat's measured prefill rate |
+| `stall_decode` | unknown | not investigated: no progress while tokens were generated; the rows do not say whether the engine wedged or the allowance was too tight | agent/liveness.go; 0 rows in 30 days, 51 in the whole ledger (written before the stamp) | not investigated: read the engine log at the time of the rows |
+| `stall_tool` | unknown | not investigated: the ledger holds no row of this class, so no failure of it has been observed; it settles when a row appears and its reason and node are read | agent/liveness.go (silence inside a tool call); 0 rows in the 30 days to 2026-11-12 and 0 in the whole ledger | not investigated |
+| `stall_repack` | unknown | not investigated: no progress in the structured re-pack of an answer; why is not on the row | agent/liveness.go (`structured re-pack unreachable: stalled`); 0 rows in 30 days, 99 in the whole ledger (written before the stamp) | not investigated: read the re-pack requests of those rows against the seat's log |
+| `stall_engine` | unknown | not investigated: the ledger holds no row of this class, so no failure of it has been observed; it settles when a row appears and its reason and node are read | agent/liveness.go (the engine did no work, or kept stepping without a token); 0 rows in the 30 days to 2026-11-12 and 0 in the whole ledger | not investigated |
+| `stall_other` | unknown | not investigated: the ledger holds no row of this class, so no failure of it has been observed; it settles when a row appears and its reason and node are read | delegate/reasoncode.go stallReasonCode (a stall whose phase the reason does not name); 0 rows in the 30 days to 2026-11-12 and 0 in the whole ledger | not investigated |
+| `budget` | caller contract | A limit the call carried ended the run before the agent finished: the call's own deadline (`call deadline reached`, `wall timeout after ... the caller's deadline`), a cancellation filed under this class (`agent loop: canceled`), or the step budget (`step budget exhausted`). Most are the caller's deadline, not a node ceiling. | core/calldeadline.go, pipeline/liveness.go:411, pipeline/agenttask.go:1295; 250 rows in 30 days, 241 from research subtasks | give long research subtasks a longer call deadline or fewer subtasks per call; a run that ends on the step budget needs a larger max_steps. |
+| `abstention` | node configuration | The answer was cut at its completion token cap, so there was nothing usable to return: the vision lane's `vision output truncated` (117 rows) and an agent answer cut at the completion budget so the re-pack was skipped (about 94 rows, `output_truncated`). The cap is a setting of the seat or the call. | pipeline/pipeline_vision.go:315 and pipeline/agentlistcap.go:75; 221 rows in 30 days, 107 on one vision seat's questions | raise the vision lane's output cap for that seat, or ask for shorter answers; not investigated: why those answers run past the cap. |
+| `contract` | caller contract | The caller named something the node does not serve: an image family the node does not carry. | config/families.go:730; 4 rows in 30 days, all one family name on generate_image | the caller names a served family, or the node adds that family. |
+| `config` | node configuration | A seat was set up so that it cannot serve the call: its tool-call parser does not match its chat template, so a tool call came back as text. | pipeline/agenttask.go:1303; 2 rows in 30 days, both on one seat | set that seat's --tool-call-parser to the one its chat template needs. |
+| `write` | unknown | not investigated: the ledger holds no row of this class, so no failure of it has been observed; it settles when a row appears and its reason and node are read | pipeline/agenttask.go (the write door refused: agent_allow_write false, or a write set past a door cap); 0 rows in the 30 days to 2026-11-12 and 0 in the whole ledger | not investigated |
+| `infrastructure` | upstream service | Mostly a seat whose engine was gone from llama-swap's /running (the node's defer class infrastructure carrying the same sentence as seat_down), then a vision seat that was cold and timed out. Some rows are a capacity hold filed here (see the followups). | agent/seatdown.go:185, pipeline_vision.go; 195 rows in 30 days: research 90, fleet 82; about 63 delegate rows read `local seat reserved (gpu lease ...)` | see seat_down; not investigated: why the engine goes away. The lease-hold rows are a classification defect, not an infrastructure fault. |
+| `bad_input` | caller contract | The input cannot be used as given: an image path that does not exist, a template variable the template does not declare. | pipeline (image load) and compose_video BAD_INPUT; 2 rows in 30 days | none: working as designed. The caller fixes the input. |
+| `other` | unknown | not investigated: the class is the residue no rule names, a mix of causes; the largest sampled sentence is a node's `a text lease holds its card; it may take the call later` (a capacity signal no rule names), and 15 rows are the browse door's own errors | reasoncode.go DeferCode (the residue); 55 rows in 30 days: audio 18, browse 15, video 7, compose 6 | not investigated: list the distinct reasons of the 55 rows and add a rule per sentence that ties to one class |
+
+Reading the rows also found two misfilings, not changed by the catalogue: a delegate row for a local seat held by a text
+lease (`local seat reserved (gpu lease ...)`) is filed `infrastructure` though it is a capacity hold, and the agent loop's
+`agent loop: canceled` (the caller gave up, or the box is draining) is filed `budget` though `canceled` exists. A
+transport 4xx from a node's own folder failure is filed `dispatch_refused`, a class defined as a fact about the request.
+
 ### The fields
 
 | field | meaning |
@@ -108,6 +172,8 @@ a share of `failure_rows` and counts only the classes filed as stack faults: an 
 | `classes[].groups` | the rows counted per (door, seat, model) together |
 | `classes[].cards_tokens`, `rows_with_tokens` | the card work the class spent, and how many rows measured it |
 | `classes[].documented`, `investigated`, `meaning`, `root_cause`, `structural_fix` | the joined table row, and whether a person wrote a root cause or a fix in it |
+| `classes[].cause` | the catalogue entry (Root causes): `kind`, `root_cause`, `evidence`, `action`, `investigated` |
+| `causes_not_investigated` | the classes in the window whose catalogue cause is `not investigated` |
 
 **Failures by build (`--by-build`).** The ledger stamps the build that wrote each row, in `Record`, from the same
 self-hash the delegation log uses and under its names: `harness_build_sha256` on a row for work the writing process ran
@@ -156,7 +222,7 @@ The table is the human-maintained half of the register.
   `uninvestigated_classes`.
 - A new reason code needs a new row. `TestEmbeddedFailureTableCoversEveryReasonCode` fails until there is one, and
   fails again for a row that names a code the ledger does not define.
-- **No row below has been investigated.** `meaning` states what the class is, from the constants' own definitions. The
+- **No row of this table has been written by a person.** `meaning` states what the class is, from the constants' own definitions. The
   `root cause` and `structural fix` cells ship empty on purpose: filling them with a restatement of those definitions made
   every class look covered and defeated the gap list. A cell gets text only when a person has looked at an observed
   failure and wrote down what they found; `TestEmbeddedFailureTableShipsOnlyInvestigatedCells` fails for a non-empty
@@ -248,7 +314,8 @@ code; this table is checked against both.
 - `local-offload ledger --failures [--by-build] [--since DAYS] [--include-test-traffic] [--table FILE] [--config FILE]`:
   the report, JSON on stdout and nothing else. A note about the left-out traffic, a missing ledger or lines it could not
   read goes to stderr. `--failures=false` is the savings summary, as for any boolean flag. `--by-build` adds the `builds`
-  key (below) and prints the same split as a short table on stderr; without it the output is what it was.
+  key (below) and prints the same split as a short table on stderr; without it the output is what it was. Every run also
+  prints each class with its cause and action as text on stderr (the JSON carries them as `classes[].cause`).
 
 ## Invariants and assumptions
 
@@ -260,7 +327,8 @@ code; this table is checked against both.
 - A line the register cannot read is counted in `unparsed_lines`, never dropped silently; a missing ledger is
   `ledger_found: false`, never a quiet zero.
 - An unmeasured token total is `null`, never `0`.
-- `root_cause` and `structural_fix` come only from the table. A class with no row says `undocumented`.
+- `root_cause` and `structural_fix` come only from the table. A class with no row says `undocumented`. `cause` comes only
+  from the catalogue in code, and a class with no entry there reads `not investigated`.
 
 ## Testing notes
 
@@ -274,6 +342,7 @@ the unreadable lines.
 - [ledger_failures.go](../../ledger_failures.go): the `--failures` mode, the table parser and the join.
 - [internal/ledger/failures.go](../../internal/ledger/failures.go): the reader that groups the rows.
 - [internal/ledger/failurekinds.go](../../internal/ledger/failurekinds.go): the kind of every failure class.
+- [internal/ledger/rootcause.go](../../internal/ledger/rootcause.go): the root-cause catalogue.
 - [internal/ledger/reasoncode.go](../../internal/ledger/reasoncode.go): the closed reason-code set and the classifier.
 - [internal/core/agentwire.go](../../internal/core/agentwire.go): the wire defer classes.
 - [ledger_failures_test.go](../../ledger_failures_test.go): the acceptance tests.

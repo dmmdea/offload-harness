@@ -1484,7 +1484,7 @@ replaces the default. `cmd/local-agent/serve_test.go` covers the loopback guard.
 ## Source map
 
 - [`internal/agent/loop.go`](../../internal/agent/loop.go) — loop, budget, `dispatchOrThrottle`
-- [`trace_corpus.go`](../../trace_corpus.go) — the `trace-corpus` verb (harvest, readout, freeze, check)
+- [`trace_corpus.go`](../../trace_corpus.go) — the `trace-corpus` verb (harvest, readout, trigger, freeze, check)
   over recorded agent runs; [`internal/agent/contextpager.go`](../../internal/agent/contextpager.go) — the pager
   instrument and the compaction pass count it records
 - [`internal/agent/policy.go`](../../internal/agent/policy.go) — broker, `.git` denial, audit append

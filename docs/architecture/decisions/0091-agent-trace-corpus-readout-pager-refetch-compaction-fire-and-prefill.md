@@ -1,11 +1,11 @@
 ---
-status: Proposed
+status: Accepted
 date: "2026-10-14"
 ---
 
 # 0091 — Agent-trace corpus readout: pager re-fetch, compaction-fire and prefill
 
-Release: unreleased
+Release: 0.206.0 (the verb, the harvest, the readout and the recording of the pager report and compaction pass count; `trace-corpus trigger` and the stderr trigger line are in the next release, see ADR 0036's 2026-11-12 amendment)
 
 ## Context
 
@@ -136,6 +136,17 @@ A recommendation for the human decision on the planned context-editing measureme
    it and read `pager.measured_runs`, `pager.distinct_evicted`, `compaction.recorded_runs` and `compaction.fire_rate`,
    stating the counts beside any verdict. This ADR sets no minimum sample size; whoever reads the gate states how many
    runs it rests on.
+
+## Status note 2026-11-12
+
+Accepted, because what it decides is built and in use: the verb, the harvest, the null-not-zero rule, the run
+definition, the pool-alias bucket and the redaction shipped in 0.206.0 (PR 588), and the recording of the pager report
+and compaction pass count ships in the agent wire result, so recorded runs now exist. The "What the numbers decide" list
+stays a set of recommendations for a human decision, not decisions of this ADR, and the first-readout table is a
+dated snapshot. What it has not produced is the evidence it was built to collect: a harvest on 2026-11-12 of 12,332 runs
+(installed 0.232.0) holds 31 runs with a measured pager report, of 5,258 that recorded one, so the pager gate reads
+`BELOW_GATE` on 31 runs (8 of 86 evicted payloads re-fetched, 9.3 % against the 10 % gate) rather than `NO_DATA`, and no seat has more than 10 of them. Thirty-one runs do not settle the
+`edit_context` question, which stays open. The proposer trigger in ADR 0036 is stated on this count.
 
 ## Consequences
 
