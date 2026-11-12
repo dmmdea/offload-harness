@@ -1406,19 +1406,23 @@ func (r *runner) record(contract core.AgentContract, pr PlacedResult) {
 			// on this box has none) and the closed-set reason code — so a reader
 			// never joins on latency or greps prose. The reason above is stored
 			// whole: the ledger no longer cuts it.
-			Door:             doorOf(contract),
-			FleetJobID:       fleetJobIDOf(pr),
-			ReasonCode:       reasonCodeFor(pr),
-			Route:            r.route,
-			RouteAsked:       routeAsked,
-			PinReason:        pinReason,
-			Placement:        placement,
-			Steps:            pr.Result.Steps,
-			StopReason:       pr.Result.StopReason,
-			RepackMs:         pr.Result.RepackMs,
-			RepackAttempts:   pr.Result.RepackAttempts,
-			QueuedMs:         pr.Result.QueuedMs,
-			AcceptanceResult: acceptanceResult(pr),
+			Door:       doorOf(contract),
+			FleetJobID: fleetJobIDOf(pr),
+			ReasonCode: reasonCodeFor(pr),
+			Route:      r.route,
+			RouteAsked: routeAsked,
+			PinReason:  pinReason,
+			Placement:  placement,
+			// The executing node's build and seat config, as its result reported them (the delegation log's
+			// result block carries the same two); Record stamps this process's own build as the delegator's.
+			HarnessBuildSHA256: pr.Result.HarnessBuildSHA256,
+			SeatConfigSHA256:   pr.Result.SeatConfigSHA256,
+			Steps:              pr.Result.Steps,
+			StopReason:         pr.Result.StopReason,
+			RepackMs:           pr.Result.RepackMs,
+			RepackAttempts:     pr.Result.RepackAttempts,
+			QueuedMs:           pr.Result.QueuedMs,
+			AcceptanceResult:   acceptanceResult(pr),
 			// The same mark the corpus line carries (delegationLogLine.Refusal): a place in line, not the subtask's outcome.
 			Refusal: pr.refusalRow,
 		}); err != nil {

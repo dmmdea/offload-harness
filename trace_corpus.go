@@ -123,6 +123,14 @@ type tcRun struct {
 	// compaction ladder (elision markers, skeletons). It exists only for agent traces, which keep
 	// a transcript; nil on a delegation row. It is a LOWER BOUND on whether the ladder fired.
 	LadderArtifacts *int `json:"ladder_artifacts"`
+	// DelegatorBuildSHA256 is the build of the delegator that wrote the delegation-log row, HarnessBuildSHA256 the build
+	// of the node that ran the work and SeatConfigSHA256 the pin of the seat's server config, copied from the row under
+	// the names the row uses. They let a reader split the corpus by build. Delegation rows only, omitted when the row
+	// carries none (a row from before the stamps, an agent trace, or a run whose seat never served), which a reader
+	// must treat as unknown, never as a value.
+	DelegatorBuildSHA256 string `json:"delegator_build_sha256,omitempty"`
+	HarnessBuildSHA256   string `json:"harness_build_sha256,omitempty"`
+	SeatConfigSHA256     string `json:"seat_config_sha256,omitempty"`
 }
 
 // ---- reading the records ----
@@ -181,9 +189,11 @@ type tcTraceIn struct {
 
 // tcDelegationIn is the part of a delegation-log row the harvest reads.
 type tcDelegationIn struct {
-	Seat    string `json:"seat"`
-	Node    string `json:"node"`
-	Refusal *struct {
+	Seat string `json:"seat"`
+	Node string `json:"node"`
+	// The delegator's own build, stamped on the row itself; the executing node's build and seat pin are in Result.
+	DelegatorBuildSHA256 string `json:"delegator_build_sha256"`
+	Refusal              *struct {
 		Status int `json:"status"`
 	} `json:"refusal"`
 	Result *tcDelegationResult `json:"result"`
@@ -199,6 +209,9 @@ type tcDelegationResult struct {
 	CacheTokens   int64      `json:"cache_tokens"`
 	SeatTokensIn  int64      `json:"seat_tokens_in"`
 	Pager         *tcPagerIn `json:"pager"`
+	// The node's build and seat-config pin (omitted by a node that predates them).
+	HarnessBuildSHA256 string `json:"harness_build_sha256"`
+	SeatConfigSHA256   string `json:"seat_config_sha256"`
 }
 
 // neverRan reports a logged subtask whose agent never executed: a deferral (capacity,
@@ -490,6 +503,10 @@ func tcHarvestDelegation(o tcHarvestOpts, stats *tcHarvestStats) ([]tcRun, error
 				TraceBearing: len(res.Trace) > 0,
 				Steps:        res.Steps,
 				StopReason:   res.StopReason,
+
+				DelegatorBuildSHA256: in.DelegatorBuildSHA256,
+				HarnessBuildSHA256:   res.HarnessBuildSHA256,
+				SeatConfigSHA256:     res.SeatConfigSHA256,
 			}
 			pg, ok := res.Pager.run()
 			if !ok {

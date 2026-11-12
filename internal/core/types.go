@@ -363,6 +363,9 @@ type Meta struct {
 	Steps      int    `json:"steps,omitempty"`
 	StopReason string `json:"stop_reason,omitempty"`
 	RepackMs   int64  `json:"repack_ms,omitempty"`
+	// SeatConfigSHA256 is the seat-config pin of an agent run whose seat served (the wire result's field of the same
+	// name), carried to the ledger row. In-process only (`json:"-"`): the wire result publishes it already.
+	SeatConfigSHA256 string `json:"-"`
 	// RepackAttempts: the re-pack's completion count beside its wall, so the
 	// ledger row can separate one slow attempt from a three-attempt loop —
 	// the figure the D-129 engine route is measured on.

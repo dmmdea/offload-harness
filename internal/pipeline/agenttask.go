@@ -204,6 +204,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		meta.StopReason = w.StopReason
 		meta.RepackMs = w.RepackMs
 		meta.RepackAttempts = w.RepackAttempts
+		meta.SeatConfigSHA256 = w.SeatConfigSHA256
 		if jid, _ := req.Params["job_id"].(string); jid != "" {
 			meta.JobID = jid
 		}

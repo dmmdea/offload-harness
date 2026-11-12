@@ -1014,6 +1014,8 @@ func entryFrom(task core.TaskType, meta core.Meta, deferred bool, inputChars int
 		StopReason:     meta.StopReason,
 		RepackMs:       meta.RepackMs,
 		RepackAttempts: meta.RepackAttempts,
+		// The seat-config pin of an agent run whose seat served (empty — omitted — on every other row).
+		SeatConfigSHA256: meta.SeatConfigSHA256,
 		// The surface that admitted the call (A-102): "offload_summarize",
 		// "cli:summarize", "fleet". Empty when no door stamped the request.
 		Door: meta.Door,

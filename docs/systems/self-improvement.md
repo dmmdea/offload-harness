@@ -122,6 +122,11 @@ refuses one), so a baseline is never replaced and a new one goes to a new `--out
 for byte and refuses a baseline taken from a different corpus. `readout`, `freeze` and `check` are deterministic and
 model-free, and the report carries no timestamp.
 
+A harvested delegation row carries three stamps over from its log row, under the log's names and omitted when the log row
+has none: `delegator_build_sha256` (the delegator's build), `harness_build_sha256` (the executing node's build) and
+`seat_config_sha256` (the seat's config pin). A row from before the stamps, or whose seat never served, carries none:
+unknown, never a value. The readout does not use them yet; they let a reader split a corpus by build.
+
 `harvest --since` and `--until` bound the delegation shards by their day, inclusive. Each must be a real `YYYY-MM-DD`
 date and `--since` must not be after `--until`; anything else is refused with exit 2 before a shard is read, so a typo
 cannot silently widen or narrow the window. `trace-corpus help`, `--help` and `-h` print the usage with the flags of every

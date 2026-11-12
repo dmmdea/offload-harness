@@ -81,6 +81,13 @@ type failureReport struct {
 	Classes               []failureClassOut `json:"classes"`
 }
 
+// failureReportByBuild is the report with --by-build: the same object, and one more key at the end. Without the flag
+// the report is failureReport and carries no "builds" key, so its bytes are what they were.
+type failureReportByBuild struct {
+	failureReport
+	Builds []ledger.FailureBuild `json:"builds"`
+}
+
 // runLedgerMode is the ledger verb's entry (the one line main.go changed): the failure register when --failures is
 // asked for, the savings summary otherwise. The summary's own flag set does not define --failures, so a
 // --failures=false that reaches it would exit 2 with a usage dump; the flag is a mode switch decided here, and
@@ -148,6 +155,7 @@ func runLedgerFailures(args []string) error {
 	fs.Bool("failures", true, "print the failure-class register instead of the savings summary")
 	since := fs.Int("since", 0, "only count entries from the last N days")
 	includeTraffic := includeTrafficFlag(fs)
+	byBuild := fs.Bool("by-build", false, "also split the failures by the build that produced the row (JSON key \"builds\", and a short table on stderr); rows with no stamp are one bucket named \"unstamped\"")
 	table := fs.String("table", "", "markdown file holding the failure-class table (default: docs/systems/failure-register.md as embedded in this build)")
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
@@ -178,12 +186,25 @@ func runLedgerFailures(args []string) error {
 	if *since > 0 {
 		report.SinceDays = *since
 	}
-	b, err := json.MarshalIndent(report, "", "  ")
+	var out any = report
+	if *byBuild {
+		out = failureReportByBuild{failureReport: report, Builds: reg.Builds}
+		noteBuilds(reg)
+	}
+	b, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return err
 	}
 	fmt.Println(string(b))
 	return nil
+}
+
+// noteBuilds prints the build split as a table on stderr, for a person at the terminal; stdout stays the one JSON value.
+func noteBuilds(reg ledger.FailureRegister) {
+	fmt.Fprintf(os.Stderr, "failures by build (%d failed of %d job rows):\n", reg.FailureRows, reg.JobRows)
+	for _, b := range reg.Builds {
+		fmt.Fprintf(os.Stderr, "  %-72s %6d failed of %6d job rows\n", b.Build, b.FailureRows, b.JobRows)
+	}
 }
 
 // noteLedgerReading says on stderr what the JSON also says, so a person looking at the terminal sees it: the ledger

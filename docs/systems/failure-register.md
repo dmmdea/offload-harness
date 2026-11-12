@@ -109,6 +109,19 @@ a share of `failure_rows` and counts only the classes filed as stack faults: an 
 | `classes[].cards_tokens`, `rows_with_tokens` | the card work the class spent, and how many rows measured it |
 | `classes[].documented`, `investigated`, `meaning`, `root_cause`, `structural_fix` | the joined table row, and whether a person wrote a root cause or a fix in it |
 
+**Failures by build (`--by-build`).** The ledger stamps the build that wrote each row, in `Record`, from the same
+self-hash the delegation log uses and under its names: `harness_build_sha256` on a row for work the writing process ran
+itself, `delegator_build_sha256` on a delegator's row (a delegation row and its dispatch marker, and any row naming a
+remote node), and on a delegation row also the executing node's `harness_build_sha256` and, when its seat served,
+`seat_config_sha256`, as the node's result reported them. The `builds` key holds one entry per bucket,
+`{build, job_rows, failure_rows, classes}`, failure rows descending: its `job_rows` add up to the report's `job_rows`
+and its `failure_rows` to `failure_rows`. A row is bucketed by `harness_build_sha256` when it has one (the build that
+ran the work); else by `delegator_build_sha256`, named `delegator:<hash>` (the job never reached a node that reported a
+build, or the node predates the stamp, so only the delegator's build is known); else `unstamped`. Every row written
+before the stamp, and any row of a process whose self-hash failed, is `unstamped`: it is unknown, never a guess, and
+that bucket shrinks only as new rows come in. The split is by build only; `seat_config_sha256` is on the rows but not a
+bucket.
+
 **Door, seat and model.** The ledger has no seat or model column. `model_tier` is its one identity column: on a
 delegation row (task `agent_delegate`) it is `<node>:<seat alias>`, on every other row the model alias. The report
 reads the **door** as recorded (`(unknown)` when a row has none) and the **seat** as `model_tier` as recorded. The
@@ -232,9 +245,10 @@ code; this table is checked against both.
 
 ## Interfaces and entry points
 
-- `local-offload ledger --failures [--since DAYS] [--include-test-traffic] [--table FILE] [--config FILE]`: the
-  report, JSON on stdout and nothing else. A note about the left-out traffic, a missing ledger or lines it could not
-  read goes to stderr. `--failures=false` is the savings summary, as for any boolean flag.
+- `local-offload ledger --failures [--by-build] [--since DAYS] [--include-test-traffic] [--table FILE] [--config FILE]`:
+  the report, JSON on stdout and nothing else. A note about the left-out traffic, a missing ledger or lines it could not
+  read goes to stderr. `--failures=false` is the savings summary, as for any boolean flag. `--by-build` adds the `builds`
+  key (below) and prints the same split as a short table on stderr; without it the output is what it was.
 
 ## Invariants and assumptions
 

@@ -1412,8 +1412,14 @@ read-only unless deliberately widened. See
   second swap landing in that window fail on a sharing violation, with node-swap's holder diagnosis unable to see the stale server
   (its image path was renamed away).
   **Counting a rollout (runbook).** A rollout's effect (a gate that reads ledger rows after a deploy) counts only the rows whose
-  `harness_build_sha256` equals the deployed build's hash: a session on an old image keeps writing the old hash until it is
-  reconnected, so the rows themselves say which sessions are not on the build. The operator's deploy script reports the MCP servers
+  build stamp equals the deployed build's hash: a session on an old image keeps writing the old hash until it is
+  reconnected, so the rows themselves say which sessions are not on the build. The ledger stamps the build on every row it
+  writes, in `Record`, from the same hash the delegation log uses: a row for work this process ran carries
+  `harness_build_sha256`; a delegation row (task `agent_delegate`, its dispatch marker included) and any row naming a remote
+  node, written by the delegator, carry `delegator_build_sha256`, and a delegation row also carries the executing node's
+  `harness_build_sha256` and `seat_config_sha256` as the node's result reported them (a run whose seat served). A row written
+  before the stamp, or by a process whose self-hash failed, carries none. `local-offload ledger --failures --by-build` splits
+  the failures by these stamps ([failure-register.md](failure-register.md)). The operator's deploy script reports the MCP servers
   it finds still on an older image at the end of each Windows leg and in its deploy record, under "Sessions still on an old
   image" (process id and start time, and the session when the owners registry names it). It is information only: it never changes a
   node's verdict and never stops anyone's server.
@@ -1474,7 +1480,8 @@ read-only unless deliberately widened. See
   deploy replaces the installed binary while every MCP server already running keeps the image it started from, so a
   session could write rows with old behaviour for days and nothing said so (the register counted 13 of 18 MCP processes
   older than the deployed build). The block is `{version, build_sha256, installed_version?, stale_image?, note?}`:
-  the version and the build hash this process stamps on its rows, and the comparison with the file now at the path it
+  the version and the build hash this process stamps on the rows it writes (`harness_build_sha256`, or
+  `delegator_build_sha256` on a delegator's row), and the comparison with the file now at the path it
   started from. `stale_image` is `true` when the installed bytes differ, `false` when they are equal, and **absent with
   a `note` when the installed file cannot be read** (never "fresh" on a failure); `installed_version` is the build
   marker the installed file carries. `mcpserver.Run` takes the identity from `buildinfo.CaptureStartup()` and holds it on
