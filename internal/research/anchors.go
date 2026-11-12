@@ -215,7 +215,10 @@ func singular(w string) string {
 // wrong document passes it. An honest "nothing on this page" digest, which can
 // restate no page word, is excused by delegate.EvalAcceptance instead, from the
 // structure of what it says (delegate.HonestAbsence) and not from a phrase in
-// the text. It is a wrong-document
+// the text; so is a digest that quotes the page word for word, which is no answer
+// about another one (delegate.DigestGrounded: a digest of a narrow goal restates
+// the goal's words and the page's figures far more often than twenty-four other
+// words of the page). It is a wrong-document
 // tripwire, not a quality gate: lexical overlap is a poor faithfulness metric
 // (Maynez et al. 2020; Cao et al. 2022), so the bar is one word of
 // twenty-four. A page with fewer than minAnchorWords usable words yields "" —

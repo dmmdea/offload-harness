@@ -38,9 +38,10 @@ func EvalAcceptanceGraded(contract core.AgentContract, wire core.AgentWireResult
 			continue
 		}
 		// A digest that claims nothing and says the page does not carry what was asked restates none of the page's
-		// words, and is not about another document either (HonestAbsence reads the structure, not a phrase). Only a
-		// FAILED fingerprint is excused (excusesFingerprint): an unknown stays a reported failure.
-		if excusesFingerprint(a, o, parsed, wire) {
+		// words, and is not about another document either (HonestAbsence reads the structure, not a phrase); nor is one
+		// that quotes the page it was handed (DigestGrounded). Only a FAILED fingerprint is excused
+		// (excusesFingerprint): an unknown stays a reported failure.
+		if excusesFingerprint(a, o, parsed, contract, wire) {
 			continue
 		}
 		// An unknown (empty or absent evidence at a qualified check's level) is a failed check here, never a pass;
@@ -127,9 +128,9 @@ func (r *runner) strikeOnFingerprint(base string, failures []string) {
 
 // noteFingerprint is the runner's reading of one result against the document fingerprint: a contract that carries the
 // check and failed it is a strike against the node, one that carries it and PASSED is a pass (Quarantine.Pass), and one that
-// carries none says nothing about the node. A result the check missed that is an honest absence (excusedAbsence) is neither:
-// it did not fail the contract, but it restated nothing of the page either, so it is no evidence that the node reads the
-// right document and must not stand among its passes. Nor is a fingerprint the contract can never close (an unknown the
+// carries none says nothing about the node. A result the check missed that is excused (excusedAbsence: an honest absence, or a
+// digest grounded in the page) is neither: it did not fail the contract, but it restated none of the page's words either, so
+// it is no evidence that the node reads the right document and must not stand among its passes. Nor is a fingerprint the contract can never close (an unknown the
 // intake lint warns about, as a grounded check on a contract with no context documents): it is a defect of the contract,
 // still reported as a failure, and no node could have passed it, so it neither strikes nor passes (fingerprintFailedByNode).
 // An unknown over an honest absence is the same: neither. A fingerprint the node PASSED beside such a failure is still a pass.

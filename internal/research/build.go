@@ -157,6 +157,12 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 			sources = append(sources, src)
 			continue
 		}
+		// A page with no content is refused before a seat is spent on it (see emptyPage).
+		if why := emptyPage(f); why != "" {
+			src.Err, src.ErrKind, src.Skipped = why, ErrKindEmptyPage, why
+			sources = append(sources, src)
+			continue
+		}
 		name := DocName(i, f.FinalURL, f.URL)
 
 		head := fmt.Sprintf("The page at %s", f.URL)
@@ -202,6 +208,36 @@ func Build(req Request, fetched []Fetched) (specs []delegate.SubtaskSpec, source
 		}})
 	}
 	return specs, sources
+}
+
+// ErrKindEmptyPage is the error_kind of a source Build refused because the page holds no content (emptyPage): the caller can
+// read it as "there is nothing on this page to digest", where a fetch failure says the page could not be read.
+const ErrKindEmptyPage = "empty_page"
+
+// MinPageRunes is the floor of a markup page's text, in characters once the markup is stripped. A page under it is a title, a
+// banner, a "please wait" or a login wall, and a full run on it (five to thirteen minutes of a seat) can only say so. The
+// number is the 30 days to 2026-11-12 of research pages: 168 of the 4,622 pages that passed and 16 of the 356 that failed
+// verification were under 150 characters; 59 of the 168 were JSON, and of the other 109 the ones read were titles, cookie gates,
+// bot checks and login walls, bar a few (a batch file, an abstract, a README heading). A sample of 25 passes between 150 and 300
+// characters held 8 short real pages (archive capture counts, a changelog entry) among the shells, so the floor stops where
+// nearly all of what it refuses is a shell. Larger shells (a 349-character "unsupported browser" page was dispatched eight times)
+// are not caught by a length, and a page of markup with no prose at any size has no floor here.
+const MinPageRunes = 150
+
+// emptyPage returns why a fetched page is refused, or "" when it is not. Only a page read as markup (an HTML content type) is
+// judged by its length: a JSON body, a plain-text file, a feed and a subtitle track are data however short (a 40-character
+// archive-availability reply is the whole answer to a question the lane is asked), and 59 of the 168 short passes were JSON.
+// A page this short usually has too few words to anchor, so it carried no fingerprint and any digest of it passed, a digest of
+// an unrelated page included.
+func emptyPage(f Fetched) string {
+	if !strings.Contains(strings.ToLower(f.ContentType), "html") {
+		return ""
+	}
+	n := utf8.RuneCountInString(strings.TrimSpace(f.Text))
+	if n >= MinPageRunes {
+		return ""
+	}
+	return fmt.Sprintf("page has no content: %d characters of text once the markup was stripped (under %d), a title, a banner or a login wall; no digest was run", n, MinPageRunes)
 }
 
 // MaxLineChars is the longest line a context document is handed to a seat with. The agent's read_file cuts every line at
@@ -256,24 +292,27 @@ func WrapLongLines(text string, max int) string {
 	return strings.Join(lines, "\n")
 }
 
-// nonEmptyChecks asks for items only where the CALLER marked them: the first
-// array property their own schema lists in `required`, in the order they wrote
-// it. It replaces firstArrayCheck, which demanded one item from the
-// alphabetically first array of any schema. That array was the caller's choice
-// only by accident: with one caller's custom schema it picked an array that was
-// legitimately empty for the page, and every correct "none of the requested
-// topics" digest was scored failed_verification (register C-74, security review
-// R-02).
+// nonEmptyChecks guards a caller's schema only where the CALLER marked it: a schema that lists an array property in
+// `required` gets one check, that the digest said something. It replaces firstArrayCheck, which demanded one item from the
+// alphabetically first array of any schema. That array was the caller's choice only by accident: with one caller's custom
+// schema it picked an array that was legitimately empty for the page, and every correct "none of the requested topics"
+// digest was scored failed_verification (register C-74, security review R-02).
 //
-// One check, never one per required array: the rule may not add a failure a
-// schema did not have before, and callers who list every field as required
-// would otherwise be asked for items in all of them. A caller who wants more
-// says so in their own acceptance (min_items: / nonempty:), which Build appends
-// and declares required as well. The harness's default schema is not a caller's
-// mark and asks for no items: a digest of a page with nothing to say is complete
-// with empty lists and a verdict that says so, and Build guards the default
-// digest on every page with defaultDigestCheck (a value in any one of its four
-// fields) and asks for that verdict in the goal instead.
+// The first rewrite still demanded one item from the first required array (min_items:<field>:1), and that failed the same
+// answers one level up. The goal tells the seat to omit what the page does not contain and to say so plainly, so a page with
+// no prices comes back with an empty list and a sentence that says there are none. In the 30 days to 2026-11-12, 70 research
+// digests failed the item count (six of them the fingerprint as well); of the 64 that failed nothing else, 58 had a value in a
+// required field beside the empty list (the seat said there was none, or answered the page in other fields of the schema), and
+// the other six were silent or spoke only in optional fields. Each failure discarded a whole run and, being an
+// acceptance-only failure, was not retried. The check now is the default digest's, over the caller's own required fields:
+// nonempty:<f1>|<f2>|..., a value in any one of them. It fails the digest that is silent (every required field empty or
+// absent), which is what an item count was a proxy for, and it can only fail what the item count already failed: a digest
+// with an item in the first required array has a value in a required field.
+//
+// One check, never one per required array, and none for a schema that marks no array: the rule may not add a failure a
+// schema did not have before. A caller who wants items says so in their own acceptance (min_items: / nonempty:), which Build
+// appends and declares required as well, and which an honest "none" does not excuse. The harness's default schema is not a
+// caller's mark and has its own guard (defaultDigestCheck, built into Build) and a goal that asks for the verdict.
 func nonEmptyChecks(schema json.RawMessage) []string {
 	var s struct {
 		Required   []string                   `json:"required"`
@@ -282,19 +321,28 @@ func nonEmptyChecks(schema json.RawMessage) []string {
 	if json.Unmarshal(schema, &s) != nil || len(s.Properties) == 0 {
 		return nil
 	}
+	var names []string
+	seen := map[string]bool{}
+	hasArray := false
 	for _, k := range s.Required {
 		raw, declared := s.Properties[k]
-		if !declared {
+		// a name the any-of form cannot spell (it splits on the bar) or one already listed is left out, never an error
+		if !declared || seen[k] || k == "" || strings.Contains(k, "|") {
 			continue
 		}
+		seen[k] = true
+		names = append(names, k)
 		var p struct {
 			Type string `json:"type"`
 		}
 		if json.Unmarshal(raw, &p) == nil && p.Type == "array" {
-			return []string{"min_items:" + k + ":1"}
+			hasArray = true
 		}
 	}
-	return nil
+	if !hasArray {
+		return nil
+	}
+	return []string{"nonempty:" + strings.Join(names, "|")}
 }
 
 var reDocName = regexp.MustCompile(`[^a-z0-9.-]+`)

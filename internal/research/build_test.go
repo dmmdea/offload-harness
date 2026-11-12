@@ -33,6 +33,18 @@ func minItemsChecks(acc []string) []string {
 	return out
 }
 
+// callerNonEmptyChecks lists the any-of non-emptiness checks Build derives from a caller's schema (the default digest's own
+// guard, defaultDigestCheck, is not one): the check that replaced min_items:<first required array>:1.
+func callerNonEmptyChecks(acc []string) []string {
+	var out []string
+	for _, a := range acc {
+		if strings.HasPrefix(a, "nonempty:") && a != defaultDigestCheck {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
 // pageWith is one fetched page with enough distinctive prose for an anchor.
 func pageWith(text string) []Fetched {
 	return []Fetched{{URL: "https://docs.example.com/mp/", FinalURL: "https://docs.example.com/mp/", Title: "MP", Text: text}}
@@ -93,7 +105,7 @@ func TestBuildAsksForItemsOnlyWhereTheCallerMarked(t *testing.T) {
 	// Nothing marked: no automatic non-empty check at all, and no required list
 	// invented either.
 	specs, _ := Build(Request{Goal: "Digest it.", OutputSchema: json.RawMessage(arrays + `}`)}, pageWith(prosePage))
-	if got := minItemsChecks(specs[0].Acceptance); len(got) != 0 {
+	if got := append(minItemsChecks(specs[0].Acceptance), callerNonEmptyChecks(specs[0].Acceptance)...); len(got) != 0 {
 		t.Fatalf("an unmarked schema got %v: the alphabetically-first array is not the caller's ask", got)
 	}
 	if got := requiredOf(t, specs[0].OutputSchema); len(got) != 0 {
@@ -101,11 +113,16 @@ func TestBuildAsksForItemsOnlyWhereTheCallerMarked(t *testing.T) {
 	}
 
 	// The caller marked b_risks (an array) and summary (a string) required: the
-	// first REQUIRED array is the one that must come back non-empty — never
-	// a_findings, which sorts first but was not marked.
+	// digest must say something in one of THOSE (a faithful "none" in summary
+	// passes, a digest silent in both does not) — never a_findings, which sorts
+	// first but was not marked. It is no item count: min_items:b_risks:1 failed
+	// every digest that said an empty list was the answer.
 	specs, _ = Build(Request{Goal: "Digest it.", OutputSchema: json.RawMessage(arrays + `,"required":["summary","b_risks"]}`)}, pageWith(prosePage))
-	if got, want := minItemsChecks(specs[0].Acceptance), []string{"min_items:b_risks:1"}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("min_items checks = %v, want %v", got, want)
+	if got, want := callerNonEmptyChecks(specs[0].Acceptance), []string{"nonempty:summary|b_risks"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("derived checks = %v, want %v", got, want)
+	}
+	if got := minItemsChecks(specs[0].Acceptance); len(got) != 0 {
+		t.Fatalf("an item count was derived: %v", got)
 	}
 	if got, want := requiredOf(t, specs[0].OutputSchema), []string{"summary", "b_risks"}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("required = %v, want the caller's own list untouched: %v", got, want)

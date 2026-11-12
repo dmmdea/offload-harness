@@ -52,7 +52,8 @@ type Fetched struct {
 	TextBytes   int    `json:"text_bytes"`
 	Truncated   bool   `json:"truncated,omitempty"`
 	Err         string `json:"error,omitempty"`
-	// ErrKind names the failure of a text-source adapter (the ErrKind constants); empty for a page.
+	// ErrKind names why a source was not read: the failure of a text-source adapter or a page with no content (the ErrKind
+	// constants); empty for a page that read.
 	ErrKind string `json:"error_kind,omitempty"`
 	// CleanupErr is set when the adapter could not remove its per-call scratch directory; it is a note beside a
 	// result that may itself have succeeded, never a reason to drop the text.

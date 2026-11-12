@@ -13,7 +13,8 @@ package delegate
 // a stock phrase ("not specified") anywhere in a digest about the wrong document a pass. A phrase in a regex cannot be told
 // from the same phrase in the goal or in a sentence that claims something, so the cure is structural and lives here:
 // the regex holds the page's words and nothing else, and a result that misses it is excused only when its structured digest
-// makes no claim at all, which is what HonestAbsence reads.
+// makes no claim at all, which is what HonestAbsence reads. The other excuse is the converse: a digest that quotes the page it
+// was handed is no answer about another document (DigestGrounded, grounded.go).
 
 import (
 	"bytes"
@@ -129,30 +130,31 @@ func absenceOnly(v any, statements *int) bool {
 	}
 }
 
-// excusesFingerprint is the one reading of the honest-absence excuse, shared by the merge gate (EvalAcceptance) and the
+// excusesFingerprint is the one reading of the fingerprint's two excuses, shared by the merge gate (EvalAcceptance) and the
 // quarantine (excusedAbsence) so the two cannot disagree: a check is excused only when it is a document fingerprint that
-// PARSED and was graded a FAIL, and the digest is an honest absence. An unknown is not excused (an unknown is never a pass,
-// and dropping it would read it as one), and neither is a parse error. o and parsed come from gradeCheck, the same grading
-// that decides the verdict.
-func excusesFingerprint(a string, o core.AcceptanceOutcome, parsed bool, wire core.AgentWireResult) bool {
-	return parsed && o.Verdict == core.VerdictFail && strings.Contains(a, docAnchorTag) && HonestAbsence(wire.Structured)
+// PARSED and was graded a FAIL, and the digest is either an honest absence (HonestAbsence: it claims nothing about any
+// document) or grounded in the contract's own documents (DigestGrounded: it quotes the page it was handed, so it is not about
+// another one). An unknown is not excused (an unknown is never a pass, and dropping it would read it as one), and neither is a
+// parse error. o and parsed come from gradeCheck, the same grading that decides the verdict.
+func excusesFingerprint(a string, o core.AcceptanceOutcome, parsed bool, contract core.AgentContract, wire core.AgentWireResult) bool {
+	return parsed && o.Verdict == core.VerdictFail && strings.Contains(a, docAnchorTag) &&
+		(HonestAbsence(wire.Structured) || DigestGrounded(contract, wire.Structured))
 }
 
-// excusedAbsence reports whether the result misses the contract's document fingerprint and is excused because its digest is
-// an honest absence (HonestAbsence). EvalAcceptance drops that failure; the quarantine reads this to count the result as
-// neither a strike nor a pass, since an absence says nothing about whether the node reads the right document. The check is
-// graded the way EvalAcceptance grades it (gradeCheck, with the contract's context documents), never through Eval, which has
-// none: a grounded fingerprint the documents carry PASSES, and a passing result is a quarantine pass, not an excused absence.
+// excusedAbsence reports whether the result misses the contract's document fingerprint and is excused, because its digest is
+// an honest absence (HonestAbsence) or is grounded in the contract's documents (DigestGrounded). EvalAcceptance drops that
+// failure; the quarantine reads this to count the result as neither a strike nor a pass, since an absence says nothing about
+// whether the node reads the right document and a grounded digest that missed the anchor words is no off-document answer to
+// strike for. The check is graded the way EvalAcceptance grades it (gradeCheck, with the contract's context documents), never
+// through Eval, which has none: a grounded fingerprint the documents carry PASSES, and a passing result is a quarantine pass,
+// not an excused one.
 func excusedAbsence(contract core.AgentContract, wire core.AgentWireResult) bool {
-	if !HonestAbsence(wire.Structured) {
-		return false
-	}
 	for _, a := range contract.Acceptance {
 		if !strings.Contains(a, docAnchorTag) {
 			continue
 		}
 		o, parsed := gradeCheck(a, contract, wire)
-		if excusesFingerprint(a, o, parsed, wire) {
+		if excusesFingerprint(a, o, parsed, contract, wire) {
 			return true
 		}
 	}
