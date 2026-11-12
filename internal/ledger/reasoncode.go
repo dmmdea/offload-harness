@@ -163,6 +163,9 @@ var errClassCodes = map[string]string{
 	// The box or the binding cannot do what was asked as configured.
 	"not_configured": ReasonConfig, "binary_not_absolute": ReasonConfig, "model_incompatible": ReasonConfig,
 	"device_invalid": ReasonConfig, "ffmpeg_unavailable": ReasonConfig,
+	// A call that names a node (or a lane's node roster) this box is not set up to dial or that has not opened the
+	// door the call needs (a node without media-job, a roster left out for configuration): the setup, not the load.
+	"no_node_configured": ReasonConfig,
 	// A route the config binds whose file is gone (CT-54): another node may serve it, this one is misconfigured now.
 	"route_not_ready": ReasonConfig,
 	// The request itself is what no node can run.
@@ -170,8 +173,12 @@ var errClassCodes = map[string]string{
 	// The engine ran and its output failed the quality gate.
 	"black_clip": ReasonFailedVerification, "frozen_clip": ReasonFailedVerification, "depth_frames_invalid": ReasonFailedVerification,
 	"dead_air": ReasonFailedVerification, "unmeasurable": ReasonFailedVerification,
-	// The input file.
-	"bad_input": ReasonBadInput,
+	// compose_video's own checks of a composition it rendered (a page error, a layout check) failed. The composition
+	// is what the caller wrote, so bad_input is the alternative reading; the checks are the lane's acceptance of the
+	// result, which is what failed_verification names.
+	"check_failed": ReasonFailedVerification,
+	// The input file, or a composition the caller wrote that the lint refuses.
+	"bad_input": ReasonBadInput, "lint_errors": ReasonBadInput,
 }
 
 // reasonPrefixCodes classify a deferred row whose err_class names nothing, by the stable prefix of the
@@ -185,6 +192,9 @@ var reasonPrefixCodes = []struct{ prefix, code string }{
 	{"audio convert: audioio: tempdir:", ReasonInfrastructure},
 	{"the input has no audio stream", ReasonBadInput}, {"audio convert:", ReasonBadInput}, {"image load:", ReasonBadInput},
 	{"frame sampling:", ReasonBadInput}, {"empty image prompt", ReasonBadInput},
+	// The media verb's own refusal of a call with no in or out. Only this whole sentence is named: "media <op>: " also
+	// wraps what ffmpeg itself reported, which is not the caller's input.
+	{"media convert: convert: in and out are required", ReasonBadInput},
 	{"generate_svg: missing kind", ReasonBadInput}, {"generate_svg: bad spec", ReasonBadInput},
 	// The media doors' own refusals of an input that cannot be run as given (the sentence each door writes).
 	{"empty audio prompt", ReasonBadInput}, {"empty video prompt", ReasonBadInput}, {"empty character/background prompt", ReasonBadInput},
@@ -194,6 +204,10 @@ var reasonPrefixCodes = []struct{ prefix, code string }{
 	// transcribe --words: the upstream answered but gave no per-word timings, so the words door has nothing to return.
 	{"the whisper upstream returned no word timings", ReasonAbstention},
 	{"non-JSON output", ReasonAbstention},
+	// The reasoning tier's own gate: the classify answer arrived and the model's own confidence in it was below the
+	// configured minimum, so it declined to commit (pipeline_attempt.go). The rest of "reasoning tier: <verdict>" is the
+	// verifier's wording for other faults and is not named.
+	{"reasoning tier: low classify confidence ", ReasonAbstention},
 	{"transcribe call failed:", ReasonInfrastructure}, {"forecast call failed:", ReasonInfrastructure}, {"image generation failed:", ReasonInfrastructure},
 	{"audio generation failed:", ReasonInfrastructure}, {"video generation failed:", ReasonInfrastructure},
 	{"character animation failed:", ReasonInfrastructure}, {"run-graph failed:", ReasonInfrastructure},
@@ -234,12 +248,16 @@ var reasonPrefixCodes = []struct{ prefix, code string }{
 //   - "seat down: ": core.SeatDownReason, the node's typed seat-down outcome (ADR 0066), the code seat_down.
 //   - the lane placement defers (a probe of every fleet node found none able to take the call), the code
 //     no_eligible_node; "no fleet node advertises" is the accelerator forward's own.
+//   - "no node that answered is called ": a media call that named a node (mediaremote/named.go) which was not among
+//     the entries that answered the health probe; the sentence lists the entries that did not answer. It is the same
+//     defer CodeForLaneDefer files through the wire class capacity, so the code is node_busy.
 var legacyReasonPrefixCodes = []struct{ prefix, code string }{
 	{"wall timeout after", ReasonBudget}, {"step budget exhausted", ReasonBudget},
 	{"output failed schema", ReasonAbstention},
 	{"failed verification:", ReasonFailedVerification},
 	{"seat down: ", ReasonSeatDown},
 	{"no fleet node is eligible for the ", ReasonNoEligibleNode}, {"no fleet node serves ", ReasonNoEligibleNode},
+	{"no node that answered is called ", ReasonNodeBusy},
 }
 
 // queueWithdrawnClause ends a "queue deadline after" reason the node confirmed it took back
@@ -250,6 +268,20 @@ const queueWithdrawnClause = "the job was withdrawn from the node, which will ne
 // answer to a dispatch: "dispatch <url>: status 503: <the node's body>". The delegator files every such refusal
 // as queue_full (capacityRefusal), whatever the body says (queue full, node leased, too many requests).
 var dispatchCapacityRe = regexp.MustCompile(`dispatch \S+: status (?:503|429): `)
+
+// dialFailureWords is the Go net package's own wording of a connection that could not be made, inside the delegator's
+// "dispatch <url>: Post ...: dial tcp <addr>: <cause>" wrapper.
+const dialFailureWords = " dial tcp "
+
+// pollFailuresRe matches the media and the other remote lanes' own give-up on a node whose job polls stopped being
+// answered: "node <id>: job <job id>: <N> consecutive poll failures, last: <error>" (mediaremote, textremote,
+// visionremote and the others). The node stopped answering, which is the definition of node_unreachable.
+var pollFailuresRe = regexp.MustCompile(`: job \S+: \d+ consecutive poll failures, last: `)
+
+// renderedFetchFailedSentence is the media lane's defer when a node finished the render and the fetch of its output
+// then failed (mediaremote.go: "node <id> rendered the job but fetching it failed: <error>"). The reply the node gave
+// was cut or never came back, so it reads as the node not answering; the render itself succeeded.
+const renderedFetchFailedSentence = " rendered the job but fetching it failed: "
 
 // legacyReasonCode is the code of a reason one of the sentences above names, or "".
 func legacyReasonCode(reason string) string {
@@ -272,6 +304,15 @@ func legacyReasonCode(reason string) string {
 		return ReasonQueueFull
 	case strings.Contains(reason, textLeaseHoldsCardSentence):
 		return ReasonNodeBusy
+	case strings.HasPrefix(reason, "dispatch ") && strings.Contains(reason, dialFailureWords):
+		// The delegator's own wrapper of a dispatch POST that could not connect ("dispatch <url>: Post ...: dial tcp ...").
+		// The prefix is what keeps an agent loop's own "agent loop: Post ...: dial tcp ..." (a seat's engine, seat_down or
+		// infrastructure) out of it: that is the box's own seat, not a node host.
+		return ReasonNodeUnreachable
+	case pollFailuresRe.MatchString(reason):
+		return ReasonNodeUnreachable
+	case strings.HasPrefix(reason, "node ") && strings.Contains(reason, renderedFetchFailedSentence):
+		return ReasonNodeUnreachable
 	}
 	return ""
 }
@@ -297,6 +338,16 @@ const (
 	// the delegator reads as an ack-time 400 and files as dispatch_refused, a fact about the request or the
 	// credentials. The folder is the node's configured home, so the fault is the node's configuration.
 	nodeJobsDirSentence = "agent contract: creating pipeline-jobs dir"
+	// lastPollErrorClause is appended by the delegator to a "poll deadline after" reason when the last poll of the job
+	// got no answer (delegate/run_remote.go): the node stopped answering while it owned the job. The class
+	// poll_deadline is for a node that answered and kept working past the allowance, so this one is node_unreachable.
+	lastPollErrorClause = " (last poll error: "
+	// audioQAUnmeasuredSentence and audioQANoToolSentence are the audio QA's own words when it could not measure the
+	// delivered audio because ffmpeg or ffprobe is not there (render/audio-qa.mjs: "the delivered audio could not be
+	// measured (no measurement (ffmpeg/ffprobe unavailable))"). The audio was never judged, so nothing failed its check:
+	// the box is missing a tool, which is configuration.
+	audioQAUnmeasuredSentence = "could not be measured"
+	audioQANoToolSentence     = "no measurement (ffmpeg/ffprobe unavailable)"
 )
 
 // RefileStamped is the class a row's stamped code should read as, given its reason: the stamp itself when the pair
@@ -315,6 +366,14 @@ func RefileStamped(code, reason string) string {
 		}
 	case ReasonDispatchRefused:
 		if strings.Contains(reason, nodeJobsDirSentence) {
+			return ReasonConfig
+		}
+	case ReasonPollDeadline:
+		if strings.Contains(reason, lastPollErrorClause) {
+			return ReasonNodeUnreachable
+		}
+	case ReasonFailedVerification:
+		if strings.Contains(reason, audioQAUnmeasuredSentence) && strings.Contains(reason, audioQANoToolSentence) {
 			return ReasonConfig
 		}
 	}
