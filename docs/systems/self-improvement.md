@@ -9,7 +9,7 @@ Otherwise the incumbent stays.
 
 This page is the map of that loop at this head. It names the verb or door that runs each part, what the part answers
 and what it refuses to claim, and links the code and the page that owns the detail. It does not repeat those pages.
-Two parts are proposed and not merged; they get a short paragraph each at the end and no code links.
+The recipe store and its audit verb, and the evidence-preserving reducer, are merged and have their own sections below.
 
 ## Questions this doc answers
 
@@ -17,12 +17,13 @@ Two parts are proposed and not merged; they get a short paragraph each at the en
 - Which readouts feed that decision, and which command or tool runs each one?
 - What is the difference between a readout and a verdict?
 - What does a review result say about the diff it judged?
-- Which parts of the loop are proposed and not on main yet?
+- Which parts of the loop are merged, and which of them are switched off or hold nothing yet?
 
 ## Scope
 
-The discipline and the four parts that exist at this head: the failure register, the trace-corpus readout, the
-measurement gate and the SHA-bound evidence on a review result.
+The discipline and the parts that exist at this head: the failure register, the trace-corpus readout, the
+measurement gate, the SHA-bound evidence on a review result, the recipe store with its audit verb, and the
+evidence-preserving reducer (default off).
 
 ## Non-scope
 
@@ -86,8 +87,11 @@ The first, second and fourth rows only count or label. The third is the only row
 `local-offload ledger --failures [--since DAYS] [--include-test-traffic] [--table FILE]` prints one JSON object. A
 failed job (deferred, carrying a failing reason code, or failing its acceptance check) is filed under its reason code,
 a member of the closed set in [`internal/ledger/reasoncode.go`](../../internal/ledger/reasoncode.go). A row written
-before the code was stamped is classed at read time and counted in `class_derived_rows`. Rows are counted per door,
-seat and model.
+before the code was stamped is classed at read time and counted in `class_derived_rows`: from its error class, then
+from the sentence the harness itself wrote, by the prefix rules listed in [failure-register.md](failure-register.md),
+and `other` when neither names it. The lane, accelerator and compose doors stamp the code from the defer class the
+result carries, so a placement or capacity defer is not left to read time. A deferred row whose writer gave no reason is
+filed with the reason `deferred: no reason recorded`. Rows are counted per door, seat and model.
 
 Every class has one of six closed **kinds**, decided in code beside the reason-code set
 ([`failurekinds.go`](../../internal/ledger/failurekinds.go)): `stack_fault`, `capacity`, `caller`, `ceiling`, `work`
@@ -113,9 +117,15 @@ its gap list. A test fails for a non-empty cell until the class is named in it w
 `local-offload trace-corpus` has four modes. `harvest` reads recorded agent runs, from the standalone agent traces and
 the delegation log and never the ledger, reduces each to numbers and enums, redacts the few strings left and writes the
 corpus to `--out`, printing its sha256, which every report then carries as `corpus_hash`. `readout` prints the report.
-`freeze` writes the report as a baseline. `check` demands the report back byte for byte and refuses a baseline taken from
-a different corpus. `readout`, `freeze` and `check` are deterministic and model-free, and the report carries no
-timestamp.
+`freeze` writes the report as a baseline, created exclusively: a path that exists is refused (exit 2, as `gate freeze`
+refuses one), so a baseline is never replaced and a new one goes to a new `--out`. `check` demands the report back byte
+for byte and refuses a baseline taken from a different corpus. `readout`, `freeze` and `check` are deterministic and
+model-free, and the report carries no timestamp.
+
+`harvest --since` and `--until` bound the delegation shards by their day, inclusive. Each must be a real `YYYY-MM-DD`
+date and `--since` must not be after `--until`; anything else is refused with exit 2 before a shard is read, so a typo
+cannot silently widen or narrow the window. `trace-corpus help`, `--help` and `-h` print the usage with the flags of every
+mode and exit 0.
 
 It reports, for the whole corpus, by source and by seat:
 
@@ -135,7 +145,8 @@ node's real seat, so those runs are reported apart (`pool_alias`) and `attributi
 per-seat reading cannot reach.
 
 The first readout, in [ADR 0091](../architecture/decisions/0091-agent-trace-corpus-readout-pager-refetch-compaction-fire-and-prefill.md)
-(status Proposed at this head, a snapshot of one machine's log on 2026-10-14 and not re-measured here), found no run that
+(status Proposed at this head, a snapshot of one machine's log on 2026-10-14; later logs carry recorded runs, so re-run the
+readout before quoting it), found no run that
 had recorded a pager report or a pass count. The pager verdict read `NO_DATA` and the fire rate `null`, so the questions
 were recorded as unanswered rather than answered "rarely".
 
@@ -152,10 +163,11 @@ boundary: the gate checks the task ids of each arm against the declared list, no
 | `check` | refuses a baseline that is not byte for byte what `freeze` writes, and prints its hash (`--expect-hash` also refuses another hash) |
 | `verdict` | judges a candidate against the incumbent under the baseline and prints the result as JSON (`--require-adopt` exits 1 unless ADOPT) |
 | `schema` | prints the JSON Schema of the gate input |
-| `selftest` | ranks control pairs with a named scorer and prints the judge receipt |
+| `selftest` | ranks control pairs with a named scorer and prints the judge receipt; a scorer whose seat call deferred or failed could not judge, so it exits 2 with no receipt and leaves an existing `--out` alone |
 
 Exit codes: 0 the command ran (for `verdict`, a verdict was produced), 1 `--require-adopt` and the verdict is not
-ADOPT or a self-test mis-ranked a pair, 2 a refusal or a usage error.
+ADOPT or a self-test mis-ranked a pair, 2 a refusal or a usage error (for `selftest`, also a scorer that could not judge:
+its seat call deferred or failed, for example because a GPU lease is held, and the message names the defer reason).
 
 The rules, in short:
 
@@ -237,11 +249,12 @@ flags is kept raw without being shown to the seat. The key stays off until a sea
 ## Interfaces and entry points
 
 - `local-offload ledger --failures [--since DAYS] [--include-test-traffic] [--table FILE]`
-- `local-offload trace-corpus harvest [--traces DIR] [--delegation-log DIR] --out FILE`, then
-  `readout|freeze|check --corpus FILE` (`check` also takes `--baseline FILE`)
+- `local-offload trace-corpus harvest [--traces DIR] [--delegation-log DIR] --out FILE [--seat LIST]
+  [--exclude-seat LIST] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--config PATH]`, then
+  `readout|freeze|check --corpus FILE` (`check` also takes `--baseline FILE`; `readout` and `freeze` take `--out FILE`)
 - `local-offload gate freeze|check|verdict|schema|selftest`
 - `local-offload recipe-audit --recipe ID --seat ALIAS --seat-tag TAG --contracts TASKS.json --baseline BASELINE.json
-  --engine-build STR [--store DIR] [--attempts N] [--input-out FILE]`
+  --engine-build STR [--store DIR] [--attempts N] [--input-out FILE] [--config PATH]`
 - `offload_review_diff`, with the optional inputs `base_sha`, `head_sha` and `gate_receipts`
 
 ## Invariants and assumptions
@@ -266,7 +279,8 @@ flags is kept raw without being shown to the seat. The key stays off until a sea
   machine-local data that is never committed. Seat and node names appear as the records wrote them, so a readout is
   machine-local like the corpus.
 - `review-evidence.jsonl` holds short statements about someone's code (each claim and reason cut to 512 bytes). The file
-  is created with an owner-only mode.
+  is created with mode 0600 on POSIX. On Windows that mode restricts nothing: the file takes the access list of the
+  folder it sits in, so keep that folder to the owner when the claims are sensitive.
 - A real corpus, ledger or review trace is machine-local data and does not belong in the repository. The tracked-tree
   [leak gate](leak-gate.md) reads this page like any other file, so machines appear here as roles, never by name.
 
@@ -295,7 +309,7 @@ flags is kept raw without being shown to the seat. The key stays off until a sea
 - [`internal/reviewlane/evidence_test.go`](../../internal/reviewlane/evidence_test.go) and
   [`internal/mcpserver/reviewevidence_test.go`](../../internal/mcpserver/reviewevidence_test.go) cover the outcomes, the
   fingerprints, the gate receipts and the trace through the real door.
-- `go test -run TestDocsLint .` checks that this page's links resolve and that it keeps its Purpose and Source map.
+- No test checks this page's links or sections; read them back when you edit it.
 
 ## Common pitfalls
 
@@ -326,8 +340,11 @@ flags is kept raw without being shown to the seat. The key stays off until a sea
   [`gate_input.go`](../../internal/eval/gate_input.go): the verdict rules, the pre-registration and the input format.
 - [`internal/reviewlane/evidence.go`](../../internal/reviewlane/evidence.go): the evidence block, `Decide`, `Seal` and
   the trace.
-- [`internal/mcpserver/mcpserver.go`](../../internal/mcpserver/mcpserver.go): `handleReviewDiff`, where the evidence is
-  bound and sealed at every exit.
+- [`internal/mcpserver/mcpserver_review.go`](../../internal/mcpserver/mcpserver_review.go): `handleReviewDiff`, where the
+  evidence is bound and sealed at every exit.
+- [`internal/recipe/`](../../internal/recipe/) and [`recipe_audit_cmd.go`](../../recipe_audit_cmd.go): the recipe store and
+  the `recipe-audit` verb.
+- [`internal/agent/rung_reducer.go`](../../internal/agent/rung_reducer.go): the evidence-preserving reducer.
 - [`main.go`](../../main.go): the `ledger`, `trace-corpus` and `gate` cases and their usage lines.
 
 ## Related docs

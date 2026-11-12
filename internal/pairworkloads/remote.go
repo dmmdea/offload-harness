@@ -189,6 +189,8 @@ func (c *RemoteCall) Finish(res core.Result) {
 		if row.Reason == "" {
 			row.Reason = "deferred"
 		}
+		// The wire defer class the result carries, so a lane's capacity or placement defer is not filed "other".
+		row.ReasonCode = ledger.CodeForLaneDefer(res.Meta.ErrClass, row.Reason, res.DeferClass)
 	}
 	c.mu.Unlock()
 	// The row first: it is local file I/O, and the post below can take its whole bound (a PAIR on a loaded

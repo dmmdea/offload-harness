@@ -33,6 +33,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -42,6 +43,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/compeval"
@@ -998,6 +1000,7 @@ func runTraceCorpusTo(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("%s", usage)
 	}
 	mode := args[0]
+	helpAsked := mode == "-h" || mode == "--help" || mode == "help"
 	fs := flag.NewFlagSet("trace-corpus "+mode, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.String("config", "", "config file path (only used by harvest, to find the default source directories)")
@@ -1010,7 +1013,17 @@ func runTraceCorpusTo(args []string, stdout, stderr io.Writer) error {
 	excludeSeats := fs.String("exclude-seat", "fake-seat", "harvest: drop these seats (comma list; the default drops the harness's own test seat)")
 	since := fs.String("since", "", "harvest: first delegation shard day to read (YYYY-MM-DD)")
 	until := fs.String("until", "", "harvest: last delegation shard day to read (YYYY-MM-DD)")
+	if helpAsked {
+		// A requested help is not a mistake: the usage and the flags go to stdout and the exit is 0.
+		fmt.Fprint(stdout, tcHelp)
+		fs.SetOutput(stdout)
+		fs.PrintDefaults()
+		return nil
+	}
 	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
 		return err
 	}
 	if fs.NArg() > 0 {
@@ -1019,6 +1032,9 @@ func runTraceCorpusTo(args []string, stdout, stderr io.Writer) error {
 
 	switch mode {
 	case "harvest":
+		if err := tcCheckWindow(*since, *until); err != nil {
+			return err
+		}
 		return tcRunHarvest(fs, stdout, stderr, tcHarvestOpts{
 			TracesDir: *tracesDir, DelegationDir: *delegationDir,
 			Seats: tcSet(*seats), ExcludeSeats: tcSet(*excludeSeats), Since: *since, Until: *until,
@@ -1051,7 +1067,7 @@ func runTraceCorpusTo(args []string, stdout, stderr io.Writer) error {
 			if err != nil {
 				return err
 			}
-			if err := os.WriteFile(*outPath, b, 0o644); err != nil {
+			if err := tcWriteBaselineOnce(*outPath, b); err != nil {
 				return err
 			}
 			fmt.Fprintf(stderr, "[trace-corpus] baseline frozen: %s (corpus %.12s, %d runs)\n", *outPath, hash, len(runs))
@@ -1073,6 +1089,72 @@ func runTraceCorpusTo(args []string, stdout, stderr io.Writer) error {
 	default:
 		return fmt.Errorf("trace-corpus: unknown mode %q (harvest|readout|freeze|check)", mode)
 	}
+}
+
+// tcHelp is what `trace-corpus help`, `--help` and `-h` print before the flag list.
+const tcHelp = `usage: local-offload trace-corpus <harvest|readout|freeze|check> [flags]
+
+  trace-corpus harvest [--traces DIR] [--delegation-log DIR] --out CORPUS [--seat LIST]
+                       [--exclude-seat LIST] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--config PATH]
+      read the recorded runs into one corpus file. --since and --until bound the delegation shards by
+      their day, inclusive; each must be a real YYYY-MM-DD date and --since must not be after --until.
+  trace-corpus readout --corpus CORPUS [--out FILE]
+      print the readout (or write it to FILE, replacing one that is there).
+  trace-corpus freeze  --corpus CORPUS --out BASELINE
+      write the readout as the baseline. The baseline is created exclusively: an existing path is
+      refused, so a new baseline goes to a new --out.
+  trace-corpus check   --corpus CORPUS --baseline BASELINE
+      refuse unless the corpus reproduces the baseline byte for byte.
+
+Exit codes: 0 done; 1 an error or a failed check; 2 a refusal (a bad --since or --until, an existing
+freeze --out).
+
+flags (each names the mode that reads it):
+`
+
+// tcFail is a refusal of the verb: it ends the process with code 2, the usage-error code of the
+// other self-improvement verbs (gate, recipe-audit).
+func tcFail(format string, a ...any) error {
+	return &exitCodeError{code: 2, msg: "trace-corpus " + fmt.Sprintf(format, a...)}
+}
+
+// tcCheckWindow refuses a --since or --until that is not a real YYYY-MM-DD date, and a window whose
+// start is after its end. Both are compared as strings against the shard names later, so a
+// non-padded or free-form value would silently keep the wrong shards.
+func tcCheckWindow(since, until string) error {
+	for _, v := range []struct{ flag, val string }{{"--since", since}, {"--until", until}} {
+		if v.val == "" {
+			continue
+		}
+		if _, err := time.Parse("2006-01-02", v.val); err != nil || !tcDayRe.MatchString(v.val) {
+			return tcFail("harvest: %s %q is not a real YYYY-MM-DD date", v.flag, v.val)
+		}
+	}
+	if since != "" && until != "" && since > until {
+		return tcFail("harvest: --since %s is after --until %s", since, until)
+	}
+	return nil
+}
+
+// tcWriteBaselineOnce creates path with b. A baseline is written once, as gate freeze writes one:
+// an existing path is refused and the file is left as it is.
+func tcWriteBaselineOnce(path string, b []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return tcFail("freeze refused: %s already exists; a baseline is written once, so a new one goes to a new --out", path)
+		}
+		return tcFail("freeze: write %s: %v", path, err)
+	}
+	_, werr := f.Write(b)
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		os.Remove(path)
+		return tcFail("freeze: write %s: %v", path, werr)
+	}
+	return nil
 }
 
 // tcRunHarvest resolves the source directories (explicit flags, else the install root's

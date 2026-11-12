@@ -305,11 +305,35 @@ func builtinControlPairs() []compeval.ControlPair {
 // side fails strict number-grounding on benign paraphrase while the empty side passes trivially.
 // Recall pays only for preserved signal, which is the thing compaction can destroy. The control-pair
 // gate still decides admissibility on THIS box. It never returns an error: a run that did not finish
-// is a score of 0, so a seat that is down shows as a tie, which the self-test fails.
+// is a score of 0, so a seat that is down shows as a tie, which the self-test fails. That is right for
+// the A/B, where a failed arm is a score; the self-test asks the scorer a different question and uses
+// compactionOutcomeJudge.
 func compactionOutcomeScorer(run func(context.Context, core.Request) core.Result) compeval.Scorer {
+	return compactionOutcomeScore(run, false)
+}
+
+// compactionOutcomeJudge is compactionOutcomeScorer for `gate selftest`, which asks whether the scorer
+// ranks known-ordered content. A seat call that deferred or failed (a GPU lease held, a seat down) gives
+// no score to rank, so it returns an error naming why instead of a 0: the self-test then could not judge
+// the scorer, rather than finding it mis-ranking.
+func compactionOutcomeJudge(run func(context.Context, core.Request) core.Result) compeval.Scorer {
+	return compactionOutcomeScore(run, true)
+}
+
+func compactionOutcomeScore(run func(context.Context, core.Request) core.Result, strict bool) compeval.Scorer {
 	return func(ctx context.Context, rendered string) (float64, error) {
 		res := run(ctx, core.Request{Task: core.TaskSummarize, Input: rendered})
 		if !res.OK {
+			if strict {
+				why := res.Reason
+				if why == "" {
+					why = "no reason given"
+				}
+				if res.Deferred {
+					return 0, fmt.Errorf("the seat call deferred: %s", why)
+				}
+				return 0, fmt.Errorf("the seat call failed: %s", why)
+			}
 			return 0, nil
 		}
 		var payload struct {

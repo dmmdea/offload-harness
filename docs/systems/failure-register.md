@@ -2,7 +2,9 @@
 
 ## Purpose
 
-Say which failures the harness has, how many of each, who owns each kind of failure, and what is known about why.
+Say which failures the harness has, how many of each, which kind of failure each is (the stack's own, capacity, the
+caller's, a ceiling, the work), and what is known about why. The register has no owner column: a class carries its kind,
+and the person who looks into it writes the cause and the fix.
 `local-offload ledger --failures` reads the ledger and prints one JSON report: the failed jobs grouped into failure
 classes, with a count, a kind, the doors, seats and models they came through, and the card work they spent. Each class
 is then joined by name to the table on this page.
@@ -38,9 +40,9 @@ does not add to it, and the verb without the flag is unchanged.
 2. A job row is a **failure** when it deferred, or carries a failing reason code, or failed its acceptance check. A
    cache hit and a dispatch marker never are.
 3. Its **class** is its reason code, the closed set in `internal/ledger/reasoncode.go`. The set already holds the seven
-   wire defer classes (the table at the end of this page). A row written before the code was stamped, or with a code
-   outside the set, is classed with the same classifier the ledger itself uses (`DeferCode`) and counted in
-   `class_derived_rows`.
+   wire defer classes (the table at the end of this page). A row written before the code was stamped, with a code
+   outside the set, or deferred and stamped `other`, is classed with the same classifier the ledger itself uses
+   (`DeferCode`) and counted in `class_derived_rows` when that names a member.
 4. Rows are grouped by class. Within a class they are broken down by door, seat and model. Each class has a **kind**
    (below), and the failures are also counted by kind.
 5. Each class is joined to the table below by its name. This page is embedded in the binary at build time;
@@ -96,7 +98,7 @@ a share of `failure_rows` and counts only the classes filed as stack faults: an 
 | `refused_attempts` | rows that are a node's capacity refusal at dispatch, set aside: neither jobs nor failures |
 | `stack_fault_rows`, `stack_fault_share` | the failure rows whose class is a `stack_fault`, and their part of `failure_rows` (`null` with no failure row) |
 | `kinds` | the failure rows per kind and their part of `failure_rows`; kinds with no row are absent |
-| `class_derived_rows` | failed rows classed at read time because they carried no usable code |
+| `class_derived_rows` | failed rows classed at read time: they carried no usable code, or deferred with the stamp `other` and a rule now names their class |
 | `excluded_non_production` | test, bake and measurement jobs left out, per class (absent when none) |
 | `undocumented_classes` | the classes present in the ledger that have no row in the table |
 | `uninvestigated_classes` | the classes present in the ledger with no root cause and no structural fix written by a person (a class with no row is among them) |
@@ -183,6 +185,35 @@ The table is the human-maintained half of the register.
 | `other` | A failure no member above names. The classifier is total, so a row is never without a class; a growing share here means the set needs a new member. | | |
 
 `ok` and `started` are members of the closed set too, but they are not failures and have no row.
+
+### Reading a row written before the code was stamped
+
+A row with a stamped reason code is read as stamped, with one exception: `other` is what the ledger files when no member
+named the row at write time, so a deferred row stamped `other` is classed again and keeps `other` unless a rule below now
+names a member. A deferred row without a code is classed the same way. Both are counted in `class_derived_rows` and classed
+by `DeferCode` in [`internal/ledger/reasoncode.go`](../../internal/ledger/reasoncode.go): its error
+class first, then the prefix of its reason, and `other` when neither names it. The prefix rules cover only sentences the
+harness itself writes, and each maps to the class its own writer files the same defer under. A rule is added only when a
+real sentence in the source ties to an existing class without doubt; the sentence stays in a comment beside it.
+
+- `wall timeout after` and `step budget exhausted` are `budget`; `output failed schema` is `abstention`.
+- `failed verification:` is `failed_verification`; `seat down:` is `seat_down`.
+- `queue deadline after` is `queue_deadline`, or `queue_withdrawn` when the sentence ends with the node's confirmed
+  withdrawal ("the job was withdrawn from the node, which will never run it").
+- `stalled: no progress` (bare, or behind `structured re-pack unreachable:`) is the stall class of the phase word in it:
+  `stall_prefill`, `stall_decode`, `stall_repack` and the others, read as the delegator reads them.
+- `no fleet node is eligible for the ...`, `no fleet node serves ...` and the accelerator forward's `no fleet node
+  advertises ...` are `no_eligible_node`.
+- `dispatch <url>: status 503|429: ...` is `queue_full`: the delegator files every capacity refusal of a dispatch so,
+  whatever the node's body says (queue full, node leased, too many requests).
+
+A door that holds a result's wire defer class (the remote lanes and the accelerator forward) stamps the code when it
+writes the row: the error class and the sentence first, then the defer class (`capacity` is `node_busy`), so such a defer
+is no longer left to read time. A deferred row whose writer gave no reason is filed with the reason
+`deferred: no reason recorded`, which the register reads as `other`.
+
+Not yet ruled, because the sentence does not tie to one class without doubt: a bare `node leased`, `no node that answered
+is called ...`, `no fleet node can take this edit now` and the browse door's own error classes.
 
 ### Wire defer classes
 

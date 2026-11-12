@@ -937,6 +937,7 @@ func (p *Pipeline) recordExtractImageCall(task core.TaskType, meta core.Meta, st
 	e := entryFrom(task, row, res.Deferred, 0)
 	if res.Deferred {
 		e.Reason = res.Reason
+		e.ReasonCode = ledger.CodeForLaneDefer(e.ErrClass, e.Reason, res.DeferClass)
 	}
 	e.CardsTokens = cards
 	_ = p.led.Record(e)
@@ -950,10 +951,21 @@ func (p *Pipeline) recordExtractImageCall(task core.TaskType, meta core.Meta, st
 // "<id>@fleet" when the forward failed before a node answered. A nil ledger
 // (held by another process) records nothing, like every other task.
 func (p *Pipeline) RecordAccel(task, modelTier string, latencyMs int64, deferred bool, reason string) {
+	p.RecordAccelClassed(task, modelTier, latencyMs, deferred, reason, "")
+}
+
+// RecordAccelClassed is RecordAccel for a deferred call whose door knows the defer class (core.DeferClass*): the
+// ledger files the row under the sentence the harness wrote when that names it, and under the class when it does
+// not, instead of "other". An empty class is RecordAccel.
+func (p *Pipeline) RecordAccelClassed(task, modelTier string, latencyMs int64, deferred bool, reason, deferClass string) {
 	if p == nil || p.led == nil {
 		return
 	}
-	_ = p.led.Record(ledger.Entry{Task: task, ModelTier: modelTier, LatencyMs: latencyMs, Deferred: deferred, Reason: reason})
+	e := ledger.Entry{Task: task, ModelTier: modelTier, LatencyMs: latencyMs, Deferred: deferred, Reason: reason}
+	if deferred {
+		e.ReasonCode = ledger.CodeForLaneDefer("", reason, deferClass)
+	}
+	_ = p.led.Record(e)
 }
 
 // entryFrom builds a ledger entry from per-call meta + the enriched signals.

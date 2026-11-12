@@ -341,7 +341,7 @@ Usage:
   local-offload fleet-smoke [--remote URL]... [--timeout 120] [--json]   send one grounded one-step contract to EVERY node and print where each landed (node, seat, placement, wall, verdict); non-zero unless all PASS
   local-offload top [--ui http://127.0.0.1:18813] [--interval 5s]   terminal view of the fleet overview (for headless boxes; reads a running fleet-ui)
   local-offload rig --seat <alias> [--since 7d] [--node ID] [--out report.json] [--json]   the seat rigger (ADR 0036 P3a): classify this box's delegation-log failures for a seat onto ONE axis each (published precedence), weights over eligible rows, evidence job ids, the pre-authored remedy per axis — proposes and applies nothing
-  local-offload ledger [--since DAYS] [--failures]    token-savings report; --failures prints the failure-class register instead (docs/systems/failure-register.md)
+  local-offload ledger [--since DAYS] [--failures] [--table FILE] [--include-test-traffic]    token-savings report; --failures prints the failure-class register instead (docs/systems/failure-register.md); --table (with --failures) names the register's class table, --include-test-traffic counts bench and test rows too
   local-offload doctor [--config FILE] [--probe-completion]   check endpoint health + config, then the engine answering each lane and seat (--probe-completion sends a 1-token completion and can load one idle seat on an idle box)
   local-offload audit-yaml [--against-render] [--other-box] FILE...
                                          check live llama-swap config(s) against the operator rules (INV-1/INV-2: no -ngl 0, no empty CUDA_VISIBLE_DEVICES, ttl 300 everywhere, no persistent group, no preload).
@@ -369,7 +369,7 @@ Usage:
   local-offload eval [--dir DIR]         code-based quality eval (AURC, deferral-curve AUDC/QNC)
   local-offload compaction-eval <harvest|run|freeze|check|ab|kvbench> --corpus C | contextbench   compaction ladder eval: trace→corpus harvest (redacting), ratio/retention report, tokens ratchet, gated A/B, KV-reuse bench, ContextBench tasks
   local-offload gate <freeze|check|verdict|selftest|schema> [flags]   the one measurement gate: freeze a pre-registration, check it, judge a candidate against the incumbent (ADOPT/BLOCK/INCONCLUSIVE, paired interval over tasks), write a model judge's self-test receipt (selftest); exit 0 a verdict was produced, 1 non-ADOPT under --require-adopt or a scorer that failed its self-test, 2 a refusal (docs/systems/measurement-gate.md)
-  local-offload recipe-audit --recipe ID --seat ALIAS --seat-tag TAG --contracts TASKS.json --baseline BASELINE.json --engine-build STR [--store DIR] [--attempts N] [--input-out FILE]
+  local-offload recipe-audit --recipe ID --seat ALIAS --seat-tag TAG --contracts TASKS.json --baseline BASELINE.json --engine-build STR [--store DIR] [--attempts N] [--input-out FILE] [--config PATH]
                                          run the contracts with and without a recipe (ADR 0036 amendment) on one seat UNDER a GPU lease, judged by the acceptance DSL; publish the recipe only on a gate ADOPT with steps no worse, else demote it; exit 2 without a lease (run it under gpu reserve), 0 once the store records the result
   local-offload confhead-eval            out-of-fold adoption gate (AURC/AUGRC + paired-bootstrap CI)
   local-offload confhead-calibrate       per-task conformal p(correct) escalation thresholds (ADOPT tasks)

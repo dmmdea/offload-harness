@@ -111,8 +111,9 @@ type FailureRegister struct {
 	// ceiling, work and unclassified failures are not in it, and an unclassified one is never counted as the stack's.
 	StackFaultRows  int      `json:"stack_fault_rows"`
 	StackFaultShare *float64 `json:"stack_fault_share"`
-	// ClassDerivedRows is how many failed rows carried no usable reason code (rows from before it was stamped,
-	// a code outside the closed set) and were classed here by DeferCode, the classifier Record itself uses.
+	// ClassDerivedRows is how many failed rows were classed here by DeferCode, the classifier Record itself uses:
+	// rows with no usable reason code (from before it was stamped, or a code outside the closed set) and deferred
+	// rows stamped "other" that a rule now names.
 	ClassDerivedRows int `json:"class_derived_rows"`
 	// CardsTokens and RowsWithTokens total the classes' (same rule, same nil).
 	CardsTokens    *int64 `json:"cards_tokens"`
@@ -208,6 +209,14 @@ func failureClassOf(e Entry) (class string, derived, failed bool) {
 		return "", false, false
 	}
 	if IsReasonCode(e.ReasonCode) && e.ReasonCode != ReasonOK && e.ReasonCode != ReasonStarted {
+		// "other" is the residue Record files when no member named the row at write time, so it is the one stamp a
+		// later build may read better: a deferred row stamped "other" is classed again, and keeps "other" unless a
+		// sentence the harness wrote now names a member. Every other stamp is read as stamped.
+		if e.ReasonCode == ReasonOther && e.Deferred {
+			if c := DeferCode(e.ErrClass, e.Reason); c != ReasonOther {
+				return c, true, true
+			}
+		}
 		return e.ReasonCode, false, true
 	}
 	switch {

@@ -8,8 +8,9 @@ need before changing it: what each part does, how the important flows work, what
 where the code lives.
 
 - **How to write docs here:** [STYLE.md](STYLE.md) · **Shapes to fill in:** [templates/](templates/)
-- **Structural gate:** `TestDocsLint`, run by CI — links must resolve, ADR frontmatter must be
-  schema-valid, system and flow docs must keep their navigational sections.
+- **Structure:** no test checks it any more (the docs lint test was deleted) — links must resolve, ADR
+  frontmatter must be schema-valid, system and flow docs must keep their navigational sections; read them
+  back. The leak gate still fails the build on a private name.
 
 ## Systems — how each part works
 

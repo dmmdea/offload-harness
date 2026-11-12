@@ -171,11 +171,12 @@ apart.
 
 ## The lint gate
 
-CI's `TestDocsLint` checks structure: scaffold files exist, relative links resolve, ADR
-frontmatter is schema-valid, and system/flow docs keep their `## Purpose` and `## Source map`
-sections.
+No test checks structure any more (the docs lint test was deleted): scaffold files exist, relative
+links resolve, ADR frontmatter is schema-valid, and system/flow docs keep their `## Purpose` and
+`## Source map` sections. You read them back. The leak gate (`leak_gate_test.go`) still fails the
+build on a private name.
 
-It checks structure only. Meaning is a review duty — see [CONTRIBUTING.md](../CONTRIBUTING.md).
+Meaning is a review duty too — see [CONTRIBUTING.md](../CONTRIBUTING.md).
 
 The gate deliberately exempts two areas from link resolution: [templates/](templates/), whose
 placeholder links are meant to be filled in rather than followed, and `superpowers/`, the dated

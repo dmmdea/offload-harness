@@ -85,9 +85,9 @@ Documentation lives in [`docs/`](docs/README.md) and is part of the change, not 
   review.
 - **Verify what you write.** Check each factual claim against the source at the time of writing. Mark
   genuine uncertainty with `> **Unverified:**` rather than guessing.
-- **Structural gate:** CI's `TestDocsLint` checks that scaffold files exist, relative links
-  resolve, ADR frontmatter is schema-valid, and system/flow docs keep their required sections. It
-  checks structure only — meaning is a review duty.
+- **Structure and meaning are yours to check.** No test checks that links resolve, ADR frontmatter is
+  schema-valid, or system/flow docs keep their `## Purpose` and `## Source map` sections (the docs lint
+  test was deleted); read them back. The leak gate still fails the build on a private name.
 - Conventions, the ADR schema, and the privacy rules for published files are in
   [`docs/STYLE.md`](docs/STYLE.md).
 

@@ -1,6 +1,9 @@
 package ledger
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // Reason codes (register C-68, ADR 0064; every deferred row since F22): a CLOSED set that says why a
 // delegated job ended the way it did, written beside the free-text Reason on every `agent_delegate`
@@ -108,6 +111,9 @@ const (
 	ReasonOther = "other"
 )
 
+// NoReasonRecorded is the reason Record files on a deferred row whose writer gave none.
+const NoReasonRecorded = "deferred: no reason recorded"
+
 // reasonCodes is the closed set, in the order a report should list it.
 var reasonCodes = []string{
 	ReasonOK, ReasonStarted, ReasonFailedVerification,
@@ -208,6 +214,82 @@ var reasonPrefixCodes = []struct{ prefix, code string }{
 	{"probe:", ReasonInfrastructure}, {"generate_svg: write:", ReasonInfrastructure}, {"generate_svg:", ReasonInfrastructure},
 }
 
+// legacyReasonPrefixCodes classify a deferred row by the sentence the harness ITSELF wrote, for the rows
+// written before the writer stamped a reason code (and for any writer that still does not). Each prefix is a
+// sentence one writer owns, and each maps to the class that writer files the same defer under; none is a model's
+// or a node's prose. Matched in order, after err_class and reasonPrefixCodes.
+//
+//   - "wall timeout after": internal/pipeline ceilingReason, filed under ceilingClass, which is budget unless the
+//     monitor's own ceiling held the run (and then the sentence is the ceiling's, not this one).
+//   - "step budget exhausted": the agent loop's step ceiling, class budget (agenttask.go).
+//   - "output failed schema": the structured re-pack's output failing the contract's schema, class abstention.
+//   - "failed verification:": the delegator's reason for a result that arrived and failed the acceptance checks
+//     (delegate.record), the code failed_verification.
+//   - "seat down: ": core.SeatDownReason, the node's typed seat-down outcome (ADR 0066), the code seat_down.
+//   - the lane placement defers (a probe of every fleet node found none able to take the call), the code
+//     no_eligible_node; "no fleet node advertises" is the accelerator forward's own.
+var legacyReasonPrefixCodes = []struct{ prefix, code string }{
+	{"wall timeout after", ReasonBudget}, {"step budget exhausted", ReasonBudget},
+	{"output failed schema", ReasonAbstention},
+	{"failed verification:", ReasonFailedVerification},
+	{"seat down: ", ReasonSeatDown},
+	{"no fleet node is eligible for the ", ReasonNoEligibleNode}, {"no fleet node serves ", ReasonNoEligibleNode},
+}
+
+// queueWithdrawnClause ends a "queue deadline after" reason the node confirmed it took back
+// (delegate.run_remote): the delegator's queue_withdrawn, against queue_deadline for one that may still run.
+const queueWithdrawnClause = "the job was withdrawn from the node, which will never run it"
+
+// dispatchCapacityRe matches the delegator's (and the accelerator forward's) own wrapper of a node's 503 or 429
+// answer to a dispatch: "dispatch <url>: status 503: <the node's body>". The delegator files every such refusal
+// as queue_full (capacityRefusal), whatever the body says (queue full, node leased, too many requests).
+var dispatchCapacityRe = regexp.MustCompile(`dispatch \S+: status (?:503|429): `)
+
+// legacyReasonCode is the code of a reason one of the sentences above names, or "".
+func legacyReasonCode(reason string) string {
+	for _, p := range legacyReasonPrefixCodes {
+		if strings.HasPrefix(reason, p.prefix) {
+			return p.code
+		}
+	}
+	switch {
+	case strings.HasPrefix(reason, "queue deadline after"):
+		if strings.Contains(reason, queueWithdrawnClause) {
+			return ReasonQueueWithdrawn
+		}
+		return ReasonQueueDeadline
+	case strings.HasPrefix(reason, "stalled: no progress"), strings.HasPrefix(reason, "structured re-pack unreachable: stalled: no progress"):
+		return stallCodeOf(reason)
+	case strings.Contains(reason, " (fleet): no fleet node advertises "):
+		return ReasonNoEligibleNode
+	case dispatchCapacityRe.MatchString(reason):
+		return ReasonQueueFull
+	}
+	return ""
+}
+
+// stallCodeOf names the phase a node's liveness verdict ("stalled: no progress for 300s in prefill (...)") went
+// silent in, by the phase words of the run registry, as the delegator reads them (delegate.stallReasonCode).
+func stallCodeOf(reason string) string {
+	switch {
+	case strings.Contains(reason, "engine did no work"), strings.Contains(reason, "kept stepping"):
+		return ReasonStallEngine
+	case strings.Contains(reason, "cold-load"):
+		return ReasonStallColdLoad
+	case strings.Contains(reason, " in prefill"):
+		return ReasonStallPrefill
+	case strings.Contains(reason, " in decoding"):
+		return ReasonStallDecode
+	case strings.Contains(reason, " in admission"):
+		return ReasonStallAdmission
+	case strings.Contains(reason, " in repack"):
+		return ReasonStallRepack
+	case strings.Contains(reason, " in tool"):
+		return ReasonStallTool
+	}
+	return ReasonStallOther
+}
+
 // deferClassCodes maps core.DeferClass* (the class a node's defer carries on the wire) to the closed set. The
 // ledger imports no core, so the values are written as strings and a test in internal/pipeline pins every
 // core.DeferClass* constant to an entry here. "capacity" is the node's own capacity defer (a seat at its run
@@ -221,6 +303,17 @@ var deferClassCodes = map[string]string{
 // knows (the row is then classified from its err_class and its reason, DeferCode).
 func CodeForDeferClass(class string) string { return deferClassCodes[class] }
 
+// CodeForLaneDefer is the code a door stamps on the row of a result that carries a defer class and no code of its
+// own (the remote lanes, the accelerator forward): the finer reading first (err_class, then the sentence the
+// harness wrote, DeferCode), and the defer class only when neither names it. Without it a lane's capacity defer
+// was filed "other": 154 of the 157 such rows in one 30-day register. "" when nothing names the row.
+func CodeForLaneDefer(errClass, reason, deferClass string) string {
+	if c := DeferCode(errClass, reason); c != ReasonOther {
+		return c
+	}
+	return CodeForDeferClass(deferClass)
+}
+
 // DeferCode is the closed-set code of a deferred row no writer classified: its err_class when the table
 // knows it, else the prefix of its reason ("no ... configured" is config), else ReasonOther. Total: every
 // deferred row gets a member of the set.
@@ -232,6 +325,9 @@ func DeferCode(errClass, reason string) string {
 		if strings.HasPrefix(reason, p.prefix) {
 			return p.code
 		}
+	}
+	if c := legacyReasonCode(reason); c != "" {
+		return c
 	}
 	if strings.HasPrefix(reason, "no ") && strings.Contains(reason, " configured") {
 		return ReasonConfig

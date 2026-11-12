@@ -24,8 +24,9 @@
 //
 // The verb reads the files it is named and writes at most one file: freeze's --out, which is
 // created exclusively (a pre-registration is written once; a changed one is a new file with a new
-// hash), or selftest's --out, which replaces what is there (a receipt is the latest answer, so a
-// failing run must not leave an older passing one behind). It prints no timestamp. The gate reads
+// hash), or selftest's --out, which replaces what is there when the run reached a finding (a receipt
+// is the latest answer, so a mis-ranking run must not leave an older passing one behind; a run that
+// could not judge writes nothing and leaves the older file alone). It prints no timestamp. The gate reads
 // no config; selftest alone reads one, to reach the seat of a scorer that calls one.
 package main
 
@@ -67,7 +68,7 @@ func realGateScorer(id string, fs *flag.FlagSet) (compeval.Scorer, func(), error
 		if err != nil {
 			return nil, nil, err
 		}
-		return compactionOutcomeScorer(p.Run), cleanup, nil
+		return compactionOutcomeJudge(p.Run), cleanup, nil
 	}
 	return nil, nil, fmt.Errorf("unknown scorer %q (known: %s)", id, strings.Join(gateScorerIDs, ", "))
 }
@@ -96,7 +97,9 @@ const gateUsage = `usage: local-offload gate <freeze|check|verdict|selftest|sche
       that receipt as "receipt", and the judge's identity in the baseline is the scorer id. A scorer
       fails when it scores a pair's good side at or below its degraded side; the receipt is then still
       printed, with passed false, and the mis-ranking goes to stderr. --out also writes the receipt to
-      a file (replacing one). Scorers: compaction-outcome (the compaction A/B's accept + entity-recall
+      a file (replacing one, when the run reached a finding). A scorer whose seat call deferred or failed
+      (a GPU lease held, a seat down) could not judge: exit 2, no receipt, --out untouched, and the
+      message names why. Scorers: compaction-outcome (the compaction A/B's accept + entity-recall
       score through the configured seat; it reads --config).
   gate schema
       print the JSON Schema (draft 2020-12) of the gate input document.
@@ -108,8 +111,8 @@ Exit codes:
      (the result is still printed)
   2  a refusal (bad hash, bad receipt, malformed input, a baseline that is not the frozen bytes,
      a freeze the gate cannot honour; for selftest, no pairs, an unknown scorer, a scorer that
-     returned an error, or a build that cannot be hashed), a result that could not be written, or a
-     usage error
+     returned an error or whose seat call deferred or failed, or a build that cannot be hashed), a
+     result that could not be written, or a usage error
 
 A global --config <path> before the subcommand is accepted. Only selftest reads it, to reach the seat
 of a scorer that calls one; the other subcommands ignore it: the gate reads no config.
@@ -362,8 +365,10 @@ func gateVerdict(args []string, stdout, stderr io.Writer) error {
 // gateSelftest ranks the control pairs with a named scorer and prints the receipt R7 asks of a model
 // judge. A scorer that mis-ranks a pair has produced a finding: the receipt is printed with passed
 // false and the exit is 1. A run that could not reach a finding (no pairs, an unknown scorer, a scorer
-// that returned an error, a build that cannot be hashed) is a refusal, exit 2, with no receipt: a
-// failed receipt would read as a statement about the scorer.
+// that returned an error, a build that cannot be hashed) is a refusal, exit 2, with no receipt and an
+// existing --out file left as it is: a failed receipt would read as a statement about the scorer. A
+// scorer whose seat call deferred or failed (a GPU lease held, a seat down) is such an error: it could
+// not judge, and the message names the defer reason (compactionOutcomeJudge).
 func gateSelftest(args []string, stdout, stderr io.Writer) error {
 	fs := gateFlags("selftest", stderr)
 	pairsPath := fs.String("pairs", "", "the control pairs: a JSON array of {name, good, degraded} (required)")
