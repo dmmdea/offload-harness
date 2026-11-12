@@ -546,6 +546,9 @@ func budgetSpent(remaining, budget, placements int) string {
 // human's timing decision, not a rewritten contract), the holder named so the
 // caller can wait, route elsewhere, or ask. It never runs the contract.
 //
+// The wire class stays infrastructure (exit code and summary counts depend on it). The ledger row is a
+// capacity hold and is filed under node_busy (ledger.RefileStamped), which is what the failure register counts.
+//
 // call is non-nil when the call's deadline bounded the wait (ADR 0073): the advice to set
 // agent_lease_wait_sec longer would then be wrong, because the wait already ran as long as the
 // call could spare.
