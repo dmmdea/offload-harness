@@ -306,7 +306,7 @@ const (
 func RefileStamped(code, reason string) string {
 	switch code {
 	case ReasonInfrastructure:
-		if strings.Contains(reason, localSeatReservedSentence) {
+		if strings.Contains(reason, localSeatReservedSentence) && !remoteFallbackFaulted(reason) {
 			return ReasonNodeBusy
 		}
 	case ReasonBudget:
@@ -319,6 +319,28 @@ func RefileStamped(code, reason string) string {
 		}
 	}
 	return code
+}
+
+// remoteFaultSentences are the delegator's own words for a remote fallback that failed because the fleet is broken
+// or misconfigured (delegate/run_probe.go nodeSideVerdict and noEligibleRemote), as opposed to full or leased.
+var remoteFaultSentences = []string{
+	"failed the health probe",
+	"no remote fleet nodes are configured",
+	"no remote passed the capability gate",
+	"advertise no context ceiling",
+}
+
+// remoteFallbackFaulted reports a lease hold whose remote fallback failed on a fault, not on room. Such a row stays
+// infrastructure: the local seat being held must never hide a dead or misconfigured fleet behind a capacity class
+// (2026-11-12 review). A row that names a fault keeps the fault class even when other remotes were only full: 17 of
+// the 72 lease-hold rows the register then counted also named a failed health probe, and stay infrastructure.
+func remoteFallbackFaulted(reason string) bool {
+	for _, s := range remoteFaultSentences {
+		if strings.Contains(reason, s) {
+			return true
+		}
+	}
+	return false
 }
 
 // stallCodeOf names the phase a node's liveness verdict ("stalled: no progress for 300s in prefill (...)") went

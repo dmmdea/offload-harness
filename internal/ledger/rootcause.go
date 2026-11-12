@@ -162,7 +162,7 @@ var failureCauses = map[string]FailureCause{
 	ReasonWrite: noRow("pipeline/agenttask.go (the write door refused: agent_allow_write false, or a write set past a door cap)"),
 	ReasonInfrastructure: {Kind: CauseUpstream, Investigated: true,
 		RootCause: "Mostly a seat whose engine was gone from llama-swap's /running (the node's defer class infrastructure carrying the same sentence as seat_down), then a vision seat that was cold and timed out, and the browse door's `browse: BROWSER_UNAVAILABLE:` and `browse: DECISION_UNAVAILABLE:`. The delegator's `local seat reserved (gpu lease ...)` was filed here until 2026-11-12; it is a capacity hold and is now `node_busy` (the wire class of that defer stays infrastructure, so the exit code and summary still count it).",
-		Evidence:  "agent/seatdown.go:185, pipeline_vision.go; 195 rows in 30 days as stamped: research 90, fleet 82; 79 of them were `local seat reserved (gpu lease ...)`, which ledger RefileStamped now reads as node_busy",
+		Evidence:  "agent/seatdown.go:185, pipeline_vision.go; 195 rows in 30 days as stamped: research 90, fleet 82; 72 of them were `local seat reserved (gpu lease ...)`: ledger RefileStamped now reads the 55 that name only remotes without room as node_busy, and the 17 that also name a failed health probe stay here",
 		Action:    "see seat_down; not investigated: why the engine goes away."},
 	ReasonBadInput: {Kind: CauseCallerContract, Investigated: true,
 		RootCause: "The input cannot be used as given: an image path that does not exist, a template variable the template does not declare.",
