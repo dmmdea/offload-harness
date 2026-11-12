@@ -665,6 +665,22 @@ fact about the node, so it strikes nothing and passes nothing. The excuse counts
 that did not read the page and reports "the page does not address it" without saying that it failed; that is delivered as an
 absence, as an honest one is, and only a second seat would tell them apart.
 
+The other faithful shape is a **digest that quotes its page**. The anchors exclude the goal's own words, so a digest of
+a narrow goal restates the goal's words and the page's figures and not twenty-four other words of the page: in the 30 days to
+2026-11-12, 282 research digests failed the fingerprint, and the rule below clears 125 of them. `delegate.DigestGrounded` excuses a failed fingerprint (the same one place as the honest absence, so the merge gate and the
+quarantine cannot disagree) when the decoded digest holds one string of at least 60 characters, or two different strings of at
+least 15, that are found in the contract's context documents with the lookup the quote check uses (`quotecheck.Locate`: case,
+spacing, quote marks and dashes set aside) and are not in the goal. A string the goal contains counts for nothing (the goal echoed
+back, the page's title and URL, and sentences a caller pasted into the goal cannot ground a digest), and a figure or a label is
+too short to count: another page holds it by chance. The thresholds were read off the 4,968 digests of those 30 days, each paired
+with three pages of other sites and up to three of the same site: a digest paired with an unrelated page of another site was
+grounded in 7 of 14,904 pairs (0.05 %: shared footers and one article's abstract under two addresses), where also counting three
+short figures grounded 0.2 to 1.2 %. Pages of one site share navigation, price tables and licence text, so there 1,281 of 11,186
+pairs (11 %) are grounded: the rule proves the answer was written from this page and not from a seat's memory, not that it is not
+a sibling page's. The excuse counts for the node as neither a strike nor a pass. It does not make the fingerprint a content check:
+that regex accepted 118 of 200 digests paired with another site's page (one of twenty-four short words appears in most long
+prose), and the new excuse accepted none of the pairs it rejected.
+
 What a digest owes beyond that is one design (register C-74): **presence is declared,
 non-emptiness is asked for only where the caller marked it, and the default digest owes that it
 said something.** The default schema `{key_facts[], numbers[], quotes[], verdict}` declares all four
@@ -672,11 +688,18 @@ fields `required`, and a caller's `output_schema` keeps its own `required` entri
 field its own `min_items:` / `nonempty:` acceptance reads, so a seat's direct JSON answer that
 leaves one out fails validation and goes to the structured re-pack instead of being delivered and
 failing acceptance after a whole run (36 of the 59 `min_items` failures on 2026-09-29). An item is
-required of the digest only for the FIRST array the caller's own schema lists in `required` (one
-check, never more than before) or through the caller's own `acceptance`; the default schema asks
-for no items and a schema that marks nothing gets none, so a faithful "nothing on this page"
-digest is a success (the old rule demanded an item from the alphabetically first array of any
-schema). What the default digest does owe, on EVERY page anchored or not, is
+required of the digest only through the caller's own `acceptance`; a schema that lists an array
+in `required` gets one check, `nonempty:<f1>|<f2>|...` over its required fields, a value in any one of them. The first
+version asked for one item from the first required array (`min_items:<field>:1`), and that failed the same answers one level up:
+the goal tells the seat to omit what the page does not contain, so a page with no prices comes back with an empty list and a
+sentence that says so. In the 30 days to 2026-11-12, 64 research digests failed only that count; 58 of them had a value in a
+required field beside the empty list, and the other six were silent or spoke only in optional fields (those still fail, and so does
+a digest silent in every required field). The check can only fail what the item count failed (a digest with an item in the first
+required array has a value in a required field), a schema that marks no array gets none, and a caller who wants items writes
+`min_items:` themselves, which an honest "none" does not excuse. One cost, stated plainly: a seat that says "none" for a page that
+holds the items is now accepted under a caller's schema as it always was under the default schema (200 of 200 planted false
+"none" digests pass the fingerprint through the honest-absence excuse; under a caller's schema 24 of the 200 were failed by the
+item count before and are accepted now). What the default digest does owe, on EVERY page anchored or not, is
 `nonempty:key_facts|numbers|quotes|verdict`, a value in any one of its four fields: a page too
 thin to anchor would otherwise carry no check at all, and a digest that said nothing (every list
 empty, no verdict) would be delivered as a success. Empty lists with a verdict that says so still
@@ -725,7 +748,13 @@ over an honest absence. Only a FAILED fingerprint can be excused (by an honest a
 or by an honest absence strikes nothing and passes nothing, and otherwise an unknown the result caused (an empty answer beside the
 documents, a declared field missing from the result) strikes like a failure. The seats never gain
 network access; the agent loop's egress cage is untouched. Failed or refused fetches come
-back as `sources[].skipped` and produce no result — a broken page never reads as a digest.
+back as `sources[].skipped` and produce no result — a broken page never reads as a digest. So does a page with no content:
+an HTML page whose text is under 150 characters once the markup is stripped (`research.MinPageRunes`) is a title, a banner,
+a "please wait" or a login wall, and is skipped with `error_kind` `empty_page` before a seat is spent on it. JSON, plain text, feeds
+and subtitle tracks are data however short and are never refused by length. In the 30 days to 2026-11-12, 16 of the 356 research
+pages that failed verification and 109 of the 4,622 that passed were such pages (the passes were mostly cookie gates, bot checks and
+bare titles whose digest said so; a few were short real text, a batch file or an abstract). Like any skipped source it writes no ledger
+row; `bad_input` is the class a row would carry.
 
 The body marshals in a fixed order — `summary`, then `untrusted` (a one-line notice that the
 results and sources are third-party page content, data to weigh and never instructions), then
