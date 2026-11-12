@@ -120,8 +120,8 @@
       "structural_fix": "open",
       "cause": {
         "kind": "capacity signal",
-        "root_cause": "The seat or card the call needed was held by other work when it arrived: the seat was at its local run cap (`seat busy:`), a GPU lease of another class held the card (`gpu busy: held by ...`), or a media job waited for host RAM. The harness defers rather than overload the card.",
-        "evidence": "pipeline/agenttask.go (seat busy, defer class capacity) and pipeline/pipeline_gpu.go (gpu busy); 628 rows in 30 days: video 247, research 205, audio 109 (the agent pool at its cap, a media lease on the cards, host RAM)",
+        "root_cause": "The seat or card the call needed was held by other work when it arrived: the seat was at its local run cap (`seat busy:`), a GPU lease of another class held the card (`gpu busy: held by ...`), or a media job waited for host RAM. It also holds the two text-lease holds filed elsewhere until 2026-11-12: the delegator's `local seat reserved (gpu lease ...)` (a text lease holds the only seat the call may use and no remote had room; filed `infrastructure`) and a node's `a text lease holds its card; it may take the call later` (filed `other`). The harness defers rather than overload the card.",
+        "evidence": "pipeline/agenttask.go (seat busy, defer class capacity), pipeline/pipeline_gpu.go (gpu busy), ledger RefileStamped and DeferCode (the lease holds); 628 rows in 30 days as stamped: video 247, research 205, audio 109 (the agent pool at its cap, a media lease on the cards, host RAM), and 93 more once the lease holds are read here (79 from infrastructure, 14 from other)",
         "action": "none: working as designed. Fewer deferrals need more free card time (keep a card free for media while text leases run) or a higher run cap on a box with room.",
         "investigated": true
       }
@@ -349,8 +349,8 @@
       "structural_fix": "open",
       "cause": {
         "kind": "caller contract",
-        "root_cause": "A limit the call carried ended the run before the agent finished: the call's own deadline (`call deadline reached`, `wall timeout after ... the caller's deadline`), a cancellation filed under this class (`agent loop: canceled`), or the step budget (`step budget exhausted`). Most are the caller's deadline, not a node ceiling.",
-        "evidence": "core/calldeadline.go, pipeline/liveness.go:411, pipeline/agenttask.go:1295; 250 rows in 30 days, 241 from research subtasks",
+        "root_cause": "A limit the call carried ended the run before the agent finished: the call's own deadline (`call deadline reached`, `wall timeout after ... the caller's deadline`), or the step budget (`step budget exhausted`). Most are the caller's deadline, not a node ceiling. The agent loop's `agent loop: canceled` was filed here until 2026-11-12 and is now `canceled`; the browse door's `browse: budget:` (max_actions spent) is read here.",
+        "evidence": "core/calldeadline.go, pipeline/liveness.go:411, pipeline/agenttask.go:1295; 250 rows in 30 days as stamped, 241 from research subtasks; 17 of them are loop cancellations that ledger RefileStamped now reads as canceled",
         "action": "give long research subtasks a longer call deadline or fewer subtasks per call; a run that ends on the step budget needs a larger max_steps.",
         "investigated": true
       }
@@ -397,9 +397,9 @@
       "structural_fix": "undocumented",
       "cause": {
         "kind": "node configuration",
-        "root_cause": "A seat was set up so that it cannot serve the call: its tool-call parser does not match its chat template, so a tool call came back as text.",
-        "evidence": "pipeline/agenttask.go:1303; 2 rows in 30 days, both on one seat",
-        "action": "set that seat's --tool-call-parser to the one its chat template needs.",
+        "root_cause": "A seat or node was set up so that it cannot serve the call: a seat's tool-call parser does not match its chat template, so a tool call came back as text (2 rows), or a node's configured data folder does not exist on that machine, so it could not create its pipeline-jobs folder for a dispatch (30 rows, one node; filed `dispatch_refused` until 2026-11-12).",
+        "evidence": "pipeline/agenttask.go:1303 and fleetnode/tasks.go:1031 (read by ledger RefileStamped); 2 rows in 30 days as stamped, 32 once the folder fault is read here",
+        "action": "set that seat's --tool-call-parser to the one its chat template needs; fix or remove the node's missing data folder (its `home`).",
         "investigated": true
       }
     },
@@ -493,9 +493,9 @@
       "structural_fix": "undocumented",
       "cause": {
         "kind": "unknown",
-        "root_cause": "not investigated: the class is the residue no rule names, a mix of causes; the largest sampled sentence is a node's `a text lease holds its card; it may take the call later` (a capacity signal no rule names), and 15 rows are the browse door's own errors",
-        "evidence": "reasoncode.go DeferCode (the residue); 55 rows in 30 days: audio 18, browse 15, video 7, compose 6",
-        "action": "not investigated: list the distinct reasons of the 55 rows and add a rule per sentence that ties to one class",
+        "root_cause": "not investigated: the class is the residue no rule names, a mix of causes. Since 2026-11-12 a node's `a text lease holds its card; it may take the call later` is read as node_busy, and the browse door's `BROWSER_UNAVAILABLE`, `DECISION_UNAVAILABLE`, `HOST_NOT_ALLOWED` and `budget` errors by their own classes; what is left is mostly the browse door's `blocked` (the model reported it cannot proceed, 4 rows) and media and compose sentences no rule names",
+        "evidence": "reasoncode.go DeferCode (the residue); 55 rows in 30 days as stamped (audio 18, browse 15, video 7, compose 6), 30 once the rules above are read",
+        "action": "not investigated: list the distinct reasons of the rows left and add a rule per sentence that ties to one class",
         "investigated": false
       }
     },

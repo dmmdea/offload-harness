@@ -135,7 +135,7 @@ var reasonCodes = []string{
 func settleReasonCode(e Entry) string {
 	switch {
 	case IsReasonCode(e.ReasonCode):
-		return e.ReasonCode
+		return RefileStamped(e.ReasonCode, e.Reason)
 	case e.Phase == PhaseStarted:
 		return ReasonStarted
 	case e.Deferred:
@@ -212,6 +212,12 @@ var reasonPrefixCodes = []struct{ prefix, code string }{
 	// A named family the node does not serve is the request's; a family whose overlay is incomplete is the config's.
 	{"unknown image family", ReasonContract}, {"unknown edit family", ReasonContract}, {"imagegen_families[", ReasonConfig},
 	{"probe:", ReasonInfrastructure}, {"generate_svg: write:", ReasonInfrastructure}, {"generate_svg:", ReasonInfrastructure},
+	// The browse door's own typed errors (pipeline/browse.go: "browse: <CLASS>: <detail>"; docs/systems/browse-lane.md),
+	// the four that name one member: no browser or no decision endpoint to drive it is the stack (as lane_unavailable),
+	// a page outside allow_hosts is the request's, and max_actions spent is a limit the call carried. The rest of the
+	// door's classes ("blocked", where the model reported it cannot proceed, and the others) are not named here.
+	{"browse: BROWSER_UNAVAILABLE:", ReasonInfrastructure}, {"browse: DECISION_UNAVAILABLE:", ReasonInfrastructure},
+	{"browse: HOST_NOT_ALLOWED:", ReasonContract}, {"browse: budget:", ReasonBudget},
 }
 
 // legacyReasonPrefixCodes classify a deferred row by the sentence the harness ITSELF wrote, for the rows
@@ -264,8 +270,55 @@ func legacyReasonCode(reason string) string {
 		return ReasonNoEligibleNode
 	case dispatchCapacityRe.MatchString(reason):
 		return ReasonQueueFull
+	case strings.Contains(reason, textLeaseHoldsCardSentence):
+		return ReasonNodeBusy
 	}
 	return ""
+}
+
+// textLeaseHoldsCardSentence is the whole sentence a media lane writes when a node's card is under a text lease and
+// the node itself would take the call once the lease ends (internal/mediaremote/named.go, defer class capacity):
+// the node's own capacity defer, node_busy. It is matched whole on purpose: the shorter "a text lease holds its
+// card" also ends a different sentence (a probe list in which no node served the call: no_eligible_node).
+const textLeaseHoldsCardSentence = "a text lease holds its card; it may take the call later"
+
+// Reasons that were stamped under the wrong class before 2026-11-12, each the sentence one harness writer owns and
+// the class its stamp should have been. RefileStamped is the one place that knows them.
+const (
+	// localSeatReservedSentence opens (or follows "route=spread: " in) the defer the delegator files when the only
+	// seat it may use is held by a text lease and no remote had room (delegate/run_wait.go reservedDefer). The wire
+	// class of that defer stays infrastructure (the exit code and the summary count it so); the ledger class is the
+	// capacity hold it is: the card is held by other work, node_busy.
+	localSeatReservedSentence = "local seat reserved ("
+	// agentLoopCanceledSentence is the node's defer when the agent loop's parent context ended (pipeline/agenttask.go).
+	// The wire class is budget because the wire has no canceled; the ledger has.
+	agentLoopCanceledSentence = "agent loop: canceled (the parent context ended"
+	// nodeJobsDirSentence is a node that could not create its own pipeline-jobs folder (fleetnode/tasks.go), which
+	// the delegator reads as an ack-time 400 and files as dispatch_refused, a fact about the request or the
+	// credentials. The folder is the node's configured home, so the fault is the node's configuration.
+	nodeJobsDirSentence = "agent contract: creating pipeline-jobs dir"
+)
+
+// RefileStamped is the class a row's stamped code should read as, given its reason: the stamp itself when the pair
+// is not one of the known misfilings. It is applied where a stamp is settled (Record, so new rows are written
+// right) and where one is read (failureClassOf, so rows written before 2026-11-12 count right), and nowhere else.
+// Each rule needs BOTH the wrong stamp and the writer's own sentence, so no other row of those classes can move.
+func RefileStamped(code, reason string) string {
+	switch code {
+	case ReasonInfrastructure:
+		if strings.Contains(reason, localSeatReservedSentence) {
+			return ReasonNodeBusy
+		}
+	case ReasonBudget:
+		if strings.HasPrefix(reason, agentLoopCanceledSentence) {
+			return ReasonCanceled
+		}
+	case ReasonDispatchRefused:
+		if strings.Contains(reason, nodeJobsDirSentence) {
+			return ReasonConfig
+		}
+	}
+	return code
 }
 
 // stallCodeOf names the phase a node's liveness verdict ("stalled: no progress for 300s in prefill (...)") went
