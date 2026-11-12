@@ -63,7 +63,7 @@ func TestTranscribeOfAFileWithNoAudioStreamSaysSoAndIsFiledAsABadInput(t *testin
 func TestEveryCoreErrClassHasALedgerReasonCode(t *testing.T) {
 	for _, c := range []string{
 		core.ErrClassGPUBusy, core.ErrClassGPUQueued, core.ErrClassComposeBusy, core.ErrClassGPULeaseUnavailable, core.ErrClassBadInput, core.ErrClassFFmpegUnavailable,
-		errClassGPUBusy, errClassLaneGone,
+		core.ErrClassNoNodeConfigured, errClassGPUBusy, errClassLaneGone,
 	} {
 		if got := ledger.DeferCode(c, ""); got == ledger.ReasonOther {
 			t.Errorf("err_class %q files as %q: add it to the ledger's table", c, got)

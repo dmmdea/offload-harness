@@ -249,9 +249,8 @@ func failureClassOf(e Entry) (class string, derived, failed bool) {
 	if IsReasonCode(e.ReasonCode) && e.ReasonCode != ReasonOK && e.ReasonCode != ReasonStarted {
 		// "other" is the residue Record files when no member named the row at write time, so it is the one stamp a
 		// later build may read better: a deferred row stamped "other" is classed again, and keeps "other" unless a
-		// sentence the harness wrote now names a member. A stamp that was a known misfiling (RefileStamped: a lease
-		// hold filed infrastructure, a cancellation filed budget, a node's folder fault filed dispatch_refused, all
-		// until 2026-11-12) reads as the class it should have carried. Every other stamp is read as stamped.
+		// sentence the harness wrote now names a member. A stamp that was a known misfiling (the stamp and sentence
+		// pairs RefileStamped lists) reads as the class it should have carried. Every other stamp is read as stamped.
 		if e.ReasonCode == ReasonOther && e.Deferred {
 			if c := DeferCode(e.ErrClass, e.Reason); c != ReasonOther {
 				return c, true, true
