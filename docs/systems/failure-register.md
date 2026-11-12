@@ -40,9 +40,9 @@ does not add to it, and the verb without the flag is unchanged.
 2. A job row is a **failure** when it deferred, or carries a failing reason code, or failed its acceptance check. A
    cache hit and a dispatch marker never are.
 3. Its **class** is its reason code, the closed set in `internal/ledger/reasoncode.go`. The set already holds the seven
-   wire defer classes (the table at the end of this page). A row written before the code was stamped, or with a code
-   outside the set, is classed with the same classifier the ledger itself uses (`DeferCode`) and counted in
-   `class_derived_rows`.
+   wire defer classes (the table at the end of this page). A row written before the code was stamped, with a code
+   outside the set, or deferred and stamped `other`, is classed with the same classifier the ledger itself uses
+   (`DeferCode`) and counted in `class_derived_rows` when that names a member.
 4. Rows are grouped by class. Within a class they are broken down by door, seat and model. Each class has a **kind**
    (below), and the failures are also counted by kind.
 5. Each class is joined to the table below by its name. This page is embedded in the binary at build time;
@@ -98,7 +98,7 @@ a share of `failure_rows` and counts only the classes filed as stack faults: an 
 | `refused_attempts` | rows that are a node's capacity refusal at dispatch, set aside: neither jobs nor failures |
 | `stack_fault_rows`, `stack_fault_share` | the failure rows whose class is a `stack_fault`, and their part of `failure_rows` (`null` with no failure row) |
 | `kinds` | the failure rows per kind and their part of `failure_rows`; kinds with no row are absent |
-| `class_derived_rows` | failed rows classed at read time because they carried no usable code |
+| `class_derived_rows` | failed rows classed at read time: they carried no usable code, or deferred with the stamp `other` and a rule now names their class |
 | `excluded_non_production` | test, bake and measurement jobs left out, per class (absent when none) |
 | `undocumented_classes` | the classes present in the ledger that have no row in the table |
 | `uninvestigated_classes` | the classes present in the ledger with no root cause and no structural fix written by a person (a class with no row is among them) |
@@ -188,8 +188,10 @@ The table is the human-maintained half of the register.
 
 ### Reading a row written before the code was stamped
 
-A row with a stamped reason code is read as stamped. A deferred row without one is classed at read time (counted in
-`class_derived_rows`) by `DeferCode` in [`internal/ledger/reasoncode.go`](../../internal/ledger/reasoncode.go): its error
+A row with a stamped reason code is read as stamped, with one exception: `other` is what the ledger files when no member
+named the row at write time, so a deferred row stamped `other` is classed again and keeps `other` unless a rule below now
+names a member. A deferred row without a code is classed the same way. Both are counted in `class_derived_rows` and classed
+by `DeferCode` in [`internal/ledger/reasoncode.go`](../../internal/ledger/reasoncode.go): its error
 class first, then the prefix of its reason, and `other` when neither names it. The prefix rules cover only sentences the
 harness itself writes, and each maps to the class its own writer files the same defer under. A rule is added only when a
 real sentence in the source ties to an existing class without doubt; the sentence stays in a comment beside it.
