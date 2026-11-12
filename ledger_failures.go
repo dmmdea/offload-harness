@@ -56,6 +56,9 @@ type failureClassOut struct {
 	Meaning       string `json:"meaning"`
 	RootCause     string `json:"root_cause"`
 	StructuralFix string `json:"structural_fix"`
+	// Cause is the root-cause catalogue's entry for the class (internal/ledger/rootcause.go): what was found by reading
+	// the emitter and the rows, as opposed to the three table columns above, which a person writes in the page.
+	Cause ledger.FailureCause `json:"cause"`
 }
 
 // failureReport is what `ledger --failures` prints: one JSON object, no trailing text.
@@ -77,8 +80,18 @@ type failureReport struct {
 	UndocumentedClasses   []string                  `json:"undocumented_classes"`
 	// UninvestigatedClasses are the classes in the ledger with no root cause and no structural fix written by a
 	// person: a class with no row (undocumented) is among them.
-	UninvestigatedClasses []string          `json:"uninvestigated_classes"`
+	UninvestigatedClasses []string `json:"uninvestigated_classes"`
+	// CausesNotInvestigated are the classes in the ledger whose catalogue entry says "not investigated" (the
+	// catalogue's cause, apart from the table's): what is still unknown, by name.
+	CausesNotInvestigated []string          `json:"causes_not_investigated"`
 	Classes               []failureClassOut `json:"classes"`
+}
+
+// failureReportByBuild is the report with --by-build: the same object, and one more key at the end. Without the flag
+// the report is failureReport and carries no "builds" key, so its bytes are what they were.
+type failureReportByBuild struct {
+	failureReport
+	Builds []ledger.FailureBuild `json:"builds"`
 }
 
 // runLedgerMode is the ledger verb's entry (the one line main.go changed): the failure register when --failures is
@@ -148,6 +161,7 @@ func runLedgerFailures(args []string) error {
 	fs.Bool("failures", true, "print the failure-class register instead of the savings summary")
 	since := fs.Int("since", 0, "only count entries from the last N days")
 	includeTraffic := includeTrafficFlag(fs)
+	byBuild := fs.Bool("by-build", false, "also split the failures by the build that produced the row (JSON key \"builds\", and a short table on stderr); rows with no stamp are one bucket named \"unstamped\"")
 	table := fs.String("table", "", "markdown file holding the failure-class table (default: docs/systems/failure-register.md as embedded in this build)")
 	_ = fs.Parse(args)
 	cfg := loadCfg(fs)
@@ -175,15 +189,38 @@ func runLedgerFailures(args []string) error {
 	noteExcluded(reg.ExcludedNonProduction)
 	noteLedgerReading(cfg.LedgerPath, reg)
 	report := joinFailureDocs(reg, docs)
+	noteCauses(report)
 	if *since > 0 {
 		report.SinceDays = *since
 	}
-	b, err := json.MarshalIndent(report, "", "  ")
+	var out any = report
+	if *byBuild {
+		out = failureReportByBuild{failureReport: report, Builds: reg.Builds}
+		noteBuilds(reg)
+	}
+	b, err := json.MarshalIndent(out, "", "  ")
 	if err != nil {
 		return err
 	}
 	fmt.Println(string(b))
 	return nil
+}
+
+// noteBuilds prints the build split as a table on stderr, for a person at the terminal; stdout stays the one JSON value.
+func noteBuilds(reg ledger.FailureRegister) {
+	fmt.Fprintf(os.Stderr, "failures by build (%d failed of %d job rows):\n", reg.FailureRows, reg.JobRows)
+	for _, b := range reg.Builds {
+		fmt.Fprintf(os.Stderr, "  %-72s %6d failed of %6d job rows\n", b.Build, b.FailureRows, b.JobRows)
+	}
+}
+
+// noteCauses prints each class with its cause and action as text on stderr, for a person at the terminal; the same
+// entries are in the JSON as `cause`. stdout stays the one JSON value.
+func noteCauses(r failureReport) {
+	fmt.Fprintf(os.Stderr, "failure causes (%d classes in the window, %d not investigated):\n", len(r.Classes), len(r.CausesNotInvestigated))
+	for _, c := range r.Classes {
+		fmt.Fprintf(os.Stderr, "  %-22s %6d rows  [%s]\n      root cause: %s\n      action:     %s\n", c.Class, c.Count, c.Cause.Kind, c.Cause.RootCause, c.Cause.Action)
+	}
 }
 
 // noteLedgerReading says on stderr what the JSON also says, so a person looking at the terminal sees it: the ledger
@@ -204,10 +241,13 @@ func joinFailureDocs(reg ledger.FailureRegister, docs map[string]failureDoc) fai
 		LedgerFound: reg.LedgerFound, UnparsedLines: reg.UnparsedLines,
 		JobRows: reg.JobRows, FailureRows: reg.FailureRows, RefusedAttempts: reg.RefusedAttempts, StackFaultRows: reg.StackFaultRows, StackFaultShare: reg.StackFaultShare, Kinds: reg.Kinds, ClassDerivedRows: reg.ClassDerivedRows,
 		CardsTokens: reg.CardsTokens, RowsWithTokens: reg.RowsWithTokens, ExcludedNonProduction: reg.ExcludedNonProduction,
-		UndocumentedClasses: []string{}, UninvestigatedClasses: []string{}, Classes: make([]failureClassOut, 0, len(reg.Classes)),
+		UndocumentedClasses: []string{}, UninvestigatedClasses: []string{}, CausesNotInvestigated: []string{}, Classes: make([]failureClassOut, 0, len(reg.Classes)),
 	}
 	for _, c := range reg.Classes {
-		row := failureClassOut{FailureClass: c}
+		row := failureClassOut{FailureClass: c, Cause: ledger.FailureCauseOf(c.Class)}
+		if !row.Cause.Investigated {
+			out.CausesNotInvestigated = append(out.CausesNotInvestigated, c.Class)
+		}
 		if d, ok := docs[c.Class]; ok {
 			row.Documented, row.Investigated, row.Meaning, row.RootCause, row.StructuralFix = true, d.Investigated, d.Meaning, d.RootCause, d.StructuralFix
 		} else {
@@ -221,6 +261,7 @@ func joinFailureDocs(reg ledger.FailureRegister, docs map[string]failureDoc) fai
 	}
 	sort.Strings(out.UndocumentedClasses)
 	sort.Strings(out.UninvestigatedClasses)
+	sort.Strings(out.CausesNotInvestigated)
 	return out
 }
 

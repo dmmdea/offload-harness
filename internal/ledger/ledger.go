@@ -239,9 +239,19 @@ type Entry struct {
 	RouteAsked string `json:"route_asked,omitempty"`
 	PinReason  string `json:"pin_reason,omitempty"`
 	Placement  string `json:"placement,omitempty"`
-	Steps      int    `json:"steps,omitempty"`
-	StopReason string `json:"stop_reason,omitempty"`
-	RepackMs   int64  `json:"repack_ms,omitempty"`
+	// HarnessBuildSHA256 is the build (the SHA-256 of the executable) that RAN the work the row records, the field
+	// the delegation log's node result calls by the same name. Record stamps this process's own on a row it wrote
+	// for work it ran itself; a delegator's row (delegation, or any row naming a remote node) is stamped
+	// DelegatorBuildSHA256 instead and takes this one from the node's result when the caller has it.
+	// SeatConfigSHA256 pins the seat's server config (the node's seat-config probe) and is set only by a writer that
+	// holds it: a row for a run whose seat served. All three are omitted when empty; a row from an older build has
+	// none, which reads as unknown, never as a value (build_stamp.go).
+	HarnessBuildSHA256   string `json:"harness_build_sha256,omitempty"`
+	DelegatorBuildSHA256 string `json:"delegator_build_sha256,omitempty"`
+	SeatConfigSHA256     string `json:"seat_config_sha256,omitempty"`
+	Steps                int    `json:"steps,omitempty"`
+	StopReason           string `json:"stop_reason,omitempty"`
+	RepackMs             int64  `json:"repack_ms,omitempty"`
 	// RepackAttempts is how many seat completions the structured re-pack
 	// spent. It rides beside RepackMs because the wall alone cannot tell a
 	// slow single attempt from a loop that re-generated three times, and the
@@ -412,6 +422,7 @@ func (l *Ledger) Record(e Entry) error {
 	// Provenance and the one token figure are stamped HERE, on the one path
 	// every writer takes, so no record site can forget them (D-101).
 	stampOrigin(&e)
+	stampBuild(&e)
 	settleRunClass(&e, l.class)
 	switch {
 	case e.ParentJobID != "":

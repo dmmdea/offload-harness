@@ -123,6 +123,14 @@ type tcRun struct {
 	// compaction ladder (elision markers, skeletons). It exists only for agent traces, which keep
 	// a transcript; nil on a delegation row. It is a LOWER BOUND on whether the ladder fired.
 	LadderArtifacts *int `json:"ladder_artifacts"`
+	// DelegatorBuildSHA256 is the build of the delegator that wrote the delegation-log row, HarnessBuildSHA256 the build
+	// of the node that ran the work and SeatConfigSHA256 the pin of the seat's server config, copied from the row under
+	// the names the row uses. They let a reader split the corpus by build. Delegation rows only, omitted when the row
+	// carries none (a row from before the stamps, an agent trace, or a run whose seat never served), which a reader
+	// must treat as unknown, never as a value.
+	DelegatorBuildSHA256 string `json:"delegator_build_sha256,omitempty"`
+	HarnessBuildSHA256   string `json:"harness_build_sha256,omitempty"`
+	SeatConfigSHA256     string `json:"seat_config_sha256,omitempty"`
 }
 
 // ---- reading the records ----
@@ -181,9 +189,11 @@ type tcTraceIn struct {
 
 // tcDelegationIn is the part of a delegation-log row the harvest reads.
 type tcDelegationIn struct {
-	Seat    string `json:"seat"`
-	Node    string `json:"node"`
-	Refusal *struct {
+	Seat string `json:"seat"`
+	Node string `json:"node"`
+	// The delegator's own build, stamped on the row itself; the executing node's build and seat pin are in Result.
+	DelegatorBuildSHA256 string `json:"delegator_build_sha256"`
+	Refusal              *struct {
 		Status int `json:"status"`
 	} `json:"refusal"`
 	Result *tcDelegationResult `json:"result"`
@@ -199,6 +209,9 @@ type tcDelegationResult struct {
 	CacheTokens   int64      `json:"cache_tokens"`
 	SeatTokensIn  int64      `json:"seat_tokens_in"`
 	Pager         *tcPagerIn `json:"pager"`
+	// The node's build and seat-config pin (omitted by a node that predates them).
+	HarnessBuildSHA256 string `json:"harness_build_sha256"`
+	SeatConfigSHA256   string `json:"seat_config_sha256"`
 }
 
 // neverRan reports a logged subtask whose agent never executed: a deferral (capacity,
@@ -490,6 +503,10 @@ func tcHarvestDelegation(o tcHarvestOpts, stats *tcHarvestStats) ([]tcRun, error
 				TraceBearing: len(res.Trace) > 0,
 				Steps:        res.Steps,
 				StopReason:   res.StopReason,
+
+				DelegatorBuildSHA256: in.DelegatorBuildSHA256,
+				HarnessBuildSHA256:   res.HarnessBuildSHA256,
+				SeatConfigSHA256:     res.SeatConfigSHA256,
 			}
 			pg, ok := res.Pager.run()
 			if !ok {
@@ -938,6 +955,55 @@ func tcMarshalReport(rep tcReport) ([]byte, error) {
 	return append(b, '\n'), nil
 }
 
+// tcProposerNeeded is the count the recipe proposer's trigger needs (ADR 0036, amendment 2026-11-12):
+// runs that carry a measured pager report. ADR 0036 asks for a corpus "in the hundreds", and 100 is
+// the lowest reading of that.
+const tcProposerNeeded = 100
+
+// tcTrigger is ADR 0036's proposer trigger as numbers. Have counts the runs whose pager report is
+// measured (the loop evicted something, so the re-fetch question has an answer for that run): the
+// runs a proposer could learn from. TraceBearing is the raw count the trigger used to read, kept
+// beside it so the gap is visible. The second half of the trigger, a frozen pre-registration for
+// the seat the proposer is for, is not in the corpus and is not judged here.
+type tcTrigger struct {
+	Needed       int    `json:"needed"`
+	Have         int    `json:"have"`
+	Met          bool   `json:"met"`
+	Counts       string `json:"counts"`
+	TraceBearing int    `json:"trace_bearing_runs"`
+	Runs         int    `json:"runs"`
+	LargestSeat  string `json:"largest_seat,omitempty"`
+	LargestHave  int    `json:"largest_seat_have"`
+	Note         string `json:"note"`
+}
+
+func tcProposerTrigger(rep tcReport) tcTrigger {
+	t := tcTrigger{Needed: tcProposerNeeded, Have: rep.All.Pager.MeasuredRuns,
+		Counts:       "runs whose pager report is measured (pager.measured_runs)",
+		TraceBearing: rep.All.TraceBearingRuns, Runs: rep.All.Runs,
+		Note: "also needs a frozen pre-registration for the seat the proposer is for; that is not in the corpus and is not judged here"}
+	t.Met = t.Have >= t.Needed
+	for seat, st := range rep.BySeat {
+		if m := st.Pager.MeasuredRuns; m > t.LargestHave || (m == t.LargestHave && m > 0 && seat < t.LargestSeat) {
+			t.LargestSeat, t.LargestHave = seat, m
+		}
+	}
+	return t
+}
+
+func (t tcTrigger) line() string {
+	met := "NOT MET"
+	if t.Met {
+		met = "met"
+	}
+	s := fmt.Sprintf("[trace-corpus] proposer trigger (ADR 0036): needed %d / have %d / %s; have counts runs with a measured pager report, of %d trace-bearing runs and %d runs",
+		t.Needed, t.Have, met, t.TraceBearing, t.Runs)
+	if t.LargestSeat != "" {
+		s += fmt.Sprintf("; the largest single named seat has %d (%s)", t.LargestHave, t.LargestSeat)
+	}
+	return s
+}
+
 // tcCheck compares the report for the corpus against a frozen baseline, byte for byte. A
 // baseline from a different corpus is refused rather than diffed.
 func tcCheck(baseline []byte, rep tcReport) error {
@@ -995,7 +1061,7 @@ func tcSet(csv string) map[string]bool {
 }
 
 func runTraceCorpusTo(args []string, stdout, stderr io.Writer) error {
-	const usage = "usage: local-offload trace-corpus <harvest|readout|freeze|check> [flags] (harvest takes --traces/--delegation-log/--out; the others take --corpus)"
+	const usage = "usage: local-offload trace-corpus <harvest|readout|trigger|freeze|check> [flags] (harvest takes --traces/--delegation-log/--out; the others take --corpus)"
 	if len(args) < 1 {
 		return fmt.Errorf("%s", usage)
 	}
@@ -1039,7 +1105,7 @@ func runTraceCorpusTo(args []string, stdout, stderr io.Writer) error {
 			TracesDir: *tracesDir, DelegationDir: *delegationDir,
 			Seats: tcSet(*seats), ExcludeSeats: tcSet(*excludeSeats), Since: *since, Until: *until,
 		}, *outPath)
-	case "readout", "freeze", "check":
+	case "readout", "trigger", "freeze", "check":
 		if *corpusPath == "" {
 			return fmt.Errorf("trace-corpus %s: --corpus is required", mode)
 		}
@@ -1049,7 +1115,17 @@ func runTraceCorpusTo(args []string, stdout, stderr io.Writer) error {
 		}
 		rep := tcBuildReport(runs, hash)
 		switch mode {
+		case "trigger":
+			t := tcProposerTrigger(rep)
+			fmt.Fprintln(stderr, t.line())
+			b, err := json.MarshalIndent(t, "", "  ")
+			if err != nil {
+				return err
+			}
+			_, err = stdout.Write(append(b, '\n'))
+			return err
 		case "readout":
+			fmt.Fprintln(stderr, tcProposerTrigger(rep).line())
 			b, err := tcMarshalReport(rep)
 			if err != nil {
 				return err
@@ -1087,19 +1163,23 @@ func runTraceCorpusTo(args []string, stdout, stderr io.Writer) error {
 			return nil
 		}
 	default:
-		return fmt.Errorf("trace-corpus: unknown mode %q (harvest|readout|freeze|check)", mode)
+		return fmt.Errorf("trace-corpus: unknown mode %q (harvest|readout|trigger|freeze|check)", mode)
 	}
 }
 
 // tcHelp is what `trace-corpus help`, `--help` and `-h` print before the flag list.
-const tcHelp = `usage: local-offload trace-corpus <harvest|readout|freeze|check> [flags]
+const tcHelp = `usage: local-offload trace-corpus <harvest|readout|trigger|freeze|check> [flags]
 
   trace-corpus harvest [--traces DIR] [--delegation-log DIR] --out CORPUS [--seat LIST]
                        [--exclude-seat LIST] [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--config PATH]
       read the recorded runs into one corpus file. --since and --until bound the delegation shards by
       their day, inclusive; each must be a real YYYY-MM-DD date and --since must not be after --until.
   trace-corpus readout --corpus CORPUS [--out FILE]
-      print the readout (or write it to FILE, replacing one that is there).
+      print the readout (or write it to FILE, replacing one that is there). The report is unchanged;
+      a line on stderr states the recipe proposer's trigger as needed / have / met.
+  trace-corpus trigger --corpus CORPUS
+      print ADR 0036's proposer trigger as JSON (needed, have, met) and the same line on stderr. The count
+      is runs with a measured pager report, not trace-bearing runs.
   trace-corpus freeze  --corpus CORPUS --out BASELINE
       write the readout as the baseline. The baseline is created exclusively: an existing path is
       refused, so a new baseline goes to a new --out.

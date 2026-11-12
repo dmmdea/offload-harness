@@ -173,6 +173,26 @@ one (`local-offload recipe-audit`). Decided, with the reasons on record:
   readout` reports trace-bearing runs in the hundreds, and the seat the proposer is for has a frozen pre-registration
   to be audited against.
 
+### Amendment 2026-11-12 — the proposer trigger counts measured runs, and a verb prints it
+
+The 2026-10-15 trigger is written on "trace-bearing runs ... in the hundreds". That count answers whether a run kept a
+step trace, not whether the run can teach a proposer anything: the proposer's candidates (`deny_tools`, `allow_tools`,
+`max_calls_per_tool`, and a live A/B for the rest) are judged on what the pager and the trace say about the
+run, and a run whose pager recorded no eviction says nothing about whether paged-out context was needed again. On the
+operator's machine on 2026-11-12 the corpus held 12,332 runs, 10,766 of them trace-bearing (the raw count that read as
+"in the hundreds") and 31 with a measured pager report (`pager.measured_runs`: the loop evicted something, so the
+re-fetch question has an answer for that run); 5,227 recorded a pager report with nothing evicted and 7,074 recorded none.
+The largest single named seat had 10. Both figures were read with the installed 0.232.0 build.
+
+Restated, as a number a verb prints. The reopen trigger is now: **`trace-corpus trigger` (and the stderr line of
+`trace-corpus readout`) reports `have` at or above `needed`**, where `needed` is 100, the lowest reading of "in the
+hundreds", and `have` is the corpus's `pager.measured_runs`; and the seat the proposer is for has a frozen
+pre-registration (not in the corpus, so not judged by the verb). The verb prints `needed N / have M / met | NOT MET`
+and, beside it, the trace-bearing and total run counts and the largest single named seat's count, so a reader sees
+the gap and that a total across seats can overstate what one seat has. On the 2026-11-12 corpus it prints
+`needed 100 / have 31 / NOT MET`. The rest of the 2026-10-15 amendment, including "the proposer proposes and never
+applies", stands; no proposer is built by this amendment.
+
 ## Consequences
 
 - A nil/zero table is byte-identical to the pre-key loop; every field is additive and `omitempty`, and a

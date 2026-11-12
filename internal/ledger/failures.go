@@ -112,8 +112,8 @@ type FailureRegister struct {
 	StackFaultRows  int      `json:"stack_fault_rows"`
 	StackFaultShare *float64 `json:"stack_fault_share"`
 	// ClassDerivedRows is how many failed rows were classed here by DeferCode, the classifier Record itself uses:
-	// rows with no usable reason code (from before it was stamped, or a code outside the closed set) and deferred
-	// rows stamped "other" that a rule now names.
+	// rows with no usable reason code (from before it was stamped, or a code outside the closed set), deferred
+	// rows stamped "other" that a rule now names, and rows whose stamp is a known misfiling (RefileStamped).
 	ClassDerivedRows int `json:"class_derived_rows"`
 	// CardsTokens and RowsWithTokens total the classes' (same rule, same nil).
 	CardsTokens    *int64 `json:"cards_tokens"`
@@ -123,6 +123,44 @@ type FailureRegister struct {
 	ExcludedNonProduction map[string]int `json:"excluded_non_production,omitempty"`
 	// Classes are ordered by Count descending, then Class: the same ledger gives the same bytes.
 	Classes []FailureClass `json:"classes"`
+	// Builds is the same job rows split by the build that produced them (see FailureBuild), failure rows descending,
+	// then job rows, then name. Its failure rows add up to FailureRows and its job rows to JobRows.
+	Builds []FailureBuild `json:"builds"`
+}
+
+// UnstampedBuild is the bucket of the rows that carry no build stamp: every row written before the ledger stamped
+// them, and a row written by a process whose self-hash failed.
+const UnstampedBuild = "unstamped"
+
+// delegatorBuildPrefix marks a bucket named by the DELEGATOR's build: a row that carries no executing build (the
+// job never reached a node that reported one, or the node predates the stamp) and so can only say which build
+// of the delegator wrote it.
+const delegatorBuildPrefix = "delegator:"
+
+// FailureBuild is one build's part of the register: the job rows it produced, the failed ones, and their classes.
+// Build is the executing build (harness_build_sha256) when the row has one, else delegator_build_sha256 with a
+// "delegator:" prefix, else "unstamped". A name is never a guess: a row is in "unstamped" because it holds neither.
+type FailureBuild struct {
+	Build       string         `json:"build"`
+	JobRows     int            `json:"job_rows"`
+	FailureRows int            `json:"failure_rows"`
+	Classes     []FailureCount `json:"classes"`
+}
+
+// buildBucket is the register's build bucket for a row (see FailureBuild).
+func buildBucket(e Entry) string {
+	switch {
+	case e.HarnessBuildSHA256 != "":
+		return e.HarnessBuildSHA256
+	case e.DelegatorBuildSHA256 != "":
+		return delegatorBuildPrefix + e.DelegatorBuildSHA256
+	}
+	return UnstampedBuild
+}
+
+type buildAcc struct {
+	jobs, failures int
+	classes        map[string]int
 }
 
 // failureRow is a ledger row and the one fact Entry cannot carry: whether the line had the cards_tokens key.
@@ -211,11 +249,16 @@ func failureClassOf(e Entry) (class string, derived, failed bool) {
 	if IsReasonCode(e.ReasonCode) && e.ReasonCode != ReasonOK && e.ReasonCode != ReasonStarted {
 		// "other" is the residue Record files when no member named the row at write time, so it is the one stamp a
 		// later build may read better: a deferred row stamped "other" is classed again, and keeps "other" unless a
-		// sentence the harness wrote now names a member. Every other stamp is read as stamped.
+		// sentence the harness wrote now names a member. A stamp that was a known misfiling (RefileStamped: a lease
+		// hold filed infrastructure, a cancellation filed budget, a node's folder fault filed dispatch_refused, all
+		// until 2026-11-12) reads as the class it should have carried. Every other stamp is read as stamped.
 		if e.ReasonCode == ReasonOther && e.Deferred {
 			if c := DeferCode(e.ErrClass, e.Reason); c != ReasonOther {
 				return c, true, true
 			}
+		}
+		if c := RefileStamped(e.ReasonCode, e.Reason); c != e.ReasonCode {
+			return c, true, true
 		}
 		return e.ReasonCode, false, true
 	}
@@ -301,7 +344,7 @@ type classAcc struct {
 // file readers: a last line still being written is not a row, and is counted in UnparsedLines with every other line
 // that does not decode.
 func FailureRegisterFile(path string, since int64, includeTraffic bool) (FailureRegister, error) {
-	reg := FailureRegister{Classes: []FailureClass{}, Kinds: []FailureKindCount{}}
+	reg := FailureRegister{Classes: []FailureClass{}, Kinds: []FailureKindCount{}, Builds: []FailureBuild{}}
 	f, err := os.Open(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -334,6 +377,7 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 	jobs := jobClasses(all)
 
 	accs := map[string]*classAcc{}
+	builds := map[string]*buildAcc{}
 	var total tokenSum
 	for _, r := range rows {
 		e := r.Entry
@@ -359,10 +403,18 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 			continue
 		}
 		reg.JobRows++
+		ba := builds[buildBucket(e)]
+		if ba == nil {
+			ba = &buildAcc{classes: map[string]int{}}
+			builds[buildBucket(e)] = ba
+		}
+		ba.jobs++
 		class, derived, failed := failureClassOf(e)
 		if !failed {
 			continue
 		}
+		ba.failures++
+		ba.classes[class]++
 		reg.FailureRows++
 		if derived {
 			reg.ClassDerivedRows++
@@ -400,6 +452,20 @@ func FailureRegisterFile(path string, since int64, includeTraffic bool) (Failure
 	}
 
 	reg.CardsTokens, reg.RowsWithTokens = total.ptr(), total.measured
+	reg.Builds = make([]FailureBuild, 0, len(builds))
+	for name, b := range builds {
+		reg.Builds = append(reg.Builds, FailureBuild{Build: name, JobRows: b.jobs, FailureRows: b.failures, Classes: sortedCounts(b.classes)})
+	}
+	sort.Slice(reg.Builds, func(i, j int) bool {
+		x, y := reg.Builds[i], reg.Builds[j]
+		switch {
+		case x.FailureRows != y.FailureRows:
+			return x.FailureRows > y.FailureRows
+		case x.JobRows != y.JobRows:
+			return x.JobRows > y.JobRows
+		}
+		return x.Build < y.Build
+	})
 	kinds := map[string]int{}
 	for class, a := range accs {
 		c := FailureClass{
