@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -395,6 +396,11 @@ func (l *Ledger) Record(e Entry) error {
 	// the placement note keeps its short form (readers that want the short reason
 	// call ShortReason).
 	e.Reason = capAt(e.Reason, maxStoredReasonLen)
+	// A deferred row always says why (LO-8): a writer that has nothing to say files the fixed placeholder, so the
+	// row reads as "deferred, reason not recorded" and never as an empty string a reader must guess at.
+	if e.Deferred && strings.TrimSpace(e.Reason) == "" {
+		e.Reason = NoReasonRecorded
+	}
 	e.Placement = truncateReason(e.Placement)
 	// Every agent_delegate row and every deferred row of any task carries a reason code from the
 	// closed set, whatever the writer knew: settled HERE, on the one path every writer takes, so no

@@ -136,7 +136,7 @@ the CLI version that wrote it. `TestOpenSpecGeneratedToolFilesStayUntracked` hol
 
 ## Testing notes
 
-`go test -run 'TestOpenSpec|TestDocsLint' .` covers the structure, both scripts (against stand-in `openspec` and `npm`
+`go test -run TestOpenSpec .` covers the structure, both scripts (against stand-in `openspec` and `npm`
 programs, so the switches, the arguments, the exit code and the install's success path, with npm's cache and temp folders
 under the prefix whatever the caller exported, need neither the network nor the CLI) and the ignore
 lines. With `OPENSPEC_BIN` set it also runs the real CLI. With `OPENSPEC_INSTALL_TEST=1` it also runs the install script for

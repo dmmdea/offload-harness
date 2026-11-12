@@ -350,10 +350,10 @@ gate wrote it, for the refusal tests.
 | `seed` | 1 | |
 | `max_excluded_share` | 0.20 | within 0 to 1 |
 
-Freeze also refuses an empty corpus, a task list that is empty, unsorted, repeated or holds an empty id, a held-out id that
-is not a declared task, a pre-registration that holds out every task, and a frozen incumbent that does not fit the
+Freeze sorts the task and held-out lists and refuses an empty corpus, a task list that is empty, repeated or holds an empty
+id, a held-out id that is not a declared task, a pre-registration that holds out every task, and a frozen incumbent that does not fit the
 declared tasks. `gate check` runs the same rules on a baseline file, so a hand-built canonical file below a floor is
-refused.
+refused, and so is one whose lists are not sorted and unique, which is not the form freeze writes.
 
 Corpus conventions (docs only, nothing is committed): a corpus is harvested redacted at harvest time, hash-stamped,
 machine-local and never committed; `freeze` and `check` reproduce from the hash, as `compaction-eval` does.
@@ -426,13 +426,15 @@ local-offload gate schema
   - The scorer must score every pair's good side above its degraded side. A tie is a failure, and the first
     mis-ranking ends the run. A failed self-test still prints the receipt, with `passed` false, writes the mis-ranking
     to stderr and exits 1; the gate refuses that receipt. A run that never reached a finding (an unreadable, malformed or
-    empty pairs file, an unknown scorer, a scorer that returned an error, a build that cannot be hashed) prints no
-    receipt and exits 2.
+    empty pairs file, an unknown scorer, a scorer that returned an error or whose seat call deferred or failed, a build that
+    cannot be hashed) prints no receipt and exits 2.
   - `--out` also writes the receipt to a file and replaces one that is there, so that a failing run does not leave an
-    older passing receipt behind.
+    older passing receipt behind. A run that could not judge writes no receipt and leaves an existing `--out` file as it is.
   - Scorers: `compaction-outcome`, the outcome scorer of `compaction-eval ab` (accept, then entity recall over a summary
-    of the transcript, through the configured seat). It reads `--config`. A seat that is down scores every side 0, which
-    is a tie, so it fails the self-test rather than erroring. The receipt records the scorer id, the pairs and the
+    of the transcript, through the configured seat). It reads `--config`. A seat call that deferred or failed (a seat that is down, a GPU lease held
+    by another job) gives no score to rank, so the self-test could not judge: it exits 2 with no receipt, and the message
+    names the defer reason. It is not read as a tie, and it is not a finding about the scorer. (The A/B, `compaction-eval ab`,
+    still scores such a call 0, as before.) The receipt records the scorer id, the pairs and the
     harness build that ran the self-test; it does not say which model answered, which the stamps of the runs carry
     (`seat_config_sha256`).
   - What the gate checks of a receipt: that its `scorer_id` is the judge identity, that `passed` is true, and that both

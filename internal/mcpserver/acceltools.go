@@ -15,6 +15,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/accelremote"
 	"github.com/dmmdea/offload-harness/internal/agent"
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/core"
 )
 
 // accelMCPTool is one row of an accelerator's MCP tool table: the advertised
@@ -198,12 +199,12 @@ func (s *Server) accelCallMap(ctx context.Context, id, tool string, args map[str
 	start := time.Now()
 	sc := s.accelSidecar(id)
 	if err := sc.Ensure(ctx); err != nil {
-		s.p.RecordAccel(tool, id, sinceMs(start), true, id+": "+err.Error())
+		s.p.RecordAccelClassed(tool, id, sinceMs(start), true, id+": "+err.Error(), core.DeferClassInfrastructure)
 		return map[string]any{"deferred": true, "reason": id + ": " + err.Error()}
 	}
 	out, err := sc.Client().Call(ctx, tool, args)
 	if err != nil {
-		s.p.RecordAccel(tool, id, sinceMs(start), true, id+": "+err.Error())
+		s.p.RecordAccelClassed(tool, id, sinceMs(start), true, id+": "+err.Error(), core.DeferClassInfrastructure)
 		return map[string]any{"deferred": true, "reason": id + ": " + err.Error()}
 	}
 	s.p.RecordAccel(tool, id, sinceMs(start), false, "")
@@ -518,7 +519,7 @@ func (s *Server) fleetAccelCallMap(ctx context.Context, id, tool string, in map[
 	start := time.Now()
 	out, err := accelremote.Call(ctx, s.p.Cfg(), id, tool, in)
 	if err != nil {
-		s.p.RecordAccel(tool, id+FleetOwnerSuffix, sinceMs(start), true, id+" (fleet): "+err.Error())
+		s.p.RecordAccelClassed(tool, id+FleetOwnerSuffix, sinceMs(start), true, id+" (fleet): "+err.Error(), core.DeferClassInfrastructure)
 		return map[string]any{"deferred": true, "reason": id + " (fleet): " + err.Error()}
 	}
 	tier := id + FleetOwnerSuffix

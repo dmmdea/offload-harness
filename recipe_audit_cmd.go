@@ -152,6 +152,7 @@ Exit codes:
   2  a refusal, which records nothing: usage, no lease, a lease not held or lost, a seat tag that is not
      the recipe's, input the store or the gate will not take, or a seat whose pin moved or is missing.
      Only a lost lease and a seat pin can come after a seat call; the rest come before the first
+     seat call.
 `
 
 func runRecipeAudit(args []string) error { return recipeAuditMain(args, os.Stdout, os.Stderr) }

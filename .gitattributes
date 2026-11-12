@@ -59,3 +59,7 @@ setup/patches/*.patch text eol=lf
 # and pins their hash): no line-ending conversion on any checkout.
 internal/eval/testdata/baseline-v1-frozen.json -text
 internal/eval/testdata/baseline-v2-frozen.json -text
+
+# The gate input schema is embedded in the binary (go:embed) and printed by `gate schema`: a CRLF checkout would put CRs into the bytes the binary
+# prints, and the build would depend on the builder's line-ending setting.
+internal/eval/*.json text eol=lf
