@@ -278,6 +278,8 @@ func runGPUStatus(args []string) error {
 			out[k] = v
 		}
 		out["card_scoped_leases"] = m.CardScoped()
+		// Which configured card UUIDs name no live card (a replaced card leaves them behind): state none | ok | stale | unknown.
+		out["card_refs"] = cardRefReport(cardCfg, cards, cardsErr)
 		out["host_memory"] = host.Map()
 		b, _ := json.MarshalIndent(out, "", "  ")
 		fmt.Println(string(b))

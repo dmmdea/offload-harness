@@ -18,6 +18,7 @@ package mcpserver
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -221,12 +222,13 @@ func gpuCardsSection(cfg config.Config, act gpuactivity.View) map[string]any {
 		})
 	}
 	cards, note := gpuprobe.BuildCards(devs, cfg.GPUComfyOrder)
+	var cardsErr error
 	if len(devs) == 0 {
 		reason := act.GPUErr
 		if reason == "" {
 			reason = "the GPU sample was not taken"
 		}
-		note = "no card table (" + reason + ")"
+		note, cardsErr = "no card table ("+reason+")", errors.New(reason)
 	}
 	var leases []gpulease.Info
 	var waiters []gpulease.Waiter
@@ -238,6 +240,11 @@ func gpuCardsSection(cfg config.Config, act gpuactivity.View) map[string]any {
 	capPct := cfg.LiveGPUDisplayCap()
 	sec := gpucards.Section(cards, note, leases, waiters, capPct, cfg.DisplayFloorGiB())
 	sec["card_scoped_leases"] = scoped
+	// Which configured card UUIDs name no live card (a replaced card leaves them behind). An agent branches on card_refs.state:
+	// none (nothing names a card by UUID) | ok | stale (stale[], unnamed_cards[] and the fix are in the block) | unknown (no card table).
+	// The note above is the older, prose-only half of the same fact for gpu_comfy_order.
+	refs, unchecked := cfg.CardRefs()
+	sec["card_refs"] = gpuprobe.CheckRefs(cards, cardsErr, refs, unchecked)
 	// The idle gate (operator rule 2026-11-07), as the allocator reads it now, so the brief does not call the
 	// display card open to jobs while the allocator keeps them off it.
 	if rows, ok := sec["cards"].([]gpucards.Row); ok && capPct > 0 {

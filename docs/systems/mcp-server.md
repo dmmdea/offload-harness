@@ -1498,7 +1498,11 @@ read-only unless deliberately widened. See
   meets a string there. `gpu_lease_verdict` leads with the verdict word, then what the cards are
   doing, the holder and its reason, the queue length and the queue command. `local_verdict` gives
   the local endpoint's state and served count, the local agent seat's verdict, and the roster
-  entries that are empty and so defer here. When the server holds a startup identity the brief also carries the full
+  entries that are empty and so defer here. The brief's `gpu_cards` carries `card_refs`, the field an agent branches on when a
+  card was replaced: `state` is `none` (the config names no card by UUID), `ok`, `stale` (`stale[]` names each configured UUID no
+  live card has, with the setting that holds it, the seats it pins and what that setting does meanwhile; `unnamed_cards[]` are the live
+  cards the stale settings do not name, the candidates for the replacement; `fix` is the lever) or `unknown` (the card table was not read, so
+  nothing is judged; [gpu-lease.md](gpu-lease.md)). When the server holds a startup identity the brief also carries the full
   answer's `process` block (below), so a stale server is visible on the call a caller makes first. An unknown section, an unknown argument or a wrong type
   is a defer that lists the valid values, never a fall-back to the full dump. `config_error`, when
   set, stays the first key of every answer. The block table in `status_section.go` feeds both the

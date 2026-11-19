@@ -104,10 +104,27 @@ func displayCapNow(cfg config.Config) (capPct int, floorGiB float64) {
 	return cfg.LiveGPUDisplayCap(), cfg.DisplayFloorGiB()
 }
 
+// cardRefReport holds the card UUIDs this config names (gpu_comfy_order, primary_gpu_uuid, a layer's pins, the serving
+// config's seat pins) against the card table as it was just read: the one verdict `gpu status`, `gpu cards`, doctor and
+// the offload_status brief print. A table that was not read judges nothing (state "unknown"), never "stale".
+func cardRefReport(cfg config.Config, cards []gpuprobe.Card, cerr error) gpuprobe.RefReport {
+	refs, unchecked := cfg.CardRefs()
+	return gpuprobe.CheckRefs(cards, cerr, refs, unchecked)
+}
+
+// printCardRefs prints the card-reference verdict under the card table (nothing when nothing names a card or every
+// name resolves), one line each, indented to sit under it.
+func printCardRefs(rep gpuprobe.RefReport) {
+	for _, ln := range gpucards.RefLines(rep) {
+		fmt.Println("    " + ln)
+	}
+}
+
 // printCardTable prints the card table under a "card table:" heading, or says why there is none.
 func printCardTable(cfg config.Config, cards []gpuprobe.Card, note string, cerr error, leases []gpulease.Info) {
 	if cerr != nil {
 		fmt.Printf("  card table: none (%v)\n", cerr)
+		printCardRefs(cardRefReport(cfg, cards, cerr))
 		return
 	}
 	fmt.Println("  card table:")
@@ -124,6 +141,7 @@ func printCardTable(cfg config.Config, cards []gpuprobe.Card, note string, cerr 
 			break
 		}
 	}
+	printCardRefs(cardRefReport(cfg, cards, nil))
 }
 
 // displayCheckRefused is `gpu display-check`'s exit status when the display card would not take the job now. It is
@@ -194,6 +212,7 @@ func runGPUCards(args []string) error {
 		b, _ := json.MarshalIndent(map[string]any{
 			"cards": rows, "leases": gpucards.LeaseRows(leases), "cards_note": note,
 			"card_scoped_leases": m.CardScoped(), "state_root": m.Root(),
+			"card_refs": cardRefReport(cfg, cards, nil),
 		}, "", "  ")
 		fmt.Println(string(b))
 		return nil
@@ -203,6 +222,9 @@ func runGPUCards(args []string) error {
 	}
 	if note != "" {
 		fmt.Fprintf(os.Stdout, "note: %s\n", note)
+	}
+	for _, ln := range gpucards.RefLines(cardRefReport(cfg, cards, nil)) {
+		fmt.Println(ln)
 	}
 	if !m.CardScoped() {
 		fmt.Println("card-scoped leases: off on this host (every reservation is whole-node); see `gpu doctor`")

@@ -1025,6 +1025,10 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	// A card that drives a display under a bound ComfyUI lane with no --reserve-vram in the launch: informational (never an exit code), silent unless a
 	// lane is bound and none is set, and the GPU read it makes comes last. It needs no endpoint.
 	writeDisplayReserveRow(w, cfg, routes)
+	// Settings that name a card by UUID which no live card has (a replaced card leaves its UUID behind): a FAIL row and an exit code,
+	// because each of them loads and then does something other than what it says (a ComfyUI order that is dropped, a llama-swap seat that
+	// loads on the CPU). Silent on a config that names no card by UUID, which reads no GPU; an unreadable card table is UNKNOWN, never FAIL.
+	staleCards := writeCardRefsSection(w, cfg)
 	// Endpoints that name a box by a private-range IP literal instead of a tailnet name: pure config, a
 	// warning only (never an exit code), and silent on a config with none.
 	writeLANIPEndpointsSection(w, cfg)
@@ -1106,6 +1110,9 @@ func doctorRunChecked(cfg config.Config, routes []mediacap.Route, w io.Writer, d
 	}
 	if findings > 0 {
 		return fmt.Errorf("%d configuration finding(s) — see the config findings section above", findings)
+	}
+	if staleCards > 0 {
+		return fmt.Errorf("%d configured card UUID(s) match no live card — see the card refs rows above", staleCards)
 	}
 	if dataOnOS > 0 {
 		return fmt.Errorf("%d data location(s) on the OS drive %s while %s qualifies to hold them — see the data volume section above", dataOnOS, data.OSDrive, data.Target.Volume.Root)
