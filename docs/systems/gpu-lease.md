@@ -811,6 +811,29 @@ position, and two same-model cards cannot be ordered by anything it does report,
 `CUDA_VISIBLE_DEVICES=<uuid>` probe. A box with one card needs no declaration. With no nvidia-smi the verbs still print the
 leases and say there is no table.
 
+**A card UUID the config names that no live card has (`card_refs`).** Replacing a card, or a card falling off the bus,
+leaves its UUID behind in the settings that name it, and each reader then degrades on its own and quietly: the ComfyUI order is
+dropped with one `note:` line (every card's order reads `?`, a command naming `--cuda-device N` is reserved as the whole node and
+card-scoped media leases fall back to whole-node holds), and a llama-swap seat whose only pin is the missing UUID sees no CUDA
+device and loads on the CPU. `gpuprobe.CheckRefs` holds every setting that can name a card by UUID against the card table, and
+`gpu status`, `gpu cards`, `local-offload doctor` and `offload_status` with `section: "brief"` print the one verdict. The settings it
+reads (`Config.CardRefs`): `gpu_comfy_order` (an element that is not an index), `primary_gpu_uuid` (compared whole, as
+`fleetnode.SelectHeadlineDevice` does), each layer's `display_device`, `devices` and seat `device` where they are written as UUIDs,
+and the `CUDA_VISIBLE_DEVICES` of every llama-swap seat in the serving config (`serving_config_path`, read by `internal/servingcfg`,
+one reference per distinct UUID with the seats that hold it). Plain indices are not judged (`comfy_cuda_device`, the `*_pool_*`
+`cuda:N` keys, `audiocpp_device` hold only indices), a pin a macro writes is not a literal list to that reader (`audit-yaml` expands
+macros and judges it with the rule `pin-unresolved`), and an unset `serving_config_path` says nothing: the seats are not read.
+The block is `card_refs` in `gpu status --json`, `gpu cards --json` and the brief's `gpu_cards`; an agent branches on
+`card_refs.state`: `none` (nothing names a card by UUID), `ok`, `stale` (`stale[]` with `setting`, `key`, `seats` and the `effect` of
+the setting meanwhile; `unnamed_cards[]`, the live cards the settings that hold a stale UUID do not name, which are the candidates for the replacement; `fix`) or
+`unknown` (`why`: the card table could not be read, so nothing is judged, and an unread table is never read as "the card is gone").
+`unchecked[]` lists a serving config that is set and could not be read. The text surfaces print a `DEFECT:` block (doctor: `card refs:`
+rows) only when something is stale or unknown, so a clean box prints nothing new. The match is the card table's own: a UUID prefix,
+with or without `GPU-`, case-insensitive. **No verb rewrites a card UUID in the config today**: the fix is a hand edit of the setting
+the row names (`config.json`, and the seat's `CUDA_VISIBLE_DEVICES` entry in the serving yaml, which the harness never rewrites),
+and `gpu_comfy_order` is the operator's declaration of an order nvidia-smi cannot give for two cards of one model, so the new list is
+measured with a `CUDA_VISIBLE_DEVICES=<uuid>` probe before it is trusted, never copied from the old slot's position.
+
 **The display card's row says where it stands against its cap** (`display_cap`; the display card's row, plus every row of a reading that could not say which card the monitor is on (there as `unknown`); otherwise absent on every
 other card and on a box that flags no display card). It reads the VRAM in use now, **the desktop and every process counted**,
 against the budget `gpulease.DisplayBudgetGiB` gives from `gpu_display_cap_pct` and the display layer's declared floor, which is
