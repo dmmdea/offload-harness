@@ -29,8 +29,11 @@
   `admission_wait_sec` 10.0. With a deliberately high stated commit (45 GiB touched, 80 GiB of commit) it deferred against
   the commit limit instead: `the seat's 45.0 GiB and 80.0 GiB of commit (seat): ... needs 80.0 GiB of commit, committed 67.2
   of 146.7 GiB commit limit, 8.0 GiB headroom (after 10s waiting ...)`. `doctor` printed the two-figure `seat ram:` row for
-  that config and the `no commit is stated` row for the live one. A load ADMITTED on a stated commit had not run when this
-  was written: the box stayed above the line its measured figures allow.
+  that config and the `no commit is stated` row for the live one. Then two loads ADMITTED on a stated commit (45 GiB
+  touched, 73 GiB of commit), the seat absent and 54 to 56 GiB committed, each one pinned-local contract through the door
+  inside a GPU lease: `deferred` false, the seat cold-loaded and answered (281 and 399 s, the longer one with a cold
+  compile cache). Measured over those loads: the host's commit peaked +53.4 and +55.3 GiB over the base and available RAM
+  fell by at most 32.2 GiB, which is what a node sets the two keys from.
 - **Where.** `internal/config/config.go`, `config.example.json`, `internal/hostneed/hostneed.go` (`SeatNeed`, `Need.HostLoad`,
   `Need.SeatRefusal`), `internal/gpulease/relief.go` (`HostRAMSettle`), `internal/pipeline/seathostram.go`
   (`SeatColdLoadAdmission`), `internal/pipeline/agenttask.go`, `internal/mcpserver/mcpserver_agentrun.go`, `gpu_drain.go`,
