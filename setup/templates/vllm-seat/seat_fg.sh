@@ -817,20 +817,60 @@ fi
 # keeps this PID for the engine) drops clean page cache once the engine answers /health and again whenever the guest's cache
 # passes SEAT_CACHE_CAP_GIB, until the engine exits. drop_caches=1 frees clean cache only (no dirty data, no process memory) and
 # needs root, which a WSL seat has. Native Linux is left alone: there the cache is reclaimable kernel memory, not host commit.
+#
+# The bound holds DURING the load too (2026-11-21). The watcher used to do nothing until /health answered, so the whole
+# checkpoint sat in the cache for the rest of the load: sampled on the reference box, the engine read 19 GiB in 20 s, about
+# 70 s before it answered, and from then on about 1 GiB of the 22 GiB cache was still mapped. That dead copy was the top
+# third of the load's peak (host commit 49.5 -> 116.0 GiB at the peak, about 95 once serving), and the peak is what a cold
+# load has to fit on the host: the contract door's host-RAM gate refuses a load the host cannot take.
+#
+# How tight the loop is decides whether it helps, because the VM gives freed pages back to the host 15-25 s late: pages the
+# guest touched and dropped stay host commit meanwhile, so a loop that lets the cache grow by GiBs between drops still grows
+# the VM. Measured the same day by reading the checkpoint's 18.1 GiB to /dev/null inside the guest with a copy of this loop
+# beside it (VM private bytes on the host, growth over the read): no loop +17.4 GiB; 4 GiB cap every 2 s +9.5; 2 GiB cap
+# every 1 s +4.0; 1 GiB cap every 0.5 s +0.0, +2.0 and +0.9 over three runs, with the read no slower (7.4 s). Small drops
+# made often are reused by the next read before they spread over fresh guest memory. So until the engine answers the watcher
+# looks every 0.5 s and drops once the file cache is over SEAT_LOAD_CACHE_CAP_MIB (1024) and 256 MiB above what the last drop
+# left; it does not sync there (a checkpoint being read has no dirty pages, and sync walks every mount, the cache-server share
+# included). The health probe keeps its 30 s step. At the first answer it syncs, drops once and logs one line with the count
+# of load-time drops and the largest cache it saw; from then on it steps every 30 s against SEAT_CACHE_CAP_GIB as before.
+# Two whole cold loads under this loop (2026-11-22, same box, host commit sampled every 2 s): the peak rose +55.3 and +53.4 GiB
+# over the base, against +66 to +72 with the old watcher; about +42 to +44 once serving, as before. The loop cannot hold the cap
+# during the weight read itself: vLLM maps the two shards while it copies them (13.4 and 13.7 s, against 12.3 to 13.0 s before,
+# so no slower), mapped pages are not dropped, and the cache reached 18.5 GiB both times. What the loop removes is the copy
+# left after that read, which used to stay through the compile and profiling (52 to 139 s); it took 36 to 39 drops.
+# A page a reader still maps is not dropped; one it has yet to read is read again from the disk. The cache it measures is the
+# file cache (Cached less Shmem): shared memory and tmpfs count as Cached and no drop frees them. What a drop leaves behind
+# (pages still mapped) is remembered, so a cache no drop can free is not dropped every step.
 SEAT_PID=$$
 if grep -qi microsoft /proc/sys/kernel/osrelease 2>/dev/null && [ -w /proc/sys/vm/drop_caches ]; then
-  ( cap_kib=$(( ${SEAT_CACHE_CAP_GIB:-4} * 1048576 )); ready=0
+  ( cap_kib=$(( ${SEAT_CACHE_CAP_GIB:-4} * 1048576 )); load_cap_kib=$(( ${SEAT_LOAD_CACHE_CAP_MIB:-1024} * 1024 ))
+    ready=0; n=0; left=0; drops=0; peak=0
+    file_cache_kib() { awk '/^Cached:/{c=$2} /^Shmem:/{s=$2} END{print c-s}' /proc/meminfo; }
     while kill -0 "$SEAT_PID" 2>/dev/null; do
-      sleep 30
       if [ "$ready" = 0 ]; then
-        "$VENV/bin/python" -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:$PORT/health', timeout=5)" 2>/dev/null || continue
-        ready=1; force=1
-      fi
-      c=$(awk '/^Cached:/{print $2}' /proc/meminfo)
-      if [ "${force:-0}" = 1 ] || [ "${c:-0}" -gt "$cap_kib" ]; then
-        sync; echo 1 > /proc/sys/vm/drop_caches
-        echo "seat_fg: page cache dropped ($(( ${c:-0} / 1048576 )) GiB -> $(awk '/^Cached:/{print int($2/1048576)}' /proc/meminfo) GiB; cap ${SEAT_CACHE_CAP_GIB:-4} GiB)"
-        force=0
+        sleep 0.5; n=$(( n + 1 ))
+        c=$(file_cache_kib); c=${c:-0}
+        [ "$c" -gt "$peak" ] && peak=$c
+        if [ "$c" -gt "$load_cap_kib" ] && [ "$c" -gt $(( left + 262144 )) ]; then
+          echo 1 > /proc/sys/vm/drop_caches
+          left=$(file_cache_kib); left=${left:-0}; drops=$(( drops + 1 ))
+          [ "$drops" = 1 ] && echo "seat_fg: page cache bound active during the load (first drop at $(( c / 1024 )) MiB; load cap ${SEAT_LOAD_CACHE_CAP_MIB:-1024} MiB)"
+        fi
+        if [ $(( n % 60 )) = 0 ] && "$VENV/bin/python" -c "import urllib.request,sys; urllib.request.urlopen('http://127.0.0.1:$PORT/health', timeout=5)" 2>/dev/null; then
+          ready=1
+          c=$(file_cache_kib); sync; echo 1 > /proc/sys/vm/drop_caches
+          left=$(file_cache_kib); left=${left:-0}
+          echo "seat_fg: page cache bounded during the load: $drops drops, largest $(( peak / 1024 )) MiB seen (load cap ${SEAT_LOAD_CACHE_CAP_MIB:-1024} MiB); dropped at ready ($(( ${c:-0} / 1048576 )) GiB -> $(( left / 1048576 )) GiB)"
+        fi
+      else
+        sleep 30
+        c=$(file_cache_kib)
+        if [ "${c:-0}" -gt "$cap_kib" ] && [ "${c:-0}" -gt $(( left + 1048576 )) ]; then
+          sync; echo 1 > /proc/sys/vm/drop_caches
+          left=$(file_cache_kib); left=${left:-0}
+          echo "seat_fg: page cache dropped ($(( ${c:-0} / 1048576 )) GiB -> $(( left / 1048576 )) GiB; cap ${SEAT_CACHE_CAP_GIB:-4} GiB; serving)"
+        fi
       fi
     done ) &
 fi

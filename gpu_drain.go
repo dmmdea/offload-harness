@@ -54,6 +54,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpualloc"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/seatload"
@@ -1117,6 +1118,12 @@ type warmGuard struct {
 //     host that reads NEAR or OVER never warms).
 //
 // The lease being released is left out of both: its command has exited and it will load nothing more.
+//
+// The reading is taken through HostRAMSettle with no bound: one look, and on a refusal the installed relief is asked once (the
+// WSL page-cache drop, when the node enables it), so a warm-back that was refused frees what the cache holds for the next
+// reader. It does NOT wait: the lease being released is still held while this guard runs and others queue behind it, and the
+// seat loads on its next request, where the contract door's own gate settles for up to a minute (internal/pipeline/seathostram.go).
+// A seat whose commit the node states (agent_seat_host_commit_gib) is judged on it against the OS commit limit, as at the door.
 func hostRAMWarmCheck(m *gpulease.Manager, epoch uint64) func(need hostneed.Need) string {
 	return func(need hostneed.Need) string {
 		self := epoch
@@ -1129,8 +1136,9 @@ func hostRAMWarmCheck(m *gpulease.Manager, epoch uint64) func(need hostneed.Need
 				return fmt.Sprintf("a lane that declared %.1f GiB of host RAM is still live (%s lease epoch %d), and a seat is not loaded while a lane streams", max(l.HostRAMGiB, l.HostRAMCommitGiB), l.Class, l.Epoch)
 			}
 		}
-		if chk := m.HostRAMCheckWithout(need.GiB, self); !chk.OK {
-			return fmt.Sprintf("the host cannot take the seat's %.1f GiB (%s): %s", need.GiB, need.Source, chk.Why)
+		load := need.HostLoad()
+		if chk, _ := m.HostRAMSettle(context.Background(), 0, func() gpuprobe.HostRAMCheck { return m.HostRAMCheckLoadWithout(load, self) }); !chk.OK {
+			return need.SeatRefusal(chk.Why)
 		}
 		return ""
 	}

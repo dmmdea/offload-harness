@@ -106,6 +106,25 @@ func (n Need) String() string {
 	return fmt.Sprintf("%.1f GiB host RAM (%s: %s)", n.GiB, n.Source, n.Detail)
 }
 
+// HostLoad is the need as the admission rule takes it: the working set it touches and the commit it is charged. A stated commit is
+// kept as stated (judged against the OS commit limit); otherwise the one figure stands for both, which is what
+// gpulease.Manager.HostRAMCheck builds from it.
+func (n Need) HostLoad() gpuprobe.HostLoad {
+	if n.CommitStated && n.CommitGiB > 0 {
+		return gpuprobe.HostLoad{TouchGiB: n.GiB, CommitGiB: n.CommitGiB, CommitStated: true}
+	}
+	return gpuprobe.HostLoad{TouchGiB: n.GiB, CommitGiB: n.GiB}
+}
+
+// SeatRefusal is the sentence for a host that cannot take this need as the agent seat's cold load or warm-back, with why the
+// admission rule gave. The one sentence for every caller (the contract doors and the warm-back).
+func (n Need) SeatRefusal(why string) string {
+	if n.CommitStated && n.CommitGiB > 0 {
+		return fmt.Sprintf("the host cannot take the seat's %.1f GiB and %.1f GiB of commit (%s): %s", n.GiB, n.CommitGiB, n.Source, why)
+	}
+	return fmt.Sprintf("the host cannot take the seat's %.1f GiB (%s): %s", n.GiB, n.Source, why)
+}
+
 // The host memory the ComfyUI process itself holds for a graph that loads no weight file, measured on a Windows node with a small
 // VHS GIF graph: 2.63 GiB private (the process) and 3.64 GiB of system commit raised. Rounded up to whole GiB.
 const (
@@ -879,8 +898,13 @@ const DefaultSeatHostGiB = 21.0
 // SeatNeed is the host RAM the agent seat needs once loaded: the node's own figure when its config states one
 // (agent_seat_host_ram_gib), else DefaultSeatHostGiB. It is never 0: a seat whose footprint is unknown is
 // held to the chosen default (fail closed, though below the 44 GB the 2026-09-10 incident recorded), because a
-// load the guard cannot size is the one it must not wave through.
+// load the guard cannot size is the one it must not wave through. A node that also states the seat's commit
+// (agent_seat_host_commit_gib, read only with the ram figure) gets a need whose commit is stated: it is judged against the OS
+// commit limit, and the ram figure is then the touched set alone.
 func SeatNeed(cfg config.Config) Need {
+	if g, c := cfg.AgentSeatHostRAMGiB, cfg.AgentSeatHostCommitGiB; g > 0 && c > 0 {
+		return Need{GiB: g, CommitGiB: c, CommitStated: true, Source: SourceSeat, Detail: "the node's agent_seat_host_ram_gib and agent_seat_host_commit_gib"}
+	}
 	if g := cfg.AgentSeatHostRAMGiB; g > 0 {
 		return Need{GiB: g, Source: SourceSeat, Detail: "the node's agent_seat_host_ram_gib"}
 	}

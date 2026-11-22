@@ -716,8 +716,13 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// The host-RAM gate on a load this run would START (pipeline/seathostram.go), the delegation door's own: a seat the
 	// pre-flight established has no row in /running, with no load in flight, is loaded by the warm-up below, so the host is
 	// asked first, by the warm-back's rule. A seat that is loaded, or whose state could not be told, is not refused here.
+	var settleNote string
 	if seatAbsent && loadSeen.IsZero() {
-		if why := pipeline.SeatColdLoadRefusalFor(cfg, model); why != "" {
+		// The gate settles for up to a minute: that wait is admission, counted whether the host gave the memory back or not.
+		why, settled, note := pipeline.SeatColdLoadAdmissionFor(ctx, cfg, model, time.Until(admitDeadline))
+		admitted += settled
+		settleNote = note
+		if why != "" {
 			log.Printf("agent_run: seat %s not loaded: %s", model, why)
 			dout := map[string]any{
 				"deferred":    true,
@@ -738,7 +743,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// start outlasted the probe). Reported with the wire's own field names.
 	coldLoad, warmNote, warmAttempted := pipeline.WarmSeat(ctx, cfg.Endpoint, model, time.Until(admitDeadline))
 	admitted += coldLoad
-	admitNote := joinAdmissionNotes(preNote, warmNote)
+	admitNote := joinAdmissionNotes(preNote, settleNote, warmNote)
 	// Post-warm COHERENCE probe (register D-118) — the same shared helper the
 	// delegation door runs, on the same admission budget, BEFORE the wall
 	// context below exists. A seat that is healthy by every other gate and

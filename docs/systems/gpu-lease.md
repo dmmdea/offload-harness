@@ -31,7 +31,7 @@ other on a single shared card.
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmitsLoad` (the ONE admission rule, over the working set a job touches and the commit it is charged, apart), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
 | `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB` and `Options.HostRAMCommitGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases, per quantity (the working set less what the processes below the holder, and the keyed ComfyUI instances whose launch marker names the lease's epoch, hold RESIDENT; the commit less what they hold PRIVATELY), `Manager.HostRAMPendingLoad` (a running lease is credited with the commit peak its tree has plateaued at: `hostram_observed.go`); and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
 | `internal/pipeline/mediahostram.go` | **F82 for the media path**: whether a render defers its host RAM until its own unload has run (`hostRAMDeferral`, shared by the grant and the lane probe), the Go-side clear under the lease (`clearForHostRAM`), the bound of the wait after it (`hostRAMWaitEnd`, `mediaHostRAMFloor`) and the step that runs both (`clearThenAdmitHostRAM`); [the media order](#a-render-lease-follows-the-same-order-the-media-path-the-incident-of-2026-10-24) |
-| `internal/gpulease/relief.go`, `internal/wslcache` | **the WSL VM's page cache (`gpu_hostram_wsl_cache_drop`, off by default)**: a lease waiting for host RAM asks the WSL 2 VM to drop the page cache a drop can free, when that covers its shortfall ([below](#the-wsl-vms-page-cache-gpu_hostram_wsl_cache_drop)) |
+| `internal/gpulease/relief.go`, `internal/wslcache` | **the WSL VM's page cache (`gpu_hostram_wsl_cache_drop`, off by default)**: a lease waiting for host RAM asks the WSL 2 VM to drop the page cache a drop can free, when that covers its shortfall (also asked by a contract door's cold load of the seat, which settles for up to a minute, and once by the seat's warm-back; [below](#the-wsl-vms-page-cache-gpu_hostram_wsl_cache_drop)) |
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card (for its own `--graph`, the files that graph's loaders name), else the media class default (see "Host RAM") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
@@ -2420,7 +2420,18 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   incident recorded 44 GB of host RAM for a seat, the note that carries it attributes that to LMCache staging plus page cache,
   and the page-cache part is droppable (measured 2026-10-18 on a WSL2 pair seat: loading the INT4 27B left 23 GiB of guest page
   cache, which on WSL2 is host commit; one drop took the VM 68.7 -> 46.8 GiB and host commit 149.7 -> 128.0 GiB with the seat
-  serving). On WSL2 the launcher now drops it itself (`SEAT_CACHE_CAP_GIB`, below). So with the key unset the warm-back is
+  serving). On WSL2 the launcher now drops it itself (`SEAT_CACHE_CAP_GIB` once the seat serves), and since 2026-11-21 it
+  bounds it during the load as well (`SEAT_LOAD_CACHE_CAP_MIB`, default 1024, looked at every 0.5 s until the engine answers
+  `/health`): before, the whole checkpoint sat in the cache until the engine answered, and that dead copy was the top third of
+  a cold load's host peak. The loop has to be that tight because the VM returns freed pages to the host 15 to 25 s late.
+  Reading the checkpoint's 18.1 GiB inside the guest with a copy of the loop beside it grew the VM's private bytes by 17.4 GiB
+  with no loop, 9.5 with a 4 GiB cap every 2 s, 4.0 with 2 GiB every 1 s, and 0.0, 2.0 and 0.9 (three runs) with 1 GiB every
+  0.5 s, the read no slower. Two whole cold loads under the loop (2026-11-22, the same box) peaked +55.3 and +53.4 GiB of
+  host commit over the base, against +66 to +72 with the old watcher, and settled at +42 to +44 once serving, as before. The
+  loop cannot hold the cap during the weight read itself: vLLM maps the shards while it copies them (about 13.5 s), mapped
+  pages are not dropped, and the cache reached 18.5 GiB both times; what it removes is the copy left after that read, which
+  used to stay through the compile and profiling. The seat log's `page cache bounded during the load: N drops, largest M MiB
+  seen` line shows it on every load. So with the key unset the warm-back is
   admitted against a figure below the incident's, and a node that runs a seat sets `agent_seat_host_ram_gib` from its own
   measurement before it relies on the check. Two readers help the node do that (register B-56 / H-08). The vLLM seat launcher
   (`seat_fg.sh`) logs `host rss N GiB (L1 N GiB)` to the seat log at every start: the resident set of the LMCache MP server unit
@@ -2429,9 +2440,19 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   `seat ram:` row on a box that runs a vLLM seat (`vllm_seats`, or the tier table's vLLM seat as `agent_model`): WARN while
   the key is unset, OK once it is declared. The row does not compare the declaration with a live reading, because the seat's
   memory is read inside its own distro and the harness holds no cheap read of it; it never changes doctor's exit code.
+* **The seat can state its commit apart from its touched set.** `agent_seat_host_commit_gib` is the commit charge a cold load of
+  the seat adds to the host at its peak, measured on the node that runs the seat and recorded as `measured <date> <node>`.
+  Stated, the seat's commit is judged against the OS commit limit less the headroom, as a stated `--ram-commit` is, and
+  `agent_seat_host_ram_gib` is then the touched set alone (`hostneed.SeatNeed` returns a need whose commit is stated; the refusal
+  says `the seat's N GiB and M GiB of commit`). Unset, the one figure stands in for both and the commit is held to physical RAM, as
+  before. It is read only together with `agent_seat_host_ram_gib`: a commit with no ram figure is ignored, and `doctor` says so.
+  As with `--ram-commit`, a stated commit is judged only where the OS enforces a commit limit (always on Windows; on Linux with
+  `vm.overcommit_memory=2`). On a Linux node in mode 0 or 1, stating it leaves the touched set as the only line the seat is held
+  to, which is less than the physical-RAM line an unstated figure gets: leave the key unset there unless that is intended. The
+  `seat ram:` row of `doctor` says this on every box that states both figures.
 * **The warm passes the grant's admission.** The seat's footprint, taken for both quantities and with no commit stated, plus
   what the *other* live leases have yet to load, must leave the headroom of the available RAM and keep the commit charge under
-  physical RAM less the headroom: the warm-back states no commit, so it is held to physical RAM and not to the commit limit
+  physical RAM less the headroom: the warm-back states no commit (unless the node states `agent_seat_host_commit_gib`, above), so it is held to physical RAM and not to the commit limit
   (`TestAWarmBackIsHeldToPhysicalRAMAndNotToTheCommitLimit`). It is `Manager.HostRAMCheckWithout`, the same function
   as the grant, with the lease being released left out, because its command has exited and it loads nothing more. A host
   that reads NEAR or OVER therefore never warms (`TestAWarmBackIsRefusedWhenTheHostCannotTakeTheSeatAndStaysOwed`,
@@ -2446,7 +2467,17 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   and when the seat does not fit it defers as `capacity`, re-placeable, with a reason that starts `host RAM:`, so the delegator
   places it on another node. A load already in flight, a seat already loaded and a model that is not the agent seat are not
   gated; a node that states no `agent_seat_host_ram_gib` keeps the old behaviour (the warm-back's fail-closed default is a
-  chosen figure). "Absent" is established, never assumed: the pre-flight resolves the seat's bound name against the roster
+  chosen figure). **The door's gate settles; it is not one look.** Right after another model unloads, the host's memory takes
+  up to about a minute to come back, and a contract arriving then used to be refused for a load that fit seconds later. The door
+  now reads the host again every 2 seconds (`Manager.HostRAMSettle`, `internal/gpulease/relief.go`), for at most
+  `HostRAMSettleBound` (60 seconds, a chosen figure, and never past what is left of the admission budget), and asks the page-cache
+  relief on each refusal when `gpu_hostram_wsl_cache_drop` is on (the relief rate-limits itself to one attempt a minute across
+  the box). It stops when the reading admits, when the host cannot be read or the need can never fit, when the bound or the
+  admission budget is spent, or when the shortfall has not shrunk by 0.25 GiB below the lowest seen in 10 seconds (no progress).
+  The wait is counted as admission time, never as the seat's cold load, and a refusal after a wait says how long it waited. The
+  settle admits nothing: the door's own check, on the last reading, is what admits. A lane that declared host RAM is still
+  refused at once. The warm-back at a release asks the relief once and does not wait: the lease it follows is still held while
+  it asks, and the seat loads on its next request, where the door's gate settles. "Absent" is established, never assumed: the pre-flight resolves the seat's bound name against the roster
   before it concludes that no `/running` row is the seat's, because a box that binds its seat by an alias lists it under the
   canonical id. A seat whose state cannot be told (a roster or a `/running` read that failed) is not gated either. Until that
   resolution was made on every reading, a loaded seat with nothing else mid-swap read as "not ready" and was put to this gate:
@@ -2938,7 +2969,8 @@ or a request reaches them, and the distro name is one `wsl.exe` listed.
 **Where it does nothing.** Off Windows (a Linux host's own page cache already counts as available); with no running distro;
 in a process whose account sees no distros (a service under another account); when the droppable cache does not cover the
 shortfall (the desktop or a process holds the memory, and a drop would only cost cold reads); for a request with no `--wait`;
-for a single check that does not wait (the agent seat's cold-load gate, `agent_seat_host_ram_gib`).
+for a check that never asks: the agent seat's cold-load gate at a contract door now settles for up to a minute and asks it
+(`Manager.HostRAMSettle`, above), and the seat's warm-back at a release asks it once and does not wait.
 
 **Off by default.** It changes the state of something the harness does not own (the VM's cache), so an operator turns it on
 per host with `"gpu_hostram_wsl_cache_drop": true`.
