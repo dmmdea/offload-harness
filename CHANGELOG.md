@@ -7,6 +7,111 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.236.0] - 2026-11-22 - The agent seat's cold load is admitted on its measured commit, its page cache is bounded during the load, and its cache-server store lands on the cache server
+
+### Fixed - the vLLM seat's cache-server share is mounted where the LMCache MP server looks, not only where the launcher looks
+
+- **What was wrong.** On WSL2 the seat launcher (`seat_fg.sh`) is started through `wsl.exe`, and that session has a mount
+  namespace of its own whose `/` is private. The launcher mounted the cache-server share at `SEAT_L2_MOUNT_DIR` in that
+  namespace, logged `cache-server share mounted`, and then started the LMCache MP server as a systemd unit
+  (`systemd-run`), which lives in systemd's namespace and never saw the mount. The MP server is the process that writes
+  the L2 store, so it wrote the store into the bare mount point on the distro's own disk. On the reference box that was
+  91 GiB in 27 hours (2026-11-19 08:07 to 11-20 11:31, 1,875 chunk files written as the seat came ready and served), until
+  the disk was full. From then on the store's writes failed, and after the next host restart WSL mounted the distro
+  read-only with a RAM overlay: every start of the seat died before it answered, and every local contract was deferred
+  `seat down`. In those 27 hours nothing reached the cache server at all.
+- **What it does now.** When the launcher's mount namespace is not pid 1's, it mounts the share in pid 1's namespace as
+  well (`nsenter -t 1 -m`, the same source and options) and logs
+  `cache-server share also mounted in systemd's mount namespace, where the MP server runs`. When that mount fails, or
+  `nsenter` is missing, the tier is degraded (`CACHE SERVER DEGRADED ...`) instead of writing to the local disk. Files left
+  in the bare mount point by an earlier start are named with their size before the share hides them. The mount in pid 1's
+  namespace outlives the start, so a later start finds it: it says so, and when an earlier start mounted it from another
+  address it warns, reports the address the MP server really uses in the status file, and names the unmount to run in
+  that namespace (the "unmount and restart" hint names it too). The write probe behind `SEAT_L2_MIN_MBPS` now runs in pid
+  1's namespace, so the floor measures the mount the MP server writes through rather than the launcher's copy.
+- **Not changed.** A launcher that already runs in systemd's namespace (native Linux, or one started by a unit) does
+  nothing new. The address choice, the write floor, the prune and everything after the mount are unchanged.
+- **Check.** On the reference box, after the orphaned store was archived off the distro's disk and the distro restarted,
+  two cold loads of the seat through the contract door. First start: the launcher logged `cache-server share also mounted
+  in systemd's mount namespace, where the MP server runs (//<store>/kvcache)`; pid 1's view, the session's view and the MP
+  server's own `/proc/<pid>/mounts` all showed the CIFS share at the mount point; the store's new chunk files landed on
+  the share and the distro's free space stayed at 76 GiB. Second start, the distro held open so pid 1's mount survived:
+  `cache-server share already mounted in systemd's mount namespace too` and `write probe ~328 MB/s (floor 100), through
+  systemd's mount namespace, where the MP server writes`. The launcher's existing store tests
+  (`seat_fg.kv-and-store.tests.sh`) pass unchanged as a non-root user, where the block stays off.
+- **Where.** `setup/templates/vllm-seat/seat_fg.sh`.
+
+### Fixed - the vLLM seat launcher bounds the guest page cache during the load, not only after it
+
+- **What was wrong.** On WSL2 the launcher's page-cache watcher did nothing until the engine answered `/health`. vLLM
+  reads the checkpoint through the guest page cache and keeps none of it mapped once the weights are on the cards, so for
+  the rest of the load the whole checkpoint sat in the cache as a second copy, and guest cache is host commit. Sampled on
+  the reference box: the engine read 19 GiB in 20 s, about 70 s before it answered, and that dead copy was the top third
+  of the load's host peak (commit 49.5 -> 116.0 GiB at the peak, about 95 once serving). The peak is what a cold load has
+  to fit on the host, so the contract door's host-RAM gate was refusing loads for memory nothing used.
+- **What it does now.** Until the engine answers, the watcher looks every 0.5 s and drops clean cache once the file cache
+  is over `SEAT_LOAD_CACHE_CAP_MIB` (default 1024) and 256 MiB above what the last drop left. It does not `sync` there (a
+  checkpoint being read has no dirty pages, and `sync` walks every mount). At the first `/health` answer it syncs, drops
+  once and logs `seat_fg: page cache bounded during the load: N drops, largest M MiB seen ...`; the first load-time drop
+  logs one line too. Once serving it steps every 30 s against `SEAT_CACHE_CAP_GIB`, as before.
+- **Why the loop is that tight.** The VM returns freed pages to the host 15 to 25 s late, so pages the guest touched and
+  dropped stay host commit meanwhile. A loop that lets the cache grow by GiBs between drops still grows the VM.
+- **Check.** A read test on the reference box, the cache's share only: the checkpoint's 18.1 GiB read to `/dev/null`
+  inside the guest with a standalone copy of the loop beside it, growth of the VM's private bytes on the host over the
+  read. No loop: +17.4 GiB (guest file cache 18.3 GiB). 4 GiB cap every 2 s: +9.5 (cache peak 5.2). 2 GiB cap every 1 s:
+  +4.0 (2.8). 1 GiB cap every 0.5 s: +0.0, +2.0 and +0.9 over three runs (1.5), the read no slower (7.4 s). Then two
+  whole cold loads of the seat under the new launcher, through the contract door and inside a GPU lease, host commit
+  sampled every 2 s: the peak rose +55.3 and +53.4 GiB over the base (the old watcher: +66 to +72), +44.4 and +41.9 75 s
+  after ready (as before). Weight read 13.4 and 13.7 s (12.3 to 13.0 s on the old launcher). The launcher logged
+  `page cache bounded during the load: 39 drops, largest 18515 MiB seen` and `36 drops, largest 18497 MiB seen`.
+- **What it does not do.** It cannot hold the cap during the weight read itself: vLLM maps the two shards while it copies
+  them, mapped pages are not dropped, and the cache reached 18.5 GiB both times. What it removes is the copy left after
+  that read, which used to stay through the compile and the profiling run.
+- **Not changed.** Native Linux (the cache there is reclaimable kernel memory, not host commit), the serving-phase cap,
+  and everything else in the launcher.
+- **Where.** `setup/templates/vllm-seat/seat_fg.sh`, `docs/systems/gpu-lease.md`.
+
+### Fixed - the agent seat's cold-load gate judges a stated commit against the commit limit and re-checks for up to a minute
+
+- **What was wrong.** The contract doors' host-RAM gate on a cold load of the agent seat refused most contracts on a busy
+  desktop box, for two reasons. The seat stated one figure (`agent_seat_host_ram_gib`), taken for both the touched set and
+  the commit, with no commit stated, so the seat's commit was held to physical RAM less the headroom although it is a
+  measured figure that belongs against the OS commit limit, as a stated `--ram-commit` is. And the gate was one look, with no
+  wait and no relief: right after another model unloads, the host's memory takes up to about a minute to come back, and a
+  contract arriving in that window was refused for a load that would fit seconds later.
+- **What it does now.** A node can state the seat's commit with the new key `agent_seat_host_commit_gib`, read only together
+  with `agent_seat_host_ram_gib`; the commit is then judged against the OS commit limit less the headroom, and the refusal
+  says `the seat's N GiB and M GiB of commit`. Both contract doors (`runAgentTask` and the MCP `agent_run` door) now settle
+  (`Manager.HostRAMSettle`): a refusal is re-read every 2 seconds for at most 60 seconds, never past the admission budget, and
+  asks the WSL page-cache relief on each refusal when `gpu_hostram_wsl_cache_drop` is on. It stops early when the reading
+  admits, when the host cannot be read or the need can never fit, or when the shortfall has not shrunk by 0.25 GiB in 10
+  seconds. The wait is counted as admission time, not as cold-load time, and a refusal after a wait says how long it waited.
+  `doctor`'s `seat ram:` row names the commit key, says it is ignored when set without the ram figure, and says where a
+  stated commit is judged: only where the OS enforces a commit limit (always on Windows; on Linux with
+  `vm.overcommit_memory=2`), as with `--ram-commit`. On a Linux node in mode 0 or 1, stating it leaves the touched set as
+  the only line.
+- **Not changed.** With `agent_seat_host_commit_gib` unset, the rule the seat is judged by is as before (the one figure,
+  its commit held to physical RAM) and so is the refusal sentence, which gains only the `(after N s waiting ...)` clause
+  when the door waited. A lane that declared host RAM still refuses at once, and one granted while the door waited
+  refuses the load too. The seat's warm-back at a lease release still takes one look
+  and does not wait (the lease it follows is still held); it now also asks the relief once on a refusal. The admission rule
+  itself, the relief's rate limit and the lease wait loops are untouched.
+- **Check.** Real runs of the built binary on the reference box, the seat absent and about 67 GiB committed. With the
+  commit key unset the door waited 10 s, saw no progress and deferred: `host RAM: the host cannot take the seat's 56.0 GiB
+  (seat): ... committed 67.5 of 127.7 GiB physical ... (after 10s waiting for the host to give memory back)`,
+  `admission_wait_sec` 10.0. With a deliberately high stated commit (45 GiB touched, 80 GiB of commit) it deferred against
+  the commit limit instead: `the seat's 45.0 GiB and 80.0 GiB of commit (seat): ... needs 80.0 GiB of commit, committed 67.2
+  of 146.7 GiB commit limit, 8.0 GiB headroom (after 10s waiting ...)`. `doctor` printed the two-figure `seat ram:` row for
+  that config and the `no commit is stated` row for the live one. Then two loads ADMITTED on a stated commit (45 GiB
+  touched, 73 GiB of commit), the seat absent and 54 to 56 GiB committed, each one pinned-local contract through the door
+  inside a GPU lease: `deferred` false, the seat cold-loaded and answered (281 and 399 s, the longer one with a cold
+  compile cache). Measured over those loads: the host's commit peaked +53.4 and +55.3 GiB over the base and available RAM
+  fell by at most 32.2 GiB, which is what a node sets the two keys from.
+- **Where.** `internal/config/config.go`, `config.example.json`, `internal/hostneed/hostneed.go` (`SeatNeed`, `Need.HostLoad`,
+  `Need.SeatRefusal`), `internal/gpulease/relief.go` (`HostRAMSettle`), `internal/pipeline/seathostram.go`
+  (`SeatColdLoadAdmission`), `internal/pipeline/agenttask.go`, `internal/mcpserver/mcpserver_agentrun.go`, `gpu_drain.go`,
+  `doctor_seathostram.go`, `docs/systems/gpu-lease.md`, `docs/OPERATOR-GUIDE.md`.
+
 ## [0.235.0] - 2026-11-21 - A loaded agent seat is no longer refused by its own host-RAM gate, and a stale card UUID is a named defect
 
 ### Fixed - a loaded agent seat is no longer refused by its own cold-load host-RAM gate
