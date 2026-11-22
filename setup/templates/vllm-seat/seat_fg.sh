@@ -786,7 +786,11 @@ fi
 # left; it does not sync there (a checkpoint being read has no dirty pages, and sync walks every mount, the cache-server share
 # included). The health probe keeps its 30 s step. At the first answer it syncs, drops once and logs one line with the count
 # of load-time drops and the largest cache it saw; from then on it steps every 30 s against SEAT_CACHE_CAP_GIB as before.
-# That read test is the cache's share only: a whole cold load under this loop had not been measured when this was written.
+# Two whole cold loads under this loop (2026-11-22, same box, host commit sampled every 2 s): the peak rose +55.3 and +53.4 GiB
+# over the base, against +66 to +72 with the old watcher; about +42 to +44 once serving, as before. The loop cannot hold the cap
+# during the weight read itself: vLLM maps the two shards while it copies them (13.4 and 13.7 s, against 12.3 to 13.0 s before,
+# so no slower), mapped pages are not dropped, and the cache reached 18.5 GiB both times. What the loop removes is the copy
+# left after that read, which used to stay through the compile and profiling (52 to 139 s); it took 36 to 39 drops.
 # A page a reader still maps is not dropped; one it has yet to read is read again from the disk. The cache it measures is the
 # file cache (Cached less Shmem): shared memory and tmpfs count as Cached and no drop frees them. What a drop leaves behind
 # (pages still mapped) is remembered, so a cache no drop can free is not dropped every step.

@@ -16,10 +16,14 @@
 - **Check.** A read test on the reference box, the cache's share only: the checkpoint's 18.1 GiB read to `/dev/null`
   inside the guest with a standalone copy of the loop beside it, growth of the VM's private bytes on the host over the
   read. No loop: +17.4 GiB (guest file cache 18.3 GiB). 4 GiB cap every 2 s: +9.5 (cache peak 5.2). 2 GiB cap every 1 s:
-  +4.0 (2.8). 1 GiB cap every 0.5 s: +0.0, +2.0 and +0.9 over three runs (1.5), the read no slower (7.4 s). A whole cold
-  load under the new loop had NOT been measured when this was written: the box stayed above the commit line at which the
-  gate admits a cold load, and a load is not forced past that refusal. The launcher's own log line is where the next
-  load shows it.
+  +4.0 (2.8). 1 GiB cap every 0.5 s: +0.0, +2.0 and +0.9 over three runs (1.5), the read no slower (7.4 s). Then two
+  whole cold loads of the seat under the new launcher, through the contract door and inside a GPU lease, host commit
+  sampled every 2 s: the peak rose +55.3 and +53.4 GiB over the base (the old watcher: +66 to +72), +44.4 and +41.9 75 s
+  after ready (as before). Weight read 13.4 and 13.7 s (12.3 to 13.0 s on the old launcher). The launcher logged
+  `page cache bounded during the load: 39 drops, largest 18515 MiB seen` and `36 drops, largest 18497 MiB seen`.
+- **What it does not do.** It cannot hold the cap during the weight read itself: vLLM maps the two shards while it copies
+  them, mapped pages are not dropped, and the cache reached 18.5 GiB both times. What it removes is the copy left after
+  that read, which used to stay through the compile and the profiling run.
 - **Not changed.** Native Linux (the cache there is reclaimable kernel memory, not host commit), the serving-phase cap,
   and everything else in the launcher.
 - **Where.** `setup/templates/vllm-seat/seat_fg.sh`, `docs/systems/gpu-lease.md`.

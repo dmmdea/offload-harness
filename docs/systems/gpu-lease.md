@@ -2426,8 +2426,12 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   a cold load's host peak. The loop has to be that tight because the VM returns freed pages to the host 15 to 25 s late.
   Reading the checkpoint's 18.1 GiB inside the guest with a copy of the loop beside it grew the VM's private bytes by 17.4 GiB
   with no loop, 9.5 with a 4 GiB cap every 2 s, 4.0 with 2 GiB every 1 s, and 0.0, 2.0 and 0.9 (three runs) with 1 GiB every
-  0.5 s, the read no slower. That is the cache's share alone; a whole cold load under the loop was not measured that day, and
-  the seat log's `page cache bounded during the load: N drops, largest M MiB seen` line is where the next one shows it. So with the key unset the warm-back is
+  0.5 s, the read no slower. Two whole cold loads under the loop (2026-11-22, the same box) peaked +55.3 and +53.4 GiB of
+  host commit over the base, against +66 to +72 with the old watcher, and settled at +42 to +44 once serving, as before. The
+  loop cannot hold the cap during the weight read itself: vLLM maps the shards while it copies them (about 13.5 s), mapped
+  pages are not dropped, and the cache reached 18.5 GiB both times; what it removes is the copy left after that read, which
+  used to stay through the compile and profiling. The seat log's `page cache bounded during the load: N drops, largest M MiB
+  seen` line shows it on every load. So with the key unset the warm-back is
   admitted against a figure below the incident's, and a node that runs a seat sets `agent_seat_host_ram_gib` from its own
   measurement before it relies on the check. Two readers help the node do that (register B-56 / H-08). The vLLM seat launcher
   (`seat_fg.sh`) logs `host rss N GiB (L1 N GiB)` to the seat log at every start: the resident set of the LMCache MP server unit
