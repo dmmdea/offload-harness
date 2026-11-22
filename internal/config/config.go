@@ -1550,7 +1550,10 @@ type Config struct {
 	// seat's commit is judged against the OS commit limit less the headroom, as a stated `--ram-commit` is, and
 	// agent_seat_host_ram_gib is then the touched set alone. 0 = unset: the one figure (agent_seat_host_ram_gib) stands in
 	// for both and the commit is held to physical RAM less the headroom, as before. It is read only together with
-	// agent_seat_host_ram_gib: a commit with no ram figure is ignored, and `doctor` says so.
+	// agent_seat_host_ram_gib: a commit with no ram figure is ignored, and `doctor` says so. As with `--ram-commit`, a stated
+	// commit is judged only where the OS enforces a commit limit (always on Windows; on Linux with vm.overcommit_memory=2):
+	// on a Linux node in mode 0 or 1, stating it leaves the touched set as the only line, so leave it unset there unless
+	// that is what the node wants.
 	AgentSeatHostCommitGiB float64 `json:"agent_seat_host_commit_gib,omitempty"`
 	// GPUOrphanGraceMin (plan P8, default 15) is how many minutes an attended lease's
 	// owner may be gone before `gpu status`, offload_status and the fleet health read the

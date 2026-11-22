@@ -2435,6 +2435,10 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   `agent_seat_host_ram_gib` is then the touched set alone (`hostneed.SeatNeed` returns a need whose commit is stated; the refusal
   says `the seat's N GiB and M GiB of commit`). Unset, the one figure stands in for both and the commit is held to physical RAM, as
   before. It is read only together with `agent_seat_host_ram_gib`: a commit with no ram figure is ignored, and `doctor` says so.
+  As with `--ram-commit`, a stated commit is judged only where the OS enforces a commit limit (always on Windows; on Linux with
+  `vm.overcommit_memory=2`). On a Linux node in mode 0 or 1, stating it leaves the touched set as the only line the seat is held
+  to, which is less than the physical-RAM line an unstated figure gets: leave the key unset there unless that is intended. The
+  `seat ram:` row of `doctor` says this on every box that states both figures.
 * **The warm passes the grant's admission.** The seat's footprint, taken for both quantities and with no commit stated, plus
   what the *other* live leases have yet to load, must leave the headroom of the available RAM and keep the commit charge under
   physical RAM less the headroom: the warm-back states no commit (unless the node states `agent_seat_host_commit_gib`, above), so it is held to physical RAM and not to the commit limit

@@ -40,7 +40,7 @@ func writeSeatHostRAMSection(w io.Writer, cfg config.Config) {
 	const operatorsWord = "it is the operator's statement and is not compared with a live reading here (the seat log's `host rss` line is the staging buffer's share at start, the loaded seat holds more)"
 	if g := cfg.AgentSeatHostRAMGiB; g > 0 {
 		if c := cfg.AgentSeatHostCommitGiB; c > 0 {
-			fmt.Fprintf(w, "seat ram:   OK    agent_seat_host_ram_gib %g GiB and agent_seat_host_commit_gib %g GiB are declared for vLLM seat %s; the commit is judged against the OS commit limit; %s\n", g, c, seat, operatorsWord)
+			fmt.Fprintf(w, "seat ram:   OK    agent_seat_host_ram_gib %g GiB and agent_seat_host_commit_gib %g GiB are declared for vLLM seat %s; the commit is judged against the OS commit limit where the OS enforces one (always on Windows; on Linux with vm.overcommit_memory=2), and in Linux mode 0 or 1 a stated commit is not judged, so only the touched set is; %s\n", g, c, seat, operatorsWord)
 			return
 		}
 		fmt.Fprintf(w, "seat ram:   OK    agent_seat_host_ram_gib %g GiB is declared for vLLM seat %s; %s; no commit is stated (agent_seat_host_commit_gib), so the seat's commit is held to physical RAM\n", g, seat, operatorsWord)

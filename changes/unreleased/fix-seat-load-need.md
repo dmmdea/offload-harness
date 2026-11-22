@@ -13,7 +13,10 @@
   asks the WSL page-cache relief on each refusal when `gpu_hostram_wsl_cache_drop` is on. It stops early when the reading
   admits, when the host cannot be read or the need can never fit, or when the shortfall has not shrunk by 0.25 GiB in 10
   seconds. The wait is counted as admission time, not as cold-load time, and a refusal after a wait says how long it waited.
-  `doctor`'s `seat ram:` row names the commit key, and says it is ignored when set without the ram figure.
+  `doctor`'s `seat ram:` row names the commit key, says it is ignored when set without the ram figure, and says where a
+  stated commit is judged: only where the OS enforces a commit limit (always on Windows; on Linux with
+  `vm.overcommit_memory=2`), as with `--ram-commit`. On a Linux node in mode 0 or 1, stating it leaves the touched set as
+  the only line.
 - **Not changed.** With `agent_seat_host_commit_gib` unset, the rule the seat is judged by is as before (the one figure,
   its commit held to physical RAM) and so is the refusal sentence, which gains only the `(after N s waiting ...)` clause
   when the door waited. A lane that declared host RAM still refuses at once, and one granted while the door waited
