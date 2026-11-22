@@ -7,6 +7,52 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.235.0] - 2026-11-21 - A loaded agent seat is no longer refused by its own host-RAM gate, and a stale card UUID is a named defect
+
+### Fixed - a loaded agent seat is no longer refused by its own cold-load host-RAM gate
+
+- **What was wrong.** Both contract doors (`runAgentTask` and the MCP `agent_run` door) put a run to the cold-load
+  host-RAM gate when the admission pre-flight reported the seat "not ready" with no load in flight. The pre-flight
+  matched `/running` rows by the seat's bound name and resolved an alias to its canonical id only when another model
+  was mid-swap. On a box that binds its seat by an alias, a seat that was loaded and ready with nothing else swapping
+  therefore read as not ready. The gate then judged the seat's whole footprint against a commit charge that already
+  held the seat, and the contract was deferred in milliseconds as `capacity` with
+  `host RAM: ... the seat was not loaded`.
+- **What it does now.** The pre-flight resolves the alias whenever the seat's row is not found under its bound name
+  and `/running` lists anything, and it reports a third fact, `absent`: the last reading established that no row is
+  the seat's under any of its names. The doors gate only an absent seat. A seat that is loaded, loading, or whose
+  state could not be told (a roster or `/running` read that failed) is not gated. An empty `/running` still costs no
+  roster read.
+- **Why it matters.** On the reference box the local seat deferred 786 contracts with this reason in five days
+  against 37 local runs. 79 of the 345 deferrals after the serving log's first entry fell inside a window that log
+  shows the seat ready. The remaining deferrals are the gate judging a real cold load on a host with more than
+  about 64 GiB committed, which this change does not alter.
+- **Check.** One real run on the reference box, the same pinned-local contract twice within four seconds while
+  `/running` listed the seat ready and 92.1 GiB was committed. The 0.234.0 binary deferred it
+  (`host RAM: the host cannot take the seat's 56.0 GiB ... committed 92.1 of 127.7 GiB physical ... the seat was not
+  loaded`); this build answered it in one step. One test,
+  `TestALoadedSeatBoundByAliasIsNotReadAsAbsent`, drives the exported pre-flight with that shape and its control.
+- **Where.** `internal/pipeline/agenttask.go` (`awaitSeatAdmissionLoad`), `internal/pipeline/seathostram.go`,
+  `internal/mcpserver/mcpserver_agentrun.go`, `docs/systems/gpu-lease.md`.
+
+### Fixed - a configured GPU UUID that no live card has is now a named defect in doctor, `gpu status` and the offload_status brief
+
+- **What was wrong.** After a card was replaced, its UUID stayed in `gpu_comfy_order` (and in every other setting that names a card by UUID,
+  and in the `CUDA_VISIBLE_DEVICES` of the llama-swap seats), and each reader degraded on its own, quietly: the ComfyUI order was dropped
+  with one `note:` line, card-scoped media leases fell back to whole-node holds, and a seat whose only pin was the missing UUID saw no CUDA
+  device and loaded on the CPU. `doctor` passed, and no field told an agent to act.
+- **What changed.** One check holds every UUID-valued setting (`gpu_comfy_order`, `primary_gpu_uuid`, a layer's `display_device`, `devices`
+  and seat `device`, and the serving config's seat pins) against the card table (`gpuprobe.CheckRefs`, `Config.CardRefs`). `doctor` prints a
+  `card refs:  FAIL` row per stale UUID (the setting, the seats, what the setting does meanwhile, the live cards the stale settings do not name, the fix)
+  and exits non-zero; `gpu status` and `gpu cards` print the same as a `DEFECT:` block; `gpu status --json`, `gpu cards --json` and the
+  `offload_status` brief's `gpu_cards` carry `card_refs` with `state` `none` | `ok` | `stale` | `unknown`. A card table that cannot be read is
+  `unknown` and flags nothing as stale. A box whose config names no card by UUID reads no GPU and prints nothing new.
+- **Not changed.** No verb rewrites a card UUID in the config: the fix is a hand edit of the setting the row names (a new `gpu_comfy_order`
+  is measured with a `CUDA_VISIBLE_DEVICES=<uuid>` probe first). Seats are read only when `serving_config_path` is set, and a pin a macro
+  writes is judged by `audit-yaml` (`pin-unresolved`), not here.
+- **Check.** `doctor` and `gpu status` run on a temp config (`--config`) naming a made-up UUID in `gpu_comfy_order` and in three seats of a temp
+  serving yaml, against the real card table; docs: `docs/systems/gpu-lease.md`, `docs/OPERATOR-GUIDE.md`, `docs/systems/mcp-server.md`.
+
 ## [0.234.0] - 2026-11-12 - Research digests that are right stop failing, and every failure class has a cause
 
 ### Fixed - the failure register files 31 more rows under the class that names them, and the four classes it had not investigated now carry their causes
