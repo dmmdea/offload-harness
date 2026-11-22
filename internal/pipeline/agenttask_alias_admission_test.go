@@ -114,10 +114,45 @@ func TestSeatAdmissionStillWaitsWhenItsOwnRowIsAbsent(t *testing.T) {
 	}
 }
 
+// TestALoadedSeatBoundByAliasIsNotReadAsAbsent is the 2026-11-21 incident's own
+// shape: the seat is bound by its ALIAS, /running lists it READY under the
+// CANONICAL id, and nothing on the endpoint is mid-swap. The pre-flight admitted
+// at once but reported the seat not ready, because it resolved the alias only
+// when another model was mid-swap; the cold-load host-RAM gate then judged a
+// seat that was already loaded, against a commit charge that already held it,
+// and deferred the contract in milliseconds with "the seat was not loaded".
+// A loaded seat reads ready and never absent, whatever name it is bound by.
+func TestALoadedSeatBoundByAliasIsNotReadAsAbsent(t *testing.T) {
+	fake := &swapFake{
+		canonical: "seat-canonical",
+		alias:     "seat-alias",
+		running: func(int64) string {
+			return `{"running":[{"model":"seat-canonical","state":"ready","cmd":"y"},` +
+				`{"model":"embedder","state":"ready","cmd":"e"}]}`
+		},
+	}
+	srv := fake.server(t)
+
+	waited, note, loadSeen, ready, absent := AwaitSeatAdmissionState(context.Background(), srv.URL, "seat-alias", 30*time.Second)
+	if !ready || absent {
+		t.Fatalf("ready=%v absent=%v, want ready and not absent: the seat's own /running row is ready under its canonical id, and a door that reads it absent puts a loaded seat to the cold-load gate", ready, absent)
+	}
+	if waited != 0 || note != "" || !loadSeen.IsZero() {
+		t.Fatalf("waited=%v note=%q loadSeen=%v, want an immediate admission with nothing to report", waited, note, loadSeen)
+	}
+
+	// The control: the same endpoint without the seat's row. Only then is the seat absent, and only an absent seat is a
+	// cold load a contract would start.
+	fake.running = func(int64) string { return `{"running":[{"model":"embedder","state":"ready","cmd":"e"}]}` }
+	if _, _, _, ready, absent = AwaitSeatAdmissionState(context.Background(), srv.URL, "seat-alias", 30*time.Second); ready || !absent {
+		t.Fatalf("ready=%v absent=%v, want not ready and absent: no row is this seat's under either name", ready, absent)
+	}
+}
+
 // TestSeatAdmissionReadsTheRosterOnlyWhenItWouldOtherwiseWait: the alias
 // resolution is a second HTTP call, so it is paid only when the bare name
-// matched nothing AND something is mid-swap. An endpoint with nothing swapping
-// admits on the first probe alone.
+// matched nothing AND /running lists a row that could be the seat under its
+// canonical id. An endpoint that lists nothing admits on the first probe alone.
 func TestSeatAdmissionReadsTheRosterOnlyWhenItWouldOtherwiseWait(t *testing.T) {
 	fake := &swapFake{
 		canonical: "seat-canonical",
