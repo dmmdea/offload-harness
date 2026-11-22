@@ -1545,6 +1545,13 @@ type Config struct {
 	// (setup/templates/vllm-seat/seat_fg.sh) logs `host rss N GiB (L1 N GiB)` for its LMCache MP server at every start,
 	// and `doctor` warns while this key is unset on a box that runs a vLLM seat (register B-56 / H-08).
 	AgentSeatHostRAMGiB float64 `json:"agent_seat_host_ram_gib,omitempty"`
+	// AgentSeatHostCommitGiB is the commit charge a cold load of the agent seat adds to the host at its peak (GiB), a figure
+	// to MEASURE on the node that runs the seat and to record beside the value as `measured <date> <node>`. Stated, the
+	// seat's commit is judged against the OS commit limit less the headroom, as a stated `--ram-commit` is, and
+	// agent_seat_host_ram_gib is then the touched set alone. 0 = unset: the one figure (agent_seat_host_ram_gib) stands in
+	// for both and the commit is held to physical RAM less the headroom, as before. It is read only together with
+	// agent_seat_host_ram_gib: a commit with no ram figure is ignored, and `doctor` says so.
+	AgentSeatHostCommitGiB float64 `json:"agent_seat_host_commit_gib,omitempty"`
 	// GPUOrphanGraceMin (plan P8, default 15) is how many minutes an attended lease's
 	// owner may be gone before `gpu status`, offload_status and the fleet health read the
 	// lease as orphaned. It only changes what is REPORTED: nothing reclaims, releases or

@@ -17,7 +17,10 @@ import (
 // measurement.
 //
 //	seat ram:   WARN  vLLM seat <seat>: the agent seat's host footprint is not configured (agent_seat_host_ram_gib), ...
-//	seat ram:   OK    agent_seat_host_ram_gib 24 GiB is declared for vLLM seat <seat>; ...
+//	seat ram:   OK    agent_seat_host_ram_gib 24 GiB is declared for vLLM seat <seat>; ...; no commit is stated, ...
+//	seat ram:   OK    agent_seat_host_ram_gib 24 GiB and agent_seat_host_commit_gib 30 GiB are declared for vLLM seat <seat>; ...
+//
+// agent_seat_host_commit_gib is read only with the ram figure: set alone, the WARN row says it is ignored.
 //
 // A box counts as running a vLLM seat when its vllm_seats names one, or when the tier table declares a vLLM seat and
 // this box's agent_model is it: the same two statements the capacity row and the backends section read, and nothing
@@ -34,12 +37,21 @@ func writeSeatHostRAMSection(w io.Writer, cfg config.Config) {
 	if seat == "" {
 		return
 	}
+	const operatorsWord = "it is the operator's statement and is not compared with a live reading here (the seat log's `host rss` line is the staging buffer's share at start, the loaded seat holds more)"
 	if g := cfg.AgentSeatHostRAMGiB; g > 0 {
-		fmt.Fprintf(w, "seat ram:   OK    agent_seat_host_ram_gib %g GiB is declared for vLLM seat %s; it is the operator's statement and is not compared with a live reading here (the seat log's `host rss` line is the staging buffer's share at start, the loaded seat holds more)\n", g, seat)
+		if c := cfg.AgentSeatHostCommitGiB; c > 0 {
+			fmt.Fprintf(w, "seat ram:   OK    agent_seat_host_ram_gib %g GiB and agent_seat_host_commit_gib %g GiB are declared for vLLM seat %s; the commit is judged against the OS commit limit; %s\n", g, c, seat, operatorsWord)
+			return
+		}
+		fmt.Fprintf(w, "seat ram:   OK    agent_seat_host_ram_gib %g GiB is declared for vLLM seat %s; %s; no commit is stated (agent_seat_host_commit_gib), so the seat's commit is held to physical RAM\n", g, seat, operatorsWord)
 		return
 	}
 	need := hostneed.SeatNeed(cfg)
-	fmt.Fprintf(w, "seat ram:   WARN  vLLM seat %s: %s; the seat log has a `host rss` line from every start (the pinned L1 staging buffer plus about 1.1 GiB), add the engine's resident set from the loaded seat and record the figure as `measured <date> <node>`\n", seat, need.Detail)
+	ignored := ""
+	if cfg.AgentSeatHostCommitGiB > 0 {
+		ignored = "; agent_seat_host_commit_gib is ignored until agent_seat_host_ram_gib is set"
+	}
+	fmt.Fprintf(w, "seat ram:   WARN  vLLM seat %s: %s; the seat log has a `host rss` line from every start (the pinned L1 staging buffer plus about 1.1 GiB), add the engine's resident set from the loaded seat and record the figure as `measured <date> <node>`%s\n", seat, need.Detail, ignored)
 }
 
 // vllmSeatOfBox names the vLLM agent seat this box runs, or "" when it runs none: the first seat of vllm_seats, else
