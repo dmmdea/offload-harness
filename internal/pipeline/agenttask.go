@@ -400,9 +400,18 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// the commit charge the rule reads already holds a loaded seat, so judging its footprint again refuses it against itself.
 	if seatAbsent && loadSeen.IsZero() {
 		if m, err := p.scopedManager(); err == nil {
-			if why := SeatColdLoadRefusal(p.cfg, m, seat); why != "" {
+			// The gate settles for up to a minute (seathostram.go): that wait is admission time, counted whether the host then
+			// gave the memory back or not. preflightEnd stays where the pre-flight ended: it bounds a cold load the pre-flight
+			// watched, and the settle is not one.
+			why, settled, settleNote := SeatColdLoadAdmission(ctx, p.cfg, m, seat, time.Until(admissionEnd))
+			admitted += settled
+			if why != "" {
 				log.Printf("agent task: seat %s not loaded: %s", seat, why)
 				return deferWire(core.DeferClassCapacity, "host RAM: "+why+"; the seat was not loaded, and this contract is re-placeable")
+			}
+			if settleNote != "" {
+				log.Printf("agent task: seat admission (%s): %s", seat, settleNote)
+				admitNote = joinAdmissionNotes(admitNote, settleNote)
 			}
 		}
 	}

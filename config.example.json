@@ -276,6 +276,7 @@
   "gpu_hostram_wsl_cache_drop": false,
   "gpu_display_cap_pct": null,
   "agent_seat_host_ram_gib": 0,
+  "agent_seat_host_commit_gib": 0,
   "gpu_orphan_grace_min": 0,
   "gpu_max_term_min": 0,
   "gpu_max_total_min": 0,

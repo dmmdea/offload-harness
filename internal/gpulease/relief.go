@@ -92,6 +92,66 @@ func (m *Manager) relieveHostRAM(chk gpuprobe.HostRAMCheck) {
 	}()
 }
 
+const (
+	// HostRAMSettleBound is the longest a caller with no line to wait in settles for (a chosen figure: on the reference box the
+	// host's commit took up to about a minute to come back after a seat unload).
+	HostRAMSettleBound = 60 * time.Second
+	// hostRAMSettleTick is how long HostRAMSettle waits between two readings of the host.
+	hostRAMSettleTick = 2 * time.Second
+	// hostRAMSettleProgress and hostRAMSettleStall: a settle that has not seen the shortfall fall this far below the lowest it has
+	// seen for this long is not going to see the host recover, and stops. Chosen figures.
+	hostRAMSettleProgress = 0.25
+	hostRAMSettleStall    = 10 * time.Second
+)
+
+// HostRAMSettle is for a caller that has no line to wait in and whose own check is what admits it: a contract door's cold load of
+// the agent seat. Right after another model unloads, the host's memory takes up to about a minute to come back, and a contract
+// that arrives in that window would be refused for a load that fits seconds later. It reads the host with check; a refusal asks
+// the installed relief (relieveHostRAM, which rate-limits itself) and reads again every tick. It returns the last reading and the
+// time it waited. Nothing here admits anything: the caller acts on the reading it gets back, with the same rule it passed in.
+//
+// It stops on the first of three exits: the reading is OK, Impossible or Unreadable (waiting changes none of them); bound has
+// passed or ctx is done; or the shortfall (hostRAMShortGiB) has not fallen at least 0.25 GiB below the lowest seen for 10 s
+// (no progress). bound <= 0 is one look plus the relief trigger on a refusal, with no wait: a caller whose lease is still held
+// while it asks (the warm-back at a release) must not hold the others behind it.
+func (m *Manager) HostRAMSettle(ctx context.Context, bound time.Duration, check func() gpuprobe.HostRAMCheck) (gpuprobe.HostRAMCheck, time.Duration) {
+	chk := check()
+	if chk.OK || chk.Impossible || chk.Unreadable {
+		return chk, 0
+	}
+	m.relieveHostRAM(chk)
+	if bound <= 0 {
+		return chk, 0
+	}
+	start := m.now()
+	// best is the shortfall at the last reading that counted as progress, and bestAt when that was: slow steady recovery
+	// (under 0.25 GiB a tick) still adds up to progress, because each reading is judged against best, not the previous one.
+	best := hostRAMShortGiB(chk)
+	bestAt := start
+	for {
+		remaining := bound - m.now().Sub(start)
+		if remaining <= 0 || ctx.Err() != nil {
+			break
+		}
+		m.pauseOrCancel(min(hostRAMSettleTick, remaining), ctx.Done())
+		if ctx.Err() != nil {
+			break
+		}
+		chk = check()
+		if chk.OK || chk.Impossible || chk.Unreadable {
+			break
+		}
+		m.relieveHostRAM(chk)
+		now := m.now()
+		if short := hostRAMShortGiB(chk); short <= best-hostRAMSettleProgress {
+			best, bestAt = short, now
+		} else if now.Sub(bestAt) >= hostRAMSettleStall {
+			break
+		}
+	}
+	return chk, m.now().Sub(start)
+}
+
 // hostRAMShortGiB is how much memory the host would have to give back for the refused request to be admitted on the
 // reading the refusal rested on: the larger of the touched-set shortfall (headroom less what would be left available) and
 // the commit shortfall (the projected charge less its bound). A relief that frees less cannot admit it by itself.
