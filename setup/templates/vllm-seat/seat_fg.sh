@@ -140,6 +140,11 @@ L2_DEGRADED=0
 L2_ADDR=""          # the address the share was mounted at when the launcher chose one: status file and degrade messages
 L2_SEEN_ADDR=""     # the server address of a share that was ALREADY mounted when this start found it (read from the mount)
 L2_SEEN_NOTE=""     # and the sentence the degrade messages append for such a share
+L2_NS=()            # the prefix that runs a step in the MP server's mount namespace (pid 1's), set when this launcher's is another
+L2_NS_NOTE=""       # and the words the write-probe line adds when it ran there
+L2_NS_SPLIT=0       # 1 when this launcher's mount namespace is readably not pid 1's (WSL2 through wsl.exe; see the block after the mount)
+_ns_self="$(readlink /proc/self/ns/mnt 2>/dev/null)"; _ns_init="$(readlink /proc/1/ns/mnt 2>/dev/null)"
+[ -n "$_ns_self" ] && [ -n "$_ns_init" ] && [ "$_ns_self" != "$_ns_init" ] && L2_NS_SPLIT=1
 MOUNT_SRC="${SEAT_L2_MOUNT_SRC:-}"
 l2_mdns_answers() {   # $1 = the .local name, $2 = the source address; prints each distinct IPv4 answer, in arrival order
   local py=""
@@ -283,11 +288,12 @@ l2_local_name() {   # $1 = a mount source: prints <name> when it is //<name>.loc
   printf '%s' "$host"
 }
 l2_report_mounted() {   # the share was already mounted: say where it is and leave it alone; sets L2_SEEN_ADDR and L2_SEEN_NOTE
-  local name src opts a="" hint=""
+  local name src opts a="" hint="" also=""
   name="$(l2_local_name "$SEAT_L2_MOUNT_SRC")" || return 0
   read -r src opts <<< "$(findmnt -n -o SOURCE,OPTIONS -M "$SEAT_L2_MOUNT_DIR" 2>/dev/null)"
   if [[ ",${opts:-}," =~ ,addr=([0-9.]+), ]]; then a="${BASH_REMATCH[1]}"; fi
-  case "${src:-}" in ""|"//$name"/*) hint="; to choose it again, unmount the share while no seat uses it (umount $SEAT_L2_MOUNT_DIR) and restart the seat" ;; esac
+  [ "$L2_NS_SPLIT" -eq 1 ] && also=", and in systemd's mount namespace, where the MP server runs: nsenter -t 1 -m -- umount $SEAT_L2_MOUNT_DIR"
+  case "${src:-}" in ""|"//$name"/*) hint="; to choose it again, unmount the share while no seat uses it (umount $SEAT_L2_MOUNT_DIR${also}) and restart the seat" ;; esac
   L2_SEEN_ADDR="$a"
   L2_SEEN_NOTE=" [the share was already mounted${a:+ at server address $a}; a start does not choose the address again]"
   echo "seat_fg: cache-server share $SEAT_L2_MOUNT_DIR is already mounted${src:+ from $src}${a:+ (server address $a)} — the store address is chosen only when the share is mounted, so it was not looked up again${hint}"
@@ -402,6 +408,48 @@ if [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
     l2_report_mounted
   fi
 fi
+# The share must be mounted where the MP SERVER looks, not only where this launcher looks (2026-11-22). The MP server runs as
+# a systemd unit (systemd-run, below), and on WSL2 a launcher started through wsl.exe has a mount namespace of its own whose /
+# is private, so a mount it makes under /mnt is not seen by systemd or by any unit (measured on the reference box: a tmpfs
+# mounted at /mnt/kvtmp from a wsl.exe session read 1 in the session, 0 in pid 1 and 0 in a transient unit). Every start there
+# logged "cache-server share mounted" while the MP server found the bare mount point and wrote the L2 store onto the distro's
+# own disk: 91 GiB in 27 hours (2026-11-19 08:07 to 11-20 11:31), until that disk was full, after which WSL mounted the distro
+# read-only with a RAM overlay and the seat could not start at all. So when this launcher's namespace is not pid 1's, the share
+# is mounted in pid 1's namespace as well (the same source and options as here), and the tier is turned off when it cannot be.
+# A store left in the bare mount point by such a start is named, with its size, before the share hides it. The mount in pid
+# 1's namespace outlives this start (until the distro stops), so a later start finds it there: its source is compared with
+# this launcher's, and when an earlier start mounted it from another address that is said, and the address the MP server
+# really uses is the one reported. The write probe below runs in pid 1's namespace, so the floor measures the mount the MP
+# server writes through, not this launcher's copy.
+if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ] && [ "$L2_NS_SPLIT" -eq 1 ]; then
+  if ! command -v nsenter >/dev/null 2>&1; then
+    degrade_l2 "this launcher's mount namespace is not systemd's and nsenter is missing, so the MP server (a systemd unit) would not see the share at $SEAT_L2_MOUNT_DIR and would write the store onto this distro's own disk"
+  elif ! nsenter -t 1 -m -- mountpoint -q "$SEAT_L2_MOUNT_DIR" 2>/dev/null; then
+    left=$(nsenter -t 1 -m -- du -xsm "$SEAT_L2_MOUNT_DIR" 2>/dev/null | cut -f1)
+    [ "${left:-0}" -gt 64 ] 2>/dev/null && echo "seat_fg: WARNING — ${left} MiB of files sit in the bare mount point $SEAT_L2_MOUNT_DIR on this distro's own disk (an earlier start's store, written while the share was not mounted where the MP server looks); the share hides them once it is mounted, and they still use the disk"
+    src_now=$(findmnt -n -o SOURCE -M "$SEAT_L2_MOUNT_DIR" 2>/dev/null | tail -1)
+    if timeout 30 nsenter -t 1 -m -- mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "${src_now:-$MOUNT_SRC}" "$SEAT_L2_MOUNT_DIR" -o "$MOUNT_OPTS" \
+        && nsenter -t 1 -m -- mountpoint -q "$SEAT_L2_MOUNT_DIR"; then
+      echo "seat_fg: cache-server share also mounted in systemd's mount namespace, where the MP server runs (${src_now:-$MOUNT_SRC})"
+    else
+      degrade_l2 "the share is mounted for this launcher but could not be mounted in systemd's mount namespace, where the MP server runs; with it on, the MP server would write the store onto this distro's own disk at $SEAT_L2_MOUNT_DIR"
+    fi
+  else
+    read -r src1 opts1 <<< "$(nsenter -t 1 -m -- findmnt -n -o SOURCE,OPTIONS -M "$SEAT_L2_MOUNT_DIR" 2>/dev/null | tail -1)"
+    read -r src0 _ <<< "$(findmnt -n -o SOURCE,OPTIONS -M "$SEAT_L2_MOUNT_DIR" 2>/dev/null | tail -1)"
+    a1=""; if [[ ",${opts1:-}," =~ ,addr=([0-9.]+), ]]; then a1="${BASH_REMATCH[1]}"; fi
+    if [ "${src1:-}" = "${src0:-}" ]; then
+      echo "seat_fg: cache-server share already mounted in systemd's mount namespace too, where the MP server runs (${src1:-?})"
+    else
+      echo "seat_fg: WARNING — the MP server (systemd's mount namespace) uses the share at $SEAT_L2_MOUNT_DIR as an earlier start mounted it, from ${src1:-?}${a1:+ (server address $a1)}, while this launcher's mount is from ${src0:-?}; this start's address choice does not reach the MP server, and the write probe measures the MP server's mount. To choose again: while no seat runs, nsenter -t 1 -m -- umount $SEAT_L2_MOUNT_DIR, then restart the seat"
+      L2_ADDR=""; L2_SEEN_ADDR="$a1"
+      L2_SEEN_NOTE=" [the MP server's share was mounted by an earlier start from ${src1:-?}${a1:+ at server address $a1}; a start does not choose its address again]"
+    fi
+  fi
+  if [ "$L2_DEGRADED" -eq 0 ]; then
+    L2_NS=(nsenter -t 1 -m --); L2_NS_NOTE=", through systemd's mount namespace, where the MP server writes"
+  fi
+fi
 if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L2_MOUNT_DIR:-}" ]; then
   echo "seat_fg: cache-server share mounted: $(df -h "$SEAT_L2_MOUNT_DIR" | tail -1)"
   # Prune the persistent store to its cap (0.113.12). LMCache's fs_native L2 eviction controller starts fresh with every MP
@@ -430,16 +478,16 @@ if [ "$L2_DEGRADED" -eq 0 ] && [ -n "${SEAT_L2_MOUNT_SRC:-}" ] && [ -n "${SEAT_L
   if [ "$MIN_MBPS" -gt 0 ] 2>/dev/null; then
     probe="$SEAT_L2_MOUNT_DIR/.seat_fg-write-probe.$$"
     t0=$(date +%s%N)
-    if timeout 120 dd if=/dev/zero of="$probe" bs=4M count=16 conv=fsync status=none 2>/dev/null; then
-      t1=$(date +%s%N); rm -f "$probe"
+    if timeout 120 ${L2_NS[@]+"${L2_NS[@]}"} dd if=/dev/zero of="$probe" bs=4M count=16 conv=fsync status=none 2>/dev/null; then
+      t1=$(date +%s%N); ${L2_NS[@]+"${L2_NS[@]}"} rm -f "$probe"
       mbps=$(( 67109 / ( (t1 - t0) / 1000000 + 1 ) ))   # 64 MiB = 67,108,864 bytes → decimal MB/s over elapsed ms
       if [ "$mbps" -lt "$MIN_MBPS" ]; then
         degrade_l2 "share writes at ~${mbps} MB/s, below SEAT_L2_MIN_MBPS=${MIN_MBPS} (the tier would be slower than recompute)${L2_ADDR:+ [the share is mounted at the mDNS-chosen address $L2_ADDR]}${L2_SEEN_NOTE}"
       else
-        echo "seat_fg: cache-server share write probe ~${mbps} MB/s (floor ${MIN_MBPS})"
+        echo "seat_fg: cache-server share write probe ~${mbps} MB/s (floor ${MIN_MBPS})${L2_NS_NOTE}"
       fi
     else
-      rm -f "$probe"
+      ${L2_NS[@]+"${L2_NS[@]}"} rm -f "$probe"
       degrade_l2 "cannot write a 64 MiB probe to the share at $SEAT_L2_MOUNT_DIR within 120 s${L2_SEEN_NOTE}"
     fi
   fi
