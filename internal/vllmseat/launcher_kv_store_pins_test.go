@@ -77,11 +77,19 @@ func TestLauncherStoreAddressChoiceIsBoundedAndScoped(t *testing.T) {
 	if !(srcaddr < pick && pick < mount) {
 		t.Errorf("the address choice must sit between the source-address resolution (%d) and the mount (%d); it is at %d", srcaddr, mount, pick)
 	}
-	if n := strings.Count(s, `mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}"`); n != 1 {
-		t.Errorf("the launcher must run ONE mount command with a variable source, found %d", n)
+	// Two mount commands with a variable source: the launcher's own, which the address choice reaches through "$MOUNT_SRC",
+	// and the same mount in pid 1's namespace for a launcher whose mount namespace is not systemd's (WSL2 through wsl.exe),
+	// where the MP server runs. That one takes its source from the launcher's mount as findmnt reads it, so the chosen
+	// address reaches the MP server's mount too (2026-11-22: before it, the MP server wrote the store to the distro's disk).
+	if n := strings.Count(s, `mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}"`); n != 2 {
+		t.Errorf("the launcher must run TWO mount commands with a variable source (its own and pid 1's), found %d", n)
 	}
 	if !strings.Contains(s[mount:], `"$MOUNT_SRC" "$SEAT_L2_MOUNT_DIR" -o "$MOUNT_OPTS"`) {
 		t.Error(`the mount no longer takes its source from "$MOUNT_SRC"`)
+	}
+	mirror := strings.Index(s, `nsenter -t 1 -m -- mount -t "${SEAT_L2_MOUNT_TYPE:-cifs}" "${src_now:-$MOUNT_SRC}" "$SEAT_L2_MOUNT_DIR" -o "$MOUNT_OPTS"`)
+	if mirror < 0 || mirror < mount {
+		t.Errorf("the mount in pid 1's namespace must follow the launcher's mount (%d) and take its source from it; it is at %d", mount, mirror)
 	}
 	for _, must := range []string{
 		`timeout -s KILL 3 "$py" - "$1" "$2" <<'PYEOF'`, // the hard bound: 3 s, then SIGKILL, around the embedded helper
