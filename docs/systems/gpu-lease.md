@@ -2420,7 +2420,18 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   incident recorded 44 GB of host RAM for a seat, the note that carries it attributes that to LMCache staging plus page cache,
   and the page-cache part is droppable (measured 2026-10-18 on a WSL2 pair seat: loading the INT4 27B left 23 GiB of guest page
   cache, which on WSL2 is host commit; one drop took the VM 68.7 -> 46.8 GiB and host commit 149.7 -> 128.0 GiB with the seat
-  serving). On WSL2 the launcher now drops it itself (`SEAT_CACHE_CAP_GIB`, below). So with the key unset the warm-back is
+  serving). On WSL2 the launcher now drops it itself (`SEAT_CACHE_CAP_GIB` once the seat serves), and since 2026-11-21 it
+  bounds it during the load as well (`SEAT_LOAD_CACHE_CAP_MIB`, default 1024, looked at every 0.5 s until the engine answers
+  `/health`): before, the whole checkpoint sat in the cache until the engine answered, and that dead copy was the top third of
+  a cold load's host peak. The loop has to be that tight because the VM returns freed pages to the host 15 to 25 s late.
+  Reading the checkpoint's 18.1 GiB inside the guest with a copy of the loop beside it grew the VM's private bytes by 17.4 GiB
+  with no loop, 9.5 with a 4 GiB cap every 2 s, 4.0 with 2 GiB every 1 s, and 0.0, 2.0 and 0.9 (three runs) with 1 GiB every
+  0.5 s, the read no slower. Two whole cold loads under the loop (2026-11-22, the same box) peaked +55.3 and +53.4 GiB of
+  host commit over the base, against +66 to +72 with the old watcher, and settled at +42 to +44 once serving, as before. The
+  loop cannot hold the cap during the weight read itself: vLLM maps the shards while it copies them (about 13.5 s), mapped
+  pages are not dropped, and the cache reached 18.5 GiB both times; what it removes is the copy left after that read, which
+  used to stay through the compile and profiling. The seat log's `page cache bounded during the load: N drops, largest M MiB
+  seen` line shows it on every load. So with the key unset the warm-back is
   admitted against a figure below the incident's, and a node that runs a seat sets `agent_seat_host_ram_gib` from its own
   measurement before it relies on the check. Two readers help the node do that (register B-56 / H-08). The vLLM seat launcher
   (`seat_fg.sh`) logs `host rss N GiB (L1 N GiB)` to the seat log at every start: the resident set of the LMCache MP server unit
