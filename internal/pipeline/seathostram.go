@@ -66,8 +66,11 @@ func SeatColdLoadRefusalFor(cfg config.Config, model string) string {
 }
 
 // AwaitSeatAdmissionState is AwaitSeatAdmission that also reports what the pre-flight saw of the seat itself: when it first
-// saw the seat loading (zero = never) and whether the seat read ready at the end. A door asks it so that it can tell a load
-// it would START (not ready, none seen) from one already in flight or a seat already loaded.
-func AwaitSeatAdmissionState(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, time.Time, bool) {
+// saw the seat loading (zero = never), whether the seat read ready at the end, and whether the last reading established that
+// the seat has no row in /running under any of its names (absent). A door asks it so that it can tell a load it would START
+// (absent, none seen) from one already in flight, a seat already loaded, and a seat whose state could not be told. Only the
+// first is put to SeatColdLoadRefusal: the names a seat is bound by (an alias) and listed by (its canonical id) differ on
+// every box that binds seats by alias, and "not seen ready" refused loaded seats there.
+func AwaitSeatAdmissionState(ctx context.Context, endpoint, seat string, budget time.Duration) (waited time.Duration, note string, loadSeen time.Time, ready, absent bool) {
 	return awaitSeatAdmissionLoad(ctx, endpoint, seat, budget)
 }

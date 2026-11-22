@@ -387,17 +387,18 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// the clock. Known bound: the drain phase before a swap shows nothing
 	// non-ready, so a swap that begins a second later is still charged to the
 	// wall — this removes the swap WINDOW from the wall, not the race.
-	preflight, preNote, loadSeen, seatReady := awaitSeatAdmissionLoad(ctx, p.cfg.Endpoint, seat, time.Until(admissionEnd))
+	preflight, preNote, loadSeen, seatReady, seatAbsent := awaitSeatAdmissionLoad(ctx, p.cfg.Endpoint, seat, time.Until(admissionEnd))
 	preflightEnd := time.Now()
 	admitted += preflight
 	admitNote = preNote
 	if admitNote != "" {
 		log.Printf("agent task: seat admission (%s): %s", seat, admitNote)
 	}
-	// The host-RAM gate on a load this contract would START (seathostram.go): a seat that is not ready, with no load in flight,
-	// is loaded by the warm-up below, so the host is asked first, by the warm-back's rule. A load already in flight or a seat
-	// already loaded is not refused here.
-	if !seatReady && loadSeen.IsZero() {
+	// The host-RAM gate on a load this contract would START (seathostram.go): a seat the pre-flight established has no row in
+	// /running, with no load in flight, is loaded by the warm-up below, so the host is asked first, by the warm-back's rule. A
+	// load already in flight or a seat already loaded is not refused here, and neither is a seat whose state could not be told:
+	// the commit charge the rule reads already holds a loaded seat, so judging its footprint again refuses it against itself.
+	if seatAbsent && loadSeen.IsZero() {
 		if m, err := p.scopedManager(); err == nil {
 			if why := SeatColdLoadRefusal(p.cfg, m, seat); why != "" {
 				log.Printf("agent task: seat %s not loaded: %s", seat, why)
@@ -3217,7 +3218,7 @@ var warmClient = &http.Client{}
 // proceeds (fail-open, logged): the loop's first chat call surfaces the real
 // transport error with far more detail.
 func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string) {
-	waited, note, _, _ := awaitSeatAdmissionLoad(ctx, endpoint, seat, budget)
+	waited, note, _, _, _ := awaitSeatAdmissionLoad(ctx, endpoint, seat, budget)
 	return waited, note
 }
 
@@ -3229,30 +3230,40 @@ func awaitSeatAdmission(ctx context.Context, endpoint, seat string, budget time.
 // caller records it from loadSeen; before, the wait was admission time and
 // nothing else, so a seat that other requests always loaded first never fed the
 // store's cold-load figure at all.
-func awaitSeatAdmissionLoad(ctx context.Context, endpoint, seat string, budget time.Duration) (waited time.Duration, note string, loadSeen time.Time, ready bool) {
+//
+// absent is whether the last reading ESTABLISHED that the seat has no row in
+// /running under any of its names: /running listed nothing, or it listed other
+// models and the seat's name resolved against the roster and still matched none.
+// It is false whenever that could not be told (no reading taken, a probe that
+// failed, an alias the roster would not resolve), and false for a seat whose row
+// is there in any state. A door that refuses a load it would START asks absent,
+// never !ready: "not seen ready" is also what a loaded seat listed under its
+// canonical id read as, and the host-RAM gate then judged a loaded seat's whole
+// footprint a second time, against a commit charge that already held it.
+func awaitSeatAdmissionLoad(ctx context.Context, endpoint, seat string, budget time.Duration) (waited time.Duration, note string, loadSeen time.Time, ready, absent bool) {
 	if budget <= 0 || strings.TrimSpace(endpoint) == "" {
-		return 0, "", time.Time{}, false
+		return 0, "", time.Time{}, false, false
 	}
 	sc, err := swapclient.New(endpoint, admissionPoll)
 	if err != nil {
-		return 0, "no swap client (proceeding): " + err.Error(), time.Time{}, false
+		return 0, "no swap client (proceeding): " + err.Error(), time.Time{}, false, false
 	}
 	// The seat's own /running row may be listed under the CANONICAL id while the
 	// contract names an alias; seatMatcher resolves that, lazily.
 	m := newSeatMatcher(endpoint, seat)
-	// waited counts the SLEEPS and the alias-resolution round-trips that
-	// precede them, never the /running probe itself: an immediate admission
-	// reports zero, which is what "nothing was swapping" must read as on the
-	// wire. The resolution is charged because it only runs when a sleep would
-	// follow, and a roster that TIMES OUT (3 s, admissionPoll) on every poll
-	// would otherwise let this loop run twice its budget in wall-clock time
-	// while reporting the budget exactly (reviewer finding on the S-08 retry).
+	// waited counts the SLEEPS and the FAILED alias-resolution round-trips, never
+	// the /running probe itself nor a resolution that answered: an immediate
+	// admission reports zero, which is what "nothing was swapping" must read as on
+	// the wire. A failed resolution is charged because a roster that TIMES OUT
+	// (3 s, admissionPoll) on every poll would otherwise let this loop run twice
+	// its budget in wall-clock time while reporting the budget exactly (reviewer
+	// finding on the S-08 retry).
 	for {
 		rows, rerr := sc.Running(ctx)
 		if rerr != nil {
-			return waited, "running probe failed (proceeding): " + rerr.Error(), loadSeen, false
+			return waited, "running probe failed (proceeding): " + rerr.Error(), loadSeen, false, false
 		}
-		mine, busy := false, ""
+		mine, listed, busy := false, false, ""
 		seeStarting := func() {
 			for _, r := range rows {
 				if m.matches(r.ID) && r.State == "starting" && loadSeen.IsZero() {
@@ -3260,21 +3271,33 @@ func awaitSeatAdmissionLoad(ctx context.Context, endpoint, seat string, budget t
 				}
 			}
 		}
-		for _, r := range rows {
-			if m.matches(r.ID) && r.State == "ready" {
-				mine = true
+		scan := func() {
+			for _, r := range rows {
+				if m.matches(r.ID) {
+					listed = true
+					if r.State == "ready" {
+						mine = true
+					}
+				}
 			}
+		}
+		for _, r := range rows {
 			if r.State != "ready" {
 				busy = r.ID + ":" + r.State
 			}
 		}
+		scan()
 		seeStarting()
-		// Resolve the alias only when it would change the verdict — the seat's
-		// own row was not found under its bound name AND something else is
-		// mid-swap, i.e. the next step would be a sleep. This is the fast path
-		// that was dead: a READY alias-bound seat waited the whole budget for
-		// another model's swap it had no stake in (register S-08).
-		if !mine && busy != "" {
+		// Resolve the alias whenever the seat's own row was not found under its
+		// bound name and /running lists anything at all: any row there may be this
+		// seat under its canonical id. Two verdicts turn on it. With another model
+		// mid-swap, a READY alias-bound seat used to wait the whole budget for a swap
+		// it had no stake in (register S-08). With nothing mid-swap it was admitted
+		// at once but reported not ready, and the cold-load host-RAM gate refused a
+		// seat that was already loaded (79 of the 345 such refusals of 2026-11-19..21
+		// on the reference box fell inside a window its serving log shows it ready).
+		// An empty /running needs no roster: no name could match a row.
+		if !listed && len(rows) > 0 {
 			resolveStart := time.Now()
 			resolved := m.resolve(ctx)
 			if !resolved && m.note != "" {
@@ -3284,26 +3307,25 @@ func awaitSeatAdmissionLoad(ctx context.Context, endpoint, seat string, budget t
 				waited += time.Since(resolveStart)
 			}
 			if resolved {
-				for _, r := range rows {
-					if m.matches(r.ID) && r.State == "ready" {
-						mine = true
-					}
-				}
+				scan()
 				seeStarting() // the seat listed under its canonical id, now that the alias resolves
 			}
 		}
+		// No row under any name, and that is known: nothing was listed, or the
+		// roster answered (whether or not it taught a second name).
+		gone := !listed && (len(rows) == 0 || m.resolved)
 		// The seat this contract needs is up: another model's swap is not this
 		// contract's business, and waiting it out is wall spent on somebody
 		// else's load. Every exit below carries the matcher's note, so an alias
 		// probe that failed is reported whatever verdict this poll reaches.
 		if mine || busy == "" {
-			return waited, m.note, loadSeen, mine
+			return waited, m.note, loadSeen, mine, gone
 		}
 		if waited+admissionPoll > budget {
-			return waited, joinAdmissionNotes(m.note, "budget spent while "+busy+" (proceeding into the wall)"), loadSeen, false
+			return waited, joinAdmissionNotes(m.note, "budget spent while "+busy+" (proceeding into the wall)"), loadSeen, false, gone
 		}
 		if serr := seatwait.Sleep(ctx, admissionPoll); serr != nil {
-			return waited, joinAdmissionNotes(m.note, serr.Error()), loadSeen, false
+			return waited, joinAdmissionNotes(m.note, serr.Error()), loadSeen, false, gone
 		}
 		waited += admissionPoll
 	}

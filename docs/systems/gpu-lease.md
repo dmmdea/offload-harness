@@ -2442,10 +2442,17 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   loads on its next request. That request is a llama-swap load the lease system does not gate (see the reach note below):
   refusing the warm keeps the harness from *adding* a load to a tight host. **A contract's own cold load is now gated by the
   same rule** (`internal/pipeline/seathostram.go`, both contract doors: `runAgentTask` and the MCP `agent_run` door): a run
-  that finds the agent seat not ready, with no load in flight, asks the host before its warm-up starts the load, and when the
-  seat does not fit it defers as `capacity`, re-placeable, with a reason that starts `host RAM:`, so the delegator places it on
-  another node. A load already in flight, a seat already loaded and a model that is not the agent seat are not gated; a node
-  that states no `agent_seat_host_ram_gib` keeps the old behaviour (the warm-back's fail-closed default is a chosen figure).
+  that finds the agent seat absent from `/running`, with no load in flight, asks the host before its warm-up starts the load,
+  and when the seat does not fit it defers as `capacity`, re-placeable, with a reason that starts `host RAM:`, so the delegator
+  places it on another node. A load already in flight, a seat already loaded and a model that is not the agent seat are not
+  gated; a node that states no `agent_seat_host_ram_gib` keeps the old behaviour (the warm-back's fail-closed default is a
+  chosen figure). "Absent" is established, never assumed: the pre-flight resolves the seat's bound name against the roster
+  before it concludes that no `/running` row is the seat's, because a box that binds its seat by an alias lists it under the
+  canonical id. A seat whose state cannot be told (a roster or a `/running` read that failed) is not gated either. Until that
+  resolution was made on every reading, a loaded seat with nothing else mid-swap read as "not ready" and was put to this gate:
+  the commit charge already held the seat, so the rule judged its footprint a second time and deferred the contract in
+  milliseconds with "the seat was not loaded". On the reference box 79 of 345 such deferrals in three days fell inside a
+  window its serving log shows the seat ready, and one more was reproduced with the seat ready and 92.1 GiB committed.
   Why: on the 3-card reference box, with about 80 GiB already committed by the desktop and its sessions, one contract's cold
   load took the commit charge to 152.0 of 153.8 GiB (the page file had grown 7 GiB to make room). A request sent straight to
   llama-swap, outside both doors, is still not gated.
