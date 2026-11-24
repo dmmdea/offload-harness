@@ -227,6 +227,9 @@ type HostPeaks struct {
 	Runs                          int
 	MaxPrivateGiB, MaxResidentGiB float64
 	Window                        int
+	// Updated is when the key's entry was last written (the last recorded run, for a key only RecordHost writes). The agent
+	// seat's cold-load measurement reads it to record a load that several contracts waited on once (internal/pipeline).
+	Updated time.Time
 }
 
 // hostRecentRuns is how many of a key's most recent host peaks the store keeps, and hostPeakPercentile (nearest rank, in
@@ -339,6 +342,7 @@ func (f *Footprints) HostPeak(family, quant, task string) (HostPeaks, bool) {
 		MaxPrivateGiB:  r.HostPeakGiB,
 		MaxResidentGiB: r.HostResidentPeakGiB,
 		Window:         len(r.HostRecent),
+		Updated:        r.Updated,
 	}, true
 }
 
