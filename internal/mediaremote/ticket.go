@@ -734,6 +734,26 @@ func maxInt64(a, b int64) int64 {
 	return b
 }
 
+// OwnedLive is how many tickets THIS process runs that have not ended. A ticket's request body lives in its owning process
+// only, so a process that exits while it runs one loses the call: its waiting ticket is swept, and a placed one waits for an
+// identical call to adopt it. A server that would exit by itself (mcpserver, exit_when_stale.go) asks first. 0 for a machine
+// that keeps no queue.
+func OwnedLive(cfg config.Config) int {
+	st, ok := storeFor(cfg)
+	if !ok {
+		return 0
+	}
+	// The owner the process's queue stamps on its tickets (defaultQ.owner, taken once at start), not a second reading of the
+	// process's start time: two readings that disagree would count none of its own tickets.
+	me, n := defaultQ.owner, 0
+	for _, t := range st.list() {
+		if t.Owner == me && !terminalState(t.State) {
+			n++
+		}
+	}
+	return n
+}
+
 // QueueRow is one ticket as offload_status lists it (media_queue[]).
 type QueueRow struct {
 	Ticket   string `json:"ticket"`

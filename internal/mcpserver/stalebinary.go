@@ -79,6 +79,9 @@ type exeWatch struct {
 	mu          sync.Mutex
 	blind       error
 	blindLogged sync.Once
+	// armed says whether this server will exit by itself when idle (exit_when_stale.go); nil reads as no. It decides which way out
+	// the note names.
+	armed func() bool
 }
 
 func newExeWatch(read func() (exeStamp, error)) *exeWatch {
@@ -192,10 +195,19 @@ func (w *exeWatch) staleNoteWith(version string, compare func() imageCheck) stri
 	}
 	note := fmt.Sprintf("this MCP server is running %s from an executable image that has changed on disk since it started "+
 		"(it started from %s; now %s%s). A long-lived server keeps the image it started from, so a fix shipped since is not in "+
-		"this process: reconnect this server with /mcp (select local-offload, Reconnect) or restart the MCP client to load it. Nothing has been interrupted and this call ran as it always does.",
-		version, w.started, nowWords(now), evidence)
+		"this process: %s Nothing has been interrupted and this call ran as it always does.",
+		version, w.started, nowWords(now), evidence, w.wayOut("load it"))
 	w.logged.Do(func() { log.Printf("mcpserver: %s", note) })
 	return note
+}
+
+// wayOut is the sentence that tells the reader what ends the staleness: for a server that is armed to exit by itself it does, at
+// its next idle moment, and the client starts the installed build at its next call; for any other server it is the manual way.
+func (w *exeWatch) wayOut(what string) string {
+	if w != nil && w.armed != nil && w.armed() {
+		return "this server exits by itself when it is idle (no call in flight), and the client starts the installed build at its next call, so there is nothing to do."
+	}
+	return "reconnect this server with /mcp (select local-offload, Reconnect) or restart the MCP client to " + what + "."
 }
 
 func nowWords(now exeStamp) string {

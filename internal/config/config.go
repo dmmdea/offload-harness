@@ -2186,6 +2186,14 @@ type Config struct {
 	// The profile is read once, when the MCP server is built (the rewrite is a middleware installed at that moment), so
 	// changing it takes an MCP server restart or a client reconnect, which starts a new server process.
 	ToolsSchemaProfile string `json:"tools_schema_profile,omitempty"`
+	// MCPExitWhenStale lets a long-lived MCP server that finds its image (or its config file) changed on disk EXIT BY ITSELF
+	// when it is idle, so the client starts the installed build at its next tool call. A deploy replaces the installed binary
+	// by rename and every running server keeps the image it started from; measured on one box 2.5 days after two releases, 36
+	// servers ran and none ran the installed build (7 two releases old, 29 the previous one), and the notice "reconnect with
+	// /mcp" reached nobody. Armed only for a client on a small allowlist whose restart of a stopped stdio server was checked
+	// (internal/mcpserver/exit_when_stale.go); any other client keeps the notice alone. *bool because it defaults ON and an
+	// absent key must not read as an opt-out; false switches it off. Read once, when the MCP server starts.
+	MCPExitWhenStale *bool `json:"mcp_exit_when_stale,omitempty"`
 	// DelegateRemotes are the fleet node base URLs (tailnet-only, e.g.
 	// "http://node-b:18811") the delegator considers when a call passes no
 	// remotes of its own. Durable fleet membership belongs in config, not in every
@@ -4509,6 +4517,12 @@ func (c Config) EnsureDirs() error {
 // AgentKVSlotRetentionOn reports whether the agent loop's KV-slot retention may attach: on unless the key is false.
 func (c Config) AgentKVSlotRetentionOn() bool {
 	return c.AgentKVSlotRetention == nil || *c.AgentKVSlotRetention
+}
+
+// MCPExitWhenStaleOn reports whether an idle MCP server whose image changed on disk may exit by itself: on unless
+// mcp_exit_when_stale is explicitly false.
+func (c Config) MCPExitWhenStaleOn() bool {
+	return c.MCPExitWhenStale == nil || *c.MCPExitWhenStale
 }
 
 // CascadeSeatGuardOn reports whether the cascade seat guard runs: on unless

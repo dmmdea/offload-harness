@@ -1464,6 +1464,42 @@ read-only unless deliberately widened. See
   is logged once. A server with no config source (built-in defaults) or a config file that did not exist at start says nothing.
   The stamp is taken when the config source is given, a little after the config was loaded, so an edit in that short window is
   not seen. Nothing is interrupted and the call still runs.
+  **An idle stale server exits by itself (`mcp_exit_when_stale`).** The notices above only say that a server is old, and the
+  way out they name (`/mcp`, Reconnect) is one nobody takes across a few dozen sessions. Measured on one box 2.5 days after two
+  releases: 36 MCP servers were running, 7 from a build two releases old and 29 from the previous one, and none ran the
+  installed build, so a fix that had shipped reached no session. The agent client (`clientInfo.name` `claude-code`, checked with
+  client version 2.1.330.0) starts a stopped stdio server again by itself at its next tool call: one stale server was stopped,
+  the next call of that session was answered normally by a new process that ran the installed build (`process.version` the
+  installed version, `stale_image` false), and no error reached the model. So a server that finds itself stale and idle now
+  returns from `Run` (`internal/mcpserver/exit_when_stale.go`) and the client starts the installed build at its next call. It
+  logs one line to stderr saying why (the version it runs, the installed version, that no call is in flight, that the client
+  starts the installed build at its next call), runs its deferred cleanup (the session-registry entry is removed) and exits with
+  code 0; it never calls `os.Exit` from the middle of a request. It happens only when all of these hold: the client named in
+  `initialize` is on a small constant list (`claude-code`, compared case-insensitively) and its version is 2.1.330 or later,
+  the build the restart was seen with (any other client, an older build and a version that cannot be read keep the notice
+  alone, because whether they restart a stopped server is not verified); `mcp_exit_when_stale` is not `false` (default on); the image
+  check gives a definite `stale: true` (never on "cannot read", never with no startup identity) and the installed file is at least
+  10 s old (a deploy still being written, or rolled back a moment later, is not acted on); no `tools/call` is in flight and none
+  finished in the last 5 s (a receiving middleware counts them; it is registered last, so a call counts until the whole chain
+  returned); the process has been up 60 s, so a misfire can never become a restart loop; and nothing that outlives a tool call
+  depends on the process: no media ticket it runs (a ticket's request body lives in its owning process only) and no live GPU
+  lease owned by the session it serves. That last one matters because this process IS the session's entry in the session
+  registry: a lease whose session has no live registered process reads as owner gone and, past the grace, as orphaned, with
+  the takeover command shown to every other session, so a server that left while its session held a render's lease would put
+  that render up for takeover. A changed config file is not a reason to exit: a server must never restart onto a config it
+  cannot load, the only check that one loads is the repo's loader, and that loader installs process-wide gates (the GPU lease
+  root among them) on every exit, the error exits included, so a running server does not call it. A changed config keeps its
+  `stale_config` notice and the manual reconnect. The check
+  runs every 30 s (one stat while nothing moved) and shortly after each tool call finishes. A client that speaks the per-request
+  protocol (clientInfo in each request's `_meta`, no `initialize`) is read from the session on its first request. The notices
+  say the server exits by itself only for a server that is armed; any other server keeps the manual `/mcp` instruction.
+  `offload_status`'s `process` block carries `client_name` and `client_version` as read, and `exit_when_stale`: `armed`,
+  `armed, held by: <the lease or the tickets it still owns>`, or `off: <why>` (the client is not on the list, switched off by
+  config, no client seen yet). That field is how the live server
+  is checked after a deploy. A request that reaches the server after it decided to exit (the window is the server's own shutdown, which on a busy
+  box can take seconds) is answered at once with the SDK's server-closing error, nothing is cut silently, and the client
+  starts the installed build at its next call. That is
+  the one case the quiet window cannot cover.
 - `offload_status` reports harness state to the calling agent: the configured model roster (the one
   table in `config.ModelRoutes`, shared with `doctor`/`acceptance`/`report`), a live `/v1/models`
   probe through [`internal/swapclient`](../../internal/swapclient/swapclient.go), and
@@ -1512,7 +1548,8 @@ read-only unless deliberately widened. See
 - **`process`: which image this server runs, and whether the installed build has moved on (D-36).** A rename-swap
   deploy replaces the installed binary while every MCP server already running keeps the image it started from, so a
   session could write rows with old behaviour for days and nothing said so (the register counted 13 of 18 MCP processes
-  older than the deployed build). The block is `{version, build_sha256, installed_version?, stale_image?, note?}`:
+  older than the deployed build). The block is `{version, build_sha256, installed_version?, stale_image?, note?, client_name?, client_version?, exit_when_stale}`
+  (the last three are the exit-when-stale fields described above):
   the version and the build hash this process stamps on the rows it writes (`harness_build_sha256`, or
   `delegator_build_sha256` on a delegator's row), and the comparison with the file now at the path it
   started from. `stale_image` is `true` when the installed bytes differ, `false` when they are equal, and **absent with
@@ -1611,6 +1648,8 @@ keep the stamp and say so, a path that is gone is stale without a comparison, an
   the image the process started from, compared with the file on disk and settled by the `process` block's byte comparison
 - [`internal/mcpserver/stale_notice.go`](../../internal/mcpserver/stale_notice.go) — the middleware that appends the stale
   notice as a second text block to the result of every door that does not carry it itself
+- [`internal/mcpserver/exit_when_stale.go`](../../internal/mcpserver/exit_when_stale.go) — the client gate, the idle rule and the
+  background check by which an idle stale server returns from `Run`
 - [`internal/gpulease/openshared_windows.go`](../../internal/gpulease/openshared_windows.go) — the read open that shares delete,
   so a stale server's read of the installed image cannot block a rename of it
 - [`internal/askjob`](../../internal/askjob/ask.go) — `offload_ask`’s contract builder (goal,
