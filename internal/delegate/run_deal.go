@@ -249,14 +249,14 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 		if verdicts != "" {
 			reason += "; " + verdicts
 		}
-		if r.autoDealBusy.occupiedBy != "" {
+		if r.autoDealBusy.cannotLoad() {
 			reason += "; " + r.autoDealBusy.why()
 		}
 		return spreadSlot{placement: placement{view: best, base: bestBase, reason: reason}}
 	}
 	if anyEligible {
 		reason := fmt.Sprintf("route=%s: every eligible remote is at headroom or cannot start the job inside the caller's patience", r.route)
-		if r.autoDealBusy.occupiedBy != "" {
+		if r.autoDealBusy.cannotLoad() {
 			reason += "; " + r.autoDealBusy.why()
 		}
 		if verdicts != "" {
@@ -526,8 +526,9 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 			return spreadSlot{placement: placement{view: localView, reason: fmt.Sprintf("route=spread: every remote with room is already dealt to its headroom (%s); %s", strings.Join(atCap, "; "), r.spreadLocalBusy.why())}, capacityWait: true}
 		}
 		// An occupied seat is never the fallback (operator 2026-10-06: "wait in line"): the
-		// subtask waits for the occupant to leave or a remote to free, whichever comes first.
-		if r.spreadLocalBusy.occupiedBy != "" {
+		// subtask waits for the occupant to leave or a remote to free, whichever comes first. A seat the host cannot
+		// load now (hostShort) is a place in line the same way: the host's memory comes back.
+		if r.spreadLocalBusy.cannotLoad() {
 			what := "no remote with room"
 			if eligible == 0 {
 				what = "no eligible remote"

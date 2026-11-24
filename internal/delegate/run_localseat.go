@@ -13,6 +13,8 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
+	"github.com/dmmdea/offload-harness/internal/hostneed"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	// Aliased: this file's `placement` struct (a resolved "run it HERE") predates
 	// the package and is used at every placement site; the package is the
 	// composite tier's decision TABLE (ADR 0052), so the alias names what it is.
@@ -128,7 +130,8 @@ func (r *runner) anyLeaseHeld(info gpulease.Info, subtasks []core.AgentContract)
 // (PlacedResult.overflow) may take the seat only once the deal would have. route=spread
 // reads busy on any request in flight (agent_spread_local_slot: always never reads
 // busy); route=auto on a held lease, an in-flight count at the fleet's own cap, a
-// load in progress (W-01), or another vLLM seat a load would evict (occupiedBy). An UNREADABLE seat keeps the deal's busy answer: the deal
+// load in progress (W-01), or a seat a load cannot take now: another vLLM seat it would evict (occupiedBy) or a host short of the
+// memory for the cold load (hostShort). An UNREADABLE seat keeps the deal's busy answer: the deal
 // fails open because it has no evidence, but here it read the seat busy, and a probe
 // that fails afterwards (a box too loaded to answer in time) is no evidence of idle.
 // Failing open here ran the overflow on the busy seat (register C-88, CI run
@@ -139,7 +142,7 @@ func (r *runner) localStillBusy(ctx context.Context, lease gpulease.Info) (busy 
 	if r.route == "spread" {
 		return (rd.busy || rd.unknown) && r.cfg.SpreadLocalSlot() != config.SpreadLocalAlways, rd.note
 	}
-	return lease.Held || r.atRunCap(rd.inflight) || rd.loading || rd.occupiedBy != "" || rd.unknown, rd.note
+	return lease.Held || r.atRunCap(rd.inflight) || rd.loading || rd.cannotLoad() || rd.unknown, rd.note
 }
 
 // atRunCap reports whether `inflight` requests on the local seat have reached the fleet's own
@@ -160,8 +163,9 @@ func (r *runner) atRunCap(inflight int) bool {
 // a block in RunWith, so the reading can be pinned without a live run (unlimited_cap_test.go).
 func (r *runner) readAutoLocalSlot(ctx context.Context, leaseInfo gpulease.Info, subtasks []core.AgentContract) (busy bool) {
 	localBusy := r.probeLocalBusy(ctx)
-	// occupiedBy: another vLLM seat holds the cards and loading this one would evict it.
-	busy = r.anyLeaseHeld(leaseInfo, subtasks) || r.atRunCap(localBusy.inflight) || localBusy.loading || localBusy.occupiedBy != ""
+	// cannotLoad: another vLLM seat holds the cards and loading this one would evict it (occupiedBy), or the host cannot take the
+	// seat's cold load now (hostShort).
+	busy = r.anyLeaseHeld(leaseInfo, subtasks) || r.atRunCap(localBusy.inflight) || localBusy.loading || localBusy.cannotLoad()
 	// A live driver-fault repeat on the seat's cards (ADR 0096): the deal sends the work to a remote first. Not part
 	// of autoDealReadBusy (the seat's LOAD), so the capacity wait can still give an overflow subtask the seat.
 	if faulted, why := r.localFaulted(subtasks); faulted {
@@ -171,12 +175,12 @@ func (r *runner) readAutoLocalSlot(ctx context.Context, leaseInfo gpulease.Info,
 	r.autoDealBusy = localBusy
 	// The seat's LOAD only: a lease is the wait's own business (Reserved, fencedLocal),
 	// and a lease this process holds must not keep its own subtasks off the seat.
-	r.autoDealReadBusy.Store(r.atRunCap(localBusy.inflight) || localBusy.loading || localBusy.occupiedBy != "")
+	r.autoDealReadBusy.Store(r.atRunCap(localBusy.inflight) || localBusy.loading || localBusy.cannotLoad())
 	// One line per run, mirroring route=spread's own local-slot log
 	// (review round 1 item 4): before this the identical W-01 read had
 	// no trace at all, so an operator could not tell "busy" from
 	// "idle" without re-deriving it from the placement_reason.
-	log.Printf("delegate: auto local slot: busy=%v inflight=%d loading=%v occupied_by=%q (%s)", busy, localBusy.inflight, localBusy.loading, localBusy.occupiedBy, localBusy.note)
+	log.Printf("delegate: auto local slot: busy=%v inflight=%d loading=%v occupied_by=%q host_short=%v (%s)", busy, localBusy.inflight, localBusy.loading, localBusy.occupiedBy, localBusy.hostShort != "", localBusy.note)
 	return busy
 }
 
@@ -279,13 +283,29 @@ type busyReading struct {
 	// three-card seat is opencode's model, so a harness contract dealt to an idle
 	// agent seat there evicted the operator's session (2026-10-06).
 	occupiedBy string
+	// hostShort is the sentence for a host that cannot take the agent seat's cold load right now: the seat is NOT loaded, nothing
+	// occupies it, and the host-RAM gate the node would put the contract to (pipeline.SeatColdLoadAdmission) refuses, or a lane
+	// that declared host RAM is live. busy is true with it, as with occupiedBy: nothing is in flight, but taking the seat now would
+	// be refused at the door after a look, so the subtask keeps its place in line and the capacity wait takes the seat the instant
+	// the host admits. "" when the host can take it, when the reading could not be taken, and for every seat but this box's own
+	// agent seat. The memory comes back: on the reference 3-card Windows box the host had 66.5 GiB available four minutes after a
+	// contract was refused at 41.1 GiB for a 36.0 GiB seat with 8.0 GiB of headroom.
+	hostShort string
 }
 
+// cannotLoad is true when the local seat cannot be loaded for a contract right now, for a reason that ends by itself: another
+// vLLM seat holds the cards (occupiedBy) or the host is short of memory for the cold load (hostShort). It is the question every
+// "may the local seat take this now" site asks; a site that only names the occupant keeps occupiedBy.
+func (b busyReading) cannotLoad() bool { return b.occupiedBy != "" || b.hostShort != "" }
+
 // why renders the reading for a placement reason: the seat a load would evict
-// when another vLLM seat holds the cards, else the in-flight count.
+// when another vLLM seat holds the cards, the host's shortage when it cannot take the cold load, else the in-flight count.
 func (b busyReading) why() string {
 	if b.occupiedBy != "" {
 		return "local seat occupied: loading it would evict the loaded vLLM seat " + b.occupiedBy
+	}
+	if b.hostShort != "" {
+		return "local seat not loaded, and the host cannot take its cold load now: " + b.hostShort
 	}
 	return fmt.Sprintf("local seat busy: %d in flight", b.inflight)
 }
@@ -304,7 +324,14 @@ func (r *runner) probeLocalBusy(ctx context.Context) busyReading {
 		// (localServesLayer), so "idle" would misreport it.
 		return busyReading{note: noLocalSeat}
 	}
-	return probeSeatBusy(ctx, r.cfg, seat, "agent seat", r.checkSeatGuard)
+	rd := probeSeatBusy(ctx, r.cfg, seat, "agent seat", r.checkSeatGuard)
+	if rd.hostShort != "" && !r.hasLine() {
+		// This run has no line to wait in, so the seat's door is the line (hostRAMWait): the seat is dealt as it reads without
+		// the host, and the door waits for the memory. Read as busy here, the subtask would go to a capacity wait that ends
+		// in two minutes, be shed, or have its retry skipped, and never reach the wait the door holds for exactly this caller.
+		rd.hostShort, rd.busy, rd.note = "", false, "local seat not loaded"
+	}
+	return rd
 }
 
 // probeSeatBusy is the reading behind every "is this local seat busy" question the harness asks of a seat: the
@@ -347,7 +374,12 @@ func probeSeatBusy(ctx context.Context, cfg config.Config, seat, what string, gu
 			log.Printf("delegate: local seat busy probe of %s/%s is ambiguous (roster unreadable: %v; /running lists %d other model(s)); dealing the local slot as idle", endpoint, seat, rd.RosterErr, rd.RunningOthers)
 			return busyReading{note: "ambiguous: roster unreadable", unknown: true}
 		}
-		return busyReading{note: "local seat not loaded"}
+		rd := busyReading{note: "local seat not loaded"}
+		if why := localHostShort(cfg, seat); why != "" {
+			rd.busy, rd.hostShort = true, why
+			rd.note += "; the host cannot take its cold load now"
+		}
+		return rd
 	}
 	if rd.Starting {
 		// A load in progress: the request that triggered it is queued on the
@@ -357,6 +389,89 @@ func probeSeatBusy(ctx context.Context, cfg config.Config, seat, what string, gu
 		return busyReading{busy: true, loading: true, note: "local seat " + strings.TrimPrefix(rd.Source, "running-state:") + " (a load is in progress)"}
 	}
 	return busyReading{busy: rd.Inflight > 0, inflight: rd.Inflight, note: rd.Source}
+}
+
+// seatNeed is the host need of a cold load of the box's agent seat, as the seat's door reads it. hostneed.SeatNeed (the config's
+// figures) until internal/pipeline hands in its own reader, which adds what the harness measured of the seat's loads.
+var seatNeed = hostneed.SeatNeed
+
+// SetSeatNeed replaces the reader localHostShort judges the host by. internal/pipeline calls it at init with the reader its
+// door uses, so the delegator and the door ask the same question of the same figures. A nil reader is ignored.
+func SetSeatNeed(read func(config.Config) hostneed.Need) {
+	if read != nil {
+		seatNeed = read
+	}
+}
+
+// hostRAMWait says who is the line for the local seat's host-RAM gate (LocalOptions.HostRAMWait). A delegator that has a line
+// answers 0: the door looks once and defers at once, and the capacity wait re-reads the host and the seat every tick and takes the
+// seat the instant the host admits. The line exists when the subtask has another node to be re-placed on (isReplaceable's own
+// condition: not route=local, remotes configured) and the capacity wait is there to hold it (agent_placement_wait_sec not
+// switched off, and the run is not sheddable, which never waits). Without one, route=local pinned or a box with no remotes, the door
+// itself is the line and waits for the host for as long as its admission budget lasts (HostRAMWaitAdmission).
+func (r *runner) hostRAMWait() *time.Duration {
+	w := time.Duration(0)
+	if !r.hasLine() {
+		w = HostRAMWaitAdmission
+	}
+	return &w
+}
+
+// hasLine says whether this run has a line a subtask can wait in for the local seat's host memory: another node it could be
+// re-placed on (not route=local, remotes configured) and a capacity wait to hold it (agent_placement_wait_sec not switched off,
+// and the run not sheddable, which never waits). The one answer both sides read: with a line the delegator reads the host
+// before it deals the seat (probeLocalBusy) and the door looks once; without one the delegator does not read the host and the
+// door waits (hostRAMWait).
+func (r *runner) hasLine() bool {
+	return r.route != "local" && len(r.remotes) > 0 && r.cfg.AgentPlacementWaitSec >= 0 && r.priority >= core.BandNormal
+}
+
+// localHostShort says why the host cannot take the cold load of seat right now, "" when it can or when that cannot be told. The
+// node's own door (pipeline.SeatColdLoadAdmission) puts every contract that finds the agent seat unloaded to the host-RAM rule and
+// defers it as capacity when the host is short, so the delegator asks the same rule BEFORE it deals the seat a subtask: a subtask
+// dealt to a seat the host cannot load is a place in line (the capacity wait re-reads the host every tick and takes the seat the
+// instant it admits), not a refused attempt. Only for this box's own agent seat, and only when the node states the seat's footprint
+// (agent_seat_host_ram_gib, as the door does): a local reading says nothing about an endpoint on another box, and a seat the
+// config never sized is not refused on an invented figure. Fail open, as probeSeatBusy always has: a lease directory that cannot
+// be opened, a host that cannot be read and a need no host could ever meet (Impossible: waiting does not help, the door answers) read
+// as "not short".
+//
+// The need is the one the door judges by (seatNeed): the harness's measured need once it holds cold loads of the seat, the
+// config's figures as the seed. internal/pipeline imports this package, so it hands its reader in at init (SetSeatNeed) and a
+// program that links no pipeline reads the config's figures. The two readings can still part for a moment (the host moved
+// between the two looks, a load was recorded in between): the subtask then goes to the door, which answers with the host-RAM
+// defer, and the capacity wait takes that as one more tick (placements.holdsLocalForHost).
+func localHostShort(cfg config.Config, seat string) string {
+	if !strings.EqualFold(strings.TrimSpace(seat), strings.TrimSpace(cfg.AgentPlannerModel(""))) {
+		return ""
+	}
+	if modelaffinity.EndpointHost(cfg.Endpoint, cfg.FleetNodeID) != "" {
+		return ""
+	}
+	if cfg.AgentPlacementWaitSec < 0 {
+		// The operator switched the capacity wait off: a subtask kept off the seat would have nowhere to wait and would be
+		// published at once, so the door is the place to wait (hostRAMWait says so) and the delegator does not read the host.
+		return ""
+	}
+	need := seatNeed(cfg)
+	if (need.Source != hostneed.SourceSeat && need.Source != hostneed.SourceMeasured) || need.GiB <= 0 {
+		return ""
+	}
+	m, err := gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir)
+	if err != nil {
+		return ""
+	}
+	// The door's first refusal, in its words: a lane that declared host RAM is live, and a seat is not loaded while a lane streams.
+	for _, l := range m.Leases() {
+		if l.DeclaresHostRAM() {
+			return fmt.Sprintf("a lane that declared %.1f GiB of host RAM is live (%s lease epoch %d), and a seat is not loaded while a lane streams", max(l.HostRAMGiB, l.HostRAMCommitGiB), l.Class, l.Epoch)
+		}
+	}
+	chk := m.HostRAMCheckLoad(need.HostLoad())
+	if chk.OK || chk.Impossible || chk.Unreadable {
+		return ""
+	}
+	return need.SeatRefusal(chk.Why)
 }
 
 // dealReadLocalBusy reports whether this run's placement read the local seat busy and
@@ -373,13 +488,13 @@ func (r *runner) dealReadLocalBusy() bool {
 	return false
 }
 
-// autoOccupant is route=auto's reading when it found the local seat occupied: the joint
-// deal's (autoDealBusy) or the per-subtask placement's (autoLocalBusy); zero otherwise.
+// autoOccupant is route=auto's reading when it found the local seat unable to take a load now, occupied by another vLLM seat or
+// short of host memory (cannotLoad): the joint deal's (autoDealBusy) or the per-subtask placement's (autoLocalBusy); zero otherwise.
 func (r *runner) autoOccupant() busyReading {
-	if r.autoDealBusy.occupiedBy != "" {
+	if r.autoDealBusy.cannotLoad() {
 		return r.autoDealBusy
 	}
-	if r.autoLocalBusy.occupiedBy != "" {
+	if r.autoLocalBusy.cannotLoad() {
 		return r.autoLocalBusy
 	}
 	return busyReading{}

@@ -82,6 +82,27 @@ type placements struct {
 	// lastRowRefusal: the row of the latest attempt was written as a refusal (PlacedResult.refusalRow). A subtask
 	// that ends without a node taking it has no row of its own then, and settle writes one.
 	lastRowRefusal bool
+	// hostDefers counts the host-RAM defers (HostRAMDefer) the local seat's door answered this subtask with, and hostRAM is the
+	// latest one's reason while the subtask is kept in line for the seat because of it ("" otherwise). The memory the door found
+	// short comes back, so such a defer is a place in line, not a verdict: the seat is not marked tried (holdsLocalForHost),
+	// the subtask is wait-worthy, and hostRetryAt is the earliest the capacity wait asks the seat again when its own reading of
+	// the host admits (a node whose measured need is higher than the config's the delegator reads with refuses what the
+	// delegator admits; one look per refusalCooldown, not one per tick).
+	hostDefers  int
+	hostRAM     string
+	hostRetryAt time.Time
+}
+
+// maxHostDefers is how many host-RAM defers one subtask takes from the local seat's door before the next is a verdict. The wait
+// asks the door only when the delegator's own reading of the host admits the load, so a door that keeps refusing then is a
+// node that holds the seat to a higher need than the delegator can read (or a need no state of the host meets): a few looks
+// show that, and an unbounded loop of them would write a ledger row per look for the whole call. A chosen figure.
+const maxHostDefers = 4
+
+// holdsLocalForHost: this attempt is the local seat's host-RAM defer and the subtask keeps its place in line for the seat
+// instead of marking the seat tried (the caller has a line: isReplaceable). False once the subtask has had maxHostDefers of them.
+func (pl *placements) holdsLocalForHost(pr PlacedResult) bool {
+	return capacityDeferRefusal(pr) && HostRAMDefer(pr.Result) && pl.hostDefers+1 < maxHostDefers
 }
 
 // isRefusalRow: the row of this attempt is a node's capacity refusal AT DISPATCH, a place in line. A job the node
@@ -145,13 +166,26 @@ func newPlacements() *placements {
 // refusal to LIST (refusalLine) but not, by itself, a reason to wait - replacementNode
 // marks the subtask wait-worthy when some ELIGIBLE node is merely busy, and a defer
 // beside a remote that can never run the contract would otherwise hold the subtask for
-// the whole placement wait to publish the same defer.
+// the whole placement wait to publish the same defer. The one exception is the host-RAM
+// defer (HostRAMDefer): the memory comes back, so it IS wait-worthy, for the seat itself.
 func (pl *placements) noteRefusal(pr PlacedResult) {
 	// Time the refused job provably spent QUEUED on a node that then took it back
 	// (a confirmed withdrawal at the queue deadline) is not execution: it is
 	// credited like every other span the subtask spent waiting rather than
 	// working, so the re-placement still owns the budget the contract asked for.
 	pl.credit += pr.queuedWait
+	if capacityDeferRefusal(pr) && HostRAMDefer(pr.Result) {
+		// A host-RAM defer from the local seat is a place in line (placements.hostDefers); the maxHostDefers-th is a verdict.
+		if pl.holdsLocalForHost(pr) {
+			pl.capacityRefusal = true
+			pl.hostRAM, pl.hostRetryAt = pr.Result.Reason, time.Now().Add(refusalCooldown)
+		} else {
+			pl.hostRAM = ""
+			pl.tried[""] = true
+		}
+		pl.hostDefers++
+		return
+	}
 	if capacityRefusal(pr.refusalStatus) {
 		pl.capacityRefusal = true
 		return

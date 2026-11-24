@@ -791,7 +791,7 @@ that could run the subtask refused for CAPACITY (503/429; `placements.capacityRe
 seat, `awaitCapacity` polls every `placementPollInterval` (3 s): the local seat once the lease clears (only reachable when it
 WAS reserved — an unreserved, untried local seat is taken by `replacementNode` first), else the best remote whose health says
 it has room (`hasRoom`), skipping a node that refused inside the wait for `refusalCooldown` (10 s). A node that passes and
-still refuses is one more tick, paced by the poll — never a tight loop. Idle time is credited (`placements.credit`, so
+still refuses is one more tick, paced by the poll — never a tight loop. Host RAM is among the reasons the wait holds a subtask: a local seat that is not loaded while the host cannot take its cold load (the delegator's own reading, or the door's `host RAM:` defer, `delegate.HostRAMDefer`) is a place in line like a busy, reserved, fenced or occupied seat, and the seat is taken on the first tick at which the host admits it ([gpu-lease.md](gpu-lease.md)). Idle time is credited (`placements.credit`, so
 `remaining()` hands the seat that finally takes the work its whole `timeout_sec`); attempts are charged as always. Outcomes:
 landed (`summary.waited`, `results[].capacity_wait_sec`, `replacements` counts the refusals) · the wait exhausted with the
 local seat still reserved → the holder-naming `infrastructure` deferral of 0.113.14 · exhausted otherwise → deferred, class

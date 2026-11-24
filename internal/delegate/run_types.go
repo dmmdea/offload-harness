@@ -38,7 +38,19 @@ type LocalOptions struct {
 	// route=local job is counted once, not twice. "" (every caller that is not
 	// the delegator) keeps the runner's row a job of its own.
 	ParentJobID string
+	// HostRAMWait says who is the line for the agent seat's host-RAM gate (pipeline.SeatColdLoadAdmission). nil keeps the gate as
+	// it was: settle up to a minute with the no-progress stop, which is what a fleet node serving a REMOTE delegator does. 0 is one
+	// look plus the relief trigger: the caller has a line (the delegator's capacity wait re-reads the host and the seat every few
+	// seconds and takes the seat the instant the host admits), so the door answers at once and the line does the waiting. A
+	// negative value (HostRAMWaitAdmission) is a caller with NO line - route=local, a box with no remotes: the door itself is
+	// the line and waits for as long as the admission budget lasts, re-reading the host every tick with no no-progress stop.
+	// A positive value is that same patient wait bounded by it.
+	HostRAMWait *time.Duration
 }
+
+// HostRAMWaitAdmission is LocalOptions.HostRAMWait for a caller with no line to wait in: the door waits for the host for as long
+// as its admission budget lasts.
+const HostRAMWaitAdmission time.Duration = -1
 
 // LocalRunner executes one contract in-process on the local node — the same
 // read-only agent.Build path a fleet node runs (pipeline.RunAgentContract
