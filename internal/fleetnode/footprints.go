@@ -227,6 +227,9 @@ type HostPeaks struct {
 	Runs                          int
 	MaxPrivateGiB, MaxResidentGiB float64
 	Window                        int
+	// Updated is when the key's entry was last written (the last recorded run, for a key only RecordHost writes). The agent
+	// seat's cold-load measurement reads it to record a load that several contracts waited on once (internal/pipeline).
+	Updated time.Time
 }
 
 // hostRecentRuns is how many of a key's most recent host peaks the store keeps, and hostPeakPercentile (nearest rank, in
@@ -339,7 +342,28 @@ func (f *Footprints) HostPeak(family, quant, task string) (HostPeaks, bool) {
 		MaxPrivateGiB:  r.HostPeakGiB,
 		MaxResidentGiB: r.HostResidentPeakGiB,
 		Window:         len(r.HostRecent),
+		Updated:        r.Updated,
 	}, true
+}
+
+// LatestHostQuant is the quant of the key written most recently among the host-peak keys of one family and task, whatever
+// their quant. The agent seat's cold loads are keyed by the model id the seat's name resolved to when the load was measured
+// (internal/pipeline, seatmeasure.go): a reader that holds only the seat's name asks which id was measured last, and reads that
+// key. ok is false when the family and task hold no host peak.
+func (f *Footprints) LatestHostQuant(family, task string) (quant string, ok bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reloadMergeLocked()
+	var newest time.Time
+	for k, r := range f.entries {
+		if k.family != family || k.task != task || r.HostPeakGiB <= 0 {
+			continue
+		}
+		if !ok || r.Updated.After(newest) {
+			quant, newest, ok = k.quant, r.Updated, true
+		}
+	}
+	return quant, ok
 }
 
 // Entries returns the wire-shaped entries with vram_peak_gb > 0, sorted by

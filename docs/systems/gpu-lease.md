@@ -35,6 +35,7 @@ other on a single shared card.
 | `internal/gpulease/relief.go`, `internal/wslcache` | **the WSL VM's page cache (`gpu_hostram_wsl_cache_drop`, off by default)**: a lease waiting for host RAM asks the WSL 2 VM to drop the page cache a drop can free, when that covers its shortfall (also asked by a contract door's cold load of the seat, which settles for up to a minute, and once by the seat's warm-back; [below](#the-wsl-vms-page-cache-gpu_hostram_wsl_cache_drop)) |
 | `gpu_hostram_await.go` | **F82**: how a reserve's host-RAM need is split between the grant and the wait after the unload (`hostRAMSplit`), whether the unload can free anything on the lease's cards (`unloadReachesLease`), the grant's screen that refuses a need no state of the box admits and keeps the grant's comparison when host memory cannot be read (`screenDeferredHostRAM`), the wait's deadline and its words (`hostRAMDeadline`, `awaitHostRAMBounded`), the hold bound that ends that wait and releases the lease (`errHostRAMHoldBound`, `releaseAfterRAMWait`, `autoReleaseWarmGuard`; [the hold bound](#the-hold-bound-gpu_hostram_hold_max_sec-the-incident-of-2026-10-14)), `gpu status`'s sentence for a lease that is waiting (`hostRAMAskedStatus`, `holderGaveUpNote`), the line for a release that did not happen and the command that frees it (`leaseNotReleasedLine`, `releaseCommand`), the confirmation of a release's answer (`releaseConfirmed`, `releaseLeaseConfirmed`) and the failure of a wait whose stamp could not be written (`holdStampError`) |
 | `internal/hostneed` | **how much host RAM a lease declares**: `--ram`, else the model files of a recognised render helper call that do not fit the card (for its own `--graph`, the files that graph's loaders name), else the media class default (see "Host RAM") |
+| `internal/seatmeasure`, `internal/pipeline/seatmeasure.go` | **the seat measures itself**: the host-memory sampler of one cold load of the agent seat (`seatmeasure.Begin` / `Finish`: baseline median, rolling-median peaks, the clean rule), and where a clean result is recorded and read back (`BeginSeatLoadMeasure`, `SeatNeedFor`, `hostneed.SeatNeedMeasured`; see "The seat measures itself") |
 | `internal/gpucards/hostview.go` | the `host_memory` block and verdict that `gpu status` and `offload_status` render |
 | `internal/gpucards` | the per-card view (`RowsWithCap`, `LeaseRows`, `QueueRows`, `Table`, `Section`) that `gpu status`, `gpu cards` and `offload_status` brief all render; the display card's `DisplayCap` verdict is computed in `RowsWithCap` and nowhere else |
 | `internal/servingtmpl/audit_displaycap.go` | the **display-cap-unseen note** of `audit-yaml` (`AuditDisplayCapUnseen`, `HasProxyEntry`): names the llama-swap entries that may sit on the display card, judges none (see "The display card is allocatable up to a cap") |
@@ -2512,6 +2513,38 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   `vm.overcommit_memory=2`). On a Linux node in mode 0 or 1, stating it leaves the touched set as the only line the seat is held
   to, which is less than the physical-RAM line an unstated figure gets: leave the key unset there unless that is intended. The
   `seat ram:` row of `doctor` says this on every box that states both figures.
+* **The seat measures itself.** The two config keys are the *seed* for a seat that has not been measured yet, not the answer.
+  The harness reads the host's memory before every cold load of the seat that it starts itself (a contract door's warm-up,
+  the kv-slot rewarm, and the seat warm-back at a lease release) and every 500 ms during it (`internal/seatmeasure`). The
+  baseline is the median of six readings 100 ms apart; a peak is taken on the median of the last five samples, so one tick of
+  the desk is not a peak (the commit moves by several GiB a minute on the reference box). The load's touched peak is the
+  baseline available memory less the lowest available memory; its commit peak is the highest commit charge less the baseline
+  commit. A load is recorded only when this call started it (the seat had no row in `/running` and no other model was
+  mid-swap, and the warm request went out within one admission poll of that look: a call that waited for the card behind the
+  lease fence is not measured; the baseline itself is read just before the request), it completed, no reading failed, no gap between samples passed five intervals, there were at least ten samples,
+  the commit peak is at least three times the baseline's own spread and at least 1 GiB, the touched peak is above three
+  times that spread, no lease that declares host RAM was live at the start or at the end, and llama-swap lists the same
+  other models, all ready, at the end as at the start (a model that unloaded or loaded while the seat loaded moved the same
+  counters; on a contract's own warm-up the two lists are the looks at `/running` it already makes, so a measurement adds no
+  request to an admission). What the counters cannot tell apart is another process of the host that grew or shrank during the load: the
+  percentile answers that, one low run never lowers it and one high run speaks until ten loads exist. A load that several contracts waited on is recorded once (a
+  second record within 10 s of the key's last write is dropped, the window `internal/seatrate` merges cold loads in). A
+  measurement never delays a contract beyond the 0.6 s of the baseline and never fails one: any error in it is swallowed.
+  The figures are kept in the footprint store (`footprints.json`, beside the ledger) under the seat's model name as the
+  config binds it, the model id llama-swap's roster resolved that name to when the load was measured (the key's quant slot)
+  and the task `agent-seat-load`: the touched peak in the resident slot and the commit peak in the private slot,
+  so the store's 20-run window and 90th percentile apply. The model id is in the key because a seat's name outlives its
+  model: a name bound to another model starts a window of its own, the seed as its floor again. The reader asks no serving
+  layer which model the name means now; it takes the key measured last (`Footprints.LatestHostQuant`), so a rebound seat
+  is judged by the old model's figures until its first load is recorded. `hostneed.SeatNeedMeasured` turns the figures into the need the
+  contract doors, the warm-back and `doctor`'s `seat ram:` row all read (`pipeline.SeatNeedFor`). With no recorded load it
+  is exactly `hostneed.SeatNeed`. With one or two, each quantity is the larger of the measurement and the seed (where the
+  config states none, the working set's floor is the 21 GiB default such a seat was held to before, and the commit is the
+  measurement). From three loads the measurement replaces the seed in both directions,
+  and the commit is stated. On the reference 3-card Windows box three cold loads of the vLLM seat raised the commit by 55.3,
+  53.4 and 54.0 GiB and lowered the available memory by 32.2, 30.7 and 33.4 GiB, in 281 to 399 s, against a seed of 36 and 61.
+  A warm-back is not recorded while the lease being released itself declared host RAM, because that lease is still live while
+  the seat loads.
 * **The warm passes the grant's admission.** The seat's footprint, taken for both quantities and with no commit stated, plus
   what the *other* live leases have yet to load, must leave the headroom of the available RAM and keep the commit charge under
   physical RAM less the headroom: the warm-back states no commit (unless the node states `agent_seat_host_commit_gib`, above), so it is held to physical RAM and not to the commit limit (where the commit limit can grow, to 2.1 times the footprint against the ceiling instead, and not to physical RAM)

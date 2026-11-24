@@ -2930,6 +2930,15 @@ func (m *seatMatcher) resolve(ctx context.Context) bool {
 	return true
 }
 
+// canonical is the model id the seat's name resolved to: the id the roster gave when the name is an alias, the name itself
+// when the roster lists it as an id, and "" while no roster read has succeeded.
+func (m *seatMatcher) canonical() string {
+	if !m.resolved {
+		return ""
+	}
+	return m.names[len(m.names)-1]
+}
+
 // joinAdmissionNotes concatenates admission findings with "; ", dropping empties
 // — the same shape the caller uses to fold the pre-flight's note into the
 // warm-up's, so one admission_note can carry every step that had something to
@@ -2990,6 +2999,9 @@ type residency struct {
 	ready bool   // the seat's own row reads ready
 	state string // the state of the seat's own row when it is not ready ("" = no row)
 	busy  string // "<id>:<state>" of a row for ANOTHER model that is mid-swap ("" = none)
+	// others is the other models listed ready, sorted, on one line: what the seat's cold-load measurement compares between
+	// the start and the end of a load (seatmeasure.go).
+	others string
 }
 
 // warmBodyMax bounds the part of a refused warm request's body that is read.
@@ -3031,6 +3043,25 @@ func warmStartFailed(status int, body string, res residency, readErr error) (fai
 // evidence, and a caller that passes nil, keep proceeding into the wall with the
 // note, as before.
 func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Duration, st *warmStatus) (time.Duration, string, bool, bool) {
+	// A cold load this call starts is measured for what it costs the host (seatmeasure.go): the one place both contract
+	// doors and the kv-slot rewarm load the seat through. The measurement never changes what the warm-up answers.
+	var meas seatLoadMeter
+	spent, note, attempted, loaded := warmSeatMeasured(ctx, endpoint, seat, budget, st, &meas)
+	if attempted && !loaded {
+		// The warm request went out and the budget ended before the seat was ready: the load goes on inside the wall, and
+		// on the reference box it usually does (loads of 281 to 399 s against a 300 s admission budget). The measurement
+		// follows it to ready instead of dropping every such load.
+		meas.endWhenReady(endpoint, seat)
+	} else {
+		meas.end(attempted && loaded)
+	}
+	return spent, note, attempted, loaded
+}
+
+// warmSeatMeasured is the body of warmSeatWith. meas.begin is called just before the warm request, and only when the seat had no
+// row in /running and no other model was mid-swap: a load this call would start, not one already in flight and not a seat already
+// loaded. The measurement is handed the looks at /running this function makes anyway and makes no request of its own here.
+func warmSeatMeasured(ctx context.Context, endpoint, seat string, budget time.Duration, st *warmStatus, meas *seatLoadMeter) (time.Duration, string, bool, bool) {
 	if strings.TrimSpace(endpoint) == "" {
 		return 0, "", false, false // no endpoint to warm against: the gate is off by construction
 	}
@@ -3061,6 +3092,7 @@ func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Durati
 		}
 		read := func() residency {
 			var res residency
+			var others []string
 			for _, r := range rows {
 				switch {
 				case m.matches(r.ID):
@@ -3071,8 +3103,12 @@ func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Durati
 					}
 				case r.State != "ready" && res.busy == "":
 					res.busy = r.ID + ":" + r.State
+				case r.State == "ready":
+					others = append(others, r.ID)
 				}
 			}
+			sort.Strings(others)
+			res.others = strings.Join(others, " ")
 			return res
 		}
 		res := read()
@@ -3081,11 +3117,8 @@ func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Durati
 		}
 		return res, nil
 	}
-	ready := func() (bool, error) {
-		res, rerr := look()
-		return res.ready, rerr
-	}
-	if ok, rerr := ready(); rerr != nil || ok {
+	res0, rerr := look()
+	if rerr != nil || res0.ready {
 		if rerr != nil {
 			// "Could not read" is not "is ready", and it was reported as
 			// neither. A seat whose residency is unknown proceeds into the wall
@@ -3094,6 +3127,9 @@ func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Durati
 		}
 		return 0, m.note, false, false // already resident: nothing to warm; only an alias-probe failure, if any, to report
 	}
+	// A load this call would start: no row for the seat and no other model mid-swap. The measurement itself begins further
+	// down, after the wait for the card, so nothing that happens during that wait is in its baseline.
+	coldStart := res0.state == "" && res0.busy == ""
 	start := time.Now()
 	b := swapclient.BaseURL(endpoint)
 	if b == "" {
@@ -3117,6 +3153,11 @@ func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Durati
 	if rerr != nil {
 		return 0, joinAdmissionNotes(m.note, "warm-up request could not be built (proceeding; the seat may still be cold): "+rerr.Error()), false, false
 	}
+	// Measured only when the request goes out within one poll of the look it rests on: a call the lease fence held longer saw a
+	// host and a /running list that are no longer the ones the load starts from.
+	if coldStart && time.Since(start) < admissionPoll {
+		meas.begin(seat, m.canonical(), res0.others)
+	}
 	resp, derr := warmClient.Do(req)
 	if derr != nil {
 		spent := time.Since(start)
@@ -3138,7 +3179,11 @@ func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Durati
 	// 0.115.15 acceptance run reported "never listed" on a 187 s cold load
 	// that had plainly succeeded).
 	if resp.StatusCode == http.StatusOK {
-		if ok, rerr := ready(); rerr == nil && ok {
+		res, rerr := look()
+		if rerr == nil {
+			meas.saw(res)
+		}
+		if rerr == nil && res.ready {
 			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true, true
 		}
 		return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall (passthrough answered 200; /running lists the seat under another id)", time.Since(start).Seconds())), true, true
@@ -3150,6 +3195,9 @@ func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Durati
 	var lastErr error
 	for i := 0; i < 2; i++ {
 		res, rerr := look()
+		if rerr == nil {
+			meas.saw(res)
+		}
 		if rerr == nil && res.ready {
 			return time.Since(start), joinAdmissionNotes(m.note, fmt.Sprintf("cold load %.0fs outside the wall", time.Since(start).Seconds())), true, true
 		}

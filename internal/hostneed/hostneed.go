@@ -911,6 +911,68 @@ func SeatNeed(cfg config.Config) Need {
 	return Need{GiB: DefaultSeatHostGiB, Source: SourceSeatDefault, Detail: "the agent seat's host footprint is not configured (agent_seat_host_ram_gib), so a chosen 21 GiB is assumed: not a measurement, and below the 44 GB the 2026-09-10 incident recorded, so state the seat's own measured figure in agent_seat_host_ram_gib"}
 }
 
+// SeatMinRuns is how many measured cold loads of the seat must exist before the measured figures replace the config's
+// in both directions. It is the footprint store's own hostPeakMinRuns (internal/pipeline), the fewest that lets one
+// outlier be seen against two others.
+const SeatMinRuns = 3
+
+// SeatNeedMeasured is SeatNeed once the harness has measured cold loads of the seat (internal/seatmeasure): the working set
+// the load took from the available memory and the commit charge it added, both at the store's 90th percentile of the
+// recent loads, over runs loads. The config's agent_seat_host_ram_gib and agent_seat_host_commit_gib are then the SEED, the
+// figures a seat that has not been measured is held to.
+//
+//   - runs == 0 (or no usable measurement): exactly SeatNeed(cfg), so a node that never measured its seat behaves as it did.
+//   - fewer than SeatMinRuns loads: each quantity is the larger of the seed and the measurement. Where the config states no
+//     seed the working set's floor is DefaultSeatHostGiB, the figure such a seat was held to before it was measured, and the
+//     commit is the measurement. One or two loads are one or two readings of a number the desk moves by several GiB a
+//     minute, and a measurement that is low must not wave through what the node's own statement, or the default, refused.
+//   - SeatMinRuns loads or more: the measurement replaces the seed in both directions. On the reference 3-card Windows box
+//     three loads raised the commit by 55.3, 53.4 and 54.0 GiB and lowered the available memory by 32.2, 30.7 and 33.4 GiB
+//     against a seed of 36 and 61, so a seed can be wrong either way.
+//
+// The commit is always stated (it is judged against the OS commit limit where one is enforced, and the working set is then the
+// touched figure alone).
+func SeatNeedMeasured(cfg config.Config, touchedP90, commitP90 float64, runs int) Need {
+	if runs <= 0 || commitP90 <= 0 {
+		return SeatNeed(cfg)
+	}
+	var seedTouch, seedCommit float64
+	if cfg.AgentSeatHostRAMGiB > 0 {
+		seedTouch = cfg.AgentSeatHostRAMGiB
+		seedCommit = max(cfg.AgentSeatHostCommitGiB, 0)
+	}
+	touch, commit := touchedP90, commitP90
+	if touch <= 0 { // a load recorded with no resident reading: the working set is not measured, the seed (or the default) stands
+		touch = seedTouch
+		if touch <= 0 {
+			touch = DefaultSeatHostGiB
+		}
+	}
+	if runs < SeatMinRuns {
+		floor := seedTouch
+		if floor <= 0 {
+			floor = DefaultSeatHostGiB
+		}
+		touch, commit = max(touch, floor), max(commit, seedCommit)
+	}
+	seed := fmt.Sprintf("the config states none, so the default %.0f GiB is the working set's floor until then", DefaultSeatHostGiB)
+	if runs >= SeatMinRuns {
+		seed = "the config states none"
+	}
+	if seedTouch > 0 {
+		seed = fmt.Sprintf("the config's figures %.1f / %.1f GiB are the seed", seedTouch, seedCommit)
+		if seedCommit <= 0 {
+			seed = fmt.Sprintf("the config's figure %.1f GiB (no commit) is the seed", seedTouch)
+		}
+	}
+	rule := ""
+	if runs < SeatMinRuns {
+		rule = fmt.Sprintf(", each held at the larger of the measurement and the seed until %d loads exist", SeatMinRuns)
+	}
+	return Need{GiB: touch, CommitGiB: commit, CommitStated: true, Source: SourceMeasured,
+		Detail: fmt.Sprintf("measured over %d cold loads of this seat (touched %.1f GiB, commit %.1f GiB at the 90th percentile)%s; %s", runs, touchedP90, commitP90, rule, seed)}
+}
+
 // Resolve is the order in the package comment: explicit, a recognised render call, the media class
 // default, nothing.
 func Resolve(r Request, f Facts) Need {

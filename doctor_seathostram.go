@@ -7,6 +7,7 @@ import (
 
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
+	"github.com/dmmdea/offload-harness/internal/pipeline"
 )
 
 // writeSeatHostRAMSection prints one row for the host RAM a vLLM agent seat holds, which the node must declare in
@@ -35,6 +36,12 @@ import (
 func writeSeatHostRAMSection(w io.Writer, cfg config.Config) {
 	seat := vllmSeatOfBox(cfg)
 	if seat == "" {
+		return
+	}
+	// The harness measures every cold load of the seat it starts (internal/pipeline/seatmeasure.go). Once it holds one, the row
+	// states the measured need and the run count, and the config's figures as the seed they are.
+	if need, runs := pipeline.SeatNeedFor(cfg); runs > 0 && need.Source == hostneed.SourceMeasured {
+		fmt.Fprintf(w, "seat ram:   OK    vLLM seat %s: %s; a cold load is judged by %.1f GiB touched and %.1f GiB of commit (agent_seat_host_ram_gib and agent_seat_host_commit_gib are the seed for a seat that has not been measured)\n", seat, need.Detail, need.GiB, need.CommitGiB)
 		return
 	}
 	const operatorsWord = "it is the operator's statement and is not compared with a live reading here (the seat log's `host rss` line is the staging buffer's share at start, the loaded seat holds more)"

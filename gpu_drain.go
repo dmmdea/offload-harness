@@ -57,6 +57,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
@@ -1252,7 +1253,7 @@ func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 		return
 	}
 	out = &lockedWriter{w: out}
-	g.seatNeed = hostneed.SeatNeed(cfg)
+	g.seatNeed, _ = pipeline.SeatNeedFor(cfg) // measured over the seat's recorded cold loads, the config's figures as the seed
 	if g.onlyIfOwed && g.owed != nil && g.owed() == "" {
 		fmt.Fprintf(out, "gpu: not warming %s back: it was not loaded when the lease took the card\n", model)
 		return
@@ -1293,7 +1294,9 @@ func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 			cancel()
 		})
 	}
+	endMeasure := beginWarmBackMeasure(ctx, cfg, endpoint, model)
 	werr := warmSeatGated(ctx, maintenanceClient, endpoint, model, func() bool { return g.allowsWarm(model, out) })
+	endMeasure(werr == nil)
 	stopRenew()
 	if errors.Is(werr, errWarmGuardStopped) {
 		// allowsWarm has said why; the marker stays for the holder that has the right to pay it.
@@ -1341,6 +1344,27 @@ func warmBackGuarded(cfg config.Config, g warmGuard, out io.Writer) {
 		}
 	}
 	fmt.Fprintf(out, "gpu: %s warmed back\n", model)
+}
+
+// beginWarmBackMeasure starts measuring what this warm-back's cold load costs the host (internal/pipeline/seatmeasure.go), when
+// the seat reads absent: not loaded, not loading, and the reading is not ambiguous. A read that fails or a seat that is not
+// absent measures nothing. The returned function ends it (loaded = the warm request succeeded); it never fails the warm-back.
+func beginWarmBackMeasure(ctx context.Context, cfg config.Config, endpoint, model string) func(loaded bool) {
+	rctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	rd, err := seatload.Running(rctx, maintenanceClient, endpoint, model)
+	if err != nil || rd.Loaded || rd.Starting || rd.Ambiguous {
+		return func(bool) {}
+	}
+	before, ok := pipeline.SeatOtherModels(endpoint, model, rd.Canonical)
+	if !ok {
+		return func(bool) {}
+	}
+	finish := pipeline.BeginSeatLoadMeasure(cfg, model, rd.Canonical)
+	return func(loaded bool) {
+		now, ok := pipeline.SeatOtherModels(endpoint, model, rd.Canonical)
+		finish(loaded && ok && now == before)
+	}
 }
 
 // owedNote ends a line about a warm that did not pay the debt: it says the warm stays owed,

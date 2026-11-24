@@ -271,6 +271,7 @@ func (p *Pipeline) EmbedMemoStats() (embedmemo.Stats, string) {
 }
 
 func New(cfg config.Config, c *llamaclient.Client, ca *cache.Cache, l *ledger.Ledger) *Pipeline {
+	registerSeatMeasure(cfg) // the config the seat's cold loads are measured under (seatmeasure.go)
 	p := &Pipeline{cfg: cfg, client: c, cache: ca, led: l, lastHeal: map[string]time.Time{}, learnHashes: map[string]string{}}
 	// A held card is waited for gpu_wait_ms, like every other GPU door, and the HTTP timeout
 	// only caps that: the lease wait used to BE stt_request_timeout_sec (1,800 s), which is

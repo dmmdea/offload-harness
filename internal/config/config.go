@@ -1537,15 +1537,18 @@ type Config struct {
 	// not a setting. A running process never reloads its config, so the one key the operator's "I need the card"
 	// switch lives in (gpu_display_cap_pct) is re-read from this file when the allocator or a status surface asks (LiveGPUDisplayCap).
 	sourcePath string
-	// AgentSeatHostRAMGiB is the host RAM the agent seat holds once it is loaded (resident set plus any staged
-	// KV cache, GiB): what the warm-back of a seat a lease unloaded must find room for before it loads the seat
-	// again (gpu_drain.go; internal/hostneed.SeatNeed). It is a figure to MEASURE on the node that runs the seat
+	// AgentSeatHostRAMGiB is the SEED for the host RAM the agent seat holds once it is loaded (resident set plus any staged
+	// KV cache, GiB): what the warm-back of a seat a lease unloaded, and a contract's cold load of the seat, must find room
+	// for before the seat loads (gpu_drain.go; internal/hostneed.SeatNeed). The harness measures every cold load of the seat
+	// it starts and, from three loads, uses the measured figures instead (hostneed.SeatNeedMeasured); this key is what a seat
+	// that has not been measured is held to, and the floor under one or two measurements. It is a figure to MEASURE on the node that runs the seat
 	// and to record beside the value as `measured <date> <node>`; 0 = unset, and an unset seat is not assumed to
 	// be small: hostneed.DefaultSeatHostGiB stands in, a chosen fail-closed figure and never 0. The vLLM seat launcher
 	// (setup/templates/vllm-seat/seat_fg.sh) logs `host rss N GiB (L1 N GiB)` for its LMCache MP server at every start,
 	// and `doctor` warns while this key is unset on a box that runs a vLLM seat (register B-56 / H-08).
 	AgentSeatHostRAMGiB float64 `json:"agent_seat_host_ram_gib,omitempty"`
-	// AgentSeatHostCommitGiB is the commit charge a cold load of the agent seat adds to the host at its peak (GiB), a figure
+	// AgentSeatHostCommitGiB is the SEED for the commit charge a cold load of the agent seat adds to the host at its peak
+	// (GiB), used until the harness has measured three cold loads of the seat (hostneed.SeatNeedMeasured), a figure
 	// to MEASURE on the node that runs the seat and to record beside the value as `measured <date> <node>`. Stated, the
 	// seat's commit is judged against the OS commit limit less the headroom, as a stated `--ram-commit` is, and
 	// agent_seat_host_ram_gib is then the touched set alone. 0 = unset: the one figure (agent_seat_host_ram_gib) stands in
