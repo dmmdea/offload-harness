@@ -922,9 +922,10 @@ const SeatMinRuns = 3
 // figures a seat that has not been measured is held to.
 //
 //   - runs == 0 (or no usable measurement): exactly SeatNeed(cfg), so a node that never measured its seat behaves as it did.
-//   - fewer than SeatMinRuns loads: each quantity is the larger of the seed and the measurement when the config states a seed,
-//     else the measurement. One or two loads are one or two readings of a number the desk moves by several GiB a minute,
-//     and a measurement that is low must not wave through what the node's own statement refused.
+//   - fewer than SeatMinRuns loads: each quantity is the larger of the seed and the measurement. Where the config states no
+//     seed the working set's floor is DefaultSeatHostGiB, the figure such a seat was held to before it was measured, and the
+//     commit is the measurement. One or two loads are one or two readings of a number the desk moves by several GiB a
+//     minute, and a measurement that is low must not wave through what the node's own statement, or the default, refused.
 //   - SeatMinRuns loads or more: the measurement replaces the seed in both directions. On the reference 3-card Windows box
 //     three loads raised the commit by 55.3, 53.4 and 54.0 GiB and lowered the available memory by 32.2, 30.7 and 33.4 GiB
 //     against a seed of 36 and 61, so a seed can be wrong either way.
@@ -948,9 +949,16 @@ func SeatNeedMeasured(cfg config.Config, touchedP90, commitP90 float64, runs int
 		}
 	}
 	if runs < SeatMinRuns {
-		touch, commit = max(touch, seedTouch), max(commit, seedCommit)
+		floor := seedTouch
+		if floor <= 0 {
+			floor = DefaultSeatHostGiB
+		}
+		touch, commit = max(touch, floor), max(commit, seedCommit)
 	}
-	seed := "the config states none"
+	seed := fmt.Sprintf("the config states none, so the default %.0f GiB is the working set's floor until then", DefaultSeatHostGiB)
+	if runs >= SeatMinRuns {
+		seed = "the config states none"
+	}
 	if seedTouch > 0 {
 		seed = fmt.Sprintf("the config's figures %.1f / %.1f GiB are the seed", seedTouch, seedCommit)
 		if seedCommit <= 0 {

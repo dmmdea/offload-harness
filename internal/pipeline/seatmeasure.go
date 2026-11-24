@@ -4,18 +4,26 @@ package pipeline
 //
 // The seat's host need was two typed config numbers (agent_seat_host_ram_gib, agent_seat_host_commit_gib). Every cold load of the
 // seat that this harness starts now reads what it cost the host, and the figures are kept in the footprint store beside the
-// renders' host peaks: key = the seat's model name as the config binds it, task "agent-seat-load", the working set the load
-// took from the available memory in the resident slot and the commit charge it added in the private slot, so the store's
-// 20-run window and 90th percentile apply unchanged. hostneed.SeatNeedMeasured turns them into the need the three callers
-// judge a load by (SeatNeedFor), the config figures being the seed until three loads exist.
+// renders' host peaks: key = the seat's model name as the config binds it, the model id that name resolved to when the load was
+// measured (the quant slot) and task "agent-seat-load", the working set the load took from the available memory in the resident
+// slot and the commit charge it added in the private slot, so the store's 20-run window and 90th percentile apply unchanged.
+// hostneed.SeatNeedMeasured turns them into the need the three callers judge a load by (SeatNeedFor), the config figures being
+// the seed until three loads exist. The model id is in the key because a seat's name outlives its model: a name bound to another
+// model starts a window of its own, with the seed as its floor again, and the reader takes the key measured last.
 //
 // A measurement is a side effect of a load and never part of it: nothing here returns an error, delays the load past the 0.6 s
 // the baseline takes, or can panic out (seatLoadMeter.end recovers). A load is recorded only when this call started it (the seat had no
-// row in /running and no other model was mid-swap when the call began), it completed, the result is clean and no lease that
-// declares host RAM was live at the start or the end: such a lane's own growth is in the same counters.
+// row in /running and no other model was mid-swap, read again just before the warm request goes out), it completed, the result is
+// clean, no lease that declares host RAM was live at the start or the end (such a lane's own growth is in the same counters) and
+// llama-swap lists the same other models, all ready, at the end as at the start: a model that unloaded or loaded while the seat
+// loaded moved the same counters.
+//
+// What the counters cannot tell apart stays in a record: another process of the host that grew or shrank during the load. The
+// store's percentile is what answers that (one low run never lowers it, one high run speaks until ten loads exist).
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -29,6 +37,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatmeasure"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
+	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
 const (
@@ -46,6 +55,9 @@ const (
 	// seatLoadSameWindow: two recordings of one seat that end within this window are one load seen by several contracts (the
 	// window internal/seatrate merges cold-load observations in): a seat cannot unload and load again in ten seconds.
 	seatLoadSameWindow = 10 * time.Second
+	// seatOthersTimeout bounds each read of llama-swap's lists around a measurement. Chosen: llama-swap answers in milliseconds
+	// when it is up, and a measurement that cannot read them in this long records nothing.
+	seatOthersTimeout = 5 * time.Second
 )
 
 // seatMeasureCfg is the config the loads started through warmSeatWith are measured under: the one the process built its pipeline
@@ -60,11 +72,21 @@ var seatRecordMu sync.Mutex
 // seatLoadMeter is the measurement of one warm-up. The zero value measures nothing.
 type seatLoadMeter struct{ finish func(loaded bool) }
 
-// begin starts the measurement when seat is the registered config's agent seat.
-func (s *seatLoadMeter) begin(seat string) {
-	if cfg := seatMeasureCfg.Load(); cfg != nil {
-		s.finish = BeginSeatLoadMeasure(*cfg, seat)
+// begin starts the measurement when seat is the registered config's agent seat and reads absent now: the caller looked before
+// it waited for the card (the lease fence), so the seat is read again here, just before the warm request, and the baseline is of
+// this moment. A seat that another call began loading in between, or whose model id cannot be resolved, is not measured.
+func (s *seatLoadMeter) begin(ctx context.Context, endpoint, seat string) {
+	cfg := seatMeasureCfg.Load()
+	if cfg == nil {
+		return
 	}
+	rctx, cancel := context.WithTimeout(ctx, seatOthersTimeout)
+	rd, err := seatload.Running(rctx, warmClient, endpoint, seat)
+	cancel()
+	if err != nil || rd.Loaded || rd.Starting || rd.Ambiguous {
+		return
+	}
+	s.finish = BeginSeatLoadMeasure(*cfg, endpoint, seat, rd.Canonical)
 }
 
 // end finishes it; loaded says the load completed.
@@ -114,10 +136,11 @@ func (s *seatLoadMeter) endWhenReady(endpoint, seat string) {
 }
 
 // BeginSeatLoadMeasure starts measuring a cold load of seat that the caller is about to start, and returns the function that ends
-// the measurement (loaded = the load completed). The caller has already established that the seat is absent. For a seat that is
-// not cfg's agent seat, a platform with no host-memory reader, a lease directory that cannot be read, or a lane that declared host
-// RAM and is live, the returned function does nothing. Never nil, never panics.
-func BeginSeatLoadMeasure(cfg config.Config, seat string) (finish func(loaded bool)) {
+// the measurement (loaded = the load completed). The caller has just established that the seat is absent, and canonical is the
+// model id llama-swap's roster resolved the seat's name to in that reading. For a seat that is not cfg's agent seat, a name the
+// roster did not resolve, a platform with no host-memory reader, a lease directory that cannot be read, a lane that declared host
+// RAM and is live, or another model that is listed and not ready, the returned function does nothing. Never nil, never panics.
+func BeginSeatLoadMeasure(cfg config.Config, endpoint, seat, canonical string) (finish func(loaded bool)) {
 	nop := func(bool) {}
 	defer func() {
 		if recover() != nil {
@@ -125,11 +148,16 @@ func BeginSeatLoadMeasure(cfg config.Config, seat string) (finish func(loaded bo
 		}
 	}()
 	model := strings.TrimSpace(cfg.AgentPlannerModel(""))
-	if model == "" || !strings.EqualFold(strings.TrimSpace(seat), model) || !gpuprobe.HostMemorySupported {
+	canonical = strings.TrimSpace(canonical)
+	if model == "" || canonical == "" || !strings.EqualFold(strings.TrimSpace(seat), model) || !gpuprobe.HostMemorySupported {
 		return nop
 	}
 	m, err := gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir)
 	if err != nil || hostLaneLive(m) {
+		return nop
+	}
+	before, ok := otherModels(endpoint, model, canonical)
+	if !ok {
 		return nop
 	}
 	run := seatmeasure.Begin(gpuprobe.ReadHostMemory, seatMeasureEvery)
@@ -139,8 +167,35 @@ func BeginSeatLoadMeasure(cfg config.Config, seat string) (finish func(loaded bo
 		if !loaded || !res.Clean || hostLaneLive(m) {
 			return
 		}
-		recordSeatLoad(cfg, model, res)
+		if now, ok := otherModels(endpoint, model, canonical); !ok || now != before {
+			return
+		}
+		recordSeatLoad(cfg, model, canonical, res)
 	}
+}
+
+// otherModels is what llama-swap lists besides the seat, as one sorted line of model ids. ok is false when the list cannot be
+// read or any of those models is not ready (loading, stopping): a load measured across that is not the seat's alone.
+func otherModels(endpoint, seat, canonical string) (ids string, ok bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), seatOthersTimeout)
+	defer cancel()
+	rows, err := seatload.Occupants(ctx, warmClient, swapclient.BaseURL(endpoint))
+	if err != nil {
+		return "", false
+	}
+	var others []string
+	for _, r := range rows {
+		switch {
+		case r.State == "stopped" || r.State == "shutdown":
+		case strings.EqualFold(r.Model, seat) || strings.EqualFold(r.Model, canonical):
+		case r.State != "ready":
+			return "", false
+		default:
+			others = append(others, r.Model)
+		}
+	}
+	sort.Strings(others)
+	return strings.Join(others, " "), true
 }
 
 // hostLaneLive says a lease that declares host RAM is live (the test SeatColdLoadAdmission applies).
@@ -153,18 +208,18 @@ func hostLaneLive(m *gpulease.Manager) bool {
 	return false
 }
 
-// recordSeatLoad keeps a clean result in the footprint store, once per load.
-func recordSeatLoad(cfg config.Config, model string, res seatmeasure.Result) {
+// recordSeatLoad keeps a clean result in the footprint store, once per load, under the model id the seat's name resolved to.
+func recordSeatLoad(cfg config.Config, model, canonical string, res seatmeasure.Result) {
 	store := seatStore(cfg)
 	if store == nil {
 		return
 	}
 	seatRecordMu.Lock()
 	defer seatRecordMu.Unlock()
-	if hp, ok := store.HostPeak(model, "", seatLoadTask); ok && time.Since(hp.Updated).Abs() <= seatLoadSameWindow {
+	if hp, ok := store.HostPeak(model, canonical, seatLoadTask); ok && time.Since(hp.Updated).Abs() <= seatLoadSameWindow {
 		return // the load another contract (or process) already recorded
 	}
-	store.RecordHost(model, "", seatLoadTask, res.CommitPeakGiB, res.TouchedPeakGiB)
+	store.RecordHost(model, canonical, seatLoadTask, res.CommitPeakGiB, res.TouchedPeakGiB)
 }
 
 // seatStore opens the footprint store the config names, fresh: a process that only reads or records the seat's loads holds no
@@ -178,12 +233,17 @@ func seatStore(cfg config.Config) *fleetnode.Footprints {
 }
 
 // SeatNeedFor is the host need of a cold load of cfg's agent seat: hostneed.SeatNeedMeasured over what the footprint store holds of
-// its measured loads, and exactly hostneed.SeatNeed(cfg) for a seat that has none. runs is how many loads are recorded.
+// its measured loads, and exactly hostneed.SeatNeed(cfg) for a seat that has none. runs is how many loads are recorded. It reads
+// the store alone (no serving layer is asked which model the seat's name means now): the loads are those of the model id measured
+// last under that name, so a name bound to another model is judged by the old model's figures until its first load is recorded,
+// and by the new window, the seed as its floor, from then on.
 func SeatNeedFor(cfg config.Config) (need hostneed.Need, runs int) {
 	if model := strings.TrimSpace(cfg.AgentPlannerModel("")); model != "" {
 		if store := seatStore(cfg); store != nil {
-			if hp, ok := store.HostPeak(model, "", seatLoadTask); ok {
-				return hostneed.SeatNeedMeasured(cfg, hp.ResidentGiB, hp.PrivateGiB, hp.Runs), hp.Runs
+			if id, ok := store.LatestHostQuant(model, seatLoadTask); ok {
+				if hp, ok := store.HostPeak(model, id, seatLoadTask); ok {
+					return hostneed.SeatNeedMeasured(cfg, hp.ResidentGiB, hp.PrivateGiB, hp.Runs), hp.Runs
+				}
 			}
 		}
 	}

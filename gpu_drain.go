@@ -1356,7 +1356,7 @@ func beginWarmBackMeasure(ctx context.Context, cfg config.Config, endpoint, mode
 	if err != nil || rd.Loaded || rd.Starting || rd.Ambiguous {
 		return func(bool) {}
 	}
-	return pipeline.BeginSeatLoadMeasure(cfg, model)
+	return pipeline.BeginSeatLoadMeasure(cfg, endpoint, model, rd.Canonical)
 }
 
 // owedNote ends a line about a warm that did not pay the debt: it says the warm stays owed,

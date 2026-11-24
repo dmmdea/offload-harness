@@ -7,12 +7,19 @@
 - **What it does now.** Every cold load of the seat that the harness starts is measured (`internal/seatmeasure`): the host's
   available memory and commit charge are read every 500 ms from just before the load until the seat is ready, and the load's
   two peaks are taken over a baseline, on a rolling median so one tick of the desktop is not a peak. A load is recorded only
-  when this call started it, it completed, no lease that declares host memory was live, every reading succeeded and the
-  load stood out of the host's own movement. A load that outlasts the warm-up's budget is followed until the seat is ready.
-  The peaks go into the footprint store beside the renders' (`agent-seat-load`), with its 20-run window and 90th
-  percentile. The contract doors, the seat warm-back and `doctor` read the need from there (`hostneed.SeatNeedMeasured`):
-  with one or two loads on record each quantity is the larger of the measurement and the config's figure; from three loads
-  the measurement replaces it in both directions. A seat with no load on record is judged exactly as before.
+  when this call started it (read again just before the warm request, after any wait for the card), it completed, no lease
+  that declares host memory was live, every reading succeeded, both peaks stood out of the host's own movement and
+  llama-swap lists the same other models, all ready, at the end as at the start. A load that outlasts the warm-up's budget
+  is followed until the seat is ready. The peaks go into the footprint store beside the renders' (`agent-seat-load`), with
+  its 20-run window and 90th percentile, under the seat's name and the model id that name resolved to, so a name bound to
+  another model starts a window of its own. The contract doors, the seat warm-back and `doctor` read the need from there
+  (`hostneed.SeatNeedMeasured`): with one or two loads on record each quantity is the larger of the measurement and the
+  config's figure (the 21 GiB default for the working set where the config states none); from three loads the measurement
+  replaces it in both directions. A seat with no load on record is judged exactly as before.
+- **What it does not do.** It reads the host's counters, not the seat's processes, so another process that grows or shrinks
+  during a load is in the record: one low run never lowers the percentile, one high run speaks until ten loads exist. A
+  seat whose launch settings change under the same model id keeps its window, and a bigger load then takes two or three
+  loads to move the percentile once ten are on record.
 - **Check.** One real contract on the reference 3-card Windows box, seat absent, 36 agent sessions open: `succeeded 1,
   deferred 0`, output `pong`, wall 341 s, the cold load running past the 300 s admission budget. `doctor` then read:
   `seat ram: OK vLLM seat ...: measured over 1 cold loads of this seat (touched 34.1 GiB, commit 53.8 GiB at the 90th

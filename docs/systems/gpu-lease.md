@@ -2520,17 +2520,26 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   the desk is not a peak (the commit moves by several GiB a minute on the reference box). The load's touched peak is the
   baseline available memory less the lowest available memory; its commit peak is the highest commit charge less the baseline
   commit. A load is recorded only when this call started it (the seat had no row in `/running` and no other model was
-  mid-swap when the call began), it completed, no reading failed, no gap between samples passed five intervals, there were
-  at least ten samples, the commit peak is at least three times the baseline's own spread and at least 1 GiB, and no lease
-  that declares host RAM was live at the start or at the end. A load that several contracts waited on is recorded once (a
+  mid-swap, read again just before the warm request goes out, so a wait for the card behind the lease fence is not in the
+  baseline), it completed, no reading failed, no gap between samples passed five intervals, there were at least ten samples,
+  the commit peak is at least three times the baseline's own spread and at least 1 GiB, the touched peak is above three
+  times that spread, no lease that declares host RAM was live at the start or at the end, and llama-swap lists the same
+  other models, all ready, at the end as at the start (a model that unloaded or loaded while the seat loaded moved the same
+  counters). What the counters cannot tell apart is another process of the host that grew or shrank during the load: the
+  percentile answers that, one low run never lowers it and one high run speaks until ten loads exist. A load that several contracts waited on is recorded once (a
   second record within 10 s of the key's last write is dropped, the window `internal/seatrate` merges cold loads in). A
   measurement never delays a contract beyond the 0.6 s of the baseline and never fails one: any error in it is swallowed.
   The figures are kept in the footprint store (`footprints.json`, beside the ledger) under the seat's model name as the
-  config binds it and the task `agent-seat-load`: the touched peak in the resident slot and the commit peak in the private slot,
-  so the store's 20-run window and 90th percentile apply. `hostneed.SeatNeedMeasured` turns them into the need the
+  config binds it, the model id llama-swap's roster resolved that name to when the load was measured (the key's quant slot)
+  and the task `agent-seat-load`: the touched peak in the resident slot and the commit peak in the private slot,
+  so the store's 20-run window and 90th percentile apply. The model id is in the key because a seat's name outlives its
+  model: a name bound to another model starts a window of its own, the seed as its floor again. The reader asks no serving
+  layer which model the name means now; it takes the key measured last (`Footprints.LatestHostQuant`), so a rebound seat
+  is judged by the old model's figures until its first load is recorded. `hostneed.SeatNeedMeasured` turns the figures into the need the
   contract doors, the warm-back and `doctor`'s `seat ram:` row all read (`pipeline.SeatNeedFor`). With no recorded load it
-  is exactly `hostneed.SeatNeed`. With one or two, each quantity is the larger of the measurement and the seed (the
-  measurement alone where the config states none). From three loads the measurement replaces the seed in both directions,
+  is exactly `hostneed.SeatNeed`. With one or two, each quantity is the larger of the measurement and the seed (where the
+  config states none, the working set's floor is the 21 GiB default such a seat was held to before, and the commit is the
+  measurement). From three loads the measurement replaces the seed in both directions,
   and the commit is stated. On the reference 3-card Windows box three cold loads of the vLLM seat raised the commit by 55.3,
   53.4 and 54.0 GiB and lowered the available memory by 32.2, 30.7 and 33.4 GiB, in 281 to 399 s, against a seed of 36 and 61.
   A warm-back is not recorded while the lease being released itself declared host RAM, because that lease is still live while

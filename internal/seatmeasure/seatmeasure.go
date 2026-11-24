@@ -11,7 +11,7 @@
 // minute on that box, so a single raw sample is not a peak:
 //   - the baseline is the median of six readings 100 ms apart, and its spread (max less min) is the noise;
 //   - a peak is taken on the median of the last five samples, so a one-tick spike of the desk is not one;
-//   - a load whose commit peak is under three times the noise was not seen above the host's own movement.
+//   - a load whose commit peak or touched peak is under three times the noise was not seen above the host's own movement.
 //
 // The package imports gpuprobe only. Where a clean result is recorded, and when, is the caller's (internal/pipeline,
 // seatmeasure.go).
@@ -189,6 +189,10 @@ func (r *Run) Finish(loaded bool) Result {
 		res.Why = fmt.Sprintf("%d samples, fewer than %d", r.samples, minSamples)
 	case res.CommitPeakGiB < max(noiseFactor*r.noise, minCommitGiB):
 		res.Why = "the load was not seen above the host's own movement"
+	case res.TouchedPeakGiB <= noiseFactor*r.noise:
+		// The available memory never fell under the baseline by more than the host's own movement: something else gave back
+		// what the load took, and a working set recorded as nothing would count as a run that measured one.
+		res.Why = "the load's working set was not seen above the host's own movement"
 	default:
 		res.Clean = true
 	}

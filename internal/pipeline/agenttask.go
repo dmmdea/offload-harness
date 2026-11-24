@@ -3046,8 +3046,9 @@ func warmSeatWith(ctx context.Context, endpoint, seat string, budget time.Durati
 	return spent, note, attempted, loaded
 }
 
-// warmSeatMeasured is the body of warmSeatWith. meas.begin is called once the seat is known to have no row in /running and no
-// other model to be mid-swap: a load this call would start, not one already in flight and not a seat already loaded.
+// warmSeatMeasured is the body of warmSeatWith. meas.begin is called just before the warm request, and only when the seat had no
+// row in /running and no other model was mid-swap: a load this call would start, not one already in flight and not a seat already
+// loaded.
 func warmSeatMeasured(ctx context.Context, endpoint, seat string, budget time.Duration, st *warmStatus, meas *seatLoadMeter) (time.Duration, string, bool, bool) {
 	if strings.TrimSpace(endpoint) == "" {
 		return 0, "", false, false // no endpoint to warm against: the gate is off by construction
@@ -3113,9 +3114,9 @@ func warmSeatMeasured(ctx context.Context, endpoint, seat string, budget time.Du
 		}
 		return 0, m.note, false, false // already resident: nothing to warm; only an alias-probe failure, if any, to report
 	}
-	if res0.state == "" && res0.busy == "" {
-		meas.begin(seat)
-	}
+	// A load this call would start: no row for the seat and no other model mid-swap. The measurement itself begins further
+	// down, after the wait for the card, so nothing that happens during that wait is in its baseline.
+	coldStart := res0.state == "" && res0.busy == ""
 	start := time.Now()
 	b := swapclient.BaseURL(endpoint)
 	if b == "" {
@@ -3138,6 +3139,9 @@ func warmSeatMeasured(ctx context.Context, endpoint, seat string, budget time.Du
 	req, rerr := http.NewRequestWithContext(wctx, http.MethodGet, wu, nil)
 	if rerr != nil {
 		return 0, joinAdmissionNotes(m.note, "warm-up request could not be built (proceeding; the seat may still be cold): "+rerr.Error()), false, false
+	}
+	if coldStart {
+		meas.begin(wctx, endpoint, seat)
 	}
 	resp, derr := warmClient.Do(req)
 	if derr != nil {
