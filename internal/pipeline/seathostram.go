@@ -54,8 +54,10 @@ func SeatColdLoadAdmission(ctx context.Context, cfg config.Config, m *gpulease.M
 	if m == nil || !strings.EqualFold(strings.TrimSpace(model), strings.TrimSpace(cfg.AgentPlannerModel(""))) {
 		return "", 0, ""
 	}
-	need := hostneed.SeatNeed(cfg)
-	if need.Source != hostneed.SourceSeat || need.GiB <= 0 {
+	// The measured need when the harness has measured loads of this seat (seatmeasure.go), the config's figures as the seed until
+	// it has three, and exactly the config's need for a seat it never measured.
+	need, _ := SeatNeedFor(cfg)
+	if (need.Source != hostneed.SourceSeat && need.Source != hostneed.SourceMeasured) || need.GiB <= 0 {
 		return "", 0, ""
 	}
 	lane := func() string {
