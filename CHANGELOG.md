@@ -7,6 +7,116 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.238.0] - 2026-11-24 - The seat's host need is measured, a host short of memory is a place in line, and an idle MCP server picks up a new build by itself
+
+### Changed - a host short of memory for the agent seat's cold load is a place in line, not a refusal
+
+- **What was wrong.** A contract that finds the agent seat unloaded asks the host first (the seat's host-RAM gate). When the
+  host was short the gate looked once, or settled for at most a minute and stopped after 10 s without progress, and the
+  contract came back deferred. The memory comes back: on the reference 3-card Windows box a contract pinned to the local seat
+  spent its 300 s admission budget behind another session's model swap, met the host 2.9 GiB short (`needs 36.0 GiB, only
+  41.1 GiB of 127.7 GiB physical is available, 8.0 GiB headroom`), was refused after one look, and four minutes later the
+  host had 66.5 GiB available. A live lane that declared host RAM refused the seat outright in the same way. A busy,
+  reserved, fenced or occupied seat was already a place in line; a host short of memory was the one shortage that was a
+  verdict.
+- **What it does now.** Who waits depends on whether the caller has a line (`delegate.hasLine`: not `route=local`, remotes
+  configured, the capacity wait not switched off, the run not sheddable).
+  - With a line, the delegator asks the host the door's own question before it deals the seat a subtask
+    (`delegate.localHostShort`, the same need the door reads, measured loads included). A seat the host cannot load now
+    reads like an occupied one: the subtask goes to a remote that can take it, or stays in the capacity wait, which re-reads
+    the host every tick and takes the seat the moment it admits. The door then looks once. If the two readings part (the
+    host moved between the looks) the door's host-RAM defer is one more tick of the wait, at most four per subtask and not
+    more often than the refusal cooldown.
+  - Without a line (a pinned local route, a box with no remotes, a sheddable run, a run on a decided seat, the `agent_run`
+    door) the door itself is the line: it re-reads the host every tick for as long as the admission budget lasts, with no
+    no-progress stop (`gpulease.Manager.HostRAMAwait`), and a live lane that declared host RAM is a reason to keep waiting.
+    When the swap pre-flight had already spent the budget the host gets one budget of its own. The admission deadline moves
+    out by the time the door waited, so the cold load that follows keeps its whole budget instead of running inside the
+    contract's wall.
+  - Both doors write the defer with one constant (`core.HostRAMReason`), and the delegator recognises it by that constant.
+- **What did not change.** The rule itself: the seat is loaded only when the available memory, less the seat's need, less
+  what live leases have yet to touch, leaves the headroom, and never while a lane that declared host RAM is live. A fleet
+  node serving a remote delegator settles as before (the option is absent on the wire). A need no state of the host could
+  meet is still answered at once.
+- **Check.** On the reference box, the released build, earlier the same day: a contract pinned local was deferred after one
+  look with the sentence above. With this change, on a host staged short for 75 s (a process holding 23 to 29 GiB so that
+  38 GiB stayed available for a 36 GiB need with 8 GiB of headroom), seat unloaded:
+  - pinned local (the door is the line): after 75 s short the contract was still waiting; then `succeeded 1, deferred 0`,
+    `admission_note: waited 1m16s for host RAM before the seat's cold load; cold load exceeded the admission budget after
+    300s (proceeding into the wall)`, output `pong`. The cold load kept its whole 300 s after the wait.
+  - route auto with no remote able to take it (the delegator's line, the capacity wait set to the order of the MCP door's
+    call deadline): `succeeded 1, deferred 0`, `capacity_wait_sec 62.4`, placement `local seat could not take its cold load
+    for want of host RAM, which came back after 1m2s, running local (capacity wait)`, output `pong`.
+  - the same contract through the command-line door's default two-minute capacity wait, while the first contract's cold
+    load was still running, was deferred at two minutes: a wait shorter than a cold load is the door's own bound and is
+    not changed here.
+  The two route-auto runs predate the last review fixes of this change (one answer for "has a line", the admission
+  deadline moving out); the pinned-local run is on the final code. Before the deadline moved, the same pinned-local run
+  left the warm-up 224 s.
+
+### Changed - an idle MCP server whose image changed on disk exits by itself, so the client starts the installed build
+
+- **What was wrong.** A deploy replaces the installed binary by rename, and every running `local-offload mcp` server keeps the
+  image it started from. On one box, 2.5 days after two releases, 36 such servers were running: 7 from a build two releases old,
+  29 from the previous one, and none ran the installed build, so a fix that had shipped reached no session. The server already
+  detected this (`process.stale_image`, the `stale_binary` and `stale_config` notices) and only said so, and the way out it named,
+  `/mcp` and Reconnect, is one nobody takes across 36 sessions.
+- **What it does now.** A server that finds its image stale returns from `Run` by itself when it is idle, and the client starts the
+  installed build at its next tool call (with client version 2.1.330.0, a stopped stdio server was started again at the next call
+  and answered by a new process on the installed build, with no error reaching the model). It acts only for a client on a small
+  constant list (`claude-code`, from the `initialize` clientInfo, case-insensitive) at version 2.1.330 or later, and only while the new key
+  `mcp_exit_when_stale` is not `false` (default on). It exits only on a definite stale verdict, with the installed file at least
+  10 s old, no `tools/call` in flight and none finished in the last 5 s, the process up at least 60 s, and nothing that outlives
+  a tool call depending on it: no media ticket the process runs, and no live GPU lease owned by the session it serves (the
+  process is that session's entry in the session registry, and a lease whose session has no live process reads as orphaned
+  after the grace, with the takeover command shown to other sessions). The check runs every 30 s and shortly after each tool
+  call. It logs one line to stderr saying why, runs its deferred cleanup (the
+  session-registry entry is removed) and exits with code 0. `offload_status`'s `process` block gains `client_name`,
+  `client_version` and `exit_when_stale` (`armed`, `armed, held by: <what it still owns>`, or `off: <why>`). The stale-image
+  notice says the server exits by itself for an armed server and keeps the manual `/mcp` instruction for any other.
+- **What did not change.** Any other client keeps today's behaviour: the notice and nothing else. A call in flight is never cut. A
+  server never exits on an unreadable installed file or without a startup identity. A changed CONFIG file still only gives its
+  notice: the one check that a config loads installs process-wide gates as it runs, so a running server does not make it.
+  `mcp_exit_when_stale: false` restores the notice-only behaviour. No other key, tool or answer changes.
+- **Check.** The client's side, with the released build: one stale server was stopped, the next tool call of that session was
+  answered by a new process on the installed build (`stale_image` false), and no error reached the model; the client's own
+  binary (2.1.330) constructs its MCP client as `name: "claude-code"`. The server's side, this build over real stdio, named
+  as that client: `exit_when_stale: armed` when fresh. With its executable replaced by other bytes and a lease held from the
+  same session it answered `stale_image: true`, `exit_when_stale: armed, held by: the session this server serves owns a live
+  GPU lease (text, epoch N)` and was still running 75 s in, past the uptime gate and two checks. The lease was released at
+  83 s and the process exited by itself at 91 s with code 0, logging `exiting by itself (client claude-code 2.1.330): this
+  server runs X and the installed build is Y; no call is in flight, so it exits now and the client starts the installed build
+  at its next call`.
+
+### Changed - the agent seat's host-memory need is measured by the harness, and the config's figures are the seed
+
+- **What was wrong.** What a cold load of the agent seat costs the host was two numbers an operator typed into the config
+  (`agent_seat_host_ram_gib`, `agent_seat_host_commit_gib`). Nothing compared them with a load, so they were right for the
+  seat and the day they were typed for and wrong after the next model, launch setting or engine update, in either
+  direction: too high refuses loads that fit, too low admits one that does not.
+- **What it does now.** Every cold load of the seat that the harness starts is measured (`internal/seatmeasure`): the host's
+  available memory and commit charge are read every 500 ms from just before the load until the seat is ready, and the load's
+  two peaks are taken over a baseline, on a rolling median so one tick of the desktop is not a peak. A load is recorded only
+  when this call started it and did not wait for the card behind the lease fence, it completed, no lease
+  that declares host memory was live, every reading succeeded, both peaks stood out of the host's own movement and
+  llama-swap lists the same other models, all ready, at the end as at the start. A load that outlasts the warm-up's budget
+  is followed until the seat is ready. The peaks go into the footprint store beside the renders' (`agent-seat-load`), with
+  its 20-run window and 90th percentile, under the seat's name and the model id that name resolved to, so a name bound to
+  another model starts a window of its own. The contract doors, the seat warm-back and `doctor` read the need from there
+  (`hostneed.SeatNeedMeasured`): with one or two loads on record each quantity is the larger of the measurement and the
+  config's figure (the 21 GiB default for the working set where the config states none); from three loads the measurement
+  replaces it in both directions. A seat with no load on record is judged exactly as before.
+- **What it does not do.** It reads the host's counters, not the seat's processes, so another process that grows or shrinks
+  during a load is in the record: one low run never lowers the percentile, one high run speaks until ten loads exist. A
+  seat whose launch settings change under the same model id keeps its window, and a bigger load then takes two or three
+  loads to move the percentile once ten are on record.
+- **Check.** One real contract on the reference 3-card Windows box, seat absent, 36 agent sessions open: `succeeded 1,
+  deferred 0`, output `pong`, wall 341 s, the cold load running past the 300 s admission budget. `doctor` then read:
+  `seat ram: OK vLLM seat ...: measured over 1 cold loads of this seat (touched 34.1 GiB, commit 53.8 GiB at the 90th
+  percentile), each held at the larger of the measurement and the seed until 3 loads exist; the config's figures 36.0 /
+  61.0 GiB are the seed; a cold load is judged by 36.0 GiB touched and 61.0 GiB of commit`. An independent sampler on the
+  load before it, every 2 s, had read 33.1 GiB taken from the available memory and 54.9 GiB added to the commit charge.
+
 ## [0.237.0] - 2026-11-24 - A commit is held to the ceiling the commit limit can reach, so a desktop's commit charge no longer refuses the agent seat
 
 ### Fixed - a commit is held to the ceiling the commit limit can reach, not to where the limit stands
