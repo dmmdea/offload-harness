@@ -7,7 +7,7 @@
 - **What it does now.** Every cold load of the seat that the harness starts is measured (`internal/seatmeasure`): the host's
   available memory and commit charge are read every 500 ms from just before the load until the seat is ready, and the load's
   two peaks are taken over a baseline, on a rolling median so one tick of the desktop is not a peak. A load is recorded only
-  when this call started it (read again just before the warm request, after any wait for the card), it completed, no lease
+  when this call started it and did not wait for the card behind the lease fence, it completed, no lease
   that declares host memory was live, every reading succeeded, both peaks stood out of the host's own movement and
   llama-swap lists the same other models, all ready, at the end as at the start. A load that outlasts the warm-up's budget
   is followed until the seat is ready. The peaks go into the footprint store beside the renders' (`agent-seat-load`), with

@@ -2520,12 +2520,13 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   the desk is not a peak (the commit moves by several GiB a minute on the reference box). The load's touched peak is the
   baseline available memory less the lowest available memory; its commit peak is the highest commit charge less the baseline
   commit. A load is recorded only when this call started it (the seat had no row in `/running` and no other model was
-  mid-swap, read again just before the warm request goes out, so a wait for the card behind the lease fence is not in the
-  baseline), it completed, no reading failed, no gap between samples passed five intervals, there were at least ten samples,
+  mid-swap, and the warm request went out within one admission poll of that look: a call that waited for the card behind the
+  lease fence is not measured; the baseline itself is read just before the request), it completed, no reading failed, no gap between samples passed five intervals, there were at least ten samples,
   the commit peak is at least three times the baseline's own spread and at least 1 GiB, the touched peak is above three
   times that spread, no lease that declares host RAM was live at the start or at the end, and llama-swap lists the same
   other models, all ready, at the end as at the start (a model that unloaded or loaded while the seat loaded moved the same
-  counters). What the counters cannot tell apart is another process of the host that grew or shrank during the load: the
+  counters; on a contract's own warm-up the two lists are the looks at `/running` it already makes, so a measurement adds no
+  request to an admission). What the counters cannot tell apart is another process of the host that grew or shrank during the load: the
   percentile answers that, one low run never lowers it and one high run speaks until ten loads exist. A load that several contracts waited on is recorded once (a
   second record within 10 s of the key's last write is dropped, the window `internal/seatrate` merges cold loads in). A
   measurement never delays a contract beyond the 0.6 s of the baseline and never fails one: any error in it is swallowed.

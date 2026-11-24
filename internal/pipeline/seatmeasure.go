@@ -13,10 +13,12 @@ package pipeline
 //
 // A measurement is a side effect of a load and never part of it: nothing here returns an error, delays the load past the 0.6 s
 // the baseline takes, or can panic out (seatLoadMeter.end recovers). A load is recorded only when this call started it (the seat had no
-// row in /running and no other model was mid-swap, read again just before the warm request goes out), it completed, the result is
-// clean, no lease that declares host RAM was live at the start or the end (such a lane's own growth is in the same counters) and
-// llama-swap lists the same other models, all ready, at the end as at the start: a model that unloaded or loaded while the seat
-// loaded moved the same counters.
+// row in /running and no other model was mid-swap, and the warm request went out within one admission poll of that look: a call
+// that waited for the card behind the lease fence is not measured), it completed, the result is clean, no lease that declares
+// host RAM was live at the start or the end (such a lane's own growth is in the same counters) and llama-swap lists the same
+// other models, all ready, at the end as at the start: a model that unloaded or loaded while the seat loaded moved the same
+// counters. On the warm-up's own path the two lists are the ones its looks at /running already read, so a measurement adds no
+// request to a contract's admission.
 //
 // What the counters cannot tell apart stays in a record: another process of the host that grew or shrank during the load. The
 // store's percentile is what answers that (one low run never lowers it, one high run speaks until ten loads exist).
@@ -70,29 +72,33 @@ func registerSeatMeasure(cfg config.Config) { seatMeasureCfg.Store(&cfg) }
 var seatRecordMu sync.Mutex
 
 // seatLoadMeter is the measurement of one warm-up. The zero value measures nothing.
-type seatLoadMeter struct{ finish func(loaded bool) }
-
-// begin starts the measurement when seat is the registered config's agent seat and reads absent now: the caller looked before
-// it waited for the card (the lease fence), so the seat is read again here, just before the warm request, and the baseline is of
-// this moment. A seat that another call began loading in between, or whose model id cannot be resolved, is not measured.
-func (s *seatLoadMeter) begin(ctx context.Context, endpoint, seat string) {
-	cfg := seatMeasureCfg.Load()
-	if cfg == nil {
-		return
-	}
-	rctx, cancel := context.WithTimeout(ctx, seatOthersTimeout)
-	rd, err := seatload.Running(rctx, warmClient, endpoint, seat)
-	cancel()
-	if err != nil || rd.Loaded || rd.Starting || rd.Ambiguous {
-		return
-	}
-	s.finish = BeginSeatLoadMeasure(*cfg, endpoint, seat, rd.Canonical)
+type seatLoadMeter struct {
+	finish func(loaded bool)
+	// canonical is the model id the seat's name resolved to, and before the other models /running listed ready in the look the
+	// warm-up began from.
+	canonical, before string
+	// last is the warm-up's last look at /running after its request (nil when it never looked again).
+	last *residency
 }
 
-// end finishes it; loaded says the load completed.
+// begin starts the measurement when seat is the registered config's agent seat: the baseline is read here, just before the warm
+// request. canonical is the model id the warm-up's matcher resolved the seat's name to ("" when the roster could not be read:
+// not measured) and others the other models its look listed ready.
+func (s *seatLoadMeter) begin(seat, canonical, others string) {
+	if cfg := seatMeasureCfg.Load(); cfg != nil {
+		s.canonical, s.before = canonical, others
+		s.finish = BeginSeatLoadMeasure(*cfg, seat, canonical)
+	}
+}
+
+// saw keeps the warm-up's latest look at /running after its request: the list the load's end is judged by.
+func (s *seatLoadMeter) saw(r residency) { s.last = &r }
+
+// end finishes it; loaded says the load completed. A load whose last look lists other models than the first, or one mid-swap,
+// is finished as not loaded: it is not recorded.
 func (s *seatLoadMeter) end(loaded bool) {
 	if s.finish != nil {
-		s.finish(loaded)
+		s.finish(loaded && s.last != nil && s.last.busy == "" && s.last.others == s.before)
 	}
 }
 
@@ -105,6 +111,7 @@ func (s *seatLoadMeter) endWhenReady(endpoint, seat string) {
 	if finish == nil {
 		return
 	}
+	canonical, before := s.canonical, s.before
 	go func() {
 		defer func() { _ = recover() }()
 		ctx, cancel := context.WithTimeout(context.Background(), seatLoadTail)
@@ -114,7 +121,8 @@ func (s *seatLoadMeter) endWhenReady(endpoint, seat string) {
 			rd, err := seatload.Running(ctx, warmClient, endpoint, seat)
 			switch {
 			case err == nil && rd.Loaded && !rd.Starting: // a row that reads starting is listed as loaded too (seatload.Reading)
-				finish(true)
+				now, ok := SeatOtherModels(endpoint, seat, canonical)
+				finish(ok && now == before)
 				return
 			case err == nil && !rd.Loaded && !rd.Ambiguous:
 				finish(false) // no row: the load ended without a ready seat
@@ -136,11 +144,12 @@ func (s *seatLoadMeter) endWhenReady(endpoint, seat string) {
 }
 
 // BeginSeatLoadMeasure starts measuring a cold load of seat that the caller is about to start, and returns the function that ends
-// the measurement (loaded = the load completed). The caller has just established that the seat is absent, and canonical is the
-// model id llama-swap's roster resolved the seat's name to in that reading. For a seat that is not cfg's agent seat, a name the
-// roster did not resolve, a platform with no host-memory reader, a lease directory that cannot be read, a lane that declared host
-// RAM and is live, or another model that is listed and not ready, the returned function does nothing. Never nil, never panics.
-func BeginSeatLoadMeasure(cfg config.Config, endpoint, seat, canonical string) (finish func(loaded bool)) {
+// the measurement (loaded = the load completed AND llama-swap lists the same other models, all ready, as when it began: the
+// caller holds both lists, SeatOtherModels reads one). The caller has just established that the seat is absent, and canonical
+// is the model id llama-swap's roster resolved the seat's name to in that reading. For a seat that is not cfg's agent seat, a
+// name the roster did not resolve, a platform with no host-memory reader, a lease directory that cannot be read or a lane that
+// declared host RAM and is live, the returned function does nothing. Never nil, never panics.
+func BeginSeatLoadMeasure(cfg config.Config, seat, canonical string) (finish func(loaded bool)) {
 	nop := func(bool) {}
 	defer func() {
 		if recover() != nil {
@@ -156,10 +165,6 @@ func BeginSeatLoadMeasure(cfg config.Config, endpoint, seat, canonical string) (
 	if err != nil || hostLaneLive(m) {
 		return nop
 	}
-	before, ok := otherModels(endpoint, model, canonical)
-	if !ok {
-		return nop
-	}
 	run := seatmeasure.Begin(gpuprobe.ReadHostMemory, seatMeasureEvery)
 	return func(loaded bool) {
 		defer func() { _ = recover() }()
@@ -167,16 +172,15 @@ func BeginSeatLoadMeasure(cfg config.Config, endpoint, seat, canonical string) (
 		if !loaded || !res.Clean || hostLaneLive(m) {
 			return
 		}
-		if now, ok := otherModels(endpoint, model, canonical); !ok || now != before {
-			return
-		}
 		recordSeatLoad(cfg, model, canonical, res)
 	}
 }
 
-// otherModels is what llama-swap lists besides the seat, as one sorted line of model ids. ok is false when the list cannot be
-// read or any of those models is not ready (loading, stopping): a load measured across that is not the seat's alone.
-func otherModels(endpoint, seat, canonical string) (ids string, ok bool) {
+// SeatOtherModels is what llama-swap lists besides the seat, as one sorted line of model ids (the shape of residency.others).
+// ok is false when the list cannot be read or any of those models is not ready (loading, stopping): a load measured across that
+// is not the seat's alone. It is one request, for the callers that hold no look of their own (the warm-back, and the
+// measurement that follows a load past the warm-up's budget).
+func SeatOtherModels(endpoint, seat, canonical string) (ids string, ok bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), seatOthersTimeout)
 	defer cancel()
 	rows, err := seatload.Occupants(ctx, warmClient, swapclient.BaseURL(endpoint))
