@@ -26,14 +26,19 @@ func TestTheWindowsReaderWiresEachCounterToItsField(t *testing.T) {
 		return true
 	})
 	defer restore()
+	// The page files' room to grow is the kernel's own list (pagefile_windows.go); stood in, so the reading does not depend on
+	// the machine running the test. It lands on top of the commit limit, as the ceiling.
+	prevGrowth := pageFileGrowthGiB
+	pageFileGrowthGiB = func() float64 { return 60 }
+	defer func() { pageFileGrowthGiB = prevGrowth }()
 
 	got, ok := readHostMemory()
 	if !ok {
 		t.Fatal("a call that succeeds is a reading")
 	}
-	want := HostMemory{PhysicalGiB: 128, AvailableGiB: 72, CommitUsedGiB: 72, CommitLimitGiB: 172}
+	want := HostMemory{PhysicalGiB: 128, AvailableGiB: 72, CommitUsedGiB: 72, CommitLimitGiB: 172, CommitCeilingGiB: 232}
 	if got != want {
-		t.Fatalf("reading %+v, want %+v: physical is TotalPhys, available AvailPhys, the commit limit TotalPageFile and the charge TotalPageFile less AvailPageFile", got, want)
+		t.Fatalf("reading %+v, want %+v: physical is TotalPhys, available AvailPhys, the commit limit TotalPageFile, the charge TotalPageFile less AvailPageFile, and the ceiling the limit plus what the page files can still grow", got, want)
 	}
 	if sawLength != 64 {
 		t.Errorf("GlobalMemoryStatusEx refuses a structure whose Length is not set to its size (64), the reader passed %d", sawLength)
