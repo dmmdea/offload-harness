@@ -55,8 +55,13 @@ func readPageFiles() ([]PageFile, bool) {
 		e := (*pageFileInfoEx)(unsafe.Pointer(&buf[off]))
 		if name := e.PageFileName.String(); name != "" {
 			path := strings.TrimPrefix(name, `\??\`)
-			files = append(files, PageFile{Path: path, Volume: filepath.VolumeName(path) + `\`,
-				SizeBytes: uint64(e.TotalSize) * page, MaxBytes: uint64(e.MaximumSize) * page})
+			// A file whose path names no volume (a mounted folder, a device path) is listed at its size with no room to grow: its
+			// free space cannot be read by a root, and a guess would be read off whatever drive this process runs from.
+			f := PageFile{Path: path, SizeBytes: uint64(e.TotalSize) * page, MaxBytes: uint64(e.TotalSize) * page}
+			if vol := filepath.VolumeName(path); vol != "" {
+				f.Volume, f.MaxBytes = vol+`\`, uint64(e.MaximumSize)*page
+			}
+			files = append(files, f)
 		}
 		if e.NextEntryOffset == 0 {
 			break

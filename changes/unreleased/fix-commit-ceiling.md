@@ -15,7 +15,8 @@
   grow, its maximum (read from the kernel, `SystemPageFileInformationEx`) less its size, bounded by the free space of its
   volume less a tenth of the volume. A stated commit is admitted while the charge, the commit and what running leases have
   yet to be charged stay under the ceiling less the headroom. A commit nobody stated, on a host whose limit can grow, is
-  taken as 2.1 times the touched figure (the ratio measured on that box) and held to the same line. The host verdict on such
+  taken as 2.1 times the touched figure (the ratio measured on that box) and held to the same line, and so is what a lease
+  already granted has yet to load: a lane granted a moment ago is in neither counter. The host verdict on such
   a host rests on available memory and the ceiling. A refusal says `committed X of a commit limit that is A GiB now and can
   reach B GiB`, and the status JSON gains `commit_ceiling_gib`. The lane auto-plan pre-filter now passes the commit a
   graph's estimate states, as the grant already did.

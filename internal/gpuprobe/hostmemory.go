@@ -353,7 +353,10 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 			// growing it (commitceiling.go), and refuses only past the ceiling. Where it cannot grow the two are one figure.
 			c.CommitApplies = true
 			c.CommitBoundGiB = c.CommitCeilingGiB - headroomGiB
-			c.CommitProjectedGiB = mem.CommitUsedGiB + need.CommitGiB + pending.CommitGiB
+			if mem.CommitCanGrow() {
+				c.CommitPendingGiB = pendingCommitAtCeiling(pending)
+			}
+			c.CommitProjectedGiB = mem.CommitUsedGiB + need.CommitGiB + c.CommitPendingGiB
 		case !need.CommitStated && hardLimit && mem.CommitCanGrow():
 			// A commit nobody stated, on a host whose commit limit can grow. The physical-RAM line below is a stand-in from before
 			// the ceiling was read, and on such a host it measures nothing: the commit charge of a desktop sits above physical RAM
@@ -364,7 +367,7 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 			need.CommitGiB *= UnstatedCommitFactor
 			c.CommitNeedGiB = need.CommitGiB
 			c.CommitBoundGiB = c.CommitCeilingGiB - headroomGiB
-			c.CommitPendingGiB = pending.TouchGiB * UnstatedCommitFactor
+			c.CommitPendingGiB = pendingCommitAtCeiling(pending)
 			c.CommitProjectedGiB = mem.CommitUsedGiB + need.CommitGiB + c.CommitPendingGiB
 		case !need.CommitStated:
 			// The retired comparison, kept for every caller that stated no commit: commit charge + the declared figure + what the
@@ -424,7 +427,7 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 				need.CommitGiB, UnstatedCommitFactor, mem.CommitUsedGiB, mem.CommitLimitGiB, c.CommitCeilingGiB, pend(c.CommitPendingGiB), headroomGiB))
 		} else if need.CommitStated && mem.CommitCanGrow() {
 			why = append(why, fmt.Sprintf("needs %.1f GiB of commit, committed %.1f of a commit limit that is %.1f GiB now and can reach %.1f GiB%s, %.1f GiB headroom",
-				need.CommitGiB, mem.CommitUsedGiB, mem.CommitLimitGiB, c.CommitCeilingGiB, pend(pending.CommitGiB), headroomGiB))
+				need.CommitGiB, mem.CommitUsedGiB, mem.CommitLimitGiB, c.CommitCeilingGiB, pend(c.CommitPendingGiB), headroomGiB))
 		} else if need.CommitStated {
 			why = append(why, fmt.Sprintf("needs %.1f GiB of commit, committed %.1f of %.1f GiB commit limit%s, %.1f GiB headroom",
 				need.CommitGiB, mem.CommitUsedGiB, mem.CommitLimitGiB, pend(pending.CommitGiB), headroomGiB))
@@ -446,6 +449,17 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 	}
 	c.Why = "waiting for host RAM: " + strings.Join(why, "; and ")
 	return c
+}
+
+// pendingCommitAtCeiling is what the leases already granted have yet to be CHARGED, as the ceiling line counts it. The pending
+// figure the lease manager hands over pools every running lease: the commit of those that stated one, and for those that
+// stated none only what they have yet to touch. On the ceiling line a commit nobody stated is UnstatedCommitFactor times the
+// touched figure, for a lease still loading as much as for the one asking, so the part not yet charged is raised by the factor's
+// excess over one on everything still to be touched. That counts a pending lease that DID state its commit high (by 1.1 times
+// what it has yet to touch) for as long as it is loading, and never counts one low: a lease granted a moment ago and not loaded
+// yet is exactly the load neither counter shows.
+func pendingCommitAtCeiling(pending HostLoad) float64 {
+	return pending.CommitGiB + pending.TouchGiB*(UnstatedCommitFactor-1)
 }
 
 // unstatedCommitLineIsLimit says the line a commit nobody stated is held to is the OS commit limit and not physical RAM: the limit

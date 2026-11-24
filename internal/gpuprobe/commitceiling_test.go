@@ -57,6 +57,14 @@ func TestACommitIsHeldToTheCeilingThePageFileCanReachNotToTheCurrentLimit(t *tes
 	if u := HostRAMAdmitsLoad(growable, true, HostLoad{TouchGiB: 36, CommitGiB: 36}, HostLoad{}, 8); !u.OK || !u.CommitEstimated || math.Abs(u.CommitNeedGiB-36*UnstatedCommitFactor) > 0.01 {
 		t.Errorf("an unstated commit on a host whose limit can grow: %+v", u)
 	}
+	// A lease granted a moment ago and not loaded yet is in neither counter. One that stated no commit (a lane declared with 25 GiB
+	// alone) is counted at the factor like any unstated commit on this line: 130 + 61 + 2.1 x 25 passes the ceiling less the
+	// headroom, and at the 25 GiB it declared the seat would have been admitted into it.
+	behind := growable
+	behind.CommitUsedGiB = 130
+	if c := HostRAMAdmitsLoad(behind, true, seat, HostLoad{TouchGiB: 25, CommitGiB: 25}, 8); c.OK || !c.CommitShort || math.Abs(c.CommitPendingGiB-25*UnstatedCommitFactor) > 0.01 {
+		t.Errorf("a pending lease that stated no commit must count at the factor on the ceiling line: %+v", c)
+	}
 	// What pages is still refused: the touched set against the memory that is available.
 	short := growable
 	short.AvailableGiB = 40
