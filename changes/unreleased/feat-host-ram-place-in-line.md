@@ -30,13 +30,15 @@
 - **Check.** On the reference box, the released build, earlier the same day: a contract pinned local was deferred after one
   look with the sentence above. With this change, on a host staged short for 75 s (a process holding 23 to 29 GiB so that
   38 GiB stayed available for a 36 GiB need with 8 GiB of headroom), seat unloaded:
-  - pinned local (the door is the line): `succeeded 1, deferred 0`, `admission_note: waited 1m16s for host RAM before the
-    seat's cold load; cold load exceeded the admission budget after 224s (proceeding into the wall)`, output `pong`.
+  - pinned local (the door is the line): after 75 s short the contract was still waiting; then `succeeded 1, deferred 0`,
+    `admission_note: waited 1m16s for host RAM before the seat's cold load; cold load exceeded the admission budget after
+    300s (proceeding into the wall)`, output `pong`. The cold load kept its whole 300 s after the wait.
   - route auto with no remote able to take it (the delegator's line, the capacity wait set to the order of the MCP door's
     call deadline): `succeeded 1, deferred 0`, `capacity_wait_sec 62.4`, placement `local seat could not take its cold load
     for want of host RAM, which came back after 1m2s, running local (capacity wait)`, output `pong`.
   - the same contract through the command-line door's default two-minute capacity wait, while the first contract's cold
     load was still running, was deferred at two minutes: a wait shorter than a cold load is the door's own bound and is
     not changed here.
-  The second run of the first case predates the change that moves the admission deadline out; its note shows the 224 s the
-  warm-up was left with before it.
+  The two route-auto runs predate the last review fixes of this change (one answer for "has a line", the admission
+  deadline moving out); the pinned-local run is on the final code. Before the deadline moved, the same pinned-local run
+  left the warm-up 224 s.

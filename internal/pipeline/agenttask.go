@@ -529,7 +529,8 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// stays honest: it is admission, not run time, and the wire says so.
 	if CoherenceProbeWanted(p.cfg, coldLoaded) {
 		act.Phase("coherence-probe")
-		v := ProbeSeatCoherence(ctx, p.cfg, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted)
+		// Less the patient host wait, like the warm-up: that wait moved the admission deadline out, it did not spend the budget.
+		v := ProbeSeatCoherence(ctx, p.cfg, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-(admitted-hostWaited))
 		admitted += v.Spent
 		RememberCoherence(p.cfg.Endpoint, seat, v)
 		if v.Ran {
