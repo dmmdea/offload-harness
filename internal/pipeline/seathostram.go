@@ -7,7 +7,10 @@ package pipeline
 // host RAM may be live. A contract that found the seat cold never asked: its warm-up (D-64) loaded the seat whatever the host
 // read, and the warm-back's own refusal said so ("the seat loads on its next request"). On the 3-card reference box, with about
 // 80 GiB already committed by the desktop and its sessions, one contract's cold load of the vLLM seat took the commit charge to
-// 152.0 of 153.8 GiB; the page file had grown 7 GiB to make room, and the box was 1.8 GiB from refusing allocations.
+// 152.0 of 153.8 GiB; the page file had grown 7 GiB to make room. That was read then as a box "1.8 GiB from refusing
+// allocations". It was not: the file was growing as designed and had some 90 GiB still to grow (gpuprobe/commitceiling.go). The
+// gate stands for the two things that are real: the seat's touched set against the available memory, and its commit against the
+// ceiling the commit limit can reach.
 //
 // Both contract doors (runAgentTask and the MCP agent_run door) now put the warm-back's rule to a load they would START, before
 // they start it, and defer as re-placeable when it does not fit, so the delegator places the contract on another node instead.
@@ -21,7 +24,9 @@ package pipeline
 // (gpulease.Manager.HostRAMSettle): it re-reads the host every couple of seconds, asks the installed relief (the WSL page-cache
 // drop, when the node enables it) on each refusal, and gives up when the host stops giving memory back or the bound is spent.
 // The warm-back at a lease release does not wait (gpu_drain.go): the lease it follows is still held while it asks.
-// A node that states the seat's commit (agent_seat_host_commit_gib) has it judged against the OS commit limit, not physical RAM.
+// A node that states the seat's commit (agent_seat_host_commit_gib) has it judged against the commit ceiling (the OS commit limit
+// with its page files at their maximum), not physical RAM and not the current limit: held to the current limit, the seat was
+// refused on every contract of a day on a desktop with 67 GiB of RAM available (commitceiling.go).
 
 import (
 	"context"
@@ -44,7 +49,7 @@ import (
 //     in any counter yet. Immediate: a lane that streams does not end in a minute;
 //   - the admission rule: the seat's footprint, plus what the live leases have yet to load, must leave the headroom of the
 //     available RAM and keep the commit charge under its bound (physical RAM less the headroom when the node states no commit,
-//     the OS commit limit less the headroom when it does). This one is re-read for up to min(gpulease.HostRAMSettleBound, budget).
+//     the commit ceiling less the headroom when it does). This one is re-read for up to min(gpulease.HostRAMSettleBound, budget).
 func SeatColdLoadAdmission(ctx context.Context, cfg config.Config, m *gpulease.Manager, model string, budget time.Duration) (why string, waited time.Duration, note string) {
 	if m == nil || !strings.EqualFold(strings.TrimSpace(model), strings.TrimSpace(cfg.AgentPlannerModel(""))) {
 		return "", 0, ""

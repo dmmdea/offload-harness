@@ -28,6 +28,10 @@ import (
 // compares a declaration, so a box can still read NEAR or OVER after a lane it admitted committed more than it
 // declared (measured: gpu-lease.md, "Known limits") as well as after something the grant never saw (a process
 // outside every lease).
+//
+// On a host whose commit limit can grow (a page file below its maximum: gpuprobe.HostMemory.CommitCanGrow) the lines are two, the
+// available memory and the commit CEILING, for every lease: the commit charge above physical RAM says nothing there (a desktop's
+// sits above it with half the RAM available) and the current limit is not a wall, so the word does not rest on either.
 type HostView struct {
 	Read bool
 	Mem  gpuprobe.HostMemory
@@ -52,6 +56,10 @@ func NewHostView(mem gpuprobe.HostMemory, ok bool, headroomGiB float64, declared
 // nobody stated is held to physical RAM less the headroom on every reading, enforced limit or not, and to the enforced limit less
 // the headroom when that sits below physical RAM (unstatedCommitLine).
 func (v HostView) commitEnforced() bool { return !v.Mem.CommitLimitSoft && v.Mem.CommitLimitGiB > 0 }
+
+// commitGrows says the OS enforces a commit limit here and can still raise it: every commit, stated or not, is then judged
+// against the ceiling (gpuprobe.HostRAMAdmitsLoad), and the physical-RAM line is not applied.
+func (v HostView) commitGrows() bool { return v.commitEnforced() && v.Mem.CommitCanGrow() }
 
 // unstatedCommitLine is the line a commit nobody stated is held to, before the headroom: physical RAM, or the enforced commit
 // limit when that sits nearer (the same choice gpuprobe.HostRAMAdmitsLoad makes).
@@ -91,6 +99,13 @@ func (v HostView) Map() map[string]any {
 		if v.commitEnforced() {
 			out["commit_room_gib"] = round1(max(v.Mem.CommitLimitGiB-v.Mem.CommitUsedGiB-v.Pending.CommitGiB-v.HeadroomGiB, 0))
 		}
+		if v.commitGrows() {
+			// The limit can grow: the line is the ceiling, for a stated commit and (taken at the factor) for one nobody stated.
+			ceiling := v.Mem.CommitCeilingGiB
+			out["commit_ceiling_gib"] = round1(ceiling)
+			out["commit_room_gib"] = round1(max(ceiling-v.Mem.CommitUsedGiB-v.Pending.CommitGiB-v.HeadroomGiB, 0))
+			out["unstated_commit_room_gib"] = round1(max((ceiling-v.Mem.CommitUsedGiB-v.HeadroomGiB)/gpuprobe.UnstatedCommitFactor-v.Pending.TouchGiB, 0))
+		}
 	}
 	if why := v.Why(); why != "" {
 		out["verdict_why"] = why
@@ -110,8 +125,8 @@ func (v HostView) Map() map[string]any {
 // It is "" for any other verdict, for an OVER that rests on something else (nothing available), and for a reading at or near an
 // enforced limit, where a stated commit waits as well.
 func (v HostView) StatedCommitClause() string {
-	if v.Verdict != gpuprobe.HostOver || !v.Read || v.Mem.CommitUsedGiB <= v.Mem.PhysicalGiB {
-		return ""
+	if v.Verdict != gpuprobe.HostOver || !v.Read || v.Mem.CommitUsedGiB <= v.Mem.PhysicalGiB || v.commitGrows() {
+		return "" // where the limit can grow no verdict rests on the physical line
 	}
 	if !v.commitEnforced() {
 		return "a lease that states its commit is not judged on this line"
@@ -134,6 +149,10 @@ func (v HostView) Why() string {
 		parts = append(parts, fmt.Sprintf("%.1f of %.1f GiB physical RAM is available", v.Mem.AvailableGiB, v.Mem.PhysicalGiB))
 	}
 	switch {
+	case v.commitGrows():
+		if v.Mem.CommitUsedGiB > v.Mem.CommitCeilingGiB-v.HeadroomGiB {
+			parts = append(parts, fmt.Sprintf("committed %.1f of the %.1f GiB the commit limit can reach", v.Mem.CommitUsedGiB, v.Mem.CommitCeilingGiB))
+		}
 	case v.commitEnforced() && v.Mem.CommitUsedGiB > v.Mem.CommitLimitGiB-v.HeadroomGiB:
 		parts = append(parts, fmt.Sprintf("committed %.1f of the %.1f GiB commit limit", v.Mem.CommitUsedGiB, v.Mem.CommitLimitGiB))
 	case v.Mem.CommitUsedGiB > v.Mem.PhysicalGiB-v.HeadroomGiB:
@@ -143,6 +162,12 @@ func (v HostView) Why() string {
 }
 
 func (v HostView) overNote() string {
+	if v.commitGrows() {
+		return fmt.Sprintf("%s. This reading cannot say whether the box is paging now; "+
+			"a lease that declares host RAM waits until there is room again (the available RAM less its need and the %.1f GiB headroom, "+
+			"and the commit charge plus its commit under the %.1f GiB the commit limit can reach, less the headroom); "+
+			"end a lease or stop a kept ComfyUI instance to free it", v.Why(), v.HeadroomGiB, v.Mem.CommitCeilingGiB)
+	}
 	return fmt.Sprintf("%s. This reading cannot say whether the box is paging now; "+
 		"a lease that declares host RAM waits until there is room again (the available RAM less its need and the %.1f GiB headroom, "+
 		"and the commit charge plus its commit under physical RAM (or an enforced commit limit that sits below it) less the headroom, or, for a commit it states, under the commit limit less the headroom where the OS enforces one); "+
@@ -158,6 +183,9 @@ func (v HostView) Line() string {
 	commit := fmt.Sprintf("commit %.1f of %.1f GiB", v.Mem.CommitUsedGiB, v.Mem.CommitLimitGiB)
 	if !v.commitEnforced() {
 		commit += " (not a limit this OS enforces: a commit a lease states is not judged on it; one it does not state is still held to physical RAM)"
+	}
+	if v.commitGrows() {
+		commit += fmt.Sprintf(" (the page file can take that limit to %.1f GiB, the line a commit is held to)", v.Mem.CommitCeilingGiB)
 	}
 	line := fmt.Sprintf("host memory: %s — %.1f GiB physical, %.1f GiB available, %s", v.Verdict, v.Mem.PhysicalGiB, v.Mem.AvailableGiB, commit)
 	switch {

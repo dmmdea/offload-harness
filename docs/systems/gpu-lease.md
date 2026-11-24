@@ -29,6 +29,7 @@ other on a single shared card.
 | `internal/gpulease/audit.go`, `procimages_*.go` | the **reader audit** behind `gpu doctor`: finds harness binaries, Node readers and running images, and writes the reader-audit marker |
 | `internal/gpuprobe/cards.go` | the **card table** (UUID-keyed, index spaces side by side) |
 | `internal/gpuprobe/hostmemory.go`, `hostram*.go` | the **host memory reading** (physical, available, commit used and limit; Windows `GlobalMemoryStatusEx`, Linux `/proc/meminfo`), `HostRAMAdmitsLoad` (the ONE admission rule, over the working set a job touches and the commit it is charged, apart), the OK / NEAR / OVER verdict and the `UseHostMemoryReader` test seam |
+| `internal/gpuprobe/commitceiling.go`, `internal/gpuprobe/pagefile_windows.go` | the **commit ceiling**: what the commit limit can reach, the current limit plus the room each page file still has to grow (`commitGrowthBytes`, `HostMemory.CommitCeilingGiB`, `CommitCanGrow`), `UnstatedCommitFactor` (in `hostmemory.go`), and the Windows reader of the page files' own bounds (`NtQuerySystemInformation`, `SystemPageFileInformationEx`) and of their volumes' free space; [below](#the-commit-limit-moves-and-the-line-is-the-ceiling) |
 | `internal/gpulease/hostram.go`, `procmem*.go` | the **host-RAM term of the grant**: `Options.HostRAMGiB` and `Options.HostRAMCommitGiB`, `ErrHostRAM`, the not-yet-loaded part of granted leases, per quantity (the working set less what the processes below the holder, and the keyed ComfyUI instances whose launch marker names the lease's epoch, hold RESIDENT; the commit less what they hold PRIVATELY), `Manager.HostRAMPendingLoad` (a running lease is credited with the commit peak its tree has plateaued at: `hostram_observed.go`); and, for a lease that unloads the seat (F82), `Options.HostRAMWaitGiB` / `Meta.HostRAMWaitGiB` and `Manager.AwaitHostRAM`, the same rule put after the unload |
 | `internal/pipeline/mediahostram.go` | **F82 for the media path**: whether a render defers its host RAM until its own unload has run (`hostRAMDeferral`, shared by the grant and the lane probe), the Go-side clear under the lease (`clearForHostRAM`), the bound of the wait after it (`hostRAMWaitEnd`, `mediaHostRAMFloor`) and the step that runs both (`clearThenAdmitHostRAM`); [the media order](#a-render-lease-follows-the-same-order-the-media-path-the-incident-of-2026-10-24) |
 | `internal/gpulease/relief.go`, `internal/wslcache` | **the WSL VM's page cache (`gpu_hostram_wsl_cache_drop`, off by default)**: a lease waiting for host RAM asks the WSL 2 VM to drop the page cache a drop can free, when that covers its shortfall (also asked by a contract door's cold load of the seat, which settles for up to a minute, and once by the seat's warm-back; [below](#the-wsl-vms-page-cache-gpu_hostram_wsl_cache_drop)) |
@@ -973,9 +974,9 @@ whole-node lease claims every card), not under a foreign compute process
 (`foreign-busy`, reported and skipped, never killed), its free VRAM fits `--vram` (GiB per card), and the **host** has the
 host's memory admits what `--ram` and `--ram-commit` declare: the same rule the grant applies (`gpuprobe.HostRAMAdmitsLoad`: the
 available RAM less the touched need and the not-yet-touched part of granted leases must leave `gpu_host_ram_headroom_gib`, default
-8, and the commit charge + the commit need + the not-yet-touched part must stay under physical RAM less the headroom (a commit
-nobody stated), or, for a commit stated with `--ram-commit` where the OS enforces a limit, with the not-yet-charged part under that
-limit less the headroom; see "Host RAM" below), here as an advisory pre-filter. Among allocatable cards the order is: no resident
+8, and the commit charge + the commit need + the not-yet-charged part must stay under the commit ceiling less the headroom where
+the OS enforces a commit limit (a commit nobody stated is taken as 2.1 times the touched figure there), or, where it does not or the
+limit cannot grow, under physical RAM less the headroom for a commit nobody stated; see "Host RAM" below), here as an advisory pre-filter. Among allocatable cards the order is: no resident
 seat first, then the cheapest eviction (the footprint of the configured layer seats loaded on it), then the lowest id. An
 unreadable host-memory reading refuses only when a RAM need was declared, and a need no state of the host admits ends the
 request at once. On Windows (WDDM) nvidia-smi lists no per-process
@@ -1939,16 +1940,20 @@ takeover that stops a tree, the hardening of `gpu release --epoch N` over a live
 bounded, and it never makes the box unstable. **What the guard keeps of that rule** is narrower, and is stated here so it is
 not read as more: before a lease that declares host RAM is granted, the guard holds it back if either of two things its
 declaration adds would pass a line. The **working set it will touch** is held to the memory that is *available* (less a
-headroom): that is what pages when it runs out. The **commit it will be charged** is held to a line that depends on who said what
-the commit is. A job that **states its commit** (`--ram-commit`, or a caller that measured one) is held to the OS *commit limit*
-(less the same headroom), where the OS enforces one: past it other processes' allocations fail once the page file has reached its
-maximum (the limit moves with a system-managed page file: "The commit limit moves", below). A job that **states none** declares one
-figure, and its commit is that figure standing in for one: it is held to *physical RAM* (less the headroom), the line every such
-caller always had, because a job can commit more than it touches (a coder-model arm touched 27.8 GiB and was charged 58.1) and the
-commit limit lies 44 GiB further out than physical RAM on the reference box, so against it two such arms were admitted into commit
-exhaustion that the old line refuses ("Why two quantities", below). Committed memory is not memory in use, which is why a job that
-has measured its commit is not held to the physical line. The lines are the guard's own, chosen 2026-10-09 as a conservative way to
-keep spill bounded; they are a definition, not a measurement of any box's paging. The guard compares a *declaration*, which is an
+headroom): that is what pages when it runs out. The **commit it will be charged** is held to a line, and which line depends on
+the host. Where the OS enforces a commit limit that can still grow (Windows with a page file below its maximum, the default), the
+line is the commit *ceiling*, the current limit plus the room each page file has left to grow, less the same headroom, for a
+commit stated (`--ram-commit`, or a caller that measured one) and for one nobody stated, which is taken as 2.1 times the touched
+figure there. The ceiling is where the OS refuses a commit: below it Windows grows the page file and grants the request ("The
+commit limit moves and the line is the ceiling", below). Where the OS enforces a limit that cannot grow (a fixed page file, one at
+its maximum, none, or a reader that cannot say), a job that **states its commit** is held to that limit (less the headroom), and a
+job that **states none** declares one figure, and its commit is that figure standing in for one: it is held to *physical RAM* (less the headroom),
+the line every such caller always had, because a job can commit more than it touches (a coder-model arm touched 27.8 GiB and
+was charged 58.1) and the commit limit lies 44 GiB further out than physical RAM on the reference box, so against it two such
+arms were admitted into commit exhaustion that the old line refuses ("Why two quantities", below). Committed memory is not memory in use,
+which is why a job that has measured its commit is not held to the physical line. The touched line is the guard's own, chosen 2026-10-09
+as a conservative way to keep spill bounded; it is a definition, not a measurement of any box's paging. The commit line was first set at
+the current limit on the same reasoning and was corrected 2026-11, when the reference box measured what it did (below). The guard compares a *declaration*, which is an
 estimate: it does not bound what a lane then commits and it does not stop a process that holds no lease (the measured case in
 which an admitted lane leaves the box close to a line is under "Known limits", below). A card has a hard edge (the driver
 refuses the allocation); host RAM does not (the OS pages and every other process stalls), so the harness checks *before* the
@@ -1976,7 +1981,7 @@ A lease carries `Options.HostRAMGiB`, the working set it will touch, stamped on 
 omitted when 0: an older binary ignores it, and a record without it declares nothing), and `Options.HostRAMCommitGiB`, the commit
 it STATES it will be charged, stamped as `host_ram_commit_gib` (additive; 0 or absent means no commit was stated and the commit is the
 same figure as `host_ram_gib`, which is what every caller that declares one number leaves, so such a caller is judged on commit
-against physical RAM as it always was; present, even equal to `host_ram_gib`, it is stated and judged against the commit limit).
+against physical RAM as it always was, or, where the commit limit can grow, as 2.1 times `host_ram_gib` against the commit ceiling; present, even equal to `host_ram_gib`, it is stated and judged against the commit limit, or the ceiling where that can grow).
 Where the touched figure comes from, in order
 (`internal/hostneed`; `TestAKrea2Bf16CallOn16GiBIsTheUnetPlusTheTextEncoder`, `TestAnExplicitRamBeatsTheEstimate`,
 `TestTextAndSeatLeasesDefaultToZero`):
@@ -1986,7 +1991,7 @@ Where the touched figure comes from, in order
 | `gpu reserve --ram <GiB>` | the operator's word. **0 is allowed** and means "needs no host RAM". A negative value is refused. |
 | a recognised render helper call | `render/comfy-generate.mjs`, `comfy-render`, `comfy-edit`, `comfy-inpaint`, `comfy-video` or `comfy-run-graph` (see its row below), wherever it sits in the wrapped command (either path-separator style). The UNet or checkpoint and the text-encoder files the family loads are sized through the configured ComfyUI model paths (`mediacap.ModelRoots`, the same tables `doctor` reads) and counted **in full when together they do not fit the largest card of the lease** less the runner's `--reserve-vram`; a set that fits declares 0. A krea2 bf16 call on a 16 GiB card is 24.48 + 8.27 = 32.75 GiB. A video call is sized from the files its flags name (`--transformer`, `--high-unet`, `--low-unet`, `--text-encoder`) and the builder's default for each it is not given, because a hand-run helper gets nothing from the machine's config: a bf16 LTX-2.5 `--transformer` is 39.13 + 14.32 = 53.45 GiB where the int8 default is 20.03 + 14.32 (`TestAVideoCallIsSizedFromTheFilesItsFlagsName`). `run-graph` (`comfy-run-graph.mjs`) is not recognised and takes the class default below. A helper run with `--graph` (`comfy-render`, `comfy-video`) posts the caller's own workflow, so its family flags say nothing about what it loads and it is never sized as the helper's default family: it is sized by the next row, and takes the class default only when that cannot be done, on a text lease too (`TestAGraphCallIsSizedByTheClassDefaultNotItsDefaultFamily`). |
 | a helper's own `--graph <file>` | the **weight files the graph's own loaders name** (`hostneed.ForGraphFile`, source `graph loaders`). The file must be a regular file of at most 8 MiB holding a ComfyUI API-format graph. `mediacap.ScanGraph` (the reader the node door's held-by-name check uses: any string input that ends in a weight extension, whatever the loader calls it) lists the names, each once, and `mediacap.ModelFileSizes` finds each under any class directory of any ComfyUI model root, as that check does (a name held under two class directories counts as the larger). The figure is the **sum of their sizes**, by the family estimate's own rule (`hostneed.fitToCard`, one function both use): a VAE or a LoRA counts with the checkpoint, the sum is declared **in full when together the files do not fit the card** (the largest card of the lease, less the runner's reserve; a card that is not known counts everything) and **0 when they fit**, with the same wording ("does not fit the N GiB card, so the weights stream from RAM", "fits the N GiB card ..., so no weights stream from RAM"). A 512x512 qwen-image graph of a 6.76 GiB checkpoint and a 16.33 GiB text encoder is 23.09 GiB on a 16 GiB card, where the class default of a node that binds a Wan 2.2 video pair is 32.89 GiB (`TestTheIncidentsGraphIsItsOwnFilesNotTheLargestFamilyOfTheBox`, `TestAGraphNamingTwoLoaderFilesDeclaresTheirSum`, `TestAGraphThatFitsTheCardDeclaresZeroAndOneThatDoesNotDeclaresItsSum`, `TestAGraphAndTheFamilyEstimateAgreeOnTheSameFiles`). **Any doubt keeps the class default, exactly as before**, because a size that is not known must never shrink a declaration: a document that is not a JSON object (a UI-format workflow included), a graph with no node or with a loader node that names no file (a graph that names no weight file and has no loader node is the process floor, next row), ONE named file that is not in the model tree, is empty, or is not a safe relative path, or a weight-like name anywhere in the document that the sizing did not cover (the whole JSON is walked, nested objects and lists included, for a string ending in a weight extension: the scan's six and `.bin .pt2 .pkl .pickle .onnx .engine .trt .npz .h5`; a partial sum would be low) (`TestAGraphWithOneUnresolvedFileKeepsTheClassDefault`, `TestAGraphThatCannotBeReadKeepsTheClassDefault`, `TestAGraphThatNamesNoLoaderKeepsTheClassDefault`, which also pins the process floor, `TestAGraphNamingAWeightItCouldNotSizeKeepsTheClassDefault`). The card is fitted with the call's own `--reserve-vram` (a helper call) or `reserve_vram` (the `run-graph` lane), a value the runner would not take being the default (`TestAGraphIsFittedWithTheReserveVRAMTheCallStates`, `TestTheGraphLaneFitsTheGraphWithTheReserveVRAMOfTheCall`). **Limits:** it is an estimate from the files' sizes, not a measurement; it counts only weight files, so an input image or a custom node's own data file is not in it; a weight is recognised by its extension, so one named by another extension, or built at run time, is not seen and the figure can be low; and the family routes of the pipeline lane (image, edit, video) are still fitted with the config's reserve, not the request's `reserve_vram`, which only the runner receives. |
-| a graph that names **no weight file** | the **ComfyUI process floor**: **3 GiB** touched and **4 GiB of commit, stated** (source `measured`; `hostneed.ProcessFloor`). A small VHS GIF graph with no weight file measured 2.63 GiB private (the ComfyUI process) and raised system commit by 3.64 GiB; the figures are those rounded up. It applies to an API-format graph (a JSON object with at least one node) that names no weight file anywhere in the document, with no node of a weight-loader class (a class with `loader`, `checkpoint` or `lora` in its name: such a node's file may be fed by a link or built at run time, and a graph with one and no file named keeps the class default). The commit is **stated**, so it is admitted against the OS commit limit like a `--ram-commit`, not against physical RAM as an unstated commit is (`gpu reserve` and the pipeline's media admission both carry it: `Need.CommitGiB`, `Need.CommitStated`). The same floor is the `run-graph` lane's figure for a graph, or a template whose runtime manifest has an empty `models` list, that names no weight file. A graph whose weights are not on disk yet (a manifest download) keeps the class default. |
+| a graph that names **no weight file** | the **ComfyUI process floor**: **3 GiB** touched and **4 GiB of commit, stated** (source `measured`; `hostneed.ProcessFloor`). A small VHS GIF graph with no weight file measured 2.63 GiB private (the ComfyUI process) and raised system commit by 3.64 GiB; the figures are those rounded up. It applies to an API-format graph (a JSON object with at least one node) that names no weight file anywhere in the document, with no node of a weight-loader class (a class with `loader`, `checkpoint` or `lora` in its name: such a node's file may be fed by a link or built at run time, and a graph with one and no file named keeps the class default). The commit is **stated**, so it is admitted against the OS commit limit (the commit ceiling where that can grow) like a `--ram-commit`, not against physical RAM as an unstated commit is (`gpu reserve` and the pipeline's media admission both carry it: `Need.CommitGiB`, `Need.CommitStated`). The same floor is the `run-graph` lane's figure for a graph, or a template whose runtime manifest has an empty `models` list, that names no weight file. A graph whose weights are not on disk yet (a manifest download) keeps the class default. |
 | `render/comfy-run-graph.mjs` | the helper takes `--graph FILE`, or `--template NAME --manifest FILE`, as **flags**, and is recognised as such (it was once left out, so `gpu reserve -- node render/comfy-run-graph.mjs --graph g --manifest m` declared the class default, 32.9 GiB on a node that binds Wan 2.2). `--graph` is sized by its loaders (`ForGraphFile`, above) and a template by its runtime manifest's model files (`ForManifestFile`); no weight file in either is the process floor. |
 | a file whose size cannot be read | the documented per-family size (`hostneed.familySizes`: the files the reference box binds, rounded up; Qwen-Image 2512 bf16 is the incident's ~38 GiB stream). A family with neither has no estimate and takes the class default. |
 | the **media class default** | for a media lease with no `--ram` and no recognised call: the largest estimate over the render families **this box binds** (`imagegen_*`, `gen_edit_*`, `videogen_*`, named families; a binding on the sd.cpp engine is not counted, on whichever route it is, a video family included), so a 32 GiB node is not held to a 128 GiB node's numbers; 0 when nothing is bound. It is never clamped to fit the box: a default that cannot be admitted is refused with the reason and `--ram` as the way out. |
@@ -1996,12 +2001,15 @@ Where the touched figure comes from, in order
 more than the job touches. Measured on the reference box (session readings, not recorded in this repository): one
 coder-model arm's process tree reached a 27.8 GiB working set and a 58.1 GiB private charge while the host's available memory
 fell from 91.5 to 61.1 GiB with no paging; a llama.cpp leg with every layer on the card held a 3.6 GiB working set and a 32.1
-GiB charge. So the arm states `--ram 28 --ram-commit 58`. **Stating the commit is what moves it to the commit limit.** Unset,
-`--ram-commit` is not stated: the commit is the `--ram` figure standing in for one, **including when `--ram` was estimated**, and
-it is held to physical RAM less the headroom, the line a job that declares one number has always been held to (or to an enforced commit limit
-less the headroom where that sits below physical RAM: strict-mode Linux with little swap, where the kernel refuses allocations at the limit). A commit stated
+GiB charge. So the arm states `--ram 28 --ram-commit 58`. **Stating the commit is what moves it to the commit limit** (the
+ceiling, where the limit can grow). Unset, `--ram-commit` is not stated: the commit is the `--ram` figure standing in for one,
+**including when `--ram` was estimated**. Where the commit limit can grow it is then taken as 2.1 times that figure (the ratio the
+arm above measured, 58.1 charged over 27.8 touched, and about 2.1 for a ComfyUI arm) and held to the ceiling less the headroom.
+Where it cannot grow it is held to physical RAM less the headroom, the line a job that declares one number has always been held
+to (or to an enforced commit limit less the headroom where that sits below physical RAM: strict-mode Linux with little swap,
+where the kernel refuses allocations at the limit). A commit stated
 equal to `--ram` is still stated (the lease record keeps it and the detached holder is passed it), so a job that measured its
-commit and found it equal to its working set is judged on the limit. A commit is declared beside the working set it goes with:
+commit and found it equal to its working set is judged on the limit (the ceiling). A commit is declared beside the working set it goes with:
 `--ram-commit` needs a `--ram` (given or estimated) above 0, and is itself above 0 and finite (`NaN` and `Inf` are refused by
 name, as is a non-finite `--ram`: neither compares against anything; the rule itself and the hidden `gpu hold` verb refuse a figure that is not finite as well,
 `TestARuleCallerThatDeclaresAFigureThatIsNotFiniteIsRefused`, `TestHoldRefusesAHostRAMFigureThatIsNotFinite`). The converse is a known limit: a job whose commit is
@@ -2069,8 +2077,10 @@ file; Linux: `Committed_AS` and `CommitLimit`), and admits a lease iff BOTH cond
 
 ```
 touched:  available RAM now - the lease's touched need - the not-yet-touched part                              >= headroom
-commit:   commit charge now + the lease's commit need + the not-yet-charged part        <=  commit limit - headroom     (a STATED commit, where the OS enforces a limit)
-          commit charge now + the lease's declared figure + the not-yet-touched part    <=  physical RAM - headroom      (a commit nobody stated, on every reading)
+commit:   commit charge now + the lease's commit need + the not-yet-charged part        <=  commit CEILING - headroom   (any commit, where the OS enforces a limit that can grow; an unstated one is 2.1 x its touched figure, and so is the not-yet-charged part of such leases)
+          commit charge now + the lease's commit need + the not-yet-charged part        <=  commit limit - headroom     (a STATED commit, where the OS enforces a limit that cannot grow: the ceiling is then the limit)
+          commit charge now + the lease's declared figure + the not-yet-touched part    <=  physical RAM - headroom      (a commit nobody stated, where the limit cannot grow or is not enforced, on every reading)
+          commit ceiling = commit limit now + for each page file min(maximum - size, free space of its volume - a tenth of the volume)
           (headroom = gpu_host_ram_headroom_gib, default 8 GiB: chosen, not measured; see "How the numbers get measured")
 ```
 
@@ -2078,15 +2088,22 @@ A quantity a lease declares as 0 is not judged (it adds nothing to that counter)
 without reading anything, and a touched need above physical RAM less the headroom, or a commit above the line it is judged
 against less the headroom, is refused at once (waiting cannot help). A refusal says which condition refused and with whose numbers,
 and says both when both did: `needs 28.0 GiB, only 30.0 GiB of 127.7 GiB physical is available, 8.0 GiB headroom`, `needs 58.1 GiB of
-commit, committed 150.0 of 171.7 GiB commit limit, 8.0 GiB headroom` for a stated commit, and `needs 46.8 GiB, committed 84.6 of
-127.7 GiB physical, 8.0 GiB headroom` for a commit nobody stated, which on a host whose commit limit lies beyond physical RAM adds
-that a stated commit is held to that limit instead (`TestEachConditionRefusesAlone`,
+commit, committed 150.0 of 171.7 GiB commit limit, 8.0 GiB headroom` for a stated commit where the limit cannot grow, and `needs 46.8 GiB, committed 84.6 of
+127.7 GiB physical, 8.0 GiB headroom` for a commit nobody stated there, which on a host whose commit limit lies beyond physical RAM adds
+that a stated commit is held to that limit instead. Where the limit can grow the sentence names both the limit now and the ceiling,
+`needs <N> GiB of commit, committed <C> of a commit limit that is <L> GiB now and can reach <E> GiB, 8.0 GiB headroom`, and for a
+commit nobody stated `needs <N> GiB of commit (no commit stated, so 2.1 times what it touches), committed <C> of a commit limit
+that is <L> GiB now and can reach <E> GiB, 8.0 GiB headroom` (the sentences the ledger holds from before the ceiling are quoted
+under "The commit limit moves and the line is the ceiling"; `TestEachConditionRefusesAlone`,
 `TestAGrantIsRefusedOnItsCommitAlthoughItsTouchedSetFits`, `TestAGrantThatStatesNoCommitIsJudgedAgainstPhysicalRAMLessTheHeadroom`).
 A reading from a platform whose limit is always enforced that carries none (a Windows total page file of 0) is not a reading: the
 rule waits on it as unreadable and the verdict is `unknown` (`TestAHardReadingWithoutACommitLimitIsUnreadable`), where it used to
 skip the commit condition without a word.
 
-**Why two quantities, why those lines, and why a commit nobody stated keeps the old one.** The first version compared the commit
+**Why two quantities, why those lines, and why a commit nobody stated keeps the old one.** *(History of 2026-10-17 and before. The
+figures below were judged against the current commit limit, the line of that day. On a host whose limit can grow the line is now the
+ceiling and an unstated commit is 2.1 times its touched figure; on a host whose limit cannot grow every sentence below still holds.
+"The commit limit moves and the line is the ceiling", below, says what changed and why.)* The first version compared the commit
 charge plus the need against *physical RAM* less the headroom, for every caller. Committed memory is not memory in use: on the
 reference box (127.7 GiB RAM, 171.7 GiB commit limit) it read 70.5 GiB committed while 75.6 GiB were physically free (2026-10-17),
 and a coder-model arm that touches 27.8 GiB and is charged 58.1 GiB was refused (70.5 + 58.1 = 128.6 against 119.7). A job that
@@ -2094,7 +2111,7 @@ and a coder-model arm that touches 27.8 GiB and is charged 58.1 GiB was refused 
 of 67.6: admitted (`TestMeasuredCoderArmIsAdmittedAgainstTheCommitLimit`). The commit charge cannot simply be dropped: on Windows it,
 not the physical availability, is what can run out, because a job that commits about twice what it touches can push the charge
 past the limit (physical RAM plus the page file) and, once the page file has reached its maximum, other processes' allocations fail
-with plenty of RAM free (before that Windows grows a system-managed file: "The commit limit moves", below). And what a
+with plenty of RAM free (before that Windows grows a system-managed file: "The commit limit moves and the line is the ceiling", below). And what a
 job touches cannot be judged against the commit limit, because the available memory is what pages when it runs out. Each quantity
 is held to the line that is real for it.
 
@@ -2115,16 +2132,53 @@ available memory is: with a 56 GiB desktop baseline the first 32.75 GiB lane is 
 has not loaded, on the commit charge (56 + 65.5 = 121.5 against 120) at any available figure and on the available memory too at 72
 GiB (`TestTheTwoLaneIncidentIsRefusedWhateverIsAvailable`, `TestTheTwoLaneIncidentIsStillRefused`).
 
-**The commit limit moves.** The limit read is the *current* commit limit (`ullTotalPageFile`, physical RAM plus the page file as it
-is sized now). On a host whose page file is system managed Windows grows the file as the commit charge nears the limit, and the
-next reading carries a larger one: the reference box read 187.7 GiB on 2026-10-09 and 10 with the file at 60 to 68 GiB, and 171.7
-GiB on 2026-10-17 (read-only, 2026-10-17: the page file is `pagefile.sys` with initial and maximum size 0, the system-managed
-form, 45,056 MiB allocated, 6 MiB in use). So for a stated commit the bound is a moving one: it caps the commit at the page file's
-current size and does not stop the file growing, and growth was the incident's symptom. **"Other processes' allocations fail past
-the limit" is therefore conditional on the page file having reached its maximum**; before that, a charge near the limit makes
-Windows grow the file. The rule reads the current limit, the conservative choice: with a system-managed file the configured
-maximum is the number 0, there is no figure to read, and a rule that assumed a large maximum would admit what the file has not yet
-grown to take. The available figure is not stale: it is read on every attempt and every poll, at most 2 s before the comparison.
+#### The commit limit moves and the line is the ceiling
+
+The limit a reading carries is the *current* commit limit (`ullTotalPageFile`, physical RAM plus the page files as they are
+sized now). On a host whose page file can grow (system managed, the default, or a custom file whose maximum is above its size)
+Windows grows the file when a commit request does not fit and grants the request, and the next reading carries a larger limit:
+the reference box read 187.7 GiB on 2026-10-09 and 10 with the file at 60 to 68 GiB, and 171.7 GiB on 2026-10-17 (read-only,
+2026-10-17: the page file is `pagefile.sys` with initial and maximum size 0, the system-managed form, 45,056 MiB allocated, 6 MiB
+in use). **What was believed, and what the measurement showed.** Until 2026-11 this section said the rule reads the current
+limit as "the conservative choice", and that with a system-managed file the configured maximum is the number 0 so there is "no
+figure to read". Both were wrong. The registry and WMI do say `0 0` for a system-managed file, but the kernel reports the file's
+own bounds (`NtQuerySystemInformation`, class `SystemPageFileInformationEx`): on the reference box (127.7 GiB RAM, one
+system-managed page file) minimum 19.0, size 33.1, maximum 116.3 GiB, the maximum being the volume's size divided by 8, the
+vendor's documented maximum for a system-managed file; the volume holds 930.4 GiB with 338.4 GiB free. And reading the current
+limit was not conservative: it refused loads the OS would have granted.
+
+* The current limit read 146.7, 152.7, 154.7 and 160.8 GiB over two days while the commit charge moved between 55 and 141 GiB.
+  Windows keeps the limit 14 to 28 GiB ahead of the charge and no further, so a load that commits more than that is refused
+  against the current limit whatever memory the host has.
+* With 36 agent sessions open the charge sat at 125 to 141 GiB with 67 to 69 GiB of RAM available. The agent seat (36 GiB touched,
+  61 GiB of commit, stated) was refused on every contract of a day: `needs 61.0 GiB of commit, committed 125.2 of 152.7 GiB commit
+  limit, 8.0 GiB headroom`. The node's ledger holds about 6,300 such refusals (3,397 on the commit-limit sentence, 2,903 on the
+  physical-RAM sentence), 16 to 40 percent of each day's agent contracts.
+* A 19 GiB commit that touched nothing, requested with 13.7 GiB of spare commit, was granted in 0.75 s: the limit went from 154.7
+  to 160.8 GiB, available memory stayed at 67.1 GiB and page-file use stayed at 0.2 GiB.
+
+**The ceiling** is what the limit can reach: the current limit plus, for each page file, the room it has left to grow, its
+maximum less its size, bounded by the free space of its volume less a tenth of the volume (shared between the files of one volume;
+the tenth is chosen, not measured, and does not bind on the reference box). On the reference box that is 244.0 GiB, which is
+physical RAM plus the file at its maximum and does not move as the file grows. A commit is refused where the OS refuses it, past
+the ceiling, so the rule holds a commit to the ceiling less the headroom. Where the page file cannot grow (a fixed size, a file at
+its maximum, no file, a volume the reader cannot read, or a platform whose reader cannot say, which is every platform but
+Windows today) the ceiling is the current limit and the rule is the one it was. A commit nobody stated, on a host whose limit can
+grow, is taken as 2.1 times the touched figure (`UnstatedCommitFactor`, measured on the reference box: a coder-model arm touched
+27.8 GiB and was charged 58.1, 2.09 times, and a ComfyUI arm about 2.1 times) and judged against the same ceiling; the physical-RAM
+line is not applied there, because a desktop's commit charge sits above physical RAM with half the RAM available (125 to 141
+GiB charged of 127.7, with 67 to 69 GiB available). A job that commits more than 2.1 times what it touches states its commit
+(`gpu reserve --ram-commit`). On a host whose limit cannot grow, a commit nobody stated keeps the physical-RAM line, and Linux
+with a soft limit is unchanged.
+
+**What the cost is.** A grant that leans on the ceiling makes the page file larger on disk until the host restarts; on the
+reference box that is toward 60 to 75 GiB at the load above. That is not paging: commit is a promise, the file backs it without
+being written until memory is short, and page-file use did not move in the measurement above. What pages is the touched set, which
+the first condition (available memory) guards exactly as before. The earlier text here, that a charge near the limit makes Windows
+grow the file and that growth was the incident's symptom, took the file's growth for paging; in the measurement above the file
+grew and nothing paged. **"Other processes' allocations fail past the limit"
+is true once the page file has reached its maximum**, and that is where the line now is. The available figure is not stale: it
+is read on every attempt and every poll, at most 2 s before the comparison.
 
 **Where a stated commit is judged, and what Linux loses.** Always on Windows. On Linux in strict overcommit mode
 (`vm.overcommit_memory` = 2, or a mode that cannot be read, below); in the default heuristic mode (0) and in mode 1 the kernel grants allocations past `CommitLimit`, and
@@ -2134,8 +2188,8 @@ would turn work away for a limit nothing enforces. The reading says so (`HostMem
 cannot be read or parsed is assumed strict**: the limit stays a hard one, failing closed. A `/proc/meminfo` that hides the commit
 counters has no limit to enforce and reads soft. So on Linux in modes 0 and 1 a **stated** commit is judged by neither line: it
 loses both the commit limit and the physical line, and only the touched condition applies to it
-(`TestTheCommitConditionIsAppliedOnlyWhereTheLimitIsHard`). A commit nobody stated is still held to physical RAM less the headroom on every reading,
-as it was before the two conditions existed, and to an enforced commit limit less the headroom when that limit sits below physical RAM (strict-mode Linux
+(`TestTheCommitConditionIsAppliedOnlyWhereTheLimitIsHard`). A commit nobody stated is still held to physical RAM less the headroom on every reading where the
+limit cannot grow (where it can, it is 2.1 times the touched figure against the ceiling, above), as it was before the two conditions existed, and to an enforced commit limit less the headroom when that limit sits below physical RAM (strict-mode Linux
 with little swap: the limit is about half the RAM plus the swap, and the kernel refuses allocations at it; `TestACommitNobodyStatedIsHeldToAnEnforcedLimitThatSitsBelowPhysicalRAM`) (`TestAnUnstatedCommitIsJudgedWhereTheLimitIsNotEnforced`). Two Linux nodes of the fleet
 were read on 2026-10-17: both in mode 0, with `Committed_AS` of 19.5 GiB on a 31.2 GiB `MemTotal` and 3.8 GiB on 30.2 GiB, so there
 a stated commit is moot, and one figure declared once is held to `Committed_AS` against physical RAM less the headroom as it was.
@@ -2145,7 +2199,8 @@ processes below their holders hold *resident*; what they have yet to be charged 
 processes hold *privately* (private bytes are the currency of the commit charge: `PrivateUsage` on Windows and, on Linux, the private
 writable mappings, `VmData`, which is what `Committed_AS` charges when a mapping is made). Each is never below zero and pooled per holder
 (see the bullet below). A declaration is an estimate, so this rule is a brake on declared loads: it does not bound what a lane then
-commits, and neither condition sees a process that holds no lease.
+commits, and neither condition sees a process that holds no lease. Where a commit nobody stated is held to the ceiling, the part
+running leases have yet to touch is taken at the same 2.1 times when it is added to the commit charge.
 
 * **Everywhere the cards are granted.** A card-scoped grant (`--devices`, `--cards`, the media admission) checks inside
   `grantDevicesLocked`, under the epoch lock, after the cards are shown free and before the epoch is issued; the record that
@@ -2260,13 +2315,17 @@ commits, and neither condition sees a process that holds no lease.
   the guard's sentence, never the line's "promised to callers ahead of this one" (the cards are free and nobody is ahead;
   `TestWaitZeroKeepsTheGuardsSentenceOnAPinnedPlan` and its siblings, G2 of the P0 plan).
 * **A need no state of the box admits is refused at once.** If the touched need exceeds physical RAM less the headroom, or the
-  commit exceeds the commit limit less the headroom (where it is enforced), waiting cannot help: the request ends with the text (it
+  commit exceeds the commit limit less the headroom (where it is enforced; the commit ceiling less the headroom where the limit can
+  grow, a commit nobody stated counting at 2.1 times its touched figure), waiting cannot help: the request ends with the text (it
   names `--ram` or `--ram-commit`, and `gpu_host_ram_headroom_gib`), and the pipeline classes it
   `gpu_lease_unavailable` (a configuration fault), not `gpu_busy`. `--ram 0` is the escape hatch the operator owns.
 * **Unreadable memory.** On a platform that has a reader (Windows, Linux) a lease that declares a need waits until the host
   can be read, the way the other guards fail closed. On a platform with no reader the rule cannot judge and admits.
 
-**Known limits, stated so they are not discovered.** **An admitted lane can still leave the box close to a line.** The rule applied
+**Known limits, stated so they are not discovered.** **An admitted lane can still leave the box close to a line.** *(Judged on the lines of 2026-10-10, the current commit limit for a
+stated commit and physical RAM for one nobody stated. On a host whose commit limit can grow, every commit is now judged against the
+ceiling, so the figures below say what those lines admitted then, and the 2.1 times the unstated figure counts for what it is
+worth there.)* The rule applied
 to a commit reading of 81.6 GiB (the reference box between jobs, 2026-10-10 about 04:12 UTC; 83 GiB available, 127.7 GiB physical,
 commit limit 187.7 GiB, headroom 8) admits a 32.8 GiB declaration, the Krea 2 bf16 files: 114.4 GiB of projected commit against a
 bound of 119.7 (physical RAM less the headroom, for the one figure; 179.7 against the commit limit for a stated commit), 50.2 GiB
@@ -2292,7 +2351,7 @@ a headroom of 8, and a stated 41.0 is not, `TestTheDocumentedReadingsAgreeWithTh
 and `offload_status`. What it does not do: stop the lane that took the box over. The lasting fix is to declare the commit from
 measurement: the footprint store already records the private peak of a lane's process tree beside its resident peak
 (`TreeMemory`), so a declaration could state its commit from three measured runs instead of defaulting to the touched figure; that
-is not done here, and until it is the commit defaults to the touched figure, held to physical RAM, unless the caller states one (see
+is not done here, and until it is the commit defaults to the touched figure, held to physical RAM (taken as 2.1 times that figure against the commit ceiling where the commit limit can grow), unless the caller states one (see
 "How the numbers get measured"). On Linux a stated commit is not judged unless the kernel is in strict overcommit mode (see "The
 admission rule"). A `/proc/meminfo` that omits the commit counters (a sandbox that virtualises it) falls back to what the box visibly uses
 (`MemTotal - MemAvailable`, limit `MemTotal`), marked soft, which keeps the rule working on the available memory alone: no reading
@@ -2345,12 +2404,12 @@ Every figure this rule uses is the harness's: chosen or measured, and labelled a
   raises: the sampled tree can miss memory (a ComfyUI instance kept from an earlier lease and reused is not under the
   runner that is sampled), and a render whose weights fit its card still declares 0. **The same runs state the commit** of a
   declaration that stated none (`measuredCommit`): the private figure at the same percentile, so the call is judged against the
-  commit limit like any stated commit and not, as the touched figure standing in for a commit is, against physical RAM. A node
+  commit limit (the ceiling, where it can grow) like any stated commit and not, as the touched figure standing in for a commit is where the limit cannot grow, against physical RAM. A node
   whose commit charge is high while its RAM is free (many idle processes) refused its own measured renders on that line: one
   at 53.5 GiB of commit on 63.7 GiB of RAM with 27.9 GiB available deferred a 10 GiB render for twenty minutes, with 14 runs
   of that render at 15.5 GiB private in its store. A private figure below the declared working set states nothing (it did not
-  see this load), a commit the estimate stated itself is left alone, and a key with fewer than three runs keeps the physical
-  line: its first runs on such a node need `gpu reserve --ram <GiB> --ram-commit <GiB>` around the call. **The figure is not the all-time maximum**
+  see this load), a commit the estimate stated itself is left alone, and a key with fewer than three runs keeps the unstated
+  line (physical RAM, or 2.1 times the touched figure against the ceiling where the limit can grow): its first runs on such a node need `gpu reserve --ram <GiB> --ram-commit <GiB>` around the call. **The figure is not the all-time maximum**
   (F56: one inflated run raised a family's declaration for good, until footprints.json was edited by hand): the store keeps the
   last twenty runs' host peaks of each key (`hostRecentRuns`, `host_recent` in the file) and the calibration reads their 90th
   percentile by nearest rank (`hostPeakPercentile`), so one outlier among ten or more runs is not the answer and a bad run
@@ -2442,17 +2501,20 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   memory is read inside its own distro and the harness holds no cheap read of it; it never changes doctor's exit code.
 * **The seat can state its commit apart from its touched set.** `agent_seat_host_commit_gib` is the commit charge a cold load of
   the seat adds to the host at its peak, measured on the node that runs the seat and recorded as `measured <date> <node>`.
-  Stated, the seat's commit is judged against the OS commit limit less the headroom, as a stated `--ram-commit` is, and
-  `agent_seat_host_ram_gib` is then the touched set alone (`hostneed.SeatNeed` returns a need whose commit is stated; the refusal
+  Stated, the seat's commit is judged against the commit ceiling less the headroom (the OS commit limit where the page file cannot
+  grow), as a stated `--ram-commit` is. Held to the current limit, the agent seat (36 GiB touched, 61 GiB of commit, stated) was
+  refused on every contract of a day on the reference box with 67 to 69 GiB of RAM available: `needs 61.0 GiB of commit, committed
+  125.2 of 152.7 GiB commit limit, 8.0 GiB headroom` ("The commit limit moves and the line is the ceiling", above). The ceiling
+  there is 244.0 GiB. When the commit is stated, `agent_seat_host_ram_gib` is the touched set alone (`hostneed.SeatNeed` returns a need whose commit is stated; the refusal
   says `the seat's N GiB and M GiB of commit`). Unset, the one figure stands in for both and the commit is held to physical RAM, as
-  before. It is read only together with `agent_seat_host_ram_gib`: a commit with no ram figure is ignored, and `doctor` says so.
+  before, where the commit limit cannot grow (where it can, it is 2.1 times the figure, against the ceiling). It is read only together with `agent_seat_host_ram_gib`: a commit with no ram figure is ignored, and `doctor` says so.
   As with `--ram-commit`, a stated commit is judged only where the OS enforces a commit limit (always on Windows; on Linux with
   `vm.overcommit_memory=2`). On a Linux node in mode 0 or 1, stating it leaves the touched set as the only line the seat is held
   to, which is less than the physical-RAM line an unstated figure gets: leave the key unset there unless that is intended. The
   `seat ram:` row of `doctor` says this on every box that states both figures.
 * **The warm passes the grant's admission.** The seat's footprint, taken for both quantities and with no commit stated, plus
   what the *other* live leases have yet to load, must leave the headroom of the available RAM and keep the commit charge under
-  physical RAM less the headroom: the warm-back states no commit (unless the node states `agent_seat_host_commit_gib`, above), so it is held to physical RAM and not to the commit limit
+  physical RAM less the headroom: the warm-back states no commit (unless the node states `agent_seat_host_commit_gib`, above), so it is held to physical RAM and not to the commit limit (where the commit limit can grow, to 2.1 times the footprint against the ceiling instead, and not to physical RAM)
   (`TestAWarmBackIsHeldToPhysicalRAMAndNotToTheCommitLimit`). It is `Manager.HostRAMCheckWithout`, the same function
   as the grant, with the lease being released left out, because its command has exited and it loads nothing more. A host
   that reads NEAR or OVER therefore never warms (`TestAWarmBackIsRefusedWhenTheHostCannotTakeTheSeatAndStaysOwed`,
@@ -2485,7 +2547,10 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   milliseconds with "the seat was not loaded". On the reference box 79 of 345 such deferrals in three days fell inside a
   window its serving log shows the seat ready, and one more was reproduced with the seat ready and 92.1 GiB committed.
   Why: on the 3-card reference box, with about 80 GiB already committed by the desktop and its sessions, one contract's cold
-  load took the commit charge to 152.0 of 153.8 GiB (the page file had grown 7 GiB to make room). A request sent straight to
+  load took the commit charge to 152.0 of 153.8 GiB (the page file had grown 7 GiB to make room). That was first read as a box
+  1.8 GiB from refusing allocations. It was not: the file was growing as designed, and the kernel's own bounds (above) showed some
+  90 GiB of growth still to take. The gate stands for the two things that are real, the seat's touched set against the available
+  memory and its commit against the ceiling. A request sent straight to
   llama-swap, outside both doors, is still not gated.
 * **Not done, on purpose.** The owed warm is not counted as *pending* when another lease is admitted. The seat was unloaded to
   make room for that very lease, and its reload happens after the lease ends, so reserving room for it at the lease's grant
@@ -2929,7 +2994,7 @@ Once admitted the row shows `host_ram_gib` alone.
   comes, hours later, so one that sent the lease back to the grant would bring the deadlock back whenever the cause changed in
   between. The comparison after the unload is the decision. The only screens before the grant are the ones that do not depend
   on the host's state: a need above physical RAM less the headroom, a commit above the commit limit less the headroom (where the OS
-  enforces one), an unload that reaches nothing on the lease's cards, a host that cannot be read. The levers are the hold bound (`--ram-hold-max`, `gpu_hostram_hold_max_sec`), `--wait`, and `--ram` when the
+  enforces one; the ceiling where the limit can grow), an unload that reaches nothing on the lease's cards, a host that cannot be read. The levers are the hold bound (`--ram-hold-max`, `gpu_hostram_hold_max_sec`), `--wait`, and `--ram` when the
   figure is a guess (and Ctrl-C, which ends the wait and releases the wrapper's lease).
 
 **Not covered.** The media admission in `internal/pipeline` takes its lease with the declared figure compared in the grant, and the
@@ -2978,21 +3043,21 @@ per host with `"gpu_hostram_wsl_cache_drop": true`.
 ### What `gpu status` and `offload_status` show
 
 `gpu status` (text and `--json`) and `offload_status`'s `gpu_lease` block carry `host_memory`: `physical_gib`,
-`available_gib`, `commit_used_gib`, `commit_limit_gib`, `commit_limit_enforced` (whether a commit a lease states is
+`available_gib`, `commit_used_gib`, `commit_limit_gib`, `commit_ceiling_gib` (only on a host whose commit limit can grow: what the limit can reach, "The commit limit moves and the line is the ceiling", above), `commit_limit_enforced` (whether a commit a lease states is
 judged against the commit limit on this host: always on Windows, on Linux in strict overcommit mode or when the mode cannot be read; a commit nobody stated is
-held to physical RAM less the headroom on every host, or to an enforced commit limit less the headroom when that sits below physical RAM), `headroom_gib`, `declared_live_gib` and `declared_live_commit_gib` (the sums of the working set and the commit the live
+held to physical RAM less the headroom on a host whose commit limit cannot grow, or to an enforced commit limit less the headroom when that sits below physical RAM; where the limit can grow every commit is held to `commit_ceiling_gib` less the headroom), `headroom_gib`, `declared_live_gib` and `declared_live_commit_gib` (the sums of the working set and the commit the live
 leases declared), `pending_gib` and `pending_commit_gib` (the part of each still to load), `admits_up_to_gib` (the most a touched
 set could ever be admitted at), `touch_room_gib`, `commit_room_gib` and `unstated_commit_room_gib` (what a new lease could touch now,
 what a lease that STATES a commit could be charged now, and what a lease that states none could declare now: physical RAM (or an enforced commit limit that sits below it) less the
-commit charge, what running leases have yet to touch and the headroom; each less the headroom and never below 0),
+commit charge, what running leases have yet to touch and the headroom; each less the headroom and never below 0; where `commit_ceiling_gib` is present, `commit_room_gib` is the ceiling less the commit charge, the commit running leases have yet to be charged and the headroom, and `unstated_commit_room_gib` is the ceiling less the commit charge and the headroom, divided by 2.1, less what running leases have yet to touch),
 `verdict_why` (which line a NEAR or OVER verdict rests on, with its numbers), `stated_commit_note` (on an OVER that rests on the commit charge above physical RAM alone: what a lease that states its commit is judged on instead) and one **verdict**, built by `gpucards.HostView` for
 all three surfaces so they cannot disagree. The verdict judges the lines the grant applies:
 
 | host verdict | meaning |
 |---|---|
-| `OK` | the available RAM, the room under physical RAM for the commit charge and, where the OS enforces a commit limit, the room under it all exceed the headroom |
-| `NEAR` | one of them is inside the headroom: a lease judged on that line waits (any lease that touches host RAM when the available RAM is; one that states no commit when the room under physical RAM is; one that states its commit when the room under the commit limit is). A lease that states its commit is not held to the physical-RAM line, so a host that reads `NEAR` on that line alone still admits it (`TestAHostThatReadsNearOnThePhysicalCommitLineStillAdmitsALeaseThatStatesItsCommit`) |
-| `OVER` | one of them is gone: nothing is available, the commit charge is above physical RAM (the line a commit nobody stated is held to: the paging incident's own reading, 162.9 GiB committed on 127.7 GiB with 3.2 GiB available, reads `OVER` and leads the brief line, as it did before the two conditions), or it has reached an enforced commit limit. The reading cannot say whether the box is paging now (that takes page-file growth or the pages-out rate, which no surface here reads), so none of them claims it. New leases that declare host RAM and state no commit wait until there is room again, and one that states a commit is judged on the limit; end a lease or stop a kept ComfyUI instance to free it. An admitted stated commit can itself take the box above physical RAM (the coder arm's measured 58.1 GiB does: 128.6 on 127.7), and the verdict then reads `OVER` by design |
+| `OK` | the available RAM, the room under physical RAM for the commit charge and, where the OS enforces a commit limit, the room under it all exceed the headroom. On a host whose commit limit can grow (`commit_ceiling_gib` present) the lines are two, the available RAM and the room under the ceiling; the commit charge above physical RAM says nothing there |
+| `NEAR` | one of them is inside the headroom: a lease judged on that line waits (any lease that touches host RAM when the available RAM is; one that states no commit when the room under physical RAM is; one that states its commit when the room under the commit limit is). A lease that states its commit is not held to the physical-RAM line, so a host that reads `NEAR` on that line alone still admits it (`TestAHostThatReadsNearOnThePhysicalCommitLineStillAdmitsALeaseThatStatesItsCommit`). Where the limit can grow `NEAR` is the available RAM inside the headroom, or the commit charge inside the headroom of the ceiling |
+| `OVER` | one of them is gone: nothing is available, the commit charge is above physical RAM (the line a commit nobody stated is held to: the paging incident's own reading, 162.9 GiB committed on 127.7 GiB with 3.2 GiB available, reads `OVER` and leads the brief line, as it did before the two conditions), or it has reached an enforced commit limit. Where the limit can grow, `OVER` is nothing available or a commit charge at the ceiling; a commit charge above physical RAM no longer makes it `OVER` there. The reading cannot say whether the box is paging now (that takes page-file growth or the pages-out rate, which no surface here reads), so none of them claims it. New leases that declare host RAM and state no commit wait until there is room again, and one that states a commit is judged on the limit; end a lease or stop a kept ComfyUI instance to free it. An admitted stated commit can itself take the box above physical RAM (the coder arm's measured 58.1 GiB does: 128.6 on 127.7), and the verdict then reads `OVER` by design |
 | `unknown` | the reading could not be taken, or came from a platform whose commit limit is always enforced and carried none |
 
 The brief verdict line of `offload_status` leads with `HOST RAM OVER (3.2 of 127.7 GiB physical RAM is available; committed 187.9 of

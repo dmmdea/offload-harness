@@ -434,7 +434,7 @@ func (r *laneReading) autoInput(ctx context.Context) func() (gpulease.AllocInput
 	table := r.cards
 	stored.Cards = func(context.Context, config.Config) ([]gpuprobe.Card, string, error) { return table, "", nil }
 	return func() (gpulease.AllocInput, error) {
-		return gpualloc.BuildInput(ctx, r.m, r.p.cfg, gpualloc.Need{Claimed: r.claimed(), RAMGiB: r.askRAM}, stored)
+		return gpualloc.BuildInput(ctx, r.m, r.p.cfg, gpualloc.Need{Claimed: r.claimed(), RAMGiB: r.askRAM, RAMCommitGiB: r.askCommit}, stored)
 	}
 }
 

@@ -15,9 +15,10 @@ import (
 //
 //   - the working set it TOUCHES: the physical RAM it occupies. The line is the memory that is AVAILABLE now (what can be
 //     handed out without paging; standby and cache that can be dropped count). Past it the OS pages.
-//   - the commit it is CHARGED: memory the OS has promised it, touched or not. On Windows the line is the commit limit
-//     (physical RAM plus the page file): past it, once the page file has reached its maximum, OTHER processes cannot allocate
-//     while physical RAM may sit free (before that Windows grows a system-managed file: THE LIMIT MOVES, below).
+//   - the commit it is CHARGED: memory the OS has promised it, touched or not. On Windows the line is the commit CEILING
+//     (physical RAM plus the page files at their maximum, commitceiling.go): past it OTHER processes cannot allocate while
+//     physical RAM may sit free. The commit LIMIT a reading carries is the same sum with the files at their current size, and
+//     Windows moves it when asked (THE LIMIT MOVES, below), so it is not the line.
 //
 // They differ by a lot on the hosts this harness runs on. Measured on the reference 3-card Windows box (127.7 GiB RAM,
 // 171.7 GiB commit limit), the process tree of one coder-model arm touched at most 27.8 GiB and was charged 58.1 GiB; a
@@ -28,8 +29,10 @@ import (
 // needs BOTH conditions (HostRAMAdmitsLoad).
 //
 // WHICH LINE THE COMMIT IS JUDGED AGAINST depends on who said what the commit is. A job that STATES its commit (gpu reserve
-// --ram-commit, or a caller that measured one: HostLoad.CommitStated) is judged against the commit limit: the figure is the
-// caller's own and the limit is the line the OS enforces. A job that states none declares one figure, and the commit is that
+// --ram-commit, or a caller that measured one: HostLoad.CommitStated) is judged against the commit ceiling: the figure is the
+// caller's own and the ceiling is the line the OS enforces (the current limit, where the page file cannot grow). A job that
+// states none on a host whose limit CAN grow is judged on the same line, its commit taken as UnstatedCommitFactor times the
+// figure it declared. On a host whose limit cannot grow, a job that states none declares one figure, and the commit is that
 // figure standing in for it: it is judged against the line every such caller was judged against before the two conditions existed,
 // the commit charge plus the figure against physical RAM less the headroom, or against the commit limit less the headroom where the
 // OS enforces a limit that sits below physical RAM (the nearer of the two). The standing-in figure is the touched set, and a
@@ -49,12 +52,15 @@ import (
 // An enforced limit can sit BELOW physical RAM (Linux in strict mode with little swap: about half the RAM plus the swap), and then
 // it is the nearer line for a commit nobody stated as well: that one is held to it and not to the physical RAM that lies further out.
 //
-// THE LIMIT MOVES. On a Windows host whose page file is system managed the commit limit is the CURRENT one: Windows grows the
-// file when the commit charge nears it, and the next reading then carries a larger limit (the incident's own readings show 187.7
-// GiB with the file at 60 to 68 GiB, and 171.7 GiB later). The rule reads the current limit, the conservative choice, and does
-// not read the configured maximum. So "allocations fail past the limit" is true once the page file has reached its maximum;
-// before that, a charge near the limit makes Windows grow the file, which is the growth the incident showed and the rule exists
-// to avoid.
+// THE LIMIT MOVES. On a Windows host whose page file can grow (a system-managed file, the default) the commit limit a reading
+// carries is the CURRENT one: Windows grows the file when a commit request does not fit and grants the request, and the next
+// reading carries a larger limit (the incident's own readings show 187.7 GiB with the file at 60 to 68 GiB, and 171.7 GiB
+// later). Until 2026-11 the rule held a stated commit to that current limit, "the conservative choice". It was not
+// conservative, it was wrong: Windows keeps the limit only some 14 to 28 GiB ahead of the charge, so a load that commits more
+// than that was refused on a desktop whatever memory it had (the agent seat, 61 GiB of commit, on every contract of a day with
+// 67 GiB of RAM available), and the file's growth the rule meant to avoid is not paging. The rule now reads the maximum each
+// page file can reach from the kernel and holds a commit to the ceiling that gives (commitceiling.go has the measurements).
+// "Allocations fail past the limit" is true once the page file has reached its maximum, and that is where the line is.
 //
 // The incident that wrote this file (2026-10-09, the reference box): two ComfyUI media lanes streamed bf16 weights that do not
 // fit a 16 GiB card, from RAM, at the same time. Free RAM never said "no" at the moment each lease was granted, because
@@ -80,6 +86,12 @@ import (
 // the thing to change when a node's own measurement says so.
 const DefaultHostRAMHeadroomGiB = 8.0
 
+// UnstatedCommitFactor is what a commit nobody stated is taken as, in multiples of the touched figure the job declared, where it
+// is judged against the commit ceiling (a host whose commit limit can grow). MEASURED on the reference Windows box, the figures
+// of the header: a coder-model arm touched 27.8 GiB and was charged 58.1 (2.09 times), and a ComfyUI or Strata arm under the
+// display driver model about 2.1 times. A job that commits more than this states its commit (gpu reserve --ram-commit).
+const UnstatedCommitFactor = 2.1
+
 // HostMemory is one reading of the host's memory, in GiB. A reading whose commit limit is enforced (CommitLimitSoft false: Windows
 // always, Linux in strict mode) must carry that limit: one that leaves CommitLimitGiB at 0 is not a reading, the rule waits on it as
 // unreadable and its verdict is unknown, because a counter that came back zero must not turn the commit brake off. A SOFT reading
@@ -99,6 +111,10 @@ type HostMemory struct {
 	// CommitLimitSoft says CommitLimitGiB is not a limit this OS enforces (Linux with vm.overcommit_memory 0 or 1,
 	// or a sandbox that hides the accounting). The zero value is a hard limit: Windows always, Linux in strict mode.
 	CommitLimitSoft bool
+	// CommitCeilingGiB is what the commit limit can REACH: the current limit plus the room the page files still have to grow
+	// (commitceiling.go). It is the line a commit is judged against. 0, or a figure at or below CommitLimitGiB, means the
+	// limit cannot grow or the reader cannot say, and the current limit is the ceiling (every platform but Windows today).
+	CommitCeilingGiB float64
 }
 
 // commitLimitMissing says the reading is of a platform whose commit limit is enforced and carries none: a reading the rule cannot
@@ -165,13 +181,25 @@ const (
 // A reading from a platform whose limit is enforced but carries none is unknown (fail closed), and so is one with a figure that is
 // not a finite number (nothing compares against NaN).
 func (m HostMemory) Verdict(headroomGiB float64) HostVerdict {
-	if m.PhysicalGiB <= 0 || m.commitLimitMissing() || !finiteGiB(m.PhysicalGiB, m.AvailableGiB, m.CommitUsedGiB, m.CommitLimitGiB, headroomGiB) {
+	if m.PhysicalGiB <= 0 || m.commitLimitMissing() || !finiteGiB(m.PhysicalGiB, m.AvailableGiB, m.CommitUsedGiB, m.CommitLimitGiB, m.CommitCeilingGiB, headroomGiB) {
 		return HostUnknown
 	}
 	if headroomGiB < 0 {
 		headroomGiB = 0
 	}
 	hard := !m.CommitLimitSoft && m.CommitLimitGiB > 0
+	if hard && m.CommitCanGrow() {
+		// A host whose commit limit can grow has two lines, the ones the rule holds every lease to there: the memory that is
+		// available and the commit ceiling. The commit charge above physical RAM says nothing on such a host (a desktop's sits
+		// there with half the RAM available), and the current limit is not a wall (commitceiling.go).
+		switch {
+		case m.AvailableGiB <= 0, m.CommitUsedGiB >= m.CommitCeilingGiB:
+			return HostOver
+		case m.AvailableGiB < headroomGiB, m.CommitUsedGiB > m.CommitCeilingGiB-headroomGiB:
+			return HostNear
+		}
+		return HostOK
+	}
 	switch {
 	case m.AvailableGiB <= 0, m.CommitUsedGiB > m.PhysicalGiB, hard && m.CommitUsedGiB >= m.CommitLimitGiB:
 		return HostOver
@@ -225,6 +253,11 @@ type HostRAMCheck struct {
 	// unstated one, or the commit limit where an enforced one sits below it), and CommitProjectedGiB the charge the grant would reach (admitted iff at most the bound). The last two are
 	// set when the commit condition applies.
 	CommittedGiB, CommitNeedGiB, CommitPendingGiB, CommitLimitGiB, CommitBoundGiB, CommitProjectedGiB float64
+	// CommitCeilingGiB is what the commit limit of the reading can reach (the current limit where it cannot grow): the line a
+	// commit is held to on a host whose OS enforces one. CommitEstimated says the commit judged was not stated: on a host whose
+	// limit can grow it is the touched figure times UnstatedCommitFactor, and CommitNeedGiB and CommitPendingGiB carry it so.
+	CommitCeilingGiB float64
+	CommitEstimated  bool
 	// CommitApplies says the commit condition was put to this reading: the job declared a commit and either did not state it (the
 	// physical line, on every reading) or stated it and the OS enforces a commit limit. CommitStated says the job stated it.
 	// TouchShort and CommitShort say which condition refused; both can.
@@ -301,7 +334,7 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 	}
 	// A figure the comparisons rest on that is not a finite number (the reading, the headroom, what running leases have yet to load)
 	// is no figure: the lease waits as it does on a reading that cannot be taken.
-	if !finiteGiB(mem.PhysicalGiB, mem.AvailableGiB, mem.CommitUsedGiB, mem.CommitLimitGiB, headroomGiB, pending.TouchGiB, pending.CommitGiB) {
+	if !finiteGiB(mem.PhysicalGiB, mem.AvailableGiB, mem.CommitUsedGiB, mem.CommitLimitGiB, mem.CommitCeilingGiB, headroomGiB, pending.TouchGiB, pending.CommitGiB) {
 		c.Unreadable = true
 		c.Why = fmt.Sprintf("waiting for host RAM: a figure the rule compares against (the host's memory reading, the headroom or what running leases have yet to load) is not a finite number of GiB, so a lease that needs %.1f GiB cannot be shown to fit", max(need.TouchGiB, need.CommitGiB))
 		return c
@@ -310,14 +343,32 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 	c.LimitGiB = mem.PhysicalGiB - headroomGiB
 	c.AvailableAfterGiB = mem.AvailableGiB - need.TouchGiB - pending.TouchGiB
 	c.CommitLimitGiB = mem.CommitLimitGiB
+	c.CommitCeilingGiB = mem.commitCeilingGiB()
 	hardLimit := !mem.CommitLimitSoft && mem.CommitLimitGiB > 0
 	// The line the commit is judged against, and the not-yet-charged part that goes with it.
 	if need.CommitGiB > 0 {
 		switch {
 		case need.CommitStated && hardLimit:
+			// The ceiling, not the current limit: where the page file can grow, the OS grants a commit past the current limit by
+			// growing it (commitceiling.go), and refuses only past the ceiling. Where it cannot grow the two are one figure.
 			c.CommitApplies = true
-			c.CommitBoundGiB = mem.CommitLimitGiB - headroomGiB
-			c.CommitProjectedGiB = mem.CommitUsedGiB + need.CommitGiB + pending.CommitGiB
+			c.CommitBoundGiB = c.CommitCeilingGiB - headroomGiB
+			if mem.CommitCanGrow() {
+				c.CommitPendingGiB = pendingCommitAtCeiling(pending)
+			}
+			c.CommitProjectedGiB = mem.CommitUsedGiB + need.CommitGiB + c.CommitPendingGiB
+		case !need.CommitStated && hardLimit && mem.CommitCanGrow():
+			// A commit nobody stated, on a host whose commit limit can grow. The physical-RAM line below is a stand-in from before
+			// the ceiling was read, and on such a host it measures nothing: the commit charge of a desktop sits above physical RAM
+			// with half the RAM available (the reference box: 125 to 141 GiB charged of 127.7, 67 GiB available), so that line
+			// refused every such lease whatever it asked for. The commit is judged where the OS refuses it, the ceiling, and since
+			// nobody stated it, it is taken as UnstatedCommitFactor times the touched figure.
+			c.CommitApplies, c.CommitEstimated = true, true
+			need.CommitGiB *= UnstatedCommitFactor
+			c.CommitNeedGiB = need.CommitGiB
+			c.CommitBoundGiB = c.CommitCeilingGiB - headroomGiB
+			c.CommitPendingGiB = pendingCommitAtCeiling(pending)
+			c.CommitProjectedGiB = mem.CommitUsedGiB + need.CommitGiB + c.CommitPendingGiB
 		case !need.CommitStated:
 			// The retired comparison, kept for every caller that stated no commit: commit charge + the declared figure + what the
 			// running leases have yet to touch, against physical RAM less the headroom, on every reading, hard limit or not; and,
@@ -343,8 +394,12 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 	// An unstated commit equal to the working set is the same fact as the sentence above; a stated one is its own.
 	if c.CommitApplies && need.CommitGiB > c.CommitBoundGiB && (need.CommitStated || !c.TouchShort) {
 		c.CommitShort = true
-		never = append(never, fmt.Sprintf("it declares %.1f GiB of commit, but the %.1f GiB %s less %.1f GiB of headroom leaves %.1f GiB; "+
-			"state the real commit (gpu reserve --ram-commit <GiB>) or lower gpu_host_ram_headroom_gib", need.CommitGiB, commitLineGiB(mem, need), commitLineName(mem, need), headroomGiB, max(c.CommitBoundGiB, 0)))
+		declares := fmt.Sprintf("it declares %.1f GiB of commit", need.CommitGiB)
+		if c.CommitEstimated {
+			declares = fmt.Sprintf("it states no commit, so it is taken as %.1f GiB (%.1f times what it touches)", need.CommitGiB, UnstatedCommitFactor)
+		}
+		never = append(never, fmt.Sprintf("%s, but the %.1f GiB %s less %.1f GiB of headroom leaves %.1f GiB; "+
+			"state the real commit (gpu reserve --ram-commit <GiB>) or lower gpu_host_ram_headroom_gib", declares, commitLineGiB(mem, need), commitLineName(mem, need), headroomGiB, max(c.CommitBoundGiB, 0)))
 	}
 	if len(never) > 0 {
 		c.Impossible = true
@@ -367,7 +422,13 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 	}
 	if c.CommitApplies && c.CommitProjectedGiB > c.CommitBoundGiB {
 		c.CommitShort = true
-		if need.CommitStated {
+		if c.CommitEstimated {
+			why = append(why, fmt.Sprintf("needs %.1f GiB of commit (no commit stated, so %.1f times what it touches), committed %.1f of a commit limit that is %.1f GiB now and can reach %.1f GiB%s, %.1f GiB headroom",
+				need.CommitGiB, UnstatedCommitFactor, mem.CommitUsedGiB, mem.CommitLimitGiB, c.CommitCeilingGiB, pend(c.CommitPendingGiB), headroomGiB))
+		} else if need.CommitStated && mem.CommitCanGrow() {
+			why = append(why, fmt.Sprintf("needs %.1f GiB of commit, committed %.1f of a commit limit that is %.1f GiB now and can reach %.1f GiB%s, %.1f GiB headroom",
+				need.CommitGiB, mem.CommitUsedGiB, mem.CommitLimitGiB, c.CommitCeilingGiB, pend(c.CommitPendingGiB), headroomGiB))
+		} else if need.CommitStated {
 			why = append(why, fmt.Sprintf("needs %.1f GiB of commit, committed %.1f of %.1f GiB commit limit%s, %.1f GiB headroom",
 				need.CommitGiB, mem.CommitUsedGiB, mem.CommitLimitGiB, pend(pending.CommitGiB), headroomGiB))
 		} else if unstatedCommitLineIsLimit(mem) {
@@ -390,6 +451,17 @@ func hostRAMAdmitsLoad(mem HostMemory, readable, supported bool, need, pending H
 	return c
 }
 
+// pendingCommitAtCeiling is what the leases already granted have yet to be CHARGED, as the ceiling line counts it. The pending
+// figure the lease manager hands over pools every running lease: the commit of those that stated one, and for those that
+// stated none only what they have yet to touch. On the ceiling line a commit nobody stated is UnstatedCommitFactor times the
+// touched figure, for a lease still loading as much as for the one asking, so the part not yet charged is raised by the factor's
+// excess over one on everything still to be touched. That counts a pending lease that DID state its commit high (by 1.1 times
+// what it has yet to touch) for as long as it is loading, and never counts one low: a lease granted a moment ago and not loaded
+// yet is exactly the load neither counter shows.
+func pendingCommitAtCeiling(pending HostLoad) float64 {
+	return pending.CommitGiB + pending.TouchGiB*(UnstatedCommitFactor-1)
+}
+
 // unstatedCommitLineIsLimit says the line a commit nobody stated is held to is the OS commit limit and not physical RAM: the limit
 // is enforced and sits below physical RAM (strict-mode Linux), so it is the nearer of the two.
 func unstatedCommitLineIsLimit(mem HostMemory) bool {
@@ -399,6 +471,9 @@ func unstatedCommitLineIsLimit(mem HostMemory) bool {
 // commitLineGiB and commitLineName say which line a declared commit is judged against: the OS commit limit for a stated one,
 // physical RAM for one nobody stated, or the commit limit for that one too where an enforced limit sits below physical RAM.
 func commitLineGiB(mem HostMemory, need HostLoad) float64 {
+	if mem.CommitCanGrow() && !mem.CommitLimitSoft {
+		return mem.CommitCeilingGiB
+	}
 	if need.CommitStated || unstatedCommitLineIsLimit(mem) {
 		return mem.CommitLimitGiB
 	}
@@ -406,6 +481,9 @@ func commitLineGiB(mem HostMemory, need HostLoad) float64 {
 }
 
 func commitLineName(mem HostMemory, need HostLoad) string {
+	if mem.CommitCanGrow() && !mem.CommitLimitSoft {
+		return "commit ceiling (the commit limit with the page file at its maximum)"
+	}
 	if need.CommitStated || unstatedCommitLineIsLimit(mem) {
 		return "commit limit"
 	}

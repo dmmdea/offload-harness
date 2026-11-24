@@ -51,5 +51,13 @@ func readHostMemory() (HostMemory, bool) {
 	if !globalMemoryStatus(&m) {
 		return HostMemory{}, false
 	}
-	return hostMemoryFromStatus(m.TotalPhys, m.AvailPhys, m.TotalPageFile, m.AvailPageFile)
+	mem, ok := hostMemoryFromStatus(m.TotalPhys, m.AvailPhys, m.TotalPageFile, m.AvailPageFile)
+	if ok {
+		mem.CommitCeilingGiB = mem.CommitLimitGiB + pageFileGrowthGiB()
+	}
+	return mem, ok
 }
+
+// pageFileGrowthGiB is how far the page files can still take the commit limit (pagefile_windows.go). A variable so a test can
+// stand a host in; production never replaces it.
+var pageFileGrowthGiB = commitGrowthGiB
