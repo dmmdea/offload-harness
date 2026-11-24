@@ -114,6 +114,15 @@ func (s *Server) statusProcess() any {
 	if note != "" {
 		block["note"] = note
 	}
+	// Who the client says it is (as read at initialize) and whether this server exits by itself when idle and stale: "armed", or
+	// "off: <why>" (exit_when_stale.go). How the live server is checked after a deploy.
+	if name, ver := s.xw.client(); name != "" {
+		block["client_name"] = name
+		if ver != "" {
+			block["client_version"] = ver
+		}
+	}
+	block["exit_when_stale"] = s.exitWhenStaleState()
 	return block
 }
 

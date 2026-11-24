@@ -167,11 +167,16 @@ type Server struct {
 	// cfg is the config file this server started from, compared with the file on disk when a door answers (stale_config.go).
 	// nil for a server built without a config source, which then says nothing.
 	cfg *cfgWatch
+	// xw is what the exit-when-stale decision reads: the client named at initialize, the calls in flight, the last one's end
+	// (exit_when_stale.go).
+	xw exitWatch
 }
 
 func New(p *pipeline.Pipeline) *Server {
-	return &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0), pins: delegate.NewPinTally(), tenant: delegate.DefaultTenant(),
+	s := &Server{p: p, askCache: askcache.New(), quarantine: delegate.NewQuarantine(0), pins: delegate.NewPinTally(), tenant: delegate.DefaultTenant(),
 		originSession: func() string { return ledger.ProcessOrigin().Session }, exe: newServerExeWatch()}
+	s.exe.armed = s.exitArmed // the stale-binary note says the server exits by itself only while it will (exit_when_stale.go)
+	return s
 }
 
 // WithConfigSource records the config file this server runs on, so a node added to its delegate_remotes joins the running
@@ -375,7 +380,17 @@ func (s *Server) Run(ctx context.Context, version string) error {
 // that is killed leaves an entry whose pid reads as dead, which is the same answer.
 func (s *Server) serve(ctx context.Context, version string, t mcp.Transport) error {
 	defer s.registerSession()()
-	return s.buildServer(version).Run(ctx, t)
+	srv := s.buildServer(version)
+	// An idle server whose image changed on disk makes Run return by cancelling runCtx (exit_when_stale.go). That is a clean exit
+	// of this function, so the deferred session-registry removal above runs and the caller's exit code stays 0.
+	runCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	s.startExitWatch(runCtx, stop)
+	err := srv.Run(runCtx, t)
+	if s.xw.hasExited() && ctx.Err() == nil {
+		return nil
+	}
+	return err
 }
 
 // registerSession records this server's process under its session and returns the
@@ -419,6 +434,9 @@ func (s *Server) buildServer(version string) *mcp.Server {
 	if s.p != nil && s.p.Cfg().ToolsSchemaProfileMode() == config.ToolsProfileCompact {
 		srv.AddReceivingMiddleware(compactToolsMiddleware)
 	}
+	// Last, so it wraps outside everything else: it reads the client's name at initialize and counts the tools/call requests in
+	// flight for the exit-when-stale decision (exit_when_stale.go). It changes no request and no result.
+	srv.AddReceivingMiddleware(s.exitWatchMiddleware)
 
 	// Discovery FIRST (LO-18): before this tool existed, offload_nim was the only
 	// tool that named or listed any model, so an agent inspecting the harness
