@@ -214,10 +214,18 @@ func (r *runner) replacementNode(ctx context.Context, contract core.AgentContrac
 	// was eligible and refused, so this is a place in line: the capacity wait re-reads every node
 	// each tick and takes the local seat only once the occupant has left.
 	if r.route != "local" {
-		if rd := r.busyReadingNow(ctx); rd.occupiedBy != "" {
+		if rd := r.busyReadingNow(ctx); rd.cannotLoad() {
 			pl.capacityRefusal = true
 			return placement{}, head + ", and " + rd.why(), false
 		}
+	}
+	// The seat's own door found the host short of memory for its cold load (HostRAMDefer) and the delegator's reading cannot yet
+	// see it (a node that holds the seat to a higher need than the config's the delegator reads, or the host moved between the two
+	// looks). The seat is not handed straight back: that loops on the door's settles. It is a place in line, and the capacity
+	// wait asks the seat again when the host admits, at most once per refusalCooldown.
+	if pl.hostRAM != "" {
+		pl.capacityRefusal = true
+		return placement{}, head + ", and the local seat's door found the host short of memory for its cold load (" + pl.hostRAM + ")", false
 	}
 	if free, note := r.localSlotAhead(); !free {
 		// A full run-cap line is a place in line, not a refusal: the wait watches it and

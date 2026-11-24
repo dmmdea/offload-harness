@@ -6,8 +6,10 @@ package delegate
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -566,5 +568,68 @@ func TestCapacityWaitStillAsksTheSoleOverdueRemote(t *testing.T) {
 	}
 	if got := over.dispatches.Load(); got < 2 {
 		t.Fatalf("the overdue node saw %d dispatches, want the refused first one and the wait's retry", got)
+	}
+}
+
+// TestHostRAMDeferIsAPlaceInLineNotAVerdict: the local seat's door answers the host-RAM defer (core.HostRAMReason, capacity
+// class, no steps) twice and then admits the load. A host-RAM shortage is a place in line like a busy or occupied seat: with a
+// fleet to re-place on, the subtask waits in the capacity wait and the SAME local seat takes it once the host admits, the door
+// asked to look once (HostRAMWait 0: the wait is the line). With no remotes there is no wait to stand in, so the defer is
+// published after the one run and the door was asked to be the line itself (HostRAMWaitAdmission). A real shortage cannot be
+// staged on demand, hence this one check; it counts calls and takes no timing bound.
+func TestHostRAMDeferIsAPlaceInLineNotAVerdict(t *testing.T) {
+	compressPolls(t, 5*time.Millisecond, time.Second)
+	compressWait(t, 5*time.Millisecond, 0)
+	var mu sync.Mutex
+	var asked []*time.Duration
+	var calls atomic.Int64
+	local := func(ctx context.Context, c core.AgentContract, o LocalOptions) (core.AgentWireResult, error) {
+		n := calls.Add(1)
+		mu.Lock()
+		asked = append(asked, o.HostRAMWait)
+		mu.Unlock()
+		if n <= 2 {
+			return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
+				Deferred: true, DeferClass: core.DeferClassCapacity, Steps: 0,
+				Reason: core.HostRAMReason + "the host cannot take the seat's 36.0 GiB; the seat was not loaded, and this contract is re-placeable"}, nil
+		}
+		return core.AgentWireResult{SchemaVersion: core.AgentWireSchemaVersion, NodeID: "local", Seat: "local-seat",
+			Output: "answered locally", Structured: json.RawMessage(`{"answer":"zorblax"}`), StopReason: "done"}, nil
+	}
+
+	// A remote that can never run the contract is a fleet to re-place on, and nothing for the wait to take: the seat is the only place.
+	node, url := acceptingNode(t, "node-off", "answer", func(f *fakeNode) { f.agentEnabled = false })
+	cfg := testCfg(t)
+	cfg.AgentPlacementWaitSec = 10
+	results, sum, err := RunWith(t.Context(), cfg, local, []core.AgentContract{plainContract()}, "auto", []string{url}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Succeeded != 1 || results[0].Node != "local" || calls.Load() != 3 || node.dispatches.Load() != 0 {
+		t.Fatalf("summary = %+v node = %q reason = %q local calls = %d remote dispatches = %d, want the subtask kept in line and landed on the local seat on the third ask",
+			sum, results[0].Node, results[0].Result.Reason, calls.Load(), node.dispatches.Load())
+	}
+	mu.Lock()
+	for i, w := range asked {
+		if w == nil || *w != 0 {
+			t.Errorf("ask %d carried HostRAMWait %v, want 0 (a delegator with a capacity wait looks once; the wait is the line)", i+1, w)
+		}
+	}
+	asked = nil
+	mu.Unlock()
+
+	// No remotes: nothing to wait for, so the defer is published after one run, and the door was asked to wait for the host itself.
+	calls.Store(0)
+	results, sum, err = Run(t.Context(), testCfg(t), local, []core.AgentContract{plainContract()}, "auto", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Deferred != 1 || calls.Load() != 1 || !strings.HasPrefix(results[0].Result.Reason, core.HostRAMReason) {
+		t.Fatalf("summary = %+v local calls = %d result = %+v, want the host-RAM defer published after one run", sum, calls.Load(), results[0].Result)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) != 1 || asked[0] == nil || *asked[0] != HostRAMWaitAdmission {
+		t.Fatalf("door asked with %v, want HostRAMWaitAdmission: with no line the door is the line", asked)
 	}
 }

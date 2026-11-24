@@ -58,6 +58,8 @@ func localSeatBusy(ctx context.Context, cfg config.Config, seat, what string, gu
 	switch {
 	case rd.occupiedBy != "":
 		return SeatBusy{Busy: true, Why: "loading it would evict the loaded vLLM seat " + rd.occupiedBy}
+	case rd.hostShort != "":
+		return SeatBusy{Busy: true, Why: rd.hostShort}
 	case rd.loading:
 		return SeatBusy{Busy: true, Why: "a load or unload is in progress"}
 	}

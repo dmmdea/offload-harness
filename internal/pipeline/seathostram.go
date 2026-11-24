@@ -27,6 +27,11 @@ package pipeline
 // A node that states the seat's commit (agent_seat_host_commit_gib) has it judged against the commit ceiling (the OS commit limit
 // with its page files at their maximum), not physical RAM and not the current limit: held to the current limit, the seat was
 // refused on every contract of a day on a desktop with 67 GiB of RAM available (commitceiling.go).
+//
+// A shortage of host memory is a place in line, never a verdict (2026-11-24), like a busy, reserved, fenced or occupied seat. The
+// delegator that has a line answers its capacity wait (delegate.awaitCapacity), which re-reads the host and the seat every 3 s and
+// takes the seat the instant the host admits, so its door looks once (wait 0). A caller with no line, route=local or a box with no
+// remotes or the agent_run door, waits at the door for as long as its admission budget lasts. See SeatColdLoadAdmission.
 
 import (
 	"context"
@@ -46,11 +51,23 @@ import (
 // model that is not the config's agent seat, for a node that states no footprint for its seat (agent_seat_host_ram_gib), and when
 // m is nil. Two refusals, the warm-back's own (hostRAMWarmCheck) with no lease left out:
 //   - a lane that declared host RAM is live: a seat is not loaded while a lane streams, because the lane's own growth is not
-//     in any counter yet. Immediate: a lane that streams does not end in a minute;
+//     in any counter yet. Immediate for a caller that waits no longer than a minute: a lane that streams does not end in one;
 //   - the admission rule: the seat's footprint, plus what the live leases have yet to load, must leave the headroom of the
 //     available RAM and keep the commit charge under its bound (physical RAM less the headroom when the node states no commit,
 //     the commit ceiling less the headroom when it does). This one is re-read for up to min(gpulease.HostRAMSettleBound, budget).
-func SeatColdLoadAdmission(ctx context.Context, cfg config.Config, m *gpulease.Manager, model string, budget time.Duration) (why string, waited time.Duration, note string) {
+//
+// wait says who is the line (delegate.LocalOptions.HostRAMWait; the doors pass it through). nil is the gate as it was: the
+// settle above, with its no-progress stop. 0 is one look plus the relief trigger: the delegator has a line (its capacity wait
+// re-asks every 3 s and takes the seat the instant the host admits) and the door must answer at once so that line can do the
+// waiting. A negative wait (delegate.HostRAMWaitAdmission) is a caller with no line, and the door is the line: it re-reads the host
+// every tick for as long as budget lasts with no no-progress stop (gpulease.Manager.HostRAMAwait), and a lane that declared host RAM
+// is a reason to keep waiting, not an immediate refusal. When the swap pre-flight has already spent the budget, the host gets a
+// budget of its own, the admission budget of the config, once. The pre-flight waited on ANOTHER session's swap, and the shortage
+// it then met was that swap's own: on the reference 3-card Windows box a contract pinned local spent 300 s of admission behind a
+// vision model and then a speech model loading, met the host 2.9 GiB short (needs 36.0 GiB, 41.1 GiB of 127.7 GiB available, 8.0
+// GiB headroom), was refused after one look, and four minutes later the host had 66.5 GiB available. A positive wait is the same
+// patient wait bounded by it.
+func SeatColdLoadAdmission(ctx context.Context, cfg config.Config, m *gpulease.Manager, model string, budget time.Duration, wait *time.Duration) (why string, waited time.Duration, note string) {
 	if m == nil || !strings.EqualFold(strings.TrimSpace(model), strings.TrimSpace(cfg.AgentPlannerModel(""))) {
 		return "", 0, ""
 	}
@@ -68,26 +85,64 @@ func SeatColdLoadAdmission(ctx context.Context, cfg config.Config, m *gpulease.M
 		}
 		return ""
 	}
-	if why := lane(); why != "" {
-		return why, 0, ""
+	patient := wait != nil && *wait != 0
+	if !patient {
+		if why := lane(); why != "" {
+			return why, 0, ""
+		}
 	}
 	load := need.HostLoad()
-	chk, waited := m.HostRAMSettle(ctx, min(gpulease.HostRAMSettleBound, budget), func() gpuprobe.HostRAMCheck { return m.HostRAMCheckLoad(load) })
+	var chk gpuprobe.HostRAMCheck
+	var laneWhy, ownBudget string
+	switch {
+	case patient:
+		bound := budget
+		if *wait > 0 {
+			bound = *wait
+		} else if budget < admissionPoll {
+			// The pre-flight left less than one poll of the admission budget (it ends a poll early: awaitSeatAdmissionLoad).
+			bound = admissionBudget(cfg.AgentAdmissionWaitSec)
+			ownBudget = fmt.Sprintf("the swap pre-flight had spent the admission budget, so the host got a budget of its own, %s", bound.Round(time.Second))
+		}
+		// A live lane reads as a refusal with no shortfall: the relief has nothing to free for it, and the wait goes on.
+		chk, waited = m.HostRAMAwait(ctx, bound, func() gpuprobe.HostRAMCheck {
+			laneWhy = lane()
+			if laneWhy != "" {
+				return gpuprobe.HostRAMCheck{Why: laneWhy}
+			}
+			return m.HostRAMCheckLoad(load)
+		})
+	case wait != nil:
+		chk, waited = m.HostRAMSettle(ctx, 0, func() gpuprobe.HostRAMCheck { return m.HostRAMCheckLoad(load) })
+	default:
+		chk, waited = m.HostRAMSettle(ctx, min(gpulease.HostRAMSettleBound, budget), func() gpuprobe.HostRAMCheck { return m.HostRAMCheckLoad(load) })
+	}
 	if chk.OK {
 		// A lane granted while the gate waited is judged like one that was live when it started.
-		if waited > 0 {
+		if waited > 0 && !patient {
 			if why := lane(); why != "" {
 				return why, waited, ""
 			}
 		}
 		if waited >= time.Second {
 			note = fmt.Sprintf("waited %s for host RAM before the seat's cold load", waited.Round(time.Second))
+			if ownBudget != "" {
+				note += " (" + ownBudget + ")"
+			}
 		}
 		return "", waited, note
 	}
-	why = need.SeatRefusal(chk.Why)
+	if laneWhy != "" {
+		why = laneWhy
+	} else {
+		why = need.SeatRefusal(chk.Why)
+	}
 	if waited >= time.Second {
-		why += fmt.Sprintf(" (after %s waiting for the host to give memory back)", waited.Round(time.Second))
+		why += fmt.Sprintf(" (after %s waiting for the host to give memory back", waited.Round(time.Second))
+		if ownBudget != "" {
+			why += "; " + ownBudget
+		}
+		why += ")"
 	}
 	return why, waited, ""
 }
@@ -95,12 +150,12 @@ func SeatColdLoadAdmission(ctx context.Context, cfg config.Config, m *gpulease.M
 // SeatColdLoadAdmissionFor is SeatColdLoadAdmission with the lease manager this config names (the state root and lease path it
 // configures). A manager that cannot be opened refuses nothing: the gate is a guard on top of the load that always ran, and
 // an unreadable lease directory is not evidence the host is short.
-func SeatColdLoadAdmissionFor(ctx context.Context, cfg config.Config, model string, budget time.Duration) (why string, waited time.Duration, note string) {
+func SeatColdLoadAdmissionFor(ctx context.Context, cfg config.Config, model string, budget time.Duration, wait *time.Duration) (why string, waited time.Duration, note string) {
 	m, err := gpulease.OpenAt(cfg.GPULockPath, cfg.StateDir)
 	if err != nil {
 		return "", 0, ""
 	}
-	return SeatColdLoadAdmission(ctx, cfg, m, model, budget)
+	return SeatColdLoadAdmission(ctx, cfg, m, model, budget, wait)
 }
 
 // AwaitSeatAdmissionState is AwaitSeatAdmission that also reports what the pre-flight saw of the seat itself: when it first

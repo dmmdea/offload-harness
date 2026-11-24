@@ -719,7 +719,9 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	var settleNote string
 	if seatAbsent && loadSeen.IsZero() {
 		// The gate settles for up to a minute: that wait is admission, counted whether the host gave the memory back or not.
-		why, settled, note := pipeline.SeatColdLoadAdmissionFor(ctx, cfg, model, time.Until(admitDeadline))
+		// This door has no line to wait in: it waits for the host itself, for as long as its admission budget lasts.
+		hostWait := delegate.HostRAMWaitAdmission
+		why, settled, note := pipeline.SeatColdLoadAdmissionFor(ctx, cfg, model, time.Until(admitDeadline), &hostWait)
 		admitted += settled
 		settleNote = note
 		if why != "" {
@@ -727,7 +729,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 			dout := map[string]any{
 				"deferred":    true,
 				"defer_class": string(core.DeferClassCapacity),
-				"reason":      "host RAM: " + why + "; the seat was not loaded, and this run is re-placeable",
+				"reason":      core.HostRAMReason + why + "; the seat was not loaded, and this run is re-placeable",
 				"steps":       0,
 			}
 			withAdmission(dout, admitted, preNote)

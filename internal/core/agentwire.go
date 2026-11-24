@@ -178,6 +178,15 @@ const IncoherentSeatReason = "seat incoherent at warm: "
 // produce a duplicate run.
 const SeatDownReason = "seat down: "
 
+// HostRAMReason prefixes the defer a contract door files when the host cannot take the cold load of the agent seat the contract
+// would start (pipeline.runAgentTask and the MCP agent_run door). Both doors write the reason with it and the delegator
+// recognises it (delegate.HostRAMDefer) to keep the subtask in line for the seat instead of publishing the refusal: a shortage
+// of host memory is a place in line like a busy, reserved or fenced seat, never a verdict, because the memory comes back (on the
+// reference 3-card Windows box the host had 66.5 GiB available four minutes after a refusal that found 41.1 GiB). The class
+// stays `capacity`, so a node without this constant is read as before. A constant and not a sentence typed in three places, so
+// the delegator never matches prose.
+const HostRAMReason = "host RAM: "
+
 // SeatNotServingReason prefixes the defer a run files when llama-swap answered a 5xx
 // for its seat and the answer outlived the contention budget while the seat was not
 // known to be down (ADR 0066): a start that failed, a health check that timed out.

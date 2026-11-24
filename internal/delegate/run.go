@@ -906,8 +906,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			}
 			// An occupied seat (operator 2026-10-06: "wait in line") is a place in line too, never
 			// "queued-local": loading it would unload the vLLM seat holding the cards. The wait takes
-			// it once the occupant leaves (localStillBusy reads occupiedBy) or a remote frees.
-			if occ := r.autoOccupant(); localServes && occ.occupiedBy != "" {
+			// it once the occupant leaves (localStillBusy reads occupiedBy) or a remote frees. So is a seat the host cannot load
+			// now (hostShort): the memory comes back, and the wait takes the seat the instant it does.
+			if occ := r.autoOccupant(); localServes && occ.cannotLoad() {
 				return PlacedResult{waitCapacity: true, overflow: true, pendingReason: occ.why() + "; no eligible remote — " + why, remotesUnreachable: deadFleet}
 			}
 			chosen = localView
@@ -942,8 +943,8 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// probeLocalBusy always has.
 			r.autoLocalBusyOnce.Do(func() { r.autoLocalBusy = r.probeLocalBusy(ctx) })
 			local := r.autoLocalBusy
-			busy = leaseInfo.Held || r.atRunCap(local.inflight) || local.loading || local.occupiedBy != ""
-			if r.atRunCap(local.inflight) || local.loading || local.occupiedBy != "" {
+			busy = leaseInfo.Held || r.atRunCap(local.inflight) || local.loading || local.cannotLoad()
+			if r.atRunCap(local.inflight) || local.loading || local.cannotLoad() {
 				r.autoDealReadBusy.Store(true) // the seat's load, never the lease (see the joint deal)
 			}
 			// A remote hint (ADR 0078) is placed remotes-first: the seat is unavailable whatever it read, and the
@@ -1025,7 +1026,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// place in line as a reservation, without the dial that would be turned away.
 			why, class := r.noEligibleRemote(st, views, probeErrs)
 			return PlacedResult{waitCapacity: true, fenced: true, pendingReason: "local seat fenced (" + fenceWhy + " — " + HolderLine(fence) + "); no eligible remote — " + why, remotesUnreachable: class == core.DeferClassInfrastructure}
-		case chosen.Local && r.route == "auto" && r.autoOccupant().occupiedBy != "" && r.localServesLayer(localView, contract):
+		case chosen.Local && r.route == "auto" && r.autoOccupant().cannotLoad() && r.localServesLayer(localView, contract):
 			// The occupied seat waits in line like a reservation (operator 2026-10-06: "wait in
 			// line"): never loaded over the vLLM seat holding the cards while that seat stays.
 			why, class := r.noEligibleRemote(st, views, probeErrs)
@@ -1047,7 +1048,7 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			if r.remoteHint() {
 				reason = "remotes first; placed on " + chosen.NodeID
 			}
-			if r.route == "auto" && r.autoLocalBusy.occupiedBy != "" {
+			if r.route == "auto" && r.autoLocalBusy.cannotLoad() {
 				reason = r.autoLocalBusy.why() + "; placed on " + chosen.NodeID
 			}
 		}
@@ -1158,7 +1159,13 @@ func (r *runner) runLocal(ctx context.Context, jobID string, contract core.Agent
 		pr.Err = "no local runner wired (delegator surfaces must supply one)"
 		return pr
 	}
-	opts := LocalOptions{Seat: dec.Seat, Placed: pr.Placed, ParentJobID: jobID}
+	opts := LocalOptions{Seat: dec.Seat, Placed: pr.Placed, ParentJobID: jobID, HostRAMWait: r.hostRAMWait()}
+	if dec.Seat != "" {
+		// A run on a decided seat is not held by the capacity wait when its door defers for host memory (runDecided files the
+		// defer), so its door is the line whatever the route.
+		wait := HostRAMWaitAdmission
+		opts.HostRAMWait = &wait
+	}
 	if dec.Seat != "" {
 		pr.Seat = dec.Seat
 	}

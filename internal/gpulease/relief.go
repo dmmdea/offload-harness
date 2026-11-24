@@ -115,6 +115,20 @@ const (
 // (no progress). bound <= 0 is one look plus the relief trigger on a refusal, with no wait: a caller whose lease is still held
 // while it asks (the warm-back at a release) must not hold the others behind it.
 func (m *Manager) HostRAMSettle(ctx context.Context, bound time.Duration, check func() gpuprobe.HostRAMCheck) (gpuprobe.HostRAMCheck, time.Duration) {
+	return m.hostRAMSettle(ctx, bound, check, true)
+}
+
+// HostRAMAwait is HostRAMSettle for a caller with patience: one that has no line to wait in and would otherwise refuse a contract
+// the host can take a few minutes later (a contract pinned local, a box with no remotes, the agent_run door). Same tick, same
+// relief on each refusal, same three-way reading; it has no no-progress stop, because a stop is for a caller that must not pin a
+// slot of someone else's line on a host that never recovers, and this caller's own wait is the whole line. It ends at the reading
+// being OK, Impossible or Unreadable, or at bound or ctx. bound <= 0 is one look plus the relief trigger, as in HostRAMSettle.
+func (m *Manager) HostRAMAwait(ctx context.Context, bound time.Duration, check func() gpuprobe.HostRAMCheck) (gpuprobe.HostRAMCheck, time.Duration) {
+	return m.hostRAMSettle(ctx, bound, check, false)
+}
+
+// hostRAMSettle is the one loop behind HostRAMSettle (stopOnStall true) and HostRAMAwait (false).
+func (m *Manager) hostRAMSettle(ctx context.Context, bound time.Duration, check func() gpuprobe.HostRAMCheck, stopOnStall bool) (gpuprobe.HostRAMCheck, time.Duration) {
 	chk := check()
 	if chk.OK || chk.Impossible || chk.Unreadable {
 		return chk, 0
@@ -145,7 +159,7 @@ func (m *Manager) HostRAMSettle(ctx context.Context, bound time.Duration, check 
 		now := m.now()
 		if short := hostRAMShortGiB(chk); short <= best-hostRAMSettleProgress {
 			best, bestAt = short, now
-		} else if now.Sub(bestAt) >= hostRAMSettleStall {
+		} else if stopOnStall && now.Sub(bestAt) >= hostRAMSettleStall {
 			break
 		}
 	}

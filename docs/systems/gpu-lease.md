@@ -2585,6 +2585,27 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   90 GiB of growth still to take. The gate stands for the two things that are real, the seat's touched set against the available
   memory and its commit against the ceiling. A request sent straight to
   llama-swap, outside both doors, is still not gated.
+* **A shortage is a place in line, not a refusal (2026-11-24).** The seat's host-RAM gate used to end in a refusal after one look
+  or a 10 to 60 second settle, published as `capacity` and never retried. The memory comes back: on the reference 3-card Windows
+  box a contract found the host 2.9 GiB short (it needed 36.0 GiB and 41.1 GiB of 127.7 GiB were available, with 8.0 GiB of
+  headroom) after waiting 300 s for another session's model swap, and four minutes later the host had 66.5 GiB available. Now
+  the refusal carries the constant `core.HostRAMReason` (`host RAM: `) and the delegator recognises it (`delegate.HostRAMDefer`).
+  Who waits depends on whether there is a line. A delegator with remotes and the capacity wait on reads the host itself before
+  it deals the seat a subtask (the need the door reads, measured loads included: `pipeline.SeatNeedFor`, handed to the
+  delegator at init through `delegate.SetSeatNeed`, judged by `Manager.HostRAMCheckLoad`, only for this box's own seat),
+  keeps the subtask in the capacity wait, and takes the seat on the first 3 second tick
+  at which the host admits it; the door it then runs on looks once (`LocalOptions.HostRAMWait` 0) and a door that still refuses
+  is one more tick, asked at most once per 10 seconds and at most four times per subtask before the next refusal is the answer.
+  That wait lasts to the call's deadline less 15 seconds (else `agent_placement_wait_sec`, default 120 seconds) and ends in the
+  defer that names the host's sentence and how long it waited. With no line (`delegate.hasLine` false: `route=local`, a box
+  with no remotes, a delegator with the capacity wait off, a sheddable run), on a decided seat, and at the MCP `agent_run`
+  door, the delegator does not read the host and the door is the line: it re-reads the host every 2 seconds for as long
+  as the admission budget lasts (`Manager.HostRAMAwait`: the same tick and relief, no no-progress stop, and a live lane that
+  declared host RAM is a reason to keep waiting). If the swap pre-flight has already spent that budget, the host gets a budget of
+  its own, equal to `agent_admission_wait_sec`, once, and the admission note says so. The admission deadline moves out by the
+  time the door waited, as it does for the seat-cap line, so the cold load that follows keeps its whole budget instead of
+  running inside the contract's wall. A wait is noted as `waited 1m32s for host RAM
+  before the seat's cold load`. A node serving a remote delegator passes no `HostRAMWait` and keeps the settle above.
 * **Not done, on purpose.** The owed warm is not counted as *pending* when another lease is admitted. The seat was unloaded to
   make room for that very lease, and its reload happens after the lease ends, so reserving room for it at the lease's grant
   would count the memory twice; the reload is admitted when it is attempted.

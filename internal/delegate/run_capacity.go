@@ -115,7 +115,11 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 	}
 	// Recorded whatever the outcome — a SUCCESSFUL placement must exclude its
 	// own seat from the verification retry just as firmly as a refused one.
-	pl.tried[pr.ranBase] = true
+	// The local seat's host-RAM defer (HostRAMDefer) keeps its place in line when the caller has one: the seat is not marked
+	// tried, and the capacity wait asks it again when the host admits the cold load (placements.holdsLocalForHost).
+	if !(r.isReplaceable(pr) && pl.holdsLocalForHost(pr)) {
+		pl.tried[pr.ranBase] = true
+	}
 	pl.countAttempt(pr)
 	if !r.isReplaceable(pr) {
 		return pr
@@ -220,6 +224,11 @@ func (r *runner) placeAndRun(ctx context.Context, i int, contract core.AgentCont
 			// annotateLanding). Whether its answer was any good is the four outcome buckets'
 			// business, not this loop's.
 			return annotateLanding(pr, refusals)
+		}
+		if next.base == "" && pl.holdsLocalForHost(pr) {
+			// The seat's door found the host short: the seat keeps its place in line (it was marked tried above, before it was
+			// asked) and the next iteration hands the subtask to the capacity wait (replacementNode).
+			delete(pl.tried, "")
 		}
 		refusals = append(refusals, refusalLine(pr))
 		r.noteRefusal(pl, pr)
@@ -576,6 +585,8 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	fencedSeen := seed.fenced
 	// occupiedSeen: the wait saw another vLLM seat occupy the local cards (the seat it names).
 	occupiedSeen := ""
+	// hostSeen: the wait saw the host unable to take the seat's cold load (the sentence it gave).
+	hostSeen := ""
 	// noteSuffix carries why the subtask waited, when nothing refused it, onto the
 	// placement reasons the wait writes.
 	noteSuffix := ""
@@ -656,9 +667,22 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			// when the occupant leaves. Read first, so the reason can name the occupant.
 			occupied := false
 			if !Reserved(lease) && !fenced && free && r.route != "local" {
-				if rd := r.busyReadingNow(ctx); rd.occupiedBy != "" {
-					occupied, occupiedSeen = true, rd.occupiedBy
+				// The seat the host cannot load now (hostShort) is the same place in line as an occupied one: nothing is
+				// loaded over it, and it is a candidate again the moment the delegator's own reading of the host admits.
+				if rd := r.busyReadingNow(ctx); rd.cannotLoad() {
+					occupied = true
+					if rd.occupiedBy != "" {
+						occupiedSeen = rd.occupiedBy
+					} else {
+						hostSeen = rd.hostShort
+					}
 					places[""] = PlaceWait{Node: localView.NodeID, On: "seat", Detail: rd.why()}
+				} else if pl.hostRAM != "" && time.Now().Before(pl.hostRetryAt) {
+					// The seat's own door refused for host RAM a moment ago while this reading admits the load: not asked
+					// again before refusalCooldown has passed, so a node that holds the seat to a higher need than the
+					// delegator can read costs one look per cooldown and not one per tick.
+					occupied, hostSeen = true, pl.hostRAM
+					places[""] = PlaceWait{Node: localView.NodeID, On: "seat", Detail: "the seat's door found the host short of memory for its cold load: " + pl.hostRAM, EtaSec: int(time.Until(pl.hostRetryAt).Seconds())}
 				}
 			}
 			stillBusy := false
@@ -699,6 +723,8 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 					reason = fmt.Sprintf("local seat was fenced by a lease, fence cleared after %s — running local (capacity wait)", idle.Round(time.Second))
 				case occupiedSeen != "":
 					reason = fmt.Sprintf("local seat was occupied by the vLLM seat %s, which left after %s — running local (capacity wait)", occupiedSeen, idle.Round(time.Second))
+				case hostSeen != "":
+					reason = fmt.Sprintf("local seat could not take its cold load for want of host RAM, which came back after %s, running local (capacity wait)", idle.Round(time.Second))
 				case r.remoteHint() && !r.dealReadLocalBusy():
 					// The deal kept the subtask off a seat that never read busy: a remote hint prefers the remotes
 					// (ADR 0078), and none had room.
@@ -717,14 +743,18 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 					continue
 				}
 				spanStart = time.Now() // the attempt is charged; the wait resumes here
-				pl.tried[""] = true
+				// A host-RAM defer is another tick of the wait, not a verdict: the seat is asked again once the host admits.
+				if !(r.isReplaceable(pr) && pl.holdsLocalForHost(pr)) {
+					pl.tried[""] = true
+				}
 				pl.countAttempt(pr)
 				if !r.isReplaceable(pr) {
 					return r.landedAfterWait(pr, idle, refusals)
 				}
 				// The local seat deferred it as capacity after all (its line filled between
 				// the read and the run): one more refusal, and the wait goes on for a
-				// remote - the local seat is tried now and is not asked twice.
+				// remote - the local seat is tried now and is not asked twice. (Its host-RAM defer
+				// is the exception above: the seat is asked again when the host admits.)
 				seed = pr
 				refusals = append(refusals, refusalLine(pr))
 				r.noteRefusal(pl, pr)
@@ -932,6 +962,10 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 		// deferral, naming the holder (class infrastructure — a human's timing
 		// decision), with the refusals appended.
 		return r.settle(contract, placeKept(r.reservedDefer(localView, lease, idle, "no eligible remote had room — "+strings.Join(refusals, "; ")+noteSuffix, cw.call), places), pl, waitStart)
+	}
+	if hostSeen != "" && pl.waitNote == "" {
+		// The host's shortage is what the wait stood behind, though no node refused for it: say so in the defer that ends it.
+		pl.waitNote = "the local seat could not take its cold load: " + hostSeen
 	}
 	return r.settle(contract, placeKept(r.capacityDefer(localView, seed, idle, wait, refusals, waitEvidence{note: pl.waitNote, probeFails: probeFails, heldOut: heldOut, cooling: cooling, call: cw.call, held: cw.held}), places), pl, waitStart)
 }

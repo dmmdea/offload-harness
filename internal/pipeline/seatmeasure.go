@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/config"
+	"github.com/dmmdea/offload-harness/internal/delegate"
 	"github.com/dmmdea/offload-harness/internal/fleetnode"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/gpuprobe"
@@ -67,6 +68,15 @@ const (
 var seatMeasureCfg atomic.Pointer[config.Config]
 
 func registerSeatMeasure(cfg config.Config) { seatMeasureCfg.Store(&cfg) }
+
+// The delegator asks the host the door's own question before it deals the seat a subtask (delegate.localHostShort), so it reads
+// the need the door reads. Set at init: internal/delegate cannot import this package.
+func init() {
+	delegate.SetSeatNeed(func(cfg config.Config) hostneed.Need {
+		need, _ := SeatNeedFor(cfg)
+		return need
+	})
+}
 
 // seatRecordMu serialises the same-load check and the record, so two contracts that finish together record once.
 var seatRecordMu sync.Mutex

@@ -198,7 +198,7 @@ func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string
 	if alt.base == "" {
 		rd := r.probeLocalBusy(ctx)
 		if rd.busy {
-			if rd.occupiedBy != "" {
+			if rd.cannotLoad() {
 				return true, rd.why()
 			}
 			if rd.inflight == 0 {
@@ -391,6 +391,16 @@ func failsDocumentFingerprint(failures []string) bool {
 func IncoherentSeatDefer(r core.AgentWireResult) bool {
 	return r.Deferred && r.DeferClass == core.DeferClassInfrastructure &&
 		strings.HasPrefix(r.Reason, core.IncoherentSeatReason)
+}
+
+// HostRAMDefer reports whether a result is the host-RAM defer of a contract door (pipeline.runAgentTask, the MCP agent_run door): a
+// `capacity` defer with no step run whose reason carries core.HostRAMReason, i.e. the seat was not loaded and the host could not
+// take its cold load right now. The memory comes back (the reference 3-card Windows box had 66.5 GiB available four minutes
+// after a refusal that found 41.1 GiB), so the subtask keeps its place in line for the seat instead of being published as a
+// verdict (placements.noteRefusal, awaitCapacity). It matches on the CONSTANT both doors write, never on prose.
+func HostRAMDefer(r core.AgentWireResult) bool {
+	return r.Deferred && r.DeferClass == core.DeferClassCapacity && r.Steps == 0 &&
+		strings.HasPrefix(r.Reason, core.HostRAMReason)
 }
 
 // SeatWarmFailedDefer reports whether a result is the admission-time warm-up

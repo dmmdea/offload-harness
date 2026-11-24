@@ -398,16 +398,29 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// /running, with no load in flight, is loaded by the warm-up below, so the host is asked first, by the warm-back's rule. A
 	// load already in flight or a seat already loaded is not refused here, and neither is a seat whose state could not be told:
 	// the commit charge the rule reads already holds a loaded seat, so judging its footprint again refuses it against itself.
+	var hostWaited time.Duration // the time a patient door spent waiting for host memory: admission, not charged to the warm-up
 	if seatAbsent && loadSeen.IsZero() {
 		if m, err := p.scopedManager(); err == nil {
 			// The gate settles for up to a minute (seathostram.go): that wait is admission time, counted whether the host then
 			// gave the memory back or not. preflightEnd stays where the pre-flight ended: it bounds a cold load the pre-flight
 			// watched, and the settle is not one.
-			why, settled, settleNote := SeatColdLoadAdmission(ctx, p.cfg, m, seat, time.Until(admissionEnd))
+			// Who waits for the host is the delegator's to say (LocalOptions.HostRAMWait): absent = this gate settles as it always did.
+			var hostWait *time.Duration
+			if hw, ok := req.Params["host_ram_wait"].(time.Duration); ok {
+				hostWait = &hw
+			}
+			why, settled, settleNote := SeatColdLoadAdmission(ctx, p.cfg, m, seat, time.Until(admissionEnd), hostWait)
 			admitted += settled
 			if why != "" {
 				log.Printf("agent task: seat %s not loaded: %s", seat, why)
-				return deferWire(core.DeferClassCapacity, "host RAM: "+why+"; the seat was not loaded, and this contract is re-placeable")
+				return deferWire(core.DeferClassCapacity, core.HostRAMReason+why+"; the seat was not loaded, and this contract is re-placeable")
+			}
+			if hostWait != nil && *hostWait != 0 {
+				// A door that waited for the host as the line (a caller with none) moves the admission deadline out by that
+				// wait, as the seat-cap line above does: the cold load and the probes below keep their whole budget. Without
+				// this a wait that used the budget left the warm-up none, and the load of several minutes ran inside the wall.
+				hostWaited = settled
+				admissionEnd = admissionEnd.Add(settled)
 			}
 			if settleNote != "" {
 				log.Printf("agent task: seat admission (%s): %s", seat, settleNote)
@@ -427,7 +440,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	var coldLoaded bool        // the warm-up ATTEMPTED a load this run (D-118 reads this, never coldLoad > 0: a sub-tick load measures 0)
 	act.Phase("cold-load")
 	var warmSt warmStatus
-	warmed, warmNote, warmAttempted, warmLoaded := warmSeatWith(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-admitted, &warmSt)
+	warmed, warmNote, warmAttempted, warmLoaded := warmSeatWith(ctx, p.cfg.Endpoint, seat, admissionBudget(p.cfg.AgentAdmissionWaitSec)-(admitted-hostWaited), &warmSt)
 	warmEnd := time.Now()
 	// Admission time whether or not a load was attempted: a warm-up held behind
 	// a GPU lease (2026-09-22) spends the budget waiting and loads nothing. Every
@@ -1728,6 +1741,10 @@ func (p *Pipeline) RunAgentContract(ctx context.Context, contract core.AgentCont
 		// The delegator's own row is this job's record; ours is an inner row
 		// of it (C-62), never a second job.
 		params["parent_job_id"] = opts.ParentJobID
+	}
+	if opts.HostRAMWait != nil {
+		// Who is the line for the seat's host-RAM gate (LocalOptions.HostRAMWait); absent keeps the gate as it was.
+		params["host_ram_wait"] = *opts.HostRAMWait
 	}
 	res := p.Run(ctx, core.Request{
 		Task:   core.TaskAgentRun,
