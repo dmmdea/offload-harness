@@ -271,11 +271,17 @@ its `retry_note` (a retry the deadline cut counts for nothing against the per-pa
 cap); one produced after the deadline is the deadline's budget defer, is not
 re-placed, and a rescue still re-packing its finished answer is ended by the deadline.
 
-## Amendment 2026-11-25: the confirmation follows the seat
+## Amendment 2026-11-25: the engine's own word decides, and a dead one is followed until it is gone
 
 A failure that looks like a dead seat used to be confirmed by ONE reading, taken the instant the call failed. vLLM's API server
 outlives its engine by seconds (it answers every request with an error, and a watchdog that looks every 5 s stops it), so that
 reading found the seat listed and readable and the failure stood as an ordinary error: five contracts ended that way in one second on
-2026-11-25. `ConfirmSeatDown` now follows the seat for four cold-load polls (20 s): the first reading that shows it loading, absent or
-refusing connections is the death. It ends early when the engine's counters move (an engine that worked after the failure is alive)
-and when the run ends; a seat still ready at the end keeps the failure an ordinary error, as decided above.
+2026-11-25. `ConfirmSeatDown` now asks the engine itself when the seat still reads ready: `GET /health` at the seat's own address,
+which vLLM answers with 503 from the moment its engine is dead, before it errors the requests that were open (read in 0.33's source),
+and which llama-server has too. 200, or an engine with no such door, is a seat that is up, and the failure stands at once as decided
+above. 503, or no answer, and the seat is followed for four cold-load polls (20 s): the first reading that shows it loading, absent or
+refusing connections is the death.
+
+A first version followed every such seat for the 20 s and stopped early only when its counters moved. An idle seat that works and an
+endpoint with nothing behind it have no moving counters, so every ordinary 5xx was published 20 s late; the repository's own tests ran
+past their limit on it before it was merged.

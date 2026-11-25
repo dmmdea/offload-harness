@@ -20,10 +20,11 @@ package agent
 //     a model call failed like a dead seat (a stream cut, a 5xx, a refused
 //     connection) and llama-swap reads the seat starting, stopping or absent,
 //     or the engine refuses connections while llama-swap still lists it. The
-//     failure alone is never the evidence: a 5xx from a seat that goes on reading ready
-//     and readable is an ordinary error and stays one. "Goes on" is the word: vLLM answers
-//     every request with an error the moment its engine dies, and its server lists itself
-//     for seconds more, so the seat is followed for a window (seatDeathWindow), not read once.
+//     failure alone is never the evidence: a 5xx from a seat that reads ready
+//     and readable is an ordinary error and stays one, unless its engine itself says it is
+//     dead. vLLM answers every request with an error the moment its engine dies, and its
+//     server stays listed and readable for seconds more: the engine's own health answer tells
+//     the two apart, and a seat whose engine is dead by it is followed until it is gone.
 //
 // What happens next is one bounded recovery, owned by the loop because the loop
 // owns the transcript: the monitor cancels ONLY the model call in flight (its
@@ -514,21 +515,21 @@ func (m *Monitor) SeatCheck(ctx context.Context) (bool, string) {
 	return down, why
 }
 
-// seatDeathWindow is how long the seat is followed after a model call failed like a dead seat, before the failure stands as an
-// ordinary error: 20 s at the default poll. vLLM's API server is another process than its engine: when the engine dies it answers
-// every open and new request with an error in the same second, is told to stop by a watchdog that looks every 5 s, and is gone
-// once it has shut down. On 2026-11-25 five runs read the seat in that gap, found it listed and readable, and ended as
-// infrastructure errors although the step could have been re-issued onto the engine llama-swap started next.
+// seatDeathWindow is how long a seat whose engine says it is dead, or does not answer, is followed until llama-swap sees it gone: 20 s
+// at the default poll. vLLM's API server is another process than its engine: when the engine dies it answers every open and new
+// request with an error in the same second, is told to stop by a watchdog that looks every 5 s, and is gone once it has shut down. On
+// 2026-11-25 five runs read the seat in that gap, found it listed and readable, and ended as infrastructure errors although the step
+// could have been re-issued onto the engine llama-swap started next.
 func (m *Monitor) seatDeathWindow() time.Duration { return 4 * m.pol.coldLoadPoll() }
 
-// ConfirmSeatDown follows the seat after a model call failed like a dead seat
-// (seatFailure) and returns the typed verdict when llama-swap confirms it inside
-// seatDeathWindow: nil when the engine works again (its counters moved since the failure),
-// when it still reads ready or cannot be read at the window's end, when the
-// monitor has no engine probe, or when the run itself is over.
+// ConfirmSeatDown judges the seat after a model call failed like a dead seat
+// (seatFailure) and returns the typed verdict when llama-swap confirms it. A seat that
+// still reads ready is judged by its engine's own answer (EngineReading.Health): one that
+// works, and one that cannot be asked, is up and the failure stands at once; one that says it
+// is dead, or does not answer, is followed for seatDeathWindow until it is gone.
+// nil also when the monitor has no engine probe, or when the run itself is over.
 func (m *Monitor) ConfirmSeatDown(ctx context.Context, cause error) *SeatDownError {
-	begin := time.Now()
-	for first := ""; ctx.Err() == nil; {
+	for begin := time.Now(); ctx.Err() == nil; {
 		m.mu.Lock()
 		if m.engine == nil || m.stopped || m.cause != nil {
 			m.mu.Unlock()
@@ -541,14 +542,7 @@ func (m *Monitor) ConfirmSeatDown(ctx context.Context, cause error) *SeatDownErr
 		if why, down := seatDownEvidence(rd, err); down {
 			return &SeatDownError{Kind: SeatDownDied, Phase: phase, Engine: engine, Note: why, Tokens: tokens, cause: cause}
 		}
-		if err == nil && rd.Fingerprint != "" {
-			if first == "" {
-				first = rd.Fingerprint
-			} else if rd.Fingerprint != first {
-				return nil // the engine did work after the failure: it is alive
-			}
-		}
-		if time.Since(begin) >= window {
+		if h := m.askHealth(ctx, rd); (h != EngineDead && h != EngineSilent) || time.Since(begin) >= window {
 			return nil
 		}
 		select {
@@ -557,6 +551,16 @@ func (m *Monitor) ConfirmSeatDown(ctx context.Context, cause error) *SeatDownErr
 		}
 	}
 	return nil
+}
+
+// askHealth asks the engine behind one reading whether it works, bounded like a reading.
+func (m *Monitor) askHealth(ctx context.Context, rd EngineReading) EngineHealth {
+	if rd.Health == nil {
+		return EngineHealthUnknown
+	}
+	hctx, cancel := context.WithTimeout(ctx, m.seatCheckTimeout())
+	defer cancel()
+	return rd.Health(hctx)
 }
 
 // seatJudgement is what one reading of the seat says to a run that is waiting.
