@@ -23,6 +23,7 @@ package seatload
 import (
 	"context"
 	"fmt"
+	"math"
 	"net/http"
 	"time"
 )
@@ -51,7 +52,8 @@ type Room struct {
 // the seat. Yes only on evidence: a loaded vLLM engine with nothing queued, nothing preempted between the readings, requests
 // running at roomMinTokS each or better, and a KV pool that stays under roomKVCeiling with every held run and the new one counted
 // at their present average, or at roomRunKV where that is more. An engine that cannot be read, is loading, is not vLLM, or has
-// nothing running (no rate to judge by) is not room.
+// nothing running (no rate to judge by) is not room; neither is a figure that is missing or not a number, so every comparison is
+// written for NaN to fail it.
 func ReadRoom(ctx context.Context, client *http.Client, endpoint, seat string, held int) Room {
 	a, why := readServing(ctx, client, endpoint, seat)
 	if why != "" {
@@ -59,7 +61,7 @@ func ReadRoom(ctx context.Context, client *http.Client, endpoint, seat string, h
 	}
 	runs := max(held, a.Running)
 	per := max(a.KVUsage/float64(a.Running), roomRunKV)
-	if want := max(a.KVUsage, per*float64(runs)) + per; want > roomKVCeiling {
+	if want := max(a.KVUsage, per*float64(runs)) + per; !(want <= roomKVCeiling) {
 		return Room{Why: fmt.Sprintf("the engine's KV pool is %.0f%% used by %d run(s), and one more would take it to %.0f%%", 100*a.KVUsage, runs, 100*want)}
 	}
 	t := time.NewTimer(roomWindow)
@@ -73,7 +75,10 @@ func ReadRoom(ctx context.Context, client *http.Client, endpoint, seat string, h
 	if why != "" {
 		return Room{Why: why}
 	}
-	if a.Preemptions >= 0 && b.Preemptions > a.Preemptions {
+	if a.Preemptions < 0 || b.Preemptions < 0 {
+		return Room{Why: "the engine reports no preemption count"}
+	}
+	if b.Preemptions > a.Preemptions {
 		return Room{Why: "the engine preempted a request between two readings"}
 	}
 	gen, _, ok := LiveRates(a, b)
@@ -81,7 +86,7 @@ func ReadRoom(ctx context.Context, client *http.Client, endpoint, seat string, h
 		return Room{Why: "the engine's token counters gave no rate"}
 	}
 	each := gen / float64(max(a.Running, b.Running))
-	if each < roomMinTokS {
+	if !(each >= roomMinTokS) || math.IsInf(each, 0) {
 		return Room{Why: fmt.Sprintf("the engine gives its %d running request(s) %.1f tok/s each, under %.0f", b.Running, each, roomMinTokS)}
 	}
 	return Room{OK: true, Why: fmt.Sprintf("the engine takes one more: %d running at %.0f tok/s each, none queued, KV pool %.0f%% used", b.Running, each, 100*b.KVUsage)}
@@ -99,7 +104,7 @@ func readServing(ctx context.Context, client *http.Client, endpoint, seat string
 		return act, act.Summary()
 	case act.ActSource != "vllm-metrics":
 		return act, "the engine (" + act.ActSource + ") reports no KV pool to judge by"
-	case act.KVUsage < 0:
+	case !(act.KVUsage >= 0):
 		return act, "the engine reports no KV pool usage"
 	case act.Waiting > 0:
 		return act, fmt.Sprintf("the engine already queues %d request(s)", act.Waiting)

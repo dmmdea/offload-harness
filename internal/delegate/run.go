@@ -497,7 +497,11 @@ func runWith(ctx context.Context, rp runParams) ([]PlacedResult, Summary, error)
 		room, roomNote := 0, ""
 		if route == "auto" {
 			busy = r.readAutoLocalSlot(ctx, leaseInfo, subtasks)
-			room, roomNote = r.localRunCapRoom()
+			var registered int
+			var past bool
+			if room, registered, past, roomNote = r.localRunCapReading(); past {
+				r.spendSeatMore(registered) // the deal gives it to its own first local subtask
+			}
 			// A remote hint (ADR 0078) is placed remotes-first, as route=remote is: the deal treats the seat as
 			// unavailable whatever it read. The reading is still taken and kept, unlike route=remote's, because the
 			// hint may fall back to the seat where remote would defer, and that fallback must still wait for a lease

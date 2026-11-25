@@ -94,6 +94,8 @@ type runner struct {
 	// reading for fetchViewsMemoTTL: the capacity wait asks once per tick per
 	// waiting subtask, and twelve waiters must not each read the registry. The
 	// room is counted down as they take it (claimLocalSlot).
+	localSlotPast bool // the memoised room is the engine's yes past the cap, on localSlotRuns registered runs
+	localSlotRuns int
 	localSlotMu   sync.Mutex
 	localSlotAt   time.Time
 	localSlotRoom int
@@ -135,12 +137,16 @@ type runner struct {
 	spreadLocalBusy busyReading
 	localBusyProbe  func(ctx context.Context) busyReading
 	// seatMoreProbe is the seam onto the engine question of the local seat's line (seatMore); nil = config.SeatMore.
-	// seatMoreMu/At/OK/Why memoise its answer (seatTakesOneMore).
-	seatMoreProbe modelaffinity.SeatMore
-	seatMoreMu    sync.Mutex
-	seatMoreAt    time.Time
-	seatMoreOK    bool
-	seatMoreWhy   string
+	// seatMoreMu/At/OK/Why memoise its answer (seatTakesOneMore) and SpentAt/SpentRuns say when a yes was given away, and on how
+	// many registered runs (spendSeatMore). seatMoreAsking: a question is on its way; nobody waits for it.
+	seatMoreProbe     modelaffinity.SeatMore
+	seatMoreAsking    atomic.Bool
+	seatMoreMu        sync.Mutex
+	seatMoreAt        time.Time
+	seatMoreOK        bool
+	seatMoreWhy       string
+	seatMoreSpentAt   time.Time
+	seatMoreSpentRuns int
 	// seatGuardCheck is probeLocalBusy's seam onto the seat guard (checkSeatGuard);
 	// nil = the process-wide seatguard.Shared.
 	seatGuardCheck func(ctx context.Context, model string) seatguard.Verdict

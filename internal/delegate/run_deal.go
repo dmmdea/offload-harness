@@ -297,7 +297,10 @@ func (r *runner) placeAutoRemote(seed string, st Subtask, localView NodeView, vi
 // result is read-only by the time the goroutines start (same posture as the
 // spreadViews snapshot), and the same contracts always produce the same deal.
 func (r *runner) dealSpread(contracts []core.AgentContract, localView NodeView) []spreadSlot {
-	room, note := r.localRunCapRoom()
+	room, registered, past, note := r.localRunCapReading()
+	if past {
+		r.spendSeatMore(registered) // the deal gives it to its own first local subtask
+	}
 	r.dealRoom = room
 	book := &dealBook{
 		// dealt holds the DIAL BASES already given a subtask in the CURRENT cycle.

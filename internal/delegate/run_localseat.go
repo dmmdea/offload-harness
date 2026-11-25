@@ -45,10 +45,11 @@ func (r *runner) localSlotAhead() (free bool, note string) {
 		}
 		r.localSlotMu.Unlock()
 	}
-	room, note := r.localRunCapRoom()
+	room, runs, past, note := r.localRunCapReading()
 	if fetchViewsMemoTTL > 0 {
 		r.localSlotMu.Lock()
 		r.localSlotAt, r.localSlotRoom, r.localSlotNote = time.Now(), room, note
+		r.localSlotRuns, r.localSlotPast = runs, past
 		r.localSlotMu.Unlock()
 	}
 	return room > 0, note
@@ -68,6 +69,9 @@ func (r *runner) claimLocalSlot() bool {
 		return false
 	}
 	r.localSlotRoom--
+	if r.localSlotPast {
+		r.spendSeatMore(r.localSlotRuns)
+	}
 	return true
 }
 
@@ -207,20 +211,45 @@ func (r *runner) seatMore() modelaffinity.SeatMore {
 
 // seatTakesOneMore asks whether the local seat takes one run past its cap, for a run that is not registered yet: the line's own rule
 // (modelaffinity.SeatLine.PastCap), which the run meets again at the seat. The question costs about a second (two readings of the
-// engine), so the answer is kept for fetchViewsMemoTTL like the other readings. why is "" when the cap is fixed.
+// engine), so the answer is kept for fetchViewsMemoTTL like the other readings, and a subtask that finds another one asking does not
+// wait for it: the seat reads full for that tick. A yes that was given away (spendSeatMore) is not given twice. why is "" when the
+// cap is fixed.
 func (r *runner) seatTakesOneMore(runs []gpuactivity.Run) (more bool, why string) {
 	ask := r.seatMore()
 	if ask == nil {
 		return false, ""
 	}
 	r.seatMoreMu.Lock()
-	defer r.seatMoreMu.Unlock()
-	if fetchViewsMemoTTL > 0 && !r.seatMoreAt.IsZero() && time.Since(r.seatMoreAt) < fetchViewsMemoTTL {
-		return r.seatMoreOK, r.seatMoreWhy
+	spent := !r.seatMoreSpentAt.IsZero() && len(runs) <= r.seatMoreSpentRuns && time.Since(r.seatMoreSpentAt) < seatMoreSpentFor
+	fresh := fetchViewsMemoTTL > 0 && !r.seatMoreAt.IsZero() && time.Since(r.seatMoreAt) < fetchViewsMemoTTL
+	more, why = r.seatMoreOK, r.seatMoreWhy
+	r.seatMoreMu.Unlock()
+	switch {
+	case spent:
+		return false, "a run was just let past the cap and is not registered on the seat yet"
+	case fresh:
+		return more, why
+	case !r.seatMoreAsking.CompareAndSwap(false, true):
+		return false, "another subtask is asking the engine"
 	}
+	defer r.seatMoreAsking.Store(false)
 	more, why = modelaffinity.LineOf(runs, "").PastCap(context.Background(), ask)
+	r.seatMoreMu.Lock()
 	r.seatMoreAt, r.seatMoreOK, r.seatMoreWhy = time.Now(), more, why
+	r.seatMoreMu.Unlock()
 	return more, why
+}
+
+// seatMoreSpentFor bounds how long a yes that was given away keeps the next one back while its run has not registered on the seat: a
+// local run registers before it does anything slow, so past it the run went elsewhere.
+const seatMoreSpentFor = 10 * time.Second
+
+// spendSeatMore marks the engine's yes as given to one subtask, judged on runs registered runs. Until the registry shows one more, or
+// seatMoreSpentFor has passed, the same room is not given to another subtask, which would stand in the seat's own line behind it.
+func (r *runner) spendSeatMore(runs int) {
+	r.seatMoreMu.Lock()
+	r.seatMoreSpentAt, r.seatMoreSpentRuns = time.Now(), runs
+	r.seatMoreMu.Unlock()
 }
 
 // readAutoLocalSlot is route=auto's one joint reading of the local seat for the whole run (W-01): it
@@ -284,22 +313,29 @@ func (r *runner) busyReadingNow(ctx context.Context) busyReading {
 // It reads the planner seat, the seat every run on a plain box takes (agenttask.go
 // resolves it first, and only a composite decision moves a run to a layer seat).
 func (r *runner) localRunCapRoom() (room int, note string) {
+	room, _, _, note = r.localRunCapReading()
+	return room, note
+}
+
+// localRunCapReading is localRunCapRoom with what it was read from: how many runs are registered on the seat, and whether the room is
+// the engine's yes past the cap, which whoever uses it spends (spendSeatMore).
+func (r *runner) localRunCapReading() (room, registered int, past bool, note string) {
 	limit := r.cfg.FleetConcurrencyLimit()
 	if limit <= 0 {
-		return unlimitedHeadroom, ""
+		return unlimitedHeadroom, 0, false, ""
 	}
 	runs, note := r.localRuns()
 	if room = limit - len(runs); room > 0 {
-		return room, note
+		return room, len(runs), false, note
 	}
 	more, why := r.seatTakesOneMore(runs)
 	if why != "" {
 		note += "; " + why
 	}
 	if more {
-		return 1, note
+		return 1, len(runs), true, note
 	}
-	return 0, note
+	return 0, len(runs), false, note
 }
 
 // localRunLine is how many runs are registered on the local seat's run-cap line right now (running and
