@@ -399,8 +399,9 @@ func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model 
 		hc = &cp
 	}
 	// A request whose model went away under it is sent again, inside the call's own time. A contract's calls keep the
-	// contract's own rules: what a lost answer means there is decided against the seat (ADR 0066).
-	again, alone := seatwait.NewResend(hc.Timeout), !seatwait.Attached(ctx)
+	// contract's own rules: what a lost answer means there is decided against the seat (ADR 0066), and a caller that
+	// counts the loads it causes sends once (SendOnce).
+	again, alone := seatwait.NewResend(hc.Timeout), !seatwait.Attached(ctx) && !o.once
 	caller := ctx
 	for {
 		ctx, done := again.Bound(caller)

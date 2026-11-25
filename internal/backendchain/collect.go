@@ -604,7 +604,8 @@ func (s *state) completionVerdict(ctx context.Context, c Candidate, canon string
 	cctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	client := llamaclient.New(s.cfg.Endpoint, s.cfg.CompletionPath, c.Seat, timeout)
-	_, err := client.Generate(cctx, llamaclient.GenRequest{Model: c.Seat, User: "ping", MaxTokens: 1})
+	// Sent once: this run allows one completion that can load a seat, and sending a lost one again is a second load.
+	_, err := client.Generate(cctx, llamaclient.GenRequest{Model: c.Seat, User: "ping", MaxTokens: 1}, llamaclient.SendOnce())
 	if err != nil {
 		return Verdict{Probe: ProbeCompletion, Unknown: isTimeout(err), Detail: "the 1-token completion failed (" + short(err) + ")"}
 	}

@@ -33,6 +33,8 @@ type genOpts struct {
 	// frequencyPenalty, when positive, rides the body as `frequency_penalty`
 	// (WithFrequencyPenalty). 0, the zero value, is no field at all.
 	frequencyPenalty float64
+	// once: a request whose model went away under it is not sent again (SendOnce).
+	once bool
 }
 
 // frequencyPenaltyPtr is the request-body value for this option set: nil (the key
@@ -93,6 +95,14 @@ func WithoutClientTimeout() GenOption {
 // a client with no lanes ignores the option. An empty reason is no option.
 func WithLocalBusy(reason string) GenOption {
 	return func(o *genOpts) { o.localBusy = reason }
+}
+
+// SendOnce sends the request once, whatever happens to its model: a request whose model went away under it
+// (seatwait.TakenAway) is not sent again, because every send can load a model. It is for a caller that counts
+// the loads it causes, such as the backend report's one completion that may load a seat (internal/backendchain).
+// Like localBusy it changes how the call is SENT, never the body.
+func SendOnce() GenOption {
+	return func(o *genOpts) { o.once = true }
 }
 
 // WithoutThinking asks the server to render the seat's chat template in
