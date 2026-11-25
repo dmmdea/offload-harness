@@ -56,6 +56,13 @@ The ordered set of model Tiers an offload task walks, entering at the smallest c
 escalating only when a result fails validation or lands below a confidence threshold. Exhausting the
 Cascade produces a Defer rather than an error. The Cascade never calls a remote model.
 
+## Clearing (lease)
+
+The models a GPU lease is about to unload, or has unloaded, named on its record (`clearing`: every id and alias). A request for a resident
+model normally passes the load fence, because serving it loads nothing; a request for a model on this list waits, so the calls
+already running on it finish and it can be unloaded idle. See
+[architecture/decisions/0104-a-lease-waits-for-the-calls-it-would-cut-and-a-cut-call-is-sent-again.md](architecture/decisions/0104-a-lease-waits-for-the-calls-it-would-cut-and-a-cut-call-is-sent-again.md).
+
 ## CMM
 
 The contiguous memory pool on an Axera card (2944 MiB of its 4 GB) that every model loads into. It is the card's own

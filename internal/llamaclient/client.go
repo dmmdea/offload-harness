@@ -398,7 +398,14 @@ func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model 
 		cp.Timeout = 0
 		hc = &cp
 	}
+	// A request whose model went away under it is sent again, inside the call's own time. A contract's calls keep the
+	// contract's own rules: what a lost answer means there is decided against the seat (ADR 0066), and a caller that
+	// counts the loads it causes sends once (SendOnce).
+	again, alone := seatwait.NewResend(hc.Timeout), !seatwait.Attached(ctx) && !o.once
+	caller := ctx
 	for {
+		ctx, done := again.Bound(caller)
+		defer done()
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep.base+ep.path, bytes.NewReader(buf))
 		if err != nil {
 			return GenResult{}, err
@@ -426,12 +433,13 @@ func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model 
 		}
 		tk, err := admit(ctx, ep.base, model, ep.client.Timeout)
 		if err != nil {
-			return GenResult{}, err
+			return GenResult{}, again.Err(err)
 		}
+		sentAt := time.Now()
 		resp, err := hc.Do(req)
 		if err != nil {
 			tk.Release()
-			return GenResult{}, err
+			return GenResult{}, again.Err(err)
 		}
 		if resp.StatusCode != http.StatusOK {
 			b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
@@ -446,7 +454,11 @@ func (c *Client) sendWithSeatWait(ctx context.Context, ep endpointChoice, model 
 					continue
 				}
 			}
-			return GenResult{}, &StatusError{StatusCode: resp.StatusCode, Body: truncate(string(b), 300)}
+			if alone && seatwait.TakenAway(resp.StatusCode, string(b)) && again.Again(caller, sentAt) {
+				log.Printf("llamaclient: %s (model %q) went away under a request (HTTP %d %s); sending it again", ep.base, model, resp.StatusCode, truncate(string(b), 120))
+				continue
+			}
+			return GenResult{}, again.Err(&StatusError{StatusCode: resp.StatusCode, Body: truncate(string(b), 300)})
 		}
 		var res GenResult
 		var derr error

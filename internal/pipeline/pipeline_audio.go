@@ -218,16 +218,12 @@ func (p *Pipeline) runTranscribe(ctx context.Context, req core.Request, meta cor
 			res.DeferClass = core.DeferClassCapacity
 			return res
 		}
-		// ErrUpstreamNoSpeech: the audio had no speech (register C-91). Either the
-		// upstream ANSWERED, successfully, with an empty transcript, or — whisper
-		// protocol only — it crashed on the audio (an empty-body 5xx, the F-35 crash of
-		// 2026-09-23) in a call that ran alone, with no unload sent by this process. Any
-		// other empty-body 5xx can be a model unloaded from under the call, which looks
-		// the same and used to report audio with speech as silent, so sttclient types it
-		// ErrUpstreamVanished instead. The call went through and found nothing to
-		// transcribe, so it is a calm defer rather than the "transcribe call failed"
-		// wording, which reads as an infrastructure failure it is not, and there is
-		// nothing to retry. An upstream that vanished mid-request falls through to the
+		// ErrUpstreamNoSpeech: the audio had no speech (register C-91): the upstream
+		// ANSWERED, successfully, with an empty transcript. The call went through and found
+		// nothing to transcribe, so it is a calm defer rather than the "transcribe call
+		// failed" wording, which reads as an infrastructure failure it is not, and there is
+		// nothing to retry. An upstream that gave no answer, however often it was asked
+		// (ErrUpstreamVanished), says nothing about the audio and falls through to the
 		// failure below.
 		if errors.Is(terr, sttclient.ErrUpstreamNoSpeech) {
 			meta.LatencyMs = time.Since(start).Milliseconds()

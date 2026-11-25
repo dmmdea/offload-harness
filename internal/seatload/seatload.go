@@ -491,7 +491,11 @@ func slotsInflight(ctx context.Context, client *http.Client, seatBase string, me
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("seat metrics: status %d (no --metrics) and seat slots: status %d", metricsStatus, resp.StatusCode)
+		err := fmt.Errorf("seat metrics: status %d (no --metrics) and seat slots: status %d", metricsStatus, resp.StatusCode)
+		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusNotImplemented {
+			return 0, noGauge{err}
+		}
+		return 0, err
 	}
 	n, perr := ParseSlotsInflight(io.LimitReader(resp.Body, 4<<20))
 	if perr != nil {
@@ -499,6 +503,17 @@ func slotsInflight(ctx context.Context, client *http.Client, seatBase string, me
 	}
 	return n, nil
 }
+
+// ErrNoEngineGauge marks a loaded engine that publishes no in-flight count at all: it answered both
+// /metrics and /slots with "no such route" (whisper-server, the forecast server). It is an answer about the
+// engine, not a failed read, so a caller that has another source for the calls on it (the run registry) can
+// use that source alone instead of reading "could not tell" for ever.
+var ErrNoEngineGauge = errors.New("the engine publishes no in-flight gauge")
+
+// noGauge is ErrNoEngineGauge carrying the read's own words, unchanged.
+type noGauge struct{ error }
+
+func (noGauge) Is(target error) bool { return target == ErrNoEngineGauge }
 
 // ParseSlotsInflight counts `is_processing` slots in a llama-server /slots
 // body. A body that is not an array is an error, never zero in flight.

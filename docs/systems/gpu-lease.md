@@ -56,7 +56,10 @@ other on a single shared card.
 | `internal/gpulease/owner.go` | **ownership (ADR 0070)**: who asked for a lease (`Owner`), the session registry, the first-observer orphan marker, the progress contract and `Standing`, the derived reading every status surface shares |
 | `internal/gpulease/explain.go` | the sentence a waiter reads when the lease it is queued behind is stalled, orphaned or overdue, and the installed orphan grace. READ-ONLY: it reads the orphan marker a status surface recorded and never writes it or takes the epoch lock |
 | `gpu_ownership.go` | the ownership flags (`--owner-*`, `--unattended`, `--progress-file`, `--stall`, `--yield-grace`, `--on-yield`), the `gpu owner-flags` verb, and the ownership lines of `gpu status` |
-| `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; unload / warm-back |
+| `gpu_drain.go` | `--drain`: waits until the seat's gauge AND the run registry are empty, inside the queue budget; restamps `draining` → `exclusive`; waits for every other model it is about to unload (`drainRunsElsewhere`, `drainOthers`, ADR 0104); unload / warm-back |
+| `internal/seatdrain` | the wait for the calls in flight on the models a lease unloads (ADR 0104): the engines' own gauges, a load in progress, and the calls marked in the run registry |
+| `internal/modelaffinity/callmark.go` | `Call`: one transcription or forecast on an engine with no gauge: fence, slot, mark, look at the fence again, send |
+| `internal/pipeline/mediacalls.go` | the same wait for a media lease, for the marked calls only |
 | `internal/gpuactivity` | the RUN REGISTRY (`<state root>/gpu/activity/`, one record per agent loop in flight, and one per single-shot vision call while it is on its seat: kind `vision`, no `devices`) and the activity reading behind `gpu status` / `offload_status.gpu_lease` (`verdict`, `activity`) — ADR 0041; `holders.go` derives each live lease's standing, `facts.go` the activity facts of a legacy lease, `snapshot.go` (`View.Map`, `splitProcesses`) the one JSON shape both surfaces read, with a display card's unsized processes folded into one count per card; `driverevents.go` the **driver's fault events** for the leased cards (C-83-B, [below](#the-drivers-own-fault-events-for-the-leased-cards-c-83-b)); `faults.go`, `knownerrors.go` and the generated `xidcatalog.go` the fault history behind `gpu faults` ([below](#gpu-faults-the-fault-history-as-incidents-with-known-errors)), `faultcontext.go` the restart and sleep context, `faultstore.go` the retention file and the per-card summary |
 | `internal/seatload` | the seat's in-flight reading: llama-swap's `/running` (and the roster, for an alias), then the loaded seat's own `/metrics` or `/slots` at the `proxy` `/running` reports — never through `/upstream`, which resets the idle unload timer; a `starting` seat is reported without touching the seat |
 | `gpu_hide_windows.go`, `gpu_hide_other.go` | hidden spawn for the detached holder (a visible console gets closed, killing the hold): it always gets a hidden console of its own, whatever terminal launched it (`winexec.HideWindowDetached`); the flags live in `internal/winexec`, the one place every hidden child is built |
@@ -372,6 +375,9 @@ names — is in-process only and does not close the cross-process gap named abov
 `POST /api/models/unload/<id>` **does not honour in-flight requests.** Measured on llama-swap
 v242: an unload fired 3 s into a generation returned in 1,265 ms without draining, and the
 generation died at 4,107 ms with `502 Bad Gateway`.
+
+What a reservation and a media lease wait for before they unload anything is in
+[The drain waits for runs](#the-drain-waits-for-runs-inside-the-queue-budget-0117-0-adr-0041); this section is the render runner's own last check.
 
 So `freeLlamaSwap` drains before it unloads. `quiesceLlamaSwap` polls each tier's
 `/upstream/<id>/slots`, where `is_processing` is true exactly while a slot is generating
@@ -3929,6 +3935,28 @@ the seat's run count read low; register C-82). The drain is done when the engine
 AND the registry are empty on two consecutive reads; a seat listed `starting`/`stopping` counts as busy and
 its upstream is never probed. Registering before the warm-up is also what puts the load path behind the
 fence: the pre-0.117.0 warm-up loaded the seat straight past an exclusive hold.
+
+**Every model it unloads, not only the agent seat (ADR 0104).** `--unload-seat` takes every other resident model off the leased
+cards too (the memory stack and the models placed on other cards stay), and until 2026-11-25 it took them with no look at what they
+were serving: a grant ended four transcriptions. The order now:
+
+1. The agent seat drains, as above. In the whole-node form the runs registered on the **other** resident seats are then waited for too
+   (`drainRunsElsewhere`), while the lease is still only `draining`: new runs are cordoned and the steps of the ones in flight pass.
+2. The `exclusive` stamp goes on. The models that will be unloaded, the agent seat included, are written on the lease as `clearing`
+   (every id and alias). A request for a resident model passes the fence because serving it loads nothing; one for a model on this list
+   does not (`modelaffinity.WouldBlockUpstream`), so nothing new starts on it.
+3. `drainOthers` waits until every one of them is idle on two reads in a row: the engine's own gauge, a load in progress, and the
+   calls marked in the run registry. whisper-server and the forecast server have no gauge, so a transcription and a forecast mark
+   themselves there (`modelaffinity.Call`) while their request is on the engine, and never while they wait at the fence. A gauge that cannot be
+   read is retried and then named and not waited for.
+4. The unload. If the deadline passes first, or nothing has changed for longer than any call may last (the largest of
+   `stt_request_timeout_sec`, `forecast_request_timeout_sec`, `request_timeout_sec` and 30 minutes), `exclusive` and `clearing` come off,
+   nothing is unloaded, and the reserve fails: the wrapper form gives the cards back, the detached form keeps the lease and says
+   `gpu release` frees it, as after a failed seat drain.
+
+A **media** lease does step 2 and the mark half of step 3 right after its grant, before its first unload (`awaitCallsOn`): until
+`gpu_wait_ms` from when the call began to queue, 60 s at least, then the busy answer. The engines with a gauge stay with the runner's
+own drain (up to 60 s; then it proceeds and says so).
 
 **Reading it.** `gpu status [--json]` and `offload_status.gpu_lease` carry a one-word `verdict` and an
 `activity` block:

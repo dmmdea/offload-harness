@@ -58,6 +58,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/hostneed"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
+	"github.com/dmmdea/offload-harness/internal/seatdrain"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
@@ -499,7 +500,7 @@ const (
 // warmReloadSignature is what llama-swap's router answers a request it was holding when a
 // config reload shut it down: HTTP 500 with "<router> is shutting down" (the router is
 // `matrix` or `group`, so the match starts at the verb). Read in the v236 and v256 sources.
-const warmReloadSignature = " is shutting down"
+const warmReloadSignature = seatwait.ShutdownMarker
 
 // warmRetryable reports whether an attempt's failure means the server was reloading or
 // restarting: a transport error that is not the caller's cancellation and not a timeout (a
@@ -859,13 +860,20 @@ func maintainSeat(ctx context.Context, cfg config.Config, o maintainOpts) error 
 		if reg, rerr := gpuactivity.Open(cfg.GPULockPath, cfg.StateDir); rerr == nil {
 			p.runs = reg.OnSeat
 			if scope.bounded() {
-				// The runs that matter are the ones on the leased cards, whatever seat they run on.
-				p.runs = func(now time.Time, _ ...string) []gpuactivity.Run { return reg.Where(now, scope.touchesRun) }
+				// The runs that matter are the ones on the leased cards, whatever seat they run on. A transcription or a
+				// forecast says no card and nothing cordons it: drainOthers waits for the ones on a model this lease takes.
+				p.runs = func(now time.Time, _ ...string) []gpuactivity.Run {
+					return reg.Where(now, func(r gpuactivity.Run) bool { return !seatdrain.OnEngine(r) && scope.touchesRun(r) })
+				}
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "gpu reserve: run registry unavailable (%v): draining on the seat's gauge alone\n", rerr)
 		}
-		if err := drainUntil(ctx, p, deadline); err != nil {
+		err := drainUntil(ctx, p, deadline)
+		if err == nil && unload && !scope.bounded() {
+			err = drainRunsElsewhere(ctx, cfg, endpoint, model, deadline)
+		}
+		if err != nil {
 			// A failed drain must not leave the DRAINING stamp on a lease that
 			// stays held (the detach form keeps it): the stamp cordons the seat
 			// — no new run admitted — for the rest of the window, which turned
@@ -949,6 +957,15 @@ func maintainSeat(ctx context.Context, cfg config.Config, o maintainOpts) error 
 		if !readable {
 			protect = stack
 		}
+		if drain {
+			clear := others
+			if agentOn && wasLoaded {
+				clear = append([]string{model}, others...)
+			}
+			if err := drainOthers(ctx, cfg, endpoint, clear, restamp, deadline); err != nil {
+				return err
+			}
+		}
 		if agentOn {
 			if err := unloadSeat(ctx, maintenanceClient, endpoint, model, protect); err != nil {
 				// A request the caller cancelled (a signal, a lost lease) says nothing about the seat: llama-swap
@@ -987,6 +1004,72 @@ func maintainSeat(ctx context.Context, cfg config.Config, o maintainOpts) error 
 		fmt.Fprintf(os.Stderr, "gpu reserve: %s unloaded\n", model)
 	}
 	return nil
+}
+
+// drainRunsElsewhere waits for the runs on the other resident seats, which a whole-node unload takes down too (ADR 0104).
+// It runs while the lease is only DRAINING: new runs are cordoned, and the steps of the ones in flight still pass the fence.
+// Under the exclusive stamp those steps would queue behind the lease that waits for their run. A card-scoped lease has
+// already waited for every run on its cards, whatever seat it is on.
+func drainRunsElsewhere(ctx context.Context, cfg config.Config, endpoint, agentSeat string, deadline time.Time) error {
+	others, _, _ := otherResidentModels(ctx, endpoint, agentSeat, effectiveMemoryStack(cfg))
+	if len(others) == 0 {
+		return nil
+	}
+	spec := drainSpec(cfg, endpoint, others, deadline)
+	spec.Counts = func(r gpuactivity.Run) bool { return !seatdrain.OnEngine(r) }
+	return seatdrain.Wait(ctx, spec)
+}
+
+// drainOthers waits for the calls in flight on the models the lease is about to unload (ADR 0104): the other resident
+// models, which were unloaded with no look at them until 2026-11-25, and the agent seat once more, because its own drain
+// ended before the fence went up. The cards are fenced by now: the models are first named on the lease, so new calls to
+// them queue at the fence instead of keeping them busy, and the calls that are running are waited for inside the lease's
+// own wait budget. On failure the fence and the list come off again and nothing is unloaded: the reservation fails (the wrapper
+// form then releases the lease; the detached form keeps it and tells the caller `gpu release` frees it).
+func drainOthers(ctx context.Context, cfg config.Config, endpoint string, models []string, restamp restamper, deadline time.Time) error {
+	if len(models) == 0 {
+		return nil
+	}
+	if restamp != nil {
+		names := seatdrain.Names(ctx, maintenanceClient, endpoint, models)
+		if err := restamp(func(m *gpulease.Meta) { m.Clearing = names }); err != nil {
+			return fmt.Errorf("naming the models the lease clears: %w", err)
+		}
+	}
+	spec := drainSpec(cfg, endpoint, models, deadline)
+	spec.Counts, spec.Gauge = seatdrain.OnEngine, true
+	err := seatdrain.Wait(ctx, spec)
+	if err == nil {
+		return nil
+	}
+	if restamp != nil && ctx.Err() == nil {
+		if serr := restamp(func(m *gpulease.Meta) { m.Exclusive, m.Clearing = false, nil }); serr != nil {
+			fmt.Fprintf(os.Stderr, "gpu reserve: could not clear the exclusive stamp after the failed drain: %v\n", serr)
+		}
+	}
+	return fmt.Errorf("nothing was unloaded: %w", err)
+}
+
+// drainSpec is what both waits above share: the models, this box's run registry, the lease's own deadline, and the point
+// after which an unchanged state is no longer a call anybody is waiting on.
+func drainSpec(cfg config.Config, endpoint string, models []string, deadline time.Time) seatdrain.Spec {
+	spec := seatdrain.Spec{
+		Client: maintenanceClient, Endpoint: endpoint, Models: models, Deadline: deadline, StuckAfter: longestCall(cfg),
+		Say: func(line string) { fmt.Fprintf(os.Stderr, "gpu reserve: %s\n", line) },
+	}
+	if reg, err := gpuactivity.Open(cfg.GPULockPath, cfg.StateDir); err == nil {
+		spec.Registry = reg
+	} else {
+		fmt.Fprintf(os.Stderr, "gpu reserve: run registry unavailable (%v): only the engines' own gauges are read\n", err)
+	}
+	return spec
+}
+
+// longestCall is the longest one call of any single-shot lane may last by its own timeout: a drain that has seen nothing
+// change for longer is not waiting for a call any more.
+func longestCall(cfg config.Config) time.Duration {
+	sec := max(cfg.STTRequestTimeoutSec, cfg.ForecastRequestTimeoutSec, cfg.RequestTimeoutSec, 1800)
+	return time.Duration(sec) * time.Second
 }
 
 // effectiveMemoryStack is the set every path that clears or reclaims the cards keeps
