@@ -121,7 +121,9 @@ func TestRemoteTextRefusedDispatchClosesTheCardFailed(t *testing.T) {
 	node := newFakeNode(t, "node-b", []string{"text"}, []string{"classify", "extract"}, remoteOK)
 	node.refuse = 503
 	rig := newPairRig(t, true, hostOf(t, node))
-	res := Run(context.Background(), clientConfig(node), attrLocal{&localRunner{}, rig}, textReq(), "remote")
+	cfg := clientConfig(node)
+	cfg.AgentPlacementWaitSec = -1 // the off switch: this test pins the give-up-at-once path
+	res := Run(context.Background(), cfg, attrLocal{&localRunner{}, rig}, textReq(), "remote")
 	if !res.Deferred || res.DeferClass != core.DeferClassCapacity {
 		t.Fatalf("Run: %+v", res)
 	}
@@ -218,7 +220,9 @@ func TestAutoFallingBackAfterARefusalKeepsTheFailedAttempt(t *testing.T) {
 	node.refuse = 503
 	rig := newPairRig(t, true, hostOf(t, node))
 	local := attrLocal{&localRunner{res: core.Result{OK: true}}, rig}
-	res := Run(context.Background(), clientConfig(node), local, textReq(), "auto")
+	cfg := clientConfig(node)
+	cfg.AgentPlacementWaitSec = -1 // the off switch: this test pins the give-up-at-once path
+	res := Run(context.Background(), cfg, local, textReq(), "auto")
 	if !res.OK || local.count() != 1 {
 		t.Fatalf("Run: %+v (local ran %d), want the local result", res, local.count())
 	}

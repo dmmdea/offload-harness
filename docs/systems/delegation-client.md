@@ -20,6 +20,12 @@ installed by its own mode rather than by a profile.
 | questions about one image (VQA, OCR, assessment) | `offload_vqa`, `offload_ocr`, `offload_assess_image` with `route: "remote"`: the image is sent to a node that advertises the vision lane. Their `auto` route leaves the box only while a local card is busy, so a client names `remote` |
 | classify and extract | `offload_classify`, `offload_extract` with `route: "remote"`, on a node that advertises the text lane |
 
+A node that is full or leased is a place in line, not a refusal ([ADR 0105](../architecture/decisions/0105-a-refused-single-shot-call-holds-its-place-in-both-lines.md)).
+A single-shot call (`offload_transcribe`, `offload_vqa`, `offload_ocr`, `offload_assess_image`, `offload_classify`, `offload_extract`,
+forecast) that a node turns away with a 503 or 429 keeps its place and is asked again as the node's health shows room, for up to the
+lane's own budget, instead of deferring at the first refusal. A client has no local card, so it holds for the fleet alone.
+`agent_placement_wait_sec: -1` switches waiting off.
+
 What stays out of reach:
 
 - The other cascade text tools (`offload_summarize`, `offload_triage`, `offload_ask`, ...) run on a

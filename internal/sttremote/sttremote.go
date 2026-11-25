@@ -15,6 +15,11 @@
 //     when no remotes are configured at all), never a silent local run: "remote" is the caller saying
 //     its own card must stay untouched.
 //
+// A node that is full or leased is a place in line, not a refusal (ADR 0105): the placement half of a
+// call (pick a node, upload) runs in internal/lanehold's loop, which keeps the call's place in the
+// fleet's line while this box's own card is leased too, and runs the call on whichever frees first. The
+// poll-and-run half below is unchanged.
+//
 // The audio is read HERE, on the box that has it, converted to 16 kHz mono Opus at 32 kbps (about 14 MB
 // per hour of speech; the original file is sent when conversion is impossible and it fits the node's
 // cap) and travels as base64 inside the job. The node's answer is the full core.Result it would have
@@ -47,6 +52,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
+	"github.com/dmmdea/offload-harness/internal/lanehold"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
@@ -159,27 +165,45 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 		// chosen, its one PAIR card.
 		h := core.BeginRemote(runner, req, r)
 		defer core.CloseOnPanic(h) // a panic in the dispatch, the poll or the fetch closes the card before the door dies of it
-		res, err := callWith(ctx, cfg, req, h)
+		res, waited, err := callHold(ctx, cfg, req, h, &lanehold.Place{Lane: laneName})
 		if err != nil {
 			res = placementDefer(err, "remote: forced")
 		} else {
-			res.Meta.Placement = "remote: forced"
+			res.Meta.Placement = "remote: forced" + waitedSuffix(waited)
 		}
 		h.Finish(res)
 		return res
 	}
 	// auto
-	if !localBusy(ctx, cfg, paramBool(req.Params, "hq")) {
+	hq := paramBool(req.Params, "hq")
+	if !localBusy(ctx, cfg, hq) {
 		res := runner.Run(ctx, req)
 		res.Meta.Placement = "local: gpu idle"
 		return res
 	}
 	h := core.BeginRemote(runner, req, r)
 	defer core.CloseOnPanic(h) // as above, on the auto route
-	res, err := callWith(ctx, cfg, req, h)
+	// This box's card is fenced by a lease: the call holds its place in the fleet's line and runs on
+	// whichever frees first, a node or this box's card (ADR 0105).
+	res, waited, err := callHold(ctx, cfg, req, h, &lanehold.Place{
+		Lane:      laneName,
+		LocalWhy:  "this box's card is leased",
+		LocalFree: func(c context.Context) bool { return !localBusy(c, cfg, hq) },
+		Register:  lanehold.SeatWaiter(modelFor(cfg, hq), laneName),
+	})
 	if err == nil {
-		res.Meta.Placement = "remote: local gpu busy"
+		res.Meta.Placement = "remote: local gpu busy" + waitedSuffix(waited)
 		h.Finish(res)
+		return res
+	}
+	var freed *lanehold.LocalFreeError
+	if errors.As(err, &freed) {
+		h.Discard(err.Error())
+		res = runner.Run(ctx, req)
+		res.Meta.Placement = "local: card freed after " + lanehold.Dur(freed.Waited) + " in line"
+		if freed.Last != nil {
+			res.Meta.Placement += ", " + freed.Last.Error()
+		}
 		return res
 	}
 	// Busy local, no usable remote: queued-local beats ineligible-remote. The reason travels so a slow
@@ -189,6 +213,26 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	res = runner.Run(ctx, req)
 	res.Meta.Placement = "local: gpu busy, " + err.Error()
 	return res
+}
+
+// laneName is the lane in the wait's log lines (the verb the operator typed).
+const laneName = "transcribe"
+
+// modelFor is the whisper model the local call would use (the pipeline's own choice, sttRoute): the
+// seat whose place in this box's line a waiting call keeps.
+func modelFor(cfg config.Config, hq bool) string {
+	if hq && cfg.STTModelHQ != "" {
+		return cfg.STTModelHQ
+	}
+	return cfg.STTModel
+}
+
+// waitedSuffix is ", waited 41s in line" for a call that held its place, "" for one that did not.
+func waitedSuffix(waited time.Duration) string {
+	if n := lanehold.WaitedNote(waited); n != "" {
+		return ", " + n
+	}
+	return ""
 }
 
 func hasRemotes(cfg config.Config) bool {
@@ -219,12 +263,17 @@ func placementDefer(err error, placement string) core.Result {
 type placementError struct {
 	class string
 	msg   string
+	// hint is what the wait loop reads: whether a place may free, and which node just refused.
+	hint lanehold.Hint
 }
 
 func (e *placementError) Error() string { return e.msg }
 
+// Hold is lanehold.Holder.
+func (e *placementError) Hold() lanehold.Hint { return e.hint }
+
 func infra(format string, a ...any) *placementError {
-	return &placementError{core.DeferClassInfrastructure, fmt.Sprintf(format, a...)}
+	return &placementError{class: core.DeferClassInfrastructure, msg: fmt.Sprintf(format, a...)}
 }
 
 // upload is the file that travels: the Opus conversion (path in a temp dir, removed by cleanup) or the
@@ -280,10 +329,7 @@ func cleanExt(path string) string {
 // budgetFor is how long a call waits for a node's answer: stt_request_timeout_sec when the audio's
 // length is unknown, else a base plus half the audio's length, never more than stt_request_timeout_sec.
 func budgetFor(cfg config.Config, durationSec float64) time.Duration {
-	limit := time.Duration(cfg.STTRequestTimeoutSec) * time.Second
-	if limit <= 0 {
-		limit = 1800 * time.Second
-	}
+	limit := limitFor(cfg)
 	if durationSec <= 0 {
 		return limit
 	}
@@ -292,6 +338,16 @@ func budgetFor(cfg config.Config, durationSec float64) time.Duration {
 		return limit
 	}
 	return b
+}
+
+// limitFor is stt_request_timeout_sec, 1800 s when unset: the longest one call spends on the node
+// (and the figure the wait in line is what is left of, see callHold).
+func limitFor(cfg config.Config) time.Duration {
+	limit := time.Duration(cfg.STTRequestTimeoutSec) * time.Second
+	if limit <= 0 {
+		limit = 1800 * time.Second
+	}
+	return limit
 }
 
 // dispatchTimeoutFor is how long delivering a body of n bytes may take.
@@ -304,14 +360,26 @@ func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result
 	return callWith(ctx, cfg, req, core.NopAttribution{})
 }
 
-// callWith is Call reporting the dispatch and the node's progress to h (core.RemoteAttribution). A bad
-// or missing audio file is a DEFERRED result, not an error (the shape the local convert produces); a
-// placement or wire failure is an error the caller maps to a defer class; the node's own result,
-// including its defers, comes back as the core.Result it produced.
+// callWith is Call reporting the dispatch and the node's progress to h (core.RemoteAttribution), with
+// one try at placing the call and no wait in line. A bad or missing audio file is a DEFERRED result,
+// not an error (the shape the local convert produces); a placement or wire failure is an error the
+// caller maps to a defer class; the node's own result, including its defers, comes back as the
+// core.Result it produced.
 func callWith(ctx context.Context, cfg config.Config, req core.Request, h core.RemoteAttribution) (core.Result, error) {
+	res, _, err := callHold(ctx, cfg, req, h, nil)
+	return res, err
+}
+
+// callHold is callWith for a call that may hold its place in the fleet's line (ADR 0105). tmpl carries
+// what the route knows about the wait (the lane's name, whether this box's own side can take the call
+// instead); nil is one try and no wait. The wait is the placement half only: how long it may last is
+// stt_request_timeout_sec less the budget the run half will need, so a call that waited and was then
+// accepted still has its full budget on the node (the run half's deadline starts when a node accepts).
+// It returns how long the call held its place.
+func callHold(ctx context.Context, cfg config.Config, req core.Request, h core.RemoteAttribution, tmpl *lanehold.Place) (core.Result, time.Duration, error) {
 	start := time.Now()
 	if !hasRemotes(cfg) {
-		return core.Result{}, &placementError{core.DeferClassConfig, "no delegate_remotes configured — nothing to place the transcription on"}
+		return core.Result{}, 0, &placementError{class: core.DeferClassConfig, msg: "no delegate_remotes configured — nothing to place the transcription on"}
 	}
 	up, err := prepareUpload(cfg, req.Audio)
 	if err != nil {
@@ -319,58 +387,102 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, h core.R
 			// The same defer, class and error class the local door files (pipeline.runTranscribe).
 			res := core.Deferf(audioio.ErrNoAudioStream.Error(), "", core.Meta{ErrClass: core.ErrClassBadInput})
 			res.DeferClass = core.DeferClassContract
-			return res, nil
+			return res, 0, nil
 		}
-		return core.Deferf("audio convert: "+err.Error(), "", core.Meta{}), nil
+		return core.Deferf("audio convert: "+err.Error(), "", core.Meta{}), 0, nil
 	}
 	defer up.cleanup()
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, budgetFor(cfg, up.durationSec))
-		defer cancel()
-	}
-	hq := paramBool(req.Params, "hq")
-	base, node, err := pickNode(ctx, cfg, hq, up.size)
-	if err != nil {
-		return core.Result{}, err
-	}
 	raw, err := os.ReadFile(up.path)
 	if err != nil {
-		return core.Deferf("audio convert: "+err.Error(), "", core.Meta{}), nil
+		return core.Deferf("audio convert: "+err.Error(), "", core.Meta{}), 0, nil
 	}
-	jobID, err := dispatch(ctx, cfg, base, node, req, up.ext, raw, hq, h)
-	if err != nil {
-		return core.Result{}, err
+	hq := paramBool(req.Params, "hq")
+	limit, budget := limitFor(cfg), budgetFor(cfg, up.durationSec)
+
+	var pl lanehold.Place
+	if tmpl != nil {
+		pl = *tmpl
+		pl.Bound = lanehold.Bound(ctx, cfg, max(limit-budget, 0))
 	}
-	res, err := wait(ctx, cfg, base, jobID, h)
+	var base, node, jobID string
+	pl.Try = func(c context.Context, cd *lanehold.Cooldowns) error {
+		if pl.Bound <= 0 {
+			cd = nil // a call that does not wait still tries a node that reads full, as it always did
+		}
+		b, n, err := pickNodeHold(c, cfg, hq, up.size, cd)
+		if err != nil {
+			return err
+		}
+		id, err := dispatch(c, cfg, b, n, req, up.ext, raw, hq, h)
+		if err != nil {
+			if pl.Bound > 0 && lanehold.Waitable(err) {
+				// The refused attempt's card closes quiet; the next dispatch opens the next one.
+				h.Bounce(core.Deferf(err.Error(), "", core.Meta{}))
+			}
+			return err
+		}
+		base, node, jobID = b, n, id
+		return nil
+	}
+	waited, err := pl.Await(ctx)
 	if err != nil {
-		return core.Result{}, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("node %s: %v", node, err)}
+		return core.Result{}, waited, err
+	}
+	lanehold.LogPlaced(pl.Lane, node, waited)
+
+	// The run half has its own full budget from the moment a node accepted. A caller's deadline rules
+	// when there is one; otherwise the call may run up to stt_request_timeout_sec on the node, of which
+	// the time the job sits in the node's own stt queue is not charged to the budget (wait).
+	charged := time.Duration(0)
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limit)
+		defer cancel()
+		charged = budget
+	}
+	res, err := waitCharged(ctx, cfg, base, jobID, h, charged)
+	if err != nil {
+		return core.Result{}, waited, &placementError{class: core.DeferClassInfrastructure, msg: fmt.Sprintf("node %s: %v", node, err)}
 	}
 	res.Meta.Node = node
 	if res.Meta.LatencyMs == 0 {
-		res.Meta.LatencyMs = time.Since(start).Milliseconds()
+		res.Meta.LatencyMs = time.Since(start).Milliseconds() - waited.Milliseconds()
 	}
 	if res.OK && !res.Deferred {
 		res = materialize(ctx, cfg, base, node, req, raw, res)
 	}
-	return res, nil
+	return res, waited, nil
 }
 
-// pickNode probes delegate_remotes and hands the views to delegate.PlaceSTT. Every miss is named in
-// the error so "no node" is never a mystery: an unreachable node, a node without the door (an older
-// build lists only the legacy path-taking stt, which cannot be sent bytes), one without an hq model
-// when hq was asked, one whose upload cap is smaller than the file, a leased card.
+// pickNode is pickNodeHold for a call that does not wait: no cooldowns, a node that reads full is still tried.
 func pickNode(ctx context.Context, cfg config.Config, hq bool, size int64) (base, node string, err error) {
+	return pickNodeHold(ctx, cfg, hq, size, nil)
+}
+
+// pickNodeHold probes delegate_remotes and hands the views to delegate.PlaceSTT. Every miss is named
+// in the error so "no node" is never a mystery: an unreachable node, a node without the door (an older
+// build lists only the legacy path-taking stt, which cannot be sent bytes), one without an hq model
+// when hq was asked, one whose upload cap is smaller than the file, a leased card. With cd (a call that
+// waits in line, ADR 0105) a node whose health reads full, or that just refused this call, is a
+// temporary miss too and is not dispatched to: the upload is megabytes and is not sent into a node
+// that would turn it away.
+func pickNodeHold(ctx context.Context, cfg config.Config, hq bool, size int64, cd *lanehold.Cooldowns) (base, node string, err error) {
 	var (
 		bases  []string
 		views  []delegate.NodeView
 		misses []string
+		shorts []string // the temporary misses worth a log line (not "cooling")
+		temp   bool     // at least one miss is temporary: a place may free
 	)
 	for _, r := range rosterprobe.Probe(ctx, cfg.DelegateRemotes, cfg.FleetAuthToken, healthTimeout) {
 		b, v := r.Base, r.View
 		if r.Err != nil {
 			misses = append(misses, r.Miss())
 			continue
+		}
+		name := v.NodeID
+		if name == "" {
+			name = r.Shown()
 		}
 		switch {
 		case !v.ServesSTTUpload():
@@ -384,15 +496,28 @@ func pickNode(ctx context.Context, cfg config.Config, hq bool, size int64) (base
 			continue
 		case v.LeasedText || v.LeaseBusy:
 			misses = append(misses, fmt.Sprintf("%s (%s): card leased", r.Shown(), v.NodeID))
+			temp = true
+			shorts = append(shorts, name+" card leased")
 			continue
+		}
+		if cd != nil {
+			if skip, why := cd.Skip(b, v); skip {
+				misses = append(misses, fmt.Sprintf("%s (%s): %s", r.Shown(), v.NodeID, why))
+				temp = true
+				if why != lanehold.CoolingReason {
+					shorts = append(shorts, name+" "+why)
+				}
+				continue
+			}
 		}
 		bases = append(bases, b)
 		views = append(views, v)
 	}
 	i, ok := delegate.PlaceSTT(views, hq, size)
 	if !ok {
-		return "", "", &placementError{core.DeferClassCapacity,
-			"no fleet node is eligible for the stt upload door — probed " + strings.Join(misses, "; ")}
+		return "", "", &placementError{class: core.DeferClassCapacity,
+			msg:  "no fleet node is eligible for the stt upload door — probed " + strings.Join(misses, "; "),
+			hint: lanehold.Hint{Waitable: temp, Short: strings.Join(shorts, "; ")}}
 	}
 	node = views[i].NodeID
 	if node == "" {
@@ -462,10 +587,15 @@ func dispatch(ctx context.Context, cfg config.Config, base, node string, req cor
 		// A refusal is the node's own verdict (queue full, leased, draining, 401, an upload over its
 		// cap): capacity when it is re-placeable, infrastructure otherwise.
 		class := core.DeferClassInfrastructure
+		var hint lanehold.Hint
 		if resp.StatusCode == http.StatusServiceUnavailable || resp.StatusCode == http.StatusTooManyRequests {
 			class = core.DeferClassCapacity
+			// A place may free: the wait loop keeps this node off the list for a moment and reads its
+			// Retry-After (the node's own estimate of when a worker frees).
+			hint = lanehold.Hint{Waitable: true, Base: base, Short: node + " refused it",
+				RetryAfter: time.Duration(delegate.ParseRetryAfterSeconds(resp.Header.Get("Retry-After"))) * time.Second}
 		}
-		return "", &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb)))}
+		return "", &placementError{class: class, msg: rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb))), hint: hint}
 	}
 	// The node accepted the job: whatever the negative cache holds against it is out of date.
 	rosterprobe.Default.Forget(base)
@@ -476,19 +606,45 @@ type jobWire struct {
 	State string          `json:"state"`
 	Data  json.RawMessage `json:"data"`
 	Error string          `json:"error"`
+	// Progress is the node's liveness report. For an stt job the only phases are "queued" (the job waits
+	// at the node's stt gate) and "running" (it holds a slot); a node that publishes none is an older
+	// build, and its job is charged for every second it is polled, as before.
+	Progress *struct {
+		Phase string `json:"phase"`
+	} `json:"progress,omitempty"`
 }
 
-// wait polls the job until it is done or errored. A done job's data is the node's full core.Result
-// (fleetnode.sttJobData): defers ride inside it. An error state is the node's answer too (the run
-// died, the node shut down): it comes back as a deferred result, never a transport error. A failed
-// poll is retried; the caller's context, a 404 (the node denies holding the job) and
-// maxPollFailures consecutive failures end the wait early.
+// phaseQueued is the progress phase a node publishes while an stt job waits at its stt gate.
+const phaseQueued = "queued"
+
+// wait is waitCharged with no budget of its own: the caller's context alone bounds it.
 func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.RemoteAttribution) (core.Result, error) {
+	return waitCharged(ctx, cfg, base, jobID, h, 0)
+}
+
+// waitCharged polls the job until it is done or errored. A done job's data is the node's full
+// core.Result (fleetnode.sttJobData): defers ride inside it. An error state is the node's answer too
+// (the run died, the node shut down): it comes back as a deferred result, never a transport error. A
+// failed poll is retried; the caller's context, a 404 (the node denies holding the job) and
+// maxPollFailures consecutive failures end the wait early.
+//
+// budget > 0 limits the time the job is CHARGED: every second between two polls counts, except those
+// that followed a poll reading progress.phase "queued", because a job waiting at the node's stt gate
+// is in a line, not running, and a long queue must not eat the budget the run itself needs (ADR 0105).
+// The caller's context still bounds the whole wait (stt_request_timeout_sec).
+func waitCharged(ctx context.Context, cfg config.Config, base, jobID string, h core.RemoteAttribution, budget time.Duration) (core.Result, error) {
 	failures := 0
+	var charged time.Duration
+	last, queued := time.Now(), false
 	for {
 		pctx, cancel := context.WithTimeout(ctx, pollTimeout)
 		j, err := getJSON[jobWire](pctx, cfg, base+"/fleet/jobs/"+jobID)
 		cancel()
+		now := time.Now()
+		if !queued {
+			charged += now.Sub(last)
+		}
+		last = now
 		if err != nil {
 			if ctx.Err() != nil {
 				return core.Result{}, fmt.Errorf("job %s: %w", jobID, ctx.Err())
@@ -508,6 +664,7 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.Rem
 			continue
 		}
 		failures = 0
+		queued = j.Progress != nil && j.Progress.Phase == phaseQueued && j.State != "done" && j.State != "error"
 		switch j.State {
 		case "running":
 			h.Running()
@@ -523,6 +680,9 @@ func wait(ctx context.Context, cfg config.Config, base, jobID string, h core.Rem
 			res := core.Deferf(j.Error, "", core.Meta{})
 			res.DeferClass = core.DeferClassInfrastructure
 			return res, nil
+		}
+		if budget > 0 && charged > budget {
+			return core.Result{}, fmt.Errorf("job %s still %s: %w", jobID, j.State, context.DeadlineExceeded)
 		}
 		select {
 		case <-ctx.Done():

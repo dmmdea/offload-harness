@@ -37,6 +37,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/config"
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/delegate"
+	"github.com/dmmdea/offload-harness/internal/lanehold"
 	"github.com/dmmdea/offload-harness/internal/netguard"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	"github.com/dmmdea/offload-harness/internal/rosterprobe"
@@ -129,11 +130,11 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 		// is chosen, its one PAIR card (D5/D6).
 		h := core.BeginRemote(runner, req, r)
 		defer core.CloseOnPanic(h) // a panic in the dispatch, the poll or the fetch closes the card before the door dies of it
-		res, err := callWith(ctx, cfg, req, h)
+		res, waited, err := callHold(ctx, cfg, req, h, &lanehold.Place{Lane: laneName})
 		if err != nil {
 			res = placementDefer(err, "remote: forced")
 		} else {
-			res.Meta.Placement = "remote: forced"
+			res.Meta.Placement = "remote: forced" + waitedSuffix(waited)
 		}
 		h.Finish(res)
 		return res
@@ -146,10 +147,27 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	}
 	h := core.BeginRemote(runner, req, r)
 	defer core.CloseOnPanic(h) // as above, on the auto route
-	res, err := callWith(ctx, cfg, req, h)
+	// A lease on this box's card is a place in line: the call holds its place in the fleet's line and
+	// runs on whichever frees first, a node or this box's card (ADR 0105).
+	res, waited, err := callHold(ctx, cfg, req, h, &lanehold.Place{
+		Lane:      laneName,
+		LocalWhy:  "this box's card is leased",
+		LocalFree: func(context.Context) bool { return !localBusy(cfg) },
+		Register:  lanehold.SeatWaiter(cfg.Model, laneName),
+	})
 	if err == nil {
-		res.Meta.Placement = "remote: local gpu busy"
+		res.Meta.Placement = "remote: local gpu busy" + waitedSuffix(waited)
 		h.Finish(res)
+		return res
+	}
+	var freed *lanehold.LocalFreeError
+	if errors.As(err, &freed) {
+		h.Discard(err.Error())
+		res = runner.Run(ctx, req)
+		res.Meta.Placement = "local: card freed after " + lanehold.Dur(freed.Waited) + " in line"
+		if freed.Last != nil {
+			res.Meta.Placement += ", " + freed.Last.Error()
+		}
 		return res
 	}
 	// Busy local, no usable remote: queued-local beats ineligible-remote, the
@@ -160,6 +178,17 @@ func Run(ctx context.Context, cfg config.Config, runner Runner, req core.Request
 	res = runner.Run(ctx, req)
 	res.Meta.Placement = "local: gpu busy, " + err.Error()
 	return res
+}
+
+// laneName is the lane in the wait's log lines.
+const laneName = "text"
+
+// waitedSuffix is ", waited 41s in line" for a call that held its place, "" for one that did not.
+func waitedSuffix(waited time.Duration) string {
+	if n := lanehold.WaitedNote(waited); n != "" {
+		return ", " + n
+	}
+	return ""
 }
 
 // placementDefer renders a Call failure as the deferred result the route
@@ -182,9 +211,14 @@ func placementDefer(err error, placement string) core.Result {
 type placementError struct {
 	class string
 	msg   string
+	// hint is what the wait loop reads: whether a place may free, and which node just refused.
+	hint lanehold.Hint
 }
 
 func (e *placementError) Error() string { return e.msg }
+
+// Hold is lanehold.Holder.
+func (e *placementError) Hold() lanehold.Hint { return e.hint }
 
 // Call runs req on the best eligible fleet node. A placement or wire failure is an error the caller
 // maps to a defer class; the node's own result, including its defers, comes back as the core.Result
@@ -193,37 +227,74 @@ func Call(ctx context.Context, cfg config.Config, req core.Request) (core.Result
 	return callWith(ctx, cfg, req, core.NopAttribution{})
 }
 
-// callWith is Call reporting the dispatch and the node's progress to h (core.RemoteAttribution).
+// callWith is Call reporting the dispatch and the node's progress to h (core.RemoteAttribution), with
+// one try at placing the call and no wait in line.
 func callWith(ctx context.Context, cfg config.Config, req core.Request, h core.RemoteAttribution) (core.Result, error) {
+	res, _, err := callHold(ctx, cfg, req, h, nil)
+	return res, err
+}
+
+// callHold is callWith for a call that may hold its place in the fleet's line (ADR 0105). tmpl carries
+// what the route knows about the wait; nil is one try and no wait. The wait is the placement half only
+// and is bounded by Budget; the run half gets its own full Budget from the moment a node accepts. It
+// returns how long the call held its place.
+func callHold(ctx context.Context, cfg config.Config, req core.Request, h core.RemoteAttribution, tmpl *lanehold.Place) (core.Result, time.Duration, error) {
 	start := time.Now()
 	if len(cfg.DelegateRemotes) == 0 {
-		return core.Result{}, &placementError{core.DeferClassConfig, "no delegate_remotes configured — nothing to place the text task on"}
+		return core.Result{}, 0, &placementError{class: core.DeferClassConfig, msg: "no delegate_remotes configured — nothing to place the text task on"}
 	}
+	jobID, body, err := encode(req)
+	if err != nil {
+		return core.Result{}, 0, err
+	}
+	task := string(req.Task)
+	var pl lanehold.Place
+	if tmpl != nil {
+		pl = *tmpl
+		pl.Bound = lanehold.Bound(ctx, cfg, Budget)
+	}
+	var base, node string
+	pl.Try = func(c context.Context, cd *lanehold.Cooldowns) error {
+		if pl.Bound <= 0 {
+			cd = nil // a call that does not wait still tries a node that reads full, as it always did
+		}
+		b, n, err := pickNodeHold(c, cfg, task, cd)
+		if err != nil {
+			return err
+		}
+		// The call's one PAIR card opens here, on the node about to receive the job.
+		h.Dispatched(b, n, jobID)
+		if err := dispatch(c, cfg, b, body); err != nil {
+			if pl.Bound > 0 && lanehold.Waitable(err) {
+				// The refused attempt's card closes quiet; the next dispatch opens the next one.
+				h.Bounce(core.Deferf(err.Error(), "", core.Meta{}))
+				var pe *placementError
+				if errors.As(err, &pe) {
+					pe.hint.Short = n + " refused it"
+				}
+			}
+			return err
+		}
+		base, node = b, n
+		return nil
+	}
+	waited, err := pl.Await(ctx)
+	if err != nil {
+		return core.Result{}, waited, err
+	}
+	lanehold.LogPlaced(pl.Lane, node, waited)
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, Budget)
 		defer cancel()
 	}
-	jobID, body, err := encode(req)
-	if err != nil {
-		return core.Result{}, err
-	}
-	base, node, err := pickNode(ctx, cfg, string(req.Task))
-	if err != nil {
-		return core.Result{}, err
-	}
-	// The call's one PAIR card opens here, on the node about to receive the job.
-	h.Dispatched(base, node, jobID)
-	if err := dispatch(ctx, cfg, base, body); err != nil {
-		return core.Result{}, err
-	}
 	res, err := wait(ctx, cfg, base, jobID, h)
 	if err != nil {
-		return core.Result{}, &placementError{core.DeferClassInfrastructure, fmt.Sprintf("node %s: %v", node, err)}
+		return core.Result{}, waited, &placementError{class: core.DeferClassInfrastructure, msg: fmt.Sprintf("node %s: %v", node, err)}
 	}
 	res.Meta.Node = node
 	if res.Meta.LatencyMs == 0 {
-		res.Meta.LatencyMs = time.Since(start).Milliseconds()
+		res.Meta.LatencyMs = time.Since(start).Milliseconds() - waited.Milliseconds()
 	}
 	if bad := checkNodeResult(req, res); bad != "" {
 		// The node's own pipeline validated this answer, but the delegator does not take a remote
@@ -232,9 +303,9 @@ func callWith(ctx context.Context, cfg config.Config, req core.Request, h core.R
 		d := core.Deferf(fmt.Sprintf("node %s returned an answer that fails the delegator's check: %s", node, bad),
 			string(res.Data), res.Meta)
 		d.DeferClass = core.DeferClassInfrastructure
-		return d, nil
+		return d, waited, nil
 	}
-	return res, nil
+	return res, waited, nil
 }
 
 // checkNodeResult is the delegator's cheap post-check of an OK result from a node, and "" when it
@@ -306,16 +377,28 @@ func stringIn(s string, labels any) bool {
 // node that predates it, and every node whose tier declares no text task), a node whose lane does not
 // serve this task, a leased card.
 func pickNode(ctx context.Context, cfg config.Config, task string) (base, node string, err error) {
+	return pickNodeHold(ctx, cfg, task, nil)
+}
+
+// pickNodeHold is pickNode for a call that may wait in line: with cd, a node whose health reads full,
+// or that just refused this call, is a temporary miss too and is not dispatched to (ADR 0105).
+func pickNodeHold(ctx context.Context, cfg config.Config, task string, cd *lanehold.Cooldowns) (base, node string, err error) {
 	var (
 		bases  []string
 		views  []delegate.NodeView
 		misses []string
+		shorts []string // the temporary misses worth a log line (not "cooling")
+		temp   bool     // at least one miss is temporary: a place may free
 	)
 	for _, r := range rosterprobe.Probe(ctx, cfg.DelegateRemotes, cfg.FleetAuthToken, healthTimeout) {
 		b, v := r.Base, r.View
 		if r.Err != nil {
 			misses = append(misses, r.Miss())
 			continue
+		}
+		name := v.NodeID
+		if name == "" {
+			name = r.Shown()
 		}
 		switch {
 		case !v.ServesText():
@@ -326,15 +409,27 @@ func pickNode(ctx context.Context, cfg config.Config, task string) (base, node s
 			continue
 		case v.LeasedText || v.LeaseBusy:
 			misses = append(misses, fmt.Sprintf("%s (%s): card leased", r.Shown(), v.NodeID))
+			temp = true
+			shorts = append(shorts, name+" card leased")
 			continue
+		}
+		if cd != nil {
+			if skip, why := cd.Skip(b, v); skip {
+				misses = append(misses, fmt.Sprintf("%s (%s): %s", r.Shown(), v.NodeID, why))
+				temp = true
+				if why != lanehold.CoolingReason {
+					shorts = append(shorts, name+" "+why)
+				}
+				continue
+			}
 		}
 		bases = append(bases, b)
 		views = append(views, v)
 	}
 	i, ok := delegate.PlaceText(views, task)
 	if !ok {
-		return "", "", &placementError{core.DeferClassCapacity,
-			"no fleet node is eligible for the text lane — probed " + strings.Join(misses, "; ")}
+		return "", "", &placementError{class: core.DeferClassCapacity, msg: "no fleet node is eligible for the text lane — probed " + strings.Join(misses, "; "),
+			hint: lanehold.Hint{Waitable: temp, Short: strings.Join(shorts, "; ")}}
 	}
 	node = views[i].NodeID
 	if node == "" {
@@ -357,7 +452,7 @@ type payload struct {
 func encode(req core.Request) (jobID string, body []byte, err error) {
 	var rnd [8]byte
 	if _, err := rand.Read(rnd[:]); err != nil {
-		return "", nil, &placementError{core.DeferClassInfrastructure, "job id: " + err.Error()}
+		return "", nil, &placementError{class: core.DeferClassInfrastructure, msg: "job id: " + err.Error()}
 	}
 	p := payload{JobID: "text-" + hex.EncodeToString(rnd[:]), Task: string(req.Task), Input: req.Input}
 	switch req.Task {
@@ -366,14 +461,14 @@ func encode(req core.Request) (jobID string, body []byte, err error) {
 	case core.TaskExtract:
 		p.Params = map[string]any{"schema": req.Params["schema"]}
 	default:
-		return "", nil, &placementError{core.DeferClassContract, fmt.Sprintf("the text lane serves classify and extract, not %s", req.Task)}
+		return "", nil, &placementError{class: core.DeferClassContract, msg: fmt.Sprintf("the text lane serves classify and extract, not %s", req.Task)}
 	}
 	body, err = json.Marshal(p)
 	if err != nil {
-		return "", nil, &placementError{core.DeferClassInfrastructure, "encoding text job: " + err.Error()}
+		return "", nil, &placementError{class: core.DeferClassInfrastructure, msg: "encoding text job: " + err.Error()}
 	}
 	if len(body) > maxPayload {
-		return "", nil, &placementError{core.DeferClassContract, fmt.Sprintf("the text job is %d bytes, over the node's %d-byte body cap", len(body), maxPayload)}
+		return "", nil, &placementError{class: core.DeferClassContract, msg: fmt.Sprintf("the text job is %d bytes, over the node's %d-byte body cap", len(body), maxPayload)}
 	}
 	return p.JobID, body, nil
 }
@@ -383,7 +478,7 @@ func dispatch(ctx context.Context, cfg config.Config, base string, body []byte) 
 	defer cancel()
 	hreq, err := http.NewRequestWithContext(dctx, http.MethodPost, base+"/fleet/text", bytes.NewReader(body))
 	if err != nil {
-		return &placementError{core.DeferClassInfrastructure, err.Error()}
+		return &placementError{class: core.DeferClassInfrastructure, msg: err.Error()}
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 	auth(cfg, hreq)
@@ -391,7 +486,7 @@ func dispatch(ctx context.Context, cfg config.Config, base string, body []byte) 
 	pairworkloads.WireHeadersFor(cfg, hreq.Header)
 	resp, err := HTTPClient.Do(hreq)
 	if err != nil {
-		return &placementError{core.DeferClassInfrastructure, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: %w", base, err))}
+		return &placementError{class: core.DeferClassInfrastructure, msg: rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: %w", base, err))}
 	}
 	rb, _ := io.ReadAll(io.LimitReader(resp.Body, maxBody))
 	resp.Body.Close()
@@ -400,13 +495,18 @@ func dispatch(ctx context.Context, cfg config.Config, base string, body []byte) 
 		// draining), config when the node says this task or payload is not one it serves (its
 		// health and its ack disagreed), infrastructure otherwise (401, 403, 5xx).
 		class := core.DeferClassInfrastructure
+		var hint lanehold.Hint
 		switch resp.StatusCode {
 		case http.StatusServiceUnavailable, http.StatusTooManyRequests:
 			class = core.DeferClassCapacity
+			// A place may free: the wait loop keeps this node off the list for a moment and reads its
+			// Retry-After (the node's own estimate of when a worker frees).
+			hint = lanehold.Hint{Waitable: true, Base: base,
+				RetryAfter: time.Duration(delegate.ParseRetryAfterSeconds(resp.Header.Get("Retry-After"))) * time.Second}
 		case http.StatusBadRequest:
 			class = core.DeferClassConfig
 		}
-		return &placementError{class, rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb)))}
+		return &placementError{class: class, msg: rosterprobe.Scrub(base, fmt.Errorf("dispatch %s: status %d: %s", base, resp.StatusCode, truncate(rb))), hint: hint}
 	}
 	// The node accepted the job: whatever the negative cache holds against it is out of date.
 	rosterprobe.Default.Forget(base)

@@ -201,6 +201,10 @@ really was lost and it read as a dispatch error.
    503 but is not a dispatch-time refusal and carries no mark: the node held it under an id its record and the delegator's
    intent ledger know, and when nothing else takes the subtask the published failure keeps that id.
 
+## Amendment 2026-11-25 (the single-shot lanes wait too)
+
+The transcribe, vision, text and forecast lanes wait in line on a refused or full node, bounded by the lane's own budget and half of a caller's remaining deadline ([ADR 0105](0105-a-refused-single-shot-call-holds-its-place-in-both-lines.md)); `agent_placement_wait_sec < 0` is still the off switch.
+
 ## Consequences
 
 - A fully saturated fleet holds the last subtask of a call to the horizon, about 24 minutes of a default call, where it

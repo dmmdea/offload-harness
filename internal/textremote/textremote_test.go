@@ -214,6 +214,7 @@ func TestRemoteDefersNamingTheReasonWhenNoNodeIsEligible(t *testing.T) {
 	local := &localRunner{}
 
 	cfg := config.Default()
+	cfg.AgentPlacementWaitSec = -1 // the off switch: this test pins the give-up-at-once path
 	cfg.DelegateRemotes = []string{older.srv.URL, dark.srv.URL, narrow.srv.URL, leased.srv.URL}
 	res := Run(context.Background(), cfg, local, extractReq(), "remote")
 	if !res.Deferred || res.DeferClass != core.DeferClassCapacity {
@@ -276,6 +277,7 @@ func TestRemoteRefusalMapsToAClass(t *testing.T) {
 		node := newFakeNode(t, "rk-node", []string{"text"}, []string{"classify"}, remoteOK)
 		node.refuse = status
 		cfg := config.Default()
+		cfg.AgentPlacementWaitSec = -1 // the off switch: this test pins the give-up-at-once path
 		cfg.DelegateRemotes = []string{node.srv.URL}
 		res := Run(context.Background(), cfg, &localRunner{}, classifyReq(), "remote")
 		if !res.Deferred || res.DeferClass != class || !strings.Contains(res.Reason, fmt.Sprintf("status %d", status)) {

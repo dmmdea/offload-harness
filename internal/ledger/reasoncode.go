@@ -288,6 +288,13 @@ const renderedFetchFailedSentence = " rendered the job but fetching it failed: "
 
 // legacyReasonCode is the code of a reason one of the sentences above names, or "".
 func legacyReasonCode(reason string) string {
+	// A single-shot lane that held its place in line (ADR 0105) ends, when the fleet never took the call, on a probe
+	// that found the nodes full or cooling after a refusal. That is the queue-full the 503 itself would have filed
+	// (dispatchCapacityRe), not an absence of nodes, so it is checked ahead of the "no fleet node is eligible" prefix.
+	if strings.HasPrefix(reason, "no fleet node is eligible for the ") &&
+		(strings.Contains(reason, "): queue full") || strings.Contains(reason, "): cooling after a refusal")) {
+		return ReasonQueueFull
+	}
 	for _, p := range legacyReasonPrefixCodes {
 		if strings.HasPrefix(reason, p.prefix) {
 			return p.code

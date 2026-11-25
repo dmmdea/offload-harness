@@ -1007,6 +1007,21 @@ of the loop. They now share `internal/rosterprobe`:
   is never cached as down, and nothing is cached once the caller's own context is done. A timeout is held only against
   callers who would not wait longer than the probe that failed (the accelerator lane's 2 s failure is not held against a
   vision call that waits 5 s); a refusal holds for everyone.
+- **A full or leased node is a place in line (ADR 0105).** A single-shot call used to try its roster once: a node that
+  answered the dispatch 503 or 429 ended the call at the first error, and on route `auto` with this box's card leased the call
+  then ran here and waited for the lease. `internal/lanehold` is now the one loop the four lanes (stt-upload, vision, text,
+  forecast) share for the placement half: pick a node and dispatch until a node accepts, this box's own side frees (route `auto`,
+  fenced by a lease only; the vision seat-busy trigger is not a fence), or the bound ends. Only a 503 or 429 at dispatch, or no
+  node eligible while at least one miss is temporary (card leased, queue full, cooling), waits; every other error returns at
+  once. The roster is read every 3 s (or at the earliest cooldown end). A node that refused is left alone for 10 s, stretched
+  once by up to 30 % so a burst of callers does not return together, whatever its health says; then a node that publishes its room
+  is tried as soon as its fresh health is not saturated, and one that publishes none waits out its `Retry-After`. A node that
+  reads full is a miss and is not uploaded to. The bound is the lane's `Budget` (vision, text, forecast) or
+  `stt_request_timeout_sec` less the call's run budget (stt), at most half of a caller's remaining deadline, and 0 when
+  `agent_placement_wait_sec < 0`. The run half gets its own full budget once a node accepts. The node publishes
+  `progress.phase` `queued` while an stt job waits at its stt gate and `running` once it holds a slot (only when it
+  actually waited), and the asker's poll does not charge the queued time to the run budget. The placement says what happened:
+  `remote: local gpu busy, waited 41s in line`, or `local: card freed after 41s in line, <the fleet's last answer>`.
 - **What is printed, and where the bearer goes.** A roster entry is a base URL, and nothing stops one being pasted with
   `?token=` or `user:password@`. Every message about an entry prints it redacted (`netguard.RedactBase`: userinfo, query
   and fragment dropped) and every dial error through `rosterprobe.Scrub`, which also masks any other URL left in the
