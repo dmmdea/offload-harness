@@ -2194,7 +2194,9 @@ Fan self-contained sub-agent contracts out to this box or to fleet nodes on your
 (never cloud — [ADR 0023](architecture/decisions/0023-agent-lane-tailnet-auth-and-locality.md)).
 Placement is **quality-first**: an idle local box runs the work up to its run-cap line
 (`fleet_max_concurrent_jobs`, 4 by default; 1 on a single-slot tier, below) and the rest of a wider call goes to the nodes that have room
-([ADR 0076](architecture/decisions/0076-a-calls-width-is-sized-from-its-deal.md));
+([ADR 0076](architecture/decisions/0076-a-calls-width-is-sized-from-its-deal.md)). Left unset, the key is where that line starts: a vLLM seat with a
+fast engine and KV pool to spare takes more runs, one at a time, past 4 ([ADR 0103](architecture/decisions/0103-busy-means-no-free-slot-and-the-local-line-follows-the-engine.md)); a number you set stays
+the limit;
 a remote node is also used whenever the local GPU is busy; either way it must pass the capability gate. A box with no agent seat
 (a [delegation client](systems/delegation-client.md): `agent_model` and `model` both empty) is never a
 placement: route=auto and route=spread send every subtask to the fleet. Wire details:

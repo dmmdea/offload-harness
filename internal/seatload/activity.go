@@ -83,6 +83,8 @@ type Activity struct {
 	GenTokens, PromptTokens float64
 	// Preemptions is vLLM's num_preemptions_total, -1 when unknown.
 	Preemptions float64
+	// KVUsage is the share of the engine's KV pool in use, 0 to 1 (vLLM's gauge), -1 when the source has none.
+	KVUsage float64
 	// ActSource names what answered: "vllm-metrics", "llamacpp-metrics" or
 	// "slots".
 	ActSource string
@@ -140,7 +142,7 @@ func LiveRates(prev, cur Activity) (genTokS, promptTokS float64, ok bool) {
 func ReadActivity(ctx context.Context, client *http.Client, endpoint, seat string) (Activity, error) {
 	base := strings.TrimRight(endpoint, "/")
 	rd, done, err := running(ctx, client, endpoint, seat)
-	act := Activity{Reading: rd, GenTokens: -1, PromptTokens: -1, Preemptions: -1}
+	act := Activity{Reading: rd, GenTokens: -1, PromptTokens: -1, Preemptions: -1, KVUsage: -1}
 	if err != nil {
 		return act, err
 	}
@@ -306,8 +308,10 @@ func parseEngineMetrics(body []byte, act *Activity) error {
 		kv := m["vllm:kv_cache_usage_perc"]
 		switch {
 		case m.has("vllm:kv_cache_usage_perc"):
+			act.KVUsage = kv
 		case m.has("vllm:gpu_cache_usage_perc"):
 			kv = m["vllm:gpu_cache_usage_perc"] // pre-V1 name
+			act.KVUsage = kv
 		default:
 			act.KVGaugeMissing = true
 		}

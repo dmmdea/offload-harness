@@ -12,7 +12,7 @@
 // harness registered on the seat (gpuactivity's run registry), and a single-shot vision call is not a registered run, so
 // the line cannot see its load. And the threshold is the seat's own, not the agent cap: the cap (fleet_max_concurrent_jobs)
 // is how many agent runs the harness allows on the agent seat at once and means nothing for a vision seat, so any request
-// in flight reads busy, which is the reading the spread deal uses for the agent seat.
+// in flight reads busy here. (For the agent seat the delegator asks noFreeSlot instead: that seat's line says what full is.)
 
 package delegate
 

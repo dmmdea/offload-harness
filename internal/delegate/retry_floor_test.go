@@ -133,10 +133,10 @@ func TestRunRetryNeverLandsOnASeatAlreadyRunningAnotherJob(t *testing.T) {
 	if live.dispatches.Load() != 0 || sum.Retried != 0 || !strings.Contains(results[0].RetryNote, "fresh health") {
 		t.Fatalf("a node that turned busy AFTER the fleet probe must still block the retry: dispatches=%d retried=%d note=%q", live.dispatches.Load(), sum.Retried, results[0].RetryNote)
 	}
-	// And the local landing reads the seat's in-flight count: a busy reading
-	// skips, an idle one lets the retry run.
-	r := &runner{cfg: testCfg(t), localBusyProbe: func(context.Context) busyReading { return busyReading{busy: true, inflight: 2} }}
-	if busy, why := r.retrySeatBusy(context.Background(), placement{}); !busy || !strings.Contains(why, "2 in flight") {
+	// And the local landing reads the seat's in-flight count: a full seat
+	// skips, one with a free slot lets the retry run.
+	r := &runner{cfg: testCfg(t), localBusyProbe: func(context.Context) busyReading { return busyReading{busy: true, inflight: 4} }}
+	if busy, why := r.retrySeatBusy(context.Background(), placement{}); !busy || !strings.Contains(why, "4 in flight") {
 		t.Fatalf("local busy = %v (%q), want busy with the in-flight count", busy, why)
 	}
 	r.localBusyProbe = func(context.Context) busyReading { return busyReading{} }

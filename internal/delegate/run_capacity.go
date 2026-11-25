@@ -565,7 +565,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 	// overflow: a deal kept this subtask off the local seat - because it read busy, or because
 	// the deal had already spent an idle seat's run-cap line (ADR 0076) - and handed it over
 	// because every node with room was already dealt to its headroom. The seat stays off limits
-	// until it stops reading busy (localStillBusy) and its run-cap line has a free slot
+	// until it stops reading busy (localStillBusy: it has a free slot again) and its run-cap line has a free slot
 	// (localSlotAhead, read every tick) - the wait exists to spare the subtask that pile-up, not
 	// to rebuild it at tick zero.
 	overflow := seed.overflow
@@ -648,7 +648,8 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			// or no remotes configured) the seat's own line IS the wait, bounded by the
 			// run's wall, and the subtask joins it as soon as no lease reserves it.
 			free, _ := r.localSlotAhead()
-			if r.route == "local" || len(r.remotes) == 0 {
+			alone := r.route == "local" || len(r.remotes) == 0
+			if alone {
 				free = true
 			}
 			// With no node to wait for (route=local, or no remotes) the seat's own decision still
@@ -659,7 +660,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 			}
 			// A subtask a deal kept off the seat for reading busy stays off it while
 			// the seat still reads busy by the deal's own reading: the registry above
-			// counts only delegated runs, and a seat busy with anyone else's requests
+			// counts only delegated runs, and a seat full of anyone else's requests
 			// shows nothing there.
 			// Whatever started the wait (a refusal, a lease, a deal, no remote at all), a seat
 			// another vLLM seat occupies is no candidate: taking it unloads that seat
@@ -697,7 +698,9 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 				}
 				stillBusy, _ = r.localStillBusy(ctx, readLease)
 			}
-			if !Reserved(lease) && !fenced && free && !stillBusy && !occupied {
+			// claimLocalSlot last: one free slot is one subtask's, and the others keep their place in this wait instead of
+			// standing in the seat's own line.
+			if !Reserved(lease) && !fenced && free && !stillBusy && !occupied && (alone || r.claimLocalSlot()) {
 				if ok, blocked := ensureSlot(); !ok {
 					break
 				} else if blocked {
@@ -730,7 +733,7 @@ func (r *runner) awaitCapacity(ctx context.Context, i int, contract core.AgentCo
 					// (ADR 0078), and none had room.
 					reason = fmt.Sprintf("no remote had room and the local seat was free after %s — a remote hint falls back to it (capacity wait)", idle.Round(time.Second))
 				case dealBusy:
-					reason = fmt.Sprintf("local seat was busy when the deal kept this subtask off it, idle after %s — running local (capacity wait)", idle.Round(time.Second))
+					reason = fmt.Sprintf("local seat had no free slot when the deal kept this subtask off it, one freed after %s — running local (capacity wait)", idle.Round(time.Second))
 				}
 				forced := placement{view: localView, reason: reason + noteSuffix}
 				pr := r.attempt(ctx, i, replaced, &forced)

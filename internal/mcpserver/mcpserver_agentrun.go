@@ -680,7 +680,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 		seatRuns := func(now time.Time, names ...string) []gpuactivity.Run {
 			return reg.OnSeatPinned(now, seatPins, names...)
 		}
-		if serr := modelaffinity.AwaitSeatSlot(ctx, seatRuns, model, "", act.ID(), cfg.FleetConcurrencyLimit(), capEnd); serr != nil {
+		if serr := modelaffinity.AwaitSeatLine(ctx, seatRuns, model, "", act.ID(), cfg.FleetConcurrencyLimit(), cfg.SeatMore(model), capEnd, nil); serr != nil {
 			dout := map[string]any{
 				"deferred":    true,
 				"defer_class": string(core.DeferClassCapacity),

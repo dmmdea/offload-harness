@@ -24,7 +24,7 @@ func TestAGateTurnAwayKeepsTheDealsBusyReading(t *testing.T) {
 	for _, tc := range []struct {
 		route    string
 		inflight int
-	}{{"spread", 2}, {"auto", 4}} {
+	}{{"spread", 4}, {"auto", 4}} {
 		t.Run(tc.route, func(t *testing.T) {
 			compressPolls(t, 5*time.Millisecond, time.Second)
 			compressWait(t, 10*time.Millisecond, 0)

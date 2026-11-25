@@ -461,6 +461,7 @@ func runWith(ctx context.Context, rp runParams) ([]PlacedResult, Summary, error)
 			r.spreadLocalBusy = busyReading{note: "agent_spread_local_slot=always"}
 		} else {
 			r.spreadLocalBusy = r.probeLocalBusy(ctx)
+			r.spreadLocalBusy.busy = r.noFreeSlot(r.spreadLocalBusy)
 			// A live driver-fault repeat on the seat's cards (ADR 0096) deals the local slots away like a busy seat;
 			// the capacity wait reads the seat afresh, so the seat is demoted, not excluded.
 			if faulted, why := r.localFaulted(subtasks); faulted {
@@ -496,7 +497,11 @@ func runWith(ctx context.Context, rp runParams) ([]PlacedResult, Summary, error)
 		room, roomNote := 0, ""
 		if route == "auto" {
 			busy = r.readAutoLocalSlot(ctx, leaseInfo, subtasks)
-			room, roomNote = r.localRunCapRoom()
+			var registered int
+			var past bool
+			if room, registered, past, roomNote = r.localRunCapReading(); past {
+				r.spendSeatMore(registered) // the deal gives it to its own first local subtask
+			}
 			// A remote hint (ADR 0078) is placed remotes-first, as route=remote is: the deal treats the seat as
 			// unavailable whatever it read. The reading is still taken and kept, unlike route=remote's, because the
 			// hint may fall back to the seat where remote would defer, and that fallback must still wait for a lease
@@ -943,8 +948,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// probeLocalBusy always has.
 			r.autoLocalBusyOnce.Do(func() { r.autoLocalBusy = r.probeLocalBusy(ctx) })
 			local := r.autoLocalBusy
-			busy = leaseInfo.Held || r.atRunCap(local.inflight) || local.loading || local.cannotLoad()
-			if r.atRunCap(local.inflight) || local.loading || local.cannotLoad() {
+			full := r.noFreeSlot(local)
+			busy = leaseInfo.Held || full
+			if full {
 				r.autoDealReadBusy.Store(true) // the seat's load, never the lease (see the joint deal)
 			}
 			// A remote hint (ADR 0078) is placed remotes-first: the seat is unavailable whatever it read, and the
