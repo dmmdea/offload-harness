@@ -47,7 +47,10 @@ func TestAnIdleStaleServerExitsOnlyForAListedClient(t *testing.T) {
 		clientT, serverT := mcp.NewInMemoryTransports()
 		done := make(chan error, 1)
 		go func() { done <- s.serve(ctx, "test", serverT) }()
-		cs, err := mcp.NewClient(&mcp.Implementation{Name: client, Version: "2.1.330.0"}, nil).Connect(ctx, clientT, nil)
+		// The handler makes the client hold a subscriptions/listen request open, as the real one does: a server that had decided
+		// to leave stayed for it, and answered the client's next call with "server is closing" (2026-11-25).
+		opts := &mcp.ClientOptions{ToolListChangedHandler: func(context.Context, *mcp.ToolListChangedRequest) {}}
+		cs, err := mcp.NewClient(&mcp.Implementation{Name: client, Version: "2.1.330.0"}, opts).Connect(ctx, clientT, nil)
 		if err != nil {
 			t.Fatalf("client connect: %v", err)
 		}

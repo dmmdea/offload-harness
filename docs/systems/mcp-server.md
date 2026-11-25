@@ -1493,6 +1493,10 @@ read-only unless deliberately widened. See
   runs every 30 s (one stat while nothing moved) and shortly after each tool call finishes. A client that speaks the per-request
   protocol (clientInfo in each request's `_meta`, no `initialize`) is read from the session on its first request. The notices
   say the server exits by itself only for a server that is armed; any other server keeps the manual `/mcp` instruction.
+  A client of the per-request protocol holds one request open while it is connected (`subscriptions/listen`), and the SDK's `Close`
+  waits for open requests: the server ends those when it leaves (`exitWatch.untilLeaving`) and `serve` waits at most a second for the
+  SDK (`exitGrace`). Servers of 0.238.0 and 0.239.0 do not: they stay half closed and their session's next call comes back as a closed
+  connection, once.
   `offload_status`'s `process` block carries `client_name` and `client_version` as read, and `exit_when_stale`: `armed`,
   `armed, held by: <the lease or the tickets it still owns>`, or `off: <why>` (the client is not on the list, switched off by
   config, no client seen yet). That field is how the live server

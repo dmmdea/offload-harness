@@ -33,7 +33,15 @@ package mcpserver
 //     for takeover, so it stays until the lease is released.
 //
 // The exit is Run returning nil (the deferred cleanup runs, the session registry entry is removed, the exit code stays 0); the
-// server never calls os.Exit from the middle of a request.
+// server never calls os.Exit from the middle of a request. Two things are done for Run to return at all:
+//
+//   - A client of the per-request protocol (2026-07-28, what claude-code 2.1.330 speaks) holds ONE request open for as long as it is
+//     connected: subscriptions/listen. The SDK's Close waits for open requests and cancels none, so a server that had decided to leave
+//     stayed, half closed, until its client's next call, and answered that call with "server is closing" (seen on one box on
+//     2026-11-25: ten idle servers, none of them gone minutes after the deploy, and a session's next call failed with "Connection
+//     closed"). The middleware ends the listen requests when the server leaves, which is the answer the protocol has for a server
+//     that shuts down.
+//   - serve waits exitGrace for the SDK and then returns whatever it still waits for: an idle server has nothing left to answer.
 
 import (
 	"context"
@@ -61,6 +69,7 @@ var (
 	exitStaleMinAge    = 10 * time.Second // the changed file must be at least this old
 	exitStaleMinUptime = 60 * time.Second // the process must have been up this long
 	exitStaleSlack     = 250 * time.Millisecond
+	exitGrace          = time.Second // how long the SDK gets to end the session before the process goes
 )
 
 // exitWatch is the state the exit decision reads: who the client is, which calls are running and when the last one ended.
@@ -74,6 +83,7 @@ type exitWatch struct {
 	started       time.Time
 	exited        bool
 	kick          chan struct{}
+	leaving       context.Context // ends when the server decides to leave (startExitWatch's ctx); nil while it was never started
 }
 
 func (w *exitWatch) client() (name, version string) {
@@ -86,6 +96,19 @@ func (w *exitWatch) hasExited() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.exited
+}
+
+// untilLeaving is ctx that also ends when the server decides to leave. The caller calls the release function when it is done.
+func (w *exitWatch) untilLeaving(ctx context.Context) (context.Context, func()) {
+	w.mu.Lock()
+	leaving := w.leaving
+	w.mu.Unlock()
+	if leaving == nil {
+		return ctx, func() {}
+	}
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(leaving, cancel)
+	return ctx, func() { stop(); cancel() }
 }
 
 // kicked is the channel a finished tool call signals on, so the check also runs shortly after a call.
@@ -148,6 +171,11 @@ func (s *Server) exitWatchMiddleware(next mcp.MethodHandler) mcp.MethodHandler {
 				s.xw.mu.Unlock()
 				s.xw.signal()
 			}()
+		case "subscriptions/listen":
+			// Open for as long as the client is connected: ended when the server leaves, or the session could not close.
+			var release func()
+			ctx, release = s.xw.untilLeaving(ctx)
+			defer release()
 		}
 		return next(ctx, method, req)
 	}
@@ -334,6 +362,7 @@ func (s *Server) startExitWatch(ctx context.Context, stop context.CancelFunc) {
 	w := &s.xw
 	w.mu.Lock()
 	w.started = time.Now()
+	w.leaving = ctx
 	w.mu.Unlock()
 	kick := w.kicked()
 	go func() {

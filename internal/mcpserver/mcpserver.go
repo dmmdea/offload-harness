@@ -386,7 +386,25 @@ func (s *Server) serve(ctx context.Context, version string, t mcp.Transport) err
 	runCtx, stop := context.WithCancel(ctx)
 	defer stop()
 	s.startExitWatch(runCtx, stop)
-	err := srv.Run(runCtx, t)
+	ended := make(chan error, 1)
+	go func() { ended <- srv.Run(runCtx, t) }()
+	select {
+	case err := <-ended:
+		return s.endOf(ctx, err)
+	case <-runCtx.Done():
+	}
+	if s.xw.hasExited() && ctx.Err() == nil {
+		select {
+		case <-ended:
+		case <-time.After(exitGrace):
+		}
+		return nil
+	}
+	return s.endOf(ctx, <-ended)
+}
+
+// endOf is what serve returns for the session's end: nil for a server that left by itself.
+func (s *Server) endOf(ctx context.Context, err error) error {
 	if s.xw.hasExited() && ctx.Err() == nil {
 		return nil
 	}
