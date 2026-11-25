@@ -324,6 +324,10 @@ func parseRetryAfterSeconds(v string) int {
 	return n
 }
 
+// ParseRetryAfterSeconds is parseRetryAfterSeconds for the single-shot lanes (internal/lanehold): a
+// node's Retry-After header in delta-seconds, 0 when it sent none or sent something else.
+func ParseRetryAfterSeconds(v string) int { return parseRetryAfterSeconds(v) }
+
 // pollWaitSec is what runRemote's poll asks a node to hold ONE connection
 // open for (?wait=12) before answering (item 7): at fleetnode.MaxJobWaitSec,
 // one second inside pollRequestTimeout (15 s) so the long poll always gets an

@@ -325,6 +325,10 @@ func saturated(v NodeView) bool {
 	return (v.SaturationKnown && v.SaturationHigh) || (v.MaxQueueDepth > 0 && v.QueueDepth >= v.MaxQueueDepth)
 }
 
+// Saturated is saturated for the single-shot lanes (internal/lanehold): the node's own published
+// numbers say a new dispatch would be refused, so a lane does not upload into it.
+func Saturated(v NodeView) bool { return saturated(v) }
+
 // hasRoom reports whether v would take a NEW dispatch right now by its own
 // advertisement: not saturated, and — for a sheddable contract — holding an
 // idle execution slot. It is the capacity wait's "try this one" predicate

@@ -610,6 +610,7 @@ func TestRemotePlacementDefers(t *testing.T) {
 	leased := newFakeNode(t, "node-leased", sttTasks, okResult(sampleSegments, false))
 	leased.leased = true
 	cfg := askerCfg(t, legacy, fakeFFmpeg(t, false))
+	cfg.AgentPlacementWaitSec = -1 // the off switch: this test pins the give-up-at-once path
 	cfg.DelegateRemotes = []string{legacy.srv.URL, leased.srv.URL, "http://127.0.0.1:1"}
 	got := Run(context.Background(), cfg, &localRunner{}, sttReq(srcAudio(t), nil), "remote")
 	if !got.Deferred || got.DeferClass != core.DeferClassCapacity || got.Meta.Placement != "remote: forced" {
@@ -636,7 +637,9 @@ func TestRemoteRefusedDispatchClasses(t *testing.T) {
 	for status, want := range map[int]string{503: core.DeferClassCapacity, 429: core.DeferClassCapacity, 401: core.DeferClassInfrastructure, 400: core.DeferClassInfrastructure} {
 		node := newFakeNode(t, "node-c", sttTasks, okResult(sampleSegments, false))
 		node.refuse = status
-		got := Run(context.Background(), askerCfg(t, node, fakeFFmpeg(t, false)), &localRunner{}, sttReq(srcAudio(t), nil), "remote")
+		cfg := askerCfg(t, node, fakeFFmpeg(t, false))
+		cfg.AgentPlacementWaitSec = -1 // the off switch: this test pins the give-up-at-once path
+		got := Run(context.Background(), cfg, &localRunner{}, sttReq(srcAudio(t), nil), "remote")
 		if !got.Deferred || got.DeferClass != want {
 			t.Errorf("status %d: %+v, want class %s", status, got, want)
 		}

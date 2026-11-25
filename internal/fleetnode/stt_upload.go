@@ -433,6 +433,12 @@ func newSTTGate(capacity int) *sttGate {
 // acquire takes a slot, waiting its turn; the returned release (idempotent) hands the slot to the
 // first waiter, or frees it.
 func (g *sttGate) acquire(ctx context.Context) (release func(), err error) {
+	return g.acquireNotify(ctx, nil)
+}
+
+// acquireNotify is acquire that calls onWait (when set) once the job has joined the line, before it
+// blocks: only a job that actually waits calls it.
+func (g *sttGate) acquireNotify(ctx context.Context, onWait func()) (release func(), err error) {
 	g.mu.Lock()
 	if g.held < g.cap && len(g.q) == 0 {
 		g.held++
@@ -442,6 +448,9 @@ func (g *sttGate) acquire(ctx context.Context) (release func(), err error) {
 	ch := make(chan struct{})
 	g.q = append(g.q, ch)
 	g.mu.Unlock()
+	if onWait != nil {
+		onWait()
+	}
 	select {
 	case <-ch: // the releasing job handed its slot over: held is unchanged
 		return g.releaser(), nil
@@ -501,5 +510,16 @@ func (s *Server) enterSTT(ctx context.Context, taskType string) (release func(),
 	}
 	queued := sttclient.Queued()
 	defer queued()
-	return s.sttGate.acquire(ctx)
+	// A job that has to wait says so on its record (progress.phase "queued") and says "running" once it
+	// holds a slot, so an asker that polls it does not charge the time in this line to its budget
+	// (ADR 0105). A job that finds a free slot publishes nothing, as before; a pulled job has no sink.
+	waited := false
+	release, err = s.sttGate.acquireNotify(ctx, func() {
+		waited = true
+		core.ReportProgress(ctx, core.LiveProgress{Phase: "queued"})
+	})
+	if err == nil && waited {
+		core.ReportProgress(ctx, core.LiveProgress{Phase: "running"})
+	}
+	return release, err
 }

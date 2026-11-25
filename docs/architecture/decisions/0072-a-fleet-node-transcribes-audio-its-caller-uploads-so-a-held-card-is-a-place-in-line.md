@@ -149,3 +149,15 @@ Where this record calls media names and lanes tokenless, it describes the node w
 [ADR 0023](0023-agent-lane-tailnet-auth-and-locality.md), every lane needs the fleet bearer on a node that has a token
 (dispatch of any task type, the poll and withdraw of any job, and the read of any artifact), and a node with none answers only on
 loopback. The decision recorded here is otherwise unchanged.
+
+## Amendment (2026-11-25): a refused upload holds its place in both lines
+
+Decisions 6 and 7 say what route `auto` and `remote` do when no node can take the call: `auto` falls to this box's own whisper
+at the first error, `remote` defers. On 2026-11-25 that sent four calls out of the fleet's line at a node's first `503 queue
+full` while this box's own card was leased, and the fifth to ninth ended in a gpu-lease timeout; nothing asked the node again.
+Since [ADR 0105](0105-a-refused-single-shot-call-holds-its-place-in-both-lines.md) a refusal of the upload (503 or 429), or a
+roster whose only misses are temporary, is a place in line: the call is asked again as the node's health shows room (a node that
+refused is left alone for 10 s first, and its `Retry-After` is read), bounded by `stt_request_timeout_sec` less the run budget,
+and on route `auto` it runs here instead the moment the lease ends. While an stt job waits at the node's stt gate the node
+publishes `progress.phase` `queued`, then `running`, and the asker does not charge the queued time to its run budget (D5's cap is
+unchanged). `agent_placement_wait_sec: -1` restores the single try. The rest of this record stands.

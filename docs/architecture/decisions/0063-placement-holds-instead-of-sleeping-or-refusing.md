@@ -227,6 +227,10 @@ started. That is the delegator refusing work that was making progress, and the o
    therefore be named "has room"; the job is then withdrawn as before and `replacementNode`, which does know the sets, sends it back
    to the wait. That is the pre-amendment behaviour, not a new loss.
 
+## Amendment (2026-11-25): the single-shot lanes hold their place too
+
+The transcribe, vision, text and forecast lanes follow this rule since [ADR 0105](0105-a-refused-single-shot-call-holds-its-place-in-both-lines.md): a 503 or 429 at dispatch is a place in line, asked again as the node's health shows room; the delegator's own wait is unchanged.
+
 ## Alternatives considered
 
 - **Keep the courtesy sleep and credit it.** Rejected: it still sleeps on a node that just refused while
