@@ -298,20 +298,21 @@ type Loop struct {
 	maxSteps       int
 	maxTokens      int
 	maxSameTool    int
-	noForcedFinal  bool                          // WithoutForcedFinal: the last step offers tools like any other (D-89)
-	parkHighRisk   bool                          // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
-	parkRecord     func(tool, args, risk string) // durable park record (ask queue); nil = ledger only
-	observer       RunObserver                   // WithObserver: per-step progress for the run registry (gpuactivity); nil = none
-	live           *Monitor                      // WithLiveness: the run's stall/ceiling watch (0.131.0); nil = none
-	prefillSamples []PrefillSample               // per-call prefill measurements (0.131.1), published on Result
-	batchJudge     bool                          // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
-	ctxTokens      int                           // model context window in tokens; input budget derives from it
-	keepRecent     int                           // most-recent turns kept full during compaction
-	toolTimeout    time.Duration                 // per-tool-call cap; see defaultToolTimeout
-	skeletonPrune  bool                          // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	gcfCompact     bool                          // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
-	toolResultCap  int                           // max chars of ONE tool result kept in the transcript (0 => derive from window)
-	reducer        *evidenceReducer              // the optional evidence-preserving reducer for build/test results (rung_reducer.go); nil = off
+	noForcedFinal  bool                              // WithoutForcedFinal: the last step offers tools like any other (D-89)
+	parkHighRisk   bool                              // unattended: park self-flagged high-risk effectful calls (WithParkHighRisk)
+	parkRecord     func(tool, args, risk string)     // durable park record (ask queue); nil = ledger only
+	observer       RunObserver                       // WithObserver: per-step progress for the run registry (gpuactivity); nil = none
+	live           *Monitor                          // WithLiveness: the run's stall/ceiling watch (0.131.0); nil = none
+	prefillSamples []PrefillSample                   // per-call prefill measurements (0.131.1), published on Result
+	batchJudge     bool                              // end-of-run advisory judge pass (WithBatchJudge; batchjudge.go)
+	ctxTokens      int                               // model context window in tokens; input budget derives from it
+	windowRefresh  func(context.Context) (int, bool) // WithWindowRefresh: one-shot re-read of the served window after the first completed call; nil = none
+	keepRecent     int                               // most-recent turns kept full during compaction
+	toolTimeout    time.Duration                     // per-tool-call cap; see defaultToolTimeout
+	skeletonPrune  bool                              // enable the skeleton rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	gcfCompact     bool                              // enable the lossless GCF rung of the compaction ladder (zero value off; callers default it ON per ADR 0015)
+	toolResultCap  int                               // max chars of ONE tool result kept in the transcript (0 => derive from window)
+	reducer        *evidenceReducer                  // the optional evidence-preserving reducer for build/test results (rung_reducer.go); nil = off
 	// tokenCal corrects the compaction budget using the server's own token
 	// counts — the fix for the estimator defect that let three real
 	// transcripts be rejected while the ladder declined to compact (ADR 0017).
@@ -803,6 +804,18 @@ func (l *Loop) WithContextTokens(n int) *Loop {
 	return l
 }
 
+// WithWindowRefresh installs a ONE-SHOT re-read of the served context window for a run whose start-up
+// probe could not answer (the seat was still loading and the admission budget was spent on the load, so
+// the run began on a remembered, configured or fallback window). fn is called once, in the loop's own
+// goroutine, before the compaction budget of the step after the first completed chat call: the seat has
+// answered by then, so it is loaded and the read costs milliseconds. When fn reports a window it replaces
+// the loop's (as WithContextTokens does) for the rest of the run; when it reports none the run goes on
+// unchanged. A run whose probe answered installs nothing and is untouched.
+func (l *Loop) WithWindowRefresh(fn func(context.Context) (int, bool)) *Loop {
+	l.windowRefresh = fn
+	return l
+}
+
 // WithTokenCalibration enables budget correction from the server's own token
 // counts (ADR 0017). It is **OFF by default**, and that default is measured,
 // not cautious:
@@ -1279,6 +1292,13 @@ func (l *Loop) run(ctx context.Context, objective string, bs *budgetState) (Resu
 		// token density (ADR 0017). Uncalibrated — first steps, or a backend
 		// that reports no usage — this returns inputBudget() unchanged, so the
 		// behaviour is identical to before calibration existed.
+		if l.windowRefresh != nil && len(calls) > 0 {
+			refresh := l.windowRefresh
+			l.windowRefresh = nil
+			if n, ok := refresh(ctx); ok {
+				l.WithContextTokens(n)
+			}
+		}
 		budget := l.budgetForCompaction()
 		if estimateTokens(msgs) > budget {
 			opts := l.ladderOpts()

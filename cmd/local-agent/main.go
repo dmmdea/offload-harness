@@ -34,6 +34,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/embedmemo"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/sandbox"
+	"github.com/dmmdea/offload-harness/internal/servedwindow"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 )
 
@@ -415,7 +416,7 @@ func main() {
 	// cfg.AgentCtxTokens is the seat's served window from the tier profile: the
 	// fallback when the probe cannot answer inside the run's budget, so an
 	// unanswered probe no longer silently drops the whole run to 8,192.
-	effCtx, ctxNote := agent.ResolveContextTokens(*ctxTokens, probed, cfg.AgentCtxTokens, probeOK)
+	effCtx, ctxNote := agent.ResolveContextTokens(*ctxTokens, probed, servedwindow.Known(cfg, probeModel, cfg.AgentCtxTokens).ForRun(), probeOK)
 	if ctxNote != "" {
 		fmt.Fprintln(os.Stderr, "[local-agent] "+ctxNote)
 	}

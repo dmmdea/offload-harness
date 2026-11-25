@@ -51,6 +51,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
 	"github.com/dmmdea/offload-harness/internal/seatwait"
+	"github.com/dmmdea/offload-harness/internal/servedwindow"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 	"github.com/dmmdea/offload-harness/internal/validator"
@@ -600,7 +601,16 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// the alternative is handing the wall back the licence this fix removes.
 	act.Phase(gpuactivity.PhaseWindowProbe)
 	probeStart := time.Now()
-	pctx, pcancel := context.WithDeadline(ctx, admissionEnd)
+	// What the harness believed about this seat's window BEFORE this run's own reading lands in the
+	// store: the remembered engine report, else the serving config's statement, else the key (ADR 0106).
+	known := servedwindow.Known(p.cfg, seat, p.cfg.AgentCtxTokens)
+	probeEnd := admissionEnd
+	if warmLoaded && time.Until(admissionEnd) < servedwindow.LoadedReadTimeout {
+		// The warm-up confirmed the seat ready, so the window is one cheap read away; a load that
+		// finished at the edge of the budget must not strip the probe of its turn (ADR 0106).
+		probeEnd = time.Now().Add(servedwindow.LoadedReadTimeout)
+	}
+	pctx, pcancel := context.WithDeadline(ctx, probeEnd)
 	probed, probeOK, probeFence := agent.ProbeServedWindowChecked(pctx, p.cfg.Endpoint, seat)
 	probeCtxErr := pctx.Err() // read BEFORE the cancel below, which would mask a spent deadline
 	pcancel()
@@ -622,7 +632,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// fallback was indistinguishable on the wire from a correct one — the same
 	// invisibility that let the MCP door measure 8,192 cold and 114,688 warm for
 	// months without anyone being able to say which run was which.
-	effCtx, ctxNote := agent.ResolveContextTokens(0, probed, p.cfg.AgentCtxTokens, probeOK)
+	configuredCtx := known.ForRun()
+	if configuredCtx <= 0 {
+		configuredCtx = p.cfg.AgentCtxTokens
+	}
+	effCtx, ctxNote := agent.ResolveContextTokensFrom(0, probed, configuredCtx, known.Source, probeOK)
+	if probeOK {
+		servedwindow.Remember(p.cfg, seat, probed) // at the probe: a run that later defers still taught the box
+	}
 	wire.CtxWindowNote = ctxNote
 	if ctxNote != "" {
 		log.Printf("agent task: %s", ctxNote)
@@ -898,6 +915,14 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 	// rungs with the real-tokenizer seam (fail-open to the legacy estimate).
 	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true).
 		WithTokenizer(tokclient.New(p.cfg.Endpoint, seat, 0))
+	if !probeOK {
+		// The probe could not answer (the seat was loading and the load spent the admission budget), so
+		// this run began on a remembered, serving-config or configured window. After its first answered
+		// call the seat is loaded: read the window it really serves, once (ADR 0106).
+		built.Loop.WithWindowRefresh(servedwindow.RefreshHook(p.cfg, seat, effCtx, known.Source, func(line string) {
+			wire.CtxWindowNote = joinAdmissionNotes(wire.CtxWindowNote, line)
+		}))
+	}
 
 	// Task profile: the caller's explicit choice > this box's configured
 	// agent_profile > "general" — the same resolver handleAgentRun uses, so the
@@ -2859,6 +2884,13 @@ func AdmissionBudget(sec int) time.Duration { return admissionBudget(sec) }
 // no door loads a cold seat inside its wall or probes its window before it is up.
 func WarmSeat(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool) {
 	return warmSeat(ctx, endpoint, seat, budget)
+}
+
+// WarmSeatOutcome is warmSeatOutcome for the other run launchers: WarmSeat's answer plus whether the
+// warm-up CONFIRMED the seat loaded, which is what lets the window probe take one short read after the
+// admission budget is spent (ADR 0106).
+func WarmSeatOutcome(ctx context.Context, endpoint, seat string, budget time.Duration) (time.Duration, string, bool, bool) {
+	return warmSeatOutcome(ctx, endpoint, seat, budget)
 }
 
 // AwaitSeatAdmission is awaitSeatAdmission for the other run launchers (the MCP

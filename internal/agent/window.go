@@ -283,3 +283,36 @@ func ResolveContextTokens(flag, probed, configured int, probeOK bool) (int, stri
 	}
 	return flag, ""
 }
+
+// ResolveContextTokensFrom is ResolveContextTokens for a caller whose "configured" window is not
+// always the hand-written agent_ctx_tokens key: source names where it came from (the servedwindow
+// sources, ADR 0106: "served", "served-unconfirmed", "serving_config", "config"), and the note says so
+// when it is not the key. An empty or "config" source is the key, and the answer is
+// ResolveContextTokens' own, word for word.
+func ResolveContextTokensFrom(flag, probed, configured int, source string, probeOK bool) (int, string) {
+	n, note := ResolveContextTokens(flag, probed, configured, probeOK)
+	label := sourceLabel(source)
+	if label == "" || flag > 0 || configured <= 0 {
+		return n, note
+	}
+	if probeOK {
+		if configured != probed {
+			return n, fmt.Sprintf("context window: %d (probed from the serving endpoint; the %s window %d disagrees — the served window wins)", probed, label, configured)
+		}
+		return n, note
+	}
+	return n, fmt.Sprintf("context window: %d (probe unanswered — using the %s window; set --ctx-tokens to override)", configured, label)
+}
+
+// sourceLabel words a servedwindow source for a note ("" for the key, which ResolveContextTokens words).
+func sourceLabel(source string) string {
+	switch source {
+	case "served":
+		return "last-served (read from the seat's engine)"
+	case "served-unconfirmed":
+		return "last-served (read from the seat's engine before it loaded again)"
+	case "serving_config":
+		return "serving-config (the entry's own flags)"
+	}
+	return ""
+}

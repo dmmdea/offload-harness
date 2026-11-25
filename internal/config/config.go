@@ -323,16 +323,20 @@ type Config struct {
 	// "off" (never), "always" (every run, warm or cold). Anything else is refused
 	// at the config door by name.
 	AgentCoherenceProbe string `json:"agent_coherence_probe,omitempty"`
-	// AgentCtxTokens is the agent seat's SERVED context window in tokens — the tier
+	// AgentCtxTokens is the agent seat's context window in tokens as WRITTEN — the tier
 	// profile's agent_ctx_tokens value (setup/templates/profiles.json; the installer
-	// records it in installed.json). It exists as a config key so /fleet/health can
-	// advertise the ceiling (agent_ctx_tokens, §S3 of the multi-node delegation spec)
-	// from CONFIG rather than probing: the live-window probe (/upstream/{model}/props)
-	// can cold-start a multi-GB model, which is unacceptable on a health cadence.
+	// records it in installed.json). It is the LAST resort of what the harness believes
+	// the seat serves (ADR 0106): servedwindow.Known prefers the window the seat's engine
+	// last reported on this box, then the window the serving config's own flags state, and
+	// only then this key; /fleet/health advertises that answer (agent_ctx_tokens, §S3 of
+	// the multi-node delegation spec) without probing, because the live-window probe
+	// (/upstream/{model}/props) can cold-start a multi-GB model, which is unacceptable on
+	// a health cadence. `doctor` names a key that disagrees with what the seat serves.
 	// 0 (the default) = not advertised — the delegator's placement gate then never
 	// selects this node for remote agent work (its ctx arithmetic cannot pass), which
-	// is the safe reading of "ceiling unknown". Set it to the tier's agent_ctx_tokens
-	// when opting a node in with fleet_agent_enabled.
+	// is the safe reading of "ceiling unknown", and no window is ever turned into an
+	// advertisement for it. Set it to the tier's agent_ctx_tokens when opting a node in
+	// with fleet_agent_enabled.
 	AgentCtxTokens int `json:"agent_ctx_tokens,omitempty"`
 	// AgentMaxTokens is the planner's completion budget per call for agent_run and
 	// for delegated agent jobs served by this node (the loop's max_tokens). 0 = the

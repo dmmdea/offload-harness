@@ -432,6 +432,16 @@ load llama-swap's own routing (`serving_config_path`) says would unload it rides
 (the same model elsewhere). Otherwise the loaded seat serves as the rung. With no vLLM seat
 loaded it changes nothing. See [systems/offload-pipeline.md](systems/offload-pipeline.md).
 
+## Served window
+
+The context window the harness believes a seat's ENGINE serves (ADR 0106), as `servedwindow.Known` resolves it without
+loading anything: the window the engine last reported (remembered per seat in `seat-rates.json`, valid only against the
+serving-config entry it was read under, and "confirmed" until the seat loads again), else the window the serving config's own
+flags state for a llama.cpp entry (`--ctx-size` over `--parallel`, whole under `--kv-unified`), else the hand-written
+`agent_ctx_tokens` key. `/fleet/health` advertises it as `agent_ctx_tokens` with an `agent_ctx_source`, a run falls back on it
+when its probe cannot answer, and `doctor` compares it with the key. Distinct from the probe, which is a live read at run time.
+See [systems/fleet-node.md](systems/fleet-node.md).
+
 ## Setup action
 
 One entry of a contract's `setup_actions` (ADR 0036 P2, 0.113.24): a `{tool, args}` call the coding-agent

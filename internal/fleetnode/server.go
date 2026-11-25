@@ -46,6 +46,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/placement"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
+	"github.com/dmmdea/offload-harness/internal/servedwindow"
 	"github.com/dmmdea/offload-harness/internal/storesteward"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
@@ -298,6 +299,13 @@ type Server struct {
 	seatRateCache *SeatRateHealth
 	seatRateAt    time.Time
 	seatRateMu    sync.Mutex
+	// agentWin / agentWinAt / agentWinMu: the health handler's cached view of the agent seat's window
+	// (servedwindow.Known, two small file reads), re-read at most once per seatRateTTL. agentWinSaid is
+	// the last advertisement logged, so a change is said once.
+	agentWin     servedwindow.Window
+	agentWinAt   time.Time
+	agentWinSaid string
+	agentWinMu   sync.Mutex
 	// rosterServes answers "does the llama-swap behind endpoint serve seat?"
 	// (alias-aware). A seam so tests drive the residency cache without a live
 	// llama-swap; production always gets swapRosterServes.
@@ -951,6 +959,7 @@ func (s *Server) refreshAgentResidency() {
 	var served []string
 	var seat seatload.Reading
 	var seatErr error = errRefreshIncomplete
+	var readyEdge bool // the agent seat went from not ready to ready on this probe (ADR 0106)
 	// The publish is DEFERRED, not tail-appended: the probe below runs outside
 	// any lock, and clearing the latch only on the normal path meant a panic
 	// anywhere in that seam froze residency for the life of the process — never
@@ -964,6 +973,7 @@ func (s *Server) refreshAgentResidency() {
 		a.resident = resident && err == nil
 		a.served = served
 		if !a.seatFactAt.After(probeStart) {
+			readyEdge = !(a.seatKnown && a.seatLoaded) && seatErr == nil && seat.Loaded
 			a.seatLoaded, a.seatStarting, a.seatKnown = seat.Loaded, seat.Starting, seatErr == nil
 		}
 		// else: a contract completed a call on the seat while this probe ran
@@ -975,6 +985,9 @@ func (s *Server) refreshAgentResidency() {
 		a.timeoutLogged = false
 		a.idleCond().Broadcast() // release any synchronous waiter (RefreshAgentResidency)
 		a.mu.Unlock()
+		if readyEdge {
+			go s.learnAgentWindow() // off this path: the read is its own bounded request
+		}
 	}()
 	residentCtx, residentCancel := context.WithTimeout(context.Background(), agentResidencyProbeTimeout)
 	defer residentCancel()
@@ -1556,11 +1569,18 @@ type healthPayload struct {
 	// These four fields are the ONLY ones a delegator reads, so an
 	// advertisement dispatch would refuse is a mis-route, not a near miss.
 	AgentSeat string `json:"agent_seat,omitempty"` // resolved planner seat (config.AgentPlannerModel)
-	// AgentCtxTokens is the seat's serving ceiling from config (the tier's
-	// agent_ctx_tokens) — the delegator's placement gate does its ctx
-	// arithmetic against this. 0 = omitted = "ceiling unknown", which the gate
-	// reads as never-fits.
+	// AgentCtxTokens is the seat's serving ceiling — the delegator's placement gate does its ctx
+	// arithmetic against this. It is what the harness believes the seat's ENGINE serves, never more than
+	// is known (ADR 0106): the window the engine last reported, else the one the serving config states,
+	// else the agent_ctx_tokens key (the tier's value). A key of 0 is never turned into an advertisement.
+	// 0 = omitted = "ceiling unknown", which the gate reads as never-fits.
 	AgentCtxTokens int `json:"agent_ctx_tokens,omitempty"`
+	// AgentCtxSource names where AgentCtxTokens came from when it is not the key: "served",
+	// "served-unconfirmed" or "serving_config". AgentCtxConfigured is the key's own value, published only
+	// when it differs from what is advertised. Both are additive and omitted when the key is what is
+	// advertised, so a node that knows nothing better answers as it always did.
+	AgentCtxSource     string `json:"agent_ctx_source,omitempty"`
+	AgentCtxConfigured int    `json:"agent_ctx_configured,omitempty"`
 	// AgentResident is the CACHED roster verification (agentResidency): true
 	// only when a probe inside the TTL window saw the seat in the llama-swap
 	// roster. False/omitted until the first probe lands, and on probe failure.
@@ -1948,6 +1968,16 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		payload.AgentEnabled = true
 		payload.AgentSeat = s.agentSeat
 		payload.AgentCtxTokens = s.opts.Cfg.AgentCtxTokens
+		if s.opts.Cfg.AgentCtxTokens > 0 {
+			w := s.agentWindow()
+			payload.AgentCtxTokens = w.Tokens
+			if w.Source != servedwindow.SourceConfig {
+				payload.AgentCtxSource = w.Source
+			}
+			if w.Tokens != w.Configured {
+				payload.AgentCtxConfigured = w.Configured
+			}
+		}
 		payload.AgentResident = s.agentResident()
 		if age, old := s.agentRes.ageBeyondTTL(); old {
 			stale.note(staleAgentResident, age)
@@ -2360,6 +2390,46 @@ func (s *Server) seatRate() *SeatRateHealth {
 		MinTurnSec:  seatrate.MinTurnFor(known.ColdLoadSec, b.FinalTokens, 0, known.TokS),
 		PrefillTokS: known.PrefillTokS, PrefillSlowTokS: known.PrefillSlowTokS}
 	return s.seatRateCache
+}
+
+// agentWindow is the agent seat's window as health advertises it (servedwindow.Known over the key),
+// cached for seatRateTTL like seatRate: it reads the seat-rates store and the serving config, never the
+// engine. A change of the advertised number or its source is logged once, with the key beside it, because
+// a node that advertises something other than its key is a fact an operator should be able to find.
+func (s *Server) agentWindow() servedwindow.Window {
+	s.agentWinMu.Lock()
+	defer s.agentWinMu.Unlock()
+	now := time.Now()
+	if !s.agentWinAt.IsZero() && now.Sub(s.agentWinAt) < seatRateTTL {
+		return s.agentWin
+	}
+	s.agentWinAt = now
+	s.agentWin = servedwindow.Known(s.opts.Cfg, s.agentSeat, s.opts.Cfg.AgentCtxTokens)
+	said := fmt.Sprintf("%d/%s", s.agentWin.Tokens, s.agentWin.Source)
+	if said != s.agentWinSaid {
+		prior := s.agentWinSaid
+		s.agentWinSaid = said
+		if s.agentWin.Source != servedwindow.SourceConfig || prior != "" {
+			log.Printf("fleet: advertising agent window %d (%s) for seat %q, agent_ctx_tokens says %d: %s",
+				s.agentWin.Tokens, s.agentWin.Source, s.agentSeat, s.agentWin.Configured, s.agentWin.Why)
+		}
+	}
+	return s.agentWin
+}
+
+// learnAgentWindow reads the agent seat's window from its engine ONCE, on the edge where the seat went from
+// not ready to ready, and remembers it, so a node learns of a load nobody on this box started (a restart
+// of the engine, an operator's swap). It is loaded-only (servedwindow.ReadLoaded never starts a seat) and
+// bounded, and it runs off the health path. It is an edge, never a poll: a request through llama-swap's
+// /upstream counts as activity and restarts the seat's idle timer.
+func (s *Server) learnAgentWindow() {
+	ctx, cancel := context.WithTimeout(context.Background(), servedwindow.LoadedReadTimeout)
+	defer cancel()
+	if _, ok := servedwindow.ReadLoaded(ctx, s.opts.Cfg, s.agentSeat); ok {
+		s.agentWinMu.Lock()
+		s.agentWinAt = time.Time{} // the next health answer re-reads what was just remembered
+		s.agentWinMu.Unlock()
+	}
 }
 
 // concurrencyCapped reports whether a job of this task type counts against
@@ -3505,6 +3575,11 @@ func (s *Server) layerRows(snap Snapshot) []placement.LayerRow {
 	// which index space a bare pin is in. No card table, no ids: every card.
 	cards, _ := gpuprobe.BuildCards(snap.Devices, "")
 	rows = placement.WithDeviceIDs(rows, cards)
+	// Each seat's window is what its engine serves, not the number an operator once wrote (ADR 0106);
+	// a seat nothing is known about keeps its configured window.
+	rows = placement.WithServedWindows(rows, func(model string, configured int) int {
+		return servedwindow.Known(cfg, model, configured).Tokens
+	})
 	return placement.MarkServed(rows, s.servedModels())
 }
 

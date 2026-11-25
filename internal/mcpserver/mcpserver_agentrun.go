@@ -25,6 +25,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/pipeline"
 	"github.com/dmmdea/offload-harness/internal/seatrate"
+	"github.com/dmmdea/offload-harness/internal/servedwindow"
 	"github.com/dmmdea/offload-harness/internal/tokclient"
 )
 
@@ -743,7 +744,7 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// probe after it reads a loaded seat. Without it this door measured ctx_window
 	// 8,192 cold and 114,688 warm minutes apart (2026-09-16: a 222 s vLLM cold
 	// start outlasted the probe). Reported with the wire's own field names.
-	coldLoad, warmNote, warmAttempted := pipeline.WarmSeat(ctx, cfg.Endpoint, model, time.Until(admitDeadline))
+	coldLoad, warmNote, warmAttempted, warmLoaded := pipeline.WarmSeatOutcome(ctx, cfg.Endpoint, model, time.Until(admitDeadline))
 	admitted += coldLoad
 	admitNote := joinAdmissionNotes(preNote, settleNote, warmNote)
 	// Post-warm COHERENCE probe (register D-118) — the same shared helper the
@@ -806,7 +807,16 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// returns exists to contradict: when residency could not be settled, this is
 	// exactly the call that pays for it.
 	probeStart := time.Now()
-	pctx, pcancel := context.WithDeadline(ctx, admitDeadline)
+	// What the harness believed about this seat's window before this run's own reading lands in the
+	// store: the remembered engine report, else the serving config's statement, else the key (ADR 0106).
+	known := servedwindow.Known(cfg, model, cfg.AgentCtxTokens)
+	probeEnd := admitDeadline
+	if warmLoaded && time.Until(admitDeadline) < servedwindow.LoadedReadTimeout {
+		// The warm-up confirmed the seat ready, so the window is one cheap read away; a load that
+		// finished at the edge of the budget must not strip the probe of its turn.
+		probeEnd = time.Now().Add(servedwindow.LoadedReadTimeout)
+	}
+	pctx, pcancel := context.WithDeadline(ctx, probeEnd)
 	probed, probeOK, probeFence := agent.ProbeServedWindowChecked(pctx, cfg.Endpoint, model)
 	probeCtxErr := pctx.Err() // read BEFORE the cancel, which would mask a spent deadline
 	pcancel()
@@ -832,7 +842,14 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// WHICH window this run budgets against, and where it came from. This door
 	// discarded that line for months while measuring 8,192 cold and 114,688 warm
 	// on the same seat, and nothing in either result said which it was.
-	effCtx, ctxNote := agent.ResolveContextTokens(0, probed, cfg.AgentCtxTokens, probeOK)
+	configuredCtx := known.ForRun()
+	if configuredCtx <= 0 {
+		configuredCtx = cfg.AgentCtxTokens
+	}
+	effCtx, ctxNote := agent.ResolveContextTokensFrom(0, probed, configuredCtx, known.Source, probeOK)
+	if probeOK {
+		servedwindow.Remember(cfg, model, probed) // at the probe: a run that later defers still taught the box
+	}
 	if ctxNote != "" {
 		log.Printf("agent_run: %s", ctxNote)
 	}
@@ -848,6 +865,21 @@ func (s *Server) handleAgentRun(ctx context.Context, req *mcp.CallToolRequest) (
 	// cannot drift.
 	built.Loop.WithContextTokens(effCtx).WithSkeletonPrune(true).WithGCFCompact(true).
 		WithTokenizer(tokclient.New(cfg.Endpoint, model, 0))
+	if !probeOK {
+		// The probe could not answer (the seat was loading and the load spent the admission budget), so
+		// this run began on a remembered, serving-config or configured window. After its first answered
+		// call the seat is loaded: read the window it really serves, once (ADR 0106).
+		refresh := servedwindow.RefreshHook(cfg, model, effCtx, known.Source, func(line string) {
+			ctxNote = joinAdmissionNotes(ctxNote, line)
+		})
+		built.Loop.WithWindowRefresh(func(ctx context.Context) (int, bool) {
+			n, ok := refresh(ctx)
+			if ok {
+				effCtx = n
+			}
+			return n, ok
+		})
+	}
 	// Task profile. Until now this door could only produce bare `general` — the
 	// one configuration MEASURED to fail (a 4B planner given every tool calls
 	// none of them). An unknown name is a clean defer naming the valid ones, not
