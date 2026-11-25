@@ -7,6 +7,93 @@ Releases before 0.190.0 are archived verbatim under [docs/changelog/](docs/chang
 
 ## [Unreleased]
 
+## [0.239.0] - 2026-11-25 - the local agent seat takes the work it can take, and a run outlives its engine
+
+### Fixed - a run whose engine dies under it waits for the engine again: the engine is asked, and followed until it is gone
+
+- **What was wrong.** A run survives the death of its engine (ADR 0066): the failed step waits for the seat and is sent again. The
+  death is confirmed against llama-swap first, because a 5xx alone is no proof, and that confirmation was ONE reading, taken the
+  instant the call failed. vLLM's API server is another process than its engine: when the engine dies it answers every open and new
+  request with an error in the same second, is told to stop by a watchdog that looks every 5 s, and is gone only once it has shut
+  down. Read in that gap the seat is listed and readable, so the failure stood as an ordinary infrastructure error. On 2026-11-25 the
+  agent seat of the reference 3-card box died (a worker hung, the engine's 120 s timeout) and five contracts ended that way in one
+  second (`engine error in stream: The server had an error while processing your request`, one of them 127 ms after it had
+  started). The next request started the engine again three minutes later.
+- **What it does now.** When the seat still reads ready after such a failure, the engine itself is asked (`GET /health` at the seat's
+  own address). vLLM answers 503 from the moment its engine is dead, before it errors the open requests; llama-server has the same
+  door. 200, or no such door, and the failure is an ordinary error at once, as before. 503, or no answer, and the seat is followed for
+  up to 20 s (`seatDeathWindow`): the first reading that shows it loading, absent or refusing connections is the death, and the run
+  waits for the engine and sends the step again as ADR 0066 says.
+- **What did not change.** What counts as a failure that may be a dead seat, the bound of the wait that follows, and the one re-issue
+  a seat that came back earns.
+- **Check.** A contract (`delegate --route local`) against an engine stand-in that dies the way vLLM did: an error frame on the open
+  stream, listed, readable and answering 503 for 4 s more, then gone, started by the next request. Build 0.238.0 ended at once with the
+  night's own sentence (`infrastructure: agent loop: engine error in stream: The server had an error while processing your request.`).
+  This build asked four times, read the seat gone 4.0 s after the failure, sent the step again, waited 6.1 s for the engine and
+  succeeded (`seat_recoveries` 1). The same stand-in erroring one request and going on working: 0.3 s to the ordinary error on both
+  builds (20.4 s on the first version of this change). The existing table of `TestConfirmSeatDownReadsTheSeatAfterAFailedCall` gains
+  the incident. Not seen on a live engine's death since: the seat's engine died once in four weeks, and killing it on purpose would end
+  other sessions' runs.
+
+### Changed - the local agent seat is busy when it has no free slot, not when it has a request, and its line follows the engine
+
+- **What was wrong.** Two fixed figures decided whether a box's own agent seat took a contract. `route=spread` read the seat as busy at
+  ONE request in flight (a rule of 2026-09-06, older than the line that bounds the runs of a box), so a deal made while anything ran
+  there gave its slots to the remotes, and a subtask kept off the seat could not have it back until the seat held nothing at all. And
+  the line was four long whatever the runs were. Read from the ledger of the reference 3-card Windows box: of 91 contracts in one night
+  26 were refused, 17 of them after 16 to 24 minutes in line, and in 23 of 46 two-minute samples a contract that was refused later
+  stood in line while the seat ran fewer runs than its cap. Over 14 days the fleet's slowest node, the one that was always online,
+  took 587 contracts and refused 310 of them.
+- **What busy means now** (`runner.noFreeSlot`, [ADR 0103](docs/architecture/decisions/0103-busy-means-no-free-slot-and-the-local-line-follows-the-engine.md)).
+  The seat cannot take one more run: its requests in flight are at the cap and the engine takes no more, a load is in progress, or a
+  load cannot start. The spread deal, the capacity wait and the retry's landing read it as route `auto` already did. One free slot is
+  one waiting subtask's (`claimLocalSlot`). `agent_spread_local_slot: "always"` is unchanged.
+- **What the line does now.** With `fleet_max_concurrent_jobs` unset the cap of 4 is where the line starts: the first run in it asks the
+  engine at every poll and is admitted when the engine is a loaded vLLM that queues nothing, preempted nothing between two readings a
+  second apart, gives every running request 10 tok/s or more, and stays under 85 % of its KV pool with every run and this one counted
+  at their average (10 % of the pool or more each). Runs past the cap enter one at a time. A number the operator sets is the limit, as
+  before.
+- **What did not change.** A remote's busy reading; the workers a node publishes; the lane doors, which still give way to anything in
+  flight on the seat they share a card with; a seat of another engine, or one that cannot be read, keeps the fixed line.
+- **Check.** On the reference box through the MCP door, two processes. Two contracts held the seat, then eight were dealt by
+  `route: "spread"` from the other one: the deal read `busy=false inflight=2`, six of the eight ran on the box's own seat (89 to 137 s
+  each), one on each of two remotes (496 s and 234 s), ten of ten finished, none was refused, four ran at once at most with no
+  preemption and at most 56 % of the KV pool. In a run before it, from a cold seat, the line grew: `run admitted past the cap of 4 with
+  4 on the seat: the engine takes one more: 4 running at 27 tok/s each, none queued, KV pool 42% used`, five at once at 67 % of the
+  pool, no preemption. Four answers of the two runs (three from remotes) failed the probe's own keyword check with the asked-for fields in them.
+  A line longer than five was not seen.
+
+### Fixed - the agent seat's measured need: one record per cold load, and no record of a load the host gave memory back during
+
+- **What was wrong.** Two defects in the seat's self-measurement (0.238.0), both found on the reference 3-card Windows box
+  by reading the store after real loads.
+  - A cold load that several contracts waited on was recorded once per contract. In the first night of 0.238.0 three cold loads left
+    seven records; one load is there four times, with the same two figures. The check "was this load already recorded" reads the
+    key's last-write time, and the footprint store's merge of another writer's host window (`Footprints.reloadMergeLocked`) took the
+    window and the run count but not that time. The check was also made outside the store's critical section, on a store opened
+    before the lock that serialises it.
+  - A load that began while another process was giving memory back was recorded as clean with figures far under the seat's.
+    That is the load that follows a wait for host memory: it starts the moment the memory returns. Two such loads read 15.7
+    and 21.9 GiB touched and 28.7 and 20.7 GiB of commit, against 34.2 and 56.9 GiB for the same seat on a quiet host. The
+    measurement followed only the trough of the available memory and the peak of the commit charge.
+- **What it does now.**
+  - The check is the store's own (`Footprints.RecordHostOnce`): inside its critical section, after the merge of what another process
+    wrote, which now carries the later last-write time. One load is one run, whichever contract or process records first.
+  - The measurement also follows the two readings the other way. A run is not clean when the available memory rose above
+    the baseline, or the commit charge fell under it, by more than three times the baseline's spread or 1 GiB
+    (`Result.GaveBackGiB`), or when the baseline's six readings differ by more than 1 GiB. A load only takes memory, so that
+    movement is something else's, and the peaks under-read by it.
+  - What became of a completed load's measurement is one line on the log of the process that started it: `recorded` with the two
+    peaks, the baseline's spread and what the host gave back, or `this measurement is not recorded: <why>`.
+- **What did not change.** The need in force where the low and the repeated records already sit: the reader takes the 90th
+  percentile of the window (34.6 GiB touched and 59.3 GiB of commit on the reference box). They leave the 20-run window as loads are
+  recorded. A process that grows during the load, or shrinks where the seat's own growth hides it, is still the percentile's to answer.
+- **Check.** On the reference box, through this build's MCP door. Two contracts of one call waited on one cold load of 5 min 24 s:
+  both ran on the box's own seat and succeeded, the store gained ONE run (13 to 14: 51.9 GiB of commit, 32.4 touched, baseline spread
+  0.25 GiB, 0.7 GiB given back), and one line said so. In an earlier run of the same two contracts another model unloaded on its idle
+  limit during the load: both measurements were logged as not recorded, with that reason, and the store did not move. The give-back
+  rule has not been seen to fire on a real load yet; the figures it is set against are the two under-read loads above.
+
 ## [0.238.0] - 2026-11-24 - The seat's host need is measured, a host short of memory is a place in line, and an idle MCP server picks up a new build by itself
 
 ### Changed - a host short of memory for the agent seat's cold load is a place in line, not a refusal
