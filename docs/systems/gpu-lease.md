@@ -2157,6 +2157,14 @@ limit was not conservative: it refused loads the OS would have granted.
   physical-RAM sentence), 16 to 40 percent of each day's agent contracts.
 * A 19 GiB commit that touched nothing, requested with 13.7 GiB of spare commit, was granted in 0.75 s: the limit went from 154.7
   to 160.8 GiB, available memory stayed at 67.1 GiB and page-file use stayed at 0.2 GiB.
+* One request above the spare commit is not always granted. On 2026-11-24 a single 34.6 GiB allocation asked with 31.5 GiB of
+  spare commit (127.0 of 158.5 GiB) was refused by the allocator, where 32.7 GiB in one piece with 30.1 GiB spare had been
+  granted an hour earlier, and 33.3 GiB asked in 512 MiB pieces minutes later was granted with no piece refused (the charge
+  then read 160.5 of 161.3 GiB). A load that commits as it goes, as the seat and the render engines do, took the limit from
+  166.2 to 191.4 GiB without a refusal. The rule admits against the ceiling; it does not promise a process that asks for more
+  than the spare commit in one piece that the piece is granted.
+* The limit comes back down. It read 185.0 GiB with the seat loaded and 158.5 GiB seven minutes later, after the seat had
+  unloaded: the system-managed file shrinks again, so the growth a load causes is not kept.
 
 **The ceiling** is what the limit can reach: the current limit plus, for each page file, the room it has left to grow, its
 maximum less its size, bounded by the free space of its volume less a tenth of the volume (shared between the files of one volume;
@@ -2523,12 +2531,28 @@ seat's footprint was declared nowhere. (The 2026-09-10 incident was a seat: 44 G
   mid-swap, and the warm request went out within one admission poll of that look: a call that waited for the card behind the
   lease fence is not measured; the baseline itself is read just before the request), it completed, no reading failed, no gap between samples passed five intervals, there were at least ten samples,
   the commit peak is at least three times the baseline's own spread and at least 1 GiB, the touched peak is above three
-  times that spread, no lease that declares host RAM was live at the start or at the end, and llama-swap lists the same
+  times that spread, the baseline's six readings differ by no more than 1 GiB, the host gave no memory back during the load
+  (the available memory never rose above the baseline, and the commit charge never fell under it, by more than three times
+  that spread or 1 GiB), no lease that declares host RAM was live at the start or at the end, and llama-swap lists the same
   other models, all ready, at the end as at the start (a model that unloaded or loaded while the seat loaded moved the same
   counters; on a contract's own warm-up the two lists are the looks at `/running` it already makes, so a measurement adds no
-  request to an admission). What the counters cannot tell apart is another process of the host that grew or shrank during the load: the
+  request to an admission). A load only takes memory, which is why movement the other way makes a run unclean: the load
+  that follows a wait for host memory starts the moment another process releases it, and on the reference box two such loads
+  read 15.7 and 21.9 GiB touched and 28.7 and 20.7 GiB of commit, against 34.2 and 56.9 on a quiet host, and were recorded as
+  clean before this rule. The rule sees a release only where it shows above the baseline: one slower than the seat's own
+  early growth does not, and is the percentile's. What became of a completed load's measurement is said on the log of the
+  process that started the load, one line per measurement (each contract that waited on the load measured it): `seat load
+  measurement (<seat>): recorded: ...` with the two peaks, the baseline's spread and what the host gave back, or `... this
+  measurement is not recorded: <why>` for an unclean result (with its figures), other models that changed, or a host-RAM
+  lane live at the end. A measurement of a load another contract already recorded says nothing. How often an ordinary load
+  trips the 1 GiB line is not measured yet (a seat inside a VM that hands page cache back at start can); the recorded lines
+  carry the figure that will say. What the counters still cannot tell apart is another process that grew during
+  the load, or one that shrank while the seat's own growth hid it: the
   percentile answers that, one low run never lowers it and one high run speaks until ten loads exist. A load that several contracts waited on is recorded once (a
-  second record within 10 s of the key's last write is dropped, the window `internal/seatrate` merges cold loads in). A
+  second record within 10 s of the key's last write is dropped, the window `internal/seatrate` merges cold loads in. The
+  check is the store's own, `Footprints.RecordHostOnce`: inside its critical section, after the merge of what another
+  process wrote, and that merge carries the other writer's time, without which two contracts of one call recorded the load
+  twice). A
   measurement never delays a contract beyond the 0.6 s of the baseline and never fails one: any error in it is swallowed.
   The figures are kept in the footprint store (`footprints.json`, beside the ledger) under the seat's model name as the
   config binds it, the model id llama-swap's roster resolved that name to when the load was measured (the key's quant slot)

@@ -1363,7 +1363,7 @@ func beginWarmBackMeasure(ctx context.Context, cfg config.Config, endpoint, mode
 	finish := pipeline.BeginSeatLoadMeasure(cfg, model, rd.Canonical)
 	return func(loaded bool) {
 		now, ok := pipeline.SeatOtherModels(endpoint, model, rd.Canonical)
-		finish(loaded && ok && now == before)
+		finish(loaded, ok && now == before)
 	}
 }
 
