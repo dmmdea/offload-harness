@@ -824,7 +824,7 @@ func (s *Server) fleetView(ctx context.Context, cfg config.Config) map[string]an
 	}
 	out["agent_slots"] = map[string]any{
 		"total": localSlots + fleetSlots, "local": localSlots, "fleet": fleetSlots,
-		"note": "the most agent jobs the cluster runs at once (local run cap + every reachable agent node's max_concurrent_jobs); keep a fan-out's concurrent harness calls x subtasks per call at or under total, and do the overflow or a defer yourself instead of queueing past it",
+		"note": "the most agent jobs the cluster runs at once (local run cap + every reachable agent node's max_concurrent_jobs; with fleet_max_concurrent_jobs unset the local figure is where its line starts, and a vLLM seat with a fast engine and KV pool to spare takes more); keep a fan-out's concurrent harness calls x subtasks per call at or under total, and do the overflow or a defer yourself instead of queueing past it",
 	}
 	// Published, not merely computed: an idle seat is capacity already paid for
 	// in electricity, and the whole point of this surface is that a caller can

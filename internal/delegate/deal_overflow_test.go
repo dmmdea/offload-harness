@@ -118,7 +118,7 @@ func always(n int) func() int { return func() int { return n } }
 // itself: deleting the sentinel branch in attempt() left the whole suite green,
 // because the deal tests read the deal and the run tests held a text lease.
 func TestSpreadOverflowGoesThroughTheCapacityWait(t *testing.T) {
-	_, sum, _ := overflowRun(t, "spread", always(2), 60, 10)
+	_, sum, _ := overflowRun(t, "spread", always(4), 60, 10)
 	if sum.Succeeded != 3 || sum.Waited < 1 {
 		t.Fatalf("summary = %+v, want 3 successes with the overflow subtask having waited in line", sum)
 	}
@@ -129,7 +129,7 @@ func TestSpreadOverflowGoesThroughTheCapacityWait(t *testing.T) {
 // registry, saw no run on the seat, and ran it there at the first tick while both
 // remotes were about to free.
 func TestSpreadOverflowIsNotStackedOnTheBusyLocalSeat(t *testing.T) {
-	results, sum, localCalls := overflowRun(t, "spread", always(2), 60, 10)
+	results, sum, localCalls := overflowRun(t, "spread", always(4), 60, 10)
 	if localCalls != 0 {
 		var why string
 		for _, pr := range results {
@@ -173,7 +173,7 @@ func TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable(t *testing.T) {
 	for _, tc := range []struct {
 		route    string
 		inflight func() int
-	}{{"spread", always(2)}, {"auto", always(4)}} {
+	}{{"spread", always(4)}, {"auto", always(4)}} {
 		t.Run(tc.route, func(t *testing.T) {
 			results, sum, localCalls := overflowRunFlaky(t, tc.route, tc.inflight, 60, 10, 3)
 			if localCalls != 0 || sum.Succeeded != 3 {
@@ -194,7 +194,7 @@ func TestOverflowStaysOffABusySeatWhoseLoadBecomesUnreadable(t *testing.T) {
 // subtasks re-placed after a node refused them); but the reason it waited stays on
 // the result.
 func TestOverflowIsNoRefusalAndKeepsItsStory(t *testing.T) {
-	results, sum, _ := overflowRun(t, "spread", always(2), 60, 10)
+	results, sum, _ := overflowRun(t, "spread", always(4), 60, 10)
 	if sum.Replaced != 0 || sum.ReplacementRecovered != 0 {
 		t.Fatalf("summary = %+v, want no replacement counted: no node refused anything", sum)
 	}
@@ -218,15 +218,16 @@ func TestOverflowIsNoRefusalAndKeepsItsStory(t *testing.T) {
 }
 
 // TestSpreadOverflowTakesTheLocalSeatOnceItStopsReadingBusy: the other half. The
-// remotes stay full for seconds; the local seat reads busy for 300 ms and then
-// idle; the overflow subtask must not sit out the whole wait beside an idle seat.
+// remotes stay full for seconds; the local seat reads full for 300 ms and then holds
+// one request; the overflow subtask must not sit out the whole wait beside a seat with
+// slots free (it did, until the seat had nothing in flight at all).
 func TestSpreadOverflowTakesTheLocalSeatOnceItStopsReadingBusy(t *testing.T) {
 	began := time.Now()
 	inflight := func() int {
 		if time.Since(began) < 300*time.Millisecond {
-			return 2
+			return 4
 		}
-		return 0
+		return 1
 	}
 	results, sum, localCalls := overflowRun(t, "spread", inflight, 300, 10)
 	if sum.Succeeded != 3 || localCalls != 1 {
@@ -251,7 +252,7 @@ func TestSpreadOverflowTakesTheLocalSeatOnceItStopsReadingBusy(t *testing.T) {
 // defer - never as the holder-naming deferral of a lease nobody holds, which is
 // infrastructure class and drives a non-zero exit.
 func TestSpreadOverflowWithTheWaitOffIsACapacityDeferNotALeaseDefer(t *testing.T) {
-	results, sum, _ := overflowRun(t, "spread", always(2), 60, -1)
+	results, sum, _ := overflowRun(t, "spread", always(4), 60, -1)
 	var deferred *PlacedResult
 	for i := range results {
 		if results[i].Result.Deferred {
@@ -273,9 +274,9 @@ func TestSpreadOverflowWithTheWaitOffIsACapacityDeferNotALeaseDefer(t *testing.T
 }
 
 // TestLocalStillBusyReadsTheDealsOwnPredicate: the wait takes the seat back on the
-// same reading the deal kept the subtask off it on - any request in flight for
-// route=spread (never, with agent_spread_local_slot: always), and for route=auto a
-// held lease, an in-flight count at the fleet's own cap, or a load in progress.
+// same reading the deal kept the subtask off it on - an in-flight count at the fleet's
+// own cap or a load in progress (never, for route=spread with agent_spread_local_slot:
+// always), and for route=auto a held lease too.
 func TestLocalStillBusyReadsTheDealsOwnPredicate(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -285,9 +286,10 @@ func TestLocalStillBusyReadsTheDealsOwnPredicate(t *testing.T) {
 		rd    busyReading
 		want  bool
 	}{
-		{"spread: a request in flight", "spread", "", false, busyReading{busy: true, inflight: 1}, true},
+		{"spread: in flight under the cap", "spread", "", false, busyReading{busy: true, inflight: 3}, false},
+		{"spread: in flight at the cap", "spread", "", false, busyReading{busy: true, inflight: 4}, true},
 		{"spread: idle", "spread", "", false, busyReading{}, false},
-		{"spread: slot=always never reads busy", "spread", config.SpreadLocalAlways, false, busyReading{busy: true, inflight: 3}, false},
+		{"spread: slot=always never reads busy", "spread", config.SpreadLocalAlways, false, busyReading{busy: true, inflight: 4}, false},
 		{"auto: in flight under the cap", "auto", "", false, busyReading{busy: true, inflight: 3}, false},
 		{"auto: in flight at the cap", "auto", "", false, busyReading{busy: true, inflight: 4}, true},
 		{"auto: a load in progress", "auto", "", false, busyReading{busy: true, loading: true}, true},

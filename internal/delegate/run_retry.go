@@ -197,7 +197,7 @@ func retryFloorSource(floor int) string {
 func (r *runner) retrySeatBusy(ctx context.Context, alt placement) (bool, string) {
 	if alt.base == "" {
 		rd := r.probeLocalBusy(ctx)
-		if rd.busy {
+		if r.noFreeSlot(rd) {
 			if rd.cannotLoad() {
 				return true, rd.why()
 			}

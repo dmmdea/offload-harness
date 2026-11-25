@@ -461,6 +461,7 @@ func runWith(ctx context.Context, rp runParams) ([]PlacedResult, Summary, error)
 			r.spreadLocalBusy = busyReading{note: "agent_spread_local_slot=always"}
 		} else {
 			r.spreadLocalBusy = r.probeLocalBusy(ctx)
+			r.spreadLocalBusy.busy = r.noFreeSlot(r.spreadLocalBusy)
 			// A live driver-fault repeat on the seat's cards (ADR 0096) deals the local slots away like a busy seat;
 			// the capacity wait reads the seat afresh, so the seat is demoted, not excluded.
 			if faulted, why := r.localFaulted(subtasks); faulted {
@@ -943,8 +944,9 @@ func (r *runner) attempt(ctx context.Context, i int, contract core.AgentContract
 			// probeLocalBusy always has.
 			r.autoLocalBusyOnce.Do(func() { r.autoLocalBusy = r.probeLocalBusy(ctx) })
 			local := r.autoLocalBusy
-			busy = leaseInfo.Held || r.atRunCap(local.inflight) || local.loading || local.cannotLoad()
-			if r.atRunCap(local.inflight) || local.loading || local.cannotLoad() {
+			full := r.noFreeSlot(local)
+			busy = leaseInfo.Held || full
+			if full {
 				r.autoDealReadBusy.Store(true) // the seat's load, never the lease (see the joint deal)
 			}
 			// A remote hint (ADR 0078) is placed remotes-first: the seat is unavailable whatever it read, and the

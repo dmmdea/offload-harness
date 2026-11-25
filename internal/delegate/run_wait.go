@@ -50,7 +50,7 @@ func (r *runner) hintSeatWithoutAWait(ctx context.Context, i int, contract core.
 	if _, _, fenced := r.fencedLocal(contract); fenced {
 		return PlacedResult{}, false
 	}
-	if rd := r.busyReadingNow(ctx); rd.cannotLoad() || r.atRunCap(rd.inflight) || rd.loading {
+	if r.noFreeSlot(r.busyReadingNow(ctx)) {
 		return PlacedResult{}, false
 	}
 	if free, _ := r.localSlotAhead(); !free {

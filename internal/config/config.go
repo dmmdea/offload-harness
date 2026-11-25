@@ -592,12 +592,14 @@ type Config struct {
 	// LOCAL rotation slot when the local agent seat is already busy at deal time:
 	//   ""/"skip-when-busy" (default) — the local slot is dealt to the best
 	//     eligible remote WITH ROOM instead, so K delegating sessions do not all
-	//     stack their slot-0/3/6 subtasks on one local seat (operator decision
-	//     2026-09-06: the K×8 gate's remaining tail was exactly that stacking —
-	//     first-local subtask 155–189 s under K=3 vs 91–105 s for its siblings).
-	//     Busy = the seat holds at least one request (vLLM running+waiting, or a
-	//     llama-server slot processing), read ONCE through llama-swap when the deal
-	//     is computed; an idle seat keeps every slot it had. With no remote that
+	//     stack their subtasks on one full local seat.
+	//     Busy = the seat has no free slot (ADR 0103): the requests in flight (vLLM
+	//     running+waiting, or a llama-server slot processing, read ONCE through
+	//     llama-swap when the deal is computed) are at fleet_max_concurrent_jobs and
+	//     the engine takes no more, a load is in progress, or a load cannot start. A
+	//     seat with slots free keeps its share of the deal. Until 0.239.0 one request
+	//     in flight was busy, which dealt a seat that serves many at once away
+	//     whenever it held anything. With no remote that
 	//     has room the slot stays local and the reason says why.
 	//   "always" — the pre-0.113.20 deal: subtask 0 (and every i mod len == 0
 	//     slot) lands local whatever the seat is doing.
@@ -4037,6 +4039,16 @@ func (c Config) FleetConcurrencyLimit() int {
 	default:
 		return c.FleetMaxConcurrentJobs
 	}
+}
+
+// SeatMore is the engine question of this box's run-cap line for seat (modelaffinity.AwaitSeatLine): nil when
+// fleet_max_concurrent_jobs is set, because a number the operator states is the line, and the engine's own reading when it is
+// not, because the built-in 4 is only where the line starts.
+func (c Config) SeatMore(seat string) modelaffinity.SeatMore {
+	if c.FleetMaxConcurrentJobs != 0 {
+		return nil
+	}
+	return modelaffinity.EngineRoom(c.Endpoint, seat)
 }
 
 // ImageRouteConfigured reports whether THIS box serves generate_image at all —

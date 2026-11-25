@@ -318,7 +318,7 @@ func busySwap(t *testing.T, seat string, inflight int) string {
 }
 
 // TestRunSpreadBusyLocalSeatDealsEveryContractRemote is the 0.113.20 rule end to
-// end through Run: the local seat reads busy (2 in flight through llama-swap),
+// end through Run: the local seat reads full (4 in flight through llama-swap, its cap),
 // so a 4-contract spread with two eligible remotes runs NOTHING local — two on
 // each remote, every reason naming the count — where the idle deal ran two local.
 func TestRunSpreadBusyLocalSeatDealsEveryContractRemote(t *testing.T) {
@@ -326,7 +326,7 @@ func TestRunSpreadBusyLocalSeatDealsEveryContractRemote(t *testing.T) {
 	nodeA, urlA := eligibleNode(t, "node-a", "zorblax from A")
 	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
 	cfg := testCfg(t)
-	cfg.Endpoint = busySwap(t, "local-seat", 2)
+	cfg.Endpoint = busySwap(t, "local-seat", 4)
 	var localCalls atomic.Int64
 	results, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), contracts(4), "spread", []string{urlA, urlB})
 	if err != nil {
@@ -339,7 +339,7 @@ func TestRunSpreadBusyLocalSeatDealsEveryContractRemote(t *testing.T) {
 		if pr.ranLocal {
 			t.Errorf("subtask %d ran local while the local seat was busy", i)
 		}
-		if !strings.Contains(pr.PlacementReason, "local seat busy: 2 in flight") {
+		if !strings.Contains(pr.PlacementReason, "local seat busy: 4 in flight") {
 			t.Errorf("subtask %d: placement reason %q must name the in-flight count", i, pr.PlacementReason)
 		}
 	}
@@ -349,19 +349,25 @@ func TestRunSpreadBusyLocalSeatDealsEveryContractRemote(t *testing.T) {
 }
 
 // TestRunSpreadIdleLocalSeatKeepsTheOldDeal is the control arm through Run: the
-// same fake llama-swap with ZERO in flight deals local, A, B, local as before.
+// same fake llama-swap with a free slot deals local, A, B, local. One request in flight
+// (3 under a cap of 4 is the most) used to read as busy: one night a seat with slots free
+// was dealt away whenever it held anything, and the work waited for a slow remote.
 func TestRunSpreadIdleLocalSeatKeepsTheOldDeal(t *testing.T) {
-	compressPolls(t, 10*time.Millisecond, 2*time.Second)
-	nodeA, urlA := eligibleNode(t, "node-a", "zorblax from A")
-	nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
-	cfg := testCfg(t)
-	cfg.Endpoint = busySwap(t, "local-seat", 0)
-	var localCalls atomic.Int64
-	_, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), contracts(4), "spread", []string{urlA, urlB})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if sum.Succeeded != 4 || localCalls.Load() != 2 || nodeA.dispatches.Load() != 1 || nodeB.dispatches.Load() != 1 {
-		t.Fatalf("idle seat: summary=%+v local=%d A=%d B=%d, want 4 succeeded, 2/1/1", sum, localCalls.Load(), nodeA.dispatches.Load(), nodeB.dispatches.Load())
+	for _, inflight := range []int{0, 1, 3} {
+		t.Run(strconv.Itoa(inflight)+" in flight", func(t *testing.T) {
+			compressPolls(t, 10*time.Millisecond, 2*time.Second)
+			nodeA, urlA := eligibleNode(t, "node-a", "zorblax from A")
+			nodeB, urlB := eligibleNode(t, "node-b", "zorblax from B")
+			cfg := testCfg(t)
+			cfg.Endpoint = busySwap(t, "local-seat", inflight)
+			var localCalls atomic.Int64
+			_, sum, err := Run(context.Background(), cfg, passingLocal(&localCalls), contracts(4), "spread", []string{urlA, urlB})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum.Succeeded != 4 || localCalls.Load() != 2 || nodeA.dispatches.Load() != 1 || nodeB.dispatches.Load() != 1 {
+				t.Fatalf("seat with a free slot: summary=%+v local=%d A=%d B=%d, want 4 succeeded, 2/1/1", sum, localCalls.Load(), nodeA.dispatches.Load(), nodeB.dispatches.Load())
+			}
+		})
 	}
 }

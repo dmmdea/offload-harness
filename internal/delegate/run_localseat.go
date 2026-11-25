@@ -28,7 +28,8 @@ import (
 // answers for every run that reaches the seat. A newcomer's own record is not in
 // the registry yet, so every registered run on the seat is ahead of it (waiters
 // included: the FIFO counts a waiter that arrived first), and a slot is free while
-// fewer than fleet_max_concurrent_jobs are. An unreadable registry, an unset seat
+// fewer than fleet_max_concurrent_jobs are, or while the engine itself takes one more
+// (localRunCapRoom). An unreadable registry, an unset seat
 // and an unlimited cap all read as a free slot: fail toward the behaviour every
 // earlier version had, exactly as the busy probe does.
 //
@@ -38,19 +39,36 @@ func (r *runner) localSlotAhead() (free bool, note string) {
 	if fetchViewsMemoTTL > 0 {
 		r.localSlotMu.Lock()
 		if !r.localSlotAt.IsZero() && time.Since(r.localSlotAt) < fetchViewsMemoTTL {
-			free, note = r.localSlotFree, r.localSlotNote
+			free, note = r.localSlotRoom > 0, r.localSlotNote
 			r.localSlotMu.Unlock()
 			return free, note
 		}
 		r.localSlotMu.Unlock()
 	}
-	free, note = r.readLocalSlot()
+	room, note := r.localRunCapRoom()
 	if fetchViewsMemoTTL > 0 {
 		r.localSlotMu.Lock()
-		r.localSlotAt, r.localSlotFree, r.localSlotNote = time.Now(), free, note
+		r.localSlotAt, r.localSlotRoom, r.localSlotNote = time.Now(), room, note
 		r.localSlotMu.Unlock()
 	}
-	return free, note
+	return room > 0, note
+}
+
+// claimLocalSlot takes one of the free slots the memoised reading showed (localSlotAhead), and answers false when the run's other
+// waiting subtasks have taken them all since it was read: a dozen waiters read one free slot in the same tick, and all but one of
+// them would stand in the seat's own line, which a run cannot leave. The next reading counts the runs that took them. With no
+// reading in force (the memo is off, or it has aged out) there is nothing to count against and the claim stands.
+func (r *runner) claimLocalSlot() bool {
+	r.localSlotMu.Lock()
+	defer r.localSlotMu.Unlock()
+	if fetchViewsMemoTTL <= 0 || r.localSlotAt.IsZero() || time.Since(r.localSlotAt) >= fetchViewsMemoTTL {
+		return true
+	}
+	if r.localSlotRoom <= 0 {
+		return false
+	}
+	r.localSlotRoom--
+	return true
 }
 
 // localLease is the machine-wide lease as it stands between THIS contract and a local seat
@@ -127,11 +145,9 @@ func (r *runner) anyLeaseHeld(info gpulease.Info, subtasks []core.AgentContract)
 
 // localStillBusy is the deal's own reading of the local seat, taken again: the
 // capacity wait of a subtask a DEAL kept off the seat because it read busy
-// (PlacedResult.overflow) may take the seat only once the deal would have. route=spread
-// reads busy on any request in flight (agent_spread_local_slot: always never reads
-// busy); route=auto on a held lease, an in-flight count at the fleet's own cap, a
-// load in progress (W-01), or a seat a load cannot take now: another vLLM seat it would evict (occupiedBy) or a host short of the
-// memory for the cold load (hostShort). An UNREADABLE seat keeps the deal's busy answer: the deal
+// (PlacedResult.overflow) may take the seat only once the deal would have. Both routes
+// read busy when the seat has no free slot (noFreeSlot); route=auto on a held lease too,
+// and agent_spread_local_slot: always never reads busy. An UNREADABLE seat keeps the deal's busy answer: the deal
 // fails open because it has no evidence, but here it read the seat busy, and a probe
 // that fails afterwards (a box too loaded to answer in time) is no evidence of idle.
 // Failing open here ran the overflow on the busy seat (register C-88, CI run
@@ -140,13 +156,28 @@ func (r *runner) anyLeaseHeld(info gpulease.Info, subtasks []core.AgentContract)
 func (r *runner) localStillBusy(ctx context.Context, lease gpulease.Info) (busy bool, note string) {
 	rd := r.busyReadingNow(ctx)
 	if r.route == "spread" {
-		return (rd.busy || rd.unknown) && r.cfg.SpreadLocalSlot() != config.SpreadLocalAlways, rd.note
+		return (r.noFreeSlot(rd) || rd.unknown) && r.cfg.SpreadLocalSlot() != config.SpreadLocalAlways, rd.note
 	}
-	return lease.Held || r.atRunCap(rd.inflight) || rd.loading || rd.cannotLoad() || rd.unknown, rd.note
+	return lease.Held || r.noFreeSlot(rd) || rd.unknown, rd.note
+}
+
+// noFreeSlot is what BUSY means for the agent seat, everywhere the delegator asks: the seat cannot take one more run now. The requests
+// in flight have reached its cap and the engine takes no more (atRunCap), a load is in progress (W-01), or a load cannot start:
+// another vLLM seat holds the cards (occupiedBy) or the host is short of the memory for it (hostShort).
+//
+// Until 0.239.0 route=spread read busy on any request in flight (operator decision 2026-09-06, made when nothing bounded the runs of
+// this box: K sessions stacked K x 3 of every 8 subtasks on one seat). The run-cap line bounds them now, for every process of the
+// box, and a seat that serves many sequences at once is not full at one. On the reference box that rule sent nearly all work to
+// whatever remote was online: one request in flight dealt the seat's slots away, and the subtasks that then waited in line could
+// not have the seat back until it had nothing at all in flight. In 23 of 46 two-minute samples of one night a contract that was
+// refused later stood in line while the seat ran fewer runs than its cap.
+func (r *runner) noFreeSlot(rd busyReading) bool {
+	return rd.cannotLoad() || rd.loading || r.atRunCap(rd.inflight)
 }
 
 // atRunCap reports whether `inflight` requests on the local seat have reached the fleet's own
-// concurrency cap (fleet_max_concurrent_jobs): the cap above which route=auto reads the seat as busy.
+// concurrency cap (fleet_max_concurrent_jobs) and the engine takes no run past it (seatTakesOneMore): the
+// point at which the seat reads as busy.
 // An UNLIMITED cap (a negative setting, which FleetConcurrencyLimit resolves to 0) is never reached.
 // The comparison used to be written out at four sites and guarded at one: `inflight >= 0` is always
 // true, so with fleet_max_concurrent_jobs < 0 an IDLE local seat read as permanently busy and the work
@@ -154,7 +185,42 @@ func (r *runner) localStillBusy(ctx context.Context, lease gpulease.Info) (busy 
 // cannot drift again.
 func (r *runner) atRunCap(inflight int) bool {
 	limit := r.cfg.FleetConcurrencyLimit()
-	return limit > 0 && inflight >= limit
+	if limit <= 0 || inflight < limit {
+		return false
+	}
+	if r.seatMore() == nil {
+		return true
+	}
+	runs, _ := r.localRuns()
+	more, _ := r.seatTakesOneMore(runs)
+	return !more
+}
+
+// seatMore is the engine question of the local seat's line (config.SeatMore): nil when the cap is fixed. seatMoreProbe is the test
+// seam.
+func (r *runner) seatMore() modelaffinity.SeatMore {
+	if r.seatMoreProbe != nil {
+		return r.seatMoreProbe
+	}
+	return r.cfg.SeatMore(strings.TrimSpace(r.cfg.AgentPlannerModel("")))
+}
+
+// seatTakesOneMore asks whether the local seat takes one run past its cap, for a run that is not registered yet: the line's own rule
+// (modelaffinity.SeatLine.PastCap), which the run meets again at the seat. The question costs about a second (two readings of the
+// engine), so the answer is kept for fetchViewsMemoTTL like the other readings. why is "" when the cap is fixed.
+func (r *runner) seatTakesOneMore(runs []gpuactivity.Run) (more bool, why string) {
+	ask := r.seatMore()
+	if ask == nil {
+		return false, ""
+	}
+	r.seatMoreMu.Lock()
+	defer r.seatMoreMu.Unlock()
+	if fetchViewsMemoTTL > 0 && !r.seatMoreAt.IsZero() && time.Since(r.seatMoreAt) < fetchViewsMemoTTL {
+		return r.seatMoreOK, r.seatMoreWhy
+	}
+	more, why = modelaffinity.LineOf(runs, "").PastCap(context.Background(), ask)
+	r.seatMoreAt, r.seatMoreOK, r.seatMoreWhy = time.Now(), more, why
+	return more, why
 }
 
 // readAutoLocalSlot is route=auto's one joint reading of the local seat for the whole run (W-01): it
@@ -163,9 +229,8 @@ func (r *runner) atRunCap(inflight int) bool {
 // a block in RunWith, so the reading can be pinned without a live run (unlimited_cap_test.go).
 func (r *runner) readAutoLocalSlot(ctx context.Context, leaseInfo gpulease.Info, subtasks []core.AgentContract) (busy bool) {
 	localBusy := r.probeLocalBusy(ctx)
-	// cannotLoad: another vLLM seat holds the cards and loading this one would evict it (occupiedBy), or the host cannot take the
-	// seat's cold load now (hostShort).
-	busy = r.anyLeaseHeld(leaseInfo, subtasks) || r.atRunCap(localBusy.inflight) || localBusy.loading || localBusy.cannotLoad()
+	full := r.noFreeSlot(localBusy)
+	busy = r.anyLeaseHeld(leaseInfo, subtasks) || full
 	// A live driver-fault repeat on the seat's cards (ADR 0096): the deal sends the work to a remote first. Not part
 	// of autoDealReadBusy (the seat's LOAD), so the capacity wait can still give an overflow subtask the seat.
 	if faulted, why := r.localFaulted(subtasks); faulted {
@@ -175,7 +240,7 @@ func (r *runner) readAutoLocalSlot(ctx context.Context, leaseInfo gpulease.Info,
 	r.autoDealBusy = localBusy
 	// The seat's LOAD only: a lease is the wait's own business (Reserved, fencedLocal),
 	// and a lease this process holds must not keep its own subtasks off the seat.
-	r.autoDealReadBusy.Store(r.atRunCap(localBusy.inflight) || localBusy.loading || localBusy.cannotLoad())
+	r.autoDealReadBusy.Store(full)
 	// One line per run, mirroring route=spread's own local-slot log
 	// (review round 1 item 4): before this the identical W-01 read had
 	// no trace at all, so an operator could not tell "busy" from
@@ -206,16 +271,11 @@ func (r *runner) busyReadingNow(ctx context.Context) busyReading {
 	return rd
 }
 
-// readLocalSlot is localSlotAhead's reading, unmemoised: a slot is free while the seat's
-// line has room (localRunCapRoom).
-func (r *runner) readLocalSlot() (bool, string) {
-	room, note := r.localRunCapRoom()
-	return room > 0, note
-}
-
 // localRunCapRoom is how many MORE runs the local seat's run-cap line takes: the cap
 // (fleet_max_concurrent_jobs, default 4) minus the runs registered on the seat, floored
-// at 0, or unlimitedHeadroom when no cap is configured. Its fail-open is the real
+// at 0, or unlimitedHeadroom when no cap is configured. A cap nobody set is where the line
+// starts: with it reached, the room is ONE while the engine takes one more (seatTakesOneMore),
+// because the runs past it enter one at a time. Its fail-open is the real
 // gate's: pipeline/agenttask.go skips the wait in line when the registry will not open,
 // so an unreadable registry counts nothing ahead of a newcomer - but the reading says
 // so in its note, and the process logs it once, because a wrong "free" is what silently
@@ -228,40 +288,58 @@ func (r *runner) localRunCapRoom() (room int, note string) {
 	if limit <= 0 {
 		return unlimitedHeadroom, ""
 	}
-	ahead, note := r.localRunLine()
-	return max(limit-ahead, 0), note
+	runs, note := r.localRuns()
+	if room = limit - len(runs); room > 0 {
+		return room, note
+	}
+	more, why := r.seatTakesOneMore(runs)
+	if why != "" {
+		note += "; " + why
+	}
+	if more {
+		return 1, note
+	}
+	return 0, note
 }
 
 // localRunLine is how many runs are registered on the local seat's run-cap line right now (running and
 // waiting), with the note localRunCapRoom publishes. An unset seat or an unreadable registry counts none.
 func (r *runner) localRunLine() (ahead int, note string) {
+	runs, note := r.localRuns()
+	return len(runs), note
+}
+
+// localRuns is the runs registered on the local seat's run-cap line right now, with localRunLine's note.
+func (r *runner) localRuns() (runs []gpuactivity.Run, note string) {
 	limit := r.cfg.FleetConcurrencyLimit()
 	seat := strings.TrimSpace(r.cfg.AgentPlannerModel(""))
 	if seat == "" {
-		return 0, "no agent seat configured, so no run could be counted"
+		return nil, "no agent seat configured, so no run could be counted"
 	}
 	reg, err := gpuactivity.Open(r.cfg.GPULockPath, r.cfg.StateDir)
 	if err != nil {
 		r.localSlotWarn.Do(func() {
 			log.Printf("delegate: the local run registry could not be opened (%v); the local seat's run-cap line is read as empty", err)
 		})
-		return 0, fmt.Sprintf("run registry unreadable (%v), read as empty", err)
+		return nil, fmt.Sprintf("run registry unreadable (%v), read as empty", err)
 	}
 	// A seat pinned to ONE card shares it with every other seat on it, so its line is the
 	// card's (plan P5): the same reading the node's own gate makes (OnSeatPinned). A seat that
 	// spans cards, or whose pin is unknown, keeps the per-seat line.
 	pins, _ := r.cfg.ModelPins(seat)
-	runs := reg.OnSeatPinned(time.Now(), pins, seat)
-	ahead = len(runs)
+	runs = reg.OnSeatPinned(time.Now(), pins, seat)
 	where := "on seat " + seat
 	if len(pins) == 1 {
 		where = "on card " + pins[0] + " (seat " + seat + ")"
 	}
-	return ahead, fmt.Sprintf("%d run(s) registered %s, cap %d", ahead, where, limit)
+	return runs, fmt.Sprintf("%d run(s) registered %s, cap %d", len(runs), where, limit)
 }
 
 // busyReading is what the deal knows about the local seat's load at deal time
 // (0.113.20). note says how the reading was obtained, or why there is none.
+//
+// busy is probeSeatBusy's word: anything in flight, a load, or a load that cannot start. It is what the lane doors read
+// (LocalSeatBusy); for the agent seat the delegator asks noFreeSlot, and the deal's reading (spreadLocalBusy) carries that answer.
 type busyReading struct {
 	busy     bool
 	inflight int

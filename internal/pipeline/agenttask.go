@@ -370,7 +370,7 @@ func (p *Pipeline) runAgentTask(ctx context.Context, req core.Request, meta core
 		seatRuns := func(now time.Time, names ...string) []gpuactivity.Run {
 			return reg.OnSeatPinned(now, seatPins, names...)
 		}
-		if serr := modelaffinity.AwaitSeatSlotReporting(ctx, seatRuns, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), capEnd, seatLineHeartbeat(ctx, act)); serr != nil {
+		if serr := modelaffinity.AwaitSeatLine(ctx, seatRuns, seat, "", act.ID(), p.cfg.FleetConcurrencyLimit(), p.cfg.SeatMore(seat), capEnd, seatLineHeartbeat(ctx, act)); serr != nil {
 			admitted = cordonWait(cordonStart)
 			admitNote = "held at the seat cap for the run's wall"
 			return deferWire(core.DeferClassCapacity, "seat busy: "+serr.Error())

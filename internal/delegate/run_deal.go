@@ -406,14 +406,11 @@ type spreadSlot struct {
 //     exactly as before, which is also what stops an all-reasoning fan-out from
 //     collapsing back onto one seat.
 //
-// It IS contested by LOAD (0.113.20, operator decision 2026-09-06): when the
-// local seat already holds a request at deal time (spreadLocalBusy, read once
-// with the fleet snapshot), every local slot goes to the best-fit eligible
-// remote with room instead — K delegating sessions used to stack K × 3 of every
-// 8 subtasks on one local seat while the remotes idled (first-local subtask
-// 155–189 s under K=3 vs 91–105 s for its siblings). An idle seat keeps every
-// slot it had; `agent_spread_local_slot: "always"` restores the unconditional
-// slot.
+// It IS contested by LOAD (0.113.20): when the local seat has no free slot at deal
+// time (spreadLocalBusy, read once with the fleet snapshot; noFreeSlot says what full is
+// and why one request in flight is not), every local slot goes to the best-fit eligible
+// remote with room instead. A seat with slots free keeps its share of the deal up to
+// them (localRoom); `agent_spread_local_slot: "always"` deals it unconditionally.
 //
 // And it is contested by the CONTRACT's layer (register A-108): a subtask that
 // names a layer this box does not declare is never dealt the local slot - the
@@ -449,7 +446,7 @@ func (r *runner) placeSpreadWith(i int, st Subtask, localView NodeView, book *de
 	// contract does not need leaves the seat in, exactly as before.
 	_, _, spreadFenced := r.fencedLocalSpread(st.Contract)
 	localIn := !Reserved(spreadLease) && !spreadFenced && localServes
-	// A BUSY local seat (0.113.20) leaves the rotation exactly like a leased
+	// A FULL local seat (0.113.20) leaves the rotation exactly like a leased
 	// one, but only while a remote with room exists to take its slots: the
 	// remotes are filtered by hasRoom (a sheddable run needs an idle slot), and
 	// with none left the slot falls back to the ordinary deal below, reason

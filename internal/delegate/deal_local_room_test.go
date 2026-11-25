@@ -61,7 +61,7 @@ func TestLocalRunCapRoom(t *testing.T) {
 				t.Fatalf("room = %d note = %q, want the whole cap of 3 and a note that the registry was unreadable", room, note)
 			}
 		}
-		if free, _ := r.readLocalSlot(); !free {
+		if free, _ := r.localSlotAhead(); !free {
 			t.Fatal("an unreadable registry must fail open: the real gate skips its wait in line when the registry will not open")
 		}
 		if n := strings.Count(logs.String(), "run registry could not be opened"); n != 1 {
@@ -160,7 +160,7 @@ func TestACapOfOneGivesTheLocalSeatOneRunAtATime(t *testing.T) {
 	if room, note := r.localRunCapRoom(); room != 0 || !strings.Contains(note, "cap 1") {
 		t.Fatalf("one run on the seat leaves room %d (%q), want 0: the second run of the call belongs to the fleet", room, note)
 	}
-	if free, _ := r.readLocalSlot(); free {
+	if free, _ := r.localSlotAhead(); free {
 		t.Fatal("the local seat reads a slot free with one run on a cap of 1")
 	}
 }

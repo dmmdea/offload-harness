@@ -14,6 +14,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/core"
 	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/ledger"
+	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/pairworkloads"
 	// Aliased: this file's `placement` struct (a resolved "run it HERE") predates
 	// the package and is used at every placement site; the package is the
@@ -89,12 +90,13 @@ type runner struct {
 	// Shared by every subtask of the run, because "node A is full" is a fact
 	// about the node, not about the subtask that found out.
 	cool cooldowns
-	// localSlotMu/localSlotAt/localSlotFree memoise the local seat's run-cap
+	// localSlotMu/localSlotAt/localSlotRoom memoise the local seat's run-cap
 	// reading for fetchViewsMemoTTL: the capacity wait asks once per tick per
-	// waiting subtask, and twelve waiters must not each read the registry.
+	// waiting subtask, and twelve waiters must not each read the registry. The
+	// room is counted down as they take it (claimLocalSlot).
 	localSlotMu   sync.Mutex
 	localSlotAt   time.Time
-	localSlotFree bool
+	localSlotRoom int
 	localSlotNote string
 	// localSlotWarn logs the local run registry's unreadable fail-open once per run.
 	localSlotWarn sync.Once
@@ -126,12 +128,19 @@ type runner struct {
 	// the deal — the whole reason 0.113.14 exists. A media lease is not read by
 	// the spread deal (it never was; ADR 0026 arbitrates renders elsewhere).
 	spreadLease gpulease.Info
-	// spreadLocalBusy is the local seat's in-flight reading taken ONCE with the
-	// fleet snapshot (0.113.20): a seat that already holds a request leaves the
+	// spreadLocalBusy is the local seat's load reading taken ONCE with the
+	// fleet snapshot (0.113.20): a seat with no free slot (noFreeSlot) leaves the
 	// rotation the way a leased one does (placeSpread). localBusyProbe is the
 	// seam tests drive it through; nil = the production probe (seatload).
 	spreadLocalBusy busyReading
 	localBusyProbe  func(ctx context.Context) busyReading
+	// seatMoreProbe is the seam onto the engine question of the local seat's line (seatMore); nil = config.SeatMore.
+	// seatMoreMu/At/OK/Why memoise its answer (seatTakesOneMore).
+	seatMoreProbe modelaffinity.SeatMore
+	seatMoreMu    sync.Mutex
+	seatMoreAt    time.Time
+	seatMoreOK    bool
+	seatMoreWhy   string
 	// seatGuardCheck is probeLocalBusy's seam onto the seat guard (checkSeatGuard);
 	// nil = the process-wide seatguard.Shared.
 	seatGuardCheck func(ctx context.Context, model string) seatguard.Verdict
