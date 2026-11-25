@@ -133,6 +133,9 @@ func TestWarmSeatReportsAnAttemptedLoadEvenWhenItMeasuresZero(t *testing.T) {
 // measure 8,192 cold and 114,688 warm for months. The fallback must be visible
 // AS a fallback.
 func TestCtxWindowNoteNamesTheFallbackWhenTheProbeRanOutOfAdmission(t *testing.T) {
+	// The fallback is what a seat nothing is known about gets; a window another test of this package left in the
+	// shared state root for the same seat name would (rightly) be used instead (ADR 0106).
+	t.Setenv("LOCAL_OFFLOAD_STATE_DIR", t.TempDir())
 	fake := &agentFake{
 		rosterIDs: []string{agentTestSeat},
 		// Another model swaps for the whole budget, so the PRE-FLIGHT spends it

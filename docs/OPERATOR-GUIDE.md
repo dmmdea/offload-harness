@@ -2234,6 +2234,14 @@ that `agent_model` resolves to, because that entry is what the box runs; when th
 over the manifest's. With no tier that counts, or with an agent seat that is not a tier's, the row names no tier. It never changes
 doctor's exit code.
 
+`doctor` also prints one informational `window:` row on a box with an agent seat: the `agent_ctx_tokens` key against what the seat
+serves (ADR 0106), read without calling the engine. What it serves is the window the engine last reported on this box (valid only
+while the seat's serving-config entry is the one it was read under) or, failing that, the window the serving config states for a
+llama.cpp seat. `OK` when they agree, `WARN ... exceeds` when the key is above what the seat serves (the node advertises the lower
+number anyway; correct the key), `WARN ... is below` when the key understates it, `UNKNOWN` (naming why) when nothing says: a vLLM
+seat states no window in the serving config, so until it has served a run or an `offload_status` read on this box the row is
+`UNKNOWN`. It never changes doctor's exit code.
+
 **A name, not a LAN address (`lan ip:` row).** Cross-machine reach uses tailnet names, because an IP literal works until the box it
 names moves or its firewall is scoped to the tailnet, and then the endpoint is dead with nothing in the file that says why. `doctor`
 prints one `lan ip:     WARN` row for each endpoint the harness dials whose host is an IP literal instead of a name: a
@@ -2317,8 +2325,15 @@ llama-swap has no `/props`; before 0.113.14 such a seat was budgeted at the 8,19
 and `offload_status` showed `ctx_probe_error: HTTP 404` while it was warm). The per-model probes share
 one cold-start budget of 10 minutes (llama-swap's `healthCheckTimeout`), because llama-swap answers them
 only once a cold seat is up — a vLLM seat measured 222 s, and the old 60 s per-URL timeout returned the
-fallback for the whole run. When the probe still cannot answer, the box's `agent_ctx_tokens` is the
-window; when it answers and disagrees with `agent_ctx_tokens`, the served window wins and the note says so.
+fallback for the whole run. When the probe still cannot answer, the run falls back on the **served window** the box knows without
+asking the engine (ADR 0106): the window the seat's engine last reported on this box (remembered per seat and per serving-config
+entry in `seat-rates.json`, and used as it stands until the seat loads again, after which it can only lower the answer), else the
+window the serving config states for a llama.cpp seat (`--ctx-size` over `--parallel`, whole under `--kv-unified`), else the
+`agent_ctx_tokens` key. `ctx_window_note` names which. When the probe answers and disagrees with that window, the served window wins
+and the note says so. A run that found the seat cold and could not probe in time starts on the remembered window and reads the real
+one, once, after its first answered call (loaded-only, so it never starts a model); a seat that has not served before starts on the
+key. The same window is what `/fleet/health` advertises as `agent_ctx_tokens`, so a key left behind by an edit to the serving config
+no longer sends the node contracts its engine rejects.
 
 **Store steward (0.113.16) — `fleet_store_root`, `fleet_store_cap_gb`, `fleet_store_prune_every_jobs`, `fleet_store_prune_every_sec` (0.130.1: a time tick, default 60 s, because under a GPU lease no job completes on the node while a bench arm or the pair seat writes ~1 GB/min; negative disables it).** A node that owns a
 persistent KV page store on disk (<node-c>'s LMCache fs_native dataset) keeps it under budget between its own turns:

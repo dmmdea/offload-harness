@@ -112,6 +112,28 @@ func RowsFromConfig(cfg config.Config, live Live) []LayerRow {
 	return rows
 }
 
+// WithServedWindows replaces each seat's hand-written ctx_tokens with the window the harness believes the
+// seat's engine serves (window is told the seat's model and the configured value and answers the number to
+// publish, ADR 0106). A seat that states no window (0) stays unadvertised, and a router seat with a
+// model_map has no single window to correct. Rows are modified in place: the caller owns them.
+func WithServedWindows(rows []LayerRow, window func(model string, configured int) int) []LayerRow {
+	if window == nil {
+		return rows
+	}
+	for i := range rows {
+		for j := range rows[i].Seats {
+			s := &rows[i].Seats[j]
+			if s.Model == "" || s.CtxTokens <= 0 || len(s.ModelMap) > 0 {
+				continue
+			}
+			if n := window(s.Model, s.CtxTokens); n > 0 {
+				s.CtxTokens = n
+			}
+		}
+	}
+	return rows
+}
+
 // MarkServed stamps SeatRow.Served from a roster's name list (canonical ids
 // AND aliases, as swapclient.Roster.Names returns them). A seat with a model
 // is served when that name is in the list; a router seat with a model_map is

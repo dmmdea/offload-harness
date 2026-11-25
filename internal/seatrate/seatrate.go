@@ -83,8 +83,16 @@ type Seat struct {
 	// not another load. A zero end is unknown (an entry written without one) and
 	// never merges.
 	ColdLoadEnds []time.Time `json:"cold_load_ends,omitempty"`
-	Samples      int         `json:"samples"`
-	Updated      time.Time   `json:"updated"`
+	// CtxWindow is the context window the seat's ENGINE last reported serving (llama.cpp /props
+	// n_ctx, vLLM max_model_len), in tokens; 0 = never read. CtxKey is the fingerprint of the
+	// serving-config entry that answered to the seat when it was read ("" when no serving config
+	// was readable), and CtxAtMs is when, in Unix milliseconds. A window is a fact, not a rate: a
+	// later reading replaces it, it is never averaged.
+	CtxWindow int       `json:"ctx_window,omitempty"`
+	CtxKey    string    `json:"ctx_key,omitempty"`
+	CtxAtMs   int64     `json:"ctx_at_ms,omitempty"`
+	Samples   int       `json:"samples"`
+	Updated   time.Time `json:"updated"`
 }
 
 // prefillWindow is how many of the most recent solo prefill rates a seat keeps for its stall
@@ -223,6 +231,23 @@ func (s *Store) Observe(seat string, tokS, coldLoadSec float64, now time.Time) b
 		cur.ColdLoads, cur.ColdLoadEnds, cur.ColdLoadSec = loads, ends, slowest(loads)
 	}
 	cur.Updated = now
+	s.Seats[seat] = cur
+	return true
+}
+
+// ObserveWindow remembers the context window the engine serving seat reported: n tokens, read at now,
+// while the serving-config entry for the seat had the fingerprint key. A later reading overwrites the
+// earlier one (a window is a fact, so there is no averaging). Returns false for a nameless seat or an
+// n that is not positive.
+func (s *Store) ObserveWindow(seat string, n int, key string, now time.Time) bool {
+	if s == nil || strings.TrimSpace(seat) == "" || n <= 0 {
+		return false
+	}
+	if s.Seats == nil {
+		s.Seats = map[string]Seat{}
+	}
+	cur := s.Seats[seat]
+	cur.CtxWindow, cur.CtxKey, cur.CtxAtMs = n, key, now.UnixMilli()
 	s.Seats[seat] = cur
 	return true
 }

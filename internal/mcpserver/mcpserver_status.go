@@ -25,6 +25,7 @@ import (
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
 	"github.com/dmmdea/offload-harness/internal/nimclient"
 	"github.com/dmmdea/offload-harness/internal/seatload"
+	"github.com/dmmdea/offload-harness/internal/servedwindow"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
 
@@ -1027,6 +1028,12 @@ func localSeatView(ctx context.Context, cfg config.Config) map[string]any {
 	case errors.Is(err, llamaswap.ErrNotLoaded):
 		v["loaded"] = false
 		v["note"] = "seat is cold; its window is not readable without loading it, and a status call must never trigger a multi-GB load. agent_run/agent_delegate probe the real ceiling when they warm it."
+		// What the harness believes without loading anything (ADR 0106): the window the engine last
+		// served, else the one the serving config states, else the key. Beside the note, never in place of it.
+		if w := servedwindow.Known(cfg, seat, cfg.AgentCtxTokens); w.ForRun() > 0 {
+			v["ctx_tokens"] = w.ForRun()
+			v["ctx_source"] = w.Source
+		}
 		return v
 	case errors.Is(err, llamaswap.ErrWindowUnknown):
 		// Residency WAS established (that is what the sentinel means); only
@@ -1042,6 +1049,7 @@ func localSeatView(ctx context.Context, cfg config.Config) map[string]any {
 	}
 	v["loaded"] = true
 	v["ctx_tokens"] = n
+	servedwindow.Remember(cfg, seat, n) // a seat that answered is a fact worth keeping for the next cold look
 	return v
 }
 
