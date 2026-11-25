@@ -13,6 +13,13 @@
 //   - a peak is taken on the median of the last five samples, so a one-tick spike of the desk is not one;
 //   - a load whose commit peak or touched peak is under three times the noise was not seen above the host's own movement.
 //
+// A load only takes memory. So the two readings are also followed the other way, and a run in which the available memory rose
+// above the baseline, or the commit charge fell under it, is not clean: something else gave memory back while the seat loaded,
+// and both peaks under-read the load by what it gave. The same holds for a baseline read while the host was already moving.
+// On the reference box two loads that began the moment another process released 32.7 GiB (a contract that had waited in line
+// for exactly that memory) read 15.7 and 21.9 GiB touched and 28.7 and 20.7 GiB of commit, against 34.2 and 56.9 for the same
+// seat on a quiet host, and both passed every rule above.
+//
 // The package imports gpuprobe only. Where a clean result is recorded, and when, is the caller's (internal/pipeline,
 // seatmeasure.go).
 package seatmeasure
@@ -45,6 +52,13 @@ const (
 	// says. Chosen, not measured: a 7 s read of an idle desk on the reference box showed a 0.13 GiB commit peak over 0.04 GiB
 	// of noise, which the noise rule alone passes, and a few such records would pull the store's 90th percentile down.
 	minCommitGiB = 1.0
+	// maxBaselineSpreadGiB: a baseline whose six readings, 0.6 s in all, differ by more than this was read on a host that was
+	// moving, and nothing measured from it is the load's. Chosen: the desk's several GiB a minute is under 0.1 GiB in 0.6 s, and
+	// 1 GiB in that time is a process starting or ending.
+	maxBaselineSpreadGiB = 1.0
+	// minGaveBackGiB is the least movement the other way (available memory above the baseline, commit charge under it) that
+	// makes a run unclean, beside three times the noise. Chosen: the same 1 GiB under which a load is not a model seat's.
+	minGaveBackGiB = 1.0
 )
 
 // Result is what one measured load cost the host, in GiB.
@@ -55,8 +69,11 @@ type Result struct {
 	CommitPeakGiB float64
 	// NoiseGiB is the larger of the baseline's spreads (available, commit): the host's own movement.
 	NoiseGiB float64
-	Samples  int
-	Elapsed  time.Duration
+	// GaveBackGiB is how far the host's memory moved the other way during the load: the larger of the highest rolling-median
+	// available memory less the baseline and the baseline commit charge less the lowest rolling-median one. A load only takes.
+	GaveBackGiB float64
+	Samples     int
+	Elapsed     time.Duration
 	// Clean says the figures may be recorded; Why says what stopped them when it is false.
 	Clean bool
 	Why   string
@@ -84,6 +101,7 @@ type Run struct {
 	failed              bool
 	gapped              bool
 	minAvail, maxCommit float64
+	maxAvail, minCommit float64 // the same two readings followed the other way: what the host gave back during the load
 	haveWindow          bool
 	lastAt              time.Time
 	availWin, commitWin []float64
@@ -129,6 +147,7 @@ func begin(read func() (gpuprobe.HostMemory, bool), every time.Duration, now fun
 	r.baseAvail, r.baseCommit = median(avail), median(commit)
 	r.noise = max(spread(avail), spread(commit))
 	r.minAvail, r.maxCommit = r.baseAvail, r.baseCommit
+	r.maxAvail, r.minCommit = r.baseAvail, r.baseCommit
 	r.lastAt = r.started
 	go r.loop()
 	return r
@@ -158,8 +177,9 @@ func (r *Run) loop() {
 		if len(r.availWin) < window {
 			continue
 		}
-		r.minAvail = min(r.minAvail, median(r.availWin))
-		r.maxCommit = max(r.maxCommit, median(r.commitWin))
+		avail, commit := median(r.availWin), median(r.commitWin)
+		r.minAvail, r.maxAvail = min(r.minAvail, avail), max(r.maxAvail, avail)
+		r.maxCommit, r.minCommit = max(r.maxCommit, commit), min(r.minCommit, commit)
 		r.haveWindow = true
 	}
 }
@@ -177,6 +197,7 @@ func (r *Run) Finish(loaded bool) Result {
 	if r.haveWindow {
 		res.TouchedPeakGiB = max(r.baseAvail-r.minAvail, 0)
 		res.CommitPeakGiB = max(r.maxCommit-r.baseCommit, 0)
+		res.GaveBackGiB = max(r.maxAvail-r.baseAvail, r.baseCommit-r.minCommit, 0)
 	}
 	switch {
 	case !loaded:
@@ -187,6 +208,12 @@ func (r *Run) Finish(loaded bool) Result {
 		res.Why = fmt.Sprintf("a gap between two samples above %d times the %s interval: the process was suspended or starved", gapFactor, r.every)
 	case r.samples < minSamples:
 		res.Why = fmt.Sprintf("%d samples, fewer than %d", r.samples, minSamples)
+	case r.noise > maxBaselineSpreadGiB:
+		res.Why = fmt.Sprintf("the baseline's readings differ by %.1f GiB in %s: the host's memory was moving when the load began", r.noise, time.Duration(baselineReads)*baselineEvery)
+	case res.GaveBackGiB > max(noiseFactor*r.noise, minGaveBackGiB):
+		// A load only takes: the host gave memory back while the seat loaded, so both peaks under-read the load by that much.
+		res.Why = fmt.Sprintf("the host's memory moved the other way by %.1f GiB during the load (available memory above the baseline, or the commit charge under it): something else gave memory back, and the peaks under-read the load (read: %.1f GiB touched, %.1f GiB of commit; baseline spread %.2f GiB)",
+			res.GaveBackGiB, res.TouchedPeakGiB, res.CommitPeakGiB, r.noise)
 	case res.CommitPeakGiB < max(noiseFactor*r.noise, minCommitGiB):
 		res.Why = "the load was not seen above the host's own movement"
 	case res.TouchedPeakGiB <= noiseFactor*r.noise:
