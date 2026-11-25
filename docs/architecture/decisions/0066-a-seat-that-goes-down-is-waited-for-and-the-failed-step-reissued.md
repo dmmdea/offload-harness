@@ -270,3 +270,12 @@ first attempt produced in time stands as the published result and carries the cu
 its `retry_note` (a retry the deadline cut counts for nothing against the per-page
 cap); one produced after the deadline is the deadline's budget defer, is not
 re-placed, and a rescue still re-packing its finished answer is ended by the deadline.
+
+## Amendment 2026-11-25: the confirmation follows the seat
+
+A failure that looks like a dead seat used to be confirmed by ONE reading, taken the instant the call failed. vLLM's API server
+outlives its engine by seconds (it answers every request with an error, and a watchdog that looks every 5 s stops it), so that
+reading found the seat listed and readable and the failure stood as an ordinary error: five contracts ended that way in one second on
+2026-11-25. `ConfirmSeatDown` now follows the seat for four cold-load polls (20 s): the first reading that shows it loading, absent or
+refusing connections is the death. It ends early when the engine's counters move (an engine that worked after the failure is alive)
+and when the run ends; a seat still ready at the end keeps the failure an ordinary error, as decided above.

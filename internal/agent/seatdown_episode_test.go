@@ -351,14 +351,14 @@ func TestSeatReadFailuresAreKept(t *testing.T) {
 		t.Fatal("an unreadable seat was called down by the seat check")
 	}
 	n, err := m.SeatReadFailures()
-	if n != 2 || err == nil || !strings.Contains(err.Error(), "timed out") {
-		t.Fatalf("SeatReadFailures = %d, %v, want the two reads that could not be answered and the last error", n, err)
+	if n < 2 || err == nil || !strings.Contains(err.Error(), "timed out") {
+		t.Fatalf("SeatReadFailures = %d, %v, want the reads that could not be answered (the confirm's and the check's) and the last error", n, err)
 	}
 	// A read the run itself cancelled says nothing about the seat.
 	cancelled, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, _ = m.SeatCheck(cancelled)
-	if n2, _ := m.SeatReadFailures(); n2 != 2 {
-		t.Fatalf("SeatReadFailures = %d after a cancelled read, want it still 2", n2)
+	if n2, _ := m.SeatReadFailures(); n2 != n {
+		t.Fatalf("SeatReadFailures = %d after a cancelled read, want it still %d", n2, n)
 	}
 }

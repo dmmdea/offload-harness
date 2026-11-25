@@ -415,23 +415,30 @@ func TestAwaitSeatWithoutAProbeIsTheTerminalVerdict(t *testing.T) {
 }
 
 // P1: a model call failed like a dead seat (a stream cut, a 5xx). The monitor
-// confirms against llama-swap before the failure is called a seat death.
+// confirms against llama-swap before the failure is called a seat death. The case
+// with a later state is 2026-11-25: the engine died, every request was answered with an
+// error at once, and the server was still listed and readable when the runs looked.
 func TestConfirmSeatDownReadsTheSeatAfterAFailedCall(t *testing.T) {
 	cut := errors.New("stream read: unexpected EOF")
 	for _, tc := range []struct {
 		name  string
 		state string
+		later string
 		down  bool
 		note  string
 	}{
-		{"restarting", "starting", true, "starting"},
-		{"gone from /running", "gone", true, "/running"},
-		{"engine refuses reads while listed", "refused", true, "refuses"},
-		{"ready and readable: the seat is up, the error stands", "ready", false, ""},
-		{"unreadable for another reason: cannot tell", "unreadable", false, ""},
+		{"restarting", "starting", "", true, "starting"},
+		{"gone from /running", "gone", "", true, "/running"},
+		{"engine refuses reads while listed", "refused", "", true, "refuses"},
+		{"still listed when the call failed, gone a moment later", "ready", "gone", true, "/running"},
+		{"ready and readable: the seat is up, the error stands", "ready", "", false, ""},
+		{"unreadable for another reason: cannot tell", "unreadable", "", false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eng := newDownEngine(tc.state)
+			if tc.later != "" {
+				time.AfterFunc(15*time.Millisecond, func() { eng.set(tc.later, false) })
+			}
 			_, m := NewMonitor(context.Background(), recoveryPolicy(time.Second), 30*time.Second)
 			defer m.Stop()
 			m.WithEngineProbe(eng.probe)
