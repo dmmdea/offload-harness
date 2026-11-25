@@ -40,7 +40,8 @@ Four things were missing or wrong:
    only draining, for the runs registered on the other resident seats (whole-node form; a card-scoped drain already reads every run
    on its cards); then, behind the fence, for the engines' own gauges and the marks, the agent seat's included, because its own drain
    ended before the fence went up. When the deadline passes, or nothing has changed for longer than any call may last, the fence and
-   the list come off, nothing is unloaded and the caller gives the cards back. A gauge that cannot be read is retried and then named
+   the list come off, nothing is unloaded and the reservation fails: the wrapper form gives the cards back, and the detached
+   form keeps the lease and says so (`gpu release` frees it), as it does after a failed seat drain. A gauge that cannot be read is retried and then named
    and not waited for.
 4. **A render waits for the marks** before the first unload under its lease (`awaitCallsOn`): until its own window ends, 60 s at least.
    A call still running then is not cut: the render gives the cards back with the busy answer, or with its place in line when its

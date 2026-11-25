@@ -3951,7 +3951,8 @@ were serving: a grant ended four transcriptions. The order now:
    read is retried and then named and not waited for.
 4. The unload. If the deadline passes first, or nothing has changed for longer than any call may last (the largest of
    `stt_request_timeout_sec`, `forecast_request_timeout_sec`, `request_timeout_sec` and 30 minutes), `exclusive` and `clearing` come off,
-   nothing is unloaded, and the reserve gives the cards back.
+   nothing is unloaded, and the reserve fails: the wrapper form gives the cards back, the detached form keeps the lease and says
+   `gpu release` frees it, as after a failed seat drain.
 
 A **media** lease does step 2 and the mark half of step 3 right after its grant, before its first unload (`awaitCallsOn`): until
 `gpu_wait_ms` from when the call began to queue, 60 s at least, then the busy answer. The engines with a gauge stay with the runner's

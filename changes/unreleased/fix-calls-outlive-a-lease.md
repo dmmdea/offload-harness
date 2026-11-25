@@ -7,7 +7,7 @@
 - **What changed.** A transcription and a forecast are marked in the run registry while they are on their engine
   (`gpu status` shows them). A lease names the models it is clearing, so new calls to them queue at the fence, and it unloads a
   model only when the engine's own count and the registry say nothing is running on it, the agent seat included. The wait is the lease's own
-  queue budget; when it ends, the cards go back and nothing is cut. A render waits the same way for the marked calls (its own window,
+  queue budget; when it ends, nothing is cut and the reservation fails (the detached form keeps the lease and says `gpu release` frees it). A render waits the same way for the marked calls (its own window,
   60 s at least) and answers busy instead of cutting one. The last transcription of a burst no longer unloads a model another
   process is transcribing on.
 - **And when a model is taken away anyway** (another client's swap, a config reload, an unload by hand), the transcription, forecast,

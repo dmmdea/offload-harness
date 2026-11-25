@@ -16,7 +16,7 @@
 // WHY IT ENDS. The holder stamps the models on its lease first (gpulease.Meta.Clearing), so new harness calls to
 // them queue at the fence and the number in flight only falls; every call has its own timeout; the caller's
 // deadline bounds the whole wait; and a state that has not changed for longer than any call may last (StuckAfter)
-// ends it. It never interrupts anything: on any of the last two the caller gives the cards back.
+// ends it. It never interrupts anything: on either of the last two the wait fails and nothing is unloaded.
 package seatdrain
 
 import (

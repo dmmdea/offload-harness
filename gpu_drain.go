@@ -1024,7 +1024,8 @@ func drainRunsElsewhere(ctx context.Context, cfg config.Config, endpoint, agentS
 // models, which were unloaded with no look at them until 2026-11-25, and the agent seat once more, because its own drain
 // ended before the fence went up. The cards are fenced by now: the models are first named on the lease, so new calls to
 // them queue at the fence instead of keeping them busy, and the calls that are running are waited for inside the lease's
-// own wait budget. On failure the fence and the list come off again and nothing is unloaded: the caller gives the cards back.
+// own wait budget. On failure the fence and the list come off again and nothing is unloaded: the reservation fails (the wrapper
+// form then releases the lease; the detached form keeps it and tells the caller `gpu release` frees it).
 func drainOthers(ctx context.Context, cfg config.Config, endpoint string, models []string, restamp restamper, deadline time.Time) error {
 	if len(models) == 0 {
 		return nil
