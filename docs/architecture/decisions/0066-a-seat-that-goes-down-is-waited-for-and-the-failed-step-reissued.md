@@ -282,6 +282,10 @@ and which llama-server has too. 200, or an engine with no such door, is a seat t
 above. 503, or no answer, and the seat is followed for four cold-load polls (20 s): the first reading that shows it loading, absent or
 refusing connections is the death.
 
+The single-shot lanes (transcription, forecast, embedding, text, vision) have their own, smaller rule since the same day: outside a
+contract, a call whose model went away under it is sent again inside its own timeout
+([ADR 0104](0104-a-lease-waits-for-the-calls-it-would-cut-and-a-cut-call-is-sent-again.md)).
+
 A first version followed every such seat for the 20 s and stopped early only when its counters moved. An idle seat that works and an
 endpoint with nothing behind it have no moving counters, so every ordinary 5xx was published 20 s late; the repository's own tests ran
 past their limit on it before it was merged.

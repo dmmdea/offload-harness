@@ -20,6 +20,7 @@ package seatwait
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -176,6 +177,13 @@ func FromContext(ctx context.Context) *Budget {
 	return &Budget{}
 }
 
+// Attached reports whether the caller attached a Budget: it runs under a contract, whose own rules decide what a lost
+// answer means (ADR 0066). A call without one is on its own and may use a Resend.
+func Attached(ctx context.Context) bool {
+	b, _ := ctx.Value(ctxKey{}).(*Budget)
+	return b != nil
+}
+
 // Retryable reports whether a non-200 is llama-swap saying "peers hold the
 // seat" — the three answers verified against its source — keyed on the STATUS
 // plus the smallest body discriminator that separates them from a real fault
@@ -218,6 +226,101 @@ const startRefusedMarker = "unable to start process"
 func StartFailed(body string) bool {
 	lower := strings.ToLower(body)
 	return strings.Contains(lower, DeathMarker) || strings.Contains(lower, startRefusedMarker)
+}
+
+// SwapMarker and ShutdownMarker are llama-swap's own words for a request it was still holding when the model was
+// taken away: "<router>: model unloaded" and "<router> is shutting down" (a config reload closed the router; read in
+// the v236 and v256 sources). The router is `matrix` or `group`, so both matches start after its name.
+const (
+	SwapMarker     = "model unloaded"
+	ShutdownMarker = " is shutting down"
+)
+
+// TakenAway reports whether a refusal means the model went away under the request, so that sending it again loads it
+// back and answers it. There are two shapes, and which one a request gets depends on where it stood when the model went:
+//
+//   - llama-swap was still holding it: the markers above.
+//   - the engine was working on it: a 5xx with no body, which is llama-swap's answer when its connection to the engine
+//     drops. An unload gives the engine 10 s and then ends it, and every request on it is answered that way (measured on
+//     v273 on 2026-11-25, a text and a speech model unloaded by hand: 502, no body, "proxy error: EOF" in its log). An
+//     engine that crashed looks the same; the caller's bound is what keeps a crash from being asked for again and again.
+//
+// An answer that says a start died (StartFailed) is neither: asking again is a second failed start.
+func TakenAway(status int, body string) bool {
+	if status < 500 {
+		return false
+	}
+	lower := strings.ToLower(strings.TrimSpace(body))
+	if lower == "" {
+		return true
+	}
+	return (strings.Contains(lower, SwapMarker) || strings.Contains(lower, ShutdownMarker)) && !StartFailed(body)
+}
+
+// maxResends is how many times one call may be sent again after its model was swapped out under it: the
+// figure an agent run's seat recoveries use. Two swaps under one call are bad luck; a third is something
+// that keeps taking the model away, and the caller is told.
+const maxResends = 2
+
+// ResendPause is the pause before a call is sent again, so a reloading llama-swap has its new router up. A var
+// so a test compresses it.
+var ResendPause = time.Second
+
+// Resend is one call's allowance to be sent again after TakenAway. The call's own time starts when it is first
+// sent: waiting for a card or a slot is bounded by the waits themselves.
+type Resend struct {
+	began time.Time
+	limit time.Duration
+	n     int
+}
+
+// NewResend is the allowance of one call that may last limit in all (0 = its context alone bounds it).
+func NewResend(limit time.Duration) *Resend { return &Resend{limit: limit} }
+
+// Again reports whether the call may be sent once more, and sleeps ResendPause when it may. sentAt is when the
+// lost attempt went out. The call's own time must still hold what that attempt took: an answer lost at minute
+// 25 of 30 is not asked for again in the 5 that are left.
+func (r *Resend) Again(ctx context.Context, sentAt time.Time) bool {
+	if r.began.IsZero() {
+		r.began = sentAt
+	}
+	if r.n >= maxResends || ctx.Err() != nil {
+		return false
+	}
+	now := time.Now()
+	if r.limit > 0 && now.Add(now.Sub(sentAt)+ResendPause).After(r.began.Add(r.limit)) {
+		return false
+	}
+	if Sleep(ctx, ResendPause) != nil {
+		return false
+	}
+	r.n++
+	return true
+}
+
+// Bound is ctx cut at the end of the call's own time, for a re-send: an http.Client's timeout starts over with
+// every request, so without it a call could last its timeout once per attempt.
+func (r *Resend) Bound(ctx context.Context) (context.Context, context.CancelFunc) {
+	if r.n == 0 || r.limit <= 0 {
+		return ctx, func() {}
+	}
+	return context.WithDeadline(ctx, r.began.Add(r.limit))
+}
+
+// Note says on a final error how often the call was sent again ("" when it was not).
+func (r *Resend) Note() string {
+	if r.n == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" (sent again %d time(s))", r.n)
+}
+
+// Err is err with Note, and err itself for a call that was sent once.
+func (r *Resend) Err(err error) error {
+	if err == nil || r.n == 0 {
+		return err
+	}
+	return fmt.Errorf("%w%s", err, r.Note())
 }
 
 // Sleeping reports whether a reserved sleep is in progress right now — the

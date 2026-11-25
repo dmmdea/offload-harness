@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"maps"
 	"math"
 	"mime/multipart"
@@ -27,7 +28,9 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/seatwait"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 	"llamaswap-pp-cli/pkg/llamaswap"
 )
@@ -81,75 +84,27 @@ func QueuedNow() int { return int(sttQueued.Load()) }
 // test can wait until a second call is in line instead of sleeping and hoping.
 func Pending() int { return int(sttCalls.Load()) }
 
-// traffic is what a transcription call needs to know about the rest of this process's dealings
-// with the upstream while it ran, so it can say afterwards whether a crash was its own
-// (register C-91, F-35; see lineMark.ranAlone). It counts, ever, the transcriptions that have
-// joined the line and the unloads that have begun, and how many unloads are going out now.
-// It has its own mutex, held only for the arithmetic and never across I/O: it nests inside
-// inferMu and nothing nests inside it.
-var traffic struct {
-	sync.Mutex
-	arrivals  uint64
-	unloads   uint64
-	unloading int
+// joinLine counts a call into the line (sttCalls, which UnloadIfIdle reads); the returned func counts it out.
+func joinLine() (leave func()) {
+	sttCalls.Add(1)
+	return func() { sttCalls.Add(-1) }
 }
 
-// lineMark is one call's place in line, noted at the moment it joined.
-type lineMark struct {
-	arrival uint64 // this call's own arrival number
-	unloads uint64 // unloads begun when it joined
-	crowded bool   // another transcription was in line, or an unload was going out, when it joined
-}
-
-// joinLine counts a call into the line (sttCalls, which UnloadIfIdle reads) and notes who else
-// was in it. The arrival number and the in-line count are taken together, so "nobody has joined
-// since" is exact.
-func joinLine() lineMark {
-	traffic.Lock()
-	defer traffic.Unlock()
-	traffic.arrivals++
-	n := sttCalls.Add(1)
-	return lineMark{arrival: traffic.arrivals, unloads: traffic.unloads, crowded: n > 1 || traffic.unloading > 0}
-}
-
-// leave counts the call out of the line.
-func (lineMark) leave() { sttCalls.Add(-1) }
-
-// ranAlone reports whether nothing else this process does to the upstream overlapped the call
-// from the moment it joined the line until now: no other transcription was in line when it
-// joined or has joined since, and no unload was going out when it joined or has begun since.
-// (An unload that is still going out now either began before the call joined, which crowded
-// it, or after, which moved the count.) A call that cannot say so cannot tell its own crash
-// from one something else caused.
-func (m lineMark) ranAlone() bool {
-	traffic.Lock()
-	defer traffic.Unlock()
-	return !m.crowded && traffic.arrivals == m.arrival && traffic.unloads == m.unloads
-}
-
-// ErrUpstreamNoSpeech is the verdict "the audio had no speech": Transcribe and TranscribeOAI
-// return it, wrapped, in place of an empty Result when the upstream ANSWERED, successfully,
-// with an empty transcript. Transcribe also returns it for the one failure that is the F-35
-// crash when this process can vouch for itself: an empty-body 5xx in a call that ran alone
-// (see lineMark.ranAlone, and the comment at the call site). Any other failure to get an
-// answer is ErrUpstreamVanished, never this (register C-91). Until 2026-10-01 every
-// empty-body 5xx was read as no speech (root-caused 2026-09-23, F-35: whisper-server exits
-// on audio with no speech content), but the same bare status, or a read cut off mid-answer,
-// follows a model that is unloaded, swapped or restarted under a call, and audio WITH speech
-// was reported to its caller as silent. A status cannot tell the two apart; an answer can,
-// and so can a process that knows it did nothing to the upstream while the call ran. Callers
-// treat this as "no speech found", not as an infrastructure failure, and have nothing to
-// retry.
+// ErrUpstreamNoSpeech is the verdict "the audio had no speech": Transcribe and TranscribeOAI return it, wrapped, in
+// place of an empty Result when the upstream ANSWERED, successfully, with an empty transcript, and for nothing else.
+// A failure to get an answer says nothing about the audio. It was read as if it did twice: until 2026-10-01 every
+// empty-body 5xx was no speech, and until 2026-11-25 one in a call that had run alone in its process still was,
+// because whisper-server died on audio without speech (F-35). An unload by another process looks exactly like that: on
+// a real run a clip full of speech whose model was taken away came back as silent. What whisper-server died of is
+// avoided in the request now (buildMultipart, no_language_probabilities), so audio without speech is answered, 200 and
+// empty, and a lost answer is only ever that. Callers treat this as "no speech found", not as an infrastructure
+// failure, and have nothing to retry.
 var ErrUpstreamNoSpeech = errors.New("stt upstream: no speech found")
 
-// ErrUpstreamVanished marks a call whose upstream went away under it: the answer was an
-// empty-body 5xx (llama-swap's bare answer when its connection to the model drops) or was cut
-// off mid-read, and this process cannot rule out that something else caused it. An unload, a
-// swap, a restart and a crash all look like that, so it is a failed call, which a caller can
-// retry, and never a verdict about the audio: tell it from ErrUpstreamNoSpeech with
-// errors.Is. Transcribe returns it for a call that was not alone (lineMark.ranAlone),
-// TranscribeOAI for every such answer: nothing says llama-server's mtmd path exits on audio
-// without speech, as whisper.cpp does.
+// ErrUpstreamVanished marks a call whose upstream went away under it every time it was sent (exchange): the answer was
+// an empty-body 5xx (llama-swap's bare answer when its connection to the model drops) or was cut off mid-read. An
+// unload, a swap, a restart and a crash all look like that, so it is a failed call, which a caller can retry, and never
+// a verdict about the audio: tell it from ErrUpstreamNoSpeech with errors.Is.
 var ErrUpstreamVanished = errors.New("stt upstream: the upstream vanished mid-request")
 
 // Word is one timestamped word with whisper's per-word confidence. whisper-server
@@ -290,14 +245,13 @@ type Client struct {
 // client carries no timeout of its own.
 const fenceBudget = 120 * time.Second
 
-// fencedURL builds the whisper upstream's URL behind the GPU-lease fence
-// (2026-09-22). The passthrough STARTS the whisper model when it is not loaded,
-// so under a render or an exclusive hold the request waits for the card — the
-// fence-wait budget (WithFenceWait; the pipeline hands it gpu_wait_ms, the bound
-// every GPU door shares), never longer than the client's own timeout, then ctx —
-// and on exhaustion returns the fence's *modelaffinity.LeaseError, which the
-// pipeline defers as capacity ("gpu busy"). A resident whisper model is served at once.
-func (c *Client) fencedURL(ctx context.Context, model, path string) (string, error) {
+// fenceWaitLeft is how long one transcription may wait at the GPU-lease fence in all. The passthrough STARTS the
+// whisper model when it is not loaded, so under a render or an exclusive hold the request waits for the card
+// (2026-09-22): the fence-wait budget (WithFenceWait; the pipeline hands it gpu_wait_ms, the bound every GPU door
+// shares), never longer than the client's own timeout, then ctx. On exhaustion the fence's *modelaffinity.LeaseError
+// comes back, which the pipeline defers as capacity ("gpu busy"). A resident whisper model is served at once, unless
+// a holder is clearing it off its cards (gpulease.Meta.Clearing).
+func (c *Client) fenceWaitLeft() time.Duration {
 	budget := c.http.Timeout
 	if budget <= 0 {
 		budget = fenceBudget
@@ -305,7 +259,78 @@ func (c *Client) fencedURL(ctx context.Context, model, path string) (string, err
 	if c.fenceWaitSet && c.fenceWait < budget {
 		budget = c.fenceWait
 	}
-	return modelaffinity.AwaitUpstream(ctx, c.base, model, path, time.Now().Add(budget))
+	return budget
+}
+
+// reply is what one transcription got back from the upstream.
+type reply struct {
+	status int
+	body   []byte
+	cut    error  // the read that was cut off mid-answer; nil for a whole answer
+	resent string // how often the call was sent again ("" when it was not), for the error it ends with
+}
+
+// silent reports a bare 5xx: llama-swap's answer when its connection to the model drops.
+func (r reply) silent() bool { return r.status >= 500 && len(bytes.TrimSpace(r.body)) == 0 }
+
+// errorText is the start of an answer that is not a transcript.
+func (r reply) errorText() string {
+	if r.status == http.StatusOK {
+		return ""
+	}
+	return strings.TrimSpace(string(r.body[:min(len(r.body), 400)]))
+}
+
+// lost reports an answer that never came because the model went away under the call.
+func (r reply) lost() bool { return r.cut != nil || seatwait.TakenAway(r.status, r.errorText()) }
+
+// maxErrorBody bounds what is read back of an answer that is not a transcript.
+const maxErrorBody = 4096
+
+// exchange sends one transcription and returns the upstream's reply: the part the two protocols share. It waits at the
+// fence, serializes against the single-slot server (inferMu: overlapping requests crash whisper-server; it is held
+// until the answer is read, so a second caller waits for the connection to fully drain), and marks the call where
+// other processes can see it (modelaffinity.Call). A call whose model went away under it is sent again: the audio is on
+// disk, the request is the same, and llama-swap loads the model back. It waits at the fence like a new call, so a lease
+// that took the model is waited for, and it is bounded by the call's own timeout (seatwait.Resend).
+func (c *Client) exchange(ctx context.Context, model, path, contentType string, body []byte) (reply, error) {
+	call := modelaffinity.Call{Kind: gpuactivity.KindSTT, Endpoint: c.base, Model: model, Path: path, Fence: c.fenceWaitLeft(), Slot: &inferMu}
+	again := seatwait.NewResend(c.http.Timeout)
+	for {
+		var rep reply
+		var sentAt time.Time
+		rctx, cancel := again.Bound(ctx)
+		err := call.Run(rctx, func(url string) error {
+			req, err := http.NewRequestWithContext(rctx, http.MethodPost, url, bytes.NewReader(body))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Content-Type", contentType)
+			c.markWarm(model)
+			sentAt = time.Now()
+			resp, err := c.http.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			rep.status = resp.StatusCode
+			var answer io.Reader = resp.Body
+			if resp.StatusCode != http.StatusOK {
+				answer = io.LimitReader(resp.Body, maxErrorBody)
+			}
+			rep.body, rep.cut = io.ReadAll(answer)
+			return nil
+		})
+		cancel()
+		if err != nil {
+			return reply{}, again.Err(err)
+		}
+		if !rep.lost() || !again.Again(ctx, sentAt) {
+			rep.resent = again.Note()
+			return rep, nil
+		}
+		log.Printf("sttclient: %s went away under a transcription (HTTP %d %s); sending it again", model, rep.status, rep.errorText())
+	}
 }
 
 // New builds a client. timeout bounds one transcription (long audio).
@@ -340,10 +365,8 @@ func (c *Client) WithFenceWait(d time.Duration) *Client {
 // mono — ~2 MB/min — comfortable in 64 GB RAM).
 func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params) (Result, error) {
 	// In line from the first statement (register C-91): the call counts as waiting for the
-	// whole of its fence wait and its queue on inferMu, which is what UnloadIfIdle reads, and
-	// notes who else is in line, which is what decides below whether a crash was its own.
-	call := joinLine()
-	defer call.leave()
+	// whole of its fence wait and its queue on inferMu, which is what UnloadIfIdle reads.
+	defer joinLine()()
 	wav, err := os.ReadFile(wavPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("sttclient: read wav %q: %w", wavPath, err)
@@ -353,70 +376,31 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 		return Result{}, fmt.Errorf("sttclient: build form: %w", err)
 	}
 	// Target the subpath directly; the bare /upstream/<model> form 301-redirects.
-	url, err := c.fencedURL(ctx, model, "/inference")
+	rep, err := c.exchange(ctx, model, "/inference", contentType, body.Bytes())
 	if err != nil {
 		return Result{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, body)
-	if err != nil {
-		return Result{}, err
-	}
-	req.Header.Set("Content-Type", contentType)
-	// Serialize against the single-slot server (see inferMu): overlapping requests
-	// crash whisper-server. Held across the whole request/response so a second caller
-	// waits for the connection to fully drain, not just for Do() to return.
-	inferMu.Lock()
-	defer inferMu.Unlock()
-	c.markWarm(model)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return Result{}, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		b, rerr := io.ReadAll(io.LimitReader(resp.Body, 400))
-		// NO ANSWER IS NOT NO SPEECH, unless this process can vouch for itself (register C-91).
-		// An empty-body 5xx is llama-swap's bare answer when its connection to whisper-server
-		// drops mid-request ("upstream process exited unexpectedly" in llama-swap.log), and a
-		// read that was cut off reads empty too. Both follow a crash: whisper.cpp (build-v194)
-		// reliably exits on audio with no speech content (root-caused 2026-09-23, F-35: direct
-		// /inference calls reproduced it 100% of the time on a near-silent ACE-Step tail, on the
-		// same clip with the per-request vad field on and off, and on a plain 440 Hz tone — no
-		// speech, not loudness, not a cold load; an upstream bug outside this repo). They follow
-		// an unload, a swap or a restart under the call just as well, and then the audio HAD
-		// speech: reading the status alone as no speech reported a call whose model was taken
-		// away mid-flight as a recording with nothing in it. The status cannot say which it was;
-		// this process can say what IT did. Its own unloads no longer land on a call in flight
-		// (UnloadIfIdle holds the slot), so an empty-body 5xx in a call that ran ALONE (no
-		// other transcription in line from the moment it joined, no unload sent or going out)
-		// has no cause of this process's making left, and is the F-35 crash: the calm no-speech
-		// verdict, with nothing to retry (a retry re-crashes the server and costs the restart
-		// llama-swap then does, ~60 s of refusals). Anything else overlapped it, and may have
-		// taken the model away: a failed call that says the upstream vanished, which a caller
-		// can retry. What this cannot see is another PROCESS doing the same to the same
-		// upstream (another session's harness, a `gpu reserve` drain, llama-swap swapping the
-		// slot for another model): an alone call that dies that way reads as no speech.
+	if rep.status != http.StatusOK {
+		// NO ANSWER IS NOT NO SPEECH (register C-91, ADR 0104): an empty-body 5xx and a read that was cut off are
+		// what a call gets when its model is unloaded, swapped, restarted or crashes under it, and they say nothing
+		// about the audio (see ErrUpstreamNoSpeech). exchange has sent the call again by now.
 		switch {
-		case rerr != nil:
-			return Result{}, fmt.Errorf("%w: whisper-server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
-		case resp.StatusCode >= 500 && len(bytes.TrimSpace(b)) == 0:
-			if call.ranAlone() {
-				return Result{}, fmt.Errorf("whisper-server %d (empty body) with nothing else of this process on the upstream: whisper.cpp exits on audio with no speech content (F-35): %w", resp.StatusCode, ErrUpstreamNoSpeech)
-			}
-			return Result{}, fmt.Errorf("%w: whisper-server %d (empty body): it was unloaded, swapped, restarted or crashed under the call, and another transcription or an unload of this process overlapped it (whisper.cpp also exits on audio with no speech content)", ErrUpstreamVanished, resp.StatusCode)
+		case rep.cut != nil:
+			return Result{}, fmt.Errorf("%w: whisper-server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call%s", ErrUpstreamVanished, rep.status, rep.cut, rep.resent)
+		case rep.silent():
+			return Result{}, fmt.Errorf("%w: whisper-server %d (empty body): it was unloaded, swapped, restarted or crashed under the call%s", ErrUpstreamVanished, rep.status, rep.resent)
 		}
-		return Result{}, fmt.Errorf("whisper-server %d: %s", resp.StatusCode, string(b))
+		return Result{}, fmt.Errorf("whisper-server %d: %s%s", rep.status, rep.errorText(), rep.resent)
 	}
 	var out Result
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+	if err := decodeAnswer(rep, &out); err != nil {
 		// An answer cut off mid-read is a vanished upstream whatever its status, as above.
 		if errors.Is(err, io.ErrUnexpectedEOF) {
-			return Result{}, fmt.Errorf("%w: whisper-server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, err)
+			return Result{}, fmt.Errorf("%w: whisper-server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call%s", ErrUpstreamVanished, rep.status, err, rep.resent)
 		}
 		return Result{}, fmt.Errorf("sttclient: decode verbose_json: %w", err)
 	}
-	// The producer of the no-speech verdict that needs no knowledge of this process: the
-	// upstream answered 200 and heard nothing. (The other is the F-35 crash, above.)
+	// The one producer of the no-speech verdict: the upstream answered 200 and heard nothing.
 	if strings.TrimSpace(out.Text) == "" && len(out.Segments) == 0 {
 		return Result{}, fmt.Errorf("whisper-server answered with an empty transcript: %w", ErrUpstreamNoSpeech)
 	}
@@ -425,6 +409,14 @@ func (c *Client) Transcribe(ctx context.Context, model, wavPath string, p Params
 	// number behind it. Set here, after the decode, because the upstream never sends these keys.
 	out.WordsReliable, out.WordsDriftSec = checkWordDrift(out.Segments, wordDriftThresholdSec)
 	return out, nil
+}
+
+// decodeAnswer decodes a 200 answer. The error that cut the read off comes first: what arrived before it is not the answer.
+func decodeAnswer(rep reply, out *Result) error {
+	if rep.cut != nil {
+		return rep.cut
+	}
+	return json.NewDecoder(bytes.NewReader(rep.body)).Decode(out)
 }
 
 // buildMultipart assembles the multipart/form-data body: the wav under "file"
@@ -469,6 +461,13 @@ func buildMultipart(wav []byte, filename string, p Params) (*bytes.Buffer, strin
 	if p.SplitOnWord {
 		fields["split_on_word"] = "true"
 	}
+	// verbose_json makes whisper-server detect the language a SECOND time after the decode, only to list a
+	// probability per language, which nothing here reads. On audio its VAD found no speech in, that detection has no
+	// audio: it fails, the server prints a null language name, and the request dies (2026-11-25, read in whisper.cpp
+	// 1.9.5: libstdc++ answers 500 "basic_string: construction from null is not valid"; the Windows build reads the null
+	// and exits, which is F-35). Without the list, silent audio is answered 200 with an empty transcript, and a
+	// transcript with speech is the same. A build that does not know the field ignores it.
+	fields["no_language_probabilities"] = "true"
 	for k, v := range fields {
 		if err := mw.WriteField(k, v); err != nil {
 			return nil, "", err
@@ -499,18 +498,6 @@ func buildMultipart(wav []byte, filename string, p Params) (*bytes.Buffer, strin
 // so there is nothing in flight to drain. Passing UnloadOpts{Drain: true} is the
 // one-line change if a future caller unloads a seat it does not own.
 func (c *Client) Unload(ctx context.Context, model string) error {
-	// Counted in traffic for as long as it is going out, so a transcription that ran while
-	// it was can say so (lineMark.ranAlone): a bare Unload holds nothing, and what it does
-	// to a model in use is what an empty-body 5xx looks like.
-	traffic.Lock()
-	traffic.unloads++
-	traffic.unloading++
-	traffic.Unlock()
-	defer func() {
-		traffic.Lock()
-		traffic.unloading--
-		traffic.Unlock()
-	}()
 	ls, err := swapclient.New(c.base, c.http.Timeout)
 	if err != nil {
 		return err
@@ -553,6 +540,9 @@ func (c *Client) warmedModels() []string {
 //     freed it, or this call never reached the upstream (the card was fenced, the wav would
 //     not read).
 //
+// A model another PROCESS has a transcription on is left to that process (2026-11-25): its call is marked in the
+// run registry (modelaffinity.Call) and frees the model when it ends.
+//
 // What it frees is every model warmed on this client's base, not the model of the call that
 // happens to be last out. A burst can mix stt_model with stt_model_hq, or the two protocols
 // on two models; they share the one slot, so they are one burst, and the call that finishes
@@ -590,6 +580,12 @@ func (c *Client) UnloadIfIdle(ctx context.Context) error {
 	}
 	var errs []error
 	for _, model := range c.warmedModels() {
+		if modelaffinity.CallsElsewhere(gpuactivity.KindSTT, model) > 0 {
+			// Another process's transcription is on this model right now. It warmed the model too, so it is the last
+			// one out and unloads it then (or the ttl does); unloading it here would cut that call.
+			delete(warmed[c.base], model)
+			continue
+		}
 		if err := c.Unload(ctx, model); err != nil {
 			errs = append(errs, fmt.Errorf("unload %q: %w", model, err))
 			continue
@@ -686,7 +682,7 @@ func wavDurationSec(wav []byte) float64 {
 // upstream is served single-slot too.
 func (c *Client) TranscribeOAI(ctx context.Context, model, wavPath string) (Result, error) {
 	// In line from the first statement, exactly as Transcribe is (register C-91).
-	defer joinLine().leave()
+	defer joinLine()()
 	wav, err := os.ReadFile(wavPath)
 	if err != nil {
 		return Result{}, fmt.Errorf("read wav: %w", err)
@@ -708,36 +704,19 @@ func (c *Client) TranscribeOAI(ctx context.Context, model, wavPath string) (Resu
 		return Result{}, err
 	}
 
-	url, err := c.fencedURL(ctx, model, "/v1/audio/transcriptions")
+	rep, err := c.exchange(ctx, model, "/v1/audio/transcriptions", mw.FormDataContentType(), body.Bytes())
 	if err != nil {
 		return Result{}, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, &body)
-	if err != nil {
-		return Result{}, err
-	}
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-
-	inferMu.Lock()
-	defer inferMu.Unlock()
-	c.markWarm(model)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return Result{}, err
-	}
-	defer resp.Body.Close()
-	raw, rerr := io.ReadAll(resp.Body)
+	raw := rep.body
 	// The same two shapes of "no answer" as on the whisper path, typed alike (register C-91).
-	// Unlike that path they are never read as no speech, not even in a call that ran alone: the
-	// crash on audio without speech is whisper.cpp's, and nothing says llama-server's mtmd path
-	// exits on it.
 	switch {
-	case rerr != nil:
-		return Result{}, fmt.Errorf("%w: transcriptions endpoint %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
-	case resp.StatusCode >= 500 && len(bytes.TrimSpace(raw)) == 0:
-		return Result{}, fmt.Errorf("%w: transcriptions endpoint %d (empty body): it was unloaded, swapped, restarted or crashed under the call", ErrUpstreamVanished, resp.StatusCode)
-	case resp.StatusCode != http.StatusOK:
-		return Result{}, fmt.Errorf("transcriptions endpoint %d: %s", resp.StatusCode, strings.TrimSpace(string(raw)))
+	case rep.cut != nil:
+		return Result{}, fmt.Errorf("%w: transcriptions endpoint %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call%s", ErrUpstreamVanished, rep.status, rep.cut, rep.resent)
+	case rep.silent():
+		return Result{}, fmt.Errorf("%w: transcriptions endpoint %d (empty body): it was unloaded, swapped, restarted or crashed under the call%s", ErrUpstreamVanished, rep.status, rep.resent)
+	case rep.status != http.StatusOK:
+		return Result{}, fmt.Errorf("transcriptions endpoint %d: %s%s", rep.status, strings.TrimSpace(string(raw)), rep.resent)
 	}
 
 	var parsed struct {

@@ -112,7 +112,7 @@ var gatedRouteFiles = map[string]struct {
 	"internal/agent/client.go":        {"Chat takes modelaffinity.Admit before its request goes out", true},
 	"internal/config/config.go":       {"the CompletionPath default, consumed only by llamaclient (gated above)", false},
 	"internal/pipeline/agenttask.go":  {"repackClient hands the path to llamaclient (gated above)", false},
-	"internal/sttclient/sttclient.go": {"an /upstream subpath handed to fencedURL, which is modelaffinity.AwaitUpstream", false},
+	"internal/sttclient/sttclient.go": {"an /upstream subpath handed to modelaffinity.Call, which waits in AwaitUpstream", false},
 	"internal/ttsclient/ttsclient.go": {"tts_endpoint is a separate OpenAI-shaped speech server that owns its GPU, never llama-swap (ttsclient package doc)", false},
 	"cmd/local-agent/serve.go":        {"a route this process SERVES, not a request it sends", false},
 	"internal/update/sideport.go":     {"the smoke gate's own side-port llama-server, started under the GPU lease the gate holds; never llama-swap", false},

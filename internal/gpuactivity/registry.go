@@ -110,6 +110,17 @@ const (
 // `vision_calls_running`, so the name lives here.
 const KindVision = "vision"
 
+// KindSTT and KindForecast are Run.Kind for ONE transcription and ONE forecast while the request is on
+// its engine (2026-11-25). whisper-server and the forecast server publish no in-flight gauge (no /metrics,
+// no /slots), so nothing on the box could tell that a call was running: a lease grant unloaded the model
+// under four transcriptions at once. Like a vision record, they carry no Devices and take no agent slot.
+// They are registered only while the request is on the engine, never while it waits at the GPU-lease fence:
+// a lease that waits for them must not wait for a call that waits for the lease.
+const (
+	KindSTT      = "transcription"
+	KindForecast = "forecast"
+)
+
 // Run is one registered run on a seat: the harness's unit of work.
 type Run struct {
 	// ID is unique per run within a process whatever the clock does (see runID) and is the record's
@@ -121,7 +132,8 @@ type Run struct {
 	Seat        string `json:"seat"`
 	// Kind names the door the run came through: "agent_run" (the MCP tool),
 	// "contract" (a delegation contract run by this node — a local spread leg or
-	// a fleet job), "lab" (the CLI replay gate), KindVision (one vision call).
+	// a fleet job), "lab" (the CLI replay gate), KindVision (one vision call),
+	// KindSTT (one transcription), KindForecast (one forecast).
 	Kind        string `json:"kind"`
 	Origin      string `json:"origin,omitempty"` // who asked: node id, job id, host
 	Goal        string `json:"goal,omitempty"`   // the first goalClip characters

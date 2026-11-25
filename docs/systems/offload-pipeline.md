@@ -261,15 +261,20 @@ refusal is a `capacity` defer, `gpu busy: …` (register C-89). Since 0.165.0 th
 file, and the fleet node's own jobs wait at its stt gate (`sttclient.Queued` tells `UnloadIfIdle` they are coming, so the
 model stays loaded for them). The verdict "no speech"
 (`ErrUpstreamNoSpeech`, the defer reason `empty transcript (no speech detected)`) is an upstream that
-answered 200 with an empty transcript or, on the whisper protocol only, whisper.cpp's exit on audio with
-no speech content (an empty-body 5xx, the F-35 crash) in a call that ran alone: no other transcription was
-in line from the moment it joined and this process sent no unload meanwhile, so nothing of its own can have
-taken the model away. Any other empty-body 5xx, or an answer cut off mid-read, is `ErrUpstreamVanished`:
-an unload, a swap, a restart and that crash all look the same, and with another call or an unload
-overlapping it this process cannot say which it was, so it is a failed call a caller can retry, never a
-claim that the audio is silent. The OpenAI protocol never reads no-speech off a failure (nothing says that
-path crashes on such audio). What the rule cannot see is another process doing the same to the same
-upstream: an alone call that dies that way reads as no speech.
+answered 200 with an empty transcript, on either protocol, and nothing else. An empty-body 5xx, or an answer cut
+off mid-read, is `ErrUpstreamVanished`: an unload, a swap, a restart and a crash all look the same and none of them
+says anything about the audio, so it is a failed call a caller can retry. Until 2026-11-25 the bare 5xx of a call that
+ran alone was read as no speech, because whisper-server died on audio without speech (F-35) and that is what
+llama-swap then answers; a recording full of speech was reported as silent that way. What it died of is avoided in the
+request (`no_language_probabilities=true`, ADR 0104): such audio is answered 200 and empty.
+
+**A transcription whose model is taken away under it is sent again** ([ADR 0104](../architecture/decisions/0104-a-lease-waits-for-the-calls-it-would-cut-and-a-cut-call-is-sent-again.md)):
+when llama-swap says so (`matrix: model unloaded`, `... is shutting down`), and when there is no answer at all (an empty-body 5xx, a
+read that was cut off). At most twice, inside `stt_request_timeout_sec`, behind the same fence and the same slot; an answer lost after more
+than half of that time stands as it is. While its request is on the engine the call is marked in the machine-wide run registry
+(`modelaffinity.Call`, kind `transcription`), which is how a lease grant, a render and another process's `UnloadIfIdle` know
+that whisper-server, which has no gauge, is busy. The forecast client does the same (kind `forecast`), and the text, vision and embedding
+clients send such a call again too, outside a contract.
 
 Transcription also checks its own **word times** (D-38, issue #169). whisper-server's `verbose_json` carries a
 `words[]` array per segment and `internal/sttclient` hands it on untouched; on a long file those word times have
@@ -355,7 +360,8 @@ vanished upstream (an infrastructure defer, `forecast call failed:`), and a leas
 `runForecast` with no `forecast_model` defers as config (`no forecast model configured`). The result is
 `core.Result{OK:true, Data:<the server's object>}` with `Meta.Model` the alias and one ledger row. There is no result cache: the
 payload is the identity and can be megabytes of numbers, a hash would cost about what a warm call does (0.2 to 0.7 s), and
-the seat's `ttl` frees the card, so there is no unload after a burst.
+the seat's `ttl` frees the card, so there is no unload after a burst. A forecast is marked while it runs and sent again when its model
+is taken away, as a transcription is (ADR 0104, above).
 
 **Installing it.** `local-offload install forecast [--home H] [--models M] [--ref <sha|branch>] [--torch-backend auto] [--json]`
 needs `uv` on PATH and builds `<home>/forecast/venv` (python 3.13; `<home>` is `--home`, else `$OFFLOAD_HOME`, else the nearest `installed.json` the way `update` finds it, else `~/.local-offload`, and the first progress line names it), installs torch with `uv pip install torch

@@ -17,7 +17,12 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/dmmdea/offload-harness/internal/seatwait"
 )
+
+// A lost answer is asked for again after this pause; no stand-in here has a model to load back.
+func init() { seatwait.ResendPause = time.Millisecond }
 
 // resetClientState forgets what this process believes it has warmed, now and again when the
 // test ends, so no test sees another's state whatever port its stand-in was given.

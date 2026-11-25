@@ -12,11 +12,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/gpuactivity"
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/seatwait"
 )
 
 // ErrBadInput marks a request the server refused as given: a 400 (the model refuses the shape,
@@ -72,10 +75,10 @@ func (c *Client) WithFenceWait(d time.Duration) *Client {
 	return c
 }
 
-// fencedURL builds the forecast upstream's URL behind the GPU-lease fence. The passthrough STARTS the
-// model when it is not loaded, so under a render or an exclusive hold the request waits for the card
-// and, on exhaustion, returns the fence's *modelaffinity.LeaseError, which the pipeline defers as capacity.
-func (c *Client) fencedURL(ctx context.Context, model, path string) (string, error) {
+// fenceWaitLeft is how long one call may wait at the GPU-lease fence in all. The passthrough STARTS the model when
+// it is not loaded, so under a render or an exclusive hold the request waits for the card and, on exhaustion, returns
+// the fence's *modelaffinity.LeaseError, which the pipeline defers as capacity.
+func (c *Client) fenceWaitLeft() time.Duration {
 	budget := c.http.Timeout
 	if budget <= 0 {
 		budget = fenceBudget
@@ -83,7 +86,59 @@ func (c *Client) fencedURL(ctx context.Context, model, path string) (string, err
 	if c.fenceWaitSet && c.fenceWait < budget {
 		budget = c.fenceWait
 	}
-	return modelaffinity.AwaitUpstream(ctx, c.base, model, path, time.Now().Add(budget))
+	return budget
+}
+
+// reply is what one forecast got back from the upstream; resent says how often it was sent again ("" when it was not).
+type reply struct {
+	status int
+	body   []byte
+	cut    error // the read that was cut off mid-answer
+	resent string
+}
+
+// silent reports a bare 5xx: llama-swap's answer when its connection to the model drops.
+func (r reply) silent() bool { return r.status >= 500 && len(bytes.TrimSpace(r.body)) == 0 }
+
+// exchange sends one forecast behind the fence, marked where other processes can see it (modelaffinity.Call), and sends
+// it again when its model went away under it (seatwait.TakenAway, or an answer cut off mid-read). A re-send waits at the
+// fence like a new call and stays inside the call's own timeout.
+func (c *Client) exchange(ctx context.Context, model string, payload []byte) (reply, error) {
+	// Target the subpath directly; the bare /upstream/<model> form 301-redirects.
+	call := modelaffinity.Call{Kind: gpuactivity.KindForecast, Endpoint: c.base, Model: model, Path: "/v1/forecast", Fence: c.fenceWaitLeft()}
+	again := seatwait.NewResend(c.http.Timeout)
+	for {
+		var rep reply
+		var sentAt time.Time
+		rctx, cancel := again.Bound(ctx)
+		err := call.Run(rctx, func(url string) error {
+			req, err := http.NewRequestWithContext(rctx, http.MethodPost, url, bytes.NewReader(payload))
+			if err != nil {
+				return err
+			}
+			req.Header.Set("Content-Type", "application/json")
+			sentAt = time.Now()
+			resp, err := c.http.Do(req)
+			if err != nil {
+				return err
+			}
+			defer resp.Body.Close()
+			rep.status = resp.StatusCode
+			rep.body, rep.cut = io.ReadAll(io.LimitReader(resp.Body, maxAnswer))
+			return nil
+		})
+		cancel()
+		if err != nil {
+			return reply{}, again.Err(err)
+		}
+		said := strings.TrimSpace(string(rep.body[:min(len(rep.body), 400)]))
+		lost := rep.cut != nil || seatwait.TakenAway(rep.status, said)
+		if !lost || !again.Again(ctx, sentAt) {
+			rep.resent = again.Note()
+			return rep, nil
+		}
+		log.Printf("forecastclient: %s went away under a forecast (HTTP %d %s); sending it again", model, rep.status, said)
+	}
 }
 
 // Forecast posts payload (the server's request body, a JSON object) to the upstream `model` and
@@ -91,35 +146,22 @@ func (c *Client) fencedURL(ctx context.Context, model, path string) (string, err
 // detail; an empty-body 5xx or a cut-off answer is ErrUpstreamVanished; a held card is the fence's
 // lease refusal (modelaffinity.IsLeaseRefusal).
 func (c *Client) Forecast(ctx context.Context, model string, payload []byte) (json.RawMessage, error) {
-	// Target the subpath directly; the bare /upstream/<model> form 301-redirects.
-	url, err := c.fencedURL(ctx, model, "/v1/forecast")
+	rep, err := c.exchange(ctx, model, payload)
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
+	b := rep.body
+	if rep.cut != nil {
+		return nil, fmt.Errorf("%w: forecast server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call%s", ErrUpstreamVanished, rep.status, rep.cut, rep.resent)
 	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	b, rerr := io.ReadAll(io.LimitReader(resp.Body, maxAnswer))
-	if resp.StatusCode != http.StatusOK {
+	if rep.status != http.StatusOK {
 		switch {
-		case rerr != nil:
-			return nil, fmt.Errorf("%w: forecast server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
-		case resp.StatusCode >= 500 && len(bytes.TrimSpace(b)) == 0:
-			return nil, fmt.Errorf("%w: forecast server %d (empty body): it was unloaded, swapped, restarted or crashed under the call", ErrUpstreamVanished, resp.StatusCode)
-		case resp.StatusCode == http.StatusBadRequest || resp.StatusCode == http.StatusRequestEntityTooLarge:
-			return nil, fmt.Errorf("%w: %s", ErrBadInput, refusalDetail(resp.StatusCode, b))
+		case rep.silent():
+			return nil, fmt.Errorf("%w: forecast server %d (empty body): it was unloaded, swapped, restarted or crashed under the call%s", ErrUpstreamVanished, rep.status, rep.resent)
+		case rep.status == http.StatusBadRequest || rep.status == http.StatusRequestEntityTooLarge:
+			return nil, fmt.Errorf("%w: %s", ErrBadInput, refusalDetail(rep.status, b))
 		}
-		return nil, fmt.Errorf("forecast server %d: %s", resp.StatusCode, refusalDetail(resp.StatusCode, b))
-	}
-	if rerr != nil {
-		return nil, fmt.Errorf("%w: forecast server %d: the answer was cut off mid-read (%w): the upstream was stopped or restarted under the call", ErrUpstreamVanished, resp.StatusCode, rerr)
+		return nil, fmt.Errorf("forecast server %d: %s%s", rep.status, refusalDetail(rep.status, b), rep.resent)
 	}
 	if !json.Valid(b) {
 		return nil, fmt.Errorf("forecastclient: the answer is not JSON (%d bytes)", len(b))

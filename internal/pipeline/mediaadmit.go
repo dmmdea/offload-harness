@@ -1231,12 +1231,17 @@ func (p *Pipeline) acquireCards(ctx context.Context, m *gpulease.Manager, reason
 		return o
 	}
 	// refuseFor turns the end of the wait after the clear into the answer the grant gave for a host that stayed short: the
-	// same words, the same defer class, the same place in line.
+	// same words, the same defer class, the same place in line. A wait for the calls on the models the lease unloads
+	// (awaitCallsOn) ends the same way.
 	refuseFor := func(ids []string) func(error) error {
 		return func(err error) error {
 			var short *gpulease.ErrHostRAM
 			if errors.As(err, &short) && !short.Impossible {
 				return p.hostRAMAnswer(m, ids, since, tokenID, tokenOptsFor(ids), reason, short, need.Resumable)
+			}
+			var busy *errGPUBusy
+			if errors.As(err, &busy) && need.Resumable {
+				return p.queuedAnswerWhy(m, ids, since, tokenID, tokenOptsFor(ids), reason, nil, true, busy.detail)
 			}
 			return err
 		}
@@ -1521,9 +1526,10 @@ func intersects(a, b []string) bool {
 	return false
 }
 
-// grantCards builds the grant for a lease just taken (the slots for ids are already held). A lease that deferred its host RAM
-// (d.defers) clears the models its own unload takes now, under the heartbeat, and asks the host afterwards; when the host never
-// has the room the lease is released and refuse gives the answer (grantCards then returns no grant).
+// grantCards builds the grant for a lease just taken (the slots for ids are already held). It first waits for the
+// transcriptions and forecasts running on the models the lease unloads (awaitCallsOn). A lease that deferred its host RAM
+// (d.defers) clears the models its own unload takes now, under the heartbeat, and asks the host afterwards; when a call does
+// not end in time, or the host never has the room, the lease is released and refuse gives the answer (grantCards then returns no grant).
 func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *gpulease.Lease, ids []string, plan mediaPlan, cards []gpuprobe.Card, tokenID string,
 	d hostRAMDeferral, declares bool, start time.Time, refuse func(error) error) (mediaGrant, error) {
 	if tokenID != "" {
@@ -1551,13 +1557,18 @@ func (p *Pipeline) grantCards(ctx context.Context, m *gpulease.Manager, lease *g
 		})
 	}
 	unload := d.unload
+	if !d.defers {
+		unload = p.unloadEnv(ctx, ids, cards)
+	}
+	if err := p.awaitCallsOn(ctx, lease, unload, start); err != nil {
+		release()
+		return mediaGrant{}, refuse(err)
+	}
 	if d.defers {
 		if err := p.clearThenAdmitHostRAM(ctx, lease, d, start); err != nil {
 			release()
 			return mediaGrant{}, refuse(err)
 		}
-	} else {
-		unload = p.unloadEnv(ctx, ids, cards)
 	}
 	// The card is ours from here: the call's PAIR card turns running.
 	core.MarkWorking(ctx)

@@ -10,11 +10,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math"
 	"net/http"
 	"time"
 
 	"github.com/dmmdea/offload-harness/internal/modelaffinity"
+	"github.com/dmmdea/offload-harness/internal/seatwait"
 )
 
 type Embedder struct {
@@ -54,6 +56,25 @@ func (e *Embedder) Embed(text string) ([]float64, error) {
 	return vecs[0], nil
 }
 
+// post is one embeddings request: the status and the whole body, whatever the status.
+func (e *Embedder) post(url string, body []byte) (status int, answer []byte, err error) {
+	req, err := http.NewRequest("POST", url, bytes.NewReader(body))
+	if err != nil {
+		return 0, nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := e.hc.Do(req)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer resp.Body.Close()
+	answer, err = io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, nil, fmt.Errorf("embed: read body: %w", err)
+	}
+	return resp.StatusCode, answer, nil
+}
+
 // embed posts inputs to /v1/embeddings and returns vectors ordered by the API
 // `index` field (never response position). Errors on non-200 or a missing index.
 func (e *Embedder) embed(inputs []string) ([][]float64, error) {
@@ -72,26 +93,29 @@ func (e *Embedder) embed(inputs []string) ([][]float64, error) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
-	u, err := modelaffinity.AwaitModelRoute(ctx, e.endpoint, e.model, "/v1/embeddings", time.Now().Add(budget))
-	if err != nil {
-		return nil, fmt.Errorf("embed: %w", err)
-	}
-	req, err := http.NewRequest("POST", u, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := e.hc.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	raw, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("embed: read body: %w", err)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("embed: status %d", resp.StatusCode)
+	again := seatwait.NewResend(budget)
+	var raw []byte
+	for {
+		u, err := modelaffinity.AwaitModelRoute(ctx, e.endpoint, e.model, "/v1/embeddings", time.Now().Add(budget))
+		if err != nil {
+			return nil, again.Err(fmt.Errorf("embed: %w", err))
+		}
+		sentAt := time.Now()
+		status, b, err := e.post(u, body)
+		if err != nil {
+			return nil, again.Err(err)
+		}
+		if status == http.StatusOK {
+			raw = b
+			break
+		}
+		// The model went away under the request (a lease that clears the cards, another client's swap): the same
+		// request loads it back, inside this embedder's own budget.
+		if seatwait.TakenAway(status, string(b[:min(len(b), 400)])) && again.Again(ctx, sentAt) {
+			log.Printf("embed: %s went away under an embedding (HTTP %d); sending it again", e.model, status)
+			continue
+		}
+		return nil, again.Err(fmt.Errorf("embed: status %d", status))
 	}
 	var out struct {
 		Data []struct {

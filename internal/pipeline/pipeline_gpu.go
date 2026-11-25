@@ -458,6 +458,11 @@ func (p *Pipeline) acquireWholeNodeWith(ctx context.Context, reason string, ttl,
 		})
 	}
 	slotHeld = false
+	if aerr := p.awaitCallsOn(ctx, lease, d.unload, start); aerr != nil {
+		// A transcription or a forecast is still running on a model this render unloads: it is not cut, and the cards go back.
+		release()
+		return nil, noop, aerr
+	}
 	if d.defers {
 		// The unload the runner would do after launch is done here, under the lease, and only then is the host asked. The wait is
 		// bounded (hostRAMWaitEnd); past it the lease is released and the call is refused with the words the grant always used.

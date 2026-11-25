@@ -267,6 +267,13 @@ type Meta struct {
 	// only once the drain has completed (Restamp); stamping it at acquire made the
 	// drain block the very run it was waiting for (2026-09-14).
 	Draining bool `json:"draining,omitempty"`
+	// Clearing is every name (id and alias) of the models the holder is about to unload, or has unloaded, for
+	// this lease (2026-11-25). A model that is resident normally passes the load fence, because serving it
+	// loads nothing; a model in this list does not: a call that began on it after the holder looked for calls
+	// in flight would be cut by the unload. So new calls wait at the fence, the calls already running finish,
+	// and the unload happens on an idle model. Stamped for the rest of the lease. Additive and omitempty: a
+	// reader that predates it keeps letting resident models through.
+	Clearing []string `json:"clearing,omitempty"`
 	// Command (0.117.0) is what the wrapper form runs under the lease (the wrapped
 	// argv, clipped), so a reader of `gpu status` sees WHAT holds the cards, not
 	// only who.
@@ -417,6 +424,8 @@ type Info struct {
 	// Draining mirrors Meta.Draining: the holder is waiting for the seat to go
 	// idle; new runs wait, in-flight runs complete.
 	Draining bool
+	// Clearing mirrors Meta.Clearing: the models the holder takes off its cards.
+	Clearing []string
 	// Command mirrors Meta.Command: what the holder is running, when it said.
 	Command string
 	// HostRAMGiB mirrors Meta.HostRAMGiB: the host RAM the holder declared (0 = none declared).
@@ -1371,6 +1380,7 @@ func infoFrom(meta *Meta, now time.Time) Info {
 		ExpiresAt:        expires,
 		Exclusive:        meta.Exclusive,
 		Draining:         meta.Draining,
+		Clearing:         append([]string(nil), meta.Clearing...),
 		Command:          meta.Command,
 		HostRAMGiB:       meta.HostRAMGiB,
 		HostRAMCommitGiB: effectiveCommit(meta.HostRAMGiB, meta.HostRAMCommitGiB),

@@ -42,6 +42,9 @@
 // ledger files it as congestion. A caller that must not wait (the post-run pin,
 // the per-step tokenizer) passes a deadline of now and gets one inspection.
 //
+// One resident model does not pass: one the holder has named as being cleared off its cards
+// (gpulease.Meta.Clearing, 2026-11-25; see clearing below).
+//
 // The residency read is taken ONLY when a fence is up, so an unfenced box pays
 // what it paid before: one ReadFile of a lease record that usually does not
 // exist. The same check-then-act window ADR 0026 names for Admit remains (a
@@ -58,6 +61,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dmmdea/offload-harness/internal/gpulease"
 	"github.com/dmmdea/offload-harness/internal/seatload"
 	"github.com/dmmdea/offload-harness/internal/swapclient"
 )
@@ -160,10 +164,33 @@ func WouldBlockUpstream(ctx context.Context, endpoint, model string) bool {
 	if dir == "" {
 		return false // not armed: inert by construction, exactly like awaitCard
 	}
-	if !blocksLoad(ScopeToModel(InspectLease(dir), model)) {
+	info := ScopeToModel(InspectLease(dir), model)
+	if !blocksLoad(info) {
 		return false
 	}
+	if clearing(info, model) {
+		return true // resident or not: a lease that fences this card is taking the model off it
+	}
 	return !upstreamResident(ctx, endpoint, model)
+}
+
+// clearing reports whether a lease that fences loads has named model among the ones it unloads
+// (gpulease.Meta.Clearing). Serving a resident model loads nothing, which is why it passes the fence; but a call
+// that starts on a model its holder is about to unload would be cut by that unload, and a stream of such calls
+// would keep the holder waiting for an idle moment that never comes. They queue here instead, and the calls
+// already running finish.
+func clearing(info gpulease.Info, model string) bool {
+	for _, l := range info.Each() {
+		if !blocksLoadOne(l) {
+			continue
+		}
+		for _, n := range l.Clearing {
+			if strings.EqualFold(strings.TrimSpace(n), strings.TrimSpace(model)) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // awaitUpstream is the fence itself; see the file header.

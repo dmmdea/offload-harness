@@ -37,13 +37,10 @@ func TestTranscribeBadAudioDefers(t *testing.T) {
 	}
 }
 
-// TestTranscribeACrashOfACallThatRanAloneDefersAsNoSpeech (the F-35 case, 2026-09-23;
-// narrowed by register C-91, whose first cut read every empty-body 5xx as a vanished upstream,
-// and put back in its review for the case that can be told apart). whisper.cpp exits on audio
-// with no speech content, and llama-swap answers that with a bare 5xx. A call that ran alone,
-// with no unload sent by this process, has nothing of its own to blame, so it defers calmly as
-// no speech: a retry would only crash the server again and cost the restart.
-func TestTranscribeACrashOfACallThatRanAloneDefersAsNoSpeech(t *testing.T) {
+// TestTranscribeAnUpstreamThatNeverAnswersIsAFailedCallNotSilence: until 2026-11-25 a bare 5xx in a call that ran
+// alone was filed as "no speech detected" (the F-35 crash), and a clip full of speech whose model another process had
+// unloaded was reported that way.
+func TestTranscribeAnUpstreamThatNeverAnswersIsAFailedCallNotSilence(t *testing.T) {
 	ffmpeg := lookFFmpeg()
 	if ffmpeg == "" {
 		t.Skip("ffmpeg not on PATH; this test needs a real convert to reach the STT call")
@@ -51,7 +48,7 @@ func TestTranscribeACrashOfACallThatRanAloneDefersAsNoSpeech(t *testing.T) {
 	wav := makeSilentWav(t, ffmpeg)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadGateway) // 502, empty body: the crash signature
+		w.WriteHeader(http.StatusBadGateway) // 502, empty body, every time
 	}))
 	defer srv.Close()
 
@@ -63,10 +60,10 @@ func TestTranscribeACrashOfACallThatRanAloneDefersAsNoSpeech(t *testing.T) {
 
 	res := p.Run(context.Background(), core.Request{Task: core.TaskTranscribe, Audio: wav})
 	if res.OK || !res.Deferred {
-		t.Fatalf("want a deferred no-speech result, got OK=%v Deferred=%v data=%s", res.OK, res.Deferred, res.Data)
+		t.Fatalf("want a deferred failure, got OK=%v Deferred=%v data=%s", res.OK, res.Deferred, res.Data)
 	}
-	if res.Reason != "empty transcript (no speech detected)" {
-		t.Errorf("reason = %q, want the calm no-speech defer for the F-35 crash of a call that ran alone", res.Reason)
+	if !strings.HasPrefix(res.Reason, "transcribe call failed:") || !strings.Contains(res.Reason, "vanished") {
+		t.Errorf("reason = %q, want the call-failed defer that says the upstream vanished", res.Reason)
 	}
 }
 
