@@ -162,7 +162,7 @@ func (f *Footprints) reloadMergeLocked() {
 		if r.ObservedPeakGiB > cur.ObservedPeakGiB {
 			// The other process saw a higher VRAM peak: its VRAM side wins, whole. The host side below is
 			// merged on its own, so a higher VRAM peak never drops a higher host peak (or the reverse).
-			cur.VramPeakGiB, cur.ObservedPeakGiB, cur.Samples, cur.Updated = r.VramPeakGiB, r.ObservedPeakGiB, r.Samples, r.Updated
+			cur.VramPeakGiB, cur.ObservedPeakGiB, cur.Samples = r.VramPeakGiB, r.ObservedPeakGiB, r.Samples
 		}
 		cur.HostPeakGiB = math.Max(cur.HostPeakGiB, r.HostPeakGiB)
 		cur.HostResidentPeakGiB = math.Max(cur.HostResidentPeakGiB, r.HostResidentPeakGiB)
@@ -173,6 +173,13 @@ func (f *Footprints) reloadMergeLocked() {
 				cur.HostRecent = r.HostRecent
 			}
 			cur.HostRuns = r.HostRuns
+		}
+		// The entry was last written at the later of the two times, whichever side the write was on and whichever side won
+		// above. Without this a reader that took the other process's host window kept its own older time, and the agent seat's
+		// "was this load already recorded" check (RecordHostOnce) read a load another contract had just recorded as not
+		// recorded: one cold load that two contracts waited on was counted as two runs.
+		if r.Updated.After(cur.Updated) {
+			cur.Updated = r.Updated
 		}
 	}
 }
@@ -276,8 +283,21 @@ func nearestRank(xs []float64, p int) float64 {
 // before the first tick) and is dropped, so a run that measured nothing is never counted as a run that held
 // nothing. The resident peak is kept as the max of whatever was read.
 func (f *Footprints) RecordHost(family, quant, task string, privateGiB, residentGiB float64) {
+	f.recordHost(family, quant, task, privateGiB, residentGiB, 0)
+}
+
+// RecordHostOnce is RecordHost for a run that several writers may each have measured (one cold load of the agent seat that
+// several contracts, or several processes, waited on): the run is dropped when the key's host side was last written within
+// `within` of now. The check sits inside the store's own critical section, after the merge of what another process wrote and
+// before the fold, so the only thing that can land between the check and the write is another process's rename. It reports
+// whether the run was recorded.
+func (f *Footprints) RecordHostOnce(family, quant, task string, privateGiB, residentGiB float64, within time.Duration) bool {
+	return f.recordHost(family, quant, task, privateGiB, residentGiB, within)
+}
+
+func (f *Footprints) recordHost(family, quant, task string, privateGiB, residentGiB float64, within time.Duration) bool {
 	if privateGiB <= 0 {
-		return
+		return false
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -286,6 +306,9 @@ func (f *Footprints) RecordHost(family, quant, task string, privateGiB, resident
 	f.reloadMergeLocked()
 	key := footprintKey{family, quant, task}
 	rec, ok := f.entries[key]
+	if ok && within > 0 && rec.HostPeakGiB > 0 && time.Since(rec.Updated).Abs() <= within {
+		return false // the run another writer already recorded
+	}
 	if !ok {
 		rec = &footprintRecord{ModelFamily: family, Quant: quant, TaskType: task}
 		f.entries[key] = rec
@@ -308,6 +331,7 @@ func (f *Footprints) RecordHost(family, quant, task string, privateGiB, resident
 	if err := f.persistLocked(); err != nil {
 		log.Printf("footprints: persist %s failed (entry kept in memory): %v", f.path, err)
 	}
+	return true
 }
 
 // HostPeak reports what the key's renders were measured to hold on the host, and false when none was measured.

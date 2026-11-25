@@ -77,6 +77,9 @@ type EngineReading struct {
 	// process is gone. Set only for a LOCAL seat address; a seat behind another
 	// machine's llama-swap that this box cannot reach is unreadable, not down.
 	Refused bool
+	// Health asks the engine itself, at the seat's own address, whether it works: a request of its own, made by the one reader that
+	// needs it (Monitor.ConfirmSeatDown). nil = there is nothing to ask.
+	Health func(ctx context.Context) EngineHealth
 	// Running and Waiting are the engine's own request gauges (vLLM running and
 	// waiting; llama-server processing and deferred). Waiting is -1 when the
 	// source cannot see a queue. 0/0 with no Fingerprint = not read.
@@ -99,6 +102,20 @@ func (r EngineReading) Load() int {
 	}
 	return n
 }
+
+// EngineHealth is what the seat's engine answers when it is asked whether it works (EngineReading.Health).
+type EngineHealth int
+
+const (
+	// EngineHealthUnknown: it has no such door, or the answer says nothing.
+	EngineHealthUnknown EngineHealth = iota
+	// EngineWorks: it says it works.
+	EngineWorks
+	// EngineDead: it says it does not.
+	EngineDead
+	// EngineSilent: it does not answer.
+	EngineSilent
+)
 
 // EngineProbe reads the seat's engine. A non-nil error means "cannot tell".
 type EngineProbe func(ctx context.Context) (EngineReading, error)

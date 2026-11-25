@@ -20,11 +20,16 @@ package pipeline
 // counters. On the warm-up's own path the two lists are the ones its looks at /running already read, so a measurement adds no
 // request to a contract's admission.
 //
-// What the counters cannot tell apart stays in a record: another process of the host that grew or shrank during the load. The
-// store's percentile is what answers that (one low run never lowers it, one high run speaks until ten loads exist).
+// What the counters cannot tell apart stays in a record: another process of the host that grew during the load, or one that
+// shrank while the seat's own growth hid it. The store's percentile is what answers that (one low run never lowers it, one
+// high run speaks until ten loads exist). A host that gave memory back where it shows (the available memory above the
+// baseline, the commit charge under it, or a baseline read while the host was moving) is not recorded: the load that follows a
+// wait for host memory starts at that moment, and loads measured across it under-read (seatmeasure's package comment has the
+// figures). A release slower than the seat's own early growth never shows above the baseline and is still the percentile's.
 
 import (
 	"context"
+	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -81,9 +86,12 @@ func init() {
 // seatRecordMu serialises the same-load check and the record, so two contracts that finish together record once.
 var seatRecordMu sync.Mutex
 
+// seatListsChanged is the reason for a load that completed while llama-swap's other models did not stay as they were.
+const seatListsChanged = "the other models llama-swap lists changed during the load, or the list could not be read: a model that loaded or unloaded meanwhile moved the same counters"
+
 // seatLoadMeter is the measurement of one warm-up. The zero value measures nothing.
 type seatLoadMeter struct {
-	finish func(loaded bool)
+	finish func(loaded, same bool)
 	// canonical is the model id the seat's name resolved to, and before the other models /running listed ready in the look the
 	// warm-up began from.
 	canonical, before string
@@ -108,7 +116,7 @@ func (s *seatLoadMeter) saw(r residency) { s.last = &r }
 // is finished as not loaded: it is not recorded.
 func (s *seatLoadMeter) end(loaded bool) {
 	if s.finish != nil {
-		s.finish(loaded && s.last != nil && s.last.busy == "" && s.last.others == s.before)
+		s.finish(loaded, s.last != nil && s.last.busy == "" && s.last.others == s.before)
 	}
 }
 
@@ -132,21 +140,21 @@ func (s *seatLoadMeter) endWhenReady(endpoint, seat string) {
 			switch {
 			case err == nil && rd.Loaded && !rd.Starting: // a row that reads starting is listed as loaded too (seatload.Reading)
 				now, ok := SeatOtherModels(endpoint, seat, canonical)
-				finish(ok && now == before)
+				finish(true, ok && now == before)
 				return
 			case err == nil && !rd.Loaded && !rd.Ambiguous:
-				finish(false) // no row: the load ended without a ready seat
+				finish(false, false) // no row: the load ended without a ready seat
 				return
 			case err != nil:
 				if misses++; misses >= seatLoadTailMisses {
-					finish(false)
+					finish(false, false)
 					return
 				}
 			default:
 				misses = 0
 			}
 			if seatwait.Sleep(ctx, seatLoadTailPoll) != nil {
-				finish(false)
+				finish(false, false)
 				return
 			}
 		}
@@ -154,13 +162,15 @@ func (s *seatLoadMeter) endWhenReady(endpoint, seat string) {
 }
 
 // BeginSeatLoadMeasure starts measuring a cold load of seat that the caller is about to start, and returns the function that ends
-// the measurement (loaded = the load completed AND llama-swap lists the same other models, all ready, as when it began: the
-// caller holds both lists, SeatOtherModels reads one). The caller has just established that the seat is absent, and canonical
+// the measurement (loaded = the load completed; same = llama-swap lists the same other models, all ready, as when it began: the
+// caller holds both lists, SeatOtherModels reads one). What became of a completed load's measurement is said on the log of the
+// process that started the load, one line per measurement (several contracts that waited on one load each measured it), so a
+// store that stops gaining runs is explained. The caller has just established that the seat is absent, and canonical
 // is the model id llama-swap's roster resolved the seat's name to in that reading. For a seat that is not cfg's agent seat, a
 // name the roster did not resolve, a platform with no host-memory reader, a lease directory that cannot be read or a lane that
 // declared host RAM and is live, the returned function does nothing. Never nil, never panics.
-func BeginSeatLoadMeasure(cfg config.Config, seat, canonical string) (finish func(loaded bool)) {
-	nop := func(bool) {}
+func BeginSeatLoadMeasure(cfg config.Config, seat, canonical string) (finish func(loaded, same bool)) {
+	nop := func(bool, bool) {}
 	defer func() {
 		if recover() != nil {
 			finish = nop
@@ -176,13 +186,24 @@ func BeginSeatLoadMeasure(cfg config.Config, seat, canonical string) (finish fun
 		return nop
 	}
 	run := seatmeasure.Begin(gpuprobe.ReadHostMemory, seatMeasureEvery)
-	return func(loaded bool) {
+	notRecorded := func(why string) {
+		log.Printf("seat load measurement (%s): this measurement is not recorded: %s", seat, why)
+	}
+	return func(loaded, same bool) {
 		defer func() { _ = recover() }()
-		res := run.Finish(loaded)
-		if !loaded || !res.Clean || hostLaneLive(m) {
-			return
+		res := run.Finish(loaded && same)
+		switch {
+		case !loaded: // no load to speak of
+		case !same:
+			notRecorded(seatListsChanged)
+		case !res.Clean:
+			notRecorded(res.Why)
+		case hostLaneLive(m):
+			notRecorded("a lease that declares host RAM was live when the load ended: its own growth is in the same counters")
+		case recordSeatLoad(cfg, model, canonical, res):
+			log.Printf("seat load measurement (%s): recorded: %.1f GiB touched, %.1f GiB of commit in %s (baseline spread %.2f GiB, the host gave back %.1f GiB)",
+				seat, res.TouchedPeakGiB, res.CommitPeakGiB, res.Elapsed.Round(time.Second), res.NoiseGiB, res.GaveBackGiB)
 		}
-		recordSeatLoad(cfg, model, canonical, res)
 	}
 }
 
@@ -223,17 +244,18 @@ func hostLaneLive(m *gpulease.Manager) bool {
 }
 
 // recordSeatLoad keeps a clean result in the footprint store, once per load, under the model id the seat's name resolved to.
-func recordSeatLoad(cfg config.Config, model, canonical string, res seatmeasure.Result) {
-	store := seatStore(cfg)
-	if store == nil {
-		return
-	}
+// It reports whether this call recorded it: false for the load another contract, or another process, already recorded (the
+// store drops a second record within seatLoadSameWindow of the key's last write, inside its own critical section).
+func recordSeatLoad(cfg config.Config, model, canonical string, res seatmeasure.Result) bool {
 	seatRecordMu.Lock()
 	defer seatRecordMu.Unlock()
-	if hp, ok := store.HostPeak(model, canonical, seatLoadTask); ok && time.Since(hp.Updated).Abs() <= seatLoadSameWindow {
-		return // the load another contract (or process) already recorded
+	// Opened under the lock: a store opened before it held the file as it was before the other contract of this process
+	// recorded the same load.
+	store := seatStore(cfg)
+	if store == nil {
+		return false
 	}
-	store.RecordHost(model, canonical, seatLoadTask, res.CommitPeakGiB, res.TouchedPeakGiB)
+	return store.RecordHostOnce(model, canonical, seatLoadTask, res.CommitPeakGiB, res.TouchedPeakGiB, seatLoadSameWindow)
 }
 
 // seatStore opens the footprint store the config names, fresh: a process that only reads or records the seat's loads holds no
