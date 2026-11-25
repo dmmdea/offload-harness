@@ -55,6 +55,9 @@ type Activity struct {
 	// Reading is the /running half (Loaded, Starting, Stopping, Proxy, …).
 	// Starting or !Loaded means the engine was not asked.
 	Reading
+	// Addr is the seat's own address, the one its engine was read at: set with a failed read too, "" when it is not known or the
+	// seat is on another machine this box cannot reach.
+	Addr string
 	// Fingerprint changes whenever the engine takes a step for any request.
 	// "" when the engine was not asked or no counter could be read.
 	Fingerprint string
@@ -155,9 +158,11 @@ func ReadActivity(ctx context.Context, client *http.Client, endpoint, seat strin
 	if err != nil {
 		return act, fmt.Errorf("seat activity: %w", err)
 	}
+	act.Addr = seatBase
 	status, body, err := getBody(ctx, client, seatBase+"/metrics")
 	if err != nil {
 		if remote && ctx.Err() == nil {
+			act.Addr = ""
 			return act, fmt.Errorf("seat activity at %s: %w: %w", seatBase, ErrRemoteSeatUnreachable, err)
 		}
 		return act, fmt.Errorf("seat activity: %w", err)
@@ -184,6 +189,37 @@ func ReadActivity(ctx context.Context, client *http.Client, endpoint, seat strin
 	}
 	act.At = time.Now()
 	return act, nil
+}
+
+// Health is what a seat's engine says about itself (ReadHealth).
+type Health int
+
+const (
+	// HealthUnknown: the engine has no health door, or its answer says nothing.
+	HealthUnknown Health = iota
+	// HealthWorks: it answers that it works.
+	HealthWorks
+	// HealthDead: it answers that it does not (503). vLLM's API server says so from the moment its engine process is dead, before
+	// it errors the requests that were open, and goes on answering until it has shut itself down seconds later. llama-server says
+	// the same while it loads its model.
+	HealthDead
+	// HealthSilent: no answer.
+	HealthSilent
+)
+
+// ReadHealth asks the engine at the seat's own address (Activity.Addr) whether it works: GET /health, which vLLM and llama-server
+// answer without queueing behind their work.
+func ReadHealth(ctx context.Context, client *http.Client, addr string) Health {
+	status, _, err := getBody(ctx, client, addr+"/health")
+	switch {
+	case err != nil:
+		return HealthSilent
+	case status == http.StatusOK:
+		return HealthWorks
+	case status == http.StatusServiceUnavailable:
+		return HealthDead
+	}
+	return HealthUnknown
 }
 
 // getBody is one bounded GET at the seat's own address.

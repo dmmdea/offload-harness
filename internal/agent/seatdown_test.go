@@ -34,6 +34,8 @@ type downEngine struct {
 	// hung engine's HTTP front end still accepting requests.
 	blind    bool
 	growWait bool
+	// health is what the engine answers when it is asked whether it works.
+	health EngineHealth
 }
 
 func newDownEngine(state string) *downEngine {
@@ -86,6 +88,7 @@ func (e *downEngine) probe(context.Context) (EngineReading, error) {
 		Running:          e.running,
 		Waiting:          e.waiting,
 		PrefillBlind:     e.blind,
+		Health:           func(context.Context) EngineHealth { return e.health },
 	}, nil
 }
 
@@ -415,23 +418,35 @@ func TestAwaitSeatWithoutAProbeIsTheTerminalVerdict(t *testing.T) {
 }
 
 // P1: a model call failed like a dead seat (a stream cut, a 5xx). The monitor
-// confirms against llama-swap before the failure is called a seat death.
+// confirms against llama-swap before the failure is called a seat death. The cases
+// with a later state are 2026-11-25: the engine died, every request was answered with an
+// error at once, and the server was still listed and readable when the runs looked; the
+// engine's own answer is what tells that from a seat that works.
 func TestConfirmSeatDownReadsTheSeatAfterAFailedCall(t *testing.T) {
 	cut := errors.New("stream read: unexpected EOF")
 	for _, tc := range []struct {
-		name  string
-		state string
-		down  bool
-		note  string
+		name   string
+		state  string
+		later  string
+		health EngineHealth
+		down   bool
+		note   string
 	}{
-		{"restarting", "starting", true, "starting"},
-		{"gone from /running", "gone", true, "/running"},
-		{"engine refuses reads while listed", "refused", true, "refuses"},
-		{"ready and readable: the seat is up, the error stands", "ready", false, ""},
-		{"unreadable for another reason: cannot tell", "unreadable", false, ""},
+		{"restarting", "starting", "", EngineHealthUnknown, true, "starting"},
+		{"gone from /running", "gone", "", EngineHealthUnknown, true, "/running"},
+		{"engine refuses reads while listed", "refused", "", EngineHealthUnknown, true, "refuses"},
+		{"dead by its own word, still listed when the call failed, gone a moment later", "ready", "gone", EngineDead, true, "/running"},
+		{"does not answer, still listed when the call failed, gone a moment later", "ready", "gone", EngineSilent, true, "/running"},
+		{"it works by its own word: the error stands at once", "ready", "gone", EngineWorks, false, ""},
+		{"ready and readable: the seat is up, the error stands", "ready", "", EngineHealthUnknown, false, ""},
+		{"unreadable for another reason: cannot tell", "unreadable", "", EngineHealthUnknown, false, ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			eng := newDownEngine(tc.state)
+			eng.health = tc.health
+			if tc.later != "" {
+				time.AfterFunc(15*time.Millisecond, func() { eng.set(tc.later, false) })
+			}
 			_, m := NewMonitor(context.Background(), recoveryPolicy(time.Second), 30*time.Second)
 			defer m.Stop()
 			m.WithEngineProbe(eng.probe)

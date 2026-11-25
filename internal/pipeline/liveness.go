@@ -143,6 +143,22 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 	}
 	base := swapclient.BaseURL(endpoint)
 	client := &http.Client{Timeout: engineProbeTimeout}
+	healthAt := func(addr string) func(context.Context) agent.EngineHealth {
+		if addr == "" {
+			return nil
+		}
+		return func(ctx context.Context) agent.EngineHealth {
+			switch seatload.ReadHealth(ctx, client, addr) {
+			case seatload.HealthWorks:
+				return agent.EngineWorks
+			case seatload.HealthDead:
+				return agent.EngineDead
+			case seatload.HealthSilent:
+				return agent.EngineSilent
+			}
+			return agent.EngineHealthUnknown
+		}
+	}
 	return func(ctx context.Context) (agent.EngineReading, error) {
 		if load != nil {
 			loading, state, err := load(ctx)
@@ -158,7 +174,7 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 			// of llama-swap's OWN address (the service is down) is not the seat's
 			// engine, and a seat behind another machine's llama-swap that this box
 			// cannot reach is unreadable, never down.
-			return agent.EngineReading{Refused: act.Loaded && connRefused(err)}, err
+			return agent.EngineReading{Refused: act.Loaded && connRefused(err), Health: healthAt(act.Addr)}, err
 		}
 		if act.Starting {
 			return agent.EngineReading{Loading: true, State: strings.TrimPrefix(act.Source, "running-state:")}, nil
@@ -169,6 +185,7 @@ func engineActivityProbe(endpoint, seat string, load agent.SeatProbe) agent.Engi
 			// loading it (a loading seat was handled above).
 			NotLoaded: !act.Loaded,
 			Running:   act.Running, Waiting: act.Waiting,
+			Health: healthAt(act.Addr),
 			// A source whose counters do not move through a prefill (llama-server's
 			// /slots; a vLLM exposition with no KV-usage gauge): the flat bound keeps
 			// the prefill allowance, stretched by the load.
